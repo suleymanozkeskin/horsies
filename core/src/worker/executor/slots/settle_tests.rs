@@ -338,8 +338,8 @@ fn claimed_row(
 }
 
 const RETRY_ON_TIMEOUT: &str = r#"{"timeout_ms": 1000, "cancel_grace_ms": 500, "retry_policy": {
-    "max_retries": 2, "intervals": [5, 5], "backoff_strategy": "fixed", "jitter": false,
-    "max_delay_seconds": null, "auto_retry_for": ["TASK_TIMEOUT"]}}"#;
+    "max_retries": 2, "intervals_seconds": [5, 5], "backoff_strategy": "fixed", "jitter": false,
+    "max_delay_seconds": null, "retry_for": ["TASK_TIMEOUT"]}}"#;
 
 /// A reported result of a shared run completes its row.
 #[tokio::test]
@@ -558,8 +558,8 @@ async fn a_loop_kill_fails_the_row_with_its_code() {
 fn retrying(code: &str) -> String {
     format!(
         r#"{{"timeout_ms": 1000, "cancel_grace_ms": 500, "retry_policy": {{
-    "max_retries": 2, "intervals": [5, 5], "backoff_strategy": "fixed", "jitter": false,
-    "max_delay_seconds": null, "auto_retry_for": ["{code}"]}}}}"#
+    "max_retries": 2, "intervals_seconds": [5, 5], "backoff_strategy": "fixed", "jitter": false,
+    "max_delay_seconds": null, "retry_for": ["{code}"]}}}}"#
     )
 }
 

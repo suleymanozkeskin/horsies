@@ -40,21 +40,21 @@ impl WorkflowDefinition for Shipping {
         let book = builder.task(
             book_courier::node()
                 .node_id("book_courier")
-                .set(book_courier::params::order_id(), params.order_id.clone())?
-                .set(book_courier::params::courier(), params.courier)?
-                .set(book_courier::params::express(), params.express)?,
+                .set(book_courier::fields::order_id(), params.order_id.clone())?
+                .set(book_courier::fields::courier(), params.courier)?
+                .set(book_courier::fields::express(), params.express)?,
         )?;
         let label = builder.task(
             print_label::node()
                 .node_id("print_label")
-                .set(print_label::params::order_id(), params.order_id.clone())?
-                .arg_from(print_label::params::booking(), book),
+                .set(print_label::fields::order_id(), params.order_id.clone())?
+                .arg_from(print_label::fields::booking(), book),
         )?;
         let tracking = builder.task(
             tracking_seed::node()
                 .node_id("tracking_seed")
-                .set(tracking_seed::params::order_id(), params.order_id)?
-                .arg_from(tracking_seed::params::label(), label),
+                .set(tracking_seed::fields::order_id(), params.order_id)?
+                .arg_from(tracking_seed::fields::label(), label),
         )?;
         builder.output(tracking);
         builder.build()

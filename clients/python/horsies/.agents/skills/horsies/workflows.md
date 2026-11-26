@@ -38,9 +38,9 @@ class ETLPipeline(WorkflowDefinition[SaveResult]):
     name = "etl_pipeline"
     definition_key = "myapp.etl_pipeline.v1"
 
-    fetch = TaskNode(fn=fetch_data)
-    process = TaskNode(fn=process_data, waits_for=[fetch], args_from={"data": fetch})
-    save = TaskNode(fn=save_result, waits_for=[process], args_from={"result": process})
+    fetch = TaskNode(function=fetch_data)
+    process = TaskNode(function=process_data, waits_for=[fetch], args_from={"data": fetch})
+    save = TaskNode(function=save_result, waits_for=[process], args_from={"result": process})
 
     config = WorkflowDefinitionConfig(
         output=save,
@@ -73,8 +73,8 @@ class ChildPipeline(WorkflowDefinition[ProcessedData]):
 
     @classmethod
     def build_with(cls, app: Horsies, source_url: str, *_a: Any, **_kw: Any) -> WorkflowSpec:
-        fetch = TaskNode(fn=fetch_raw, kwargs={"source_url": source_url})
-        process = TaskNode(fn=process_data, waits_for=[fetch], args_from={"raw": fetch})
+        fetch = TaskNode(function=fetch_raw, kwargs={"source_url": source_url})
+        process = TaskNode(function=process_data, waits_for=[fetch], args_from={"raw": fetch})
         return WorkflowSpec(
             name=cls.name, tasks=[fetch, process], output=process,
         )
@@ -113,7 +113,7 @@ def build_regional_workflow(region: str) -> WorkflowSpec:
 ```python
 @dataclass
 class TaskNode(Generic[OkT]):
-    fn: TaskFunction[Any, OkT] | AsyncTaskFunction[Any, OkT]       # required
+    function: TaskFunction[Any, OkT] | AsyncTaskFunction[Any, OkT]  # required
     kwargs: Mapping[str, Any] = {}                                 # static task kwargs (JSON-serializable)
     waits_for: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] = [] # dependencies
     args_from: Mapping[str, TaskNode[Any] | SubWorkflowNode[Any]] = {}  # inject upstream TaskOutcome
@@ -129,7 +129,7 @@ class TaskNode(Generic[OkT]):
     index: int | None = None                  # position in DAG (0-based)
 ```
 
-Properties: `.name` → `fn.task_name`, `.key()` → `NodeKey[OkT]`.
+Properties: `.name` → `function.task_name`, `.key()` → `NodeKey[OkT]`.
 
 **Auto-assigned `node_id` format:**
 - In `WorkflowDefinition`: attribute name (e.g., `"fetch"`)
@@ -150,7 +150,7 @@ Set `node_id` on every node. The docs site recommends it too.
 fetch = fetch_rows.node(node_id="fetch")(source="warehouse")
 ```
 
-**Import cycle with `result_for(Workflow.node)`.** A task that calls `ctx.result_for(MyWorkflow.fetch)` must import `MyWorkflow`. The workflow module imports the task module for `fn=`. The two modules import each other.
+**Import cycle with `result_for(Workflow.node)`.** A task that calls `ctx.result_for(MyWorkflow.fetch)` must import `MyWorkflow`. The workflow module imports the task module for `function=`. The two modules import each other.
 
 `result_for()` accepts a `NodeKey` and looks up the result by `node_id`. Build the key from the explicit id string. The task module then does not import the workflow module.
 
@@ -206,7 +206,7 @@ class SubWorkflowNode(Generic[OkT]):
 ```
 
 Differences from `TaskNode`:
-- No `fn`, `queue`, `priority`, `good_until` fields.
+- No `function`, `queue`, `priority`, `good_until` fields.
 - `kwargs` forwarded to `workflow_def.build_with(app, **kwargs)` at execution time.
 - `args_from` injects the upstream `TaskOutcome` into `build_with()`.
 - The node follows the child's output: child COMPLETED with a `Succeeded` output → node COMPLETED with that output; child COMPLETED with a `Failed` output → node FAILED with that error (see SuccessPolicy / SuccessCase); child FAILED → node FAILED with `SubWorkflowError`.
@@ -592,7 +592,7 @@ class NodeKey(Generic[OkT]):
 
 - Obtained via `node.key()` (raises if `node_id` is None).
 - Accepted by `WorkflowContext.result_for()` and `WorkflowHandle.result_for()`.
-- Useful for string-based lookup of a node with an explicit `node_id`: `TaskNode(fn=fetch_data, node_id="fetch")` → `NodeKey("fetch")`.
+- Useful for string-based lookup of a node with an explicit `node_id`: `TaskNode(function=fetch_data, node_id="fetch")` → `NodeKey("fetch")`.
 
 ## SubWorkflowSummary
 
@@ -673,7 +673,7 @@ def process(*, data: TaskOutcome[int, TaskError]) -> Result[str, TaskError]:
             # With the defaults, this branch runs only on a decode failure.
             return Err(error)
 
-node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
+node_b = TaskNode(function=process, waits_for=[node_a], args_from={"data": node_a})
 ```
 
 ## Validation Errors (HRS-001–HRS-038)
@@ -690,7 +690,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | HRS-007 | `WORKFLOW_CYCLE_DETECTED` | Cycle in dependency graph |
 | HRS-008 | `WORKFLOW_INVALID_ARGS_FROM` | `args_from` node not in `waits_for` |
 | HRS-009 | `WORKFLOW_INVALID_CTX_FROM` | `workflow_context_from` node not in `waits_for` |
-| HRS-010 | `WORKFLOW_CTX_PARAM_MISSING` | `workflow_context_from` set but fn lacks param |
+| HRS-010 | `WORKFLOW_CTX_PARAM_MISSING` | `workflow_context_from` set but the function lacks the parameter |
 | HRS-011 | `WORKFLOW_INVALID_OUTPUT` | `output` node not in task list |
 | HRS-012 | `WORKFLOW_INVALID_SUCCESS_POLICY` | Policy references unknown nodes |
 | HRS-013 | `WORKFLOW_INVALID_JOIN` | `quorum` without valid `min_success` |

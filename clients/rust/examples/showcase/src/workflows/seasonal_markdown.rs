@@ -35,10 +35,10 @@ impl WorkflowDefinition for SeasonalMarkdown {
                     update_price::node()
                         .node_id(format!("update_price_{index:02}"))
                         .set(
-                            update_price::params::sku(),
+                            update_price::fields::sku(),
                             format!("ACME-SKU-{sku_number:04}"),
                         )?
-                        .set(update_price::params::campaign_id(), CAMPAIGN_ID.to_owned())?,
+                        .set(update_price::fields::campaign_id(), CAMPAIGN_ID.to_owned())?,
                 )?,
             );
         }
@@ -46,7 +46,7 @@ impl WorkflowDefinition for SeasonalMarkdown {
             sales_rollup::node()
                 .node_id("sales_rollup")
                 .set(
-                    sales_rollup::params::window(),
+                    sales_rollup::fields::window(),
                     format!("markdown-{CAMPAIGN_ID}"),
                 )?
                 .waits_for_all(markdowns),

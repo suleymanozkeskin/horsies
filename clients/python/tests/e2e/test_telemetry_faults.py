@@ -582,7 +582,7 @@ def _traced_producer() -> TracedProducer:
         ),
     )
 
-    @app.task(task_name='e2e_telemetry_faults_add')
+    @app.task(name='e2e_telemetry_faults_add')
     def traced_add(*, left: int, right: int) -> Result[int, TaskError]:
         return Ok(left + right)
 

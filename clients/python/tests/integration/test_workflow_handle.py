@@ -130,8 +130,8 @@ class TestWorkflowHandleStatus:
         task_a = make_simple_task(app, 'status_running_a')
         task_b = make_simple_task(app, 'status_running_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='status_running', tasks=[node_a, node_b],
@@ -182,8 +182,8 @@ class TestWorkflowHandleGet:
         """The PENDING node that the expiry of a paused workflow skips gets completed_at."""
         failing = make_failing_task(app, 'expiry_skip_completed_at_a')
         waiting = make_simple_task(app, 'expiry_skip_completed_at_b')
-        node_a = TaskNode(fn=failing)
-        node_b = TaskNode(fn=waiting, kwargs={'value': 1}, waits_for=[node_a])
+        node_a = TaskNode(function=failing)
+        node_b = TaskNode(function=waiting, kwargs={'value': 1}, waits_for=[node_a])
         spec = make_workflow_spec(
             broker=broker,
             name='expiry_skip_completed_at',
@@ -230,10 +230,10 @@ class TestWorkflowHandleGet:
         task_a = make_simple_task(app, 'get_timeout_a')
         task_b = make_simple_task(app, 'get_timeout_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         node_a.queue = 'timeout_queue'
         node_a.priority = 100
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
         node_b.queue = 'timeout_queue'
         node_b.priority = 100
 
@@ -260,8 +260,8 @@ class TestWorkflowHandleGet:
         task_a = make_simple_task(app, 'get_cancelled_a')
         task_b = make_simple_task(app, 'get_cancelled_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='get_cancelled', tasks=[node_a, node_b],
@@ -314,7 +314,7 @@ class TestWorkflowHandleResults:
         """result_for() returns Err(ReadResultNotReady) if task not completed."""
         task_a = make_simple_task(app, 'result_for_not_ready_a')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker, name='result_for_not_ready', tasks=[node_a],
@@ -336,7 +336,7 @@ class TestWorkflowHandleResults:
         """result_for_async() returns WORKFLOW_CTX_MISSING_ID when node_id is None."""
         task_a = make_simple_task(app, 'result_for_no_id_a')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker, name='result_for_no_id', tasks=[node_a],
@@ -345,7 +345,7 @@ class TestWorkflowHandleResults:
         handle = await start_ok(spec, broker)
 
         # Create a bare TaskNode not assigned to any spec — node_id is None
-        orphan_node: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
+        orphan_node: TaskNode[int] = TaskNode(function=task_a, kwargs={'value': 1})
         assert orphan_node.node_id is None
 
         result = await handle.result_for_async(orphan_node)
@@ -365,8 +365,8 @@ class TestWorkflowHandleResults:
         task_a = make_simple_task(app, 'results_empty_a')
         task_b = make_simple_task(app, 'results_empty_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='results_empty', tasks=[node_a, node_b],
@@ -389,8 +389,8 @@ class TestWorkflowHandleResults:
         task_a = make_simple_task(app, 'tasks_info_a')
         task_b = make_simple_task(app, 'tasks_info_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='tasks_info', tasks=[node_a, node_b],
@@ -417,9 +417,9 @@ class TestWorkflowHandleResults:
         task_b = make_simple_task(app, 'tasks_order_b')
         task_c = make_simple_task(app, 'tasks_order_c')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2})
-        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a, node_b])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2})
+        node_c = TaskNode(function=task_c, kwargs={'value': 3}, waits_for=[node_a, node_b])
 
         spec = make_workflow_spec(
             broker=broker, name='tasks_order', tasks=[node_a, node_b, node_c],
@@ -444,8 +444,8 @@ class TestWorkflowHandleResults:
         task_a = make_simple_task(app, 'tasks_status_a')
         task_b = make_simple_task(app, 'tasks_status_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='tasks_status', tasks=[node_a, node_b],
@@ -483,7 +483,7 @@ class TestWorkflowHandleSubWorkflowFields:
     ) -> None:
         """Regular TaskNode has sub_workflow_id=None and sub_workflow_summary=None."""
         task_a = make_simple_task(app, 'subwf_regular_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker, name='subwf_regular', tasks=[node_a],
@@ -505,7 +505,7 @@ class TestWorkflowHandleSubWorkflowFields:
     ) -> None:
         """When sub_workflow_id is set (child started), tasks_async() exposes it."""
         task_a = make_simple_task(app, 'subwf_id_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker, name='subwf_id', tasks=[node_a],
@@ -554,7 +554,7 @@ class TestWorkflowHandleSubWorkflowFields:
     ) -> None:
         """Completed subworkflow node has both sub_workflow_id and sub_workflow_summary."""
         task_a = make_simple_task(app, 'subwf_summary_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker, name='subwf_summary', tasks=[node_a],
@@ -623,7 +623,7 @@ class TestWorkflowHandleSubWorkflowFields:
     ) -> None:
         """Corrupt sub_workflow_summary JSON is Err(HandleStoredDataInvalid) with the cause."""
         task_a = make_simple_task(app, 'subwf_corrupt_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker, name='subwf_corrupt', tasks=[node_a],
@@ -683,7 +683,7 @@ class TestWorkflowHandleSubWorkflowFields:
         now surface as Err(HandleStoredDataInvalid) with the ValueError.
         """
         task_a = make_simple_task(app, 'subwf_badstatus_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker, name='subwf_badstatus', tasks=[node_a],
@@ -751,8 +751,8 @@ class TestWorkflowHandleCancel:
         task_a = make_simple_task(app, 'cancel_a')
         task_b = make_simple_task(app, 'cancel_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(broker=broker, name='cancel', tasks=[node_a, node_b])
 
@@ -774,7 +774,7 @@ class TestWorkflowHandleCancel:
     ) -> None:
         """The cancelled root and its cancelled child both get completed_at."""
         task_a = make_simple_task(app, 'cancel_completed_at_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker, name='cancel_completed_at', tasks=[node_a],
         )
@@ -822,8 +822,8 @@ class TestWorkflowHandleCancel:
         task_a = make_simple_task(app, 'cancel_skip_a')
         task_b = make_simple_task(app, 'cancel_skip_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='cancel_skip', tasks=[node_a, node_b],
@@ -850,8 +850,8 @@ class TestWorkflowHandleCancel:
         """The PENDING node and the ENQUEUED node that the cancel skips get completed_at."""
         task_a = make_simple_task(app, 'cancel_skip_completed_at_a')
         task_b = make_simple_task(app, 'cancel_skip_completed_at_b')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
         spec = make_workflow_spec(
             broker=broker, name='cancel_skip_completed_at', tasks=[node_a, node_b],
         )
@@ -895,8 +895,8 @@ class TestWorkflowHandleCancel:
         """
         task_a = make_simple_task(app, 'cancel_lock_order_a')
         task_b = make_simple_task(app, 'cancel_lock_order_b')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
         spec = make_workflow_spec(
             broker=broker, name='cancel_lock_order', tasks=[node_a, node_b],
         )
@@ -949,7 +949,7 @@ class TestWorkflowHandleCancel:
     ) -> None:
         """The cascade sets completed_at on each child workflow it cancels."""
         task_a = make_simple_task(app, 'descendant_cancel_completed_at_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker,
             name='descendant_cancel_completed_at',
@@ -998,7 +998,7 @@ class TestWorkflowHandleCancel:
     ) -> None:
         """Descendant cancellation locks its workflow row before its nodes."""
         task_a = make_simple_task(app, 'descendant_cancel_lock_order_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker,
             name='descendant_cancel_lock_order',
@@ -1088,8 +1088,8 @@ class TestWorkflowHandleCancel:
         task_a = make_simple_task(app, 'cancel_guarantee_states_a')
         task_b = make_simple_task(app, 'cancel_guarantee_states_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
         spec = make_workflow_spec(
             broker=broker, name='cancel_guarantee_states', tasks=[node_a, node_b],
         )
@@ -1137,7 +1137,7 @@ class TestWorkflowHandleCancel:
     ) -> None:
         """Cancel turns ENQUEUED+CLAIMED-not-started work into CANCELLED+SKIPPED."""
         task_a = make_simple_task(app, 'cancel_guarantee_claimed_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker, name='cancel_guarantee_claimed', tasks=[node_a],
         )
@@ -1251,8 +1251,8 @@ class TestWorkflowHandlePauseResume:
         task_a = make_simple_task(app, 'pause_run_a')
         task_b = make_simple_task(app, 'pause_run_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='pause_running', tasks=[node_a, node_b],
@@ -1284,8 +1284,8 @@ class TestWorkflowHandlePauseResume:
         task_a = make_simple_task(app, 'resume_paused_a')
         task_b = make_simple_task(app, 'resume_paused_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='resume_paused', tasks=[node_a, node_b],
@@ -1317,8 +1317,8 @@ class TestWorkflowHandlePauseResume:
         task_a = make_simple_task(app, 'resume_running_a')
         task_b = make_simple_task(app, 'resume_running_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='resume_running', tasks=[node_a, node_b],
@@ -1397,7 +1397,7 @@ class TestUnknownStoredWorkflowStatus:
         spec = make_workflow_spec(
             broker=broker,
             name='unknown_status_refused',
-            tasks=[TaskNode(fn=task_a, kwargs={'value': 1})],
+            tasks=[TaskNode(function=task_a, kwargs={'value': 1})],
         )
         handle = await start_ok(spec, broker)
 
@@ -1456,7 +1456,7 @@ class TestWorkflowHandleInfraErrors:
         run in the core; each fails at its first statement, where the core
         pool opens its connection."""
         task_a = make_simple_task(app, f'{name}_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(broker=broker, name=name, tasks=[node_a])
         started = await start_ok(spec, broker)
         return WorkflowHandle(workflow_id=started.workflow_id, broker=unreachable_broker)
@@ -1515,7 +1515,7 @@ class TestWorkflowHandleInfraErrors:
         """result_for_async() and result_for() return Err(ReadDatabaseError) when
         the read fails, with Python 0.7's message, which names the node."""
         task_a = make_simple_task(app, 'result_for_db_err_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker, name='result_for_db_err', tasks=[node_a],
         )
@@ -1679,7 +1679,7 @@ class TestListenerFallbackContract:
         on ``listener_refused_broker``. Checks that the workflow is RUNNING:
         that read opens the connection of the handle's core pool."""
         task_a = make_simple_task(app, f'{name}_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 50})
+        node_a = TaskNode(function=task_a, kwargs={'value': 50})
         spec = make_workflow_spec(broker=broker, name=name, tasks=[node_a], output=node_a)
         started = await start_ok(spec, broker)
         handle: WorkflowHandle[Any] = WorkflowHandle(
@@ -1760,7 +1760,7 @@ async def _paused_workflow(
     name: str,
 ) -> str:
     """A one-node workflow with ``on_error=PAUSE`` whose task failed: PAUSED."""
-    node = TaskNode(fn=make_failing_task(app, name))
+    node = TaskNode(function=make_failing_task(app, name))
     spec = make_workflow_spec(
         broker=broker, name=name, tasks=[node], on_error=OnError.PAUSE,
     )

@@ -56,12 +56,12 @@ app.discover_tasks(
 )
 
 
-@app.task(task_name='e2e_softcap_healthcheck')
+@app.task(name='e2e_softcap_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='e2e_softcap_slow')
+@app.task(name='e2e_softcap_slow')
 def slow_task(*, duration_ms: int) -> Result[str, TaskError]:
     """Task that sleeps for specified duration."""
     import time
@@ -70,7 +70,7 @@ def slow_task(*, duration_ms: int) -> Result[str, TaskError]:
     return Ok(f'slept_{duration_ms}')
 
 
-@app.task(task_name='e2e_softcap_blocker')
+@app.task(name='e2e_softcap_blocker')
 def blocker_task(*, duration_ms: int) -> Result[str, TaskError]:
     """Single-process blocker used to keep a worker process busy during reclaim races."""
     import time
@@ -79,7 +79,7 @@ def blocker_task(*, duration_ms: int) -> Result[str, TaskError]:
     return Ok(f'blocked_{duration_ms}')
 
 
-@app.task(task_name='e2e_softcap_slow_idempotent')
+@app.task(name='e2e_softcap_slow_idempotent')
 def slow_idempotent_task(*, token: str, duration_ms: int) -> Result[str, TaskError]:
     """Slow task with atomic file detection for double-execution testing.
 
@@ -114,7 +114,7 @@ def slow_idempotent_task(*, token: str, duration_ms: int) -> Result[str, TaskErr
         )
 
 
-@app.task(task_name='e2e_softcap_db_ledger')
+@app.task(name='e2e_softcap_db_ledger')
 def db_ledger_task(*, token: str) -> Result[str, TaskError]:
     """Record task-body entry in DB and enforce a single winner via unique token."""
     import psycopg

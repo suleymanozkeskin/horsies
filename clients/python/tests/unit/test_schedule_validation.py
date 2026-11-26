@@ -66,10 +66,10 @@ def _make_mock_app(tasks: dict[str, MagicMock] | None = None) -> MagicMock:
 
 
 def _make_task_mock(fn: object, *, task_options_json: str | None = None) -> MagicMock:
-    """Mock task object exposing _original_fn, a default queue and its options text."""
+    """Mock task object exposing _original_function, a default queue and its options text."""
     task = MagicMock()
-    task._original_fn = fn
-    task.task_queue_name = None
+    task._original_function = fn
+    task.queue = None
     task.task_options_json = task_options_json
     return task
 

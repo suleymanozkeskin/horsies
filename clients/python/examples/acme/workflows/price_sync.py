@@ -49,17 +49,17 @@ class PriceSync(WorkflowDefinition[CacheWarm]):
     ) -> WorkflowSpec[CacheWarm]:
         """Build a fresh spec for one price sync."""
         cdn = TaskNode(
-            fn=publish_cdn,
+            function=publish_cdn,
             kwargs={'campaign_id': campaign_id, 'sku': sku},
             node_id='publish_cdn',
         )
         origin = TaskNode(
-            fn=publish_origin,
+            function=publish_origin,
             kwargs={'campaign_id': campaign_id, 'sku': sku},
             node_id='publish_origin',
         )
         warm = TaskNode(
-            fn=warm_cache_edge,
+            function=warm_cache_edge,
             kwargs={'campaign_id': campaign_id},
             waits_for=[cdn, origin],
             node_id='warm_cache_edge',

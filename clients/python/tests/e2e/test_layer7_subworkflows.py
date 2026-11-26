@@ -852,12 +852,12 @@ async def test_subworkflow_join_any_first_success(
     broker: PostgresBroker,
 ) -> None:
     fast = TaskNode(
-        fn=wf_tasks.mark_task,
+        function=wf_tasks.mark_task,
         node_id='l7_any_fast_success',
         kwargs={'value': 'fast'},
     )
     slow = TaskNode(
-        fn=wf_tasks.slow_mark_task,
+        function=wf_tasks.slow_mark_task,
         node_id='l7_any_slow_success',
         kwargs={'value': 'slow', 'delay_ms': 1_000},
     )
@@ -899,12 +899,12 @@ async def test_subworkflow_join_any_all_fail(
     broker: PostgresBroker,
 ) -> None:
     fail_a = TaskNode(
-        fn=wf_tasks.fail_task,
+        function=wf_tasks.fail_task,
         node_id='l7_any_fail_a',
         kwargs={'error_code': 'L7_ANY_FAIL_A'},
     )
     fail_b = TaskNode(
-        fn=wf_tasks.fail_task,
+        function=wf_tasks.fail_task,
         node_id='l7_any_fail_b',
         kwargs={'error_code': 'L7_ANY_FAIL_B'},
     )
@@ -941,17 +941,17 @@ async def test_subworkflow_join_quorum_met(
     broker: PostgresBroker,
 ) -> None:
     ok_a = TaskNode(
-        fn=wf_tasks.mark_task,
+        function=wf_tasks.mark_task,
         node_id='l7_quorum_met_a',
         kwargs={'value': 'A'},
     )
     ok_b = TaskNode(
-        fn=wf_tasks.mark_task,
+        function=wf_tasks.mark_task,
         node_id='l7_quorum_met_b',
         kwargs={'value': 'B'},
     )
     fail_c = TaskNode(
-        fn=wf_tasks.fail_task,
+        function=wf_tasks.fail_task,
         node_id='l7_quorum_met_c_fail',
         kwargs={'error_code': 'L7_QUORUM_OPTIONAL_FAIL'},
     )
@@ -994,17 +994,17 @@ async def test_subworkflow_join_quorum_unmet(
     broker: PostgresBroker,
 ) -> None:
     ok_a = TaskNode(
-        fn=wf_tasks.mark_task,
+        function=wf_tasks.mark_task,
         node_id='l7_quorum_unmet_a',
         kwargs={'value': 'A'},
     )
     fail_b = TaskNode(
-        fn=wf_tasks.fail_task,
+        function=wf_tasks.fail_task,
         node_id='l7_quorum_unmet_b',
         kwargs={'error_code': 'L7_QUORUM_FAIL_B'},
     )
     fail_c = TaskNode(
-        fn=wf_tasks.fail_task,
+        function=wf_tasks.fail_task,
         node_id='l7_quorum_unmet_c',
         kwargs={'error_code': 'L7_QUORUM_FAIL_C'},
     )
@@ -1042,17 +1042,17 @@ async def test_subworkflow_join_quorum_impossible(
     broker: PostgresBroker,
 ) -> None:
     fail_a = TaskNode(
-        fn=wf_tasks.fail_task,
+        function=wf_tasks.fail_task,
         node_id='l7_quorum_impossible_a',
         kwargs={'error_code': 'L7_QI_FAIL_A'},
     )
     fail_b = TaskNode(
-        fn=wf_tasks.fail_task,
+        function=wf_tasks.fail_task,
         node_id='l7_quorum_impossible_b',
         kwargs={'error_code': 'L7_QI_FAIL_B'},
     )
     slow_c = TaskNode(
-        fn=wf_tasks.slow_mark_task,
+        function=wf_tasks.slow_mark_task,
         node_id='l7_quorum_impossible_slow_c',
         kwargs={'value': 'slow_c', 'delay_ms': 1_000},
     )
@@ -1095,7 +1095,7 @@ async def test_subworkflow_skip_task_fail_to_sub_skip(
     broker: PostgresBroker,
 ) -> None:
     source = TaskNode(
-        fn=wf_tasks.fail_task,
+        function=wf_tasks.fail_task,
         node_id='l7_skip_source_task',
         kwargs={'error_code': 'L7_TASK_FAILS_BEFORE_SUB'},
     )
@@ -1133,7 +1133,7 @@ async def test_subworkflow_skip_sub_fail_to_task_skip(
         node_id='l7_skip_failed_sub',
     )
     downstream = TaskNode(
-        fn=wf_tasks.mark_task,
+        function=wf_tasks.mark_task,
         node_id='l7_skip_task_after_failed_sub',
         waits_for=[child],
         kwargs={'value': 'should_skip'},
@@ -1194,7 +1194,7 @@ async def test_subworkflow_skip_chain_skip(
     broker: PostgresBroker,
 ) -> None:
     source = TaskNode(
-        fn=wf_tasks.fail_task,
+        function=wf_tasks.fail_task,
         node_id='l7_chain_source_fail',
         kwargs={'error_code': 'L7_CHAIN_SOURCE_FAIL'},
     )
@@ -1204,7 +1204,7 @@ async def test_subworkflow_skip_chain_skip(
         waits_for=[source],
     )
     middle = TaskNode(
-        fn=wf_tasks.mark_task,
+        function=wf_tasks.mark_task,
         node_id='l7_chain_middle_task_skipped',
         kwargs={'value': 'middle'},
         waits_for=[first_sub],
@@ -1277,7 +1277,7 @@ async def test_subworkflow_cancel_before_start(
     broker: PostgresBroker,
 ) -> None:
     gate = TaskNode(
-        fn=wf_tasks.slow_mark_task,
+        function=wf_tasks.slow_mark_task,
         node_id='l7_cancel_before_start_gate',
         kwargs={'value': 'gate', 'delay_ms': 2_000},
     )
@@ -1497,7 +1497,7 @@ async def test_subworkflow_recovery_ready_unstarted(
     broker: PostgresBroker,
 ) -> None:
     gate = TaskNode(
-        fn=wf_tasks.mark_task,
+        function=wf_tasks.mark_task,
         node_id='l7_recovery_ready_gate',
         kwargs={'value': 'gate'},
     )
@@ -1870,7 +1870,7 @@ async def test_subworkflow_success_policy_optional_fail_workflow_complete(
     broker: PostgresBroker,
 ) -> None:
     required = TaskNode(
-        fn=wf_tasks.mark_task,
+        function=wf_tasks.mark_task,
         node_id='l7_policy_optional_required',
         kwargs={'value': 'required_ok'},
     )
@@ -1950,7 +1950,7 @@ async def test_subworkflow_success_policy_mixed_required_optional(
         node_id='l7_policy_mixed_required_sub',
     )
     required_task = TaskNode(
-        fn=wf_tasks.mark_task,
+        function=wf_tasks.mark_task,
         node_id='l7_policy_mixed_required_task',
         kwargs={'value': 'task_ok'},
     )
@@ -2072,7 +2072,7 @@ async def test_subworkflow_deep_outputless_nested_failed_optional(
     broker: PostgresBroker,
 ) -> None:
     required = TaskNode(
-        fn=wf_tasks.mark_task,
+        function=wf_tasks.mark_task,
         node_id='l7_deep_outputless_required',
         kwargs={'value': 'required_ok'},
     )
@@ -2167,7 +2167,7 @@ async def test_subworkflow_deep_mixed_paths(
         node_id='l7_deep_mixed_ok_sub',
     )
     failed_source = TaskNode(
-        fn=wf_tasks.fail_task,
+        function=wf_tasks.fail_task,
         node_id='l7_deep_mixed_failed_source',
         kwargs={'error_code': 'L7_DEEP_MIXED_SOURCE_FAIL'},
     )

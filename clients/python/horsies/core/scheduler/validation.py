@@ -176,7 +176,7 @@ def _resolve_queue_error(
 ) -> HorsiesError | None:
     """Resolve the schedule's queue (explicit, else task default) and validate it."""
     task = app.tasks.get(schedule.task_name)
-    task_queue = task.task_queue_name if task is not None else None
+    task_queue = task.queue if task is not None else None
     queue_name = (
         schedule.queue if schedule.queue is not None else task_queue
     )
@@ -202,13 +202,13 @@ def _signature_error(
     the runtime on each run, so a schedule does not supply it, and a schedule
     kwarg with its name does not bind."""
     task = app.tasks.get(schedule.task_name)
-    original_fn = getattr(task, '_original_fn', None) if task else None
-    if original_fn is None:
+    original_function = getattr(task, '_original_function', None) if task else None
+    if original_function is None:
         return None  # Cannot validate without original function signature
 
     sig = without_runtime_parameter(
-        inspect.signature(original_fn),
-        task_runtime_parameter(original_fn),
+        inspect.signature(original_function),
+        task_runtime_parameter(original_function),
     )
     try:
         sig.bind(**schedule.kwargs)

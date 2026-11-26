@@ -25,10 +25,10 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### Horsies (app instance)
 - app = Horsies(config=AppConfig(...))
 - @app.task("name", retry_policy=...) -> decorator (DEFAULT mode)
-- @app.task("name", queue_name="q", retry_policy=...) -> decorator (CUSTOM mode)
+- @app.task("name", queue="q", retry_policy=...) -> decorator (CUSTOM mode)
 - @app.task("name", exception_mapper={ValueError: "VALIDATION_ERROR"}) -> per-task exception mapping
 - @app.task("name", default_unhandled_error_code="MY_ERROR") -> override default error code
-- @app.task("name", error_codes=ChargeCode) or error_codes=("CARD_DECLINED",) -> declares the task's own codes (an Enum class: its member values; or a tuple of str; default ()); they are the values of the task's error_code metric label besides the built-in codes and `undeclared`; the values of the task's exception_mapper and of AppConfig.exception_mapper are added with no second declaration; task_function.task_error_codes keeps them; refusals: not an Enum class or a tuple HRS-102, not UPPER_SNAKE_CASE HRS-112, built-in or WORKFLOW_STOPPED HRS-212, repeated HRS-113
+- @app.task("name", error_codes=ChargeCode) or error_codes=("CARD_DECLINED",) -> declares the task's own codes (an Enum class: its member values; or a tuple of str; default ()); they are the values of the task's error_code metric label besides the built-in codes and `undeclared`; the values of the task's exception_mapper and of AppConfig.exception_mapper are added with no second declaration; task_function.error_codes keeps them; refusals: not an Enum class or a tuple HRS-102, not UPPER_SNAKE_CASE HRS-112, built-in or WORKFLOW_STOPPED HRS-212, repeated HRS-113
 - app.workflow(name, tasks, on_error, output, success_policy, *, definition_key) -> WorkflowSpec (definition_key is required; a WorkflowDefinition class supplies it)
 - @app.workflow_builder(cases=[...]) -> decorator; registers a WorkflowSpec builder for `horsies check` validation
 - app.discover_tasks(["myapp.tasks", "myapp.workflows"]) -> register modules for import
@@ -122,7 +122,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - PgBouncer-only workers are unsupported because PostgreSQL LISTEN requires a persistent session
 
 ### QueueMode
-- QueueMode.DEFAULT — single "default" queue, no queue_name on tasks
+- QueueMode.DEFAULT — single "default" queue, no queue on tasks
 - QueueMode.CUSTOM — named queues with priorities and per-queue concurrency
 
 ### CustomQueueConfig
@@ -208,7 +208,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - In an isolated child (Execution.ISOLATED, the default), an async def task runs on the one event loop that the child keeps; the loop runs only while an async task runs; in an async task, send with send_async (the sync send returns TaskSendAsyncContext in a running loop)
 - An async def task in an isolated child must await the work it starts: when its body returns with asyncio tasks of it still on the loop, the child waits up to 1 s for them, then cancels what is alive in three rounds 0.1 s apart; the worker writes what the task returned (then the retry and the workflow step) only after that work ended, and replaces the child; the return ends the deadline, so the outcome is never TASK_TIMEOUT here; the child marks the row finalizing only after that work ended (never for stuck work), so runner heartbeats cover the row while the work runs; work alive after the rounds, or no report within 26.3 s of the return: the worker kills the child and writes what the task returned after the exit; a client that keeps its own background tasks on the loop delays each outcome by about 1 s and causes a replacement after each async task; an asyncio.to_thread() thread is not a task: it is not waited for and does not cause one; only asyncio tasks are seen: a loop.call_soon()/call_later() callback or loop.run_in_executor() work that the task did not await is not waited for, causes no replacement and can still run during a later task of the same child; a task that cancels a helper task in finally must also await it (helper.cancel(), then await asyncio.gather(helper, return_exceptions=True)); one worker log line per such task names the coroutine of each task left (up to 10) and how that work ended
 - A child creates its event loop at boot, before it reports ready, when the app has an async def task (an app with none gets no loop); when it cannot be created (for example EMFILE, or an event loop policy that raises), the child fails its boot and no task reaches it; that cause can clear, so only that slot is down and boots again after a growing wait (1 s, 2 s, 4 s, up to 60 s); when every slot is down, the worker exits non-zero after three failed starts so its supervisor restarts it
-- Options: task_name, queue_name, retry_policy, exception_mapper, default_unhandled_error_code, timeout_ms, execution, cancel_grace_ms
+- Options: name, queue, retry_policy, exception_mapper, default_unhandled_error_code, timeout_ms, execution, cancel_grace_ms
 - execution: Execution.ISOLATED (default; def or async def, timeout_ms optional), Execution.SHARED_ASYNC (async def, timeout_ms required), Execution.SHARED_THREAD (def, timeout_ms required); every task row stores the class
 - cancel_grace_ms: 100 to 10000 ms; SHARED_ASYNC: the time to the second cancel, default 1000 ms; ISOLATED: the time from an operator cancel to the kill of the child, no default (no kill); SHARED_THREAD: refused (HRS-110); the stored options hold the value in effect at send
 - A task reads the cancel of its run through its first parameter runtime: TaskRuntime: runtime.cancel_state() -> CancelNotRequested() | CancelRequested(cause: CancelCause); CancelCause: OPERATOR (an operator cancel of the running task), DEADLINE (the deadline of a SHARED_ASYNC or SHARED_THREAD run); the first cause stays; TaskRuntime.for_test(task_id=..., cancel_state=...) gives a runtime with a fixed cancel state for a direct call
@@ -318,7 +318,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### TaskNode[T]
 - T = ok type of the task's Result
-- fn: TaskFunction | AsyncTaskFunction, kwargs: dict (args field exists but is init=False — not a construction param)
+- function: TaskFunction | AsyncTaskFunction, kwargs: dict (args field exists but is init=False — not a construction param)
 - waits_for: list of TaskNode | SubWorkflowNode (wait for terminal)
 - args_from: dict[str, TaskNode | SubWorkflowNode] (inject the upstream TaskOutcome as kwarg; the parameter is typed TaskOutcome[T, TaskError])
 - workflow_context_from: list[TaskNode | SubWorkflowNode] | None (subset for WorkflowContext)
@@ -475,9 +475,9 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Per-task: @app.task("name", exception_mapper={TimeoutError: "TIMEOUT"})
 
 ### RetryPolicy
-- RetryPolicy.fixed(intervals, *, auto_retry_for, jitter) e.g. RetryPolicy.fixed([60, 120, 300], auto_retry_for=["ERROR_CODE", ...]); the length of intervals is the retry count
-- RetryPolicy.exponential(base_seconds, *, max_retries, auto_retry_for, jitter, max_delay_seconds=None)
-- auto_retry_for: required list of error codes that trigger retries
+- RetryPolicy.fixed(intervals_seconds, *, retry_for, jitter) e.g. RetryPolicy.fixed([60, 120, 300], retry_for=["ERROR_CODE", ...]); the length of intervals_seconds is the retry count
+- RetryPolicy.exponential(base_seconds, *, max_retries, retry_for, jitter, max_delay_seconds=None)
+- retry_for: required list of error codes that trigger retries
 - jitter: bool (default True, adds a random 0-25% to each delay; never shortens)
 - Exponential: exactly one base interval, delay = base * 2^(attempt-1)
 
@@ -708,7 +708,7 @@ Registry (HRS-300-HRS-399):
 - .file -> str, .line -> int, .column -> int | None
 - .get_source_line() -> str | None (reads actual source for display)
 - .format_short() -> str ("file:line" or "file:line:col")
-- SourceLocation.from_function(fn) -> SourceLocation | None
+- SourceLocation.from_function(function) -> SourceLocation | None
 
 #### ValidationReport
 - Collects multiple HorsiesError instances within a validation phase
@@ -917,7 +917,7 @@ send, send_async, enqueue, dispatch, produce, TaskSendResult, TaskSendError, res
 Result, Ok, Err, TaskError, Ok(Failed), Err(ReadError), error patterns -> /horsies/tasks/error-handling/
 BuiltInTaskCode, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode, TaskError, TaskSendErrorCode, error codes, UNHANDLED_EXCEPTION -> /horsies/tasks/errors/
 TaskHandle, get, get_async, timeout, result, ReadResult, ReadWaitTimeout, ReadTaskNotFound -> /horsies/tasks/retrieving-results/
-retry, backoff, exponential, fixed, jitter, max_delay_seconds, auto_retry_for -> /horsies/tasks/retry-policy/
+retry, backoff, exponential, fixed, jitter, max_delay_seconds, retry_for -> /horsies/tasks/retry-policy/
 RetryPolicy, RetryPolicy.fixed, RetryPolicy.exponential, exception_mapper -> /horsies/tasks/defining-tasks/#configure-retries
 PENDING, CLAIMED, RUNNING, COMPLETED, FAILED, task status -> /horsies/concepts/task-lifecycle/
 TaskStatus, is_terminal, TASK_TERMINAL_STATES -> /horsies/tasks/retrieving-results/#terminal-statuses

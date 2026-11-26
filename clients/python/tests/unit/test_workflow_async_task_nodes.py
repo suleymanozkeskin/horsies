@@ -51,7 +51,7 @@ class TestAsyncTaskNodes:
 
         node = spec.tasks[0]
         assert isinstance(node, TaskNode)
-        assert node.fn is double
+        assert node.function is double
         assert stored_kwargs(node) == {'value': 3}
 
     def test_args_from_flows_between_def_and_async_def_tasks(self) -> None:
@@ -169,6 +169,6 @@ class TestAsyncTaskNodes:
 
         node = spec.tasks[1]
         assert isinstance(node, TaskNode)
-        assert node.fn is with_ctx
+        assert node.function is with_ctx
         assert node.workflow_context_from is not None
         assert len(node.workflow_context_from) == 1

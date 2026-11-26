@@ -170,7 +170,7 @@ things follow, and they are not optional in a real deployment:
   in this showcase does, and the `replayed` field on its result says whether
   this run did the work or found it already done.
 - **Retry the crash, not the cause.** `WORKER_CRASHED` belongs in
-  `auto_retry_for`; the error that caused the kill does not. `generate_invoice`
+  `retry_for`; the error that caused the kill does not. `generate_invoice`
   omits `TASK_TIMEOUT` on purpose — its stall is a stable property of the order,
   so a retry would stall again and cost another child.
 

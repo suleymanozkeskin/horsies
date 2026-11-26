@@ -1,11 +1,11 @@
 """Verify that every queue/task mismatch combination is a hard fail.
 
 Combinations tested:
-  1. DEFAULT mode + task with queue_name       → ConfigurationError
-  2. CUSTOM mode + task without queue_name      → ConfigurationError
+  1. DEFAULT mode + task with queue            → ConfigurationError
+  2. CUSTOM mode + task without queue           → ConfigurationError
   3. CUSTOM mode + task with non-existent queue → ConfigurationError
   4. CUSTOM mode + task with valid queue         → OK
-  5. DEFAULT mode + task without queue_name      → OK
+  5. DEFAULT mode + task without queue           → OK
   6. validate_queue_name called at send time too → ConfigurationError
   7. check() catches queue mismatch from imports → error collected
 """
@@ -44,27 +44,27 @@ def _custom_app(*queue_names: str) -> Horsies:
 
 
 # ---------------------------------------------------------------------------
-# 1. DEFAULT mode + task specifies queue_name → hard fail
+# 1. DEFAULT mode + task specifies queue → hard fail
 # ---------------------------------------------------------------------------
 @pytest.mark.unit
 class TestDefaultModeRejectsQueueName:
 
-    def test_task_with_queue_name_raises(self) -> None:
-        """DEFAULT mode must reject @app.task(queue_name='fast')."""
+    def test_task_with_queue_raises(self) -> None:
+        """DEFAULT mode must reject @app.task(queue='fast')."""
         app = _default_app()
         with pytest.raises(ConfigurationError) as exc_info:
-            @app.task('my_task', queue_name='fast')
+            @app.task('my_task', queue='fast')
             def my_task() -> Result[str, TaskError]:
                 return Ok('done')  # pragma: no cover
 
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
         assert 'DEFAULT' in str(exc_info.value)
 
-    def test_task_with_queue_name_default_string_raises(self) -> None:
-        """Even queue_name='default' is rejected — DEFAULT mode means no queue_name at all."""
+    def test_task_with_queue_default_string_raises(self) -> None:
+        """Even queue='default' is rejected — DEFAULT mode means no queue at all."""
         app = _default_app()
         with pytest.raises(ConfigurationError) as exc_info:
-            @app.task('my_task', queue_name='default')
+            @app.task('my_task', queue='default')
             def my_task() -> Result[str, TaskError]:
                 return Ok('done')  # pragma: no cover
 
@@ -72,13 +72,13 @@ class TestDefaultModeRejectsQueueName:
 
 
 # ---------------------------------------------------------------------------
-# 2. CUSTOM mode + task omits queue_name → hard fail
+# 2. CUSTOM mode + task omits queue → hard fail
 # ---------------------------------------------------------------------------
 @pytest.mark.unit
 class TestCustomModeRequiresQueueName:
 
-    def test_task_without_queue_name_raises(self) -> None:
-        """CUSTOM mode must reject @app.task('x') without queue_name."""
+    def test_task_without_queue_raises(self) -> None:
+        """CUSTOM mode must reject @app.task('x') without queue."""
         app = _custom_app('fast', 'slow')
         with pytest.raises(ConfigurationError) as exc_info:
             @app.task('my_task')
@@ -96,10 +96,10 @@ class TestCustomModeRequiresQueueName:
 class TestCustomModeRejectsUnknownQueue:
 
     def test_task_with_unknown_queue_raises(self) -> None:
-        """CUSTOM mode with queues ['fast','slow'] must reject queue_name='analytics'."""
+        """CUSTOM mode with queues ['fast','slow'] must reject queue='analytics'."""
         app = _custom_app('fast', 'slow')
         with pytest.raises(ConfigurationError) as exc_info:
-            @app.task('my_task', queue_name='analytics')
+            @app.task('my_task', queue='analytics')
             def my_task() -> Result[str, TaskError]:
                 return Ok('done')  # pragma: no cover
 
@@ -109,10 +109,10 @@ class TestCustomModeRejectsUnknownQueue:
         assert 'fast' in str(exc_info.value) or 'slow' in str(exc_info.value)
 
     def test_task_with_typo_queue_raises(self) -> None:
-        """Typo in queue_name (e.g. 'fats' instead of 'fast') must fail."""
+        """Typo in queue (e.g. 'fats' instead of 'fast') must fail."""
         app = _custom_app('fast', 'slow')
         with pytest.raises(ConfigurationError) as exc_info:
-            @app.task('my_task', queue_name='fats')
+            @app.task('my_task', queue='fats')
             def my_task() -> Result[str, TaskError]:
                 return Ok('done')  # pragma: no cover
 
@@ -129,7 +129,7 @@ class TestCustomModeAcceptsValidQueue:
         """CUSTOM mode should accept a task targeting one of the configured queues."""
         app = _custom_app('fast', 'slow')
 
-        @app.task('my_task', queue_name='fast')
+        @app.task('my_task', queue='fast')
         def my_task() -> Result[str, TaskError]:
             return Ok('done')  # pragma: no cover
 
@@ -139,11 +139,11 @@ class TestCustomModeAcceptsValidQueue:
         """Multiple tasks can target different valid queues."""
         app = _custom_app('fast', 'slow')
 
-        @app.task('task_a', queue_name='fast')
+        @app.task('task_a', queue='fast')
         def task_a() -> Result[str, TaskError]:
             return Ok('a')  # pragma: no cover
 
-        @app.task('task_b', queue_name='slow')
+        @app.task('task_b', queue='slow')
         def task_b() -> Result[str, TaskError]:
             return Ok('b')  # pragma: no cover
 
@@ -152,13 +152,13 @@ class TestCustomModeAcceptsValidQueue:
 
 
 # ---------------------------------------------------------------------------
-# 5. DEFAULT mode + task without queue_name → OK
+# 5. DEFAULT mode + task without queue → OK
 # ---------------------------------------------------------------------------
 @pytest.mark.unit
 class TestDefaultModeAcceptsNoQueue:
 
     def test_task_without_queue_succeeds(self) -> None:
-        """DEFAULT mode should accept @app.task('x') with no queue_name."""
+        """DEFAULT mode should accept @app.task('x') with no queue."""
         app = _default_app()
 
         @app.task('my_task')
@@ -290,13 +290,13 @@ class TestWorkflowValidatesFrozenNodes:
         """A frozen node with queue='ghost' fails app.workflow() in CUSTOM mode."""
         app = _custom_app('scraping')
 
-        @app.task('scrape', queue_name='scraping')
+        @app.task('scrape', queue='scraping')
         def scrape() -> Result[int, TaskError]:
             return Ok(1)  # pragma: no cover
 
         # Freeze a node carrying a concrete invalid queue by building a spec.
         node: TaskNode[int] = TaskNode(
-            fn=scrape, node_id='n', queue='ghost', priority=7,
+            function=scrape, node_id='n', queue='ghost', priority=7,
         )
         frozen = list(
             WorkflowSpec(
@@ -320,12 +320,12 @@ class TestWorkflowValidatesFrozenNodes:
         """A frozen node on a valid queue passes (no false rejection)."""
         app = _custom_app('scraping')
 
-        @app.task('scrape_ok', queue_name='scraping')
+        @app.task('scrape_ok', queue='scraping')
         def scrape_ok() -> Result[int, TaskError]:
             return Ok(1)  # pragma: no cover
 
         node: TaskNode[int] = TaskNode(
-            fn=scrape_ok, node_id='n', queue='scraping', priority=30,
+            function=scrape_ok, node_id='n', queue='scraping', priority=30,
         )
         frozen = list(
             WorkflowSpec(

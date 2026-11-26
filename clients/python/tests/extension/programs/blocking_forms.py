@@ -64,7 +64,7 @@ APP: Final = Horsies(
 )
 
 
-@APP.task(task_name='tests.extension.blocking_forms.value')
+@APP.task(name='tests.extension.blocking_forms.value')
 def value_task(*, value: int) -> Result[int, TaskError]:
     return Ok(value)
 
@@ -75,7 +75,7 @@ def _start_request(name: str, workflow_id: uuid.UUID) -> core.WorkflowStartReque
     Raises:
         RuntimeError: the spec data does not encode (a defect of the builder).
     """
-    node: TaskNode[int] = TaskNode(fn=value_task, kwargs={'value': 1}, node_id=NODE_ID)
+    node: TaskNode[int] = TaskNode(function=value_task, kwargs={'value': 1}, node_id=NODE_ID)
     spec = APP.workflow(name, [node], output=node, definition_key=f'{name}.v1')
     match workflow_spec_json(spec, top_node_rows(APP.get_broker(), spec)):
         case Ok(ok_value=spec_json):

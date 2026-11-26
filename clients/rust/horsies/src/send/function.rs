@@ -103,10 +103,10 @@ impl SendContext {
 /// can run, so it is never a [`TaskSendError`].
 pub struct TaskFunction<A, T, E> {
     task_name: String,
-    queue_name: String,
+    queue: String,
     priority: u32,
     task_options: Option<TaskOptions>,
-    accepts_workflow_ctx: bool,
+    accepts_workflow_context: bool,
     context: Arc<SendContext>,
     types: PhantomData<fn(A) -> (T, E)>,
 }
@@ -115,10 +115,10 @@ impl<A, T, E> Clone for TaskFunction<A, T, E> {
     fn clone(&self) -> Self {
         Self {
             task_name: self.task_name.clone(),
-            queue_name: self.queue_name.clone(),
+            queue: self.queue.clone(),
             priority: self.priority,
             task_options: self.task_options.clone(),
-            accepts_workflow_ctx: self.accepts_workflow_ctx,
+            accepts_workflow_context: self.accepts_workflow_context,
             context: Arc::clone(&self.context),
             types: PhantomData,
         }
@@ -130,7 +130,7 @@ impl<A, T, E> std::fmt::Debug for TaskFunction<A, T, E> {
         formatter
             .debug_struct("TaskFunction")
             .field("task_name", &self.task_name)
-            .field("queue_name", &self.queue_name)
+            .field("queue", &self.queue)
             .field("priority", &self.priority)
             .finish_non_exhaustive()
     }
@@ -161,7 +161,7 @@ where
                 .with_help("build the typed function with the input type of the task"));
             }
         }
-        let (Some(queue_name), Some(priority)) = (task.queue_name(), task.priority()) else {
+        let (Some(queue), Some(priority)) = (task.queue(), task.priority()) else {
             return Err(HorsiesError::new(format!(
                 "task '{task_name}' has no resolved queue; register it with Horsies::register"
             ))
@@ -169,10 +169,10 @@ where
         };
         let function = Self {
             task_name: task_name.to_owned(),
-            queue_name: queue_name.to_owned(),
+            queue: queue.to_owned(),
             priority,
             task_options: task.task_options().cloned(),
-            accepts_workflow_ctx: task.accepts_workflow_ctx(),
+            accepts_workflow_context: task.accepts_workflow_context(),
             context: Arc::new(SendContext::of(app)),
             types: PhantomData,
         };
@@ -186,8 +186,8 @@ where
     }
 
     /// The queue the task is sent to.
-    pub fn queue_name(&self) -> &str {
-        &self.queue_name
+    pub fn queue(&self) -> &str {
+        &self.queue
     }
 
     /// The priority of the task's queue: 1 is claimed first, 100 last.
@@ -201,9 +201,9 @@ where
     }
 
     /// Whether the task's input takes the workflow context (the task
-    /// attribute's `workflow_ctx`).
-    pub fn accepts_workflow_ctx(&self) -> bool {
-        self.accepts_workflow_ctx
+    /// attribute's `workflow_context`).
+    pub fn accepts_workflow_context(&self) -> bool {
+        self.accepts_workflow_context
     }
 
     /// Send the task now.
@@ -268,18 +268,14 @@ where
                 ),
             });
         }
-        let retention = send_retention(
-            &context.retention,
-            &self.queue_name,
-            options.chosen_retention(),
-        )
-        .map_err(|refused| self.validation_failed(&format!("Invalid retention: {refused}")))?;
+        let retention = send_retention(&context.retention, &self.queue, options.chosen_retention())
+            .map_err(|refused| self.validation_failed(&format!("Invalid retention: {refused}")))?;
         let input_json = self.encoded_input(input)?;
         self.check_payload_size(&input_json)?;
         let priority = i32::try_from(self.priority).map_err(|_| {
             self.validation_failed(&format!(
                 "the priority of queue '{}' does not fit a Postgres integer",
-                self.queue_name
+                self.queue
             ))
         })?;
         let task_id = mint_task_id().map_err(|refused| {
@@ -292,7 +288,7 @@ where
         );
         let payload = TaskSendPayload {
             task_name: self.task_name.clone(),
-            queue_name: self.queue_name.clone(),
+            queue_name: self.queue.clone(),
             priority,
             input_json,
             sent_at: Utc::now(),
@@ -531,9 +527,9 @@ pub(crate) fn send_options_text(
 fn isolated_options(task_name: &str) -> TaskOptions {
     TaskOptions {
         task_name: task_name.to_owned(),
-        queue_name: None,
+        queue: None,
         good_until: None,
-        auto_retry_for: None,
+        retry_for: None,
         retry_policy: None,
         timeout_ms: None,
         execution: Execution::Isolated,
@@ -642,7 +638,7 @@ mod tests {
         let app = app_with(config());
         let function = function(&app);
         assert_eq!(function.task_name(), "send_invoice");
-        assert_eq!(function.queue_name(), "default");
+        assert_eq!(function.queue(), "default");
         assert_eq!(function.priority(), 100);
     }
 
@@ -672,9 +668,9 @@ mod tests {
     fn a_builder_gives_a_node_the_queue_and_options_of_the_registration_on_its_app() {
         let options = TaskOptions {
             task_name: "send_invoice".to_owned(),
-            queue_name: None,
+            queue: None,
             good_until: None,
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: None,
             timeout_ms: Some(5_000),
             execution: Execution::Isolated,
@@ -948,12 +944,12 @@ mod tests {
         let _function = function(&app);
         let runtime = app.task_runtime();
         let found = runtime
-            .task_handle::<Invoice, u32, Infallible>("send_invoice")
+            .task_function::<Invoice, u32, Infallible>("send_invoice")
             .unwrap();
-        assert_eq!(found.queue_name(), "default");
+        assert_eq!(found.queue(), "default");
         assert_eq!(
             runtime
-                .task_handle::<Invoice, String, Infallible>("send_invoice")
+                .task_function::<Invoice, String, Infallible>("send_invoice")
                 .unwrap_err(),
             crate::TaskFunctionNotFound::OtherTypes {
                 task_name: "send_invoice".to_owned(),
@@ -962,7 +958,7 @@ mod tests {
             }
         );
         assert!(matches!(
-            runtime.task_handle::<Invoice, u32, Infallible>("lossy"),
+            runtime.task_function::<Invoice, u32, Infallible>("lossy"),
             Err(crate::TaskFunctionNotFound::NotRegistered { .. })
         ));
     }

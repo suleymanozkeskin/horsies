@@ -46,6 +46,6 @@ pub use horsies_core::{
 // Registration by hand: `Horsies::register` takes a `RegisteredTask` that
 // `async_task_fn!` or `blocking_task_fn!` builds, with its options.
 pub use horsies_core::{
-    BackoffStrategy, CancelGraceMs, CancelGraceOutOfRange, Execution, RegisteredTask, RetryPolicy,
-    RetryPolicyError, TaskOptions,
+    BackoffStrategy, CancelGraceOutOfRange, Execution, RegisteredTask, RetryPolicy,
+    RetryPolicyError, TaskOptions, DEFAULT_CANCEL_GRACE_MS,
 };

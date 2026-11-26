@@ -501,7 +501,7 @@ class TestDefinitionTimeOptions:
 
         with pytest.raises(TaskDefinitionError) as caught:
             refused_options: dict[str, Any] = {'timeout_ms': MARKER}
-            app.task(task_name='test.bad_timeout', **refused_options)(task_fn)
+            app.task(name='test.bad_timeout', **refused_options)(task_fn)
 
         notes = ' '.join(caught.value.notes)
         assert caught.value.code == ErrorCode.TASK_INVALID_OPTIONS
@@ -516,7 +516,7 @@ class TestDefinitionTimeOptions:
         )
         app.tasks['test.metadata'] = cast(Any, SimpleNamespace(
             task_options_json=json.dumps({
-                'retry_policy': {'max_retries': MARKER, 'auto_retry_for': ['TRANSIENT']},
+                'retry_policy': {'max_retries': MARKER, 'retry_for': ['TRANSIENT']},
             }),
         ))
 

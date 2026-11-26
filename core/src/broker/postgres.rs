@@ -4976,9 +4976,9 @@ mod enqueue_task_options_tests {
     fn policy(max_retries: u32, extra: &str) -> String {
         let intervals = vec!["60"; max_retries as usize].join(", ");
         format!(
-            r#"{{"retry_policy": {{"max_retries": {max_retries}, "intervals": [{intervals}],
+            r#"{{"retry_policy": {{"max_retries": {max_retries}, "intervals_seconds": [{intervals}],
                 "backoff_strategy": "fixed", "jitter": false,
-                "auto_retry_for": ["STORAGE_ERROR"]{extra}}},
+                "retry_for": ["STORAGE_ERROR"]{extra}}},
               "good_until": null, "timeout_ms": null, "execution": "ISOLATED",
               "cancel_grace_ms": null}}"#
         )
@@ -5228,9 +5228,9 @@ mod enqueue_task_options_tests {
     fn the_core_written_options_are_accepted() {
         let options = crate::core::TaskOptions {
             task_name: "t".to_owned(),
-            queue_name: None,
+            queue: None,
             good_until: None,
-            auto_retry_for: Some(vec![crate::core::TaskErrorCode::Custom(
+            retry_for: Some(vec![crate::core::TaskErrorCode::Custom(
                 crate::core::CustomCode::parse("X").expect("X is a custom code"),
             )]),
             retry_policy: Some(crate::core::RetryPolicy::exponential(30, 4, true).unwrap()),

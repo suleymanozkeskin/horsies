@@ -64,7 +64,7 @@ WORKFLOW_ID = '3c1f5e7a-9b2d-4c6e-8f0a-1b3d5f7a9c2e'
 SENT_AT = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)
 
 
-@APP.task(task_name='start_core.value')
+@APP.task(name='start_core.value')
 def value_task(*, value: int) -> Result[int, TaskError]:
     return Ok(value)
 
@@ -78,7 +78,7 @@ class StartCoreChild(WorkflowDefinition[int]):
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
         _ = (args, params)
-        node = TaskNode(fn=value_task, kwargs={'value': 1})
+        node = TaskNode(function=value_task, kwargs={'value': 1})
         return app.workflow(cls.name, [node], output=node, definition_key=cls.definition_key)
 
 
@@ -89,11 +89,11 @@ def registered_child() -> None:
 
 
 def _spec() -> WorkflowSpec[Any]:
-    first = TaskNode(fn=value_task, kwargs={'value': 1})
-    second = TaskNode(fn=value_task, kwargs={'value': 2})
+    first = TaskNode(function=value_task, kwargs={'value': 1})
+    second = TaskNode(function=value_task, kwargs={'value': 2})
     child = SubWorkflowNode(workflow_def=StartCoreChild, waits_for=[first])
     joined = TaskNode(
-        fn=value_task,
+        function=value_task,
         kwargs={'value': 3},
         waits_for=[first, second],
         join='quorum',
@@ -313,7 +313,7 @@ class TestStartAnswers:
     @pytest.mark.asyncio(loop_scope='function')
     async def test_spec_data_that_does_not_encode_is_refused_with_no_core_call(self) -> None:
         broker = _broker(_record(core.WorkflowStarted))
-        node = TaskNode(fn=value_task, kwargs={'value': 1})
+        node = TaskNode(function=value_task, kwargs={'value': 1})
         spec = APP.workflow(
             'start_core.\ud800', [node], output=node, definition_key='start_core.surrogate.v1',
         )
@@ -344,7 +344,7 @@ class TestNodeRowAsserts:
         self,
     ) -> None:
         broker = _broker(_record(core.WorkflowStarted))
-        node = TaskNode(fn=value_task, kwargs={'value': 1})
+        node = TaskNode(function=value_task, kwargs={'value': 1})
         spec = APP.workflow(
             'start_core.task_args', [node], output=node,
             definition_key='start_core.task_args.v1',

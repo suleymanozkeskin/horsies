@@ -59,9 +59,9 @@ class TaskNode(Generic[OkT_co, CodeT_co]):
 
     Example:
         ```python
-        fetch = TaskNode(fn=fetch_data, kwargs={"url": "https://example.com"})
+        fetch = TaskNode(function=fetch_data, kwargs={"url": "https://example.com"})
         process = TaskNode(
-            fn=process_data,
+            function=process_data,
             waits_for=[fetch],           # wait for fetch to be terminal
             args_from={"raw": fetch},     # inject fetch's TaskOutcome as 'raw' kwarg
             allow_failed_dependencies=True,  # run even if fetch failed
@@ -69,7 +69,7 @@ class TaskNode(Generic[OkT_co, CodeT_co]):
         ```
     """
 
-    fn: (
+    function: (
         TaskFunction[Any, OkT_co, CodeT_co]
         | AsyncTaskFunction[Any, OkT_co, CodeT_co]
         | RuntimeTaskFunction[Any, OkT_co, CodeT_co]
@@ -207,7 +207,7 @@ class TaskNode(Generic[OkT_co, CodeT_co]):
     @property
     def name(self) -> str:
         """Get the task name from the wrapped function."""
-        return self.fn.task_name
+        return self.function.task_name
 
     def key(self) -> NodeKey[OkT_co, CodeT_co]:
         """Return a typed NodeKey for this task node."""

@@ -95,15 +95,15 @@ impl WorkflowDefinition for OrderSummary {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let load =
-            builder.task(load_prices::node().set(load_prices::params::order_id(), ORDER_ID)?)?;
+            builder.task(load_prices::node().set(load_prices::fields::order_id(), ORDER_ID)?)?;
         let total =
-            builder.task(sum_prices::node().arg_from(sum_prices::params::prices(), load))?;
+            builder.task(sum_prices::node().arg_from(sum_prices::fields::prices(), load))?;
         let count =
-            builder.task(count_items::node().arg_from(count_items::params::prices(), load))?;
+            builder.task(count_items::node().arg_from(count_items::fields::prices(), load))?;
         let summary = builder.task(
             summarize::node()
-                .arg_from(summarize::params::total(), total)
-                .arg_from(summarize::params::count(), count),
+                .arg_from(summarize::fields::total(), total)
+                .arg_from(summarize::fields::count(), count),
         )?;
         Ok(WorkflowDefConfig::new().output(summary))
     }

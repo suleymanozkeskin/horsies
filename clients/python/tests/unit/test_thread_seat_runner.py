@@ -86,33 +86,33 @@ RAN: list[str] = []
 
 
 @APP.task(
-    task_name='thread_double', execution=Execution.SHARED_THREAD, timeout_ms=10_000
+    name='thread_double', execution=Execution.SHARED_THREAD, timeout_ms=10_000
 )
 def thread_double(*, x: int) -> Result[int, TaskError]:
     RAN.append(threading.current_thread().name)
     return Ok(x * 2)
 
 
-@APP.task(task_name='thread_async', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
+@APP.task(name='thread_async', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
 async def thread_async() -> Result[int, TaskError]:
     RAN.append('thread_async')
     return Ok(1)
 
 
-@APP.task(task_name='thread_raises', execution=Execution.SHARED_THREAD, timeout_ms=1000)
+@APP.task(name='thread_raises', execution=Execution.SHARED_THREAD, timeout_ms=1000)
 def thread_raises() -> Result[int, TaskError]:
     raise ValueError('bad input')
 
 
 @APP.task(
-    task_name='thread_core_stopped', execution=Execution.SHARED_THREAD, timeout_ms=1000
+    name='thread_core_stopped', execution=Execution.SHARED_THREAD, timeout_ms=1000
 )
 def thread_core_stopped() -> Result[int, TaskError]:
     """A core call of the body met the stopped core of the child."""
     raise core.CoreStopped('log forwarder', 'planned panic')
 
 
-@APP.task(task_name='thread_never', execution=Execution.SHARED_THREAD, timeout_ms=1000)
+@APP.task(name='thread_never', execution=Execution.SHARED_THREAD, timeout_ms=1000)
 def thread_never() -> Result[int, TaskError]:
     RAN.append('thread_never')
     return Ok(1)

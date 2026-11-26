@@ -151,38 +151,38 @@ def _body_work() -> None:
         logging.getLogger(BODY_LOGGER).warning('inside the body')
 
 
-@APP.task(task_name='isolated_work')
+@APP.task(name='isolated_work')
 def isolated_work() -> Result[int, TaskError]:
     _body_work()
     return Ok(1)
 
 
-@APP.task(task_name='isolated_async_work')
+@APP.task(name='isolated_async_work')
 async def isolated_async_work() -> Result[int, TaskError]:
     await asyncio.sleep(0)
     _body_work()
     return Ok(1)
 
 
-@APP.task(task_name='seat_work', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
+@APP.task(name='seat_work', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
 async def seat_work() -> Result[int, TaskError]:
     await asyncio.sleep(0)
     _body_work()
     return Ok(1)
 
 
-@APP.task(task_name='thread_work', execution=Execution.SHARED_THREAD, timeout_ms=10_000)
+@APP.task(name='thread_work', execution=Execution.SHARED_THREAD, timeout_ms=10_000)
 def thread_seat_work() -> Result[int, TaskError]:
     _body_work()
     return Ok(1)
 
 
-@APP.task(task_name='returns_error')
+@APP.task(name='returns_error')
 def returns_error() -> Result[int, TaskError]:
     return Err(TaskError(code='LIMIT_REACHED', message='over the limit'))
 
 
-@APP.task(task_name='raises')
+@APP.task(name='raises')
 def raises() -> Result[int, TaskError]:
     raise ValueError('bad input')
 

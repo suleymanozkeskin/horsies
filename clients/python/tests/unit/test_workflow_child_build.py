@@ -51,7 +51,7 @@ APP = Horsies(
 )
 
 
-@APP.task(task_name='child_build.value')
+@APP.task(name='child_build.value')
 def value_task(*, value: int) -> Result[int, TaskError]:
     return Ok(value)
 
@@ -66,8 +66,8 @@ class ValueChild(WorkflowDefinition[int]):
     def build_with(  # pyright: ignore[reportIncompatibleMethodOverride]
         cls, app: Horsies, value: int = 7,
     ) -> WorkflowSpec[int]:
-        root = TaskNode(fn=value_task, kwargs={'value': value})
-        dependent = TaskNode(fn=value_task, kwargs={'value': value + 1}, waits_for=[root])
+        root = TaskNode(function=value_task, kwargs={'value': value})
+        dependent = TaskNode(function=value_task, kwargs={'value': value + 1}, waits_for=[root])
         return app.workflow(
             cls.name, [root, dependent], output=dependent, definition_key=cls.definition_key,
         )
@@ -84,7 +84,7 @@ class ResultChild(WorkflowDefinition[int]):
         cls, app: Horsies, source: TaskOutcome[int, TaskError],
     ) -> WorkflowSpec[int]:
         assert isinstance(source, Succeeded), f'the tests give a succeeded source, got {source!r}'
-        node = TaskNode(fn=value_task, kwargs={'value': source.value})
+        node = TaskNode(function=value_task, kwargs={'value': source.value})
         return app.workflow(cls.name, [node], output=node, definition_key=cls.definition_key)
 
 
@@ -97,7 +97,7 @@ class SurrogateNameChild(WorkflowDefinition[int]):
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
         _ = (args, params)
-        node = TaskNode(fn=value_task, kwargs={'value': 1})
+        node = TaskNode(function=value_task, kwargs={'value': 1})
         return app.workflow(
             'child_build.\ud800', [node], output=node, definition_key=cls.definition_key,
         )

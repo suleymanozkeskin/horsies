@@ -49,12 +49,12 @@ app._broker = broker
 broker.app = app
 
 
-@app.task(task_name='e2e_isolation_healthcheck')
+@app.task(name='e2e_isolation_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='e2e_isolation_wait_refused')
+@app.task(name='e2e_isolation_wait_refused')
 def wait_refused_in_child() -> Result[bool, TaskError]:
     """Report whether a result wait in this worker child is refused at once."""
     sent = healthcheck.send()
@@ -69,26 +69,26 @@ def wait_refused_in_child() -> Result[bool, TaskError]:
             return Ok(False)
 
 
-@app.task(task_name='e2e_isolation_sleep')
+@app.task(name='e2e_isolation_sleep')
 def sleep_task(*, seconds: float) -> Result[str, TaskError]:
     time.sleep(seconds)
     return Ok(str(os.getpid()))
 
 
-@app.task(task_name='e2e_isolation_gil_hold')
+@app.task(name='e2e_isolation_gil_hold')
 def gil_hold(*, seconds: int) -> Result[str, TaskError]:
     """Hold this child's GIL in C code: no other thread of the child runs."""
     ctypes.PyDLL(None).sleep(seconds)
     return Ok(str(os.getpid()))
 
 
-@app.task(task_name='e2e_isolation_timeout', timeout_ms=1_000)
+@app.task(name='e2e_isolation_timeout', timeout_ms=1_000)
 def timeout_task(*, seconds: float) -> Result[str, TaskError]:
     time.sleep(seconds)
     return Ok(str(os.getpid()))
 
 
-@app.task(task_name='e2e_isolation_spawn_timeout', timeout_ms=1_000)
+@app.task(name='e2e_isolation_spawn_timeout', timeout_ms=1_000)
 def spawn_then_hang(*, marker: str) -> Result[str, TaskError]:
     process = subprocess.Popen(['sleep', '120'])
     with open(marker, 'w', encoding='ascii') as target:
@@ -97,7 +97,7 @@ def spawn_then_hang(*, marker: str) -> Result[str, TaskError]:
     return Ok('unreachable')
 
 
-@app.task(task_name='e2e_isolation_fork_helper')
+@app.task(name='e2e_isolation_fork_helper')
 def fork_helper_then_hang(*, helper_seconds: float) -> Result[str, TaskError]:
     if os.fork() == 0:
         time.sleep(helper_seconds)
@@ -110,7 +110,7 @@ def _exit_with_three() -> None:
     os._exit(3)
 
 
-@app.task(task_name='e2e_isolation_multiprocessing')
+@app.task(name='e2e_isolation_multiprocessing')
 def run_multiprocessing(*, start_method: str) -> Result[str, TaskError]:
     context = multiprocessing.get_context(start_method)
     process = context.Process(target=_exit_with_three)
@@ -152,7 +152,7 @@ def _send_in_pool_worker() -> dict[str, str]:
             }
 
 
-@app.task(task_name='e2e_isolation_fork_pool_send')
+@app.task(name='e2e_isolation_fork_pool_send')
 def send_from_fork_pool() -> Result[dict[str, str], TaskError]:
     """Open a fork-start ``multiprocessing.Pool`` in this task body and send
     from its worker. The run started on the core of this child, so the pool

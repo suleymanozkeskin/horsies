@@ -80,7 +80,7 @@ def resolve_schedule_queue(app: Horsies, schedule: TaskSchedule) -> str:
             (`Horsies.validate_queue_name`).
     """
     task = app.tasks.get(schedule.task_name)
-    task_queue = task.task_queue_name if task is not None else None
+    task_queue = task.queue if task is not None else None
     queue_name = schedule.queue if schedule.queue is not None else task_queue
     return app.validate_queue_name(queue_name)
 

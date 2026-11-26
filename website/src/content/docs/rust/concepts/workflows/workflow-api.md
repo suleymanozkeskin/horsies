@@ -51,10 +51,10 @@ impl WorkflowDefinition for DailyReport {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let fetched = builder.task(
-            fetch_report::node().set(fetch_report::params::region(), "eu".to_owned())?,
+            fetch_report::node().set(fetch_report::fields::region(), "eu".to_owned())?,
         )?;
         let published = builder.task(
-            publish_report::node().arg_from(publish_report::params::report(), fetched),
+            publish_report::node().arg_from(publish_report::fields::report(), fetched),
         )?;
         Ok(WorkflowDefConfig::new().output(published))
     }
@@ -214,9 +214,9 @@ fn report_spec(
     region: String,
 ) -> Result<WorkflowSpec, HorsiesError> {
     builder.definition_key("reports.regional_report.v1");
-    let sales = builder.task(fetch_sales::node().set(fetch_sales::params::region(), region)?)?;
+    let sales = builder.task(fetch_sales::node().set(fetch_sales::fields::region(), region)?)?;
     let report =
-        builder.task(format_report::node().arg_from(format_report::params::sales(), sales))?;
+        builder.task(format_report::node().arg_from(format_report::fields::sales(), sales))?;
     builder.output(report);
     builder.build()
 }
@@ -386,7 +386,7 @@ fn region_spec(
 ) -> Result<WorkflowSpec, HorsiesError> {
     builder.definition_key("reports.region_fetch.v1");
     let fetched = builder.task(
-        fetch_report::node().set(fetch_report::params::region(), region.clone())?,
+        fetch_report::node().set(fetch_report::fields::region(), region.clone())?,
     )?;
     builder.output(fetched);
     builder.build()

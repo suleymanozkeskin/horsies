@@ -110,7 +110,7 @@ async fn a_skipped_charge_is_reported() {
 
 ## Build a Workflow Context
 
-A task with the `workflow_ctx` attribute takes a `WorkflowContext`. A test builds one from its stored form: `workflow_id`, `task_index`, `task_name`, and `results_by_id`, the stored result of each node by node id. `serde_json::to_value` of a `TaskOutcome` writes a stored result.
+A task with the `workflow_context` attribute takes a `WorkflowContext`. A test builds one from its stored form: `workflow_id`, `task_index`, `task_name`, and `results_by_id`, the stored result of each node by node id. `serde_json::to_value` of a `TaskOutcome` writes a stored result.
 
 ```rust
 use std::convert::Infallible;
@@ -118,7 +118,7 @@ use std::convert::Infallible;
 use horsies::{task, NodeKey, TaskError, TaskOutcome, WorkflowContext};
 use serde_json::json;
 
-#[task("audit_checkout", workflow_ctx)]
+#[task("audit_checkout", workflow_context)]
 async fn audit_checkout(workflow_ctx: WorkflowContext) -> Result<bool, TaskError<Infallible>> {
     let charged = workflow_ctx.result_for::<u64, Infallible>(&NodeKey::new("charge"));
     Ok(matches!(charged, Ok(TaskOutcome::Succeeded(_))))

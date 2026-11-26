@@ -77,8 +77,8 @@ To run several steps with effects so that a retry or a crash runs only the step 
 
 Workflow tasks use the same retry mechanism as standalone tasks:
 
-- A task retries only when it has a `retry_policy` **and** the failure matches `auto_retry_for` (configured on `RetryPolicy`).
-- `auto_retry_for` is a required field on `RetryPolicy`, so retry triggers are always co-located with retry timing.
+- A task retries only when it has a `retry_policy` **and** the failure matches `retry_for` (configured on `RetryPolicy`).
+- `retry_for` is a required field on `RetryPolicy`, so retry triggers are always co-located with retry timing.
 - While retrying, the workflow task remains `RUNNING` until the final attempt completes.
 
 ### Worker crash / restart
@@ -86,7 +86,7 @@ Workflow tasks use the same retry mechanism as standalone tasks:
 If a worker crashes mid-task, recovery behaves as follows:
 
 - **CLAIMED task** (never started): requeued safely.
-- **RUNNING task** (started): retried if the task has `WORKER_CRASHED` in `auto_retry_for` and retries remaining; otherwise marked `FAILED` with `WORKER_CRASHED`.
+- **RUNNING task** (started): retried if the task has `WORKER_CRASHED` in `retry_for` and retries remaining; otherwise marked `FAILED` with `WORKER_CRASHED`.
 - **Workflow reconciliation**: if `tasks.status` is terminal but the corresponding
   `workflow_tasks.status` is still non-terminal, recovery triggers the normal
   completion path to update `workflow_tasks`, propagate to dependents, and finalize
@@ -435,14 +435,14 @@ To create nodes from runtime data, use a `SubWorkflowNode`. Its `build_with()` r
 
 ## Retry Policies in Workflows
 
-Workflow tasks honor the same retry policies configured on the `@task` decorator. When a task with a `retry_policy` is used in a workflow, those settings (including `auto_retry_for`) are preserved and applied when the workflow engine enqueues the task.
+Workflow tasks honor the same retry policies configured on the `@task` decorator. When a task with a `retry_policy` is used in a workflow, those settings (including `retry_for`) are preserved and applied when the workflow engine enqueues the task.
 
 The Python example is in [Retry Policies in Workflows](/horsies/concepts/workflows/workflow-examples/#retry-policies-in-workflows).
 
 **Behavior:**
 
 - `max_retries` from the retry policy is applied to the underlying task
-- `auto_retry_for` error codes (on `RetryPolicy`) trigger automatic retries on matching failures
+- `retry_for` error codes (on `RetryPolicy`) trigger automatic retries on matching failures
 - Retries happen at the task level (worker handles retry scheduling)
 - A task that fails after exhausting retries propagates failure to the workflow
 

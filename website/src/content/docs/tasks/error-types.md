@@ -19,7 +19,7 @@ The Python types that carry the error codes of the [Errors Reference](/horsies/t
 | `data` | `JsonInput` on write, `JsonValue` on read | Additional context (task_id, etc.) |
 | `exception` | `BaseException \| FlattenedException \| None` | Live exception in-process; flattened to a `FlattenedException` TypedDict (`type`, `module`, `message`, `repr`, `traceback`) when serialized to the wire |
 
-`code` must not be null: `auto_retry_for` and outcome routing read it. `TaskError` refuses a key that it does not declare, at construction and at decode. `SubWorkflowError` adds `sub_workflow_id` and `sub_workflow_summary`, and it refuses any other key. A stored error with an unknown key, or without the key `error_code` (the stored key of `code`), is stored data that does not parse: see [Decode Errors](/horsies/tasks/task-types/#decode-errors).
+`code` must not be null: `retry_for` and outcome routing read it. `TaskError` refuses a key that it does not declare, at construction and at decode. `SubWorkflowError` adds `sub_workflow_id` and `sub_workflow_summary`, and it refuses any other key. A stored error with an unknown key, or without the key `error_code` (the stored key of `code`), is stored data that does not parse: see [Decode Errors](/horsies/tasks/task-types/#decode-errors).
 
 ## Validation Failure Text
 
@@ -368,12 +368,12 @@ def welcome_text(read: ReadResult[str, TaskError[WelcomeCode]]) -> str:
             return f"no outcome: {read_error.code}"
 ```
 
-Custom codes are auto-retried when listed in `auto_retry_for`:
+Custom codes are auto-retried when listed in `retry_for`:
 
 ```python
 @app.task(
     "call_api",
-    retry_policy=RetryPolicy.fixed([30, 60, 120], auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"]),
+    retry_policy=RetryPolicy.fixed([30, 60, 120], retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"]),
 )
 def call_api(*, url: str) -> Result[dict[str, JsonValue], TaskError]:
     ...
@@ -391,7 +391,7 @@ TaskError(code="MY_CUSTOM_CODE", message="card declined")             # correct 
 TaskError(code="BROKER_ERROR", message="db down")                     # ValueError — reserved
 ```
 
-`WORKFLOW_STOPPED` is also reserved, and it is not a task code: it names a workflow task that stopped before its body ran. `TaskError(code="WORKFLOW_STOPPED", ...)` raises `ValueError`, and a stored task error with this code does not decode. An `exception_mapper` value, a `default_unhandled_error_code` or an `auto_retry_for` entry with this name is refused like any other invalid code.
+`WORKFLOW_STOPPED` is also reserved, and it is not a task code: it names a workflow task that stopped before its body ran. `TaskError(code="WORKFLOW_STOPPED", ...)` raises `ValueError`, and a stored task error with this code does not decode. An `exception_mapper` value, a `default_unhandled_error_code` or an `retry_for` entry with this name is refused like any other invalid code.
 
 **Serialization**: built-in codes are serialized as tagged dicts `{"__builtin_task_code__": "BROKER_ERROR"}` so round-trip identity is preserved through standard `model_validate()` / `model_validate_json()`. Custom codes are serialized as plain strings. This tagged format eliminates wire-format ambiguity between built-in and custom codes, allowing `model_validate()` to work correctly everywhere — including nested models. The stored form (the `err` slot of a stored result) has the key `error_code` in place of `code`: `encode_task_error` writes it and `decode_task_error` reads it.
 
@@ -453,7 +453,7 @@ Startup errors provide Rust-style formatting automatically. When raised, they di
 error[HRS-007]: cycle detected in workflow DAG
   --> /app/workflows/order.py:12
    |
-12 | node_b = TaskNode(fn=process, waits_for=[node_a])
+12 | node_b = TaskNode(function=process, waits_for=[node_a])
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = note: workflows must be acyclic directed graphs (DAG)
 

@@ -1,4 +1,4 @@
-//! Automatic retries: `retry_policy` with `auto_retry_for`. A retry starts
+//! Automatic retries: `retry_policy` with `retry_for`. A retry starts
 //! when the task ends with one of the listed codes: a code of the task's own
 //! enum, or a built-in code such as `TASK_TIMEOUT`.
 //!
@@ -33,7 +33,7 @@ enum PartnerCode {
 #[task(
     "call_partner",
     retry_policy = RetryPolicy::fixed(vec![1, 2], false).expect("a valid policy"),
-    auto_retry_for = ["RATE_LIMITED", "TASK_TIMEOUT"],
+    retry_for = ["RATE_LIMITED", "TASK_TIMEOUT"],
     timeout_ms = 5_000
 )]
 async fn call_partner(request: String) -> Result<String, TaskError<PartnerCode>> {

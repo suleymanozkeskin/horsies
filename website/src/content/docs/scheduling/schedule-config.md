@@ -124,7 +124,7 @@ In CUSTOM mode, override the task's default queue:
 
 <!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
-@app.task("background_job", queue_name="normal")
+@app.task("background_job", queue="normal")
 def background_job() -> Result[None, TaskError]:
     ...
 

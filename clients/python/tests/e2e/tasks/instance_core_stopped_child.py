@@ -140,12 +140,12 @@ def _stop_the_core(delay_s: float, marker_path: str) -> None:
     ping_returned.set()
 
 
-@app.task(task_name='e2e_core_stopped_healthcheck')
+@app.task(name='e2e_core_stopped_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='e2e_core_stops_after_return')
+@app.task(name='e2e_core_stops_after_return')
 def stops_after_return(*, marker_path: str) -> Result[int, TaskError]:
     """Arm the panic, which comes ``STOP_DELAY_S`` later, and return the
     process id of the child."""
@@ -153,7 +153,7 @@ def stops_after_return(*, marker_path: str) -> Result[int, TaskError]:
     return Ok(os.getpid())
 
 
-@app.task(task_name='e2e_core_stopped_child_pid')
+@app.task(name='e2e_core_stopped_child_pid')
 def child_pid() -> Result[int, TaskError]:
     """The process id of the child that runs this task."""
     return Ok(os.getpid())
@@ -167,8 +167,8 @@ def _wait_for_the_stop() -> None:
 
 
 @app.task(
-    task_name='e2e_core_stops_during_body',
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=['WORKER_CRASHED']),
+    name='e2e_core_stops_during_body',
+    retry_policy=RetryPolicy.fixed([1], retry_for=['WORKER_CRASHED']),
 )
 def stops_during_body(*, runs_path: str, marker_path: str) -> Result[int, TaskError]:
     """Append the process id of the child to ``runs_path``, stop the core of
@@ -183,8 +183,8 @@ def stops_during_body(*, runs_path: str, marker_path: str) -> Result[int, TaskEr
 
 
 @app.task(
-    task_name='e2e_core_stops_and_interrupts_body',
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=['WORKER_CRASHED']),
+    name='e2e_core_stops_and_interrupts_body',
+    retry_policy=RetryPolicy.fixed([1], retry_for=['WORKER_CRASHED']),
 )
 def interrupted_in_body(*, first_run_path: str, marker_path: str) -> Result[int, TaskError]:
     """The first run (no file at ``first_run_path``) writes that file, stops

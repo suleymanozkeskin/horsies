@@ -67,11 +67,11 @@ class StaticKwargsChildWorkflow(WorkflowDefinition[int]):
 
     @classmethod
     def build_with(cls, app: Horsies, value: int) -> Any:
-        @app.task(task_name='static_kwargs_child_task')
+        @app.task(name='static_kwargs_child_task')
         def child_task(*, value: int) -> Result[int, TaskError]:
             return Ok(value)
 
-        node = TaskNode(fn=child_task, kwargs={'value': value})
+        node = TaskNode(function=child_task, kwargs={'value': value})
         return app.workflow(
             name=cls.name,
             tasks=[node],
@@ -113,7 +113,7 @@ class TestKwargsOnlyWrites:
         session, broker, app = setup
         task_fn = make_simple_task(app, 'kwargs_simple')
 
-        node = TaskNode(fn=task_fn, kwargs={'value': 42})
+        node = TaskNode(function=task_fn, kwargs={'value': 42})
         spec = _workflow(app, 
             name='kwargs_write_test',
             tasks=[node],
@@ -185,7 +185,7 @@ class TestKwargsOnlyWrites:
         _ = (session, broker)
 
         # Manually set args to bypass any constructor ban
-        node = TaskNode(fn=task_fn, kwargs={'value': 1})
+        node = TaskNode(function=task_fn, kwargs={'value': 1})
         node.args = (5,)  # Force positional args
 
         with pytest.raises(WorkflowValidationError) as exc:

@@ -55,7 +55,7 @@ app._broker = broker
 broker.app = app
 
 
-@app.task(task_name='e2e_queue_retention_task')
+@app.task(name='e2e_queue_retention_task')
 def mapped_task(*, x: int) -> Result[int, TaskError]:
     return Ok(x * 2)
 

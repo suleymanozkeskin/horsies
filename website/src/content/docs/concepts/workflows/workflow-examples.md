@@ -75,18 +75,18 @@ def process(*, data: TaskOutcome[int, TaskError]) -> Result[str, TaskError]:
         case Succeeded(value):
             return Ok(str(value))
 
-node_a: TaskNode[int] = TaskNode(fn=produce)
+node_a: TaskNode[int] = TaskNode(function=produce)
 
 # Default (join="all", allow_failed_dependencies=False): downstream is SKIPPED when upstream fails
 node_b_skip: TaskNode[str] = TaskNode(
-    fn=process,
+    function=process,
     waits_for=[node_a],
     args_from={"data": node_a},
 )
 
 # With allow_failed_dependencies: downstream runs and receives Failed(task_error)
 node_b_recover: TaskNode[str] = TaskNode(
-    fn=process,
+    function=process,
     waits_for=[node_a],
     args_from={"data": node_a},
     allow_failed_dependencies=True,
@@ -121,7 +121,7 @@ See [Join Modes](/horsies/concepts/workflows/workflow-semantics/#join-modes).
 ```python
 # Task runs when any dependency succeeds
 aggregator = TaskNode(
-    fn=aggregate,
+    function=aggregate,
     waits_for=[branch_a, branch_b, branch_c],
     join="any",
 )
@@ -131,7 +131,7 @@ aggregator = TaskNode(
 ```python
 # Task runs when at least 2 of 3 dependencies succeed
 quorum_task = TaskNode(
-    fn=quorum_handler,
+    function=quorum_handler,
     waits_for=[replica_a, replica_b, replica_c],
     join="quorum",
     min_success=2,
@@ -146,7 +146,7 @@ A node with `allow_failed_dependencies=True` receives `Failed(task_error)` for a
 ```python
 from horsies import Failed, Ok, OutcomeCode, Result, Succeeded, TaskError, TaskOutcome
 
-@app.task(task_name="recovery_handler")
+@app.task(name="recovery_handler")
 def recovery_handler(*, input_result: TaskOutcome[Data, TaskError]) -> Result[...]:
     match input_result:
         case Failed(err) if err.code == OutcomeCode.UPSTREAM_SKIPPED:
@@ -207,14 +207,14 @@ from horsies import RetryPolicy, Result, TaskError, JsonValue
     retry_policy=RetryPolicy.exponential(
         base_seconds=1,
         max_retries=3,
-        auto_retry_for=["UNHANDLED_EXCEPTION", "NETWORK_ERROR"],
+        retry_for=["UNHANDLED_EXCEPTION", "NETWORK_ERROR"],
     ),
 )
 def fetch_data(*, url: str) -> Result[dict[str, JsonValue], TaskError]:
     ...
 
 # This task will retry up to 3 times when used in a workflow
-node = TaskNode(fn=fetch_data, kwargs={'url': "https://api.example.com"})
+node = TaskNode(function=fetch_data, kwargs={'url': "https://api.example.com"})
 ```
 
 ## Success Policy
@@ -249,11 +249,11 @@ A package delivery workflow where multiple delivery outcomes are acceptable:
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Define tasks
-pickup = TaskNode(fn=pickup_package)
-deliver_recipient = TaskNode(fn=deliver_to_recipient, waits_for=[pickup])
-deliver_neighbor = TaskNode(fn=deliver_to_neighbor, waits_for=[pickup])
-deliver_locker = TaskNode(fn=deliver_to_locker, waits_for=[pickup])
-notify = TaskNode(fn=send_notification, waits_for=[pickup])
+pickup = TaskNode(function=pickup_package)
+deliver_recipient = TaskNode(function=deliver_to_recipient, waits_for=[pickup])
+deliver_neighbor = TaskNode(function=deliver_to_neighbor, waits_for=[pickup])
+deliver_locker = TaskNode(function=deliver_to_locker, waits_for=[pickup])
+notify = TaskNode(function=send_notification, waits_for=[pickup])
 
 # Success policy: any delivery method is acceptable
 policy = SuccessPolicy(
@@ -307,11 +307,11 @@ def read_label(handle: WorkflowHandle[str]) -> str | None:
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Primary task that can fail
-primary = TaskNode(fn=fetch_data)
+primary = TaskNode(function=fetch_data)
 
 # Recovery handler receives the error
 recovery = TaskNode(
-    fn=recovery_handler,
+    function=recovery_handler,
     allow_failed_dependencies=True,
     waits_for=[primary],
     args_from={"primary": primary},
@@ -326,7 +326,7 @@ Structure DAGs so failures are visible in one node's result. The workflow is sti
 ```python
 # Final aggregator that reports all branch outcomes
 final = TaskNode(
-    fn=summarize_results,
+    function=summarize_results,
     allow_failed_dependencies=True,
     waits_for=[branch_a, branch_b, branch_c],
 )
@@ -343,7 +343,7 @@ def review_step() -> Result[str, TaskError]:
 
 workflow = app.workflow(
     "critical_pipeline",
-    tasks=[TaskNode(fn=review_step, node_id="review")],
+    tasks=[TaskNode(function=review_step, node_id="review")],
     on_error=OnError.PAUSE,  # Stop for manual review on failure
     definition_key="myapp.critical_pipeline.v1",
 )
@@ -366,8 +366,8 @@ workflow = app.workflow(
 
 ```python
 # Same task used twice
-fetch_a = TaskNode(fn=fetch_data, kwargs={'url': "url_a"})  # index 0
-fetch_b = TaskNode(fn=fetch_data, kwargs={'url': "url_b"})  # index 1
+fetch_a = TaskNode(function=fetch_data, kwargs={'url': "url_a"})  # index 0
+fetch_b = TaskNode(function=fetch_data, kwargs={'url': "url_b"})  # index 1
 
 spec = WorkflowSpec(
     name="parallel_fetch",
@@ -411,15 +411,15 @@ Set `workflow_context_from` on the node, and declare `workflow_ctx: WorkflowCont
 ```python
 from horsies import Err, Failed, Ok, Result, Succeeded, TaskError, TaskNode, TaskOutcome, WorkflowContext
 
-node_a: TaskNode[int] = TaskNode(fn=fetch_data, kwargs={'url': "url"})
-node_b: TaskNode[str] = TaskNode(fn=transform, waits_for=[node_a], args_from={"data": node_a})
+node_a: TaskNode[int] = TaskNode(function=fetch_data, kwargs={'url': "url"})
+node_b: TaskNode[str] = TaskNode(function=transform, waits_for=[node_a], args_from={"data": node_a})
 node_c: TaskNode[Summary] = TaskNode(
-    fn=aggregate,
+    function=aggregate,
     waits_for=[node_a, node_b],
     workflow_context_from=[node_a, node_b],  # Include both in context
 )
 
-@app.task(task_name="aggregate")
+@app.task(name="aggregate")
 def aggregate(*, workflow_ctx: WorkflowContext | None = None) -> Result[Summary, TaskError]:
     if workflow_ctx is None:
         return Err(TaskError(code="NO_CTX", message="Missing context"))
@@ -534,7 +534,7 @@ A task that needs only the workflow metadata declares a `WorkflowMeta` parameter
 ```python
 from horsies import WorkflowMeta
 
-@app.task(task_name="my_task")
+@app.task(name="my_task")
 def my_task(*, workflow_meta: WorkflowMeta | None = None) -> Result[str, TaskError]:
     if workflow_meta:
         print(f"Running in workflow {workflow_meta.workflow_id}")
@@ -584,9 +584,9 @@ def transform(*, data: TaskOutcome[int, TaskError]) -> Result[str, TaskError]:
         case Succeeded(value):
             return Ok(str(value))
 
-node_a: TaskNode[int] = TaskNode(fn=produce_number)
+node_a: TaskNode[int] = TaskNode(function=produce_number)
 node_b: TaskNode[str] = TaskNode(
-    fn=transform,
+    function=transform,
     waits_for=[node_a],
     args_from={"data": node_a},
 )

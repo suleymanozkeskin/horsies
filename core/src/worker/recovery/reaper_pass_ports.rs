@@ -29,11 +29,11 @@ fn crash_retry_options(max_retries: u32) -> String {
     serde_json::json!({
         "retry_policy": {
             "max_retries": max_retries,
-            "intervals": intervals,
+            "intervals_seconds": intervals,
             "backoff_strategy": "fixed",
             "jitter": false,
             "max_delay_seconds": null,
-            "auto_retry_for": ["WORKER_CRASHED"]
+            "retry_for": ["WORKER_CRASHED"]
         }
     })
     .to_string()
@@ -297,15 +297,15 @@ fn a_candidate_whose_crash_retries_are_spent_fails() {
 
 /// The stored options of the stale recovery tests: a fixed
 /// policy of 3 retries after 5, 10 and 20 s, with no jitter, for the codes
-/// `auto_retry_for`.
-fn fixed_policy_for(auto_retry_for: &[&str]) -> String {
+/// `retry_for`.
+fn fixed_policy_for(retry_for: &[&str]) -> String {
     serde_json::json!({
         "retry_policy": {
             "max_retries": 3,
-            "intervals": [5, 10, 20],
+            "intervals_seconds": [5, 10, 20],
             "backoff_strategy": "fixed",
             "jitter": false,
-            "auto_retry_for": auto_retry_for
+            "retry_for": retry_for
         }
     })
     .to_string()
@@ -335,8 +335,8 @@ fn the_crash_retry_of_a_candidate_follows_its_stored_policy() {
     let python_options_for_timeout = serde_json::json!({
         "retry_policy": {
             "max_retries": 3,
-            "intervals": [5],
-            "auto_retry_for": ["TIMEOUT"]
+            "intervals_seconds": [5],
+            "retry_for": ["TIMEOUT"]
         }
     })
     .to_string();

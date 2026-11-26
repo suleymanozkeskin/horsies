@@ -528,16 +528,17 @@ class RetryPolicy(BaseModel):
     Retry policy configuration for tasks.
 
     Two strategies supported:
-    1. Fixed: Uses intervals list exactly as specified
-    2. Exponential: Uses intervals[0] as base, exponentially increases
+    1. Fixed: Uses the intervals_seconds list exactly as specified
+    2. Exponential: Uses intervals_seconds[0] as base, exponentially increases
 
     Fields:
         max_retries: maximum number of retry attempts (initial send not counted)
-        intervals: delay intervals in seconds between retry attempts
-        backoff_strategy: 'fixed' uses intervals as-is, 'exponential' uses intervals[0] as base
+        intervals_seconds: delay intervals in seconds between retry attempts
+        backoff_strategy: 'fixed' uses intervals_seconds as-is, 'exponential' uses
+            intervals_seconds[0] as base
         jitter: whether to add ±25% randomization to delays
         max_delay_seconds: optional maximum delay after backoff and jitter
-        auto_retry_for: error codes that trigger automatic retries
+        retry_for: error codes that trigger automatic retries
     """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
@@ -550,7 +551,7 @@ class RetryPolicy(BaseModel):
             description='Number of retry attempts (1-20)',
         ),
     ] = 3
-    intervals: Annotated[
+    intervals_seconds: Annotated[
         list[
             Annotated[
                 PositiveInt,
@@ -565,40 +566,42 @@ class RetryPolicy(BaseModel):
         Optional[PositiveInt],
         Field(description='Optional maximum retry delay in seconds'),
     ] = None
-    auto_retry_for: Annotated[
+    retry_for: Annotated[
         list[Union[str, BuiltInTaskCode]],
         Field(min_length=1),
     ]
 
     @model_validator(mode='after')
     def validate_strategy_consistency(self) -> Self:
-        """Validate that backoff strategy is consistent with intervals configuration."""
+        """Validate that backoff strategy is consistent with intervals_seconds configuration."""
 
         if self.backoff_strategy == 'fixed':
-            # Fixed strategy: intervals length should match max_retries
-            if len(self.intervals) != self.max_retries:
+            # Fixed strategy: intervals_seconds length should match max_retries
+            if len(self.intervals_seconds) != self.max_retries:
                 raise ValueError(
-                    f'Fixed backoff strategy requires intervals length ({len(self.intervals)}) '
+                    f'Fixed backoff strategy requires intervals_seconds length '
+                    f'({len(self.intervals_seconds)}) '
                     f'to match max_retries ({self.max_retries}). '
-                    f'Either adjust intervals list or use exponential strategy.'
+                    f'Either adjust intervals_seconds list or use exponential strategy.'
                 )
 
         elif self.backoff_strategy == 'exponential':
             # Exponential strategy: should have exactly one base interval
-            if len(self.intervals) != 1:
+            if len(self.intervals_seconds) != 1:
                 raise ValueError(
                     f'Exponential backoff strategy requires exactly one base interval, '
-                    f'got {len(self.intervals)} intervals. Use intervals=[base_seconds] for exponential backoff.'
+                    f'got {len(self.intervals_seconds)} intervals. '
+                    f'Use intervals_seconds=[base_seconds] for exponential backoff.'
                 )
 
         return self
 
     @model_validator(mode='after')
     def validate_error_code_fields(self) -> Self:
-        """Validate that auto_retry_for entries are valid error code strings."""
-        for entry in self.auto_retry_for:
+        """Validate that retry_for entries are valid error code strings."""
+        for entry in self.retry_for:
             code = entry.value if isinstance(entry, Enum) else entry
-            err = validate_error_code_string(code, field_name='auto_retry_for')
+            err = validate_error_code_string(code, field_name='retry_for')
             if err is not None:
                 raise ValueError(err)
         return self
@@ -607,18 +610,19 @@ class RetryPolicy(BaseModel):
     @classmethod
     def fixed(
         cls,
-        intervals: list[int],
+        intervals_seconds: list[int],
         *,
-        auto_retry_for: list[Union[str, BuiltInTaskCode]],
+        retry_for: list[Union[str, BuiltInTaskCode]],
         jitter: bool = True,
     ) -> 'RetryPolicy':
-        """Create a fixed backoff policy where intervals length defines max_retries."""
+        """Create a fixed backoff policy where the length of intervals_seconds
+        defines max_retries."""
         return cls(
-            max_retries=len(intervals),
-            intervals=intervals,
+            max_retries=len(intervals_seconds),
+            intervals_seconds=intervals_seconds,
             backoff_strategy='fixed',
             jitter=jitter,
-            auto_retry_for=auto_retry_for,
+            retry_for=retry_for,
         )
 
     @classmethod
@@ -627,7 +631,7 @@ class RetryPolicy(BaseModel):
         base_seconds: int,
         *,
         max_retries: int,
-        auto_retry_for: list[Union[str, BuiltInTaskCode]],
+        retry_for: list[Union[str, BuiltInTaskCode]],
         jitter: bool = True,
         max_delay_seconds: int | None = None,
     ) -> 'RetryPolicy':
@@ -638,11 +642,11 @@ class RetryPolicy(BaseModel):
         """
         return cls(
             max_retries=max_retries,
-            intervals=[base_seconds],
+            intervals_seconds=[base_seconds],
             backoff_strategy='exponential',
             jitter=jitter,
             max_delay_seconds=max_delay_seconds,
-            auto_retry_for=auto_retry_for,
+            retry_for=retry_for,
         )
 
 
@@ -652,15 +656,15 @@ class TaskOptions(BaseModel):
 
     Fields:
         task_name: Unique task identifier (mandatory - decoupled from function names)
-        queue_name: Target queue name (validated against app config at definition time)
+        queue: Target queue name (validated against app config at definition time)
         good_until: Task expiry deadline (task skipped if not claimed by this time)
-        retry_policy: Retry timing and backoff configuration (includes auto_retry_for)
+        retry_policy: Retry timing and backoff configuration (includes retry_for)
         timeout_ms: Execution time limit. Measured by the worker parent from
             the moment a child takes the task (time waiting for a free child
             does not count). On expiry the task fails with
             OutcomeCode.TASK_TIMEOUT and the child process is killed with the
             subprocesses in its session; retry only happens when
-            'TASK_TIMEOUT' is listed in auto_retry_for. Other tasks on the
+            'TASK_TIMEOUT' is listed in retry_for. Other tasks on the
             worker continue. The worker must start a new child, so timeouts
             are for exceptional hangs, not routine control flow. A
             SHARED_ASYNC task on a shared async child is cancelled instead,
@@ -678,7 +682,7 @@ class TaskOptions(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
     task_name: str
-    queue_name: Optional[str] = None
+    queue: Optional[str] = None
     good_until: Optional[datetime.datetime] = None
     retry_policy: Optional[RetryPolicy] = None
     timeout_ms: Annotated[

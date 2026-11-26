@@ -82,7 +82,7 @@ def _app(
     @app.task(
         _REPORT_TASK,
         timeout_ms=30_000,
-        retry_policy=RetryPolicy.fixed([1, 2], auto_retry_for=['TASK_EXCEPTION']),
+        retry_policy=RetryPolicy.fixed([1, 2], retry_for=['TASK_EXCEPTION']),
     )
     def nightly(*, day: str, limit: int) -> Result[int, TaskError]:
         return Ok(limit)

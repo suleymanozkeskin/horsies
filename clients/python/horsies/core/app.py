@@ -286,7 +286,7 @@ class _TaskSendBrokerPool:
 class _WorkflowBuilderMeta:
     """Internal metadata for a registered workflow builder."""
 
-    fn: Callable[..., Any]
+    function: Callable[..., Any]
     cases: list[dict[str, Any]]
     location: SourceLocation | None
 
@@ -767,8 +767,8 @@ class Horsies:
     @overload
     def task(  # pyright: ignore[reportOverlappingOverload]
         self,
-        task_name: str,
-        func: Callable[
+        name: str,
+        function: Callable[
             Concatenate['TaskRuntime', P],
             Coroutine[Any, Any, 'Result[T, TaskError[C]]'],
         ],
@@ -777,20 +777,20 @@ class Horsies:
     @overload
     def task(  # pyright: ignore[reportOverlappingOverload]
         self,
-        task_name: str,
-        func: Callable[Concatenate['TaskRuntime', P], 'Result[T, TaskError[C]]'],
+        name: str,
+        function: Callable[Concatenate['TaskRuntime', P], 'Result[T, TaskError[C]]'],
     ) -> 'RuntimeTaskFunction[P, T, C]': ...
 
     @overload
     def task(
         self,
-        task_name: str,
-        func: Callable[P, Coroutine[Any, Any, 'Result[T, TaskError[C]]']],
+        name: str,
+        function: Callable[P, Coroutine[Any, Any, 'Result[T, TaskError[C]]']],
     ) -> 'AsyncTaskFunction[P, T, C]': ...
 
     @overload
     def task(
-        self, task_name: str, func: Callable[P, 'Result[T, TaskError[C]]']
+        self, name: str, function: Callable[P, 'Result[T, TaskError[C]]']
     ) -> 'TaskFunction[P, T, C]': ...
 
     # The last overload also accepts a literal SHARED_ASYNC with
@@ -799,12 +799,12 @@ class Horsies:
     @overload
     def task(  # pyright: ignore[reportOverlappingOverload]
         self,
-        task_name: str,
+        name: str,
         *,
         execution: Literal[Execution.SHARED_ASYNC],
         timeout_ms: int,
         cancel_grace_ms: Optional[int] = None,
-        queue_name: Optional[str] = None,
+        queue: Optional[str] = None,
         retry_policy: Optional['RetryPolicy'] = None,
         exception_mapper: Optional['ExceptionMapper'] = None,
         default_unhandled_error_code: Optional[str] = None,
@@ -818,11 +818,11 @@ class Horsies:
     @overload
     def task(  # pyright: ignore[reportOverlappingOverload]
         self,
-        task_name: str,
+        name: str,
         *,
         execution: Literal[Execution.SHARED_THREAD],
         timeout_ms: int,
-        queue_name: Optional[str] = None,
+        queue: Optional[str] = None,
         retry_policy: Optional['RetryPolicy'] = None,
         exception_mapper: Optional['ExceptionMapper'] = None,
         default_unhandled_error_code: Optional[str] = None,
@@ -836,12 +836,12 @@ class Horsies:
     @overload
     def task(  # pyright: ignore[reportOverlappingOverload]
         self,
-        task_name: str,
+        name: str,
         *,
         execution: Literal[Execution.SHARED_THREAD],
         timeout_ms: int,
         cancel_grace_ms: int,
-        queue_name: Optional[str] = None,
+        queue: Optional[str] = None,
         retry_policy: Optional['RetryPolicy'] = None,
         exception_mapper: Optional['ExceptionMapper'] = None,
         default_unhandled_error_code: Optional[str] = None,
@@ -854,9 +854,9 @@ class Horsies:
     @overload
     def task(
         self,
-        task_name: str,
+        name: str,
         *,
-        queue_name: Optional[str] = None,
+        queue: Optional[str] = None,
         retry_policy: Optional['RetryPolicy'] = None,
         exception_mapper: Optional['ExceptionMapper'] = None,
         default_unhandled_error_code: Optional[str] = None,
@@ -873,12 +873,12 @@ class Horsies:
     @overload
     def task(
         self,
-        task_name: str,
+        name: str,
         *,
         execution: Execution,
         timeout_ms: int,
         cancel_grace_ms: Optional[int] = None,
-        queue_name: Optional[str] = None,
+        queue: Optional[str] = None,
         retry_policy: Optional['RetryPolicy'] = None,
         exception_mapper: Optional['ExceptionMapper'] = None,
         default_unhandled_error_code: Optional[str] = None,
@@ -887,8 +887,8 @@ class Horsies:
 
     def task(
         self,
-        task_name: str,
-        func: Optional[
+        name: str,
+        function: Optional[
             Callable[..., 'Result[Any, TaskError[Any]]']
             | Callable[..., Coroutine[Any, Any, 'Result[Any, TaskError[Any]]']]
         ] = None,
@@ -947,7 +947,7 @@ class Horsies:
 
         @overload
         def decorator(  # pyright: ignore[reportOverlappingOverload]
-            fn: Callable[
+            function: Callable[
                 Concatenate['TaskRuntime', P],
                 Coroutine[Any, Any, 'Result[T, TaskError[C]]'],
             ],
@@ -955,49 +955,49 @@ class Horsies:
 
         @overload
         def decorator(  # pyright: ignore[reportOverlappingOverload]
-            fn: Callable[Concatenate['TaskRuntime', P], 'Result[T, TaskError[C]]'],
+            function: Callable[Concatenate['TaskRuntime', P], 'Result[T, TaskError[C]]'],
         ) -> 'RuntimeTaskFunction[P, T, C]': ...
 
         @overload
         def decorator(
-            fn: Callable[P, Coroutine[Any, Any, 'Result[T, TaskError[C]]']],
+            function: Callable[P, Coroutine[Any, Any, 'Result[T, TaskError[C]]']],
         ) -> 'AsyncTaskFunction[P, T, C]': ...
 
         @overload
         def decorator(
-            fn: Callable[P, 'Result[T, TaskError[C]]'],
+            function: Callable[P, 'Result[T, TaskError[C]]'],
         ) -> 'TaskFunction[P, T, C]': ...
 
         def decorator(
-            fn: Callable[P, 'Result[T, TaskError[C]]']
+            function: Callable[P, 'Result[T, TaskError[C]]']
             | Callable[P, Coroutine[Any, Any, 'Result[T, TaskError[C]]']],
         ) -> 'TaskFunction[P, T, C] | AsyncTaskFunction[P, T, C] | RuntimeTaskFunction[Any, T, C] | AsyncRuntimeTaskFunction[Any, T, C]':
-            fn_location = SourceLocation.from_function(fn)
+            function_location = SourceLocation.from_function(function)
 
-            if task_name == '':
+            if name == '':
                 raise TaskDefinitionError(
                     message='task name is empty',
                     code=ErrorCode.TASK_INVALID_OPTIONS,
-                    location=fn_location,
+                    location=function_location,
                     notes=[
-                        f"task '{fn.__name__}'",
+                        f"task '{function.__name__}'",
                         "app.task('') received an empty task name",
                     ],
                     help_text='pass a task name that is not empty, for example the function name',
                 )
 
-            if 'auto_retry_for' in task_options_kwargs:
+            if 'retry_for' in task_options_kwargs:
                 raise TaskDefinitionError(
                     message='invalid task options',
                     code=ErrorCode.TASK_INVALID_OPTIONS,
-                    location=fn_location,
+                    location=function_location,
                     notes=[
-                        f"task '{fn.__name__}'",
-                        "top-level 'auto_retry_for' is deprecated",
+                        f"task '{function.__name__}'",
+                        "top-level 'retry_for' is not a task option; the codes are a field of RetryPolicy",
                     ],
                     help_text=(
                         'move retry triggers into RetryPolicy, e.g. '
-                        'RetryPolicy.fixed([...], auto_retry_for=[...])'
+                        'RetryPolicy.fixed([...], retry_for=[...])'
                     ),
                 )
 
@@ -1014,8 +1014,8 @@ class Horsies:
             error_codes_value: object = task_options_kwargs.pop('error_codes', NO_ERROR_CODES)
             declared_error_codes = _declared_error_codes_or_raise(
                 error_codes_value,
-                task_label=fn.__name__,
-                location=fn_location,
+                task_label=function.__name__,
+                location=function_location,
             )
             code_enum: type[Enum] | None = (
                 error_codes_value
@@ -1028,9 +1028,9 @@ class Horsies:
                 raise TaskDefinitionError(
                     message='good_until must be set when sending a task',
                     code=ErrorCode.TASK_INVALID_OPTIONS,
-                    location=fn_location,
+                    location=function_location,
                     notes=[
-                        f"task '{fn.__name__}'",
+                        f"task '{function.__name__}'",
                         '@app.task(..., good_until=...) is evaluated when the task is defined',
                         'relative deadlines declared there become stale and can expire future sends',
                     ],
@@ -1049,8 +1049,8 @@ class Horsies:
                     raise TaskDefinitionError(
                         message='invalid exception_mapper',
                         code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
-                        location=fn_location,
-                        notes=[f"task '{fn.__name__}'", *mapper_errors],
+                        location=function_location,
+                        notes=[f"task '{function.__name__}'", *mapper_errors],
                         help_text='keys must be BaseException subclasses, values must be UPPER_SNAKE_CASE error codes',
                     )
 
@@ -1064,35 +1064,35 @@ class Horsies:
                     raise TaskDefinitionError(
                         message='invalid default_unhandled_error_code',
                         code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
-                        location=fn_location,
-                        notes=[f"task '{fn.__name__}'", code_error],
+                        location=function_location,
+                        notes=[f"task '{function.__name__}'", code_error],
                         help_text='use UPPER_SNAKE_CASE error codes',
                     )
 
             # Validate and create TaskOptions - this enforces pydantic validation
             try:
-                task_options = TaskOptions(task_name=task_name, **task_options_kwargs)
+                task_options = TaskOptions(task_name=name, **task_options_kwargs)
             except Exception as e:
                 raise TaskDefinitionError(
                     message=f'invalid task options',
                     code=ErrorCode.TASK_INVALID_OPTIONS,
-                    location=fn_location,
-                    notes=[f"task '{fn.__name__}'", exception_text(e)],
+                    location=function_location,
+                    notes=[f"task '{function.__name__}'", exception_text(e)],
                     help_text='check task decorator arguments',
                 )
 
             # VALIDATION AT DEFINITION TIME
-            # Validate queue_name against app configuration
+            # Validate the queue against app configuration
             try:
-                self.validate_queue_name(task_options.queue_name)
+                self.validate_queue_name(task_options.queue)
             except ConfigurationError:
                 raise  # Re-raise with original formatting
 
             # Create wrapper that uses this app's configuration
             task_function = create_task_wrapper(
-                fn,
+                function,
                 self,
-                task_name,
+                name,
                 task_options,
                 exception_mapper=exception_mapper,
                 default_unhandled_error_code=default_unhandled_error_code,
@@ -1107,20 +1107,20 @@ class Horsies:
             # Register task with this app, passing source for duplicate detection
             # Normalize path with realpath to handle symlinks and relative paths
             source_str = (
-                f'{os.path.realpath(fn_location.file)}:{fn_location.line}'
-                if fn_location
+                f'{os.path.realpath(function_location.file)}:{function_location.line}'
+                if function_location
                 else None
             )
-            self.tasks.register(task_function, name=task_name, source=source_str)
+            self.tasks.register(task_function, name=name, source=source_str)
 
             return task_function
 
-        if func is None:
-            # Called with arguments: @app.task(queue_name="custom")
+        if function is None:
+            # Called with arguments: @app.task("name", queue="custom")
             return decorator
         else:
             # Called without arguments: @app.task
-            return decorator(func)
+            return decorator(function)
 
     def check(self, *, live: bool = False) -> list[HorsiesError]:
         """Orchestrate phased validation and return all errors found.
@@ -1550,39 +1550,39 @@ class Horsies:
                     )
                 )
                 continue
-            auto_retry_for = retry_policy_raw.get('auto_retry_for')
-            if auto_retry_for is None:
+            retry_for = retry_policy_raw.get('retry_for')
+            if retry_for is None:
                 errors.append(
                     _no_location(
                         ConfigurationError(
-                            message='retry_policy.auto_retry_for is required',
+                            message='retry_policy.retry_for is required',
                             code=ErrorCode.TASK_INVALID_OPTIONS,
                             notes=[f"task '{task_name}'"],
-                            help_text='configure retry triggers in RetryPolicy(auto_retry_for=[...])',
+                            help_text='configure retry triggers in RetryPolicy(retry_for=[...])',
                         )
                     )
                 )
                 continue
-            if not isinstance(auto_retry_for, list):
+            if not isinstance(retry_for, list):
                 errors.append(
                     _no_location(
                         ConfigurationError(
-                            message='auto_retry_for must be a list',
+                            message='retry_for must be a list',
                             code=ErrorCode.TASK_INVALID_OPTIONS,
                             notes=[
                                 f"task '{task_name}'",
-                                f'auto_retry_for={auto_retry_for!r}',
+                                f'retry_for={retry_for!r}',
                             ],
                             help_text='use a list of UPPER_SNAKE_CASE error codes',
                         )
                     )
                 )
                 continue
-            if len(auto_retry_for) == 0:
+            if len(retry_for) == 0:
                 errors.append(
                     _no_location(
                         ConfigurationError(
-                            message='auto_retry_for must not be empty',
+                            message='retry_for must not be empty',
                             code=ErrorCode.TASK_INVALID_OPTIONS,
                             notes=[f"task '{task_name}'"],
                             help_text='provide at least one UPPER_SNAKE_CASE error code',
@@ -1592,16 +1592,16 @@ class Horsies:
                 continue
 
             has_entry_errors = False
-            for idx, entry in enumerate(auto_retry_for):
+            for idx, entry in enumerate(retry_for):
                 if not isinstance(entry, str):
                     errors.append(
                         _no_location(
                             ConfigurationError(
-                                message='auto_retry_for entries must be strings',
+                                message='retry_for entries must be strings',
                                 code=ErrorCode.TASK_INVALID_OPTIONS,
                                 notes=[
                                     f"task '{task_name}'",
-                                    f'auto_retry_for[{idx}]={entry!r}',
+                                    f'retry_for[{idx}]={entry!r}',
                                 ],
                                 help_text='use explicit UPPER_SNAKE_CASE error codes',
                             )
@@ -1611,7 +1611,7 @@ class Horsies:
                     continue
                 code_error = validate_error_code_string(
                     entry,
-                    field_name='auto_retry_for',
+                    field_name='retry_for',
                 )
                 if code_error is None:
                     continue
@@ -1786,9 +1786,9 @@ class Horsies:
         """The error codes that each task declares (`error_codes=`), by task
         name in name order, for each task that declares at least one. Pure."""
         return {
-            name: self.tasks[name].task_error_codes
+            name: self.tasks[name].error_codes
             for name in sorted(self.tasks.keys_list())
-            if self.tasks[name].task_error_codes
+            if self.tasks[name].error_codes
         }
 
     def send_telemetry(self) -> SendTelemetry:
@@ -2739,17 +2739,17 @@ class Horsies:
                    builder has parameters without defaults.
         """
 
-        def decorator(fn: _F) -> _F:
-            location = SourceLocation.from_function(fn)
-            setattr(fn, _BUILDER_ATTR, True)
+        def decorator(function: _F) -> _F:
+            location = SourceLocation.from_function(function)
+            setattr(function, _BUILDER_ATTR, True)
             self._workflow_builders.append(
                 _WorkflowBuilderMeta(
-                    fn=fn,
+                    function=function,
                     cases=cases or [],
                     location=location,
                 ),
             )
-            return fn
+            return function
 
         return decorator
 
@@ -2779,14 +2779,14 @@ class Horsies:
         error list (check-phase containment), never raise.
         """
         errors: list[HorsiesError] = []
-        fn = meta.fn
-        fn_name = getattr(fn, '__qualname__', fn.__name__)
+        function = meta.function
+        function_name = getattr(function, '__qualname__', function.__name__)
         try:
-            sig = inspect.signature(fn)
+            sig = inspect.signature(function)
         except (ValueError, TypeError) as exc:
             errors.append(
                 ConfigurationError(
-                    message=f"builder '{fn_name}' signature is not introspectable",
+                    message=f"builder '{function_name}' signature is not introspectable",
                     code=ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
                     location=meta.location,
                     notes=[f'inspect.signature failed: {exc}'],
@@ -2810,14 +2810,14 @@ class Horsies:
 
         if not has_required:
             # Zero-arg or all-defaults builder: auto-run once
-            errors.extend(self._invoke_builder(fn, fn_name, {}, meta.location))
+            errors.extend(self._invoke_builder(function, function_name, {}, meta.location))
             return errors
 
         # Parameterized builder: must have cases
         if not meta.cases:
             errors.append(
                 ConfigurationError(
-                    message=f"parameterized builder '{fn_name}' missing cases",
+                    message=f"parameterized builder '{function_name}' missing cases",
                     code=ErrorCode.WORKFLOW_CHECK_CASES_REQUIRED,
                     location=meta.location,
                     notes=[
@@ -2837,7 +2837,7 @@ class Horsies:
             if not isinstance(case, dict):  # type: ignore[reportUnnecessaryIsInstance]
                 errors.append(
                     ConfigurationError(
-                        message=f"builder '{fn_name}' case[{idx}] is not a dict",
+                        message=f"builder '{function_name}' case[{idx}] is not a dict",
                         code=ErrorCode.WORKFLOW_CHECK_CASE_INVALID,
                         location=meta.location,
                         notes=[f'got {type(case).__name__}'],
@@ -2851,7 +2851,7 @@ class Horsies:
             if unknown_keys:
                 errors.append(
                     ConfigurationError(
-                        message=f"builder '{fn_name}' case[{idx}] has unknown keys",
+                        message=f"builder '{function_name}' case[{idx}] has unknown keys",
                         code=ErrorCode.WORKFLOW_CHECK_CASE_INVALID,
                         location=meta.location,
                         notes=[
@@ -2868,7 +2868,7 @@ class Horsies:
             if missing_keys:
                 errors.append(
                     ConfigurationError(
-                        message=f"builder '{fn_name}' case[{idx}] missing required keys",
+                        message=f"builder '{function_name}' case[{idx}] missing required keys",
                         code=ErrorCode.WORKFLOW_CHECK_CASE_INVALID,
                         location=meta.location,
                         notes=[
@@ -2879,27 +2879,27 @@ class Horsies:
                 )
                 continue
 
-            errors.extend(self._invoke_builder(fn, fn_name, case, meta.location))
+            errors.extend(self._invoke_builder(function, function_name, case, meta.location))
 
         return errors
 
     def _invoke_builder(
         self,
-        fn: Callable[..., Any],
-        fn_name: str,
+        function: Callable[..., Any],
+        function_name: str,
         kwargs: dict[str, Any],
         location: SourceLocation | None,
     ) -> list[HorsiesError]:
         """Call a builder with kwargs and collect any errors it produces."""
         errors: list[HorsiesError] = []
         try:
-            result = fn(**kwargs)
+            result = function(**kwargs)
             if not self._is_workflow_spec_like(result):
                 case_summary = f' with {kwargs}' if kwargs else ''
                 errors.append(
                     _no_location(
                         ConfigurationError(
-                            message=f"builder '{fn_name}' returned non-WorkflowSpec{case_summary}",
+                            message=f"builder '{function_name}' returned non-WorkflowSpec{case_summary}",
                             code=ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
                             location=location,
                             notes=[f'got {type(result).__name__}'],
@@ -2919,7 +2919,7 @@ class Horsies:
             errors.append(
                 _no_location(
                     ConfigurationError(
-                        message=f"builder '{fn_name}' raised an unexpected exception{case_summary}",
+                        message=f"builder '{function_name}' raised an unexpected exception{case_summary}",
                         code=ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
                         location=location,
                         notes=[f'{type(exc).__name__}: {exc}'],

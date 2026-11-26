@@ -163,7 +163,7 @@ fn list_price_cents(sku: &str) -> i32 {
     "apply_promotions",
     queue = "fulfillment",
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn apply_promotions(
     rt: TaskRuntime,
@@ -189,7 +189,7 @@ pub async fn apply_promotions(
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn compute_loyalty_points(
     customer_id: String,
@@ -205,7 +205,7 @@ pub async fn compute_loyalty_points(
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn publish_cdn(
     campaign_id: String,
@@ -225,7 +225,7 @@ pub async fn publish_cdn(
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn publish_origin(
     campaign_id: String,
@@ -245,7 +245,7 @@ pub async fn publish_origin(
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn prewarm_search(campaign_id: String) -> Result<SearchPrewarm, TaskError<AcmeCode>> {
     let documents = simulate::integer(100, 5_000, &[&campaign_id, "documents"]);
@@ -262,7 +262,7 @@ pub async fn prewarm_search(campaign_id: String) -> Result<SearchPrewarm, TaskEr
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn warm_cache_edge(campaign_id: String) -> Result<CacheWarm, TaskError<AcmeCode>> {
     let keys_warmed = simulate::integer(50, 2_000, &[&campaign_id, "keys"]);
@@ -279,7 +279,7 @@ pub async fn warm_cache_edge(campaign_id: String) -> Result<CacheWarm, TaskError
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn update_price(
     sku: String,

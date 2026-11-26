@@ -22,8 +22,8 @@ Adjust to your needs.
 | Category | Source | Examples | Auto-Retry? |
 | -------- | ------ | -------- | ----------- |
 | Read errors | `handle.get()` gave no outcome | `ReadWaitTimeout`, `ReadDatabaseError` | No |
-| Execution errors | Task raised an exception, or its worker process died | `UNHANDLED_EXCEPTION`, `TASK_EXCEPTION`, `WORKER_CRASHED` | If in `auto_retry_for` |
-| Domain errors | User returned error | `"RATE_LIMITED"`, `"VALIDATION_FAILED"` | If in `auto_retry_for` |
+| Execution errors | Task raised an exception, or its worker process died | `UNHANDLED_EXCEPTION`, `TASK_EXCEPTION`, `WORKER_CRASHED` | If in `retry_for` |
+| Domain errors | User returned error | `"RATE_LIMITED"`, `"VALIDATION_FAILED"` | If in `retry_for` |
 
 A read gives an execution error or a domain error as `Ok(Failed(task_error))`. It gives a read error as `Err(read_error)`. The read errors are on [ReadError](/horsies/concepts/result-handling/#readerror).
 
@@ -32,14 +32,14 @@ A read gives an execution error or a domain error as `Ok(Failed(task_error))`. I
 Handle errors when:
 
 - The error is a **read error** (task may still complete)
-- The error is **not in `auto_retry_for`** (won't be retried)
+- The error is **not in `retry_for`** (won't be retried)
 - The task has **exhausted retries** (final failure)
 
 ## How To
 
 ### Configure Automatic Retries
 
-The library handles retries automatically when `auto_retry_for` matches the error:
+The library handles retries automatically when `retry_for` matches the error:
 
 ```python
 from horsies import RetryPolicy, Result, TaskError, JsonValue
@@ -49,7 +49,7 @@ from horsies import RetryPolicy, Result, TaskError, JsonValue
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=3,
-        auto_retry_for=["UNHANDLED_EXCEPTION", "RATE_LIMITED"],
+        retry_for=["UNHANDLED_EXCEPTION", "RATE_LIMITED"],
     ),
 )
 def fetch_api_data(*, url: str) -> Result[dict[str, JsonValue], TaskError]:
@@ -73,7 +73,7 @@ To avoid try/except boilerplate for mapping exceptions to error codes, use `exce
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=3,
-        auto_retry_for=["RATE_LIMITED", "TIMEOUT"],
+        retry_for=["RATE_LIMITED", "TIMEOUT"],
     ),
     exception_mapper={
         RateLimitError: "RATE_LIMITED",
@@ -171,19 +171,19 @@ def save_product_record(
 
 
 fetch: TaskNode[str] = TaskNode(
-    fn=fetch_product_page,
+    function=fetch_product_page,
     kwargs={'url': "https://example.com/missing"},
     node_id="fetch_product_page",
 )
 parse: TaskNode[ProductRecord] = TaskNode(
-    fn=parse_product_page,
+    function=parse_product_page,
     waits_for=[fetch],
     args_from={"page_result": fetch},
     allow_failed_dependencies=True,
     node_id="parse_product_page",
 )
 save: TaskNode[None] = TaskNode(
-    fn=save_product_record,
+    function=save_product_record,
     waits_for=[parse],
     args_from={"product_result": parse},
     allow_failed_dependencies=True,
@@ -297,10 +297,10 @@ match handle.get():
 if error.code == "RATE_LIMITED":
     manually_schedule_retry(task_id)
 
-# Correct - configure auto_retry_for on the retry policy
+# Correct - configure retry_for on the retry policy
 @app.task(
     "my_task",
-    retry_policy=RetryPolicy.fixed([60, 120, 300], auto_retry_for=["RATE_LIMITED"]),
+    retry_policy=RetryPolicy.fixed([60, 120, 300], retry_for=["RATE_LIMITED"]),
 )
 def my_task() -> Result[str, TaskError]:
     ...

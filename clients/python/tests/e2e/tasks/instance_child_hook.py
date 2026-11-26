@@ -80,12 +80,12 @@ def _reset_db_for_child() -> None:
     _app_engine = _build_engine(worker_child=True)
 
 
-@app.task(task_name='e2e_hook_healthcheck')
+@app.task(name='e2e_hook_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='e2e_hook_db_task')
+@app.task(name='e2e_hook_db_task')
 def db_task(*, sleep_ms: int) -> Result[str, TaskError]:
     """Check out the app-owned engine and hold a connection across a slow query."""
     with get_engine().connect() as conn:

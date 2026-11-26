@@ -69,7 +69,7 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
         def value_task(*, value: int) -> Result[int, TaskError]:
             return Ok(value)
 
-        node: TaskNode[int] = TaskNode(fn=value_task, kwargs={'value': 1})
+        node: TaskNode[int] = TaskNode(function=value_task, kwargs={'value': 1})
         spec = app.workflow('routing.flow', [node], output=node, definition_key='routing.flow.v1')
         broker = app.get_broker()
         threads: list[threading.Thread] = []

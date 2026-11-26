@@ -105,7 +105,7 @@ def _optional_value_task(app: Horsies, name: str) -> Any:
     """A task whose one keyword argument has a default: a send can pass it
     or pass nothing."""
 
-    @app.task(task_name=name)
+    @app.task(name=name)
     def optional_value(*, value: int = 0) -> Result[int, TaskError]:
         return Ok(value)
 

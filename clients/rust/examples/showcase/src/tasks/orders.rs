@@ -12,7 +12,7 @@ use super::{runtime, task_store};
     "validate_order",
     queue = "fulfillment",
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn validate_order(
     rt: TaskRuntime,
@@ -27,7 +27,7 @@ pub async fn validate_order(
     "pick_pack",
     queue = "fulfillment",
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn pick_pack(rt: TaskRuntime, order_id: String) -> Result<PickPack, TaskError<AcmeCode>> {
     let store = task_store(&rt).await?;
@@ -41,7 +41,7 @@ pub async fn pick_pack(rt: TaskRuntime, order_id: String) -> Result<PickPack, Ta
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn allocate_warehouse(
     sku: String,
@@ -62,7 +62,7 @@ pub async fn allocate_warehouse(
     queue = "fulfillment",
     timeout_ms = 8_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn generate_invoice(
     rt: TaskRuntime,

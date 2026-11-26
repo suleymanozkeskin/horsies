@@ -21,8 +21,8 @@ pub use fencing::{FencingToken, FencingTokenRefused};
 pub use fn_trait::{AsyncTaskFn, BlockingTaskFn, RawTaskResult, RegisteredTask};
 pub use info::{TaskAttemptInfo, TaskInfo};
 pub use options::{
-    BackoffStrategy, CancelGraceMs, CancelGraceOutOfRange, RetryPolicy, RetryPolicyError,
-    TaskOptions,
+    check_cancel_grace_ms, BackoffStrategy, CancelGraceOutOfRange, RetryPolicy, RetryPolicyError,
+    TaskOptions, DEFAULT_CANCEL_GRACE_MS,
 };
 pub use result::TaskResult;
 pub use seat_relay::SeatRelayCode;

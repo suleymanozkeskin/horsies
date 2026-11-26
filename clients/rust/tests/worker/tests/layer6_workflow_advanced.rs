@@ -61,7 +61,7 @@ fn step(suite: &Suite, id: &str) -> TaskNode<String, workflow::step::Input> {
         .function(workflow::step::handle)
         .node()
         .node_id(id)
-        .set(workflow::step::params::step(), id.to_owned())
+        .set(workflow::step::fields::step(), id.to_owned())
         .expect("a step input")
 }
 
@@ -75,8 +75,8 @@ fn slow_step(
         .function(workflow::slow_step::handle)
         .node()
         .node_id(id)
-        .set(workflow::slow_step::params::step(), id.to_owned())
-        .and_then(|node| node.set(workflow::slow_step::params::delay_ms(), delay_ms))
+        .set(workflow::slow_step::fields::step(), id.to_owned())
+        .and_then(|node| node.set(workflow::slow_step::fields::delay_ms(), delay_ms))
         .expect("a slow step input")
 }
 
@@ -86,7 +86,7 @@ fn mark(suite: &Suite, id: &str, value: &str) -> TaskNode<String, workflow::mark
         .function(workflow::mark::handle)
         .node()
         .node_id(id)
-        .set(workflow::mark::params::value(), value.to_owned())
+        .set(workflow::mark::fields::value(), value.to_owned())
         .expect("a mark input")
 }
 
@@ -96,7 +96,7 @@ fn produce(suite: &Suite, id: &str, value: i64) -> TaskNode<i64, workflow::produ
         .function(workflow::produce_int::handle)
         .node()
         .node_id(id)
-        .set(workflow::produce_int::params::value(), value)
+        .set(workflow::produce_int::fields::value(), value)
         .expect("a produce input")
 }
 
@@ -116,7 +116,7 @@ fn fail_with(
         .node()
         .node_id(id)
         .set(
-            workflow::fail_with::params::error_code(),
+            workflow::fail_with::fields::error_code(),
             error_code.to_owned(),
         )
         .expect("a fail input")
@@ -133,10 +133,10 @@ fn retry_then_ok(
         .function(workflow::retry_then_ok::handle)
         .node()
         .node_id(id)
-        .set(workflow::retry_then_ok::params::token(), token.to_owned())
+        .set(workflow::retry_then_ok::fields::token(), token.to_owned())
         .and_then(|node| {
             node.set(
-                workflow::retry_then_ok::params::succeed_on_attempt(),
+                workflow::retry_then_ok::fields::succeed_on_attempt(),
                 succeed_on_attempt,
             )
         })
@@ -153,8 +153,8 @@ fn recovery_step(
         .function(recovery::recovery_wf_step::handle)
         .node()
         .node_id(id)
-        .set(recovery::recovery_wf_step::params::step(), id.to_owned())
-        .and_then(|node| node.set(recovery::recovery_wf_step::params::delay_ms(), delay_ms))
+        .set(recovery::recovery_wf_step::fields::step(), id.to_owned())
+        .and_then(|node| node.set(recovery::recovery_wf_step::fields::delay_ms(), delay_ms))
         .expect("a recovery step input")
 }
 
@@ -335,7 +335,7 @@ async fn test_quorum_ctx_gating() {
             .function(workflow::ctx_reader_str::handle)
             .node()
             .node_id("d")
-            .set(workflow::ctx_reader_str::params::source(), "c".to_owned())
+            .set(workflow::ctx_reader_str::fields::source(), "c".to_owned())
             .expect("a reader input")
             .waits_for_all([a, b, c])
             .workflow_context_from([c])

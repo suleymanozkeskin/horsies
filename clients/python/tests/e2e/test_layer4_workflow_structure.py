@@ -603,7 +603,7 @@ async def test_workflow_task_expires_before_claim(broker: PostgresBroker) -> Non
     expiry = datetime.now(timezone.utc) + timedelta(milliseconds=500)
 
     node_expiring = TaskNode(
-        fn=wf_tasks.step_task,
+        function=wf_tasks.step_task,
         kwargs={'step': 'expiring'},
         good_until=expiry,
     )
@@ -659,7 +659,7 @@ async def test_workflow_task_completes_before_expiry(broker: PostgresBroker) -> 
     expiry = datetime.now(timezone.utc) + timedelta(seconds=60)
 
     node_valid = TaskNode(
-        fn=wf_tasks.step_task,
+        function=wf_tasks.step_task,
         kwargs={'step': 'valid'},
         good_until=expiry,
     )

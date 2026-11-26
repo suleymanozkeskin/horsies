@@ -77,7 +77,7 @@ _APP: Final = Horsies(
 )
 
 
-@_APP.task(task_name='refusals.value')
+@_APP.task(name='refusals.value')
 def value_task(*, value: int) -> Result[int, TaskError]:
     return Ok(value)
 
@@ -344,7 +344,7 @@ class TestAppLiveCheck:
 
 
 def _spec() -> WorkflowSpec[int]:
-    node = TaskNode(fn=value_task, kwargs={'value': 1})
+    node = TaskNode(function=value_task, kwargs={'value': 1})
     return _APP.workflow('refusals.flow', [node], output=node, definition_key='refusals.flow.v1')
 
 

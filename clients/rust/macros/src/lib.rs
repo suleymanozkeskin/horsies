@@ -38,11 +38,11 @@ mod workflow_input;
 ///   of the body; default 1,000. `isolated`: the time from an operator
 ///   cancel to the kill of the child when the run has not ended; with none,
 ///   an operator cancel kills nothing.
-/// - `retry_policy = <RetryPolicy>` with `auto_retry_for = ["CODE", ...]`:
+/// - `retry_policy = <RetryPolicy>` with `retry_for = ["CODE", ...]`:
 ///   both or neither. A code is a built-in code (`TASK_TIMEOUT`,
 ///   `WORKER_CRASHED`, ...) or a code of `E`; any other is a compile
 ///   error.
-/// - `workflow_ctx`: the input gets the workflow context.
+/// - `workflow_context`: the input gets the workflow context.
 ///
 /// The attribute generates a module of the same name. It holds no state:
 /// each send names the app that it goes through, and a workflow builder
@@ -50,12 +50,12 @@ mod workflow_input;
 ///
 /// ```ignore
 /// let validate = validate_order::register(&mut app)?;   // TaskFunction<validate_order::Input, ValidatedOrder, OrderCode>
-/// let order_field = validate_order::params::order();    // InputField<validate_order::Input, Order>
+/// let order_field = validate_order::fields::order();    // InputField<validate_order::Input, Order>
 /// let handle = validate_order::send(&app, order).await?;
 /// let options = TaskSendOptions::new().delay(WholeSeconds::from_secs(30));
 /// let later = validate_order::with_options(options).send(&app, order).await?;
 /// let node = validate_order::node();                    // TaskNode<ValidatedOrder, validate_order::Input>
-/// let function = validate_order::handle(&runtime)?;     // from a TaskRuntime
+/// let function = validate_order::function(&runtime)?;   // from a TaskRuntime
 /// ```
 ///
 /// A send through an app that does not register the task is
@@ -97,10 +97,10 @@ pub fn blocking_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Derive typed workflow field tokens for a named-field struct: the params
-/// type of a workflow definition, which a sub-workflow node fills field by
+/// Derive typed workflow field tokens for a named-field struct: the
+/// parameters type of a workflow definition, which a sub-workflow node fills field by
 /// field. A task's input fields have their tokens in the task's own module
-/// (`task_name::params::<name>()`).
+/// (`task_name::fields::<name>()`).
 ///
 /// Generates one associated function `field_<name>()` per field that serde
 /// reads, with the key that serde reads: `rename`, `rename_all` and raw

@@ -202,7 +202,7 @@ def _kwargs_target_callable(
 ) -> Callable[..., Any]:
     """Return the callable whose signature ``node.kwargs`` bind against.
 
-    ``TaskNode``: resolves through ``underlying_task_fn(node.fn)`` so the
+    ``TaskNode``: resolves through ``underlying_task_fn(node.function)`` so the
     bound callable matches the one ``@app.task`` strict-serde validation
     ran against at registration.
 
@@ -218,7 +218,7 @@ def _kwargs_target_callable(
         if original is not None:
             return cast('Callable[..., Any]', original)
         return cast('Callable[..., Any]', wf_def.build_with)
-    return underlying_task_fn(node.fn)
+    return underlying_task_fn(node.function)
 
 
 # =============================================================================
@@ -416,7 +416,7 @@ class WorkflowSpec(Generic[OutT]):
     def _isolate_inputs(self) -> list[TaskNode[Any, Any] | SubWorkflowNode[Any]]:
         """Copy input node graph so each spec has independent nodes.
 
-        Uses copy.copy() for shallow copies — callables (fn) and class
+        Uses copy.copy() for shallow copies — callables (function) and class
         refs (workflow_def) are shared, not copied.
         index is always reset. node_id is only reset when _node_id_auto_derived
         is True (stale auto-derived value from a previous spec). User-provided
@@ -519,7 +519,7 @@ class WorkflowSpec(Generic[OutT]):
         ``encode_value`` / ``decode_value`` bound against the node's
         kwarg-target signature:
 
-        - ``TaskNode``: binds against ``node.fn`` (the user task).
+        - ``TaskNode``: binds against ``node.function`` (the user task).
         - ``SubWorkflowNode``: binds against
           ``workflow_def._original_build_with`` (or ``build_with``) —
           the user's typed subworkflow entry. ``cls`` and ``app`` are
@@ -957,21 +957,21 @@ class WorkflowSpec(Generic[OutT]):
                         )
                     )
 
-            # Only check function parameter for TaskNode (SubWorkflowNode has no fn)
+            # Only check function parameter for TaskNode (SubWorkflowNode has no function)
             if isinstance(node, SubWorkflowNode):
                 continue
 
             task = node
-            if not _task_accepts_workflow_ctx(task.fn):
+            if not _task_accepts_workflow_ctx(task.function):
                 # Get the original function for accurate source location
-                original_fn = getattr(task.fn, '_original_fn', task.fn)
-                fn_location = SourceLocation.from_function(original_fn)
+                original_function = getattr(task.function, '_original_function', task.function)
+                function_location = SourceLocation.from_function(original_function)
 
                 errors.append(
                     WorkflowValidationError(
                         message='workflow_context_from declared but function missing workflow_ctx param',
                         code=ErrorCode.WORKFLOW_CTX_PARAM_MISSING,
-                        location=fn_location,  # May be None for non-function callables
+                        location=function_location,  # May be None for non-function callables
                         notes=[
                             f"workflow '{self.name}'\n"
                             f"TaskNode '{task.name}' declares workflow_context_from=[...]\n"
@@ -1163,18 +1163,18 @@ class WorkflowSpec(Generic[OutT]):
 
             # Get the function to inspect (TaskNode vs SubWorkflowNode)
             if isinstance(node, TaskNode):
-                fn = node.fn
+                function = node.function
             else:
                 # SubWorkflowNode - validate against build_with signature
-                fn = getattr(
+                function = getattr(
                     node.workflow_def,
                     '_original_build_with',
                     node.workflow_def.build_with,
                 )
-                if fn is _default_build_with():
+                if function is _default_build_with():
                     continue  # Covered by WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH.
 
-            sig = _get_signature(fn)
+            sig = _get_signature(function)
             if sig is None:
                 continue  # Can't validate (uninspectable)
 
@@ -1271,15 +1271,15 @@ class WorkflowSpec(Generic[OutT]):
 
             # Get the function to inspect (TaskNode vs SubWorkflowNode)
             if isinstance(node, TaskNode):
-                fn = node.fn
+                function = node.function
             else:
-                fn = getattr(
+                function = getattr(
                     node.workflow_def,
                     '_original_build_with',
                     node.workflow_def.build_with,
                 )
 
-            sig = _get_signature(fn)
+            sig = _get_signature(function)
             if sig is None:
                 continue
 
@@ -1291,7 +1291,7 @@ class WorkflowSpec(Generic[OutT]):
             hints = (
                 _build_with_type_hints(node)
                 if isinstance(node, SubWorkflowNode)
-                else _resolved_type_hints(fn)
+                else _resolved_type_hints(function)
             )
 
             for kwarg_name, source_node in node.args_from.items():
@@ -1391,10 +1391,10 @@ class WorkflowSpec(Generic[OutT]):
         for node in self.tasks:
             # Get the function to inspect (TaskNode vs SubWorkflowNode)
             if isinstance(node, TaskNode):
-                fn = node.fn
+                function = node.function
                 # The worker passes the TaskRuntime to the first parameter of
                 # a task that takes it, on each run.
-                match task_runtime_parameter(fn):
+                match task_runtime_parameter(function):
                     case TakesRuntime():
                         args_provided: list[object] = [object()]
                     case NoRuntimeParameter():
@@ -1403,7 +1403,7 @@ class WorkflowSpec(Generic[OutT]):
                         assert_never(unreachable)
                 injected_kwargs: set[str] = set()
             else:
-                fn = getattr(
+                function = getattr(
                     node.workflow_def,
                     '_original_build_with',
                     node.workflow_def.build_with,
@@ -1413,7 +1413,7 @@ class WorkflowSpec(Generic[OutT]):
                 args_provided = [object(), object()]
                 injected_kwargs = set()
 
-            sig = _get_signature(fn)
+            sig = _get_signature(function)
             if sig is None:
                 continue  # Can't validate
 
@@ -1628,14 +1628,14 @@ class WorkflowSpec(Generic[OutT]):
         """Require defaults on args_from targets of non-'all' join nodes."""
         errors: list[WorkflowValidationError] = []
         if isinstance(task, TaskNode):
-            fn = task.fn
+            function = task.function
         else:
-            fn = getattr(
+            function = getattr(
                 task.workflow_def,
                 '_original_build_with',
                 task.workflow_def.build_with,
             )
-        sig = _get_signature(fn)
+        sig = _get_signature(function)
         if sig is None:
             return errors
 
@@ -1959,7 +1959,7 @@ def _args_from_code_type_error(
         case _:
             return None
     source_codes: object = (
-        getattr(source_node.fn, 'task_code_type', TextCodes())
+        getattr(source_node.function, 'task_code_type', TextCodes())
         if isinstance(source_node, TaskNode)
         else TextCodes()
     )

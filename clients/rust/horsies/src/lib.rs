@@ -89,9 +89,6 @@ pub mod __private {
     /// path, so the user's crate needs no serde name of its own for it.
     pub use serde;
 
-    /// The cancel grace of a `SHARED_ASYNC` task that names none.
-    pub const DEFAULT_CANCEL_GRACE: crate::CancelGraceMs = crate::CancelGraceMs::DEFAULT;
-
     /// The field token of one field of a workflow node's input type.
     pub const fn input_field<I, F>(name: &'static str) -> crate::InputField<I, F> {
         crate::InputField::raw(name)
@@ -104,25 +101,17 @@ pub mod __private {
         crate::task::is_free_custom_code(text)
     }
 
-    /// Whether `text` may stand in `auto_retry_for` of a task whose code
+    /// Whether `text` may stand in `retry_for` of a task whose code
     /// type has `custom_codes`: a built-in code or one of `custom_codes`. The
     /// task attribute asserts it for each entry at compile time.
     pub const fn is_retry_code(text: &str, custom_codes: &[&str]) -> bool {
         crate::task::is_retry_code(text, custom_codes)
     }
 
-    /// The stored code of an `auto_retry_for` entry that passed
+    /// The stored code of a `retry_for` entry that passed
     /// [`is_retry_code`].
     pub fn retry_code(text: &str) -> horsies_core::TaskErrorCode {
         crate::task::stored_retry_code(text)
-    }
-
-    /// The cancel grace of `milliseconds`. The task attribute checks the
-    /// bounds at compile time, so a value outside them is a defect.
-    pub fn cancel_grace(milliseconds: u32) -> crate::CancelGraceMs {
-        crate::CancelGraceMs::new(milliseconds).unwrap_or_else(|refused| {
-            panic!("the task attribute let through a cancel grace out of bounds: {refused}")
-        })
     }
 
     /// The `CODES` of the code type `E` of the async task function

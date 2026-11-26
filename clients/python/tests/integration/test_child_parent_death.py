@@ -52,13 +52,13 @@ from horsies.core.types.result import Ok, Result
 app = Horsies(AppConfig(broker=PostgresConfig(database_url='postgresql://u:p@localhost/none')))
 
 
-@app.task(task_name='hang')
+@app.task(name='hang')
 def hang() -> Result[None, TaskError]:
     time.sleep(60)
     return Ok(None)
 
 
-@app.task(task_name='gil_hang')
+@app.task(name='gil_hang')
 def gil_hang() -> Result[None, TaskError]:
     # PyDLL keeps the GIL during the foreign call.
     ctypes.PyDLL(None).sleep(60)

@@ -141,7 +141,7 @@ fn schedule_queue(
     task: &RegisteredTask,
     schedule: &TaskSchedule,
 ) -> Result<String, HorsiesError> {
-    match (schedule.queue.as_deref(), task.queue_name()) {
+    match (schedule.queue.as_deref(), task.queue()) {
         (Some(queue), _) => resolve_task_queue(config, Some(queue)),
         (None, Some(task_queue)) => Ok(task_queue.to_owned()),
         (None, None) => resolve_task_queue(config, None),
@@ -205,9 +205,9 @@ mod tests {
         }
         .with_task_options(TaskOptions {
             task_name: "reports.nightly".to_owned(),
-            queue_name: queue.map(str::to_owned),
+            queue: queue.map(str::to_owned),
             good_until: None,
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: None,
             timeout_ms,
             execution: Execution::Isolated,

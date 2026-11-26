@@ -47,13 +47,13 @@ class OperationalErrorCode(str, Enum):
 
     TASK_BLOCKED_LOOP = 'TASK_BLOCKED_LOOP'
     """This task held the event loop of its shared async child past the block limit, before its
-    `timeout_ms`. The worker killed the child; a retry (only when `auto_retry_for` names this code)
+    `timeout_ms`. The worker killed the child; a retry (only when `retry_for` names this code)
     runs in an isolated child.
     """
 
     NEIGHBOUR_BLOCKED_LOOP = 'NEIGHBOUR_BLOCKED_LOOP'
     """Another task held the event loop of this task's shared async child past the block limit, before
-    this task's `timeout_ms`. The worker killed the child. A retry runs only when `auto_retry_for`
+    this task's `timeout_ms`. The worker killed the child. A retry runs only when `retry_for`
     names this code.
     """
 

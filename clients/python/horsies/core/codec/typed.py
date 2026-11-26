@@ -866,7 +866,7 @@ def reportable_error(
 ) -> TaskError:
     """Return an error that crosses the wire, with its code and message kept.
 
-    An error is the report of a failure, and `auto_retry_for` and outcome routing
+    An error is the report of a failure, and `retry_for` and outcome routing
     read its code. So this function is total: a bad `data` or a bad subclass field
     never costs the code.
 

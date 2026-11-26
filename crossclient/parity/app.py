@@ -74,7 +74,7 @@ SHARED_TIMEOUT_MS: Final = 30_000
 
 DRAIN_TIMEOUT: Final = timedelta(seconds=5)
 
-RETRY_POLICY: Final = RetryPolicy.fixed([1, 1], auto_retry_for=['TRANSIENT'])
+RETRY_POLICY: Final = RetryPolicy.fixed([1, 1], retry_for=['TRANSIENT'])
 """Two retries one second apart for the code `TRANSIENT`."""
 
 CHAIN_NAME: Final = 'parity_chain'
@@ -149,32 +149,32 @@ app = Horsies(config)
 # ---- Isolated ----
 
 
-@app.task(task_name='parity.add')
+@app.task(name='parity.add')
 def add(*, a: int, b: int) -> Result[int, TaskError]:
     """A plain success."""
     return Ok(a + b)
 
 
-@app.task(task_name='parity.refuse')
+@app.task(name='parity.refuse')
 def refuse(*, value: int) -> Result[int, TaskError]:
     """A task error with no retry."""
     return Err(TaskError(code='REFUSED', message=f'refused {value}'))
 
 
-@app.task(task_name='parity.transient', retry_policy=RETRY_POLICY)
+@app.task(name='parity.transient', retry_policy=RETRY_POLICY)
 def transient(*, value: int) -> Result[int, TaskError]:
     """A task error that the policy retries until the retries run out."""
     return Err(TaskError(code='TRANSIENT', message=f'transient {value}'))
 
 
-@app.task(task_name='parity.sleep_past_deadline', timeout_ms=SHORT_TIMEOUT_MS)
+@app.task(name='parity.sleep_past_deadline', timeout_ms=SHORT_TIMEOUT_MS)
 def sleep_past_deadline() -> Result[str, TaskError]:
     """An isolated task that the parent kills at its deadline."""
     time.sleep(PAST_THE_DEADLINE_S)
     return Ok('late')
 
 
-@app.task(task_name='parity.double')
+@app.task(name='parity.double')
 def double(*, upstream: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
     """Twice the value of its upstream node."""
     match upstream:
@@ -190,7 +190,7 @@ def double(*, upstream: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
 
 
 @app.task(
-    task_name='parity.add_async',
+    name='parity.add_async',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
@@ -201,7 +201,7 @@ async def add_async(*, a: int, b: int) -> Result[int, TaskError]:
 
 
 @app.task(
-    task_name='parity.refuse_async',
+    name='parity.refuse_async',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
@@ -211,7 +211,7 @@ async def refuse_async(*, value: int) -> Result[int, TaskError]:
 
 
 @app.task(
-    task_name='parity.transient_async',
+    name='parity.transient_async',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
     retry_policy=RETRY_POLICY,
@@ -222,7 +222,7 @@ async def transient_async(*, value: int) -> Result[int, TaskError]:
 
 
 @app.task(
-    task_name='parity.async_past_deadline',
+    name='parity.async_past_deadline',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHORT_TIMEOUT_MS,
 )
@@ -237,7 +237,7 @@ async def async_past_deadline() -> Result[str, TaskError]:
 
 
 @app.task(
-    task_name='parity.add_thread',
+    name='parity.add_thread',
     execution=Execution.SHARED_THREAD,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
@@ -246,7 +246,7 @@ def add_thread(*, a: int, b: int) -> Result[int, TaskError]:
 
 
 @app.task(
-    task_name='parity.refuse_thread',
+    name='parity.refuse_thread',
     execution=Execution.SHARED_THREAD,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
@@ -255,7 +255,7 @@ def refuse_thread(*, value: int) -> Result[int, TaskError]:
 
 
 @app.task(
-    task_name='parity.transient_thread',
+    name='parity.transient_thread',
     execution=Execution.SHARED_THREAD,
     timeout_ms=SHARED_TIMEOUT_MS,
     retry_policy=RETRY_POLICY,
@@ -265,7 +265,7 @@ def transient_thread(*, value: int) -> Result[int, TaskError]:
 
 
 @app.task(
-    task_name='parity.thread_past_deadline',
+    name='parity.thread_past_deadline',
     execution=Execution.SHARED_THREAD,
     timeout_ms=SHORT_TIMEOUT_MS,
 )
@@ -278,9 +278,9 @@ def thread_past_deadline() -> Result[str, TaskError]:
 
 # ---- Workflow ----
 
-_chain_add = TaskNode(fn=add, kwargs={'a': 2, 'b': 3}, node_id='add')
+_chain_add = TaskNode(function=add, kwargs={'a': 2, 'b': 3}, node_id='add')
 _chain_double = TaskNode(
-    fn=double,
+    function=double,
     waits_for=[_chain_add],
     args_from={'upstream': _chain_add},
     node_id='double',
@@ -301,14 +301,14 @@ class ParityChild(WorkflowDefinition[int]):
     name = CHILD_NAME
     definition_key = CHILD_DEFINITION_KEY
 
-    child_add = TaskNode(fn=add, kwargs={'a': 2, 'b': 3}, node_id='add')
+    child_add = TaskNode(function=add, kwargs={'a': 2, 'b': 3}, node_id='add')
 
     config = WorkflowDefinitionConfig(output=child_add, on_error=OnError.FAIL)
 
 
 _parent_child = SubWorkflowNode(workflow_def=ParityChild, node_id='child')
 _parent_double = TaskNode(
-    fn=double,
+    function=double,
     waits_for=[_parent_child],
     args_from={'upstream': _parent_child},
     node_id='double',

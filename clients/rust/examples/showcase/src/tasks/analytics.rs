@@ -23,7 +23,7 @@ fn drawn_count(low: i64, high: i64, parts: &[&str]) -> i32 {
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn sales_rollup(window: String) -> Result<SalesRollup, TaskError<AcmeCode>> {
     let orders_counted = drawn_count(20, 400, &[&window, "orders"]);
@@ -42,7 +42,7 @@ pub async fn sales_rollup(window: String) -> Result<SalesRollup, TaskError<AcmeC
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn abandoned_cart_sweep(
     older_than_minutes: i32,
@@ -69,7 +69,7 @@ pub async fn abandoned_cart_sweep(
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn regional_rollup(region: String) -> Result<RegionalRollup, TaskError<AcmeCode>> {
     let orders_counted = drawn_count(5, 120, &[&region, "orders"]);
@@ -88,7 +88,7 @@ pub async fn regional_rollup(region: String) -> Result<RegionalRollup, TaskError
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn retention_audit(older_than_days: i32) -> Result<RetentionAudit, TaskError<AcmeCode>> {
     let window = older_than_days.to_string();
@@ -107,7 +107,7 @@ pub async fn retention_audit(older_than_days: i32) -> Result<RetentionAudit, Tas
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn catalog_import_chunk(
     import_id: String,
@@ -130,7 +130,7 @@ pub async fn catalog_import_chunk(
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::export_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn flaky_export(export_id: String) -> Result<ExportManifest, TaskError<AcmeCode>> {
     let rows = drawn_count(1_000, 50_000, &[&export_id, "rows"]);

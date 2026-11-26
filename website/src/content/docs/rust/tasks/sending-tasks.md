@@ -47,7 +47,7 @@ async fn send_receipts(app: &mut Horsies) -> Result<(), Box<dyn std::error::Erro
 | `send_with_options(options, input)` | With `TaskSendOptions`: now, or after the delay of `TaskSendOptions::delay` |
 | `with_options(options)` | A `TaskFunctionWithOptions` with `send(input)` |
 
-`task_name()`, `queue_name()`, `priority()` and `task_options()` read the task's registration.
+`task_name()`, `queue()`, `priority()` and `task_options()` read the task's registration.
 
 The generated module of a task has two sends:
 

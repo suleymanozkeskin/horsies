@@ -150,14 +150,14 @@ class _RejectedError(Exception):
 
 
 def check_task_signature(
-    fn: Callable[..., Any],
+    function: Callable[..., Any],
     *,
     task_name: str,
 ) -> None:
-    """Validate that `fn`'s signature uses only allow-list types.
+    """Validate that `function`'s signature uses only allow-list types.
 
     Args:
-        fn: Task function being registered. Pre-decoration is not handled
+        function: Task function being registered. Pre-decoration is not handled
             here — `create_task_wrapper` already rejects pre-decorated fns.
         task_name: Registered name; used in error messages.
 
@@ -171,8 +171,8 @@ def check_task_signature(
             docs URL. Fails fast — one error per call; further positions
             are not inspected after the first rejection.
     """
-    hints = get_type_hints(fn, include_extras=True)
-    sig = inspect.signature(fn)
+    hints = get_type_hints(function, include_extras=True)
+    sig = inspect.signature(function)
     runtime = runtime_parameter_of(sig, hints)
 
     for param_name, param in sig.parameters.items():

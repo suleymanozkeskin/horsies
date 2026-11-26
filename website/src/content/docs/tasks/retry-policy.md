@@ -15,11 +15,11 @@ The API is on the client pages: [Configure Retries](/horsies/tasks/defining-task
 | Field | Meaning | Rule |
 |-------|---------|------|
 | `max_retries` | The number of retries. The first run is not a retry | 1 to 20 |
-| `intervals` | The delays, in seconds | Each value is 1 to 86,400 |
+| `intervals_seconds` | The delays, in seconds | Each value is 1 to 86,400 |
 | `backoff_strategy` | `fixed` or `exponential` | `fixed`: one interval for each retry. `exponential`: exactly one interval, the base |
 | `jitter` | Adds a random part to each delay | |
 | `max_delay_seconds` | A cap on each delay, or no cap | Greater than 0 when set |
-| `auto_retry_for` | The error codes that start a retry | At least one code |
+| `retry_for` | The error codes that start a retry | At least one code |
 
 A client refuses a policy that breaks a rule when the policy is built.
 
@@ -48,18 +48,18 @@ A retry cannot start at or after the task's `good_until` deadline. See [Task Exp
 
 ## Auto-Retry Triggers
 
-A failure starts a retry only when its error code is in `auto_retry_for` and retries remain. A failure with another code is terminal.
+A failure starts a retry only when its error code is in `retry_for` and retries remain. A failure with another code is terminal.
 
-`auto_retry_for` accepts:
+`retry_for` accepts:
 
 - Codes of the task's own errors, for example `RATE_LIMITED` and `SERVICE_UNAVAILABLE`.
 - Built-in codes, for example `UNHANDLED_EXCEPTION`, `WORKER_CRASHED` and `TASK_TIMEOUT`. The built-in codes are on the [Errors Reference](/horsies/tasks/errors/).
 
-A code is `UPPER_SNAKE_CASE`. `WORKFLOW_STOPPED` is reserved and is not a task code, so `auto_retry_for` refuses it.
+A code is `UPPER_SNAKE_CASE`. `WORKFLOW_STOPPED` is reserved and is not a task code, so `retry_for` refuses it.
 
 ## How Retries Work
 
-1. A task attempt fails with a code in `auto_retry_for`.
+1. A task attempt fails with a code in `retry_for`.
 2. The worker checks `retry_count < max_retries`.
 3. If retries remain, the task status goes back to `PENDING`.
 4. `next_retry_at` is set from the retry policy.
@@ -92,7 +92,7 @@ A retry policy controls the **automatic retry of the same request**: the task ro
 |---|---|---|
 | Applies to | A live task that failed an attempt | A terminal task record |
 | Task id | Unchanged | New, with recorded lineage |
-| Started by | `auto_retry_for` matches the error code | An explicit call |
+| Started by | `retry_for` matches the error code | An explicit call |
 | Attempt history | Added to the same task | Belongs to the new task |
 | Requires | A retry policy with retries remaining | A retained enqueue input |
 | Fencing token | Same task id, a greater value | New task id, the value starts again at 1 |

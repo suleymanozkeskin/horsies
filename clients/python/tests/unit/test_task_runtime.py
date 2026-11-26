@@ -400,7 +400,7 @@ class TestProducerPaths:
     def test_a_workflow_node_does_not_miss_the_runtime(self) -> None:
         spec: WorkflowSpec[Any] = WorkflowSpec(
             name='runtime_node',
-            tasks=[TaskNode(fn=token_task, kwargs={'order_id': 'o-1'})],
+            tasks=[TaskNode(function=token_task, kwargs={'order_id': 'o-1'})],
         )
 
         assert len(spec.tasks) == 1
@@ -410,7 +410,7 @@ class TestProducerPaths:
             WorkflowSpec(
                 name='runtime_node_kwarg',
                 tasks=[
-                    TaskNode(fn=token_task, kwargs={'order_id': 'o-1', 'runtime': 1}),
+                    TaskNode(function=token_task, kwargs={'order_id': 'o-1', 'runtime': 1}),
                 ],
             )
 

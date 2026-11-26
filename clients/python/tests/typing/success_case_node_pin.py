@@ -24,11 +24,11 @@ def define(produce: TaskFunction[[], int]) -> None:
     class Child(WorkflowDefinition[int]):
         name = 'typing_pin_success_child'
         definition_key = 'tests.typing.success_case_node_pin.child.v1'
-        step = TaskNode(fn=produce)
+        step = TaskNode(function=produce)
 
         config = WorkflowDefinitionConfig(output=step)
 
-    task_node = TaskNode(fn=produce)
+    task_node = TaskNode(function=produce)
     sub_node = SubWorkflowNode(workflow_def=Child)
 
     SuccessCase(required=[sub_node])

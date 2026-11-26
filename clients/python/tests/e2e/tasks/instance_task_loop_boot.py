@@ -44,12 +44,12 @@ broker.app = app
 app.on_child_process_start(fail_loop_creation_on_demand)
 
 
-@app.task(task_name='e2e_loop_boot_healthcheck')
+@app.task(name='e2e_loop_boot_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='e2e_loop_boot_async_pid')
+@app.task(name='e2e_loop_boot_async_pid')
 async def async_pid() -> Result[int, TaskError]:
     """Runs on the task loop that its child created at boot."""
     await asyncio.sleep(0)

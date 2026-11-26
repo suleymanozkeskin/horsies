@@ -141,11 +141,11 @@ class TestComposedPatterns:
         task_c = make_simple_task(app, 'dja_c')
         task_d = make_simple_task(app, 'dja_d')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, kwargs={'value': 3}, waits_for=[node_a])
         node_d = TaskNode(
-            fn=task_d,
+            function=task_d,
             kwargs={'value': 4},
             waits_for=[node_b, node_c],
             join='any',
@@ -193,11 +193,11 @@ class TestComposedPatterns:
         task_c = make_simple_task(app, 'djaf_c')
         task_d = make_simple_task(app, 'djaf_d')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, kwargs={'value': 3}, waits_for=[node_a])
         node_d = TaskNode(
-            fn=task_d,
+            function=task_d,
             kwargs={'value': 4},
             waits_for=[node_b, node_c],
             join='any',
@@ -248,18 +248,18 @@ class TestComposedPatterns:
         task_c = make_simple_task(app, 'dafd_c')
 
         # Receiver task that accepts two injected results
-        @app.task(task_name='dafd_d')
+        @app.task(name='dafd_d')
         def diamond_sink(
             *, b_result: TaskOutcome[int, TaskError],
             c_result: TaskOutcome[int, TaskError],
         ) -> Result[str, TaskError]:
             return Ok(f'b={_outcome_status(b_result)},c={_outcome_status(c_result)}')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, kwargs={'value': 5}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, kwargs={'value': 5}, waits_for=[node_a])
         node_d = TaskNode(
-            fn=diamond_sink,
+            function=diamond_sink,
             waits_for=[node_b, node_c],
             args_from={'b_result': node_b, 'c_result': node_c},
             allow_failed_dependencies=True,
@@ -328,10 +328,10 @@ class TestComposedPatterns:
         task_c = make_failing_task(app, 'fsp_c')
         task_d = make_failing_task(app, 'fsp_d')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, waits_for=[node_a])
-        node_d = TaskNode(fn=task_d, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, waits_for=[node_a])
+        node_d = TaskNode(function=task_d, waits_for=[node_a])
 
         policy = SuccessPolicy(cases=[SuccessCase(required=[node_b])])
 
@@ -397,13 +397,13 @@ class TestComposedPatterns:
         task_e = make_simple_task(app, 'wfq_e')
         task_f = make_simple_task(app, 'wfq_f')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
-        node_d = TaskNode(fn=task_d, kwargs={'value': 4}, waits_for=[node_a])
-        node_e = TaskNode(fn=task_e, kwargs={'value': 5}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_d = TaskNode(function=task_d, kwargs={'value': 4}, waits_for=[node_a])
+        node_e = TaskNode(function=task_e, kwargs={'value': 5}, waits_for=[node_a])
         node_f = TaskNode(
-            fn=task_f,
+            function=task_f,
             kwargs={'value': 0},
             waits_for=[node_b, node_c, node_d, node_e],
             join='quorum',
@@ -463,16 +463,16 @@ class TestComposedPatterns:
         task_d = make_recovery_task(app, 'mdr_d')
         task_e = make_simple_task(app, 'mdr_e')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, kwargs={'value': 3}, waits_for=[node_a])
         node_d = TaskNode(
-            fn=task_d,
+            function=task_d,
             waits_for=[node_b],
             args_from={'input_result': node_b},
             allow_failed_dependencies=True,
         )
-        node_e = TaskNode(fn=task_e, kwargs={'value': 5}, waits_for=[node_c, node_d])
+        node_e = TaskNode(function=task_e, kwargs={'value': 5}, waits_for=[node_c, node_d])
 
         spec = make_workflow_spec(
             name='mixed_recovery',
@@ -536,18 +536,18 @@ class TestComposedPatterns:
         task_b = make_simple_task(app, 'jap_b')
         task_c = make_simple_task(app, 'jap_c')
 
-        @app.task(task_name='jap_d')
+        @app.task(name='jap_d')
         def partial_receiver(
             *, b_result: TaskOutcome[int, TaskError] | None = None,
             c_result: TaskOutcome[int, TaskError] | None = None,
         ) -> Result[str, TaskError]:
             return Ok(f'b={b_result is not None},c={c_result is not None}')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, kwargs={'value': 3}, waits_for=[node_a])
         node_d = TaskNode(
-            fn=partial_receiver,
+            function=partial_receiver,
             waits_for=[node_b, node_c],
             args_from={'b_result': node_b, 'c_result': node_c},
             join='any',
@@ -603,7 +603,7 @@ class TestComposedPatterns:
         task_d = make_simple_task(app, 'rff_d')
 
         # "Recovery" task that always fails too
-        @app.task(task_name='rff_b')
+        @app.task(name='rff_b')
         def failing_recovery(
             *, input_result: TaskOutcome[int, TaskError],
         ) -> Result[int, TaskError]:
@@ -611,15 +611,15 @@ class TestComposedPatterns:
                 TaskError(code='RECOVERY_ALSO_FAILED', message='Recovery failed too'),
             )
 
-        node_a = TaskNode(fn=task_a)
+        node_a = TaskNode(function=task_a)
         node_b = TaskNode(
-            fn=failing_recovery,
+            function=failing_recovery,
             waits_for=[node_a],
             args_from={'input_result': node_a},
             allow_failed_dependencies=True,
         )
-        node_c = TaskNode(fn=task_c, kwargs={'value': 1}, waits_for=[node_b])
-        node_d = TaskNode(fn=task_d, kwargs={'value': 2}, waits_for=[node_c])
+        node_c = TaskNode(function=task_c, kwargs={'value': 1}, waits_for=[node_b])
+        node_d = TaskNode(function=task_d, kwargs={'value': 2}, waits_for=[node_c])
 
         spec = make_workflow_spec(
             name='double_failure',
@@ -678,11 +678,11 @@ class TestComposedPatterns:
         task_c = make_failing_task(app, 'sprd_c')
         task_d = make_recovery_task(app, 'sprd_d')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, waits_for=[node_a])
         node_d = TaskNode(
-            fn=task_d,
+            function=task_d,
             waits_for=[node_b],
             args_from={'input_result': node_b},
             allow_failed_dependencies=True,
@@ -752,16 +752,16 @@ class TestComposedPatterns:
         task_d = make_simple_task(app, 'jai_d')
         task_e = make_simple_task(app, 'jai_e')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, kwargs={'value': 3}, waits_for=[node_a])
         node_d = TaskNode(
-            fn=task_d,
+            function=task_d,
             kwargs={'value': 4},
             waits_for=[node_b, node_c],
             join='any',
         )
-        node_e = TaskNode(fn=task_e, kwargs={'value': 5}, waits_for=[node_d])
+        node_e = TaskNode(function=task_e, kwargs={'value': 5}, waits_for=[node_d])
 
         spec = make_workflow_spec(
             name='join_any_intermediate',
@@ -814,8 +814,8 @@ class TestComposedPatterns:
         task_a = make_failing_task(app, 'psp_a')
         task_b = make_simple_task(app, 'psp_b')
 
-        node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a)
+        node_b = TaskNode(function=task_b, kwargs={'value': 1})
 
         policy = SuccessPolicy(cases=[SuccessCase(required=[node_b])])
 

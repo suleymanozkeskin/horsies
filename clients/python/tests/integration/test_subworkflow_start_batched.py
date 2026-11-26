@@ -59,13 +59,13 @@ def _child_def(
     suffix = uuid.uuid4().hex[:8]
     broken_def = _broken_build_def(suffix) if failing_sub_root else None
 
-    @app.task(task_name=f'bulk_child_{suffix}')
+    @app.task(name=f'bulk_child_{suffix}')
     def child_task(*, value: int) -> Result[int, TaskError]:
         return Ok(value)
 
     corrupt_fn: Any = None
     if corrupt_root:
-        @app.task(task_name=f'bulk_child_corrupt_{suffix}')
+        @app.task(name=f'bulk_child_corrupt_{suffix}')
         def corrupt_task(*, value: int) -> Result[int, TaskError]:
             return Ok(value)
 
@@ -87,7 +87,7 @@ def _child_def(
                     )
                     continue
                 fn = corrupt_fn if (corrupt_root and i == 0) else child_task
-                nodes.append(TaskNode(fn=fn, kwargs={'value': i}, waits_for=waits))
+                nodes.append(TaskNode(function=fn, kwargs={'value': i}, waits_for=waits))
             kwargs: dict[str, Any] = {}
             if on_error is not None:
                 kwargs['on_error'] = on_error
@@ -316,7 +316,7 @@ class TestBulkChildStart:
 
         suffix = uuid.uuid4().hex[:8]
 
-        @app.task(task_name=f'nested_pause_fast_{suffix}')
+        @app.task(name=f'nested_pause_fast_{suffix}')
         def fast_task(*, value: int) -> Result[int, TaskError]:
             return Ok(value)
 
@@ -337,7 +337,7 @@ class TestBulkChildStart:
 
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-                fast = TaskNode(fn=fast_task, kwargs={'value': 1})
+                fast = TaskNode(function=fast_task, kwargs={'value': 1})
                 nested = SubWorkflowNode(workflow_def=BadGrandchild)
                 return app.workflow(
                     name=cls.name,

@@ -149,7 +149,7 @@ elif result.ok_value is not None:
 
 Run the stale RUNNING recovery pass once. The reaper of each worker runs the same pass every `check_interval_ms` when `RecoveryConfig.auto_fail_stale_running` is on. Use this method to run the pass when that setting is off, or between two reaper passes.
 
-The pass recovers each RUNNING task with no runner heartbeat within the threshold, as [Stale RUNNING Recovery](/horsies/workers/heartbeats-recovery/#stale-running-recovery) states. A task with a retry policy that lists `WORKER_CRASHED` in `auto_retry_for`, and with retries left, is scheduled for retry. Each other task goes to FAILED with the `WORKER_CRASHED` error code.
+The pass recovers each RUNNING task with no runner heartbeat within the threshold, as [Stale RUNNING Recovery](/horsies/workers/heartbeats-recovery/#stale-running-recovery) states. A task with a retry policy that lists `WORKER_CRASHED` in `retry_for`, and with retries left, is scheduled for retry. Each other task goes to FAILED with the `WORKER_CRASHED` error code.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

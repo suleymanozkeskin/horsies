@@ -50,7 +50,7 @@ async fn send_receipt(
     }
 }
 
-#[task("audit_checkout", workflow_ctx)]
+#[task("audit_checkout", workflow_context)]
 async fn audit_checkout(workflow_ctx: WorkflowContext) -> Result<bool, TaskError<Infallible>> {
     let charged = workflow_ctx.result_for::<u64, Infallible>(&NodeKey::new("charge"));
     Ok(matches!(charged, Ok(TaskOutcome::Succeeded(_))))
@@ -79,13 +79,13 @@ impl WorkflowDefinition for Checkout {
         let charged = builder.task(
             charge_order::node()
                 .node_id("charge")
-                .set(charge_order::params::order(), params.order)?,
+                .set(charge_order::fields::order(), params.order)?,
         )?;
         let receipt = builder.task(
             send_receipt::node()
                 .node_id("receipt")
-                .set(send_receipt::params::order_id(), order_id)?
-                .arg_from(send_receipt::params::charged(), charged),
+                .set(send_receipt::fields::order_id(), order_id)?
+                .arg_from(send_receipt::fields::charged(), charged),
         )?;
         let _audit = builder.task(
             audit_checkout::node()
@@ -167,7 +167,7 @@ the task's registration on the builder's app.
 | `.key()` | `Option<NodeKey<T>>`: the key when the node has a given node id |
 
 - `set` and `arg_from` take the field tokens of the task's own module:
-  `task_name::params::<name>()`. A token of another task, or a source of
+  `task_name::fields::<name>()`. A token of another task, or a source of
   another output type, is a compile error.
 - `E` in `TaskOutcome<S, E>` reads the source's custom codes. `CustomCode`
   reads any custom code as checked text.
@@ -188,7 +188,7 @@ ended. Give that node its dependency results through the workflow context.
 
 ## The Workflow Context
 
-A task that takes the context has the attribute `workflow_ctx` and a
+A task that takes the context has the attribute `workflow_context` and a
 parameter named `workflow_ctx` of type `WorkflowContext`. The child of the
 worker writes the context into that parameter.
 
@@ -207,7 +207,7 @@ worker writes the context into that parameter.
   `ResultDeserializationError { node_id, cause }`,
   `UnknownCustomCode { node_id, cause }`.
 - Each node of `workflow_context_from` must be a dependency of the node.
-- `workflow_context_from` on a task without the `workflow_ctx` attribute is
+- `workflow_context_from` on a task without the `workflow_context` attribute is
   refused (`HRS-010`).
 - Use a given `node_id` for each context source, and read it with
   `NodeKey::new(id)`.
@@ -247,7 +247,7 @@ impl WorkflowDefinition for RegionReport {
     ) -> Result<WorkflowSpec, HorsiesError> {
         builder.definition_key(Self::definition_key());
         let _fetched = builder.task(
-            fetch_report::node().set(fetch_report::params::region(), params.region)?,
+            fetch_report::node().set(fetch_report::fields::region(), params.region)?,
         )?;
         builder.build()
     }
@@ -515,7 +515,7 @@ fn region_spec(
 ) -> Result<WorkflowSpec, HorsiesError> {
     builder.definition_key("reports.region_fetch.v1");
     let fetched = builder.task(
-        fetch_report::node().set(fetch_report::params::region(), region.clone())?,
+        fetch_report::node().set(fetch_report::fields::region(), region.clone())?,
     )?;
     builder.output(fetched);
     builder.build()
@@ -543,7 +543,7 @@ For a template, pass the builder to `build_with`:
 |---|---|
 | `HRS-004` | Two nodes with one node id |
 | `HRS-006`, `HRS-011`, `HRS-012` | A reference of another builder (dependency, output, success policy) |
-| `HRS-010` | `workflow_context_from` on a task without `workflow_ctx` |
+| `HRS-010` | `workflow_context_from` on a task without `workflow_context` |
 | `HRS-013` | A quorum outside 1 to the node's dependencies, or `arg_from` on an `any` or quorum join |
 | `HRS-016` | A definition with an empty definition key |
 | `HRS-017` | A definition key or a workflow name that another registered definition has |

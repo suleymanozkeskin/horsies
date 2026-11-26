@@ -3,7 +3,7 @@ use std::convert::Infallible;
 
 use horsies::{task, TaskError};
 
-#[task("bad", auto_retry_for = ["TASK_TIMEOUT"], timeout_ms = 5_000)]
+#[task("bad", retry_for = ["TASK_TIMEOUT"], timeout_ms = 5_000)]
 async fn bad(_: ()) -> Result<(), TaskError<Infallible>> {
     Ok(())
 }

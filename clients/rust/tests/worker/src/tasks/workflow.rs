@@ -136,7 +136,7 @@ pub fn slow_mark(value: String, delay_ms: u64) -> Result<String, TaskError<WfCod
 #[blocking_task(
     "e2e_wf_retry_then_ok",
     retry_policy = RetryPolicy::exponential(1, 3, false).expect("a valid exponential policy"),
-    auto_retry_for = ["RETRY_NEEDED"]
+    retry_for = ["RETRY_NEEDED"]
 )]
 #[expect(
     clippy::needless_pass_by_value,
@@ -230,7 +230,7 @@ fn context_value(
 }
 
 /// Python `e2e_wf_ctx_reader`: the value of node `source` from the context.
-#[task("e2e_wf_ctx_reader", workflow_ctx)]
+#[task("e2e_wf_ctx_reader", workflow_context)]
 pub async fn ctx_reader(
     source: String,
     workflow_ctx: Option<WorkflowContext>,
@@ -240,7 +240,7 @@ pub async fn ctx_reader(
 
 /// Python `e2e_wf_ctx_reader_str`: the text value of node `source` from the
 /// context, or that node's error.
-#[task("e2e_wf_ctx_reader_str", workflow_ctx)]
+#[task("e2e_wf_ctx_reader_str", workflow_context)]
 pub async fn ctx_reader_str(
     source: String,
     workflow_ctx: Option<WorkflowContext>,
@@ -256,7 +256,7 @@ pub async fn ctx_reader_str(
 
 /// Python `e2e_wf_ctx_sum`: the sum of nodes `first` and `second` from the
 /// context.
-#[task("e2e_wf_ctx_sum", workflow_ctx)]
+#[task("e2e_wf_ctx_sum", workflow_context)]
 pub async fn ctx_sum(
     first: String,
     second: String,
@@ -269,7 +269,7 @@ pub async fn ctx_sum(
 
 /// Python `e2e_wf_mixed_reader` and `e2e_wf_dual_reader`: one value from
 /// `args_from`, one from the context node `ctx_source`.
-#[task("e2e_wf_mixed_reader", workflow_ctx)]
+#[task("e2e_wf_mixed_reader", workflow_context)]
 pub async fn mixed_reader(
     from_args: TaskOutcome<i64, WfCode>,
     ctx_source: String,

@@ -28,7 +28,7 @@ const WRITTEN_OFF: &str = "written_off";
     "receive_return",
     queue = "fulfillment",
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn receive_return(
     rt: TaskRuntime,
@@ -64,7 +64,7 @@ pub async fn receive_return(
     "inspect_item",
     queue = "fulfillment",
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn inspect_item(
     rt: TaskRuntime,
@@ -106,7 +106,7 @@ pub async fn inspect_item(
     "restock_or_writeoff",
     queue = "fulfillment",
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn restock_or_writeoff(
     rt: TaskRuntime,

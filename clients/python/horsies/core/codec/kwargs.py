@@ -95,7 +95,7 @@ __all__ = [
 def underlying_task_fn(task: Any) -> Callable[..., Any]:
     """Return the original user function wrapped by ``@app.task``.
 
-    The decorator stores the user's callable under ``_original_fn``; older
+    The decorator stores the user's callable under ``_original_function``; older
     builds used ``_fn``. Tests sometimes pass a bare callable. One helper
     so producer (``.send`` / scheduler / workflow lifecycle / workflow
     engine child enqueue) and worker (`_run_task_entry`) all bind against
@@ -109,7 +109,7 @@ def underlying_task_fn(task: Any) -> Callable[..., Any]:
         The underlying callable to introspect for ``get_type_hints`` and
         ``inspect.signature``.
     """
-    return getattr(task, '_original_fn', getattr(task, '_fn', task))
+    return getattr(task, '_original_function', getattr(task, '_fn', task))
 
 
 _INJECTED_PARAM_NAMES: frozenset[str] = frozenset({

@@ -7,8 +7,8 @@
 
 use chrono::{DateTime, Utc};
 use horsies_core::{
-    BackoffStrategy, BuiltInTaskCode, CancelGraceMs, CustomCode, Execution, RetryPolicy,
-    TaskErrorCode, TaskOptions,
+    BackoffStrategy, BuiltInTaskCode, CustomCode, Execution, RetryPolicy, TaskErrorCode,
+    TaskOptions,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -53,7 +53,7 @@ fn whole_number(name: &str, value: &Value) -> Option<u32> {
 fn task_options(vector: &OptionsVector) -> TaskOptions {
     let name = vector.name.as_str();
     let options = &vector.options;
-    let (retry_policy, auto_retry_for) = match &options["retry_policy"] {
+    let (retry_policy, retry_for) = match &options["retry_policy"] {
         Value::Null => (None, None),
         given => {
             let backoff_strategy = match given["backoff_strategy"].as_str() {
@@ -61,9 +61,9 @@ fn task_options(vector: &OptionsVector) -> TaskOptions {
                 Some("exponential") => BackoffStrategy::Exponential,
                 other => panic!("{name}: backoff_strategy {other:?}"),
             };
-            let codes = given["auto_retry_for"]
+            let codes = given["retry_for"]
                 .as_array()
-                .unwrap_or_else(|| panic!("{name}: auto_retry_for is a list"))
+                .unwrap_or_else(|| panic!("{name}: retry_for is a list"))
                 .iter()
                 .map(|entry| {
                     let text = entry.as_str().expect("a code text");
@@ -77,9 +77,9 @@ fn task_options(vector: &OptionsVector) -> TaskOptions {
                 .collect();
             let policy = RetryPolicy {
                 max_retries: whole_number(name, &given["max_retries"]).expect("max_retries"),
-                intervals: given["intervals"]
+                intervals_seconds: given["intervals_seconds"]
                     .as_array()
-                    .unwrap_or_else(|| panic!("{name}: intervals is a list"))
+                    .unwrap_or_else(|| panic!("{name}: intervals_seconds is a list"))
                     .iter()
                     .map(|interval| whole_number(name, interval).expect("an interval"))
                     .collect(),
@@ -98,14 +98,13 @@ fn task_options(vector: &OptionsVector) -> TaskOptions {
     };
     TaskOptions {
         task_name: "stored_form_vector".to_owned(),
-        queue_name: None,
+        queue: None,
         good_until: None,
-        auto_retry_for,
+        retry_for,
         retry_policy,
         timeout_ms: whole_number(name, &options["timeout_ms"]),
         execution,
-        cancel_grace_ms: whole_number(name, &options["cancel_grace_ms"])
-            .map(|grace| CancelGraceMs::new(grace).expect("a grace in its bounds")),
+        cancel_grace_ms: whole_number(name, &options["cancel_grace_ms"]),
     }
 }
 
