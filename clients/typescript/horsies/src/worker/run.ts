@@ -3,11 +3,15 @@
 // 1. The panic rule of a worker process and the parent's log level, before the first core call.
 // 2. The static check without the schedules: a refusal prints the `worker-startup` report.
 // 3. The child command of this process.
-// 4. The start members and `prepareWorker`: the manifest bounds, the profile and the connection settings.
-// 5. The run on the core's process runtime, with the stop on `SIGTERM` and `SIGINT` while it runs.
+// 4. The start members and `prepareWorker`: the manifest bounds, the profile, the connection settings, and no
+//    `SHARED_THREAD` children (the TypeScript worker has no thread seat isolates).
+// 5. The run on the core's process runtime, with the core handle that `Horsies.create` built for the app (so the
+//    child spec source that the app registers there builds the sub-workflow children), and the stop on `SIGTERM`
+//    and `SIGINT`. The stop handlers stay until the process ends: `cli.run` ends it after the log wait.
 //
-// Each failure is one `WorkerRunError` variant; nothing starts before step 5. The JavaScript thread stays free
-// during the run: the core runs on its own threads, and the run's Promise keeps the event loop alive.
+// Each failure is one `WorkerRunError` variant; nothing starts before step 5. A defect of the package follows the
+// defect rule (`raiseDefect`): in a worker process it aborts. The JavaScript thread stays free during the run: the
+// core runs on its own threads, and the run's Promise keeps the event loop alive.
 
 import type { MetricsEndpoint, ProfileRequest, WorkerLogLevel } from "../_catalog/worker_manifest.ts";
 import type { AppContext } from "../app/context.ts";
@@ -15,15 +19,15 @@ import { type CoreChecks, refusalOfCore } from "../app/core-checks.ts";
 import { type CheckReport, checkReport, reportText } from "../check/report.ts";
 import { staticCheck } from "../check/static-check.ts";
 import type { NativePreparedWorker, WorkerBootCauseName, WorkerFailCauseName, WorkerPreparation, WorkerRunEnded } from "../native/worker/addon.ts";
-import type { HandleProfile } from "../native/handle/addon.ts";
-import { buildCoreHandle, type CoreHandle } from "../native/handle/core-handle.ts";
+import { raiseDefect } from "../native/call/defect.ts";
+import { unreachable } from "../native/call/never.ts";
+import type { CoreHandle } from "../native/handle/core-handle.ts";
 import { setPanicRule } from "../native/process-core/process-core.ts";
 import { checkAppConfig, checkTaskOptions, parseDeclaredErrorCodes } from "../native/sends/sends.ts";
 import { prepareWorker, requestWorkerStop, runWorker } from "../native/worker/worker.ts";
 import { configureLogging } from "../logging.ts";
 import { ClientDefect, CoreError } from "../thrown-errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
-import { unreachable } from "../wire/unreachable.ts";
 import {
   childCommand,
   childCommandRefusedText,
@@ -55,17 +59,14 @@ export type WorkerRunError =
   | { readonly kind: "profileRefused"; readonly report: CheckReport }
   /** The connection settings fail the broker config check. Nothing started. */
   | { readonly kind: "connectionSettingsRefused"; readonly cause: string }
+  /** The profile starts `SHARED_THREAD` children; the TypeScript worker has no thread seat isolates. Nothing started. */
+  | { readonly kind: "sharedThreadUnavailable"; readonly profile: string }
   /** The core of this process refused the call: it could not start, it stopped, or this process is a fork. */
   | { readonly kind: "coreRefused"; readonly error: CoreError }
   /** The start failed; the worker claimed nothing. */
   | { readonly kind: "bootFailed"; readonly cause: WorkerBootCauseName; readonly message: string }
   /** The worker was ready, then failed; its running tasks drained first. */
   | { readonly kind: "failed"; readonly cause: WorkerFailCauseName; readonly message: string };
-
-/** The stop handlers of one run, removed when it ends. */
-export interface StopHandlers {
-  remove(): void;
-}
 
 /** What the worker run does that has effects. The process gives the addon's; a test gives fakes. */
 export interface WorkerRunDeps {
@@ -80,8 +81,8 @@ export interface WorkerRunDeps {
   prepare(appConfigJson: string, startJson: string): WorkerPreparation;
   run(worker: NativePreparedWorker): Promise<WorkerRunEnded>;
   requestStop(worker: NativePreparedWorker): void;
-  /** Call `requestStop` at the first stop signal, until `remove`. */
-  stopOnSignals(requestStop: () => void): StopHandlers;
+  /** Call `requestStop` at the first stop signal. The handlers stay until the process ends. */
+  stopOnSignals(requestStop: () => void): void;
 }
 
 /** Run a worker of `context` as `start` says, until a stop request or a failure. */
@@ -124,9 +125,8 @@ export function preparedWorker(
     profile: start.profile,
     metricsEndpoint: start.metricsEndpoint,
     tasks: taskManifests(context),
-    // The app hub holds no event handler and no tracing setting, so the worker starts no handler child.
-    handlers: eventHandlers([]),
-    workerEndedSpans: workerEndedSpans("none"),
+    handlers: eventHandlers(context.telemetry.handlers()),
+    workerEndedSpans: workerEndedSpans(context.telemetry.tracing),
     childLaunch: childLaunch(built.value.command, start.logLevel),
   });
 
@@ -152,7 +152,7 @@ function preparationResult(prepare: () => WorkerPreparation): Result<NativePrepa
       const [first, ...rest] = preparation.refusals.map((refused) => refusalOfCore("workerProfiles", refused));
 
       if (first === undefined) {
-        throw new TypeError("preparedWorker: the addon refused the profile with no refusal");
+        return raiseDefect(new ClientDefect({ subject: "prepareWorker", rule: "a profile refusal holds at least one refusal" }));
       }
 
       return err({ kind: "profileRefused", report: checkReport("worker-startup", first, rest) });
@@ -160,22 +160,23 @@ function preparationResult(prepare: () => WorkerPreparation): Result<NativePrepa
 
     case "connectionSettingsRefused":
       return err({ kind: "connectionSettingsRefused", cause: preparation.cause });
+    case "sharedThreadUnavailable":
+      return err({ kind: "sharedThreadUnavailable", profile: preparation.profile });
     default:
-      return unreachable(preparation, "preparedWorker");
+      return unreachable(preparation);
   }
 }
 
-/** Step 5: the run, with the stop handlers while it runs. */
+/**
+ * Step 5: the run, with the stop handlers installed first. The handlers stay after the run: a later signal during
+ * the log wait of `cli.run` writes its line only, and the default action of the signal does not end the process.
+ */
 async function runPrepared(worker: NativePreparedWorker, deps: WorkerRunDeps): Promise<Result<WorkerStopped, WorkerRunError>> {
-  const handlers = deps.stopOnSignals(() => deps.requestStop(worker));
+  deps.stopOnSignals(() => deps.requestStop(worker));
 
-  try {
-    const ended = await withCoreRefusalAsync(async () => deps.run(worker));
+  const ended = await withCoreRefusalAsync(async () => deps.run(worker));
 
-    return ended.ok ? outcomeOf(ended.value) : ended;
-  } finally {
-    handlers.remove();
-  }
+  return ended.ok ? outcomeOf(ended.value) : ended;
 }
 
 /** The outcome of a run end. Pure. */
@@ -188,7 +189,7 @@ export function outcomeOf(ended: WorkerRunEnded): Result<WorkerStopped, WorkerRu
     case "failed":
       return err({ kind: "failed", cause: ended.cause, message: ended.message });
     default:
-      return unreachable(ended, "outcomeOf");
+      return unreachable(ended);
   }
 }
 
@@ -230,6 +231,8 @@ export function workerRunErrorText(error: WorkerRunError): string {
       return `${error.path}: outside ${String(error.min)} to ${String(error.max)}, the bound of its worker manifest field`;
     case "connectionSettingsRefused":
       return `the connection settings are refused: ${error.cause}`;
+    case "sharedThreadUnavailable":
+      return `workerProfiles[${JSON.stringify(error.profile)}].sharedThread: the TypeScript worker has no thread seat isolates, so it does not start SHARED_THREAD children; run the profile's tasks in isolated or shared async children`;
     case "coreRefused":
       return `the core refused the worker: ${error.error.name}: ${error.error.message}`;
     case "bootFailed":
@@ -237,14 +240,28 @@ export function workerRunErrorText(error: WorkerRunError): string {
     case "failed":
       return `worker failed (${error.cause}): ${error.message}`;
     default:
-      return unreachable(error, "workerRunErrorText");
+      return unreachable(error);
   }
 }
 
-/** The worker run of this process: the addon, the process facts and stderr; `stopOnSignals` from the command. */
+/** The worker functions of the addon that the worker run calls. A test gives fakes. */
+export interface NativeWorkerCalls {
+  prepareWorker(appConfigJson: string, startJson: string): WorkerPreparation;
+  runWorker(worker: NativePreparedWorker, handle: CoreHandle): Promise<WorkerRunEnded>;
+  requestWorkerStop(worker: NativePreparedWorker): void;
+}
+
+/** The worker functions of the addon. */
+export const NATIVE_WORKER_CALLS: NativeWorkerCalls = Object.freeze({ prepareWorker, runWorker, requestWorkerStop });
+
+/**
+ * The worker run of this process: the addon, the process facts and stderr; `stopOnSignals` from the command. The run
+ * gets the core handle that `Horsies.create` built for the app (`appHandle`).
+ */
 export function processWorkerRunDeps(
   context: AppContext,
-  stopOnSignals: (requestStop: () => void) => StopHandlers,
+  stopOnSignals: (requestStop: () => void) => void,
+  native: NativeWorkerCalls = NATIVE_WORKER_CALLS,
 ): WorkerRunDeps {
   return {
     setLogLevel: (level) => configureLogging({ levels: { default: level } }),
@@ -254,27 +271,28 @@ export function processWorkerRunDeps(
     writeLine: (line) => {
       process.stderr.write(`${line}\n`);
     },
-    prepare: prepareWorker,
-    run: async (worker) => runWorker(worker, appCoreHandle(context, "WORKER")),
-    requestStop: requestWorkerStop,
+    prepare: (appConfigJson, startJson) => native.prepareWorker(appConfigJson, startJson),
+    run: async (worker) => native.runWorker(worker, appHandle(context)),
+    requestStop: (worker) => native.requestWorkerStop(worker),
     stopOnSignals,
   };
 }
 
 /**
- * A core handle of the app's producer manifest with the pool profile `profile`. It starts nothing until an operation
- * runs. The worker run takes the child spec source of the app's workflows from it: with none registered, each
- * sub-workflow node fails as not listed (`runWorker`).
+ * The core handle that `Horsies.create` built for the app on the main thread. The worker serves the child spec source
+ * that the app registers on it, and the live check connects through it. A worker and its check run on a main thread,
+ * so another core access is a defect.
  */
-export function appCoreHandle(context: AppContext, profile: HandleProfile): CoreHandle {
-  const checked = checkAppConfig(context.config.coreConfigJson);
-
-  switch (checked.kind) {
-    case "accepted":
-      return buildCoreHandle(checked.manifestJson, profile);
-    case "refused":
-      throw new ClientDefect({ subject: "appCoreHandle", rule: "the config check refuses the config that Horsies.create accepted" });
+export function appHandle(context: AppContext): CoreHandle {
+  switch (context.core.kind) {
+    case "addon":
+      return context.core.handle;
+    case "seatRelay":
+    case "noCore":
+      return raiseDefect(
+        new ClientDefect({ subject: "appHandle", rule: "a worker and its check run on a main thread, where the app holds its core handle" }),
+      );
     default:
-      return unreachable(checked, "appCoreHandle");
+      return unreachable(context.core);
   }
 }

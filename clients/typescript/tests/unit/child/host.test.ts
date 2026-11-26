@@ -6,7 +6,7 @@ import { describe, test } from "node:test";
 
 import { onChildStartFor, provideFor } from "../../../horsies/src/child/app-members.ts";
 import { CHILD_EXIT_FLUSH_BOUND_MS } from "../../../horsies/src/child/exit.ts";
-import { type ChildModeDeps, runChildMode } from "../../../horsies/src/child/host.ts";
+import { bodyFactsMode, type ChildModeDeps, runChildMode } from "../../../horsies/src/child/host.ts";
 import type { CulpritMethod } from "../../../horsies/src/child/loop-marks.ts";
 import type { ProcessEventHooks } from "../../../horsies/src/child/process-events.ts";
 import { CHILD_KIND_HOOK_NAME } from "../../../horsies/src/child/serve.ts";
@@ -212,5 +212,12 @@ describe("child mode", () => {
     native.endServe(0);
     assert.equal(await endedCode(running), 0);
     assert.deepEqual(deps.flushes, [`wait ${String(CHILD_EXIT_FLUSH_BOUND_MS)}`]);
+  });
+});
+
+describe("the body facts of a child", () => {
+  test("OpenTelemetry tracing records the facts of each run; no tracing records none", () => {
+    assert.equal(bodyFactsMode("otel"), "SPANS");
+    assert.equal(bodyFactsMode("none"), "NO_SCOPE");
   });
 });

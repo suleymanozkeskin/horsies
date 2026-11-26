@@ -8,7 +8,7 @@ import { defineTask } from "../../../horsies/src/contract/public.ts";
 import { taskIdFromCore } from "../../../horsies/src/contract/ids.ts";
 import { readFormOf, taskHandleOf } from "../../../horsies/src/read/handle.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
-import { fakeProducer, OWNER_TASK_ID } from "../app/support.ts";
+import { fakeCoreHandle, fakeProducer, OWNER_TASK_ID } from "../app/support.ts";
 import { adapterRun } from "./support.ts";
 
 const other = defineTask({ name: "other", input: {}, output: h.int() });
@@ -20,7 +20,7 @@ describe("a result wait in a task child", () => {
     const producer = fakeProducer({ role: "RUNS_TASK_BODIES" });
 
     const handle = taskHandleOf(
-      { kind: "addon", producer },
+      { kind: "addon", producer, handle: fakeCoreHandle() },
       readFormOf(other),
       taskIdFromCore(OWNER_TASK_ID, "test"),
     );

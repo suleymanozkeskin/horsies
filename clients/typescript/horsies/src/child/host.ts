@@ -17,6 +17,7 @@ import { hostname } from "node:os";
 
 import type { Horsies } from "../app.ts";
 import type { AppContext } from "../app/context.ts";
+import type { TracingKind } from "../app/telemetry.ts";
 import { appInternals } from "../app/internals.ts";
 import { addonSettlement, settlingCallback, type CallbackSettlement } from "../native/call/callback.ts";
 import { reportDefect } from "../native/call/defect.ts";
@@ -34,7 +35,14 @@ import {
 } from "../native/child/child.ts";
 import { setPanicRule } from "../native/process-core/process-core.ts";
 import { buildTaskError, checkAppConfig } from "../native/sends/sends.ts";
-import type { ChildArgumentsCheck, ChildHostPlan, ChildPost, ChildServeEnd, StartHookCall } from "../native/child/addon.ts";
+import type {
+  BodyFactsMode,
+  ChildArgumentsCheck,
+  ChildHostPlan,
+  ChildPost,
+  ChildServeEnd,
+  StartHookCall,
+} from "../native/child/addon.ts";
 import type { AppConfigCheck } from "../native/sends/addon.ts";
 import type { PanicRule } from "../thrown-errors.ts";
 import { ClientDefect, type CoreDefect } from "../thrown-errors.ts";
@@ -154,6 +162,18 @@ async function servedChild(context: AppContext, processArguments: readonly strin
   return childEnd.end(end.code);
 }
 
+/** The body facts that a child of an app with `tracing` records: the facts of each run for its spans, or none. Pure. */
+export function bodyFactsMode(tracing: TracingKind): BodyFactsMode {
+  switch (tracing) {
+    case "otel":
+      return "SPANS";
+    case "none":
+      return "NO_SCOPE";
+    default:
+      return unreachable(tracing, "bodyFactsMode");
+  }
+}
+
 /** The plan of the child of `context`. A config that the core refuses again is a defect: `ClientDefect`. */
 export function childPlan(
   context: AppContext,
@@ -172,8 +192,7 @@ export function childPlan(
     startHooks: startHookNames(members),
     producerManifestJson: checked.manifestJson,
     hostname: deps.hostname,
-    // The app hub holds no tracing setting, so the child records no body facts.
-    bodyFacts: "NO_SCOPE",
+    bodyFacts: bodyFactsMode(context.telemetry.tracing),
     exitFlushBoundMs: CHILD_EXIT_FLUSH_BOUND_MS,
     processArguments: [...processArguments],
   };

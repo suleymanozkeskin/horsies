@@ -3,10 +3,12 @@
 // refuses. It installs no schema and writes nothing but the LISTEN probe's one NOTIFY.
 
 import { ErrorCode } from "../_catalog/error_codes.ts";
+import { raiseDefect } from "../native/call/defect.ts";
+import { ClientDefect } from "../thrown-errors.ts";
 import { refusalOfCore } from "../app/core-checks.ts";
 import { refusal, type Refusal } from "../app/refusal.ts";
 import type { LiveCheckOutcome } from "../native/worker/addon.ts";
-import { unreachable } from "../wire/unreachable.ts";
+import { unreachable } from "../native/call/never.ts";
 import { type CheckOutcome, type CheckPassed, checkReport } from "./report.ts";
 
 /** The place of a live check refusal. */
@@ -23,14 +25,14 @@ export function liveCheckOutcome(passed: CheckPassed, live: LiveCheckOutcome): C
       const [first, ...rest] = live.refusals.map((refused) => refusalOfCore("workerProfiles", refused));
 
       if (first === undefined) {
-        throw new TypeError("liveCheckOutcome: the addon refused the worker connections with no refusal");
+        return raiseDefect(new ClientDefect({ subject: "checkLive", rule: "a connections refusal holds at least one refusal" }));
       }
 
       return refusedWith(first, ...rest);
     }
 
     default:
-      return unreachable(live, "liveCheckOutcome");
+      return unreachable(live);
   }
 }
 

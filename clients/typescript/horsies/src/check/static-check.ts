@@ -15,7 +15,7 @@ import type { CoreChecks } from "../app/core-checks.ts";
 import { exceptionCodeRefusals } from "../app/implement.ts";
 import { refusal, type Refusal } from "../app/refusal.ts";
 import type { RefusalArea } from "../app/refusals.ts";
-import { unreachable } from "../wire/unreachable.ts";
+import { unreachable } from "../native/call/never.ts";
 import { type CheckOutcome, type CheckPassed, type CheckPhaseName, checkReport } from "./report.ts";
 
 /** Which refusals a check reads: every area, or every area but those that only a scheduler reads. */
@@ -27,7 +27,7 @@ export function areaScopes(area: RefusalArea): readonly CheckScope[] {
     case "contracts":
       return ["withSchedules", "withoutSchedules"];
     default:
-      return unreachable(area, "areaScopes");
+      return unreachable(area);
   }
 }
 
