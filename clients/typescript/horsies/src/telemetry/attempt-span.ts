@@ -6,15 +6,25 @@
 //   carrier gets a root span in both.
 // - The body runs in `context.with` of a context that the package builds from the root context: a function that the
 //   addon calls has an empty async context, so the package never takes the context of the bridge callback.
-// - A thrown value is recorded on the span. The end sets the status: OK for a returned value; ERROR with
-//   `error.type` for an error code, `TASK_TIMEOUT` (the run's deadline) and `TASK_CANCELLED` (an operator cancel).
+// - A thrown value is recorded on the span. The end sets the status: unset for a returned value (as the Python
+//   client); ERROR with `error.type` for an error code, `TASK_TIMEOUT` (the run's deadline) and `TASK_CANCELLED` (an
+//   operator cancel).
+// - The end is the first of the body's end and, in a `SHARED_ASYNC` child, the core's decision at the run's cancel
+//   signal: the core ends such a run at its deadline or at an operator cancel while the body may run on, so a body
+//   that never settles still gets its span.
 // - A body that does not start gets no span (the core posts no body for it).
 // - A throw of the user's SDK never changes a run: no span at the open, and one warning per process and kind.
 
 import { OutcomeCode } from "../_catalog/task_codes.ts";
 import { thrownRecord } from "../child/thrown-error.ts";
 import type { BodyEnd, BodyObservation, BodyObserver } from "../child/body-observer.ts";
-import type { BodyCarrierRecord, BodyExecution, BodyFactsRecord, BodyWorkflowRecord } from "../native/child/addon.ts";
+import type {
+  BodyCarrierRecord,
+  BodyExecution,
+  BodyFactsRecord,
+  BodyWorkflowRecord,
+  CancelCauseName,
+} from "../native/child/addon.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import {
   MESSAGING_DESTINATION_NAME_KEY,
@@ -80,6 +90,7 @@ const NO_OBSERVATION: BodyObservation = Object.freeze({
   run: <T>(call: () => T): T => call(),
   thrown: (): void => undefined,
   end: (): void => undefined,
+  cancelled: (): void => undefined,
 });
 
 /** The body observer of a child of an app with OpenTelemetry tracing. */
@@ -119,21 +130,90 @@ function openedObservation(deps: AttemptSpanDeps, facts: RecordedFacts): BodyObs
     return NO_OBSERVATION;
   }
 
-  const ids = spanIdsOf(api, span);
+  return new AttemptSpan(deps, { span, active, ids: spanIdsOf(api, span), execution: facts.execution });
+}
 
-  return Object.freeze({
-    run: <T>(call: () => T): T => runInSpan(api, active, ids, call),
-    thrown: (cause: unknown): void => {
-      guarded(deps, "attemptSpanEnd", () => {
-        recordThrown(span, cause);
+/** The span of one body and where it runs. */
+type OpenSpan = {
+  readonly span: OtelSpan;
+  readonly active: OtelContext;
+  readonly ids: SpanIds | NoSpanIds;
+  readonly execution: BodyExecution;
+};
+
+/**
+ * The observation of one body with its span, open until its first end: the end of the body, or, in a `SHARED_ASYNC`
+ * child, the core's decision at the run's cancel signal. A `thrown` or an `end` after the first end does nothing.
+ */
+class AttemptSpan implements BodyObservation {
+  readonly #deps: AttemptSpanDeps;
+  readonly #open: OpenSpan;
+  #state: "open" | "ended" = "open";
+
+  constructor(deps: AttemptSpanDeps, open: OpenSpan) {
+    this.#deps = deps;
+    this.#open = open;
+  }
+
+  run<T>(call: () => T): T {
+    return runInSpan(this.#deps.api, this.#open.active, this.#open.ids, call);
+  }
+
+  thrown(cause: unknown): void {
+    if (this.#state === "open") {
+      guarded(this.#deps, () => {
+        recordThrown(this.#open.span, cause);
       });
-    },
-    end: (end: BodyEnd): void => {
-      guarded(deps, "attemptSpanEnd", () => {
-        endAttemptSpan(api, span, end);
-      });
-    },
-  });
+    }
+  }
+
+  end(end: BodyEnd): void {
+    this.#close(end);
+  }
+
+  /**
+   * The run's cancel signal fired. In a `SHARED_ASYNC` child the core then ends the run (`TASK_TIMEOUT` at the
+   * deadline, `TASK_CANCELLED` at an operator cancel) while the body may run on, so the span ends now. In an
+   * `ISOLATED` child the span ends with the body: the body returns after the signal, or the worker kills the child and
+   * the handler child makes the span of that end. `SHARED_THREAD` bodies run in seat isolates, which have their own
+   * observer.
+   */
+  cancelled(cause: CancelCauseName): void {
+    switch (this.#open.execution) {
+      case "SHARED_ASYNC":
+        this.#close(endAtSignal(cause));
+
+        return;
+      case "ISOLATED":
+      case "SHARED_THREAD":
+        return;
+      default:
+        unreachable(this.#open.execution, "AttemptSpan.cancelled");
+    }
+  }
+
+  #close(end: BodyEnd): void {
+    if (this.#state === "ended") {
+      return;
+    }
+
+    this.#state = "ended";
+    guarded(this.#deps, () => {
+      endAttemptSpan(this.#deps.api, this.#open.span, end);
+    });
+  }
+}
+
+/** The end that the core decides at the run's cancel signal of `cause`. Pure. */
+function endAtSignal(cause: CancelCauseName): BodyEnd {
+  switch (cause) {
+    case "DEADLINE":
+      return { kind: "timedOut" };
+    case "OPERATOR":
+      return { kind: "cancelled" };
+    default:
+      return unreachable(cause, "endAtSignal");
+  }
 }
 
 /** Run `call` with the attempt span active, and its ids in the store of `currentTask()`. */
@@ -229,11 +309,13 @@ function recordThrown(span: OtelSpan, cause: unknown): void {
   span.recordException(cause instanceof Error ? cause : thrownRecord(cause).message);
 }
 
-/** Set the status of `span` by how its body ended, and end it. */
+/**
+ * Set the status of `span` by how its body ended, and end it. A returned value leaves the status unset, as the Python
+ * client does and as the OpenTelemetry rule for instrumentation libraries says.
+ */
 function endAttemptSpan(api: OtelApi, span: OtelSpan, end: BodyEnd): void {
   switch (end.kind) {
     case "returned":
-      span.setStatus({ code: api.SpanStatusCode.OK });
       break;
     case "failed":
       markError(api, span, end.code);
@@ -252,10 +334,10 @@ function endAttemptSpan(api: OtelApi, span: OtelSpan, end: BodyEnd): void {
 }
 
 /** Run `step`; a throw of the user's SDK is written once per process. */
-function guarded(deps: AttemptSpanDeps, kind: "attemptSpanEnd", step: () => void): void {
+function guarded(deps: AttemptSpanDeps, step: () => void): void {
   try {
     step();
   } catch (cause) {
-    deps.warnings.warnOnce(kind, cause);
+    deps.warnings.warnOnce("attemptSpanEnd", cause);
   }
 }

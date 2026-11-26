@@ -7,12 +7,17 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 
 import { NO_BODY_OBSERVER, type BodyObserver } from "../../../../horsies/src/child/body-observer.ts";
 import { type RunMark, runStore } from "../../../../horsies/src/child/run-store.ts";
+import { taskIdFromCore } from "../../../../horsies/src/contract/ids.ts";
 import type { BodyFactsRecord } from "../../../../horsies/src/native/child/addon.ts";
 import { otelBodyObserver } from "../../../../horsies/src/telemetry/attempt-span.ts";
 import { currentTask, type CurrentTask } from "../../../../horsies/src/telemetry/log-context.ts";
 import { installSdk, loadedApi, onlySpan, recordedWarnings, type TestSdk } from "../support.ts";
 
-const MARK: RunMark = { taskId: "0192f6a1-7b3c-7d4e-8f00-0123456789ab", taskName: "resize", attempt: 1 };
+const MARK: RunMark = {
+  taskId: taskIdFromCore("0192f6a1-7b3c-7d4e-8f00-0123456789ab", "the currentTask tests"),
+  taskName: "resize",
+  attempt: 1,
+};
 
 const FACTS: BodyFactsRecord = {
   kind: "recorded",

@@ -10,8 +10,13 @@
 //!   `tracing::Span::none()`: the attempt span is the JavaScript body
 //!   observer's.
 //! - `close` records nothing: the core gives it no run (the span of every
-//!   run is `Span::none()`), so the JavaScript body adapter reads how a body
-//!   ended from the run's settle call and its `cancelRun` post.
+//!   run is `Span::none()`), so the JavaScript side takes the core's end of a
+//!   run from the run's settle call and its `cancelRun` post. The core fires
+//!   a run's cancel signal when it decides `TimedOut` (the deadline won) or
+//!   `Cancelled` (an operator cancel), and the cancel watch posts
+//!   `cancelRun` with that cause; the body observer ends the attempt span of
+//!   a `SHARED_ASYNC` run there, so a body that never settles still gets its
+//!   span with the core's end.
 //! - The table holds at most [`RECORDED_FACTS_BOUND`] runs. A body call takes
 //!   its facts at its start, so the table holds only the runs whose bodies
 //!   start now; past the bound the oldest entry is dropped.
@@ -238,6 +243,8 @@ impl BodySpans for BodyFactsRecorder {
         tracing::Span::none()
     }
 
+    /// Nothing to record: the core's end of a run reaches JavaScript
+    /// through the run's settle call and its `cancelRun` post (module docs).
     fn close(&self, _span: &tracing::Span, _end: &BodyOutcome<'_>) {}
 }
 

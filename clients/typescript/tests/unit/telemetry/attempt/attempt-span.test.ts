@@ -166,9 +166,9 @@ describe("the attempt span", () => {
     }
   });
 
-  test("each end sets its status: OK, the error code, TASK_TIMEOUT, TASK_CANCELLED", async () => {
+  test("each end sets its status: unset for a returned value, the error code, TASK_TIMEOUT, TASK_CANCELLED", async () => {
     const ends: readonly [BodyEnd, number, string | undefined][] = [
-      [{ kind: "returned" }, otel.SpanStatusCode.OK, undefined],
+      [{ kind: "returned" }, otel.SpanStatusCode.UNSET, undefined],
       [{ kind: "failed", code: "RATE_LIMITED" }, otel.SpanStatusCode.ERROR, "RATE_LIMITED"],
       [{ kind: "timedOut" }, otel.SpanStatusCode.ERROR, "TASK_TIMEOUT"],
       [{ kind: "cancelled" }, otel.SpanStatusCode.ERROR, "TASK_CANCELLED"],
@@ -182,6 +182,40 @@ describe("the attempt span", () => {
       sdk.spans().map((span) => [span.status.code, span.attributes["error.type"]]),
       ends.map(([, code, errorType]) => [code, errorType]),
     );
+  });
+
+  test("SHARED_ASYNC: a body that never settles gets its span at the core's deadline decision", () => {
+    const observation = observerOf("childOfSend").observer.enter(factsWith({ kind: "noCarrier" }, NOT_IN_WORKFLOW));
+
+    void observation.run(async () => new Promise<never>(() => undefined));
+    observation.cancelled("DEADLINE");
+
+    const span = onlySpan(sdk.spans(), "run resize");
+
+    assert.deepEqual([span.status.code, span.attributes["error.type"]], [otel.SpanStatusCode.ERROR, "TASK_TIMEOUT"]);
+  });
+
+  test("SHARED_ASYNC: an operator cancel ends the span with TASK_CANCELLED; a later end and throw change nothing", () => {
+    const observation = observerOf("childOfSend").observer.enter(factsWith({ kind: "noCarrier" }, NOT_IN_WORKFLOW));
+
+    observation.cancelled("OPERATOR");
+    observation.thrown(new Error("late"));
+    observation.end({ kind: "returned" });
+
+    const span = onlySpan(sdk.spans(), "run resize");
+
+    assert.equal(span.attributes["error.type"], "TASK_CANCELLED");
+    assert.deepEqual(span.events, []);
+  });
+
+  test("ISOLATED: the span ends with the body, not at the cancel signal", () => {
+    const facts = { ...factsWith({ kind: "noCarrier" }, NOT_IN_WORKFLOW), execution: "ISOLATED" } as const;
+    const observation = observerOf("childOfSend").observer.enter(facts);
+
+    observation.cancelled("OPERATOR");
+    assert.deepEqual(sdk.spans(), []);
+    observation.end({ kind: "cancelled" });
+    assert.equal(onlySpan(sdk.spans(), "run resize").attributes["error.type"], "TASK_CANCELLED");
   });
 
   test("a thrown value is recorded on the span", async () => {

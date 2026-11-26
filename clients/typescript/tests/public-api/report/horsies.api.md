@@ -2990,7 +2990,7 @@ export interface RunCoveragePartialInfo {
 // @public
 export type RunningTask = {
     readonly kind: "running";
-    readonly taskId: string;
+    readonly taskId: TaskId;
     readonly taskName: string;
     readonly attempt: number;
     readonly span: SpanIds | NoSpanIds;

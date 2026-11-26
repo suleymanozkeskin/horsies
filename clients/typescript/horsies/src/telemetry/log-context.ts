@@ -6,6 +6,7 @@
 // from the span id store, which the attempt-span observer sets around the body call.
 
 import { currentRun } from "../child/run-store.ts";
+import type { TaskId } from "../contract/ids.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { attemptSpanStore } from "./span-id-store.ts";
 
@@ -18,7 +19,7 @@ export type NoSpanIds = { readonly kind: "noSpanIds" };
 /** The task whose body runs in the current async context, in a worker child. `attempt` is from 1. */
 export type RunningTask = {
   readonly kind: "running";
-  readonly taskId: string;
+  readonly taskId: TaskId;
   readonly taskName: string;
   readonly attempt: number;
   readonly span: SpanIds | NoSpanIds;

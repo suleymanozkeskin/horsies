@@ -10,7 +10,7 @@ import { taskRuntimeOf, type TaskRuntime } from "../../../horsies/src/child/runt
 import { StateValues } from "../../../horsies/src/child/state.ts";
 import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
 import { compileContract } from "../../../horsies/src/contract/compile.ts";
-import { taskIdFromCore } from "../../../horsies/src/contract/ids.ts";
+import { type TaskId, taskIdFromCore } from "../../../horsies/src/contract/ids.ts";
 import type { ImplementationParts } from "../../../horsies/src/contract/implementation.ts";
 import type {
   CancelCauseName,
@@ -20,7 +20,7 @@ import type {
 } from "../../../horsies/src/native/child/addon.ts";
 
 /** The task id of the runs of the tests. */
-export const RUN_TASK_ID = "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b";
+export const RUN_TASK_ID: TaskId = taskIdFromCore("0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b", "the child tests");
 
 /** A fake of the addon calls of a run: answers that a test sets, and the calls it made. */
 export class FakeRunNative implements RunNative {
@@ -86,6 +86,10 @@ export class RecordingObservation implements BodyObservation {
   end(end: BodyEnd): void {
     this.calls.push("end");
     this.ends.push(end);
+  }
+
+  cancelled(cause: CancelCauseName): void {
+    this.calls.push(`cancelled ${cause}`);
   }
 }
 
