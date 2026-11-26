@@ -3,11 +3,18 @@
 // `E2ESub*` definitions, and `dynamic_fanout.py`). Every process of an instance lists them, so the worker builds each
 // child from its own app when the child's node is ready.
 //
-// A check case may give an outcome for an `h.taskOutcome` param (#2549). The children here keep such a param
-// `.optional()` and leave it out of their check case: the build of such a child names what it does when the param is
-// absent, and only `check` builds it so.
+// A child param that takes an upstream result is a required `h.taskOutcome(contract)`. Its check cases give the
+// outcome that the upstream node would give, one case per branch of the build, so `check` builds each branch (#2549).
 
-import { defineTask, defineWorkflow, h, type Horsies, type TaskOutcome, type ValueOf } from "../../../../horsies/src/index.ts";
+import {
+  defineTask,
+  defineWorkflow,
+  h,
+  type Horsies,
+  type TaskError,
+  type TaskOutcome,
+  type ValueOf,
+} from "../../../../horsies/src/index.ts";
 import { err, ok, type Result } from "../../../../horsies/src/wire/result.ts";
 import { errorCode } from "../../support/outcome.ts";
 import {
@@ -38,12 +45,20 @@ export const CHILD_NODE = "child";
 export const FANOUT_TENANT_ID = "tenant-1";
 const FANOUT_SHARD_SUFFIXES = ["a", "b", "c"] as const;
 
-/** What a child build saw of an upstream param: its value, its failure, or no param (only `check` gives none). */
+/** What a child build saw of an upstream param: its value, or its failure. */
 export const UpstreamSeen = h.union("kind", [
   h.object({ kind: h.literal("succeeded"), value: h.int() }),
   h.object({ kind: h.literal("failed"), code: h.string() }),
-  h.object({ kind: h.literal("notGiven") }),
 ]);
+
+/** The upstream failure of a check case: a skipped upstream node, as the engine gives it. */
+const CHECK_UPSTREAM_FAILURE: TaskError<never> = {
+  code: { kind: "library", code: "UPSTREAM_SKIPPED" },
+  message: null,
+  data: null,
+  exception: null,
+  subWorkflow: null,
+};
 
 /** A param whose variant the stored form keeps (Python `E2ESubPet`). */
 export const Pet = h.union("kind", [
@@ -164,16 +179,19 @@ export const subNestedFailMiddle = defineWorkflow(
 );
 
 /**
- * Python `E2ESubParamWorkflow`: one node that returns the upstream value. An upstream failure, or no param, builds a
- * node that fails with `E2E_UPSTREAM_FAIL`.
+ * Python `E2ESubParamWorkflow`: one node that returns the upstream value. An upstream failure builds a node that
+ * fails with `E2E_UPSTREAM_FAIL`.
  */
 export const subParam = defineWorkflow(
   {
     name: "e2e_sub_param_workflow",
     definitionKey: "tests.e2e.sub.param.v1",
-    params: { value: h.taskOutcome(produceInt).optional() },
+    params: { value: h.taskOutcome(produceInt) },
     output: h.int(),
-    checkCases: [{}],
+    checkCases: [
+      { value: { kind: "succeeded", value: 1 } },
+      { value: { kind: "failed", error: CHECK_UPSTREAM_FAILURE } },
+    ],
   },
   (w, { value }) => {
     const given = upstreamSeen(value);
@@ -192,9 +210,9 @@ export const subFailedInput = defineWorkflow(
   {
     name: "e2e_sub_failed_input_workflow",
     definitionKey: "tests.e2e.sub.failed.input.v1",
-    params: { value: h.taskOutcome(failWith).optional() },
+    params: { value: h.taskOutcome(failWith) },
     output: UpstreamSeen,
-    checkCases: [{}],
+    checkCases: [{ value: { kind: "failed", error: CHECK_UPSTREAM_FAILURE } }],
   },
   (w, { value }) => ({ output: w.task(subReportInput, { seen: upstreamSeen(value) }, node(CHILD_NODE)) }),
 );
@@ -204,9 +222,9 @@ export const subLabel = defineWorkflow(
   {
     name: "e2e_sub_label_workflow",
     definitionKey: "tests.e2e.sub.label.v1",
-    params: { label: h.string(), value: h.taskOutcome(produceInt).optional() },
+    params: { label: h.string(), value: h.taskOutcome(produceInt) },
     output: h.string(),
-    checkCases: [{ label: "check" }],
+    checkCases: [{ label: "check", value: { kind: "succeeded", value: 1 } }],
   },
   (w, { label, value }) => ({ output: w.task(mark, { value: `${label}=${seenText(upstreamSeen(value))}` }, node(CHILD_NODE)) }),
 );
@@ -275,23 +293,25 @@ export const subExpiring = defineWorkflow(
 
 /**
  * Python `ShardReport`: one count node `shard_<n>` per shard of the upstream list, and the node `total` that reads
- * each of them from its context. An upstream failure builds a node that fails with `E2E_UPSTREAM_FAIL`; no param
- * builds a total of no shards.
+ * each of them from its context. An upstream failure builds a node that fails with `E2E_UPSTREAM_FAIL`.
  */
 export const shardReport = defineWorkflow(
   {
     name: "e2e_fanout_shard_report",
     definitionKey: "tests.e2e.dynamic_fanout.shard_report.v1",
-    params: { shards: h.taskOutcome(listShards).optional() },
+    params: { shards: h.taskOutcome(listShards) },
     output: h.int(),
-    checkCases: [{}],
+    checkCases: [
+      { shards: { kind: "succeeded", value: ["shard-a", "shard-b"] } },
+      { shards: { kind: "failed", error: CHECK_UPSTREAM_FAILURE } },
+    ],
   },
   (w, { shards }) => {
-    if (shards !== undefined && shards.kind === "failed") {
+    if (shards.kind === "failed") {
       return { output: w.task(subIntFail, { errorCode: "E2E_UPSTREAM_FAIL" }, node("total")) };
     }
 
-    const names = shards === undefined ? [] : shards.value;
+    const names = shards.value;
     const counts = names.map((shard, position) => w.task(countShardRows, { shard }, node(`shard_${String(position)}`)));
     const total = w.task(sumShardRows, { shardCount: counts.length }, contextNode("total", counts, { after: counts }));
 
@@ -341,11 +361,7 @@ export const CHILD_NODE_CONTRACTS = [
 ] as const;
 
 /** What a build saw of the upstream param `value`. Pure. */
-function upstreamSeen(value: TaskOutcome<number> | undefined): ValueOf<typeof UpstreamSeen> {
-  if (value === undefined) {
-    return { kind: "notGiven" };
-  }
-
+function upstreamSeen(value: TaskOutcome<number>): ValueOf<typeof UpstreamSeen> {
   switch (value.kind) {
     case "succeeded":
       return { kind: "succeeded", value: value.value };
@@ -371,8 +387,6 @@ function seenText(seen: ValueOf<typeof UpstreamSeen>): string {
       return String(seen.value);
     case "failed":
       return seen.code;
-    case "notGiven":
-      return "not given";
   }
 }
 
