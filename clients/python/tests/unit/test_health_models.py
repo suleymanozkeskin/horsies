@@ -6,10 +6,10 @@ import pytest
 
 
 from horsies.core.models.health import (
-    AllSlotsServing,
+    SlotHealthAllServing,
     ClassBudgets,
     DatabasePing,
-    ProfileNamed,
+    SnapshotProfileNamed,
     WorkerPong,
     WorkerStateSnapshot,
 )
@@ -55,9 +55,9 @@ class TestResultModels:
             cpu_percent=None,
             children_memory_mb=None,
             worker_started_at=now,
-            slot_health=AllSlotsServing(),
+            slot_health=SlotHealthAllServing(),
             class_capacity=ClassBudgets(()),
-            profile=ProfileNamed(name='default'),
+            profile=SnapshotProfileNamed(name='default'),
         )
         assert snap.cluster_wide_cap is None
         assert snap.queues == ['default']

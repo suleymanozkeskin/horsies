@@ -206,7 +206,7 @@ function placedClaimText(segment: TimingSegment, placedAtMs: number): string | n
   switch (segment.end.kind) {
     case 'open':
       return null;
-    case 'ended':
+    case 'closed':
       return placementText(instantMs(segment.started_at), placedAtMs);
     default:
       return assertNever(segment.end, 'segment end');

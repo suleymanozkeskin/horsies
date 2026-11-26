@@ -18,13 +18,13 @@
                 "variants": {
                   "unclaimed": {
                     "fields": {},
-                    "name": "BreakdownUnclaimedGroup"
+                    "name": "BreakdownGroupUnclaimed"
                   },
                   "value": {
                     "fields": {
                       "value": "string"
                     },
-                    "name": "BreakdownValueGroup"
+                    "name": "BreakdownGroupValue"
                   }
                 }
               }
@@ -287,13 +287,13 @@
         "variants": {
           "unclaimed": {
             "fields": {},
-            "name": "BreakdownUnclaimedGroup"
+            "name": "BreakdownGroupUnclaimed"
           },
           "value": {
             "fields": {
               "value": "string"
             },
-            "name": "BreakdownValueGroup"
+            "name": "BreakdownGroupValue"
           }
         }
       }
@@ -483,11 +483,11 @@
                         "count": "integer",
                         "first_claimed_at": "date-time"
                       },
-                      "name": "ClaimsCountedInfo"
+                      "name": "AttemptClaimsCountedInfo"
                     },
                     "not_counted": {
                       "fields": {},
-                      "name": "ClaimsNotCountedInfo"
+                      "name": "AttemptClaimsNotCountedInfo"
                     }
                   }
                 }
@@ -502,11 +502,11 @@
                       "fields": {
                         "finalizing_at": "date-time"
                       },
-                      "name": "FinalizingMarkedInfo"
+                      "name": "AttemptFinalizingMarkedInfo"
                     },
                     "not_marked": {
                       "fields": {},
-                      "name": "FinalizingNotMarkedInfo"
+                      "name": "AttemptFinalizingNotMarkedInfo"
                     }
                   }
                 }
@@ -518,13 +518,13 @@
                   "variants": {
                     "cancel": {
                       "fields": {},
-                      "name": "RecordedByCancelInfo"
+                      "name": "AttemptRecordedByCancelInfo"
                     },
                     "recovery": {
                       "fields": {
                         "last_seen_at": "date-time"
                       },
-                      "name": "RecordedByRecoveryInfo"
+                      "name": "AttemptRecordedByRecoveryInfo"
                     },
                     "worker": {
                       "fields": {
@@ -535,29 +535,29 @@
                             "variants": {
                               "not_observed": {
                                 "fields": {},
-                                "name": "PlacementNotObservedInfo"
+                                "name": "AttemptPlacementNotObservedInfo"
                               },
                               "placed": {
                                 "fields": {
                                   "placed_at": "date-time"
                                 },
-                                "name": "PlacementPlacedInfo"
+                                "name": "AttemptPlacementPlacedInfo"
                               }
                             }
                           }
                         }
                       },
-                      "name": "RecordedByWorkerInfo"
+                      "name": "AttemptRecordedByWorkerInfo"
                     }
                   }
                 }
               }
             },
-            "name": "PhasesCapturedInfo"
+            "name": "AttemptPhasesCapturedInfo"
           },
           "not_captured": {
             "fields": {},
-            "name": "PhasesNotCapturedInfo"
+            "name": "AttemptPhasesNotCapturedInfo"
           }
         }
       }
@@ -607,11 +607,11 @@
                                 "count": "integer",
                                 "first_claimed_at": "date-time"
                               },
-                              "name": "ClaimsCountedInfo"
+                              "name": "AttemptClaimsCountedInfo"
                             },
                             "not_counted": {
                               "fields": {},
-                              "name": "ClaimsNotCountedInfo"
+                              "name": "AttemptClaimsNotCountedInfo"
                             }
                           }
                         }
@@ -626,11 +626,11 @@
                               "fields": {
                                 "finalizing_at": "date-time"
                               },
-                              "name": "FinalizingMarkedInfo"
+                              "name": "AttemptFinalizingMarkedInfo"
                             },
                             "not_marked": {
                               "fields": {},
-                              "name": "FinalizingNotMarkedInfo"
+                              "name": "AttemptFinalizingNotMarkedInfo"
                             }
                           }
                         }
@@ -642,13 +642,13 @@
                           "variants": {
                             "cancel": {
                               "fields": {},
-                              "name": "RecordedByCancelInfo"
+                              "name": "AttemptRecordedByCancelInfo"
                             },
                             "recovery": {
                               "fields": {
                                 "last_seen_at": "date-time"
                               },
-                              "name": "RecordedByRecoveryInfo"
+                              "name": "AttemptRecordedByRecoveryInfo"
                             },
                             "worker": {
                               "fields": {
@@ -659,29 +659,29 @@
                                     "variants": {
                                       "not_observed": {
                                         "fields": {},
-                                        "name": "PlacementNotObservedInfo"
+                                        "name": "AttemptPlacementNotObservedInfo"
                                       },
                                       "placed": {
                                         "fields": {
                                           "placed_at": "date-time"
                                         },
-                                        "name": "PlacementPlacedInfo"
+                                        "name": "AttemptPlacementPlacedInfo"
                                       }
                                     }
                                   }
                                 }
                               },
-                              "name": "RecordedByWorkerInfo"
+                              "name": "AttemptRecordedByWorkerInfo"
                             }
                           }
                         }
                       }
                     },
-                    "name": "PhasesCapturedInfo"
+                    "name": "AttemptPhasesCapturedInfo"
                   },
                   "not_captured": {
                     "fields": {},
-                    "name": "PhasesNotCapturedInfo"
+                    "name": "AttemptPhasesNotCapturedInfo"
                   }
                 }
               }
@@ -1037,7 +1037,7 @@
                   "variants": {
                     "not_terminal": {
                       "fields": {},
-                      "name": "EndpointNotTerminalInfo"
+                      "name": "NodeEndpointNotTerminalInfo"
                     },
                     "terminal": {
                       "fields": {
@@ -1053,7 +1053,7 @@
                           }
                         }
                       },
-                      "name": "EndpointTerminalInfo"
+                      "name": "NodeEndpointTerminalInfo"
                     }
                   }
                 }
@@ -1067,15 +1067,15 @@
                           "name": "SegmentEndInfo",
                           "tag": "kind",
                           "variants": {
-                            "ended": {
+                            "closed": {
                               "fields": {
                                 "at": "date-time"
                               },
-                              "name": "SegmentEndedInfo"
+                              "name": "SegmentEndClosedInfo"
                             },
                             "open": {
                               "fields": {},
-                              "name": "SegmentOpenInfo"
+                              "name": "SegmentEndOpenInfo"
                             }
                           }
                         }
@@ -1087,7 +1087,7 @@
                           "variants": {
                             "advancing": {
                               "fields": {},
-                              "name": "PhaseAdvancingInfo"
+                              "name": "SegmentPhaseAdvancingInfo"
                             },
                             "claimed": {
                               "fields": {
@@ -1100,11 +1100,11 @@
                                         "fields": {
                                           "count": "integer"
                                         },
-                                        "name": "ClaimEarlierInfo"
+                                        "name": "SegmentClaimEarlierInfo"
                                       },
                                       "not_recorded": {
                                         "fields": {},
-                                        "name": "ClaimNotRecordedInfo"
+                                        "name": "SegmentClaimNotRecordedInfo"
                                       },
                                       "recorded": {
                                         "fields": {
@@ -1115,49 +1115,49 @@
                                               "variants": {
                                                 "not_observed": {
                                                   "fields": {},
-                                                  "name": "PlacementNotObservedInfo"
+                                                  "name": "AttemptPlacementNotObservedInfo"
                                                 },
                                                 "placed": {
                                                   "fields": {
                                                     "placed_at": "date-time"
                                                   },
-                                                  "name": "PlacementPlacedInfo"
+                                                  "name": "AttemptPlacementPlacedInfo"
                                                 }
                                               }
                                             }
                                           }
                                         },
-                                        "name": "ClaimRecordedInfo"
+                                        "name": "SegmentClaimRecordedInfo"
                                       }
                                     }
                                   }
                                 }
                               },
-                              "name": "PhaseClaimedInfo"
+                              "name": "SegmentPhaseClaimedInfo"
                             },
                             "enqueued": {
                               "fields": {},
-                              "name": "PhaseEnqueuedInfo"
+                              "name": "SegmentPhaseEnqueuedInfo"
                             },
                             "finalizing": {
                               "fields": {},
-                              "name": "PhaseFinalizingInfo"
+                              "name": "SegmentPhaseFinalizingInfo"
                             },
                             "pending": {
                               "fields": {},
-                              "name": "PhasePendingInfo"
+                              "name": "SegmentPhasePendingInfo"
                             },
                             "ready": {
                               "fields": {},
-                              "name": "PhaseReadyInfo"
+                              "name": "SegmentPhaseReadyInfo"
                             },
                             "retry_wait": {
                               "fields": {},
-                              "name": "PhaseRetryWaitInfo"
+                              "name": "SegmentPhaseRetryWaitInfo"
                             },
                             "running": {
                               "fields": {},
-                              "name": "PhaseRunningInfo"
+                              "name": "SegmentPhaseRunningInfo"
                             },
                             "unknown": {
                               "fields": {
@@ -1173,7 +1173,7 @@
                                   }
                                 }
                               },
-                              "name": "PhaseUnknownInfo"
+                              "name": "SegmentPhaseUnknownInfo"
                             }
                           }
                         }
@@ -1189,18 +1189,18 @@
                                 "generation": "integer",
                                 "task_id": "uuid"
                               },
-                              "name": "SourceAttemptInfo"
+                              "name": "SegmentSourceAttemptInfo"
                             },
                             "node": {
                               "fields": {},
-                              "name": "SourceNodeInfo"
+                              "name": "SegmentSourceNodeInfo"
                             },
                             "task": {
                               "fields": {
                                 "generation": "integer",
                                 "task_id": "uuid"
                               },
-                              "name": "SourceTaskInfo"
+                              "name": "SegmentSourceTaskInfo"
                             }
                           }
                         }
@@ -1280,7 +1280,7 @@
                         },
                         "later_at": "date-time"
                       },
-                      "name": "ConflictClockOrderInfo"
+                      "name": "TimingConflictClockOrderInfo"
                     },
                     "missing_record": {
                       "fields": {
@@ -1299,7 +1299,7 @@
                           }
                         }
                       },
-                      "name": "ConflictMissingRecordInfo"
+                      "name": "TimingConflictMissingRecordInfo"
                     },
                     "unexpected_event": {
                       "fields": {
@@ -1317,7 +1317,7 @@
                         },
                         "event_id": "integer"
                       },
-                      "name": "ConflictUnexpectedEventInfo"
+                      "name": "TimingConflictUnexpectedEventInfo"
                     }
                   }
                 }
@@ -1334,7 +1334,7 @@
                   "variants": {
                     "not_terminal": {
                       "fields": {},
-                      "name": "EndpointNotTerminalInfo"
+                      "name": "NodeEndpointNotTerminalInfo"
                     },
                     "terminal": {
                       "fields": {
@@ -1350,7 +1350,7 @@
                           }
                         }
                       },
-                      "name": "EndpointTerminalInfo"
+                      "name": "NodeEndpointTerminalInfo"
                     }
                   }
                 }
@@ -1377,15 +1377,15 @@
                           "name": "SegmentEndInfo",
                           "tag": "kind",
                           "variants": {
-                            "ended": {
+                            "closed": {
                               "fields": {
                                 "at": "date-time"
                               },
-                              "name": "SegmentEndedInfo"
+                              "name": "SegmentEndClosedInfo"
                             },
                             "open": {
                               "fields": {},
-                              "name": "SegmentOpenInfo"
+                              "name": "SegmentEndOpenInfo"
                             }
                           }
                         }
@@ -1397,7 +1397,7 @@
                           "variants": {
                             "advancing": {
                               "fields": {},
-                              "name": "PhaseAdvancingInfo"
+                              "name": "SegmentPhaseAdvancingInfo"
                             },
                             "claimed": {
                               "fields": {
@@ -1410,11 +1410,11 @@
                                         "fields": {
                                           "count": "integer"
                                         },
-                                        "name": "ClaimEarlierInfo"
+                                        "name": "SegmentClaimEarlierInfo"
                                       },
                                       "not_recorded": {
                                         "fields": {},
-                                        "name": "ClaimNotRecordedInfo"
+                                        "name": "SegmentClaimNotRecordedInfo"
                                       },
                                       "recorded": {
                                         "fields": {
@@ -1425,49 +1425,49 @@
                                               "variants": {
                                                 "not_observed": {
                                                   "fields": {},
-                                                  "name": "PlacementNotObservedInfo"
+                                                  "name": "AttemptPlacementNotObservedInfo"
                                                 },
                                                 "placed": {
                                                   "fields": {
                                                     "placed_at": "date-time"
                                                   },
-                                                  "name": "PlacementPlacedInfo"
+                                                  "name": "AttemptPlacementPlacedInfo"
                                                 }
                                               }
                                             }
                                           }
                                         },
-                                        "name": "ClaimRecordedInfo"
+                                        "name": "SegmentClaimRecordedInfo"
                                       }
                                     }
                                   }
                                 }
                               },
-                              "name": "PhaseClaimedInfo"
+                              "name": "SegmentPhaseClaimedInfo"
                             },
                             "enqueued": {
                               "fields": {},
-                              "name": "PhaseEnqueuedInfo"
+                              "name": "SegmentPhaseEnqueuedInfo"
                             },
                             "finalizing": {
                               "fields": {},
-                              "name": "PhaseFinalizingInfo"
+                              "name": "SegmentPhaseFinalizingInfo"
                             },
                             "pending": {
                               "fields": {},
-                              "name": "PhasePendingInfo"
+                              "name": "SegmentPhasePendingInfo"
                             },
                             "ready": {
                               "fields": {},
-                              "name": "PhaseReadyInfo"
+                              "name": "SegmentPhaseReadyInfo"
                             },
                             "retry_wait": {
                               "fields": {},
-                              "name": "PhaseRetryWaitInfo"
+                              "name": "SegmentPhaseRetryWaitInfo"
                             },
                             "running": {
                               "fields": {},
-                              "name": "PhaseRunningInfo"
+                              "name": "SegmentPhaseRunningInfo"
                             },
                             "unknown": {
                               "fields": {
@@ -1483,7 +1483,7 @@
                                   }
                                 }
                               },
-                              "name": "PhaseUnknownInfo"
+                              "name": "SegmentPhaseUnknownInfo"
                             }
                           }
                         }
@@ -1499,18 +1499,18 @@
                                 "generation": "integer",
                                 "task_id": "uuid"
                               },
-                              "name": "SourceAttemptInfo"
+                              "name": "SegmentSourceAttemptInfo"
                             },
                             "node": {
                               "fields": {},
-                              "name": "SourceNodeInfo"
+                              "name": "SegmentSourceNodeInfo"
                             },
                             "task": {
                               "fields": {
                                 "generation": "integer",
                                 "task_id": "uuid"
                               },
-                              "name": "SourceTaskInfo"
+                              "name": "SegmentSourceTaskInfo"
                             }
                           }
                         }
@@ -1602,7 +1602,7 @@
                           "variants": {
                             "not_terminal": {
                               "fields": {},
-                              "name": "EndpointNotTerminalInfo"
+                              "name": "NodeEndpointNotTerminalInfo"
                             },
                             "terminal": {
                               "fields": {
@@ -1618,7 +1618,7 @@
                                   }
                                 }
                               },
-                              "name": "EndpointTerminalInfo"
+                              "name": "NodeEndpointTerminalInfo"
                             }
                           }
                         }
@@ -1632,15 +1632,15 @@
                                   "name": "SegmentEndInfo",
                                   "tag": "kind",
                                   "variants": {
-                                    "ended": {
+                                    "closed": {
                                       "fields": {
                                         "at": "date-time"
                                       },
-                                      "name": "SegmentEndedInfo"
+                                      "name": "SegmentEndClosedInfo"
                                     },
                                     "open": {
                                       "fields": {},
-                                      "name": "SegmentOpenInfo"
+                                      "name": "SegmentEndOpenInfo"
                                     }
                                   }
                                 }
@@ -1652,7 +1652,7 @@
                                   "variants": {
                                     "advancing": {
                                       "fields": {},
-                                      "name": "PhaseAdvancingInfo"
+                                      "name": "SegmentPhaseAdvancingInfo"
                                     },
                                     "claimed": {
                                       "fields": {
@@ -1665,11 +1665,11 @@
                                                 "fields": {
                                                   "count": "integer"
                                                 },
-                                                "name": "ClaimEarlierInfo"
+                                                "name": "SegmentClaimEarlierInfo"
                                               },
                                               "not_recorded": {
                                                 "fields": {},
-                                                "name": "ClaimNotRecordedInfo"
+                                                "name": "SegmentClaimNotRecordedInfo"
                                               },
                                               "recorded": {
                                                 "fields": {
@@ -1680,49 +1680,49 @@
                                                       "variants": {
                                                         "not_observed": {
                                                           "fields": {},
-                                                          "name": "PlacementNotObservedInfo"
+                                                          "name": "AttemptPlacementNotObservedInfo"
                                                         },
                                                         "placed": {
                                                           "fields": {
                                                             "placed_at": "date-time"
                                                           },
-                                                          "name": "PlacementPlacedInfo"
+                                                          "name": "AttemptPlacementPlacedInfo"
                                                         }
                                                       }
                                                     }
                                                   }
                                                 },
-                                                "name": "ClaimRecordedInfo"
+                                                "name": "SegmentClaimRecordedInfo"
                                               }
                                             }
                                           }
                                         }
                                       },
-                                      "name": "PhaseClaimedInfo"
+                                      "name": "SegmentPhaseClaimedInfo"
                                     },
                                     "enqueued": {
                                       "fields": {},
-                                      "name": "PhaseEnqueuedInfo"
+                                      "name": "SegmentPhaseEnqueuedInfo"
                                     },
                                     "finalizing": {
                                       "fields": {},
-                                      "name": "PhaseFinalizingInfo"
+                                      "name": "SegmentPhaseFinalizingInfo"
                                     },
                                     "pending": {
                                       "fields": {},
-                                      "name": "PhasePendingInfo"
+                                      "name": "SegmentPhasePendingInfo"
                                     },
                                     "ready": {
                                       "fields": {},
-                                      "name": "PhaseReadyInfo"
+                                      "name": "SegmentPhaseReadyInfo"
                                     },
                                     "retry_wait": {
                                       "fields": {},
-                                      "name": "PhaseRetryWaitInfo"
+                                      "name": "SegmentPhaseRetryWaitInfo"
                                     },
                                     "running": {
                                       "fields": {},
-                                      "name": "PhaseRunningInfo"
+                                      "name": "SegmentPhaseRunningInfo"
                                     },
                                     "unknown": {
                                       "fields": {
@@ -1738,7 +1738,7 @@
                                           }
                                         }
                                       },
-                                      "name": "PhaseUnknownInfo"
+                                      "name": "SegmentPhaseUnknownInfo"
                                     }
                                   }
                                 }
@@ -1754,18 +1754,18 @@
                                         "generation": "integer",
                                         "task_id": "uuid"
                                       },
-                                      "name": "SourceAttemptInfo"
+                                      "name": "SegmentSourceAttemptInfo"
                                     },
                                     "node": {
                                       "fields": {},
-                                      "name": "SourceNodeInfo"
+                                      "name": "SegmentSourceNodeInfo"
                                     },
                                     "task": {
                                       "fields": {
                                         "generation": "integer",
                                         "task_id": "uuid"
                                       },
-                                      "name": "SourceTaskInfo"
+                                      "name": "SegmentSourceTaskInfo"
                                     }
                                   }
                                 }
@@ -1845,7 +1845,7 @@
                                 },
                                 "later_at": "date-time"
                               },
-                              "name": "ConflictClockOrderInfo"
+                              "name": "TimingConflictClockOrderInfo"
                             },
                             "missing_record": {
                               "fields": {
@@ -1864,7 +1864,7 @@
                                   }
                                 }
                               },
-                              "name": "ConflictMissingRecordInfo"
+                              "name": "TimingConflictMissingRecordInfo"
                             },
                             "unexpected_event": {
                               "fields": {
@@ -1882,7 +1882,7 @@
                                 },
                                 "event_id": "integer"
                               },
-                              "name": "ConflictUnexpectedEventInfo"
+                              "name": "TimingConflictUnexpectedEventInfo"
                             }
                           }
                         }
@@ -1899,7 +1899,7 @@
                           "variants": {
                             "not_terminal": {
                               "fields": {},
-                              "name": "EndpointNotTerminalInfo"
+                              "name": "NodeEndpointNotTerminalInfo"
                             },
                             "terminal": {
                               "fields": {
@@ -1915,7 +1915,7 @@
                                   }
                                 }
                               },
-                              "name": "EndpointTerminalInfo"
+                              "name": "NodeEndpointTerminalInfo"
                             }
                           }
                         }
@@ -1942,15 +1942,15 @@
                                   "name": "SegmentEndInfo",
                                   "tag": "kind",
                                   "variants": {
-                                    "ended": {
+                                    "closed": {
                                       "fields": {
                                         "at": "date-time"
                                       },
-                                      "name": "SegmentEndedInfo"
+                                      "name": "SegmentEndClosedInfo"
                                     },
                                     "open": {
                                       "fields": {},
-                                      "name": "SegmentOpenInfo"
+                                      "name": "SegmentEndOpenInfo"
                                     }
                                   }
                                 }
@@ -1962,7 +1962,7 @@
                                   "variants": {
                                     "advancing": {
                                       "fields": {},
-                                      "name": "PhaseAdvancingInfo"
+                                      "name": "SegmentPhaseAdvancingInfo"
                                     },
                                     "claimed": {
                                       "fields": {
@@ -1975,11 +1975,11 @@
                                                 "fields": {
                                                   "count": "integer"
                                                 },
-                                                "name": "ClaimEarlierInfo"
+                                                "name": "SegmentClaimEarlierInfo"
                                               },
                                               "not_recorded": {
                                                 "fields": {},
-                                                "name": "ClaimNotRecordedInfo"
+                                                "name": "SegmentClaimNotRecordedInfo"
                                               },
                                               "recorded": {
                                                 "fields": {
@@ -1990,49 +1990,49 @@
                                                       "variants": {
                                                         "not_observed": {
                                                           "fields": {},
-                                                          "name": "PlacementNotObservedInfo"
+                                                          "name": "AttemptPlacementNotObservedInfo"
                                                         },
                                                         "placed": {
                                                           "fields": {
                                                             "placed_at": "date-time"
                                                           },
-                                                          "name": "PlacementPlacedInfo"
+                                                          "name": "AttemptPlacementPlacedInfo"
                                                         }
                                                       }
                                                     }
                                                   }
                                                 },
-                                                "name": "ClaimRecordedInfo"
+                                                "name": "SegmentClaimRecordedInfo"
                                               }
                                             }
                                           }
                                         }
                                       },
-                                      "name": "PhaseClaimedInfo"
+                                      "name": "SegmentPhaseClaimedInfo"
                                     },
                                     "enqueued": {
                                       "fields": {},
-                                      "name": "PhaseEnqueuedInfo"
+                                      "name": "SegmentPhaseEnqueuedInfo"
                                     },
                                     "finalizing": {
                                       "fields": {},
-                                      "name": "PhaseFinalizingInfo"
+                                      "name": "SegmentPhaseFinalizingInfo"
                                     },
                                     "pending": {
                                       "fields": {},
-                                      "name": "PhasePendingInfo"
+                                      "name": "SegmentPhasePendingInfo"
                                     },
                                     "ready": {
                                       "fields": {},
-                                      "name": "PhaseReadyInfo"
+                                      "name": "SegmentPhaseReadyInfo"
                                     },
                                     "retry_wait": {
                                       "fields": {},
-                                      "name": "PhaseRetryWaitInfo"
+                                      "name": "SegmentPhaseRetryWaitInfo"
                                     },
                                     "running": {
                                       "fields": {},
-                                      "name": "PhaseRunningInfo"
+                                      "name": "SegmentPhaseRunningInfo"
                                     },
                                     "unknown": {
                                       "fields": {
@@ -2048,7 +2048,7 @@
                                           }
                                         }
                                       },
-                                      "name": "PhaseUnknownInfo"
+                                      "name": "SegmentPhaseUnknownInfo"
                                     }
                                   }
                                 }
@@ -2064,18 +2064,18 @@
                                         "generation": "integer",
                                         "task_id": "uuid"
                                       },
-                                      "name": "SourceAttemptInfo"
+                                      "name": "SegmentSourceAttemptInfo"
                                     },
                                     "node": {
                                       "fields": {},
-                                      "name": "SourceNodeInfo"
+                                      "name": "SegmentSourceNodeInfo"
                                     },
                                     "task": {
                                       "fields": {
                                         "generation": "integer",
                                         "task_id": "uuid"
                                       },
-                                      "name": "SourceTaskInfo"
+                                      "name": "SegmentSourceTaskInfo"
                                     }
                                   }
                                 }
@@ -2231,7 +2231,7 @@
                                               },
                                               "later_at": "date-time"
                                             },
-                                            "name": "ConflictClockOrderInfo"
+                                            "name": "TimingConflictClockOrderInfo"
                                           },
                                           "missing_record": {
                                             "fields": {
@@ -2250,7 +2250,7 @@
                                                 }
                                               }
                                             },
-                                            "name": "ConflictMissingRecordInfo"
+                                            "name": "TimingConflictMissingRecordInfo"
                                           },
                                           "unexpected_event": {
                                             "fields": {
@@ -2268,7 +2268,7 @@
                                               },
                                               "event_id": "integer"
                                             },
-                                            "name": "ConflictUnexpectedEventInfo"
+                                            "name": "TimingConflictUnexpectedEventInfo"
                                           }
                                         }
                                       }
@@ -2316,19 +2316,19 @@
                           "variants": {
                             "open": {
                               "fields": {},
-                              "name": "PauseOpenInfo"
+                              "name": "PauseEndOpenInfo"
                             },
                             "resumed": {
                               "fields": {
                                 "at": "date-time"
                               },
-                              "name": "PauseResumedInfo"
+                              "name": "PauseEndResumedInfo"
                             },
                             "run_ended": {
                               "fields": {
                                 "at": "date-time"
                               },
-                              "name": "PauseRunEndedInfo"
+                              "name": "PauseEndRunEndedInfo"
                             }
                           }
                         }
@@ -2421,11 +2421,11 @@
                                 "count": "integer",
                                 "first_claimed_at": "date-time"
                               },
-                              "name": "ClaimsCountedInfo"
+                              "name": "AttemptClaimsCountedInfo"
                             },
                             "not_counted": {
                               "fields": {},
-                              "name": "ClaimsNotCountedInfo"
+                              "name": "AttemptClaimsNotCountedInfo"
                             }
                           }
                         }
@@ -2440,11 +2440,11 @@
                               "fields": {
                                 "finalizing_at": "date-time"
                               },
-                              "name": "FinalizingMarkedInfo"
+                              "name": "AttemptFinalizingMarkedInfo"
                             },
                             "not_marked": {
                               "fields": {},
-                              "name": "FinalizingNotMarkedInfo"
+                              "name": "AttemptFinalizingNotMarkedInfo"
                             }
                           }
                         }
@@ -2456,13 +2456,13 @@
                           "variants": {
                             "cancel": {
                               "fields": {},
-                              "name": "RecordedByCancelInfo"
+                              "name": "AttemptRecordedByCancelInfo"
                             },
                             "recovery": {
                               "fields": {
                                 "last_seen_at": "date-time"
                               },
-                              "name": "RecordedByRecoveryInfo"
+                              "name": "AttemptRecordedByRecoveryInfo"
                             },
                             "worker": {
                               "fields": {
@@ -2473,29 +2473,29 @@
                                     "variants": {
                                       "not_observed": {
                                         "fields": {},
-                                        "name": "PlacementNotObservedInfo"
+                                        "name": "AttemptPlacementNotObservedInfo"
                                       },
                                       "placed": {
                                         "fields": {
                                           "placed_at": "date-time"
                                         },
-                                        "name": "PlacementPlacedInfo"
+                                        "name": "AttemptPlacementPlacedInfo"
                                       }
                                     }
                                   }
                                 }
                               },
-                              "name": "RecordedByWorkerInfo"
+                              "name": "AttemptRecordedByWorkerInfo"
                             }
                           }
                         }
                       }
                     },
-                    "name": "PhasesCapturedInfo"
+                    "name": "AttemptPhasesCapturedInfo"
                   },
                   "not_captured": {
                     "fields": {},
-                    "name": "PhasesNotCapturedInfo"
+                    "name": "AttemptPhasesNotCapturedInfo"
                   }
                 }
               }

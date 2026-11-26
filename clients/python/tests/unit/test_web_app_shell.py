@@ -35,6 +35,7 @@ from horsies.web.schema import EXPECTED_SCHEMA_VERSION
 from horsies.web import (
     INTENT_HEADER,
     INTENT_VALUE,
+    Actions,
     AllowAll,
     MonitoringUIConfig,
     TraceLinkTemplate,
@@ -73,7 +74,7 @@ class TestMeta:
 
     async def test_reports_version_and_capabilities(self) -> None:
         """With no reachable schema the app reports itself read-only."""
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         async with client_for(app) as client:
             response = await client.get('/api/meta')
@@ -87,7 +88,7 @@ class TestMeta:
         assert body['expected_schema_version'] == EXPECTED_SCHEMA_VERSION
         assert body['schema_compatible'] is False
         assert body['schema_state'] == 'UNKNOWN'
-        assert body['actions_enabled'] is False
+        assert body['actions'] == 'DISABLED'
         assert body['actions_disabled_reason'] == 'SCHEMA_UNKNOWN'
         assert body['trace_link_template'] is None
 
@@ -95,8 +96,8 @@ class TestMeta:
         template = 'https://grafana.example.com/explore?traceId={trace_id}'
         app = create_monitoring_app(
             make_horsies_app(),
-            auth_policy=AllowAll(),
-            config=MonitoringUIConfig(trace_link=TraceLinkTemplate(template=template)),
+            authorization_policy=AllowAll(),
+            ui=MonitoringUIConfig(trace_link=TraceLinkTemplate(template=template)),
         )
 
         async with client_for(app) as client:
@@ -107,20 +108,20 @@ class TestMeta:
 
     async def test_view_only_deployment_reports_no_action_capability(self) -> None:
         app = create_monitoring_app(
-            make_horsies_app(), auth_policy=ViewOnly(), actions_enabled=False
+            make_horsies_app(), authorization_policy=ViewOnly(), actions=Actions.DISABLED
         )
 
         async with client_for(app) as client:
             body = (await client.get('/api/meta')).json()
 
-        assert body['actions_enabled'] is False
+        assert body['actions'] == 'DISABLED'
         assert body['can_act'] is False
 
     async def test_meta_itself_requires_authorization(self) -> None:
         """The SPA's not-authorized screen is driven by this 403."""
         app = create_monitoring_app(
             make_horsies_app(),
-            auth_policy=TrustedHeader('X-Forwarded-User', allow_actions=False),
+            authorization_policy=TrustedHeader('X-Forwarded-User', actions=Actions.DISABLED),
         )
 
         async with client_for(app) as client:
@@ -158,7 +159,7 @@ class TestAuthorizationGate:
     async def test_unauthorized_reads_are_refused(self, path: str) -> None:
         app = create_monitoring_app(
             make_horsies_app(),
-            auth_policy=TrustedHeader('X-Forwarded-User', allow_actions=False),
+            authorization_policy=TrustedHeader('X-Forwarded-User', actions=Actions.DISABLED),
         )
 
         async with client_for(app) as client:
@@ -176,7 +177,7 @@ class TestAuthorizationGate:
         ],
     )
     async def test_actions_refuse_a_view_only_policy(self, path: str) -> None:
-        app = create_monitoring_app(make_horsies_app(), auth_policy=ViewOnly())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=ViewOnly())
 
         async with client_for(app) as client:
             response = await client.post(path, json={}, headers=ACT_HEADERS)
@@ -194,7 +195,7 @@ class TestAuthorizationGate:
     )
     async def test_actions_refuse_a_missing_intent_header(self, path: str) -> None:
         """A cross-site form post cannot set a custom header."""
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         async with client_for(app) as client:
             response = await client.post(path, json={})
@@ -203,7 +204,7 @@ class TestAuthorizationGate:
 
     async def test_actions_refuse_when_disabled_server_side(self) -> None:
         app = create_monitoring_app(
-            make_horsies_app(), auth_policy=AllowAll(), actions_enabled=False
+            make_horsies_app(), authorization_policy=AllowAll(), actions=Actions.DISABLED
         )
 
         async with client_for(app) as client:
@@ -217,7 +218,7 @@ class TestAuthorizationGate:
         """An unauthorized viewer gets the shell, then meta's 403 inside it."""
         app = create_monitoring_app(
             make_horsies_app(),
-            auth_policy=TrustedHeader('X-Forwarded-User', allow_actions=False),
+            authorization_policy=TrustedHeader('X-Forwarded-User', actions=Actions.DISABLED),
         )
 
         async with client_for(app) as client:
@@ -259,7 +260,7 @@ class TestUnreachableDatabase:
     async def test_read_routes_report_service_unavailable(
         self, path: str, surface: str
     ) -> None:
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         async with client_for(app) as client:
             response = await client.get(path)
@@ -283,7 +284,7 @@ class TestRequestValidation:
         ],
     )
     async def test_unknown_allowlist_values_are_bad_requests(self, path: str) -> None:
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         async with client_for(app) as client:
             response = await client.get(path)
@@ -304,7 +305,7 @@ class TestRequestValidation:
         ],
     )
     async def test_out_of_range_values_are_unprocessable(self, path: str) -> None:
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         async with client_for(app) as client:
             response = await client.get(path)
@@ -318,7 +319,7 @@ class TestRequestValidation:
     ) -> None:
         """An index that names no node is 404 with no read: with an
         unreachable database a read would answer 503."""
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         async with client_for(app) as client:
             response = await client.get(
@@ -329,7 +330,7 @@ class TestRequestValidation:
         assert response.json() == {'detail': 'Workflow task not found.'}
 
     async def test_task_page_reach_past_five_hundred_is_rejected(self) -> None:
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         async with client_for(app) as client:
             response = await client.get('/api/tasks?offset=500&limit=1')
@@ -350,7 +351,7 @@ class TestRequestValidation:
     async def test_http_page_bounds_keep_their_answer(
         self, path: str, code: int,
     ) -> None:
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         async with client_for(app) as client:
             response = await client.get(path)
@@ -364,7 +365,7 @@ class TestStaticServing:
     pytestmark = [asyncio_tests]
 
     async def test_index_is_served_with_the_runtime_config(self) -> None:
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         async with client_for(app) as client:
             response = await client.get('/')
@@ -375,7 +376,7 @@ class TestStaticServing:
 
     async def test_a_base_href_is_injected(self) -> None:
         """Relative asset URLs need a directory to resolve against."""
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         async with client_for(app) as client:
             body = (await client.get('/')).text
@@ -386,7 +387,7 @@ class TestStaticServing:
         self,
     ) -> None:
         """The case the tag exists for: assets must not resolve against /workflows."""
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         async with client_for(app) as client:
             body = (await client.get('/workflows/some-run-id')).text
@@ -397,8 +398,8 @@ class TestStaticServing:
         """A base tag only governs URLs that appear after it."""
         app = create_monitoring_app(
             make_horsies_app(),
-            auth_policy=AllowAll(),
-            config=MonitoringUIConfig(custom_css_url='brand/override.css'),
+            authorization_policy=AllowAll(),
+            ui=MonitoringUIConfig(custom_css_url='brand/override.css'),
         )
 
         async with client_for(app) as client:
@@ -407,7 +408,7 @@ class TestStaticServing:
         assert body.index('<base href=') < body.index('override.css')
 
     async def test_config_is_injected_inside_head(self) -> None:
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         async with client_for(app) as client:
             body = (await client.get('/')).text
@@ -416,7 +417,7 @@ class TestStaticServing:
 
 
     async def test_client_side_routes_fall_back_to_the_page(self) -> None:
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         async with client_for(app) as client:
             response = await client.get('/workflows?run=abc')
@@ -425,7 +426,7 @@ class TestStaticServing:
         assert 'window.__HORSIES_UI__' in response.text
 
     async def test_unknown_api_paths_are_not_swallowed_by_the_spa(self) -> None:
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         async with client_for(app) as client:
             response = await client.get('/api/does-not-exist')
@@ -434,7 +435,7 @@ class TestStaticServing:
         assert 'window.__HORSIES_UI__' not in response.text
 
     async def test_paths_cannot_escape_the_static_tree(self) -> None:
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         async with client_for(app) as client:
             response = await client.get('/../../pyproject.toml')
@@ -447,8 +448,8 @@ class TestStaticServing:
         """Adopter CSS lands last so it overrides any shipped token."""
         app = create_monitoring_app(
             make_horsies_app(),
-            auth_policy=AllowAll(),
-            config=MonitoringUIConfig(custom_css_url='/brand/override.css'),
+            authorization_policy=AllowAll(),
+            ui=MonitoringUIConfig(custom_css_url='/brand/override.css'),
         )
 
         async with client_for(app) as client:
@@ -468,7 +469,7 @@ class TestMountedAnywhere:
         host = FastAPI()
         host.mount(
             '/monitoring',
-            create_monitoring_app(make_horsies_app(), auth_policy=AllowAll()),
+            create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll()),
         )
 
         async with client_for(host) as client:
@@ -485,7 +486,7 @@ class TestMountedAnywhere:
         host = FastAPI()
         host.mount(
             '/monitoring',
-            create_monitoring_app(make_horsies_app(), auth_policy=AllowAll()),
+            create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll()),
         )
 
         async with client_for(host) as client:
@@ -512,7 +513,7 @@ class TestSchemaGate:
         self, path: str
     ) -> None:
         """An unreachable database is reported as unknown, never as absent."""
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         async with client_for(app) as client:
             response = await client.post(path, json={}, headers=ACT_HEADERS)
@@ -525,7 +526,7 @@ class TestSchemaGate:
 
     async def test_reads_are_still_attempted(self) -> None:
         """Only writes are gated; reads fail on their own terms."""
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         async with client_for(app) as client:
             response = await client.get('/api/tasks')
@@ -534,7 +535,7 @@ class TestSchemaGate:
 
     async def test_authorization_is_checked_before_the_schema(self) -> None:
         """An unauthorized caller learns nothing about the database."""
-        app = create_monitoring_app(make_horsies_app(), auth_policy=ViewOnly())
+        app = create_monitoring_app(make_horsies_app(), authorization_policy=ViewOnly())
 
         async with client_for(app) as client:
             response = await client.post(

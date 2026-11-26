@@ -31,7 +31,7 @@ impl<'a> MonitoringRequest<'a> {
 
 /// The verdicts that the guards of the router ask for one request.
 #[async_trait]
-pub(crate) trait MonitoringAuthPolicy: Send + Sync + 'static {
+pub(crate) trait MonitoringAuthorizationPolicy: Send + Sync + 'static {
     async fn can_view(&self, request: MonitoringRequest<'_>) -> bool;
     async fn can_act(&self, request: MonitoringRequest<'_>) -> bool;
 }

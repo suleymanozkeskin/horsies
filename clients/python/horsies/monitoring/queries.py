@@ -344,7 +344,7 @@ async def task_breakdown(
     independent of ``limit``. Groups arrive count-descending and are capped
     to ``limit``, while ``group_count`` reports the true number of distinct
     groups. For ``worker``, the tasks that no worker claimed are their own
-    group (``BreakdownUnclaimedGroup``), apart from a worker named
+    group (``BreakdownGroupUnclaimed``), apart from a worker named
     ``'unknown'``.
 
     One statement (``horsies_monitoring_task_breakdown``), so both sides

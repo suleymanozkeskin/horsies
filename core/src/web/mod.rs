@@ -26,7 +26,7 @@ pub use events::{
     DEBOUNCE, DEGRADED_FRAME, HEARTBEAT, HEARTBEAT_FRAME, MAX_IDS_PER_EVENT, TOPIC_DEGRADED,
 };
 pub use handler::{
-    route_access, AccessGrant, AccessNeed, MonitoringHandler, MonitoringHandlerConfig,
+    route_access, AccessGrant, AccessNeed, Actions, MonitoringHandler, MonitoringHandlerConfig,
     RequestParts, ResponseForm, ResponseParts, RouteAccess, Verdict, MAX_REQUEST_BODY_BYTES,
     MAX_RESPONSE_BYTES,
 };

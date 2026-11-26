@@ -25,7 +25,7 @@ from sqlalchemy import text
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.boot_failure import ResourceShortage, ShortageErrno
-from horsies.core.models.health import DownSlot, SlotsDown, WorkerStateSnapshot
+from horsies.core.models.health import DownSlot, SlotHealthSlotsDown, WorkerStateSnapshot
 from horsies.core.task_decorator import TaskFunction, TaskHandle
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
@@ -198,7 +198,7 @@ async def _degraded_snapshot(
         assert is_ok(listed), listed
         for snapshot in listed.ok_value:
             match snapshot.slot_health:
-                case SlotsDown() if snapshot.worker_started_at >= started_after:
+                case SlotHealthSlotsDown() if snapshot.worker_started_at >= started_after:
                     return snapshot
                 case _:
                     continue
@@ -230,7 +230,7 @@ async def test_a_slot_that_cannot_create_its_task_loop_leaves_the_worker_degrade
         assert worker.poll() is None
 
     match snapshot.slot_health:
-        case SlotsDown(
+        case SlotHealthSlotsDown(
             slots=(
                 DownSlot(slot=1, cause=ResourceShortage(ShortageErrno.EMFILE)) as down,
             ),

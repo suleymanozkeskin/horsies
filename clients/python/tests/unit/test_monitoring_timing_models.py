@@ -19,27 +19,27 @@ from pydantic import TypeAdapter
 
 from horsies.monitoring import (
     AttemptPhasesInfo,
-    ClaimEarlierInfo,
-    ClaimNotRecordedInfo,
-    ClaimRecordedInfo,
-    ConflictClockOrderInfo,
+    SegmentClaimEarlierInfo,
+    SegmentClaimNotRecordedInfo,
+    SegmentClaimRecordedInfo,
+    TimingConflictClockOrderInfo,
     NodeTimingExactInfo,
     NodeTimingInconsistentInfo,
     NodeTimingInfo,
     NodeTimingPartialInfo,
     NodeTimingUnavailableInfo,
-    PauseOpenInfo,
-    PhaseClaimedInfo,
-    PhasesCapturedInfo,
-    PhasesNotCapturedInfo,
-    RecordedByCancelInfo,
-    RecordedByRecoveryInfo,
+    PauseEndOpenInfo,
+    SegmentPhaseClaimedInfo,
+    AttemptPhasesCapturedInfo,
+    AttemptPhasesNotCapturedInfo,
+    AttemptRecordedByCancelInfo,
+    AttemptRecordedByRecoveryInfo,
     RunCoverageInconsistentInfo,
     RunTimingComposedInfo,
     RunTimingInfo,
     RunTimingUnavailableInfo,
-    SegmentOpenInfo,
-    SourceTaskInfo,
+    SegmentEndOpenInfo,
+    SegmentSourceTaskInfo,
     TimingBoundary,
     UnknownReason,
 )
@@ -73,11 +73,11 @@ class TestAttemptPhases:
 
         match models:
             case [
-                PhasesNotCapturedInfo(),
-                PhasesCapturedInfo(),
-                PhasesCapturedInfo(recorded_by=RecordedByRecoveryInfo()),
-                PhasesCapturedInfo(),
-                PhasesCapturedInfo(recorded_by=RecordedByCancelInfo()),
+                AttemptPhasesNotCapturedInfo(),
+                AttemptPhasesCapturedInfo(),
+                AttemptPhasesCapturedInfo(recorded_by=AttemptRecordedByRecoveryInfo()),
+                AttemptPhasesCapturedInfo(),
+                AttemptPhasesCapturedInfo(recorded_by=AttemptRecordedByCancelInfo()),
             ]:
                 pass
             case _:
@@ -99,23 +99,23 @@ class TestNodeTiming:
                 NodeTimingExactInfo(segments=exact_segments),
                 NodeTimingPartialInfo(reasons=reasons, segments=partial_segments),
                 NodeTimingUnavailableInfo(),
-                NodeTimingInconsistentInfo(conflict=ConflictClockOrderInfo(earlier=earlier)),
+                NodeTimingInconsistentInfo(conflict=TimingConflictClockOrderInfo(earlier=earlier)),
                 NodeTimingInconsistentInfo(),
                 NodeTimingInconsistentInfo(),
             ]:
                 claims = [
                     segment.phase.claim
                     for segment in exact_segments
-                    if isinstance(segment.phase, PhaseClaimedInfo)
+                    if isinstance(segment.phase, SegmentPhaseClaimedInfo)
                 ]
                 assert [type(claim) for claim in claims] == [
-                    ClaimEarlierInfo,
-                    ClaimRecordedInfo,
-                    ClaimNotRecordedInfo,
+                    SegmentClaimEarlierInfo,
+                    SegmentClaimRecordedInfo,
+                    SegmentClaimNotRecordedInfo,
                 ]
                 assert reasons == [UnknownReason.HISTORY_PRUNED, UnknownReason.WORKER_LOST]
-                assert isinstance(partial_segments[0].source, SourceTaskInfo)
-                assert isinstance(partial_segments[1].end, SegmentOpenInfo)
+                assert isinstance(partial_segments[0].source, SegmentSourceTaskInfo)
+                assert isinstance(partial_segments[1].end, SegmentEndOpenInfo)
                 assert earlier == TimingBoundary.CLAIM
             case _:
                 raise AssertionError(f'unexpected node timings: {models!r}')
@@ -138,6 +138,6 @@ class TestRunTiming:
                 RunTimingComposedInfo(),
                 RunTimingComposedInfo(coverage=RunCoverageInconsistentInfo(conflicts=[_, _])),
             ]:
-                assert isinstance(last_pause.end, PauseOpenInfo)
+                assert isinstance(last_pause.end, PauseEndOpenInfo)
             case _:
                 raise AssertionError(f'unexpected run timings: {models!r}')

@@ -21,7 +21,7 @@ from horsies.core.models.tasks import Execution
 
 
 @dataclass(slots=True, frozen=True)
-class StreamServed:
+class StreamCoverageStateServed:
     """Live workers serve the stream, and they have capacity in service for it.
 
     ``workers`` counts the live workers that serve the stream, 1 or more.
@@ -35,7 +35,7 @@ class StreamServed:
 
 
 @dataclass(slots=True, frozen=True)
-class StreamWithoutCapacity:
+class StreamCoverageStateNoCapacity:
     """Live workers serve the stream, and none of them has capacity in service
     for it: every child or seat of the serving budgets was down at the
     worker's snapshot. ``workers`` counts them, 1 or more."""
@@ -44,12 +44,12 @@ class StreamWithoutCapacity:
 
 
 @dataclass(slots=True, frozen=True)
-class StreamUnserved:
+class StreamCoverageStateUnserved:
     """No live worker serves the stream. Its rows wait until a worker that
     serves the class runs on the queue."""
 
 
-StreamCoverageState: TypeAlias = StreamServed | StreamWithoutCapacity | StreamUnserved
+StreamCoverageState: TypeAlias = StreamCoverageStateServed | StreamCoverageStateNoCapacity | StreamCoverageStateUnserved
 
 
 @dataclass(slots=True, frozen=True)
@@ -78,7 +78,7 @@ class ClassCoverage:
 
 
 @dataclass(slots=True, frozen=True)
-class OldestWaiting:
+class StreamWaitDue:
     """At least one row of the stream is due.
 
     ``enqueued_at`` is the due time of the oldest due row: its send time, or
@@ -91,14 +91,14 @@ class OldestWaiting:
 
 
 @dataclass(slots=True, frozen=True)
-class NoneDue:
+class StreamWaitNoneDue:
     """Every row of the stream is due later: a delayed send, or a retry that
     waits for its interval. ``next_due_at`` is the earliest due time."""
 
     next_due_at: datetime
 
 
-StreamWait: TypeAlias = OldestWaiting | NoneDue
+StreamWait: TypeAlias = StreamWaitDue | StreamWaitNoneDue
 
 
 @dataclass(slots=True, frozen=True)

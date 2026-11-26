@@ -53,7 +53,7 @@ export function runAxis(timing: ComposedRunTiming, drawAtMs: number): TimeAxis {
 export function segmentSpan(segment: TimingSegment, drawAtMs: number): TimeSpan {
   const startMs = instantMs(segment.started_at);
   switch (segment.end.kind) {
-    case 'ended':
+    case 'closed':
       return { startMs, endMs: instantMs(segment.end.at) };
     case 'open':
       return { startMs, endMs: Math.max(drawAtMs, startMs) };

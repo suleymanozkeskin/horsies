@@ -19,6 +19,7 @@ use axum::response::IntoResponse;
 use axum::Router;
 use bytes::Bytes;
 use http::{HeaderName, HeaderValue, Method, StatusCode};
+use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
 
 use crate::broker::PostgresBroker;
@@ -26,7 +27,7 @@ use crate::monitoring::fleet::FleetLabels;
 use crate::workflow_engine::child_spec::ChildSpecSource;
 
 use super::app::{build_router, MountPath, WebState};
-use super::auth::{MonitoringAuthPolicy, MonitoringRequest, INTENT_HEADER};
+use super::auth::{MonitoringAuthorizationPolicy, MonitoringRequest, INTENT_HEADER};
 use super::common::ApiError;
 use super::events::{EventBroadcaster, EventFrames};
 use super::fleet_metrics::WebFleetMetrics;
@@ -129,7 +130,7 @@ impl AccessGrant {
 pub(crate) struct GrantedAccess;
 
 #[async_trait]
-impl MonitoringAuthPolicy for GrantedAccess {
+impl MonitoringAuthorizationPolicy for GrantedAccess {
     async fn can_view(&self, request: MonitoringRequest<'_>) -> bool {
         request
             .extensions
@@ -173,10 +174,21 @@ pub struct ResponseParts {
     pub body: Bytes,
 }
 
+/// Whether the action routes (task cancel, workflow pause, resume and
+/// cancel) run. Disabled actions answer 403 without asking the policy's
+/// `can_act`. `/api/meta` reports the value as `"ENABLED"` or
+/// `"DISABLED"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Actions {
+    Enabled,
+    Disabled,
+}
+
 /// The settings of a monitoring handler.
 #[derive(Debug, Clone)]
 pub struct MonitoringHandlerConfig {
-    pub actions_enabled: bool,
+    pub actions: Actions,
     pub ui: MonitoringUiConfig,
     /// The version that `/api/meta` reports: the package version of the
     /// client that mounts the handler.
@@ -194,7 +206,7 @@ pub struct MonitoringHandlerConfig {
 pub struct MonitoringHandler {
     router: Router,
     events: Arc<EventBroadcaster>,
-    actions_enabled: bool,
+    actions: Actions,
     heartbeat: Duration,
 }
 
@@ -220,8 +232,8 @@ impl MonitoringHandler {
             task_breakdown_cache: Arc::new(ReadCache::new()),
             events: EventBroadcaster::new(Arc::clone(&broker)),
             broker,
-            auth_policy: Arc::new(GrantedAccess),
-            actions_enabled: config.actions_enabled,
+            authorization_policy: Arc::new(GrantedAccess),
+            actions: config.actions,
             ui_config: config.ui,
             assets: Arc::new(EmbeddedAssets),
             children,
@@ -232,12 +244,12 @@ impl MonitoringHandler {
         Self::from_state(state)
     }
 
-    /// The handler of a built state, whose auth policy must be
+    /// The handler of a built state, whose authorization policy must be
     /// [`GrantedAccess`]-like: it reads the grant of each request.
     pub(crate) fn from_state(state: WebState) -> Self {
         Self {
             events: Arc::clone(&state.events),
-            actions_enabled: state.actions_enabled,
+            actions: state.actions,
             heartbeat: state.heartbeat,
             router: build_router(state),
         }
@@ -261,7 +273,7 @@ impl MonitoringHandler {
     /// The access that a request needs: [`route_access`] with the actions
     /// switch of this handler. Pure.
     pub fn route_access(&self, method: &Method, path: &str) -> RouteAccess {
-        route_access(self.actions_enabled, method, path)
+        route_access(self.actions, method, path)
     }
 
     /// Serve one request with the verdicts of `grant`.
@@ -318,13 +330,13 @@ impl MonitoringHandler {
 /// mount, as the routes of the Python app guard them: every read route,
 /// `/metrics` and the event stream need `can_view`; `/api/meta` asks
 /// `can_act` to report it; an action route needs `can_view` and `can_act`,
-/// or only `can_view` while actions are disabled (`actions_enabled` false:
+/// or only `can_view` while actions are disabled ([`Actions::Disabled`]:
 /// the act guard refuses without asking). Every other path is public. Pure.
-pub fn route_access(actions_enabled: bool, method: &Method, path: &str) -> RouteAccess {
+pub fn route_access(actions: Actions, method: &Method, path: &str) -> RouteAccess {
     let segments: Vec<&str> = path.strip_prefix('/').unwrap_or(path).split('/').collect();
-    let action = match actions_enabled {
-        true => AccessNeed::ViewAndAct,
-        false => AccessNeed::View,
+    let action = match actions {
+        Actions::Enabled => AccessNeed::ViewAndAct,
+        Actions::Disabled => AccessNeed::View,
     };
     // A HEAD request is served by the GET route, with its guards.
     let verb = match method.as_str() {

@@ -1,8 +1,8 @@
 ---
 title: Web UI Mount
-summary: Mount the monitoring web UI in an axum app with horsies::web::router, and decide access per request with a MonitoringAuthPolicy.
+summary: Mount the monitoring web UI in an axum app with horsies::web::router, and decide access per request with a MonitoringAuthorizationPolicy.
 related: [monitoring-queries, ../cli, ../../monitoring/web-ui-overview, ../../monitoring/web-ui-deployment, ../../monitoring/action-semantics]
-tags: [rust, monitoring, web, axum, router, MonitoringAuthPolicy, TrustedHeader]
+tags: [rust, monitoring, web, axum, router, MonitoringAuthorizationPolicy, TrustedHeader]
 ---
 
 # Web UI Mount
@@ -35,7 +35,7 @@ fn monitoring_routes(app: &Horsies) -> Result<Router, Box<dyn std::error::Error>
 }
 ```
 
-`router(&app, config, policy) -> axum::Router` serves every path of the mount: the page and its assets, `/api/...`, the event stream `GET /api/events`, and `GET /metrics`, the fleet metrics of the app's database behind the view verdict. The `queue` and `schedule` label values of `/metrics` are the queues and the schedules of the app's config. See [Fleet Collector](/horsies/observability/fleet-collector/).
+`router(&app, config, authorization_policy) -> axum::Router` serves every path of the mount: the page and its assets, `/api/...`, the event stream `GET /api/events`, and `GET /metrics`, the fleet metrics of the app's database behind the view verdict. The `queue` and `schedule` label values of `/metrics` are the queues and the schedules of the app's config. See [Fleet Collector](/horsies/observability/fleet-collector/).
 
 - Building the router does no I/O. The core handler is built at the first request, on the app's handle. A request whose broker cannot be built is answered with the cause: 503 when the cause may clear, 500 when it stays (for example a connection setting that the core refuses). The next request tries again.
 - The mount runs no schema step. For a process that only monitors, build the app with `Horsies::with_schema_mode(config, SchemaMode::ObserveOnly)`. See [App Config](/horsies/rust/configuration/app-config/#schema-modes).
@@ -45,7 +45,7 @@ fn monitoring_routes(app: &Horsies) -> Result<Router, Box<dyn std::error::Error>
 
 | Field | Type | Default |
 |-------|------|---------|
-| `ui` | `MonitoringUiConfig { custom_css_url: Option<String>, trace_link: TraceLink }` | No stylesheet; `TraceLink::NoTraceLink` (the task detail shows the trace id as text). `TraceLink::Template(TraceLinkTemplate::parse(text)?)` links it: an `http` or `https` URL with one `{trace_id}`, at most 2,048 bytes of printable ASCII |
+| `ui` | `MonitoringUiConfig { custom_css_url: Option<String>, trace_link: TraceLink }` | No stylesheet; `TraceLink::Text` (the task detail shows the trace id as text). `TraceLink::Template(TraceLinkTemplate::parse(text)?)` links it: an `http` or `https` URL with one `{trace_id}`, at most 2,048 bytes of printable ASCII |
 | `actions` | `Actions::Enabled` or `Actions::Disabled` | `Enabled` |
 
 - With `Actions::Disabled`, every action route answers 403 and the policy's `can_act` is not called.
@@ -57,18 +57,18 @@ fn monitoring_routes(app: &Horsies) -> Result<Router, Box<dyn std::error::Error>
 |--------|------------|-----------|
 | `AllowAll` | Yes | Yes. The host owns authentication: mount the router behind it |
 | `ViewOnly` | Yes | No |
-| `TrustedHeader::new(header_name, allow_actions)` | The header has a value that is visible text and not blank | `allow_actions` and the header check |
+| `TrustedHeader::new(header_name, actions)` | The header has a value that is visible text and not blank | `actions` is `Actions::Enabled`, and the header check |
 
-`TrustedHeader::new` returns `Result<TrustedHeader, InvalidHeaderName>`. `header_name()` and `allows_actions()` read it back.
+`TrustedHeader::new` returns `Result<TrustedHeader, InvalidHeaderName>`. `header_name()` and `actions()` read it back.
 
 ### Write a Policy
 
 ```rust
-use horsies::web::{MonitoringAuthPolicy, MonitoringRequest};
+use horsies::web::{MonitoringAuthorizationPolicy, MonitoringRequest};
 
 struct AdminHeader;
 
-impl MonitoringAuthPolicy for AdminHeader {
+impl MonitoringAuthorizationPolicy for AdminHeader {
     async fn can_view(&self, request: MonitoringRequest<'_>) -> bool {
         request.headers.contains_key("x-admin-user")
     }
@@ -79,7 +79,7 @@ impl MonitoringAuthPolicy for AdminHeader {
 }
 ```
 
-- `MonitoringAuthPolicy` is `Send + Sync + 'static`. Write its methods as `async fn`; each future must be `Send`.
+- `MonitoringAuthorizationPolicy` is `Send + Sync + 'static`. Write its methods as `async fn`; each future must be `Send`.
 - `MonitoringRequest` has `method`, `uri` (the path inside the mount), `version`, `headers` and `extensions`. `extensions` holds what the host's own layers put there, for example the user of an authentication layer.
 - The mount asks only the verdicts that the route needs, in this order: `can_view` for every read route, the event stream and `/api/meta`; then, when it allowed, `can_act` for an action route while actions are enabled, and for `/api/meta`, which reports it. The page and its assets ask nothing.
 - An action route also needs the header `X-Horsies-Intent: action` (`INTENT_HEADER`, `INTENT_VALUE`). It guards against cross-site requests; it is not authentication.

@@ -40,7 +40,7 @@ from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode as WorkflowTaskNode
 from horsies.core.models.workflow import WorkflowDefinition, WorkflowSpec
 from horsies.core.workflows.registry import register_workflow_definition
-from horsies.web import INTENT_HEADER, INTENT_VALUE, AllowAll, create_monitoring_app
+from horsies.web import INTENT_HEADER, INTENT_VALUE, Actions, AllowAll, create_monitoring_app
 from horsies.core.utils.url import to_psycopg_url
 from horsies.web import schema as schema_module
 from tests.integration.conftest import DB_URL
@@ -87,7 +87,7 @@ async def clean_tables(
 @pytest_asyncio.fixture
 async def monitoring(app: Horsies) -> AsyncGenerator[FastAPI, None]:
     """The monitoring app for this horsies app."""
-    built = create_monitoring_app(app, auth_policy=AllowAll())
+    built = create_monitoring_app(app, authorization_policy=AllowAll())
     yield built
     await built.state.events.close()
 
@@ -1043,7 +1043,7 @@ class TestEventStreamAuthorization:
         from horsies.web import TrustedHeader
 
         monitoring_app = create_monitoring_app(
-            app, auth_policy=TrustedHeader('X-Forwarded-User', allow_actions=False)
+            app, authorization_policy=TrustedHeader('X-Forwarded-User', actions=Actions.DISABLED)
         )
         async with AsyncClient(
             transport=ASGITransport(app=monitoring_app), base_url='http://test'
@@ -1058,7 +1058,7 @@ class TestMountedUnderAHost:
     """The API answers under a mount path, which is how adopters deploy it."""
 
     async def test_routes_answer_under_the_mount(self, app: Horsies) -> None:
-        monitoring_app = create_monitoring_app(app, auth_policy=AllowAll())
+        monitoring_app = create_monitoring_app(app, authorization_policy=AllowAll())
         host = FastAPI()
         host.mount('/monitoring', monitoring_app)
 
@@ -1087,7 +1087,7 @@ def web_args(**overrides: Any) -> Any:
         'pgbouncer_transaction_mode': False,
         'host': '127.0.0.1',
         'port': 8600,
-        'auth': 'none',
+        'authorization': 'none',
         'trusted_header': 'X-Forwarded-User',
         'enable_actions': False,
         'loglevel': 'INFO',
@@ -1164,7 +1164,7 @@ class TestTheToolNeverRunsDdl:
 
     async def test_meta_reports_the_absent_schema(self, fresh_database: str) -> None:
         cli_app = cli.resolve_web_app(web_args(database_url=fresh_database))
-        built = create_monitoring_app(cli_app, auth_policy=AllowAll())
+        built = create_monitoring_app(cli_app, authorization_policy=AllowAll())
 
         async with AsyncClient(
             transport=ASGITransport(app=built), base_url='http://test'
@@ -1173,7 +1173,7 @@ class TestTheToolNeverRunsDdl:
 
         assert body['schema_version'] is None
         assert body['schema_compatible'] is False
-        assert body['actions_enabled'] is False
+        assert body['actions'] == 'DISABLED'
         # Reachable but empty is ABSENT, not UNKNOWN: the operator is told to
         # start a worker, which is the correct instruction here.
         assert body['actions_disabled_reason'] == 'SCHEMA_INCOMPATIBLE'
@@ -1184,7 +1184,7 @@ class TestTheToolNeverRunsDdl:
         self, fresh_database: str
     ) -> None:
         cli_app = cli.resolve_web_app(web_args(database_url=fresh_database))
-        built = create_monitoring_app(cli_app, auth_policy=AllowAll())
+        built = create_monitoring_app(cli_app, authorization_policy=AllowAll())
 
         async with AsyncClient(
             transport=ASGITransport(app=built), base_url='http://test'
@@ -1238,7 +1238,7 @@ class TestZeroXSchema:
 
     async def _meta(self, database_url: str) -> dict[str, Any]:
         cli_app = cli.resolve_web_app(web_args(database_url=database_url))
-        built = create_monitoring_app(cli_app, auth_policy=AllowAll())
+        built = create_monitoring_app(cli_app, authorization_policy=AllowAll())
         try:
             async with AsyncClient(
                 transport=ASGITransport(app=built), base_url='http://test'
@@ -1257,7 +1257,7 @@ class TestZeroXSchema:
         assert body['schema_state'] == 'ZERO_X'
         assert body['schema_version'] is None
         assert body['schema_compatible'] is False
-        assert body['actions_enabled'] is False
+        assert body['actions'] == 'DISABLED'
         assert body['actions_disabled_reason'] == 'SCHEMA_INCOMPATIBLE'
 
     async def test_meta_reports_a_rust_0x_schema(self, fresh_database: str) -> None:
@@ -1274,7 +1274,7 @@ class TestZeroXSchema:
     ) -> None:
         await run_statements(fresh_database, *_ZERO_X_PYTHON_SCHEMA)
         cli_app = cli.resolve_web_app(web_args(database_url=fresh_database))
-        built = create_monitoring_app(cli_app, auth_policy=AllowAll())
+        built = create_monitoring_app(cli_app, authorization_policy=AllowAll())
 
         async with AsyncClient(
             transport=ASGITransport(app=built), base_url='http://test'
@@ -1305,7 +1305,7 @@ class TestSchemaMatch:
         assert body['schema_version'] == schema_module.EXPECTED_SCHEMA_VERSION
         assert body['expected_schema_version'] == schema_module.EXPECTED_SCHEMA_VERSION
         assert body['schema_compatible'] is True
-        assert body['actions_enabled'] is True
+        assert body['actions'] == 'ENABLED'
         assert body['actions_disabled_reason'] is None
 
     async def test_actions_are_permitted(
@@ -1362,7 +1362,7 @@ class TestSchemaMismatch:
         assert body['expected_schema_version'] == schema_module.EXPECTED_SCHEMA_VERSION
         assert body['schema_state'] == 'MISMATCH'
         assert body['schema_compatible'] is False
-        assert body['actions_enabled'] is False
+        assert body['actions'] == 'DISABLED'
         assert body['actions_disabled_reason'] == 'SCHEMA_INCOMPATIBLE'
 
     @pytest.mark.parametrize(
@@ -1390,7 +1390,7 @@ class TestSchemaMismatch:
         """Force-disabled server-side means regardless of authorization."""
         task = make_task(status=TaskStatus.PENDING)
         await persist(session, task)
-        built = create_monitoring_app(app, auth_policy=AllowAll(), actions_enabled=True)
+        built = create_monitoring_app(app, authorization_policy=AllowAll(), actions=Actions.ENABLED)
 
         async with AsyncClient(
             transport=ASGITransport(app=built), base_url='http://test'

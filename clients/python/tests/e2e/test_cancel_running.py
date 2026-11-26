@@ -30,7 +30,7 @@ from horsies.core.models.tasks import OutcomeCode
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import is_err
 from horsies.monitoring import TaskDetail, cancel_task, get_task_detail
-from horsies.monitoring.models import PhasesCapturedInfo, RecordedByCancelInfo
+from horsies.monitoring.models import AttemptPhasesCapturedInfo, AttemptRecordedByCancelInfo
 
 from tests.e2e.helpers.assertions import assert_failed, read_succeeded, unwrap_send
 from tests.e2e.helpers.worker import run_worker
@@ -99,8 +99,8 @@ def _assert_cancelled_attempt(detail: TaskDetail) -> None:
     assert attempt.error_code == 'TASK_CANCELLED'
     assert attempt.started_at is not None
     phases = attempt.phases
-    assert isinstance(phases, PhasesCapturedInfo), phases
-    assert isinstance(phases.recorded_by, RecordedByCancelInfo), phases.recorded_by
+    assert isinstance(phases, AttemptPhasesCapturedInfo), phases
+    assert isinstance(phases.recorded_by, AttemptRecordedByCancelInfo), phases.recorded_by
 
 
 async def _result_is_cancelled(handle: TaskHandle[Any]) -> None:

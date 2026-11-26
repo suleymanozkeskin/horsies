@@ -95,7 +95,7 @@ fn phases(timing: &NodeTimingInfo) -> Vec<(SegmentPhaseInfo, i64, Option<i64>)> 
         .iter()
         .map(|segment| {
             let end = match segment.end {
-                SegmentEndInfo::Ended { at } => Some(seconds(at)),
+                SegmentEndInfo::Closed { at } => Some(seconds(at)),
                 SegmentEndInfo::Open => None,
             };
             (segment.phase, seconds(segment.started_at), end)
@@ -1753,7 +1753,7 @@ fn ended_segment(
         phase,
         started_at: at(from),
         end: match to {
-            Some(seconds) => SegmentEndInfo::Ended { at: at(seconds) },
+            Some(seconds) => SegmentEndInfo::Closed { at: at(seconds) },
             None => SegmentEndInfo::Open,
         },
         source,

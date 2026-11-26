@@ -41,8 +41,8 @@ from horsies.core.types.status import TaskStatus
 from horsies.monitoring import (
     Breakdown,
     BreakdownLimit,
-    BreakdownUnclaimedGroup,
-    BreakdownValueGroup,
+    BreakdownGroupUnclaimed,
+    BreakdownGroupValue,
     ErrorCategory,
     Facets,
     MonitoringQueryDbOperationFailed,
@@ -401,8 +401,8 @@ class TestAggregateAndWorkflowAnswers:
 
         match result:
             case Ok(Breakdown(groups=[first, second], group_count=2)):
-                assert first.group == BreakdownValueGroup(value='worker-1')
-                assert second.group == BreakdownUnclaimedGroup()
+                assert first.group == BreakdownGroupValue(value='worker-1')
+                assert second.group == BreakdownGroupUnclaimed()
             case _:
                 raise AssertionError(f'expected two groups: {result!r}')
         assert _only_argument(call).__class__ is TaskBreakdownQuery

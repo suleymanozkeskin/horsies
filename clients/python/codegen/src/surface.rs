@@ -2196,7 +2196,7 @@ const MONITORING_REQUEST_PARAMETERS: &[StubParameter] = &[
 
 const MONITORING_HANDLER_PARAMETERS: &[StubParameter] = &[
     positional("handle", "CoreHandle"),
-    keyword("actions_enabled", "bool"),
+    keyword("actions", "Literal['ENABLED', 'DISABLED']"),
     keyword("custom_css_url", "str | None"),
     keyword("trace_link_template", "str | None"),
     keyword("client_version", "str"),

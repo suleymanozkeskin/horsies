@@ -80,8 +80,8 @@ export type SegmentClaim =
   | { kind: 'recorded'; placement: AttemptPlacement }
   | { kind: 'not_recorded' };
 
-/** The end of one segment. `open`: not ended at the read (`as_of`). */
-export type SegmentEnd = { kind: 'ended'; at: string } | { kind: 'open' };
+/** The end of one segment. `closed`: the segment closed at `at`. `open`: not closed at the read (`as_of`). */
+export type SegmentEnd = { kind: 'closed'; at: string } | { kind: 'open' };
 
 /** What one segment describes. `generation` counts the tasks of the node from
  * 1; `attempt` counts the attempts of that task from 1. */

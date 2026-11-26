@@ -417,7 +417,7 @@ info = broker.get_task_info("task-uuid", include_result=True)  # sync
 
 **Monitoring** (async only): `get_stale_tasks()`, `get_expired_tasks()`, `mark_stale_tasks_as_failed()`, `requeue_stale_claimed()`, `terminate_orphaned_workflow_tasks()`. See website docs `monitoring/broker-methods` for full signatures.
 
-**Health/liveness** (app, async + sync): `ping_database_async()` (DatabasePing latency), `ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None)` (list[WorkerPong] — active ping-pong; min_responses=1 = fast liveness gate, returns on first reply), `list_worker_states_async()` / `get_worker_state_async(worker_id)` / `get_worker_state_history_async(worker_id, limit=None)` (WorkerStateSnapshot, includes idle workers). `get_class_coverage_async()` (ClassCoverage — fleet check: each (queue, class) with PENDING rows is StreamServed / StreamWithoutCapacity / StreamUnserved by live workers; the reaper logs unserved at error), `get_class_report_async()` (ClassReport — oldest wait per pending (queue, class), budget capacity/in_flight/free per live worker). Replaces the retired `get_worker_stats()`. `WorkerStateSnapshot.memory_usage_mb` is the parent process only; `children_memory_mb` is the summed RSS of executor children (the memory-quota driver — use it to size `IsolatedRecycle.after` / `IsolatedRecycle.above`, and `SharedRecycle` for shared children). See website docs `monitoring/health-reads` (the methods) and `monitoring/worker-health` (what each read means). 
+**Health/liveness** (app, async + sync): `ping_database_async()` (DatabasePing latency), `ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None)` (list[WorkerPong] — active ping-pong; min_responses=1 = fast liveness gate, returns on first reply), `list_worker_states_async()` / `get_worker_state_async(worker_id)` / `get_worker_state_history_async(worker_id, limit=None)` (WorkerStateSnapshot, includes idle workers). `get_class_coverage_async()` (ClassCoverage — fleet check: each (queue, class) with PENDING rows is StreamCoverageStateServed / StreamCoverageStateNoCapacity / StreamCoverageStateUnserved by live workers; the reaper logs unserved at error), `get_class_report_async()` (ClassReport — oldest wait per pending (queue, class), budget capacity/in_flight/free per live worker). Replaces the retired `get_worker_stats()`. `WorkerStateSnapshot.memory_usage_mb` is the parent process only; `children_memory_mb` is the summed RSS of executor children (the memory-quota driver — use it to size `IsolatedRecycle.after` / `IsolatedRecycle.above`, and `SharedRecycle` for shared children). See website docs `monitoring/health-reads` (the methods) and `monitoring/worker-health` (what each read means).
 
 ## PostgresConfig
 
@@ -582,7 +582,7 @@ Failures stay with one task:
   other slot is down too; a failed boot while another slot is in service
   starts the count again, so only 3 attempts in a row stop the worker. The worker starts degraded when one child is ready
   and each other slot is down. `WorkerStateSnapshot.slot_health` names the
-  slots that are down (`SlotsDown`).
+  slots that are down (`SlotHealthSlotsDown`).
 - An outside SIGKILL of a booting replacement child uses no attempt while
   another child is serving. It does count at first start, and when no other
   child serves.
@@ -1224,12 +1224,12 @@ horsies check <module> [--live] [--loglevel LEVEL]
 ### `horsies web`
 
 ```bash
-horsies web <module> [--host 127.0.0.1] [--port 8600] [--auth none|trusted-header] [--trusted-header X-Forwarded-User] [--enable-actions] [--trace-link TEMPLATE] [--loglevel INFO]
+horsies web <module> [--host 127.0.0.1] [--port 8600] [--authorization none|trusted-header] [--trusted-header X-Forwarded-User] [--enable-actions] [--trace-link TEMPLATE] [--loglevel INFO]
 horsies web --database-url "postgresql://..." [--session-database-url URL] [--pgbouncer-transaction-mode] [...]
 ```
 
 Serves the monitoring dashboard (requires the `web` extra). Fail-closed:
-non-loopback hosts require `--auth trusted-header`; actions are off unless
+non-loopback hosts require `--authorization trusted-header`; actions are off unless
 `--enable-actions`. Never executes DDL. See `monitoring.md` for the full
 reference including the registry-less capability boundary.
 

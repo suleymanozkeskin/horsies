@@ -356,7 +356,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
             },
         },
         started_at: now,
-        end: SegmentEndInfo::Ended { at: now },
+        end: SegmentEndInfo::Closed { at: now },
         source: SegmentSourceInfo::Attempt {
             generation: 1,
             task_id,

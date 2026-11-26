@@ -28,6 +28,7 @@ from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.web import (
     INTENT_HEADER,
     INTENT_VALUE,
+    Actions,
     AllowAll,
     MonitoringUIConfig,
     create_monitoring_app,
@@ -84,12 +85,12 @@ async def answer_of(
     *,
     view: bool,
     act: bool,
-    actions_enabled: bool = True,
+    actions: Actions = Actions.ENABLED,
 ) -> Answer:
     """The answer of one request to a new monitoring app."""
     policy = RecordingPolicy(view=view, act=act)
     built = create_monitoring_app(
-        make_horsies_app(), auth_policy=policy, actions_enabled=actions_enabled,
+        make_horsies_app(), authorization_policy=policy, actions=actions,
     )
     try:
         async with AsyncClient(transport=ASGITransport(app=built), base_url='http://test') as client:
@@ -108,14 +109,14 @@ class TestHardening:
     """The SPA is the only client; nothing else is exposed."""
 
     def test_no_schema_browser_and_no_cors(self) -> None:
-        built = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        built = create_monitoring_app(make_horsies_app(), authorization_policy=AllowAll())
 
         assert built.docs_url is None
         assert built.redoc_url is None
         assert built.openapi_url is None
         assert all(middleware.cls is not CORSMiddleware for middleware in built.user_middleware)
 
-    def test_auth_policy_has_no_default(self) -> None:
+    def test_authorization_policy_has_no_default(self) -> None:
         with pytest.raises(TypeError):
             create_monitoring_app(make_horsies_app())  # type: ignore[call-arg]
 
@@ -373,7 +374,7 @@ class TestTheCoreAnswersAsPythonDid:
 
     @pytest.mark.parametrize('path', ACTION_PATHS)
     async def test_an_action_while_actions_are_disabled(self, path: str) -> None:
-        core = await answer_of('POST', path, view=True, act=True, actions_enabled=False)
+        core = await answer_of('POST', path, view=True, act=True, actions=Actions.DISABLED)
 
         assert core == Answer(status=403, body=NOT_AUTHORIZED, calls=('can_view',))
 
@@ -416,8 +417,8 @@ async def injected_block(path: str) -> tuple[int, str, str]:
     host = FastAPI()
     built = create_monitoring_app(
         make_horsies_app(),
-        auth_policy=RecordingPolicy(view=False, act=False),
-        config=MonitoringUIConfig(custom_css_url='/static/theme.css'),
+        authorization_policy=RecordingPolicy(view=False, act=False),
+        ui=MonitoringUIConfig(custom_css_url='/static/theme.css'),
     )
     host.mount('/monitoring', built)
     try:
@@ -479,6 +480,6 @@ class TestFleetMetricLabels:
             )
         )
 
-        mounted = create_monitoring_app(app, auth_policy=AllowAll())
+        mounted = create_monitoring_app(app, authorization_policy=AllowAll())
 
         assert isinstance(mounted, FastAPI)

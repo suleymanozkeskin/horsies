@@ -393,7 +393,7 @@ jobs:
                       ),
                   ),
               )
-              web = create_monitoring_app(app, auth_policy=AllowAll())
+              web = create_monitoring_app(app, authorization_policy=AllowAll())
               transport = ASGITransport(app=web)
               async with AsyncClient(transport=transport, base_url='http://check') as client:
                   page = await client.get('/')

@@ -190,8 +190,8 @@ pub enum SegmentClaimInfo {
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SegmentEndInfo {
-    /// The segment ended at `at`.
-    Ended {
+    /// The segment closed at `at`.
+    Closed {
         #[serde(serialize_with = "time_text::utc")]
         at: DateTime<Utc>,
     },

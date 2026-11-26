@@ -127,7 +127,7 @@ class WorkflowEventKind(str, enum.Enum):
     TASK_MOVED = 'TASK_MOVED'
 
 
-class ClaimsCountedInfo(BaseModel):
+class AttemptClaimsCountedInfo(BaseModel):
     """``count`` claims (1 or more) were taken for the attempt; the first at ``first_claimed_at``."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -137,7 +137,7 @@ class ClaimsCountedInfo(BaseModel):
     first_claimed_at: datetime
 
 
-class ClaimsNotCountedInfo(BaseModel):
+class AttemptClaimsNotCountedInfo(BaseModel):
     """The attempt began before the lifecycle record: its claims were not counted."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -146,13 +146,13 @@ class ClaimsNotCountedInfo(BaseModel):
 
 
 AttemptClaimsInfo = Annotated[
-    ClaimsCountedInfo | ClaimsNotCountedInfo,
+    AttemptClaimsCountedInfo | AttemptClaimsNotCountedInfo,
     Field(discriminator='kind'),
 ]
 """The claims of one attempt."""
 
 
-class PlacementPlacedInfo(BaseModel):
+class AttemptPlacementPlacedInfo(BaseModel):
     """A child of the worker took the task at ``placed_at``: the claim time plus the measured slot wait."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -161,7 +161,7 @@ class PlacementPlacedInfo(BaseModel):
     placed_at: datetime
 
 
-class PlacementNotObservedInfo(BaseModel):
+class AttemptPlacementNotObservedInfo(BaseModel):
     """The writer of the attempt row observed no placement."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -170,13 +170,13 @@ class PlacementNotObservedInfo(BaseModel):
 
 
 AttemptPlacementInfo = Annotated[
-    PlacementPlacedInfo | PlacementNotObservedInfo,
+    AttemptPlacementPlacedInfo | AttemptPlacementNotObservedInfo,
     Field(discriminator='kind'),
 ]
 """When a child of the worker took the task of the attempt."""
 
 
-class FinalizingMarkedInfo(BaseModel):
+class AttemptFinalizingMarkedInfo(BaseModel):
     """The child marked the end of the task body at ``finalizing_at``."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -185,7 +185,7 @@ class FinalizingMarkedInfo(BaseModel):
     finalizing_at: datetime
 
 
-class FinalizingNotMarkedInfo(BaseModel):
+class AttemptFinalizingNotMarkedInfo(BaseModel):
     """No finalizing marker was written."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -194,13 +194,13 @@ class FinalizingNotMarkedInfo(BaseModel):
 
 
 AttemptFinalizingInfo = Annotated[
-    FinalizingMarkedInfo | FinalizingNotMarkedInfo,
+    AttemptFinalizingMarkedInfo | AttemptFinalizingNotMarkedInfo,
     Field(discriminator='kind'),
 ]
 """The finalizing marker of the claim that ran the attempt."""
 
 
-class RecordedByWorkerInfo(BaseModel):
+class AttemptRecordedByWorkerInfo(BaseModel):
     """The worker wrote the end of the attempt, with the placement it observed."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -209,7 +209,7 @@ class RecordedByWorkerInfo(BaseModel):
     placement: AttemptPlacementInfo
 
 
-class RecordedByRecoveryInfo(BaseModel):
+class AttemptRecordedByRecoveryInfo(BaseModel):
     """Stale RUNNING recovery wrote the attempt row. ``last_seen_at`` is the last sign of life."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -218,7 +218,7 @@ class RecordedByRecoveryInfo(BaseModel):
     last_seen_at: datetime
 
 
-class RecordedByCancelInfo(BaseModel):
+class AttemptRecordedByCancelInfo(BaseModel):
     """The cancel statement wrote the attempt row: an operator cancelled the task while the attempt ran.
 
     The attempt ended at the cancel (``finished_at``). The cancel observes no placement.
@@ -230,13 +230,13 @@ class RecordedByCancelInfo(BaseModel):
 
 
 AttemptRecordedByInfo = Annotated[
-    RecordedByWorkerInfo | RecordedByRecoveryInfo | RecordedByCancelInfo,
+    AttemptRecordedByWorkerInfo | AttemptRecordedByRecoveryInfo | AttemptRecordedByCancelInfo,
     Field(discriminator='kind'),
 ]
 """Who wrote the attempt row."""
 
 
-class PhasesCapturedInfo(BaseModel):
+class AttemptPhasesCapturedInfo(BaseModel):
     """The phase times of the attempt.
 
     ``enqueued_at`` is the due time of the attempt; ``claimed_at`` is the claim
@@ -253,7 +253,7 @@ class PhasesCapturedInfo(BaseModel):
     recorded_by: AttemptRecordedByInfo
 
 
-class PhasesNotCapturedInfo(BaseModel):
+class AttemptPhasesNotCapturedInfo(BaseModel):
     """The attempt row was written before the lifecycle record, or history holds a version-1 archive."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -262,13 +262,13 @@ class PhasesNotCapturedInfo(BaseModel):
 
 
 AttemptPhasesInfo = Annotated[
-    PhasesCapturedInfo | PhasesNotCapturedInfo,
+    AttemptPhasesCapturedInfo | AttemptPhasesNotCapturedInfo,
     Field(discriminator='kind'),
 ]
 """The phase record of one attempt row."""
 
 
-class ClaimEarlierInfo(BaseModel):
+class SegmentClaimEarlierInfo(BaseModel):
     """``count`` claims before the claim that holds the attempt: lost leases and released claims."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -277,7 +277,7 @@ class ClaimEarlierInfo(BaseModel):
     count: int
 
 
-class ClaimRecordedInfo(BaseModel):
+class SegmentClaimRecordedInfo(BaseModel):
     """The claim that ran the attempt, from its attempt row, with the placement that the row holds."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -286,7 +286,7 @@ class ClaimRecordedInfo(BaseModel):
     placement: AttemptPlacementInfo
 
 
-class ClaimNotRecordedInfo(BaseModel):
+class SegmentClaimNotRecordedInfo(BaseModel):
     """The claim of an attempt that has no attempt row.
 
     The attempt still runs, or a cancel, an expiry or a pause abandon ended it.
@@ -298,13 +298,13 @@ class ClaimNotRecordedInfo(BaseModel):
 
 
 SegmentClaimInfo = Annotated[
-    ClaimEarlierInfo | ClaimRecordedInfo | ClaimNotRecordedInfo,
+    SegmentClaimEarlierInfo | SegmentClaimRecordedInfo | SegmentClaimNotRecordedInfo,
     Field(discriminator='kind'),
 ]
 """Which claim a ``claimed`` segment shows."""
 
 
-class PhasePendingInfo(BaseModel):
+class SegmentPhasePendingInfo(BaseModel):
     """The node waits for its dependencies."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -312,7 +312,7 @@ class PhasePendingInfo(BaseModel):
     kind: Literal['pending'] = 'pending'
 
 
-class PhaseReadyInfo(BaseModel):
+class SegmentPhaseReadyInfo(BaseModel):
     """The dependencies of the node are met and nothing is dispatched."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -320,7 +320,7 @@ class PhaseReadyInfo(BaseModel):
     kind: Literal['ready'] = 'ready'
 
 
-class PhaseEnqueuedInfo(BaseModel):
+class SegmentPhaseEnqueuedInfo(BaseModel):
     """The attempt is due and waits for a claim; a sub-workflow node waits for its child start."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -328,7 +328,7 @@ class PhaseEnqueuedInfo(BaseModel):
     kind: Literal['enqueued'] = 'enqueued'
 
 
-class PhaseRetryWaitInfo(BaseModel):
+class SegmentPhaseRetryWaitInfo(BaseModel):
     """The retry delay of the attempt has not passed."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -336,7 +336,7 @@ class PhaseRetryWaitInfo(BaseModel):
     kind: Literal['retry_wait'] = 'retry_wait'
 
 
-class PhaseClaimedInfo(BaseModel):
+class SegmentPhaseClaimedInfo(BaseModel):
     """A worker holds a claim and the task code did not start."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -345,7 +345,7 @@ class PhaseClaimedInfo(BaseModel):
     claim: SegmentClaimInfo
 
 
-class PhaseRunningInfo(BaseModel):
+class SegmentPhaseRunningInfo(BaseModel):
     """The task code runs; for a sub-workflow node, the child run runs."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -353,7 +353,7 @@ class PhaseRunningInfo(BaseModel):
     kind: Literal['running'] = 'running'
 
 
-class PhaseFinalizingInfo(BaseModel):
+class SegmentPhaseFinalizingInfo(BaseModel):
     """The task body ended and the attempt is not recorded yet."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -361,7 +361,7 @@ class PhaseFinalizingInfo(BaseModel):
     kind: Literal['finalizing'] = 'finalizing'
 
 
-class PhaseAdvancingInfo(BaseModel):
+class SegmentPhaseAdvancingInfo(BaseModel):
     """The task is in history (or the child run ended) and the workflow has not applied the node yet."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -369,7 +369,7 @@ class PhaseAdvancingInfo(BaseModel):
     kind: Literal['advancing'] = 'advancing'
 
 
-class PhaseUnknownInfo(BaseModel):
+class SegmentPhaseUnknownInfo(BaseModel):
     """A known interval whose phase the record cannot show."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -379,30 +379,30 @@ class PhaseUnknownInfo(BaseModel):
 
 
 SegmentPhaseInfo = Annotated[
-    PhasePendingInfo
-    | PhaseReadyInfo
-    | PhaseEnqueuedInfo
-    | PhaseRetryWaitInfo
-    | PhaseClaimedInfo
-    | PhaseRunningInfo
-    | PhaseFinalizingInfo
-    | PhaseAdvancingInfo
-    | PhaseUnknownInfo,
+    SegmentPhasePendingInfo
+    | SegmentPhaseReadyInfo
+    | SegmentPhaseEnqueuedInfo
+    | SegmentPhaseRetryWaitInfo
+    | SegmentPhaseClaimedInfo
+    | SegmentPhaseRunningInfo
+    | SegmentPhaseFinalizingInfo
+    | SegmentPhaseAdvancingInfo
+    | SegmentPhaseUnknownInfo,
     Field(discriminator='kind'),
 ]
 """The phase of one segment."""
 
 
-class SegmentEndedInfo(BaseModel):
-    """The segment ended at ``at``."""
+class SegmentEndClosedInfo(BaseModel):
+    """The segment closed at ``at``."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
 
-    kind: Literal['ended'] = 'ended'
+    kind: Literal['closed'] = 'closed'
     at: datetime
 
 
-class SegmentOpenInfo(BaseModel):
+class SegmentEndOpenInfo(BaseModel):
     """The segment had not ended at the read (``as_of`` of the run timing)."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -411,13 +411,13 @@ class SegmentOpenInfo(BaseModel):
 
 
 SegmentEndInfo = Annotated[
-    SegmentEndedInfo | SegmentOpenInfo,
+    SegmentEndClosedInfo | SegmentEndOpenInfo,
     Field(discriminator='kind'),
 ]
 """The end of one segment."""
 
 
-class SourceNodeInfo(BaseModel):
+class SegmentSourceNodeInfo(BaseModel):
     """The node itself: before, between and after its tasks, and the child run of a sub-workflow node."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -425,7 +425,7 @@ class SourceNodeInfo(BaseModel):
     kind: Literal['node'] = 'node'
 
 
-class SourceTaskInfo(BaseModel):
+class SegmentSourceTaskInfo(BaseModel):
     """The ``generation``-th task of the node (1-based), when the record holds no attempt of it."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -435,7 +435,7 @@ class SourceTaskInfo(BaseModel):
     task_id: UUID
 
 
-class SourceAttemptInfo(BaseModel):
+class SegmentSourceAttemptInfo(BaseModel):
     """Attempt ``attempt`` of the ``generation``-th task of the node (1-based)."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -447,7 +447,7 @@ class SourceAttemptInfo(BaseModel):
 
 
 SegmentSourceInfo = Annotated[
-    SourceNodeInfo | SourceTaskInfo | SourceAttemptInfo,
+    SegmentSourceNodeInfo | SegmentSourceTaskInfo | SegmentSourceAttemptInfo,
     Field(discriminator='kind'),
 ]
 """What one segment describes."""
@@ -464,7 +464,7 @@ class TimingSegmentInfo(BaseModel):
     source: SegmentSourceInfo
 
 
-class EndpointTerminalInfo(BaseModel):
+class NodeEndpointTerminalInfo(BaseModel):
     """The node reached ``status`` at ``at``. It can come before the end of a task that ran on."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -474,7 +474,7 @@ class EndpointTerminalInfo(BaseModel):
     at: datetime
 
 
-class EndpointNotTerminalInfo(BaseModel):
+class NodeEndpointNotTerminalInfo(BaseModel):
     """The node is not terminal."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -483,13 +483,13 @@ class EndpointNotTerminalInfo(BaseModel):
 
 
 NodeEndpointInfo = Annotated[
-    EndpointTerminalInfo | EndpointNotTerminalInfo,
+    NodeEndpointTerminalInfo | NodeEndpointNotTerminalInfo,
     Field(discriminator='kind'),
 ]
 """The terminal state of a node: a marker, not a segment."""
 
 
-class ConflictClockOrderInfo(BaseModel):
+class TimingConflictClockOrderInfo(BaseModel):
     """Two boundaries in the wrong order.
 
     ``earlier`` comes first in the record, and its time ``earlier_at`` is after
@@ -505,7 +505,7 @@ class ConflictClockOrderInfo(BaseModel):
     later_at: datetime
 
 
-class ConflictMissingRecordInfo(BaseModel):
+class TimingConflictMissingRecordInfo(BaseModel):
     """The state of the node needs a record that is not there."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -514,7 +514,7 @@ class ConflictMissingRecordInfo(BaseModel):
     record: MissingRecord
 
 
-class ConflictUnexpectedEventInfo(BaseModel):
+class TimingConflictUnexpectedEventInfo(BaseModel):
     """An event that the state of the node or the run at that point does not allow."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -525,7 +525,7 @@ class ConflictUnexpectedEventInfo(BaseModel):
 
 
 TimingConflictInfo = Annotated[
-    ConflictClockOrderInfo | ConflictMissingRecordInfo | ConflictUnexpectedEventInfo,
+    TimingConflictClockOrderInfo | TimingConflictMissingRecordInfo | TimingConflictUnexpectedEventInfo,
     Field(discriminator='kind'),
 ]
 """A contradiction in the record of a node or a run."""
@@ -580,7 +580,7 @@ NodeTimingInfo = Annotated[
 """The phase timing of one node, tagged by its coverage label."""
 
 
-class PauseResumedInfo(BaseModel):
+class PauseEndResumedInfo(BaseModel):
     """A ``WORKFLOW_RESUMED`` event at ``at`` ended the pause."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -589,7 +589,7 @@ class PauseResumedInfo(BaseModel):
     at: datetime
 
 
-class PauseRunEndedInfo(BaseModel):
+class PauseEndRunEndedInfo(BaseModel):
     """A cancel or a paused expiry ended the run at ``at`` while it was paused."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -598,7 +598,7 @@ class PauseRunEndedInfo(BaseModel):
     at: datetime
 
 
-class PauseOpenInfo(BaseModel):
+class PauseEndOpenInfo(BaseModel):
     """The run is still paused."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -607,7 +607,7 @@ class PauseOpenInfo(BaseModel):
 
 
 PauseEndInfo = Annotated[
-    PauseResumedInfo | PauseRunEndedInfo | PauseOpenInfo,
+    PauseEndResumedInfo | PauseEndRunEndedInfo | PauseEndOpenInfo,
     Field(discriminator='kind'),
 ]
 """The end of one pause."""
@@ -815,7 +815,7 @@ class Facets(BaseModel):
     error_category_totals: dict[str, int]
 
 
-class BreakdownValueGroup(BaseModel):
+class BreakdownGroupValue(BaseModel):
     """The tasks whose group column holds ``value``: a worker id, a task name or a queue name."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -824,10 +824,10 @@ class BreakdownValueGroup(BaseModel):
     value: str
 
 
-class BreakdownUnclaimedGroup(BaseModel):
+class BreakdownGroupUnclaimed(BaseModel):
     """The tasks that no worker claimed. Only the ``worker`` grouping has this group.
 
-    A worker whose id is the text ``'unknown'`` is a ``BreakdownValueGroup``
+    A worker whose id is the text ``'unknown'`` is a ``BreakdownGroupValue``
     of its own, never this group.
     """
 
@@ -837,7 +837,7 @@ class BreakdownUnclaimedGroup(BaseModel):
 
 
 BreakdownGroup = Annotated[
-    BreakdownValueGroup | BreakdownUnclaimedGroup,
+    BreakdownGroupValue | BreakdownGroupUnclaimed,
     Field(discriminator='kind'),
 ]
 """What one breakdown group holds: one stored value, or the unclaimed tasks."""

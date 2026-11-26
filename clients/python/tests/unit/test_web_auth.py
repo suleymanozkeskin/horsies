@@ -8,6 +8,7 @@ import pytest
 from starlette.requests import Request
 
 from horsies.web.auth import (
+    Actions,
     AllowAll,
     TrustedHeader,
     ViewOnly,
@@ -54,13 +55,13 @@ class TestTrustedHeader:
     """Identity is whatever the proxy asserts in the configured header."""
 
     async def test_absent_header_is_unauthorized(self) -> None:
-        policy = TrustedHeader('X-Forwarded-User', allow_actions=True)
+        policy = TrustedHeader('X-Forwarded-User', actions=Actions.ENABLED)
 
         assert await policy.can_view(make_request()) is False
         assert await policy.can_act(make_request()) is False
 
     async def test_empty_and_whitespace_headers_are_unauthorized(self) -> None:
-        policy = TrustedHeader('X-Forwarded-User', allow_actions=True)
+        policy = TrustedHeader('X-Forwarded-User', actions=Actions.ENABLED)
 
         assert await policy.can_view(make_request(**{'X-Forwarded-User': ''})) is False
         assert (
@@ -68,7 +69,7 @@ class TestTrustedHeader:
         )
 
     async def test_present_header_authorizes_reads(self) -> None:
-        policy = TrustedHeader('X-Forwarded-User', allow_actions=False)
+        policy = TrustedHeader('X-Forwarded-User', actions=Actions.DISABLED)
 
         request = make_request(**{'X-Forwarded-User': 'alex'})
 
@@ -78,13 +79,13 @@ class TestTrustedHeader:
         identified = make_request(**{'X-Forwarded-User': 'alex'})
 
         assert (
-            await TrustedHeader('X-Forwarded-User', allow_actions=False).can_act(
+            await TrustedHeader('X-Forwarded-User', actions=Actions.DISABLED).can_act(
                 identified
             )
             is False
         )
         assert (
-            await TrustedHeader('X-Forwarded-User', allow_actions=True).can_act(
+            await TrustedHeader('X-Forwarded-User', actions=Actions.ENABLED).can_act(
                 identified
             )
             is True
@@ -92,7 +93,7 @@ class TestTrustedHeader:
 
     async def test_header_name_is_matched_case_insensitively(self) -> None:
         """HTTP header names are case-insensitive; the policy must not care."""
-        policy = TrustedHeader('X-Forwarded-User', allow_actions=False)
+        policy = TrustedHeader('X-Forwarded-User', actions=Actions.DISABLED)
 
         assert await policy.can_view(make_request(**{'x-forwarded-user': 'a'})) is True
 

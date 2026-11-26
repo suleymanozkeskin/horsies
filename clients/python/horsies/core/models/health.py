@@ -63,18 +63,18 @@ class DownSlot:
 
 
 @dataclass(slots=True, frozen=True)
-class AllSlotsServing:
+class SlotHealthAllServing:
     """No slot of the worker was down when it wrote the snapshot."""
 
 
 @dataclass(slots=True, frozen=True)
-class SlotsDown:
+class SlotHealthSlotsDown:
     """The worker is degraded: these slots were down, in slot order. Never empty."""
 
     slots: tuple[DownSlot, ...]
 
 
-SlotHealth: TypeAlias = AllSlotsServing | SlotsDown
+SlotHealth: TypeAlias = SlotHealthAllServing | SlotHealthSlotsDown
 
 
 @dataclass(slots=True, frozen=True)
@@ -108,7 +108,7 @@ ClassCapacity: TypeAlias = ClassBudgets
 
 
 @dataclass(slots=True, frozen=True)
-class ProfileNamed:
+class SnapshotProfileNamed:
     """The worker ran the profile ``name`` of ``AppConfig.worker_profiles``.
 
     ``name`` has 1 to 64 characters: letters, digits, ``_``, ``.`` and
@@ -119,13 +119,13 @@ class ProfileNamed:
 
 
 @dataclass(slots=True, frozen=True)
-class ProfileNotRecorded:
+class SnapshotProfileNotRecorded:
     """The snapshot holds no profile name: the worker that wrote it did not
     record one. A worker of a build before schema migration 1004 wrote it;
     every worker of this build records its profile name."""
 
 
-SnapshotProfile: TypeAlias = ProfileNamed | ProfileNotRecorded
+SnapshotProfile: TypeAlias = SnapshotProfileNamed | SnapshotProfileNotRecorded
 
 
 @dataclass(slots=True, frozen=True)
@@ -141,7 +141,7 @@ class WorkerStateSnapshot:
     the worker runs children for: its capacity in service and the classes
     whose rows it claims.
     ``profile`` names the worker profile that the worker ran:
-    ``ProfileNamed(name)`` or ``ProfileNotRecorded()``.
+    ``SnapshotProfileNamed(name)`` or ``SnapshotProfileNotRecorded()``.
     """
 
     worker_id: str

@@ -551,7 +551,7 @@ impl Timeline {
             self.segments.push(TimingSegmentInfo {
                 phase: open.phase,
                 started_at: open.start.at,
-                end: SegmentEndInfo::Ended { at: end.at },
+                end: SegmentEndInfo::Closed { at: end.at },
                 source: open.source,
             });
         }
@@ -1464,7 +1464,7 @@ fn run_range(run: &RunFacts, timings: &[NodeTimingInfo], pauses: &[PauseInterval
         };
         for segment in segments {
             match segment.end {
-                SegmentEndInfo::Ended { at } => range.reach(at),
+                SegmentEndInfo::Closed { at } => range.reach(at),
                 SegmentEndInfo::Open => {
                     range.open = true;
                     range.reach(run.as_of);

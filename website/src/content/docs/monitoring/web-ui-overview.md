@@ -579,7 +579,7 @@ Three rules govern how actions behave in the interface:
   task detail panel. The workflow actions are in the toolbar of the selected
   run. Table rows and list items carry no action buttons.
 
-When actions are disabled — by configuration, by the auth policy, or by a schema
+When actions are disabled — by configuration, by the authorization policy, or by a schema
 mismatch — the affordances are absent rather than shown-and-disabled.
 
 After the request, a message in the lower right corner gives the outcome. The

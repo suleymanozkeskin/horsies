@@ -104,7 +104,7 @@ WEB_PROCESS_CHECK: Final = textwrap.dedent(
         app = Horsies(AppConfig(broker=PostgresConfig(
             database_url=SecretStr({UNREACHABLE_URL!r}),
         )))
-        web = create_monitoring_app(app, auth_policy=AllowAll())
+        web = create_monitoring_app(app, authorization_policy=AllowAll())
         transport = ASGITransport(app=web)
         async with AsyncClient(transport=transport, base_url='http://test') as client:
             meta = await client.get('/api/meta')

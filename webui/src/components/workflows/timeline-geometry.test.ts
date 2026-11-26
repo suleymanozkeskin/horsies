@@ -88,7 +88,7 @@ describe('runAxis', () => {
 describe('segment and pause spans', () => {
   const segments = segmentsOf(PARTIAL_OPEN_NODE);
 
-  it('ends an ended segment at its end time', () => {
+  it('ends a closed segment at its end time', () => {
     expect(segmentSpan(nth(segments, 0), at(100))).toEqual({ startMs: at(0), endMs: at(5) });
   });
 
@@ -219,7 +219,7 @@ describe('phaseComposition', () => {
     const zero: TimingSegment = {
       phase: { kind: 'ready' },
       started_at: '2026-11-22T12:00:04Z',
-      end: { kind: 'ended', at: '2026-11-22T12:00:04Z' },
+      end: { kind: 'closed', at: '2026-11-22T12:00:04Z' },
       source: { kind: 'node' },
     };
 

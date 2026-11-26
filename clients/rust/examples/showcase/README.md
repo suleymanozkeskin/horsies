@@ -44,7 +44,7 @@ separate terminals:
 ```text
 cargo run -p acme-showcase --bin acme -- worker
 cargo run -p acme-showcase --bin acme -- scheduler
-cargo run -p acme-showcase --features web --bin acme -- web --auth none
+cargo run -p acme-showcase --features web --bin acme -- web --authorization none
 ```
 
 `worker` runs the profile `acme` of the app config (`--profile` names
@@ -53,7 +53,7 @@ tables, and 1 shared async child of 32 seats for the other tasks. Each child
 is the `acme` binary again, in child mode. `SIGTERM` or `SIGINT` stops the
 worker after its children drain.
 
-`--auth none` is valid only on a loopback host. Use `--auth trusted-header`
+`--authorization none` is valid only on a loopback host. Use `--authorization trusted-header`
 behind a reverse proxy for a non-loopback host. The proxy must replace, not
 forward, the trusted header from a client. `acme check` checks the app, its
 workflows and its schedules without a database.

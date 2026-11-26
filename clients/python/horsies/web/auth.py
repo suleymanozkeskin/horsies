@@ -4,7 +4,7 @@ horsies never owns identity. A deployment supplies a policy that answers two
 questions per request — may this caller read monitoring data, and may it act —
 and the app enforces the answer on every ``/api`` route. The three policies
 here cover the deployment shapes horsies documents; anything else is the
-adopter's to implement against ``MonitoringAuthPolicy``.
+adopter's to implement against ``MonitoringAuthorizationPolicy``.
 
 Mutating requests carry a second, non-identity check: the
 ``X-Horsies-Intent: action`` header. It is a CSRF guard, not authentication —
@@ -13,7 +13,8 @@ a browser cannot attach it to a cross-site form post.
 
 from __future__ import annotations
 
-from typing import Protocol
+from enum import Enum
+from typing import Protocol, assert_never
 
 from fastapi import Request
 
@@ -23,7 +24,16 @@ INTENT_HEADER = 'X-Horsies-Intent'
 INTENT_VALUE = 'action'
 
 
-class MonitoringAuthPolicy(Protocol):
+class Actions(str, Enum):
+    """Whether the action routes (task cancel, workflow pause, resume and
+    cancel) run. Disabled actions answer 403 without asking the policy's
+    ``can_act``. ``GET /api/meta`` reports the value as ``actions``."""
+
+    ENABLED = 'ENABLED'
+    DISABLED = 'DISABLED'
+
+
+class MonitoringAuthorizationPolicy(Protocol):
     """The authorization contract the monitoring app enforces."""
 
     async def can_view(self, request: Request) -> bool:
@@ -72,12 +82,18 @@ class TrustedHeader:
     the deployment's invariant to uphold.
     """
 
-    def __init__(self, header_name: str, *, allow_actions: bool) -> None:
+    def __init__(self, header_name: str, *, actions: Actions) -> None:
         self.header_name = header_name
-        self.allow_actions = allow_actions
+        self.actions = actions
 
     async def can_view(self, request: Request) -> bool:
         return bool((request.headers.get(self.header_name) or '').strip())
 
     async def can_act(self, request: Request) -> bool:
-        return self.allow_actions and await self.can_view(request)
+        match self.actions:
+            case Actions.ENABLED:
+                return await self.can_view(request)
+            case Actions.DISABLED:
+                return False
+            case _ as unreachable:
+                assert_never(unreachable)

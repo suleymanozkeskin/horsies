@@ -105,7 +105,7 @@ of the claim of a segment of the timing of a node of a run
 (``WorkflowRunDetail``). A deeper schema is a defect of the reduction."""
 
 INLINE_KIND_NAMES: Final[Mapping[Place, str]] = {
-    ('EndpointTerminalInfo', 'status'): 'TerminalNodeStatus',
+    ('NodeEndpointTerminalInfo', 'status'): 'TerminalNodeStatus',
     ('PendingStreamInfo', 'coverage'): 'StreamCoverageInfo',
     ('PendingStreamInfo', 'wait'): 'StreamWaitInfo',
     ('WorkerStateInfo', 'slot_health'): 'SlotHealthKind',

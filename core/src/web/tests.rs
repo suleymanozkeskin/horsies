@@ -24,7 +24,7 @@ use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::AppConfig;
 
 use super::app::{build_router, WebState};
-use super::auth::{MonitoringAuthPolicy, MonitoringRequest, INTENT_HEADER, INTENT_VALUE};
+use super::auth::{MonitoringAuthorizationPolicy, MonitoringRequest, INTENT_HEADER, INTENT_VALUE};
 use super::common::{parse_fastapi_bool, QueryValues};
 use super::events::{
     data_frame, degraded_frame, EventBroadcaster, EventCoalescer, TopicEvent, CHANNEL_TOPICS,
@@ -32,7 +32,7 @@ use super::events::{
 };
 use super::fleet_metrics::WebFleetMetrics;
 use super::handler::{
-    AccessGrant, AccessNeed, GrantedAccess, MonitoringHandler, MonitoringHandlerConfig,
+    AccessGrant, AccessNeed, Actions, GrantedAccess, MonitoringHandler, MonitoringHandlerConfig,
     RequestParts, ResponseForm, ResponseParts, Verdict,
 };
 use super::routes::task_not_found_text;
@@ -49,7 +49,7 @@ use super::trace_link::{TraceLink, TraceLinkTemplate};
 struct AllowAll;
 
 #[async_trait]
-impl MonitoringAuthPolicy for AllowAll {
+impl MonitoringAuthorizationPolicy for AllowAll {
     async fn can_view(&self, _request: MonitoringRequest<'_>) -> bool {
         true
     }
@@ -63,7 +63,7 @@ impl MonitoringAuthPolicy for AllowAll {
 struct ViewOnly;
 
 #[async_trait]
-impl MonitoringAuthPolicy for ViewOnly {
+impl MonitoringAuthorizationPolicy for ViewOnly {
     async fn can_view(&self, _request: MonitoringRequest<'_>) -> bool {
         true
     }
@@ -74,20 +74,20 @@ impl MonitoringAuthPolicy for ViewOnly {
 }
 
 /// A policy of the router tests that allows a request with a value of the
-/// header that is not blank; actions only when `allow_actions`.
+/// header that is not blank; actions only when `actions` is enabled.
 struct TrustedHeader {
     header_name: axum::http::HeaderName,
-    allow_actions: bool,
+    actions: Actions,
 }
 
 impl TrustedHeader {
     fn new(
         header_name: &str,
-        allow_actions: bool,
+        actions: Actions,
     ) -> Result<Self, axum::http::header::InvalidHeaderName> {
         Ok(Self {
             header_name: axum::http::HeaderName::try_from(header_name)?,
-            allow_actions,
+            actions,
         })
     }
 
@@ -101,13 +101,16 @@ impl TrustedHeader {
 }
 
 #[async_trait]
-impl MonitoringAuthPolicy for TrustedHeader {
+impl MonitoringAuthorizationPolicy for TrustedHeader {
     async fn can_view(&self, request: MonitoringRequest<'_>) -> bool {
         self.identified(request)
     }
 
     async fn can_act(&self, request: MonitoringRequest<'_>) -> bool {
-        self.allow_actions && self.identified(request)
+        match self.actions {
+            Actions::Enabled => self.identified(request),
+            Actions::Disabled => false,
+        }
     }
 }
 
@@ -168,9 +171,9 @@ fn fixed_probe(schema: SchemaStatus) -> Arc<SchemaProbe> {
 
 fn test_state(
     pool: &TestPool,
-    auth_policy: Arc<dyn MonitoringAuthPolicy>,
+    authorization_policy: Arc<dyn MonitoringAuthorizationPolicy>,
     schema_probe: Arc<SchemaProbe>,
-    actions_enabled: bool,
+    actions: Actions,
     assets: Arc<dyn super::spa::AssetStore>,
 ) -> WebState {
     let broker = Arc::new(PostgresBroker::from_test_url(
@@ -184,12 +187,12 @@ fn test_state(
         )),
         events: EventBroadcaster::with_debounce(Arc::clone(&broker), Duration::from_millis(25)),
         broker,
-        auth_policy,
+        authorization_policy,
         schema_probe,
         task_stats_cache: Arc::new(TaskStatsCache::new()),
         task_facets_cache: Arc::new(ReadCache::new()),
         task_breakdown_cache: Arc::new(ReadCache::new()),
-        actions_enabled,
+        actions,
         ui_config: MonitoringUiConfig::default(),
         assets,
         children: Arc::new(TestChildSpecs::empty()),
@@ -199,15 +202,15 @@ fn test_state(
 }
 
 fn test_router(
-    auth_policy: Arc<dyn MonitoringAuthPolicy>,
+    authorization_policy: Arc<dyn MonitoringAuthorizationPolicy>,
     schema: SchemaStatus,
-    actions_enabled: bool,
+    actions: Actions,
 ) -> Router {
     build_router(test_state(
         &lazy_pool(),
-        auth_policy,
+        authorization_policy,
         fixed_probe(schema),
-        actions_enabled,
+        actions,
         MemoryAssets::standard(),
     ))
 }
@@ -253,9 +256,9 @@ async fn json(response: axum::response::Response) -> serde_json::Value {
 #[tokio::test]
 async fn every_declared_api_route_is_view_authorized() {
     let router = test_router(
-        Arc::new(TrustedHeader::new("X-Forwarded-User", true).unwrap()),
+        Arc::new(TrustedHeader::new("X-Forwarded-User", Actions::Enabled).unwrap()),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
     let reads = [
         "/api/meta",
@@ -303,7 +306,7 @@ async fn action_guard_order_is_authorization_then_intent_then_schema() {
     let unknown = status(SchemaState::Unknown, None);
     let action = "/api/tasks/not-a-uuid/cancel";
 
-    let response = test_router(Arc::new(ViewOnly), unknown, true)
+    let response = test_router(Arc::new(ViewOnly), unknown, Actions::Enabled)
         .oneshot(action_request(action))
         .await
         .unwrap();
@@ -313,7 +316,7 @@ async fn action_guard_order_is_authorization_then_intent_then_schema() {
         serde_json::json!({"detail": "Not authorized."})
     );
 
-    let response = test_router(Arc::new(AllowAll), unknown, false)
+    let response = test_router(Arc::new(AllowAll), unknown, Actions::Disabled)
         .oneshot(request(Method::POST, action))
         .await
         .unwrap();
@@ -323,7 +326,7 @@ async fn action_guard_order_is_authorization_then_intent_then_schema() {
         serde_json::json!({"detail": "Not authorized."})
     );
 
-    let response = test_router(Arc::new(AllowAll), unknown, true)
+    let response = test_router(Arc::new(AllowAll), unknown, Actions::Enabled)
         .oneshot(request(Method::POST, action))
         .await
         .unwrap();
@@ -333,7 +336,7 @@ async fn action_guard_order_is_authorization_then_intent_then_schema() {
         serde_json::json!({"detail": "Missing X-Horsies-Intent: action header."})
     );
 
-    let response = test_router(Arc::new(AllowAll), unknown, true)
+    let response = test_router(Arc::new(AllowAll), unknown, Actions::Enabled)
         .oneshot(action_request(action))
         .await
         .unwrap();
@@ -355,7 +358,7 @@ async fn an_action_with_another_intent_value_is_refused() {
         .body(Body::from("{}"))
         .expect("action request");
 
-    let response = test_router(Arc::new(AllowAll), unknown, true)
+    let response = test_router(Arc::new(AllowAll), unknown, Actions::Enabled)
         .oneshot(wrong_intent)
         .await
         .expect("the router answers");
@@ -372,7 +375,7 @@ async fn task_action_body_defaults_when_absent_and_malformed_json_is_422() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
     let absent = Request::builder()
         .method(Method::POST)
@@ -424,7 +427,7 @@ async fn query_and_path_validation_preserve_location_input_and_window_refusals()
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
 
     for field in ["since", "until"] {
@@ -524,12 +527,12 @@ async fn the_meta_reports_the_trace_link_template_or_null() {
         &lazy_pool(),
         Arc::new(AllowAll),
         fixed_probe(schema),
-        true,
+        Actions::Enabled,
         MemoryAssets::standard(),
     );
     linked.ui_config.trace_link =
         TraceLink::Template(TraceLinkTemplate::parse(TEMPLATE).expect("the template is valid"));
-    let plain = test_router(Arc::new(AllowAll), schema, true);
+    let plain = test_router(Arc::new(AllowAll), schema, Actions::Enabled);
 
     let linked_meta = json(
         build_router(linked)
@@ -570,7 +573,7 @@ async fn schema_state_matrix_controls_meta_and_actions_without_blocking_reads() 
         (SchemaState::Unknown, None, false, Some(SCHEMA_UNKNOWN)),
     ];
     for (state, version, compatible, reason) in cases {
-        let router = test_router(Arc::new(AllowAll), status(state, version), true);
+        let router = test_router(Arc::new(AllowAll), status(state, version), Actions::Enabled);
         let meta_response = router
             .clone()
             .oneshot(request(Method::GET, "/api/meta"))
@@ -580,7 +583,11 @@ async fn schema_state_matrix_controls_meta_and_actions_without_blocking_reads() 
         let meta = json(meta_response).await;
         assert_eq!(meta["schema_compatible"], compatible);
         assert_eq!(meta["schema_state"], serde_json::to_value(state).unwrap());
-        assert_eq!(meta["actions_enabled"], compatible);
+        let actions = match compatible {
+            true => "ENABLED",
+            false => "DISABLED",
+        };
+        assert_eq!(meta["actions"], actions);
         assert_eq!(
             meta["schema_version"],
             serde_json::to_value(version).unwrap()
@@ -618,7 +625,7 @@ async fn every_action_route_inherits_the_schema_gate() {
             SchemaState::Mismatch,
             Some(crate::expected_schema_version() - 1),
         ),
-        true,
+        Actions::Enabled,
     );
     for path in [
         "/api/tasks/id/cancel",
@@ -735,7 +742,7 @@ async fn failed_listener_sends_one_degraded_frame_and_closes() {
             SchemaState::Match,
             Some(crate::expected_schema_version()),
         )),
-        true,
+        Actions::Enabled,
         MemoryAssets::standard(),
     );
     let response = build_router(state)
@@ -760,9 +767,9 @@ async fn failed_listener_sends_one_degraded_frame_and_closes() {
 async fn spa_is_public_mountable_injected_and_traversal_safe() {
     let mut state = test_state(
         &lazy_pool(),
-        Arc::new(TrustedHeader::new("X-Forwarded-User", false).unwrap()),
+        Arc::new(TrustedHeader::new("X-Forwarded-User", Actions::Disabled).unwrap()),
         fixed_probe(status(SchemaState::Unknown, None)),
-        false,
+        Actions::Disabled,
         MemoryAssets::standard(),
     );
     state.ui_config.custom_css_url = Some("/brand/override.css".to_owned());
@@ -870,7 +877,11 @@ fn the_runtime_config_is_the_text_of_python_json_dumps() {
 /// a built asset is served with the bytes of its file.
 #[tokio::test]
 async fn a_built_asset_is_served_with_its_bytes() {
-    let router = test_router(Arc::new(AllowAll), status(SchemaState::Unknown, None), true);
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Unknown, None),
+        Actions::Enabled,
+    );
 
     let asset = router
         .oneshot(request(Method::GET, "/assets/app.js"))
@@ -886,7 +897,11 @@ async fn a_built_asset_is_served_with_its_bytes() {
 /// with no custom stylesheet, the page gets no stylesheet link.
 #[tokio::test]
 async fn no_custom_css_means_no_extra_stylesheet() {
-    let router = test_router(Arc::new(AllowAll), status(SchemaState::Unknown, None), true);
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Unknown, None),
+        Actions::Enabled,
+    );
 
     let page = router.oneshot(request(Method::GET, "/")).await.unwrap();
 
@@ -997,7 +1012,7 @@ async fn missing_embedded_index_is_a_factual_503_while_api_still_answers() {
         &lazy_pool(),
         Arc::new(AllowAll),
         fixed_probe(status(SchemaState::Unknown, None)),
-        true,
+        Actions::Enabled,
         MemoryAssets::empty(),
     );
     let router = build_router(state);
@@ -1464,8 +1479,8 @@ async fn migrated_state() -> WebState {
         )),
         events: EventBroadcaster::with_debounce(Arc::clone(&broker), Duration::from_millis(25)),
         broker,
-        auth_policy: Arc::new(AllowAll),
-        actions_enabled: true,
+        authorization_policy: Arc::new(AllowAll),
+        actions: Actions::Enabled,
         ui_config: MonitoringUiConfig::default(),
         assets: MemoryAssets::standard(),
         children: Arc::new(TestChildSpecs::empty()),
@@ -1806,7 +1821,7 @@ async fn a_task_path_id_that_is_not_a_uuid_is_invalid_input() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
     let read = router
         .clone()
@@ -1834,7 +1849,7 @@ async fn a_workflow_read_path_id_that_is_not_a_uuid_is_not_found() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
     let run = router
         .clone()
@@ -1884,7 +1899,7 @@ async fn a_workflow_read_path_id_that_python_refuses_is_not_found() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
     let id = "URN:UUID:00345678-abcd-4f12-8456-7890abcdef12";
     for (path, detail) in [
@@ -1917,7 +1932,7 @@ async fn a_workflow_action_path_id_that_is_not_a_uuid_is_invalid_input() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
     let refusal = not_a_uuid_refusal("workflow_id");
     for path in [
@@ -1940,7 +1955,7 @@ async fn a_node_index_outside_the_integer_column_is_not_found() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
     let run_id = uuid::Uuid::new_v4();
     let huge = "1".repeat(40);
@@ -2015,7 +2030,7 @@ async fn a_task_detail_read_that_fails_is_not_a_not_found() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
     let read = router
         .oneshot(request(
@@ -2083,7 +2098,7 @@ async fn a_database_failure_that_may_clear_is_503_on_every_route_kind() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
 
     assert_failures_answer(&router, StatusCode::SERVICE_UNAVAILABLE).await;
@@ -2106,7 +2121,7 @@ async fn a_database_failure_that_stays_is_500_on_every_route_kind() {
             SchemaState::Match,
             Some(crate::expected_schema_version()),
         )),
-        true,
+        Actions::Enabled,
         MemoryAssets::standard(),
     );
     let broker = Arc::clone(&state.broker);
@@ -2229,7 +2244,7 @@ async fn an_unknown_error_category_is_a_bad_request_on_every_task_route() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
 
     for path in [
@@ -2670,7 +2685,7 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
         Arc::clone(&broker),
         Arc::new(TestChildSpecs::empty()),
         MonitoringHandlerConfig {
-            actions_enabled: true,
+            actions: Actions::Enabled,
             ui: MonitoringUiConfig::default(),
             client_version: env!("CARGO_PKG_VERSION").to_owned(),
             heartbeat: HEARTBEAT,
@@ -2703,7 +2718,7 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
     assert_eq!(objects, (None, None, None, 0));
 }
 
-fn granted_handler(actions_enabled: bool) -> MonitoringHandler {
+fn granted_handler(actions: Actions) -> MonitoringHandler {
     let mut state = test_state(
         &lazy_pool(),
         Arc::new(GrantedAccess),
@@ -2711,7 +2726,7 @@ fn granted_handler(actions_enabled: bool) -> MonitoringHandler {
             SchemaState::Match,
             Some(crate::expected_schema_version()),
         )),
-        actions_enabled,
+        actions,
         MemoryAssets::standard(),
     );
     state.client_version = "9.9.9-client".to_owned();
@@ -2754,7 +2769,7 @@ fn body_json(response: &ResponseParts) -> serde_json::Value {
 /// assets and every other path.
 #[tokio::test]
 async fn the_handler_asks_the_verdicts_of_the_python_routes() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
     let id = Uuid::nil();
     for (method, path, need) in [
         (
@@ -2862,7 +2877,7 @@ async fn the_handler_asks_the_verdicts_of_the_python_routes() {
     assert_eq!(events.need, AccessNeed::View);
     assert_eq!(events.form, ResponseForm::EventStream);
 
-    let view_only = granted_handler(false);
+    let view_only = granted_handler(Actions::Disabled);
     let cancel = view_only.route_access(&Method::POST, &format!("/api/tasks/{id}/cancel"));
     assert_eq!(cancel.need, AccessNeed::View);
 }
@@ -2871,7 +2886,7 @@ async fn the_handler_asks_the_verdicts_of_the_python_routes() {
 /// the verdicts of the grant; no database is reachable here.
 #[tokio::test]
 async fn the_handler_serves_the_routes_with_the_verdicts_of_the_grant() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
 
     let refused = handler
         .handle(
@@ -2965,7 +2980,7 @@ async fn the_handler_serves_the_routes_with_the_verdicts_of_the_grant() {
 /// the act guard refuses without a verdict to act.
 #[tokio::test]
 async fn an_action_while_actions_are_disabled_is_refused_without_asking_to_act() {
-    let handler = granted_handler(false);
+    let handler = granted_handler(Actions::Disabled);
 
     let refused = handler
         .handle(
@@ -2984,7 +2999,7 @@ async fn an_action_while_actions_are_disabled_is_refused_without_asking_to_act()
 #[tokio::test]
 #[should_panic(expected = "does not answer the need")]
 async fn a_grant_that_skips_a_needed_verdict_is_a_defect() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
     let _ = handler
         .handle(
             parts(Method::GET, "/api/meta"),
@@ -2996,7 +3011,7 @@ async fn a_grant_that_skips_a_needed_verdict_is_a_defect() {
 #[tokio::test]
 #[should_panic(expected = "is the event stream")]
 async fn the_event_stream_has_no_single_response() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
     let _ = handler
         .handle(
             parts(Method::GET, "/api/events"),
@@ -3009,7 +3024,7 @@ async fn the_event_stream_has_no_single_response() {
 /// the host has no stream to open.
 #[tokio::test]
 async fn a_refused_view_of_the_event_stream_is_answered_by_the_guard() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
 
     let refused = handler
         .handle(
@@ -3029,7 +3044,7 @@ async fn a_refused_view_of_the_event_stream_is_answered_by_the_guard() {
 /// refused verdict is answered first by the guards.
 #[tokio::test]
 async fn a_body_over_the_bound_is_refused_after_the_verdicts() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
     let over = axum::body::Bytes::from(vec![b' '; super::handler::MAX_REQUEST_BODY_BYTES + 1]);
 
     let too_large = handler
@@ -3068,7 +3083,7 @@ async fn route_access_follows_the_actions_switch() {
     let path = format!("/api/workflows/{}/resume", Uuid::nil());
     assert_eq!(
         super::handler::route_access(true, &Method::POST, &path),
-        granted_handler(true).route_access(&Method::POST, &path)
+        granted_handler(Actions::Enabled).route_access(&Method::POST, &path)
     );
     assert_eq!(
         super::handler::route_access(false, &Method::POST, &path).need,
@@ -3080,7 +3095,7 @@ async fn route_access_follows_the_actions_switch() {
 /// path are public (a 405 and the page).
 #[tokio::test]
 async fn metrics_needs_the_view_verdict() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
     for (method, path, need) in [
         (Method::GET, "/metrics", AccessNeed::View),
         (Method::HEAD, "/metrics", AccessNeed::View),
@@ -3100,7 +3115,7 @@ async fn metrics_needs_the_view_verdict() {
 /// with no fleet series, and the status is still 200.
 #[tokio::test]
 async fn metrics_serves_the_fleet_text_behind_the_view_verdict() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
     let refused = handler
         .handle(
             parts(Method::GET, "/metrics"),
@@ -3159,7 +3174,7 @@ async fn metrics_serves_the_fleet_text_behind_the_view_verdict() {
 /// degraded frame and ends.
 #[tokio::test]
 async fn an_event_stream_without_a_listener_degrades_and_ends() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
     let mut frames = handler.subscribe_events().await;
 
     let first = tokio::time::timeout(Duration::from_secs(5), frames.next())

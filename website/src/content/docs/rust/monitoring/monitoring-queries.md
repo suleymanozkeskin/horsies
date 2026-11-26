@@ -83,7 +83,7 @@ A count above 1 holds lost leases and released claims. `placed_at` is the claim 
 | `Unavailable` | `reason` | The record cannot show the timing of the run (`UnavailableReason`). No segment |
 | `Inconsistent` | `conflict` | The record of the node contradicts itself (`TimingConflictInfo`). No segment |
 
-Each `TimingSegmentInfo` has `phase`, `started_at`, `end` (`Ended { at }` or `Open`) and `source` (`Node`; `Task { generation, task_id }`; or `Attempt { generation, task_id, attempt }`). `generation` counts the tasks of the node from 1: a pause abandon or a resume gives a node a new task.
+Each `TimingSegmentInfo` has `phase`, `started_at`, `end` (`Closed { at }` or `Open`) and `source` (`Node`; `Task { generation, task_id }`; or `Attempt { generation, task_id, attempt }`). `generation` counts the tasks of the node from 1: a pause abandon or a resume gives a node a new task.
 
 | `SegmentPhaseInfo` | Meaning |
 |--------------------|---------|

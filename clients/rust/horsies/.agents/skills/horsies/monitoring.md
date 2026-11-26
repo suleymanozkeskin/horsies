@@ -114,7 +114,7 @@ Phase timing (the lifecycle record of migration 1001; one statement reads a run,
   `Cancel` (the cancel of a RUNNING task wrote the row, outcome `Cancelled`, `finished_at` = the cancel time).
 - `WorkflowNodeInfo.timing`: `NodeTimingInfo::Exact { segments, endpoint }`, `Partial { reasons, segments,
   endpoint }`, `Unavailable { reason }` or `Inconsistent { conflict }`. A segment is `TimingSegmentInfo {
-  phase, started_at, end: Ended { at } | Open, source: Node | Task { generation, task_id } | Attempt {
+  phase, started_at, end: Closed { at } | Open, source: Node | Task { generation, task_id } | Attempt {
   generation, task_id, attempt } }`. Phases: `Pending`, `Ready`, `Enqueued`, `RetryWait`, `Claimed { claim:
   Earlier { count } | Recorded { placement } | NotRecorded }`, `Running`, `Finalizing`, `Advancing`,
   `Unknown { reason }`. `endpoint` is `Terminal { status, at }` or `NotTerminal`; it can come before the end
@@ -247,7 +247,7 @@ fn monitoring_routes(app: &Horsies) -> Result<Router, Box<dyn std::error::Error>
 }
 ```
 
-`router(&app, config, policy) -> axum::Router` serves every path of the
+`router(&app, config, authorization_policy) -> axum::Router` serves every path of the
 mount: the page and its assets, `/api/...`, the event stream
 (`GET /api/events`), and `GET /metrics`: the fleet metrics of the app's
 database behind the view verdict (the same gauges as `<binary> metrics`,
@@ -265,7 +265,7 @@ read when the last read is 15 s old or more).
   from the app's own binary, after the registrations, when the UI must
   resume such workflows.
 - `MonitoringConfig { ui: MonitoringUiConfig { custom_css_url, trace_link }, actions }`.
-  `trace_link` is `TraceLink::NoTraceLink` (the task detail shows the trace
+  `trace_link` is `TraceLink::Text` (the task detail shows the trace
   id as text) or `TraceLink::Template(TraceLinkTemplate::parse(text)?)`: an
   `http` or `https` URL with one `{trace_id}`, at most 2,048 bytes of
   printable ASCII. `horsies web --trace-link TEMPLATE` sets it.
@@ -278,14 +278,14 @@ read when the last read is 15 s old or more).
 |---|---|---|
 | `AllowAll` | Yes | Yes. The host owns authentication: mount the router behind it |
 | `ViewOnly` | Yes | No |
-| `TrustedHeader::new(header_name, allow_actions)` | The header has a value that is not blank | `allow_actions` and the header check. `new` returns `Result<_, InvalidHeaderName>` |
+| `TrustedHeader::new(header_name, actions)` | The header has a value that is not blank | `actions` is `Actions::Enabled`, and the header check. `new` returns `Result<_, InvalidHeaderName>` |
 
 ```rust
-use horsies::web::{MonitoringAuthPolicy, MonitoringRequest};
+use horsies::web::{MonitoringAuthorizationPolicy, MonitoringRequest};
 
 struct AdminHeader;
 
-impl MonitoringAuthPolicy for AdminHeader {
+impl MonitoringAuthorizationPolicy for AdminHeader {
     async fn can_view(&self, request: MonitoringRequest<'_>) -> bool {
         request.headers.contains_key("x-admin-user")
     }
@@ -296,7 +296,7 @@ impl MonitoringAuthPolicy for AdminHeader {
 }
 ```
 
-- `MonitoringAuthPolicy` is `Send + Sync + 'static`. Write its methods as
+- `MonitoringAuthorizationPolicy` is `Send + Sync + 'static`. Write its methods as
   `async fn`; each future must be `Send`.
 - `MonitoringRequest` has `method`, `uri` (the path inside the mount),
   `version`, `headers` and `extensions` (what the host's own layers put
@@ -319,7 +319,7 @@ feature: `cargo install horsies --features web`).
 ```bash
 horsies web horsies.toml
 horsies web --database-url postgresql://app:secret@localhost:5432/horsies
-horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
+horsies web horsies.toml --host 0.0.0.0 --authorization trusted-header --enable-actions
 ```
 
 | Option | Default | Description |
@@ -330,14 +330,14 @@ horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
 | `--pgbouncer-transaction-mode` | off | `--database-url` is a PgBouncer transaction-pool endpoint. Needs `--session-database-url` |
 | `--host HOST` | `127.0.0.1` | Bind address |
 | `--port PORT` | `8600` | Bind port; `0` asks the operating system for a free port |
-| `--auth MODE` | `none` | `none` (a loopback host only) or `trusted-header` |
+| `--authorization MODE` | `none` | `none` (a loopback host only) or `trusted-header` |
 | `--trusted-header NAME` | `X-Forwarded-User` | The identity header that the proxy sets |
 | `--enable-actions` | off | Allow task cancel and workflow pause, resume and cancel |
 | `--custom-css-url URL` | none | A stylesheet that the page loads after its own |
 | `--loglevel LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
 
 - The server never installs or migrates the schema (`ObserveOnly`).
-- `--auth none` on a host that is not a loopback address exits with code 2.
+- `--authorization none` on a host that is not a loopback address exits with code 2.
 - The binary has no task or workflow of an app. A resume of a paused
   workflow that owes a sub-workflow child needs the app's definitions:
   serve the UI from the app's own binary with `horsies::web::router`.
@@ -519,7 +519,7 @@ use horsies::events::{
     AttemptEnd, AttemptRecord, HandlerError, HANDLER_QUEUE_EVENTS, HANDLER_STATS_INTERVAL,
 };
 use horsies::web::{  // feature `web`
-    router, Actions, MonitoringConfig, MonitoringUiConfig, MonitoringAuthPolicy,
+    router, Actions, MonitoringConfig, MonitoringUiConfig, MonitoringAuthorizationPolicy,
     MonitoringRequest, AllowAll, ViewOnly, TrustedHeader, INTENT_HEADER, INTENT_VALUE,
 };
 ```

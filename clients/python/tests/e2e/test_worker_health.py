@@ -24,8 +24,8 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.class_coverage import (
     BudgetLoad,
     StreamCoverage,
-    StreamServed,
-    StreamUnserved,
+    StreamCoverageStateServed,
+    StreamCoverageStateUnserved,
     WorkerClassLoad,
 )
 from horsies.core.models.tasks import Execution
@@ -238,7 +238,7 @@ async def test_the_report_gives_the_seats_of_the_shared_budget(
     )
     (stream,) = report.streams
     assert (stream.queue_name, stream.execution) == ('default', ASYNC)
-    assert stream.state == StreamServed(workers=1, capacity=seats)
+    assert stream.state == StreamCoverageStateServed(workers=1, capacity=seats)
 
 
 @pytest.mark.e2e
@@ -274,6 +274,6 @@ async def test_a_worker_with_only_shared_children_serves_only_shared_rows(
 
     assert status == 'PENDING'
     assert coverage.streams == (
-        StreamCoverage('default', ISOLATED, StreamUnserved()),
-        StreamCoverage('default', ASYNC, StreamServed(workers=1, capacity=4)),
+        StreamCoverage('default', ISOLATED, StreamCoverageStateUnserved()),
+        StreamCoverage('default', ASYNC, StreamCoverageStateServed(workers=1, capacity=4)),
     )

@@ -77,8 +77,8 @@ from horsies._catalog.monitoring_bounds import LIST_ROW_BOUND
 from horsies.monitoring import (
     Breakdown,
     BreakdownLimit,
-    BreakdownUnclaimedGroup,
-    BreakdownValueGroup,
+    BreakdownGroupUnclaimed,
+    BreakdownGroupValue,
     MonitoringResult,
     TaskPage,
     WorkflowRunsLimit,
@@ -944,11 +944,11 @@ class TestTaskBreakdown:
         assert is_ok(result)
         breakdown = result.ok_value
         rows = {row.group: row for row in breakdown.groups}
-        assert rows[BreakdownValueGroup(value='w1')].total == 2
-        assert rows[BreakdownValueGroup(value='w1')].completed == 1
-        assert rows[BreakdownValueGroup(value='w1')].failed == 1
-        assert rows[BreakdownValueGroup(value='w1')].retried == 1
-        assert rows[BreakdownValueGroup(value='w2')].running == 1
+        assert rows[BreakdownGroupValue(value='w1')].total == 2
+        assert rows[BreakdownGroupValue(value='w1')].completed == 1
+        assert rows[BreakdownGroupValue(value='w1')].failed == 1
+        assert rows[BreakdownGroupValue(value='w1')].retried == 1
+        assert rows[BreakdownGroupValue(value='w2')].running == 1
         assert breakdown.total.total == 3
         assert breakdown.group_count == 2
 
@@ -987,7 +987,7 @@ class TestTaskBreakdown:
 
         assert is_ok(result)
         assert [(row.group, row.total) for row in result.ok_value.groups] == [
-            (BreakdownUnclaimedGroup(), 2),
+            (BreakdownGroupUnclaimed(), 2),
         ]
 
     async def test_a_worker_named_unknown_is_a_group_apart_from_the_unclaimed_tasks(
@@ -1005,8 +1005,8 @@ class TestTaskBreakdown:
         assert is_ok(result)
         breakdown = result.ok_value
         assert [(row.group, row.total) for row in breakdown.groups] == [
-            (BreakdownValueGroup(value='unknown'), 2),
-            (BreakdownUnclaimedGroup(), 1),
+            (BreakdownGroupValue(value='unknown'), 2),
+            (BreakdownGroupUnclaimed(), 1),
         ]
         assert breakdown.group_count == 2
         assert breakdown.total.total == sum(row.total for row in breakdown.groups)
@@ -1026,10 +1026,10 @@ class TestTaskBreakdown:
 
         assert is_ok(result)
         assert [row.group for row in result.ok_value.groups] == [
-            BreakdownValueGroup(value='a-worker'),
-            BreakdownValueGroup(value='unknown'),
-            BreakdownUnclaimedGroup(),
-            BreakdownValueGroup(value='zz-worker'),
+            BreakdownGroupValue(value='a-worker'),
+            BreakdownGroupValue(value='unknown'),
+            BreakdownGroupUnclaimed(),
+            BreakdownGroupValue(value='zz-worker'),
         ]
 
     async def test_limit_caps_groups_but_not_total_or_group_count(
@@ -1086,8 +1086,8 @@ class TestTaskBreakdown:
         assert is_ok(result)
         assert result.ok_value.group_by == 'task_name'
         assert [row.group for row in result.ok_value.groups] == [
-            BreakdownValueGroup(value='alpha_task'),
-            BreakdownValueGroup(value='beta_task'),
+            BreakdownGroupValue(value='alpha_task'),
+            BreakdownGroupValue(value='beta_task'),
         ]
 
     async def test_filters_apply_to_groups_and_total(
@@ -1115,7 +1115,7 @@ class TestTaskBreakdown:
 
         assert is_ok(result)
         assert [row.group for row in result.ok_value.groups] == [
-            BreakdownValueGroup(value='w1'),
+            BreakdownGroupValue(value='w1'),
         ]
         assert result.ok_value.total.total == 1
 

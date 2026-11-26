@@ -105,7 +105,7 @@ export function exactTiming(
           ? { kind, reason: 'WORKER_LOST' }
           : { kind },
     started_at: at(start),
-    end: { kind: 'ended', at: at(end) },
+    end: { kind: 'closed', at: at(end) },
     source:
       kind === 'pending' || kind === 'advancing'
         ? { kind: 'node' }

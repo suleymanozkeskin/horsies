@@ -763,11 +763,11 @@ Registry (HRS-300-HRS-399):
   - `--metrics-listen HOST:PORT` (or [IPV6]:PORT; no default, no config field) serves GET /metrics (Prometheus text 0.0.4), GET /livez (503 only when the claim loop is stuck) and GET /readyz (200 when the pools have no failure, a child serves and the liveness lock is held); a bad value exits 2; a bind failure does not stop the worker. See /horsies/observability/metrics/
 - `horsies scheduler <module> [--loglevel LEVEL]`
 - `horsies check <module> [--live] [--loglevel LEVEL]`
-- `horsies web <module> [--host HOST] [--port PORT] [--auth none|trusted-header] [--trusted-header HEADER] [--enable-actions] [--trace-link TEMPLATE] [--loglevel LEVEL]` — serve the monitoring web UI (requires the `horsies[web]` extra)
+- `horsies web <module> [--host HOST] [--port PORT] [--authorization none|trusted-header] [--trusted-header HEADER] [--enable-actions] [--trace-link TEMPLATE] [--loglevel LEVEL]` — serve the monitoring web UI (requires the `horsies[web]` extra)
   - `horsies web --database-url URL [--session-database-url URL] [--pgbouncer-transaction-mode] [...]` — monitor a database without importing an app module (registry-less)
   - Pass either `<module>` or `--database-url`, not both
-  - Defaults: `--host 127.0.0.1`, `--port 8600`, `--auth none`, `--trusted-header X-Forwarded-User`, actions off (view-only)
-  - `--auth none` is allowed only on a loopback host; a non-loopback host requires `--auth trusted-header`
+  - Defaults: `--host 127.0.0.1`, `--port 8600`, `--authorization none`, `--trusted-header X-Forwarded-User`, actions off (view-only)
+  - `--authorization none` is allowed only on a loopback host; a non-loopback host requires `--authorization trusted-header`
   - `--enable-actions` allows cancel/pause/resume
   - `--trace-link TEMPLATE` links a task's trace id in the task detail: an http or https URL with one {trace_id} (MonitoringUIConfig(trace_link=TraceLinkTemplate(template=...)) when mounting; a refused template is HRS-221 CONFIG_INVALID_TRACE_LINK)
 - `horsies metrics <module> --listen HOST:PORT [--loglevel LEVEL]` — serve the fleet metrics of the app's database at GET /metrics (Prometheus text 0.0.4); `--listen` is required (HOST:PORT or [IPV6]:PORT); reads at start, then at most once per 15 s, each statement within 2 s; a failed query has no series and sets horsies_exporter_collect_failed{query} 1; exit 2 bad address, 0 on SIGTERM/SIGINT, 1 when the app does not load or the address does not bind. `horsies web` and create_monitoring_app also serve GET /metrics behind can_view. See /horsies/observability/fleet-collector/
@@ -845,7 +845,7 @@ Each entry: Title -- summary -> URL
 - Broker Methods -- async inspection APIs -> /horsies/monitoring/broker-methods/
 - Web UI Overview -- browser dashboard: surfaces, the run graph and timeline (node time, longest chain, linear and log scales), the attempt panel, durations, freshness, action outcomes, limits -> /horsies/monitoring/web-ui-overview/
 - Web UI Deployment & Authentication -- mounted and standalone modes, authorization policies, bind rules, identity, connection and schema contracts -> /horsies/monitoring/web-ui-deployment/
-- Web UI Mount -- the Python mount: the horsies[web] extra, create_monitoring_app, MonitoringAuthPolicy, AllowAll, ViewOnly, TrustedHeader, MonitoringUIConfig, static assets -> /horsies/monitoring/web-ui-mount/
+- Web UI Mount -- the Python mount: the horsies[web] extra, create_monitoring_app, MonitoringAuthorizationPolicy, AllowAll, ViewOnly, TrustedHeader, MonitoringUIConfig, static assets -> /horsies/monitoring/web-ui-mount/
 - Action Semantics -- what task cancel, task rerun, and workflow pause, resume, and cancel do -> /horsies/monitoring/action-semantics/
 
 ### Observability
@@ -980,7 +980,7 @@ ping_database, ping_workers, WorkerPong, WorkerStateSnapshot, ClassCoverage, Cla
 web UI, dashboard -> /horsies/monitoring/web-ui-overview/
 horsies web, standalone dashboard -> /horsies/cli/
 trusted-header, authentication, mounted mode, standalone mode, schema state -> /horsies/monitoring/web-ui-deployment/
-horsies[web], create_monitoring_app, MonitoringAuthPolicy, MonitoringUIConfig, FastAPI mount -> /horsies/monitoring/web-ui-mount/
+horsies[web], create_monitoring_app, MonitoringAuthorizationPolicy, MonitoringUIConfig, FastAPI mount -> /horsies/monitoring/web-ui-mount/
 cancel task, rerun task, pause workflow, resume workflow, cancel workflow, actions, include_running, horsies_task_cancel -> /horsies/monitoring/action-semantics/
 cancellation, TaskRuntime.cancel_state, CancelRequested, CancelNotRequested, CancelCause, RunCancelState -> /horsies/tasks/defining-tasks/#cancellation
 rerun_task, RerunTask, RerunEnqueuePolicy, RerunOutcome, RerunEnqueued -> /horsies/operations/rerun-in-your-transaction/

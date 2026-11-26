@@ -25,8 +25,8 @@ from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.errors import ConfigurationError, ErrorCode
-from horsies.web import NoTraceLink, TraceLinkTemplate
-from horsies.web.auth import AllowAll, TrustedHeader, ViewOnly
+from horsies.web import TraceLinkText, TraceLinkTemplate
+from horsies.web.auth import Actions, AllowAll, TrustedHeader, ViewOnly
 
 pytestmark = [pytest.mark.unit]
 
@@ -42,7 +42,7 @@ def web_args(**overrides: Any) -> argparse.Namespace:
         'pgbouncer_transaction_mode': False,
         'host': '127.0.0.1',
         'port': 8600,
-        'auth': 'none',
+        'authorization': 'none',
         'trusted_header': 'X-Forwarded-User',
         'enable_actions': False,
         'trace_link': None,
@@ -114,43 +114,43 @@ class TestAuthPolicySelection:
     """A port reachable from the network requires a proxy-supplied identity."""
 
     def test_loopback_without_actions_is_view_only(self) -> None:
-        policy = cli.resolve_web_auth_policy(web_args())
+        policy = cli.resolve_web_authorization_policy(web_args())
 
         assert isinstance(policy, ViewOnly)
 
     def test_loopback_with_actions_allows_everything(self) -> None:
-        policy = cli.resolve_web_auth_policy(web_args(enable_actions=True))
+        policy = cli.resolve_web_authorization_policy(web_args(enable_actions=True))
 
         assert isinstance(policy, AllowAll)
 
     @pytest.mark.parametrize('host', ['0.0.0.0', '192.168.1.5'])
     def test_exposed_host_refuses_auth_none(self, host: str) -> None:
         with pytest.raises(SystemExit) as raised:
-            cli.resolve_web_auth_policy(web_args(host=host))
+            cli.resolve_web_authorization_policy(web_args(host=host))
 
         assert raised.value.code == 2
 
     def test_exposed_host_is_allowed_with_a_trusted_header(self) -> None:
-        policy = cli.resolve_web_auth_policy(
-            web_args(host='0.0.0.0', auth='trusted-header', enable_actions=True)
+        policy = cli.resolve_web_authorization_policy(
+            web_args(host='0.0.0.0', authorization='trusted-header', enable_actions=True)
         )
 
         assert isinstance(policy, TrustedHeader)
         assert policy.header_name == 'X-Forwarded-User'
-        assert policy.allow_actions is True
+        assert policy.actions is Actions.ENABLED
 
     def test_trusted_header_defaults_to_view_only_actions(self) -> None:
-        policy = cli.resolve_web_auth_policy(
-            web_args(host='0.0.0.0', auth='trusted-header')
+        policy = cli.resolve_web_authorization_policy(
+            web_args(host='0.0.0.0', authorization='trusted-header')
         )
 
         assert isinstance(policy, TrustedHeader)
-        assert policy.allow_actions is False
+        assert policy.actions is Actions.DISABLED
 
     def test_blank_header_name_is_a_usage_error(self) -> None:
         with pytest.raises(SystemExit) as raised:
-            cli.resolve_web_auth_policy(
-                web_args(auth='trusted-header', trusted_header='   ')
+            cli.resolve_web_authorization_policy(
+                web_args(authorization='trusted-header', trusted_header='   ')
             )
 
         assert raised.value.code == 2
@@ -159,7 +159,7 @@ class TestAuthPolicySelection:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """The spoofing risk is the deployment's to close, so it is stated."""
-        cli.resolve_web_auth_policy(web_args(host='0.0.0.0', auth='trusted-header'))
+        cli.resolve_web_authorization_policy(web_args(host='0.0.0.0', authorization='trusted-header'))
 
         stderr = capsys.readouterr().err
         assert 'MUST strip or overwrite' in stderr
@@ -268,7 +268,7 @@ class TestTraceLink:
     def test_no_flag_gives_the_trace_id_as_text(self) -> None:
         config = cli.resolve_web_ui_config(web_args())
 
-        assert config.trace_link == NoTraceLink()
+        assert config.trace_link == TraceLinkText()
 
     def test_a_template_reaches_the_page_settings(self) -> None:
         config = cli.resolve_web_ui_config(web_args(trace_link=GRAFANA_TEMPLATE))
@@ -326,7 +326,7 @@ class TestParserDefaults:
 
         assert captured['host'] == '127.0.0.1'
         assert captured['port'] == 8600
-        assert captured['auth'] == 'none'
+        assert captured['authorization'] == 'none'
         assert captured['enable_actions'] is False
         assert captured['trusted_header'] == 'X-Forwarded-User'
         assert captured['trace_link'] is None
@@ -351,7 +351,7 @@ class TestParserDefaults:
                 '0.0.0.0',
                 '--port',
                 '9000',
-                '--auth',
+                '--authorization',
                 'trusted-header',
                 '--trusted-header',
                 'X-User',
@@ -367,7 +367,7 @@ class TestParserDefaults:
         assert captured['database_url'] == DB_URL
         assert captured['host'] == '0.0.0.0'
         assert captured['port'] == 9000
-        assert captured['auth'] == 'trusted-header'
+        assert captured['authorization'] == 'trusted-header'
         assert captured['trusted_header'] == 'X-User'
         assert captured['enable_actions'] is True
         assert captured['pgbouncer_transaction_mode'] is True
