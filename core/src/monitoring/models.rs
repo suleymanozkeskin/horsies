@@ -568,7 +568,10 @@ pub struct ScheduleStateInfo {
     pub updated_at: DateTime<Utc>,
 }
 
+/// The body of `POST /api/tasks/{task_id}/cancel`. A key other than
+/// `include_running` is refused (`deny_unknown_fields`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CancelTaskBody {
     #[serde(default)]
     pub include_running: bool,
