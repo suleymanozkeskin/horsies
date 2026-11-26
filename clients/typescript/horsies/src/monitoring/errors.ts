@@ -13,6 +13,7 @@ import type {
   NativeBrokerCoreError,
 } from "../_catalog/broker_errors.ts";
 import { brokerCoreErrorFromNative } from "../_catalog/broker_errors.ts";
+import { MonitoringQueryRefusalCode } from "../_catalog/monitoring.ts";
 import type {
   MonitoringQueryCoreError,
   NativeMonitoringQueryCoreError,
@@ -40,7 +41,7 @@ export type QueryRefusedField =
 
 /** An argument that the call refuses before any connect: no statement ran. `reason` names the rule. */
 export interface QueryRefused {
-  readonly code: "QUERY_REFUSED";
+  readonly code: typeof MonitoringQueryRefusalCode.QUERY_REFUSED;
   readonly retryable: false;
   readonly field: QueryRefusedField;
   readonly reason: string;
@@ -81,7 +82,7 @@ export type WorkerHistoryError = HealthInputError | QueryRefused;
 
 /** The frozen `QUERY_REFUSED` of `field`. Pure. */
 export function queryRefused(field: QueryRefusedField, reason: string): QueryRefused {
-  return Object.freeze({ code: "QUERY_REFUSED", retryable: false, field, reason });
+  return Object.freeze({ code: MonitoringQueryRefusalCode.QUERY_REFUSED, retryable: false, field, reason });
 }
 
 /** The monitoring query error of a raw record of the core. */

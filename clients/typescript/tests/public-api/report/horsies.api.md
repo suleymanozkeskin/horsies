@@ -1522,6 +1522,14 @@ export interface MonitoringQueryHistoryContractViolation {
     readonly retryable: false;
 }
 
+// @public (undocumented)
+export const MonitoringQueryRefusalCode: {
+    readonly QUERY_REFUSED: "QUERY_REFUSED";
+};
+
+// @public (undocumented)
+export type MonitoringQueryRefusalCode = (typeof MonitoringQueryRefusalCode)[keyof typeof MonitoringQueryRefusalCode];
+
 // @public
 export type MonitoringReadError = MonitoringQueryCoreError | QueryRefused;
 
@@ -1889,7 +1897,7 @@ export type ProviderFactory<T> = () => T | Promise<T>;
 // @public
 export interface QueryRefused {
     // (undocumented)
-    readonly code: "QUERY_REFUSED";
+    readonly code: typeof MonitoringQueryRefusalCode.QUERY_REFUSED;
     // (undocumented)
     readonly field: QueryRefusedField;
     // (undocumented)

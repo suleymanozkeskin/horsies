@@ -14,6 +14,8 @@ export type {
   WorkerReadError,
 } from "./errors.ts";
 
+export { MonitoringQueryRefusalCode } from "../_catalog/monitoring.ts";
+
 export type { CancelTaskOptions } from "./cancel.ts";
 
 export type { Monitoring, StaleTasksQuery } from "./app-area.ts";
