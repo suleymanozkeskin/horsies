@@ -102,8 +102,8 @@ type DefinitionFields = {
 
 /**
  * The task name of the params contract of every workflow. The contract only carries the params and the declared
- * output to the contract compile, so its name is a fixed label: the workflow's own rules check the workflow name
- * (HRS-001 for an empty one), and the spec text writer refuses a name with a lone surrogate.
+ * output to the contract compile, so its name is a fixed label: the workflow's own name rules check the workflow name
+ * at `Horsies.create` (`nameRefusals` of `create-checks.ts`).
  */
 const PARAMS_CONTRACT_NAME = "workflow params";
 

@@ -10,6 +10,7 @@ import type { ContractLookup } from "../send/send.ts";
 import { runBuild } from "./builder.ts";
 import { checkBuild } from "./checks.ts";
 import { workflowRecord } from "./define.ts";
+import { unreachable } from "../wire/unreachable.ts";
 import type { SpecFinding } from "./findings.ts";
 import { type ListedWorkflow, listedWorkflowOf, type WorkflowRegistry, workflowRegistry } from "./registry.ts";
 
@@ -23,9 +24,23 @@ export type WorkflowsAtCreate = {
 /** The registry of every workflow that passed its own checks, and every refusal in list order. */
 export type WorkflowsChecked = { readonly registry: WorkflowRegistry; readonly refusals: readonly Refusal[] };
 
-/** The place of a listed workflow in a refusal: `workflows[1] nightly`. Pure. */
+/**
+ * The place of a listed workflow in a refusal: `workflows[1] nightly`; only `workflows[1]` when the name breaks a name
+ * rule, so a refusal never carries a name that is too long or not well-formed. Pure.
+ */
 export function workflowPath(index: number, name: string): string {
-  return `workflows[${index}] ${name}`;
+  const check = nameCheck(name);
+
+  switch (check.kind) {
+    case "valid":
+      return `workflows[${index}] ${name}`;
+    case "empty":
+    case "loneSurrogate":
+    case "tooLong":
+      return `workflows[${index}]`;
+    default:
+      return unreachable(check, "workflowPath");
+  }
 }
 
 /** A spec finding as a refusal under the place `path`. Pure. */
@@ -84,14 +99,69 @@ export function checkWorkflowsAtCreate(input: WorkflowsAtCreate): WorkflowsCheck
   return { registry, refusals };
 }
 
+/** The most characters (code points) of a workflow name: the column `horsies_workflows.name` is `varchar(255)`. */
+export const MAX_WORKFLOW_NAME_CHARS = 255;
+
+/** How a workflow name meets the name rules. */
+type NameCheck =
+  | { readonly kind: "valid" }
+  | { readonly kind: "empty" }
+  | { readonly kind: "loneSurrogate" }
+  | { readonly kind: "tooLong"; readonly chars: number };
+
+/** The first name rule that `name` breaks, or `valid`. Pure. */
+function nameCheck(name: string): NameCheck {
+  if (name.trim() === "") {
+    return { kind: "empty" };
+  }
+
+  if (!name.isWellFormed()) {
+    return { kind: "loneSurrogate" };
+  }
+
+  // A name of at most MAX_WORKFLOW_NAME_CHARS UTF-16 units has at most that many code points.
+  const chars = name.length <= MAX_WORKFLOW_NAME_CHARS ? name.length : [...name].length;
+
+  return chars <= MAX_WORKFLOW_NAME_CHARS ? { kind: "valid" } : { kind: "tooLong", chars };
+}
+
+/**
+ * The refusal of a workflow name that breaks a name rule: an empty name is `HRS-001`; a name with a lone surrogate
+ * (the spec data text cannot carry it) or with more than `MAX_WORKFLOW_NAME_CHARS` characters (the stored column
+ * cannot hold it) is `HRS-033`. Pure.
+ */
+function nameRefusals(path: string, name: string): readonly Refusal[] {
+  const check = nameCheck(name);
+
+  switch (check.kind) {
+    case "valid":
+      return [];
+    case "empty":
+      return [refusal(ErrorCode.WORKFLOW_NO_NAME, path, "a workflow name must not be empty", [])];
+    case "loneSurrogate":
+      return [
+        refusal(ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG, path, "the workflow name holds a lone surrogate", [
+          "give the name as well-formed UTF-16: each surrogate in a pair",
+        ]),
+      ];
+    case "tooLong":
+      return [
+        refusal(
+          ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
+          path,
+          `the workflow name has ${String(check.chars)} characters; the most is ${String(MAX_WORKFLOW_NAME_CHARS)}`,
+          [],
+        ),
+      ];
+    default:
+      return unreachable(check, "nameRefusals");
+  }
+}
+
 /** The refusals of a record: the name, the key, its uniqueness, the error rule, the check cases rule. */
 function recordRefusals(path: string, workflow: object, keys: Map<string, object>): Refusal[] {
   const record = workflowRecord(workflow);
-  const refusals: Refusal[] = [];
-
-  if (record.name.trim() === "") {
-    refusals.push(refusal(ErrorCode.WORKFLOW_NO_NAME, path, "a workflow name must not be empty", []));
-  }
+  const refusals: Refusal[] = [...nameRefusals(path, record.name)];
 
   if (record.definitionKey.trim() === "") {
     refusals.push(refusal(ErrorCode.WORKFLOW_NO_DEFINITION_KEY, path, "a definition key must not be empty", []));

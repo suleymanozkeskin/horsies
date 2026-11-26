@@ -7,11 +7,24 @@ import { Worker } from "node:worker_threads";
 
 import { h } from "../../../horsies/src/wire/public.ts";
 import { checkWorkflows } from "../../../horsies/src/workflow/check-cases.ts";
+import { MAX_WORKFLOW_NAME_CHARS } from "../../../horsies/src/workflow/create-checks.ts";
 import { defineWorkflow, type NodeRef } from "../../../horsies/src/workflow/public.ts";
 import { checkedAtCreate, duplicateIds, ping, plain } from "./create-workflows.ts";
 
 function createCodes(workflows: readonly object[]): readonly string[] {
   return checkedAtCreate(workflows).refusals.map((refused) => refused.code);
+}
+
+/** The code and the place of each refusal at create. */
+function createRefusals(workflows: readonly object[]): readonly { readonly code: string; readonly path: string }[] {
+  return checkedAtCreate(workflows).refusals.map((refused) => ({ code: refused.code, path: refused.path }));
+}
+
+/** A valid workflow with no params, named `name`. */
+function namedWorkflow(name: string): object {
+  return defineWorkflow({ name, definitionKey: "tests.named.v1", output: h.int(), params: {} }, (w) => ({
+    output: w.task(ping, {}, { id: "a" }),
+  }));
 }
 
 function checkCodes(workflows: readonly object[]): readonly string[] {
@@ -30,29 +43,34 @@ describe("checkWorkflowsAtCreate", () => {
     assert.equal(checked.registry.byKey("tests.plain.v1").kind, "listed");
   });
 
-  test("an empty name: HRS-001; an empty definition key: HRS-016", () => {
-    const noName = defineWorkflow({ name: "", definitionKey: "tests.a.v1", output: h.int(), params: {} }, (w) => ({
-      output: w.task(ping, {}, { id: "a" }),
-    }));
+  test("an empty name: HRS-001, once, at the place of the entry; an empty definition key: HRS-016", () => {
+    const noName = namedWorkflow(" ");
 
     const noKey = defineWorkflow({ name: "b", definitionKey: " ", output: h.int(), params: {} }, (w) => ({
       output: w.task(ping, {}, { id: "a" }),
     }));
 
-    assert.deepEqual(createCodes([noName]), ["HRS-001"]);
+    assert.deepEqual(createRefusals([noName]), [{ code: "HRS-001", path: "workflows[0]" }]);
     assert.deepEqual(createCodes([noKey]), ["HRS-016"]);
   });
 
-  test("the workflow name is not the task name of the params contract: a lone surrogate in it gives no refusal here", () => {
-    // The spec text writer refuses the name at a start (LoneSurrogate at $.name).
-    const loneSurrogate = defineWorkflow(
-      { name: "a\uD800", definitionKey: "tests.a.v1", output: h.int(), params: {} },
-      (w) => ({
-        output: w.task(ping, {}, { id: "a" }),
-      }),
-    );
+  test("a name with a lone surrogate: HRS-033 at Horsies.create, and the refusal does not carry the name", () => {
+    assert.deepEqual(createRefusals([namedWorkflow("a\uD800")]), [{ code: "HRS-033", path: "workflows[0]" }]);
+    assert.deepEqual(createRefusals([namedWorkflow("\uDC00a")]), [{ code: "HRS-033", path: "workflows[0]" }]);
+  });
 
-    assert.deepEqual(createCodes([loneSurrogate]), []);
+  test(`a name of more than ${MAX_WORKFLOW_NAME_CHARS} characters: HRS-033; the bound counts code points`, () => {
+    const longest = "n".repeat(MAX_WORKFLOW_NAME_CHARS);
+    const longestAstral = "🐎".repeat(MAX_WORKFLOW_NAME_CHARS);
+
+    assert.deepEqual(createRefusals([namedWorkflow(longest)]), []);
+    assert.deepEqual(createRefusals([namedWorkflow(longestAstral)]), []);
+    assert.deepEqual(createRefusals([namedWorkflow(`${longest}n`)]), [{ code: "HRS-033", path: "workflows[0]" }]);
+
+    const [refused] = checkedAtCreate([namedWorkflow(`${longestAstral}🐎`)]).refusals;
+
+    assert.equal(refused?.code, "HRS-033");
+    assert.equal(refused?.message, "workflows[0]: the workflow name has 256 characters; the most is 255");
   });
 
   test("a key of another workflow, and a workflow listed twice: HRS-017", () => {
