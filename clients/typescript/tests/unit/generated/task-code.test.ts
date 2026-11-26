@@ -5,32 +5,13 @@ import {
   RESERVED_NON_TASK_CODES,
   UNDECLARED_LABEL,
 } from "../../../horsies/src/_catalog/task_code.ts";
-import type { BuiltInTaskCode, TaskErrorCode } from "../../../horsies/src/_catalog/task_code.ts";
+import type { BuiltInTaskCode } from "../../../horsies/src/_catalog/task_code.ts";
 import {
   ContractCode,
   OperationalErrorCode,
   OutcomeCode,
   RetrievalCode,
 } from "../../../horsies/src/_catalog/task_codes.ts";
-
-/** The text of a two-level code, told apart by `kind`. */
-function codeText(code: TaskErrorCode<"EMPTY_ORDER">): string {
-  switch (code.kind) {
-    case "library": {
-      return `library ${code.code}`;
-    }
-
-    case "user": {
-      return `user ${code.code}`;
-    }
-
-    default: {
-      const unreachable: never = code;
-
-      return unreachable;
-    }
-  }
-}
 
 describe("task codes", () => {
   test("the built-in codes are the members of the four catalogs, in order", () => {
@@ -49,13 +30,6 @@ describe("task codes", () => {
     const asyncContext: BuiltInTaskCode = RetrievalCode.ASYNC_CONTEXT;
 
     expect(BUILT_IN_TASK_CODES).toContain(asyncContext);
-  });
-
-  test("a two-level code is a library code or a user code", () => {
-    expect(codeText({ kind: "library", code: OutcomeCode.TASK_TIMEOUT })).toBe(
-      "library TASK_TIMEOUT",
-    );
-    expect(codeText({ kind: "user", code: "EMPTY_ORDER" })).toBe("user EMPTY_ORDER");
   });
 
   test("the reserved names are not built-in codes", () => {

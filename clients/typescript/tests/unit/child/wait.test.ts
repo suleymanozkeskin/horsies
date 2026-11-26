@@ -30,7 +30,7 @@ describe("a result wait in a task child", () => {
         implementationOf(
           waiter,
           async (_input, { ok }) => {
-            const read = await handle.get({ timeoutMs: 1000 });
+            const read = await handle.get({ waitMs: 1000 });
 
             return ok(read.ok ? "read" : read.error.kind);
           },

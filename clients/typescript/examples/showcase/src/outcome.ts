@@ -1,18 +1,18 @@
 // The code of a task error. This module is the one place where the showcase reads the code shape of an error
-// (`error.code.kind` and `error.code.code`); every other module calls `failureCode`, so a change of that shape changes
-// this file only.
+// (`error.kind` and `error.code`); every other module calls `failureCode`, so a change of that shape changes this file
+// only.
 
 import type { JsonValue, TaskError } from "horsies";
 
-/** Who chose the code of a task error: the task (`user`) or the library (`library`). */
-export type CodeSource = "user" | "library";
+/** Who chose the code of a task error: the task (`custom`) or horsies (`builtIn`). */
+export type CodeSource = "custom" | "builtIn";
 
 /** The code of a task error and who chose it. */
 export type FailureCode = { readonly source: CodeSource; readonly code: string };
 
 /** The code of `error`. Pure. */
 export function failureCode(error: TaskError): FailureCode {
-  return { source: error.code.kind, code: error.code.code };
+  return { source: error.kind, code: error.code };
 }
 
 /** The code text of `error`, for example `CARD_DECLINED` or `UNHANDLED_EXCEPTION`. Pure. */

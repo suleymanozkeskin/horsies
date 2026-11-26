@@ -128,9 +128,9 @@ export type AttemptErrorCode = AttemptErrorCodeBuiltIn | AttemptErrorCodeUser | 
 // @public (undocumented)
 export interface AttemptErrorCodeBuiltIn {
     // (undocumented)
-    readonly code: LibraryTaskCode;
+    readonly code: BuiltInTaskCode;
     // (undocumented)
-    readonly kind: "library";
+    readonly kind: "builtIn";
 }
 
 // @public (undocumented)
@@ -333,7 +333,7 @@ export type BodyFor<P extends ParameterSchemas, O extends OutputSchema, E extend
 export type BodyInput<P extends ParameterSchemas> = ParametersValue<P>;
 
 // @public
-export type BodyResult<O extends OutputSchema, E extends string> = Ok<SchemaSent<O>> | Err<UserFailure<E>>;
+export type BodyResult<O extends OutputSchema, E extends string> = Ok<SchemaSent<O>> | Err<CustomFailure<E>>;
 
 // @public
 export interface BodyRuntimes {
@@ -528,6 +528,12 @@ export interface BuildReturn {
 export type BuildReturnOf<V> = BuildReturn & {
     readonly output: NodeRef<V, string, string>;
 };
+
+// @public
+export const BUILT_IN_TASK_CODES: readonly ["UNHANDLED_EXCEPTION", "TASK_EXCEPTION", "WORKER_CRASHED", "BROKER_ERROR", "WORKER_RESOLUTION_ERROR", "WORKER_SERIALIZATION_ERROR", "RESULT_DESERIALIZATION_ERROR", "WORKFLOW_ENQUEUE_FAILED", "SUBWORKFLOW_LOAD_FAILED", "WORKFLOW_RECOVERY_LIMIT_REACHED", "SUBWORKFLOW_DEPTH_LIMIT_REACHED", "TASK_BLOCKED_LOOP", "NEIGHBOUR_BLOCKED_LOOP", "WORKFLOW_START_INCOMPLETE", "RETURN_TYPE_MISMATCH", "WORKFLOW_CTX_MISSING_ID", "NO_TYPE_AVAILABLE", "WAIT_TIMEOUT", "TASK_NOT_FOUND", "WORKFLOW_NOT_FOUND", "RESULT_NOT_AVAILABLE", "RESULT_NOT_READY", "ASYNC_CONTEXT", "INVALID_INPUT", "WAIT_INSIDE_TASK", "TASK_CANCELLED", "TASK_EXPIRED", "TASK_TIMEOUT", "WORKFLOW_PAUSED", "WORKFLOW_EXPIRED", "WORKFLOW_FAILED", "WORKFLOW_CANCELLED", "UPSTREAM_SKIPPED", "SUBWORKFLOW_FAILED", "WORKFLOW_SUCCESS_CASE_NOT_MET", "WORKFLOW_OUTPUT_SKIPPED"];
+
+// @public (undocumented)
+export type BuiltInTaskCode = OperationalErrorCode | ContractCode | RetrievalCode | OutcomeCode;
 
 // @public
 export interface CallerColumn {
@@ -906,7 +912,7 @@ export type ContextReadError =
     readonly nodeId: string;
     readonly cause: string;
 }
-/** The stored error has a user code that the contract does not list. */
+/** The stored error has a custom code that the contract does not list. */
 | {
     readonly kind: "unknownUserCode";
     readonly nodeId: string;
@@ -1138,6 +1144,16 @@ export type CurrentTask = RunningTask | NoRunningTask;
 export function currentTask(): CurrentTask;
 
 // @public
+export type CustomCode<C extends string> = C extends ReservedCode ? `horsies: "${C}" is a built-in error code` : C;
+
+// @public
+export type CustomFailure<E extends string> = {
+    readonly code: E;
+    readonly message?: string;
+    readonly data?: JsonValue;
+};
+
+// @public
 export interface CustomQueueInput {
     // (undocumented)
     readonly maxConcurrency?: TaskCap;
@@ -1358,7 +1374,7 @@ export type EnvelopeRule =
 | "ErrorMissingField"
 /** A field of the stored error does not read as its type. */
 | "ErrorFieldInvalid"
-/** The tagged code names no library code. */
+/** The tagged code names no built-in code. */
 | "ErrorUnknownBuiltInCode"
 /** The `data`, or the output of a sub-workflow summary, breaks the rules of a user value. */
 | "ErrorDataRefused";
@@ -1615,7 +1631,7 @@ export class ForkedAfterCoreStart extends CoreError {
 
 // @public
 export interface GetOptions {
-    readonly timeoutMs?: number;
+    readonly waitMs?: number;
 }
 
 // @public (undocumented)
@@ -1920,12 +1936,6 @@ export interface LeafTaskInfo {
 
 // @public
 export type LeftOutBySender<S> = S extends AnyWire ? (PresenceOf<S> extends "required" ? false : true) : false;
-
-// @public
-export const LIBRARY_TASK_CODES: readonly ["UNHANDLED_EXCEPTION", "TASK_EXCEPTION", "WORKER_CRASHED", "BROKER_ERROR", "WORKER_RESOLUTION_ERROR", "WORKER_SERIALIZATION_ERROR", "RESULT_DESERIALIZATION_ERROR", "WORKFLOW_ENQUEUE_FAILED", "SUBWORKFLOW_LOAD_FAILED", "WORKFLOW_RECOVERY_LIMIT_REACHED", "SUBWORKFLOW_DEPTH_LIMIT_REACHED", "TASK_BLOCKED_LOOP", "NEIGHBOUR_BLOCKED_LOOP", "WORKFLOW_START_INCOMPLETE", "RETURN_TYPE_MISMATCH", "WORKFLOW_CTX_MISSING_ID", "NO_TYPE_AVAILABLE", "WAIT_TIMEOUT", "TASK_NOT_FOUND", "WORKFLOW_NOT_FOUND", "RESULT_NOT_AVAILABLE", "RESULT_NOT_READY", "ASYNC_CONTEXT", "INVALID_INPUT", "WAIT_INSIDE_TASK", "TASK_CANCELLED", "TASK_EXPIRED", "TASK_TIMEOUT", "WORKFLOW_PAUSED", "WORKFLOW_EXPIRED", "WORKFLOW_FAILED", "WORKFLOW_CANCELLED", "UPSTREAM_SKIPPED", "SUBWORKFLOW_FAILED", "WORKFLOW_SUCCESS_CASE_NOT_MET", "WORKFLOW_OUTPUT_SKIPPED"];
-
-// @public (undocumented)
-export type LibraryTaskCode = OperationalErrorCode | ContractCode | RetrievalCode | OutcomeCode;
 
 // @public
 export type LiteralMember = string | number | boolean | null;
@@ -2729,15 +2739,20 @@ export type ReaderMayLeaveOut<P> = P extends AnyWire ? PresenceOf<P> extends "op
 export type ReadError =
 /** The task had not finished when the wait ended; it may still run. */
     {
-    readonly kind: "waitTimedOut";
+    readonly kind: "waitTimeout";
+    readonly code: "WAIT_TIMEOUT";
     readonly status: UnfinishedStatus;
-} | {
+}
+/** Neither the live table nor the task history holds the task; `reason` tells whether retention can have removed it. */
+| {
     readonly kind: "taskNotFound";
-    readonly absence: TaskAbsence;
+    readonly code: "TASK_NOT_FOUND";
+    readonly reason: TaskAbsenceReason;
 }
 /** The task finished and stores no result. */
 | {
     readonly kind: "resultNotAvailable";
+    readonly code: "RESULT_NOT_AVAILABLE";
     readonly status: FinishedStatus;
 }
 /** The stored result does not read with the contract's types. `cause` holds no value. */
@@ -2745,7 +2760,7 @@ export type ReadError =
     readonly kind: "storedResultUnreadable";
     readonly cause: string;
 }
-/** The stored error has a user code that the contract's `errors` does not list. */
+/** The stored error has a custom code that the contract's `errors` does not list. */
 | {
     readonly kind: "unknownUserCode";
     readonly code: string;
@@ -2753,6 +2768,7 @@ export type ReadError =
 /** A wait in a process that runs task bodies; nothing was read. */
 | {
     readonly kind: "waitInsideTask";
+    readonly code: "WAIT_INSIDE_TASK";
 }
 /** The database or the connection failed. */
 | {
@@ -2761,15 +2777,21 @@ export type ReadError =
     readonly retryable: boolean;
     readonly message: string;
 }
-/** A `timeoutMs` that is not a whole number of milliseconds from 0 to `maxMs`; nothing was read. */
+/** A `waitMs` that is not a whole number of milliseconds from 0 to `maxMs`; nothing was read. */
 | {
-    readonly kind: "invalidWait";
+    readonly kind: "invalidInput";
+    readonly code: "INVALID_INPUT";
     readonly maxMs: number;
 }
-/** In a `SHARED_THREAD` body: the seat relay held its bound of waiting calls; nothing was read; retry. */
+/**
+* In a `SHARED_THREAD` body: the seat relay held its bound of waiting calls; nothing was read; retry. `message` names
+* the bound and its value.
+*/
 | {
     readonly kind: "seatRelayFull";
-    readonly error: SeatRelayFull;
+    readonly code: "SEAT_RELAY_FULL";
+    readonly retryable: true;
+    readonly message: string;
 };
 
 // @public
@@ -3202,7 +3224,7 @@ export interface RerunUnknownStoredFamily {
 export const RESERVED_NON_TASK_CODES: readonly ["WORKFLOW_STOPPED"];
 
 // @public
-export type ReservedCode = LibraryTaskCode | (typeof RESERVED_NON_TASK_CODES)[number];
+export type ReservedCode = BuiltInTaskCode | (typeof RESERVED_NON_TASK_CODES)[number];
 
 // @public
 export interface ResilienceConfigInput {
@@ -3222,7 +3244,7 @@ export type Result<T, E> = Ok<T> | Err<E>;
 // @public
 export type ResultConstructors<O extends OutputSchema, E extends string> = {
     readonly ok: (value: SchemaSent<O>) => Ok<SchemaSent<O>>;
-    readonly err: <const K extends E>(failure: UserFailure<UserCode<K>>) => Err<UserFailure<E>>;
+    readonly err: <const K extends E>(failure: CustomFailure<CustomCode<K>>) => Err<CustomFailure<E>>;
 };
 
 // @public
@@ -3282,7 +3304,9 @@ export const RetrievalCode: {
 export type RetrievalCode = (typeof RetrievalCode)[keyof typeof RetrievalCode];
 
 // @public
-export type RetryableSendError<O, E extends string> = WithSentTypes<TaskSendEnqueueFailed, O, E>;
+export type RetryableSendError<O, E extends string> = WithSentTypes<TaskSendEnqueueFailed | (TaskSendIdempotencyKeyConflict & {
+    readonly retryable: true;
+}), O, E>;
 
 // @public
 export type RetryAttempts = {
@@ -3293,7 +3317,7 @@ export type RetryAttempts = {
 };
 
 // @public
-export type RetryCodes<E extends string> = NonEmpty<E | LibraryTaskCode>;
+export type RetryCodes<E extends string> = NonEmpty<E | BuiltInTaskCode>;
 
 // @public
 export type RetryPolicy<E extends string> = {
@@ -3555,7 +3579,9 @@ export type SendableInput<P extends ParameterSchemas> = HasRequiredUpstreamOutco
 export type SenderMayLeaveOut<P> = P extends AnyWire ? PresenceOf<P> extends "required" ? false : true : P extends ZodOptionalIn ? true : false;
 
 // @public
-export type SendFailure = TaskSendSuppressed | TaskSendValidationFailed | TaskSendEnqueueFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | TaskSendKeyConflict | SeatRelayFull;
+export type SendFailure = TaskSendSuppressed | TaskSendValidationFailed | TaskSendEnqueueFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | (TaskSendIdempotencyKeyConflict & {
+    readonly retryable: true;
+}) | SeatRelayFull;
 
 // @public
 export type SendInput<P extends ParameterSchemas> = keyof PlainParameters<P> extends never ? EmptyObject : ParametersSent<PlainParameters<P>>;
@@ -3895,15 +3921,6 @@ export interface SuccessPolicy {
     readonly optional?: readonly AnyNode[];
 }
 
-// @public
-export type TaskAbsence =
-/** The task is older than the oldest history that retention keeps: retention can have removed it. */
-"predatesRetainedHistory"
-/** No removed history can have held the task: it did not exist, or its history was removed out of band. */
-| "withinRetainedHistory"
-/** The id is not a UUIDv7, so it tells no time of birth. */
-| "notClassified";
-
 // @public (undocumented)
 export const TaskAbsenceReason: {
     readonly PREDATES_RETAINED_HISTORY: "PREDATES_RETAINED_HISTORY";
@@ -4106,7 +4123,7 @@ export interface TaskContract<P extends ParameterSchemas, O extends OutputSchema
 
 // @public
 export interface TaskDefinition<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends boolean = boolean> {
-    readonly errors?: string extends E ? readonly WidenedCodes[] : readonly UserCode<E>[];
+    readonly errors?: string extends E ? readonly WidenedCodes[] : readonly CustomCode<E>[];
     // (undocumented)
     readonly execution?: X;
     readonly input: P;
@@ -4153,20 +4170,19 @@ export type TaskDetailRead = {
 
 // @public
 export type TaskError<E extends string = string> = {
-    readonly code: TaskErrorCode<E>;
+    readonly kind: "custom";
+    readonly code: E;
     readonly message: string | null;
     readonly data: JsonValue;
     readonly exception: ExceptionRecord | null;
     readonly subWorkflow: SubWorkflowFailure | null;
-};
-
-// @public
-export type TaskErrorCode<E extends string = string> = {
-    readonly kind: "library";
-    readonly code: LibraryTaskCode;
 } | {
-    readonly kind: "user";
-    readonly code: E;
+    readonly kind: "builtIn";
+    readonly code: BuiltInTaskCode;
+    readonly message: string | null;
+    readonly data: JsonValue;
+    readonly exception: ExceptionRecord | null;
+    readonly subWorkflow: SubWorkflowFailure | null;
 };
 
 // @public
@@ -4351,7 +4367,7 @@ export interface TaskSendEnqueueFailed {
 }
 
 // @public
-export type TaskSendError<O, E extends string> = TaskSendSuppressed | TaskSendValidationFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | TaskSendKeyConflict | SeatRelayFull | RetryableSendError<O, E>;
+export type TaskSendError<O, E extends string> = TaskSendSuppressed | TaskSendValidationFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | SeatRelayFull | RetryableSendError<O, E>;
 
 // @public (undocumented)
 export interface TaskSendIdempotencyKeyConflict {
@@ -4366,11 +4382,6 @@ export interface TaskSendIdempotencyKeyConflict {
     // (undocumented)
     readonly taskId: string;
 }
-
-// @public
-export type TaskSendKeyConflict = TaskSendIdempotencyKeyConflict & {
-    readonly retryable: false;
-};
 
 // @public (undocumented)
 export interface TaskSendPayload {
@@ -4697,16 +4708,6 @@ export type UpstreamValue<S> = S extends AnyWire ? Extract<ValueOf<S>, {
 }> extends {
     readonly value: infer T;
 } ? T : never : never;
-
-// @public
-export type UserCode<C extends string> = C extends ReservedCode ? `horsies: "${C}" is a built-in error code` : C;
-
-// @public
-export type UserFailure<E extends string> = {
-    readonly code: E;
-    readonly message?: string;
-    readonly data?: JsonValue;
-};
 
 // @public
 export type ValueOf<W extends AnyWire> = W[typeof wireValue];
@@ -5056,20 +5057,23 @@ export type WorkflowPlace = "NOT_IN_WORKFLOW" | "WORKFLOW_NOT_KNOWN";
 export type WorkflowReadError =
 /** The workflow had not ended when the wait ended; it may still run. */
     {
-    readonly kind: "waitTimedOut";
+    readonly kind: "waitTimeout";
+    readonly code: "WAIT_TIMEOUT";
 } | {
     readonly kind: "workflowNotFound";
+    readonly code: "WORKFLOW_NOT_FOUND";
 }
 /** The node stores no result yet, or the workflow has no node of this id. */
 | {
     readonly kind: "resultNotReady";
+    readonly code: "RESULT_NOT_READY";
 }
 /** The stored value does not read with the handle's types. `cause` holds no value. */
 | {
     readonly kind: "storedResultUnreadable";
     readonly cause: string;
 }
-/** The stored error has a user code that the node's contract does not list. */
+/** The stored error has a custom code that the node's contract does not list. */
 | {
     readonly kind: "unknownUserCode";
     readonly code: string;
@@ -5077,10 +5081,12 @@ export type WorkflowReadError =
 /** A wait in a process that runs task bodies; nothing was read. */
 | {
     readonly kind: "waitInsideTask";
+    readonly code: "WAIT_INSIDE_TASK";
 }
-/** The app does not list the workflow, so its output has no read form; nothing was read. */
+/** The app does not list the workflow, so its output has no type to read with; nothing was read. */
 | {
-    readonly kind: "workflowNotListed";
+    readonly kind: "noTypeAvailable";
+    readonly code: "NO_TYPE_AVAILABLE";
     readonly workflowName: string;
 }
 /** The database or the connection failed. */
@@ -5090,15 +5096,21 @@ export type WorkflowReadError =
     readonly retryable: boolean;
     readonly message: string;
 }
-/** A `timeoutMs` that is not a whole number of milliseconds from 0 to `maxMs`; nothing was read. */
+/** A `waitMs` that is not a whole number of milliseconds from 0 to `maxMs`; nothing was read. */
 | {
-    readonly kind: "invalidWait";
+    readonly kind: "invalidInput";
+    readonly code: "INVALID_INPUT";
     readonly maxMs: number;
 }
-/** In a `SHARED_THREAD` body: the seat relay held its bound of waiting calls; nothing was read; retry. */
+/**
+* In a `SHARED_THREAD` body: the seat relay held its bound of waiting calls; nothing was read; retry. `message` names
+* the bound and its value.
+*/
 | {
     readonly kind: "seatRelayFull";
-    readonly error: SeatRelayFull;
+    readonly code: "SEAT_RELAY_FULL";
+    readonly retryable: true;
+    readonly message: string;
 };
 
 // @public (undocumented)

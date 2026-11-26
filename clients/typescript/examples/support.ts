@@ -75,18 +75,18 @@ export function refusalLines(refusals: readonly { readonly message: string }[]):
   return refusals.map((refusal) => refusal.message).join("\n");
 }
 
-/** Who chose the code of a task error: the task (`user`) or the library (`library`). */
-export type CodeSource = "user" | "library";
+/** Who chose the code of a task error: the task (`custom`) or horsies (`builtIn`). */
+export type CodeSource = "custom" | "builtIn";
 
 /** The code of a task error and who chose it. */
 export type FailureCode = { readonly source: CodeSource; readonly code: string };
 
 /**
- * The code of a task error. This is the one place where the examples read the code shape of an error (`code.kind`
- * and `code.code`), so a change of that shape changes this function only. Pure.
+ * The code of a task error. This is the one place where the examples read the code shape of an error (`kind` and
+ * `code`), so a change of that shape changes this function only. Pure.
  */
 export function failureCode(error: TaskError): FailureCode {
-  return { source: error.code.kind, code: error.code.code };
+  return { source: error.kind, code: error.code };
 }
 
 /** The code text of a task error, for example `OVER_LIMIT`. Pure. */
@@ -104,10 +104,10 @@ export function failureText(error: TaskError): string {
 /** The text of a task read that gave no outcome. Pure. */
 export function readErrorText(error: ReadError): string {
   switch (error.kind) {
-    case "waitTimedOut":
+    case "waitTimeout":
       return `the task is ${error.status} and has not finished; is a worker running?`;
     case "taskNotFound":
-      return `no task has this id (${error.absence})`;
+      return `no task has this id (${error.reason})`;
     case "resultNotAvailable":
       return `the task is ${error.status} and stores no result`;
     case "storedResultUnreadable":
@@ -118,10 +118,10 @@ export function readErrorText(error: ReadError): string {
       return "a wait inside a task body";
     case "database":
       return `the database read failed (${error.code}): ${error.message}`;
-    case "invalidWait":
+    case "invalidInput":
       return `the wait is not a whole number of milliseconds from 0 to ${String(error.maxMs)}`;
     case "seatRelayFull":
-      return `the seat relay sent nothing: ${error.error.message}`;
+      return `the seat relay sent nothing: ${error.message}`;
     default: {
       const unexpected: never = error;
 
@@ -133,7 +133,7 @@ export function readErrorText(error: ReadError): string {
 /** The text of a workflow read that gave no outcome. Pure. */
 export function workflowReadErrorText(error: WorkflowReadError): string {
   switch (error.kind) {
-    case "waitTimedOut":
+    case "waitTimeout":
       return "the workflow has not ended; is a worker running?";
     case "workflowNotFound":
       return "no workflow has this id";
@@ -145,14 +145,14 @@ export function workflowReadErrorText(error: WorkflowReadError): string {
       return `the stored error has the code ${error.code}, which the contract does not declare`;
     case "waitInsideTask":
       return "a wait inside a task body";
-    case "workflowNotListed":
+    case "noTypeAvailable":
       return `the app does not list the workflow ${error.workflowName}`;
     case "database":
       return `the database read failed (${error.code}): ${error.message}`;
-    case "invalidWait":
+    case "invalidInput":
       return `the wait is not a whole number of milliseconds from 0 to ${String(error.maxMs)}`;
     case "seatRelayFull":
-      return `the seat relay sent nothing: ${error.error.message}`;
+      return `the seat relay sent nothing: ${error.message}`;
     default: {
       const unexpected: never = error;
 

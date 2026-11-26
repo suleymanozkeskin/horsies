@@ -104,7 +104,7 @@ export type EnvelopeRule =
   | "ErrorMissingField"
   /** A field of the stored error does not read as its type. */
   | "ErrorFieldInvalid"
-  /** The tagged code names no library code. */
+  /** The tagged code names no built-in code. */
   | "ErrorUnknownBuiltInCode"
   /** The `data`, or the output of a sub-workflow summary, breaks the rules of a user value. */
   | "ErrorDataRefused";

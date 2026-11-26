@@ -90,7 +90,10 @@ export async function sendTask<O, E extends string>(
   return request.ok ? sentHandle<O, E>(context, listed.task, request.value, "FIRST") : request;
 }
 
-/** Send again the payload of a retryable error, under the same task id, with `REPEAT`. */
+/**
+ * Send again the payload of a retryable error (`ENQUEUE_FAILED`, `IDEMPOTENCY_KEY_CONFLICT`), under the same task id,
+ * with `REPEAT`. A key conflict before the reservation ends gives the same conflict again.
+ */
 export async function retrySend<O, E extends string>(
   context: SendContext,
   error: RetryableSendError<O, E>,
@@ -98,8 +101,8 @@ export async function retrySend<O, E extends string>(
   // A JavaScript caller can pass another error than the type allows.
   const code: string = error.code;
 
-  if (code !== "ENQUEUE_FAILED") {
-    const message = `retrySend takes ENQUEUE_FAILED only; ${code} is not retryable`;
+  if (!isRetrySendCode(code)) {
+    const message = `retrySend takes ENQUEUE_FAILED and IDEMPOTENCY_KEY_CONFLICT only; ${code} is not retryable`;
 
     return err(validationFailed(message, ruleRefused(message)));
   }
@@ -117,6 +120,17 @@ export async function retrySend<O, E extends string>(
   }
 
   return sentHandle<O, E>(context, listed.task, requestOfPayload(error.taskId, error.payload), "REPEAT");
+}
+
+/** Whether `retrySend` takes an error of the code `code`, a text that a JavaScript caller can give. Pure. */
+function isRetrySendCode(code: string): boolean {
+  switch (code) {
+    case "ENQUEUE_FAILED":
+    case "IDEMPOTENCY_KEY_CONFLICT":
+      return true;
+    default:
+      return false;
+  }
 }
 
 function notListed(taskName: string): SendFailure {

@@ -1,6 +1,6 @@
 // Compile-pass cases of a send and a read through the app: the send error switch with a full match (one case for
-// `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT`, which `retryable` tells apart), `retrySend` of a retryable error,
-// the send options, and the read switch over the two-level code.
+// `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT`, which both carry `retryable`), `retrySend` of either, the send
+// options, and the read switch over the tag and the code of the task error.
 
 import { defineTask, type Horsies, TaskId } from "../../../horsies/src/index.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
@@ -50,7 +50,7 @@ export async function sendAndRead(): Promise<void> {
   }
 
   const handle = sent.value;
-  const read = await handle.get({ timeoutMs: 5_000 });
+  const read = await handle.get({ waitMs: 5_000 });
 
   if (!read.ok) {
     console.warn(read.error.kind);
@@ -65,9 +65,9 @@ export async function sendAndRead(): Promise<void> {
       console.log(outcome.value.total.toString(), outcome.value.validatedAt.epochNanoseconds);
       break;
     case "failed":
-      switch (outcome.error.code.kind) {
-        case "user": {
-          const code = outcome.error.code.code;
+      switch (outcome.error.kind) {
+        case "custom": {
+          const code = outcome.error.code;
 
           switch (code) {
             case "EMPTY_ORDER":
@@ -80,11 +80,11 @@ export async function sendAndRead(): Promise<void> {
           break;
         }
 
-        case "library":
-          console.warn(outcome.error.code.code);
+        case "builtIn":
+          console.warn(outcome.error.code);
           break;
         default:
-          assertNever(outcome.error.code);
+          assertNever(outcome.error);
       }
 
       break;
@@ -117,4 +117,16 @@ export async function sendWithOptions(): Promise<void> {
     },
   ));
   void (await app.send(validateOrder, { orderId: crypto.randomUUID(), lines: [] }, { retention: { kind: "forever" } }));
+}
+
+/** A key conflict is retryable (`retryable: true`), and `retrySend` takes it with no `retryable` check. */
+export async function retryKeyConflict(): Promise<void> {
+  const sent = await app.send(validateOrder, { orderId: crypto.randomUUID(), lines: [] }, { idempotencyKey: "validate:2" });
+
+  if (!sent.ok && sent.error.code === "IDEMPOTENCY_KEY_CONFLICT") {
+    const retryable: true = sent.error.retryable;
+
+    console.warn(retryable, sent.error.ownerTaskId);
+    void (await app.retrySend(sent.error));
+  }
 }

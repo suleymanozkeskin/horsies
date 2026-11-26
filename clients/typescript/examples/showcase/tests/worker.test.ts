@@ -126,7 +126,7 @@ describe("through a worker of the entry", () => {
 
     assert.ok(started.ok, "the order workflow starts");
 
-    const read = await started.value.get({ timeoutMs: RESULT_WAIT_MS });
+    const read = await started.value.get({ waitMs: RESULT_WAIT_MS });
 
     assert.ok(read.ok && read.value.kind === "succeeded", `${JSON.stringify(read)}\n${workerLog(current)}`);
 
@@ -157,7 +157,7 @@ describe("through a worker of the entry", () => {
 
     assert.ok(sent.ok, "the booking sends");
 
-    const read = await sent.value.get({ timeoutMs: RESULT_WAIT_MS });
+    const read = await sent.value.get({ waitMs: RESULT_WAIT_MS });
 
     assert.ok(read.ok && read.value.kind === "succeeded", `${JSON.stringify(read)}\n${workerLog(current)}`);
 
@@ -179,7 +179,7 @@ describe("through a worker of the entry", () => {
 
     assert.ok(started.ok, "the order workflow starts");
 
-    const read = await started.value.get({ timeoutMs: RESULT_WAIT_MS });
+    const read = await started.value.get({ waitMs: RESULT_WAIT_MS });
 
     assert.ok(read.ok, `${JSON.stringify(read)}\n${workerLog(current)}`);
     assert.equal(failedCode(read.value), "INSUFFICIENT_STOCK");
@@ -212,9 +212,9 @@ describe("through a worker of the entry", () => {
 
     assert.ok(bundle.ok && size.ok && loyalty.ok, "the three tasks send");
 
-    const bundleRead = await bundle.value.get({ timeoutMs: RESULT_WAIT_MS });
-    const sizeRead = await size.value.get({ timeoutMs: RESULT_WAIT_MS });
-    const loyaltyRead = await loyalty.value.get({ timeoutMs: RESULT_WAIT_MS });
+    const bundleRead = await bundle.value.get({ waitMs: RESULT_WAIT_MS });
+    const sizeRead = await size.value.get({ waitMs: RESULT_WAIT_MS });
+    const loyaltyRead = await loyalty.value.get({ waitMs: RESULT_WAIT_MS });
 
     assert.ok(bundleRead.ok && sizeRead.ok && loyaltyRead.ok, `${JSON.stringify([bundleRead, sizeRead, loyaltyRead])}`);
 
@@ -249,7 +249,7 @@ describe("through a worker of the entry", () => {
 
     assert.ok(sent.ok, "the export sends");
 
-    const read = await sent.value.get({ timeoutMs: RESULT_WAIT_MS });
+    const read = await sent.value.get({ waitMs: RESULT_WAIT_MS });
 
     assert.ok(read.ok && read.value.kind === "succeeded", `${JSON.stringify(read)}\n${workerLog(current)}`);
 
@@ -281,7 +281,7 @@ describe("through a worker of the entry", () => {
 
     assert.ok(cancelled.ok && cancelled.value.wasStatus === "PENDING", JSON.stringify(cancelled));
 
-    const read = await sent.value.get({ timeoutMs: RESULT_WAIT_MS });
+    const read = await sent.value.get({ waitMs: RESULT_WAIT_MS });
 
     assert.ok(read.ok);
     assert.equal(failedCode(read.value), "TASK_CANCELLED");

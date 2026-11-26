@@ -23,13 +23,13 @@ import { resultsOf } from "./fixtures.ts";
 const winbackBlastResults = resultsOf(winbackBlast);
 
 /**
- * A failed upstream outcome with the user code `code`, as a worker gives it to a node. This is the one place in these
+ * A failed upstream outcome with the custom code `code`, as a worker gives it to a node. This is the one place in these
  * tests that writes the code shape of a task error.
  */
 function failedOutcome<O>(code: string): TaskOutcome<O> {
   return {
     kind: "failed",
-    error: { code: { kind: "user", code }, message: `${code} in the test`, data: null, exception: null, subWorkflow: null },
+    error: { kind: "custom", code, message: `${code} in the test`, data: null, exception: null, subWorkflow: null },
   };
 }
 

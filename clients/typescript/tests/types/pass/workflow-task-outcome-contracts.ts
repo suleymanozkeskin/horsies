@@ -52,10 +52,10 @@ export type Checks = [
 
 export const charge = app.implement(chargeOrder, ({ order }, { ok, err }) => {
   if (order.kind === "failed") {
-    const code: string = order.error.code.code;
+    const code: string = order.error.code;
 
-    if (order.error.code.kind === "user") {
-      const custom: "EMPTY_ORDER" | "INVALID_EMAIL" = order.error.code.code;
+    if (order.error.kind === "custom") {
+      const custom: "EMPTY_ORDER" | "INVALID_EMAIL" = order.error.code;
 
       return err({ code: "UPSTREAM_FAILED", message: custom });
     }
@@ -96,7 +96,8 @@ export const child = defineWorkflow(
         order: {
           kind: "failed",
           error: {
-            code: { kind: "user", code: "EMPTY_ORDER" },
+            kind: "custom",
+            code: "EMPTY_ORDER",
             message: null,
             data: null,
             exception: null,

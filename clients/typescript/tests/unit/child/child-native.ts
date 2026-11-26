@@ -94,7 +94,7 @@ export class FakeChildNative implements ChildNative {
   buildTaskError(parts: TaskErrorParts): TaskErrorBuild {
     this.builds.push(parts);
 
-    return parts.code.kind === "user" && this.refusedCodes.has(parts.code.code)
+    return parts.code.kind === "custom" && this.refusedCodes.has(parts.code.code)
       ? { kind: "refused", cause: "the code breaks a rule" }
       : { kind: "built", error: new FakeTaskError(parts) };
   }

@@ -116,7 +116,7 @@ describe("the workflow context in a child", () => {
     child.post(runBody(5n, "audit", '{"n":2,"workflow_ctx":{"workflow_id":"7","task_index":0,"task_name":"audit"}}'));
     await settled();
     assert.deepEqual(seen, []);
-    assert.deepEqual(child.native.errors[0]?.[1].code, { kind: "library", code: "WORKER_SERIALIZATION_ERROR" });
+    assert.deepEqual(child.native.errors[0]?.[1].code, { kind: "builtIn", code: "WORKER_SERIALIZATION_ERROR" });
     assert.deepEqual(child.native.errors[0]?.[1].message, {
       kind: "text",
       text: "task input does not decode as audit.input: the workflow context workflow_id: not a UUID in the lower-case 8-4-4-4-12 form",
@@ -147,7 +147,7 @@ describe("the workflow context in a child", () => {
     assert.deepEqual(seen, [{ n: 2 }]);
     assert.deepEqual(child.native.values, [[6n, "null"]]);
     assert.deepEqual(child.native.errors[0]?.[0], 7n);
-    assert.deepEqual(child.native.errors[0]?.[1].code, { kind: "library", code: "WORKER_SERIALIZATION_ERROR" });
+    assert.deepEqual(child.native.errors[0]?.[1].code, { kind: "builtIn", code: "WORKER_SERIALIZATION_ERROR" });
   });
 
   test("the child host registers a task with workflowContext: true as TAKES_CONTEXT, any other task as NO_CONTEXT", () => {

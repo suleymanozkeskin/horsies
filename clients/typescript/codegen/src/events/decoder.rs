@@ -580,7 +580,7 @@ fn named_reader_sections(named: &NamedType) -> Vec<String> {
                 .map(|variant| {
                     record_reader(
                         event_variant_type_name(variant),
-                        &variant_kind(named, variant),
+                        &variant_kind(variant),
                         variant.fields,
                     )
                 })

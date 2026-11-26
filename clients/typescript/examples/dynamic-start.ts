@@ -118,7 +118,7 @@ async function demo(): Promise<Result<void, string>> {
     return demoFailed(`send start_report: ${sendErrorText(sent.error)}`);
   }
 
-  const read = await sent.value.get({ timeoutMs: LONG_RESULT_WAIT_MS });
+  const read = await sent.value.get({ waitMs: LONG_RESULT_WAIT_MS });
 
   if (!read.ok) {
     return demoFailed(`read start_report: ${readErrorText(read.error)}`);
@@ -138,7 +138,7 @@ async function demo(): Promise<Result<void, string>> {
 
   printLine(`start_report started workflow ${workflowId.value}`);
 
-  const report = await app.workflowHandle(regionalReport, workflowId.value).get({ timeoutMs: LONG_RESULT_WAIT_MS });
+  const report = await app.workflowHandle(regionalReport, workflowId.value).get({ waitMs: LONG_RESULT_WAIT_MS });
 
   if (!report.ok) {
     return demoFailed(`read regional_report: ${workflowReadErrorText(report.error)}`);

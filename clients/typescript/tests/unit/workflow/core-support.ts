@@ -175,12 +175,12 @@ export function okEnvelope(okText: string): string {
   return `{"__h_task_result__":true,"ok":${okText},"err":null}`;
 }
 
-/** A stored result envelope of a failure with the user code `code`. */
-export function userErrorEnvelope(code: string): string {
-  return `{"__h_task_result__":true,"ok":null,"err":${userErrorText(code)}}`;
+/** A stored result envelope of a failure with the custom code `code`. */
+export function customErrorEnvelope(code: string): string {
+  return `{"__h_task_result__":true,"ok":null,"err":${customErrorText(code)}}`;
 }
 
-/** A stored error object with the user code `code`. */
-export function userErrorText(code: string): string {
+/** A stored error object with the custom code `code`. */
+export function customErrorText(code: string): string {
   return `{"exception":null,"error_code":"${code}","data":null,"message":"failed"}`;
 }

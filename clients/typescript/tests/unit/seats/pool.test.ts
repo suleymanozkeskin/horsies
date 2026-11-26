@@ -224,7 +224,7 @@ describe("runs on the seat pool", () => {
       runKey: 2n,
       outcome: {
         kind: "error",
-        parts: { code: { kind: "user", code: "TOO_BIG" }, message: { kind: "none" }, data: { kind: "noData" }, exception: { kind: "noException" } },
+        parts: { code: { kind: "custom", code: "TOO_BIG" }, message: { kind: "none" }, data: { kind: "noData" }, exception: { kind: "noException" } },
       },
     };
 
@@ -298,7 +298,7 @@ describe("an isolate that ends", () => {
     const outcome = settle?.[2];
 
     assert.equal(settle?.[0], 5n);
-    assert.deepEqual(outcome?.kind === "error" ? outcome.parts.code : undefined, { kind: "library", code: "WORKER_CRASHED" });
+    assert.deepEqual(outcome?.kind === "error" ? outcome.parts.code : undefined, { kind: "builtIn", code: "WORKER_CRASHED" });
     assert.equal(
       outcome?.kind === "error" && outcome.parts.message.kind === "text" ? outcome.parts.message.text : "",
       "Seat isolate 0 exited with code 1 before the task ended: RangeError: Worker terminated due to reaching memory limit: JS heap out of memory",

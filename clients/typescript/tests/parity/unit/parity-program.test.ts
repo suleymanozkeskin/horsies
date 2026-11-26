@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import type { TaskError, TaskOutcome } from "../../../horsies/src/index.ts";
+import type { BuiltInTaskCode, TaskError, TaskOutcome } from "../../../horsies/src/index.ts";
 import {
   doubledValue,
   holdThread,
@@ -58,14 +58,19 @@ const PYTHON_SCENARIO_NAMES = [
   "rerun",
 ];
 
-/** A stored error with `code` and no other fact. */
-function storedError(code: TaskError["code"]): TaskError {
-  return { code, message: null, data: null, exception: null, subWorkflow: null };
+/** A stored error with the custom code `code` and no other fact. */
+function customError(code: string): TaskError {
+  return { kind: "custom", code, message: null, data: null, exception: null, subWorkflow: null };
+}
+
+/** A stored error with the built-in code `code` and no other fact. */
+function builtInError(code: BuiltInTaskCode): TaskError {
+  return { kind: "builtIn", code, message: null, data: null, exception: null, subWorkflow: null };
 }
 
 const REFUSED_OUTCOME: TaskOutcome<number, string> = {
   kind: "failed",
-  error: storedError({ kind: "user", code: "REFUSED" }),
+  error: customError("REFUSED"),
 };
 
 describe("the entry's commands", () => {
@@ -113,27 +118,24 @@ describe("the send options", () => {
 });
 
 describe("the read of a stored code", () => {
-  test("a user code reads as user and its code", () => {
-    assert.deepEqual(storedCode(storedError({ kind: "user", code: "REFUSED" })), { origin: "user", code: "REFUSED" });
+  test("a custom code reads as custom and its code", () => {
+    assert.deepEqual(storedCode(customError("REFUSED")), { origin: "custom", code: "REFUSED" });
   });
 
-  test("a library code reads as library and its code", () => {
-    assert.deepEqual(storedCode(storedError({ kind: "library", code: "TASK_TIMEOUT" })), {
-      origin: "library",
-      code: "TASK_TIMEOUT",
-    });
+  test("a built-in code reads as builtIn and its code", () => {
+    assert.deepEqual(storedCode(builtInError("TASK_TIMEOUT")), { origin: "builtIn", code: "TASK_TIMEOUT" });
   });
 
-  test("only a failure with the user code REFUSED ended refused", () => {
+  test("only a failure with the custom code REFUSED ended refused", () => {
     assert.equal(endedRefused(REFUSED_OUTCOME), true);
-    assert.equal(endedRefused({ kind: "failed", error: storedError({ kind: "user", code: "TRANSIENT" }) }), false);
-    assert.equal(endedRefused({ kind: "failed", error: storedError({ kind: "library", code: "WORKER_CRASHED" }) }), false);
+    assert.equal(endedRefused({ kind: "failed", error: customError("TRANSIENT") }), false);
+    assert.equal(endedRefused({ kind: "failed", error: builtInError("WORKER_CRASHED") }), false);
     assert.equal(endedRefused({ kind: "succeeded", value: 5 }), false);
   });
 
   test("the text of an outcome names the origin and the code of a failure", () => {
     assert.equal(outcomeText({ kind: "succeeded", value: 5 }), "succeeded");
-    assert.equal(outcomeText(REFUSED_OUTCOME), "failed with the user code REFUSED");
+    assert.equal(outcomeText(REFUSED_OUTCOME), "failed with the custom code REFUSED");
   });
 });
 

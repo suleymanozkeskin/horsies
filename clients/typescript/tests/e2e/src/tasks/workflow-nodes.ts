@@ -231,7 +231,7 @@ export function passedOn(error: TaskError): NodeError {
   const code = errorCode(error);
   const message = `upstream ${code.source} code ${code.code}: ${error.message ?? "no message"}`;
 
-  return { code: code.source === "task" && isWfCode(code.code) ? code.code : "UPSTREAM_FAILED", message };
+  return { code: code.source === "custom" && isWfCode(code.code) ? code.code : "UPSTREAM_FAILED", message };
 }
 
 /** The value of `outcome`, or the error that passes its failure on. Pure. */

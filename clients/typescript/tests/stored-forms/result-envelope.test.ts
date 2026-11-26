@@ -36,7 +36,7 @@ function okEnvelopeText(okText: string): string {
 }
 
 /** The core writes the error object of a user error around the client's `data` text (`error_envelope`). */
-function userErrorEnvelopeText(code: string, message: string | null, dataText: string): string {
+function customErrorEnvelopeText(code: string, message: string | null, dataText: string): string {
   const messageText = message === null ? "null" : JSON.stringify(message);
   const error = `{"exception":null,"error_code":${JSON.stringify(code)},"data":${dataText},"message":${messageText}}`;
 
@@ -140,14 +140,14 @@ function assertUserErrorData(name: string, code: string, error: ErrorNotation, s
   assert.equal(data.state, "stored");
 
   if (storedData === undefined) {
-    assert.equal(userErrorEnvelopeText(code, error.message, data.text), vector.text);
+    assert.equal(customErrorEnvelopeText(code, error.message, data.text), vector.text);
 
     return;
   }
 
   // The data holds what the core refuses: the core stores the replacement (`stored_data`) around this text.
   assert.equal(data.text, JSON.stringify(error.data));
-  assert.equal(userErrorEnvelopeText(code, error.message, JSON.stringify(storedData)), vector.text);
+  assert.equal(customErrorEnvelopeText(code, error.message, JSON.stringify(storedData)), vector.text);
 }
 
 describe("result_envelope.json errors", () => {

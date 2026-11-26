@@ -6,10 +6,10 @@ import { z } from "zod";
 import type { Horsies } from "../../../horsies/src/app.ts";
 import {
   type BodyInput,
+  type CustomFailure,
   defineTask,
   type SendableInput,
   type SendInput,
-  type UserFailure,
 } from "../../../horsies/src/contract/public.ts";
 import { type Decimal, type EmptyObject, type Err, h, type Ok } from "../../../horsies/src/wire/public.ts";
 import { hz } from "../../../horsies/src/zod.ts";
@@ -94,7 +94,7 @@ app.implement(validateOrder, (_input, { ok, err }) => {
 
   const errValue = err({ code: "EMPTY_ORDER", message: "no lines" });
 
-  expectType<Equal<typeof errValue, Err<UserFailure<"EMPTY_ORDER" | "INVALID_EMAIL">>>>();
+  expectType<Equal<typeof errValue, Err<CustomFailure<"EMPTY_ORDER" | "INVALID_EMAIL">>>>();
 
   return okValue;
 });
@@ -103,7 +103,7 @@ app.implement(validateOrder, (_input, { ok, err }) => {
 const ping = defineTask({ name: "ping", input: {}, output: h.string() });
 
 app.implement(ping, (_input, { err }) => {
-  expectType<Equal<ReturnType<typeof err>, Err<UserFailure<string>>>>();
+  expectType<Equal<ReturnType<typeof err>, Err<CustomFailure<string>>>>();
 
   return err({ code: "RATE_LIMITED" });
 });
@@ -120,7 +120,7 @@ defineTask({
 
 defineTask({ name: "resize", execution: "SHARED_THREAD", timeoutMs: 60_000, input: { width: h.int() }, output: h.string() });
 
-// A retry policy names the task's codes and the library's codes.
+// A retry policy names the task's custom codes and the built-in codes.
 defineTask({
   name: "charge",
   input: {},

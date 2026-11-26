@@ -32,7 +32,7 @@ export type ReleaseReason =
   | "RETURNED_AS_ISOLATED";
 
 export interface AttemptErrorCodeBuiltIn {
-  readonly kind: "library";
+  readonly kind: "builtIn";
   readonly code: BuiltInTaskCode;
 }
 
@@ -805,7 +805,7 @@ function readAttemptErrorCodeBuiltIn(
 
   return accept(
     Object.freeze({
-      kind: "library",
+      kind: "builtIn",
       code: decodedCode.value,
     }),
   );

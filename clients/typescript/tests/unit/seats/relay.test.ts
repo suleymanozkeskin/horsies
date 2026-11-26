@@ -229,13 +229,17 @@ describe("each sends call kind past the bound gives SEAT_RELAY_FULL through its 
     assert.equal(operationKinds(posts).filter((kind) => kind === "enqueue").length, 0);
   });
 
-  test("a task info read: the read error seatRelayFull", async () => {
+  test("a task info read: the read error seatRelayFull with the code, retryable and the message, no nested error", async () => {
     const { relay, posts } = fullRelay();
     const handle = taskHandleOf({ kind: "seatRelay", relay }, readFormOf(crunch), taskIdOf(TASK_ID));
     const read = await handle.info();
     const error = read.ok ? assert.fail("the read past the bound was answered") : read.error;
 
-    assertRelayFull(error.kind === "seatRelayFull" ? error.error : assert.fail(`the read gave ${error.kind}`), "operations");
+    assert.ok(error.kind === "seatRelayFull", error.kind);
+    assert.deepEqual(Object.keys(error).toSorted(), ["code", "kind", "message", "retryable"]);
+    assert.equal(error.code, SeatRelayCode.SEAT_RELAY_FULL);
+    assert.equal(error.retryable, true);
+    assert.ok(error.message.includes(`${String(WAITING)} operations that wait`), error.message);
     assert.equal(posts.length, IN_FLIGHT);
   });
 });

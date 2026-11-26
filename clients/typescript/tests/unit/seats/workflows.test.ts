@@ -155,12 +155,15 @@ describe("each workflow call kind past the bound of the relay gives SEAT_RELAY_F
     assert.deepEqual(sent, []);
   });
 
-  test("a node result read: the read error seatRelayFull", async () => {
+  test("a node result read: the read error seatRelayFull with the code, retryable and the message, no nested error", async () => {
     const { core, sent } = fullCore();
     const error = errorOf(await handleOn(core).resultFor("greet"));
 
     assert.ok(error.kind === "seatRelayFull", error.kind);
-    assertRelayFull(error.error);
+    assert.deepEqual(Object.keys(error).toSorted(), ["code", "kind", "message", "retryable"]);
+    assert.equal(error.code, SeatRelayCode.SEAT_RELAY_FULL);
+    assert.equal(error.retryable, true);
+    assert.ok(error.message.includes(BOUND_TEXT) && error.message.includes("nothing was sent; retry"), error.message);
     assert.deepEqual(sent, []);
   });
 

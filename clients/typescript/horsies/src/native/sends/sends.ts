@@ -92,7 +92,7 @@ export function processRole(): ProcessRoleName {
 }
 
 /**
- * The core's task error of a body, or the refusal of its user code. Starts the log forwarder of the process, so the
+ * The core's task error of a body, or the refusal of its custom code. Starts the log forwarder of the process, so the
  * record of data that the codec cannot write reaches the log sink; starts no core. Throws `CoreStartFailed` when the
  * log forwarder cannot start.
  */

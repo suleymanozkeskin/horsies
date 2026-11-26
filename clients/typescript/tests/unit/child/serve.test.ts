@@ -1,4 +1,4 @@
-// The post dispatcher: a body settles with its value or its error; a refused user code; a cancel reaches the body's
+// The post dispatcher: a body settles with its value or its error; a refused custom code; a cancel reaches the body's
 // signal; a stop request reaches spawned work; a defect goes to the defect rule and never throws into the caller.
 
 import assert from "node:assert/strict";
@@ -145,7 +145,7 @@ describe("the post dispatcher", () => {
     child.post(runBody(6n, "double", '{"n":1}'));
     await settled();
     assert.equal(child.native.errors[0]?.[0], 6n);
-    assert.deepEqual(child.native.errors[0]?.[1].code, { kind: "library", code: "UNHANDLED_EXCEPTION" });
+    assert.deepEqual(child.native.errors[0]?.[1].code, { kind: "builtIn", code: "UNHANDLED_EXCEPTION" });
   });
 
   test("an err code that the core refuses settles as RETURN_TYPE_MISMATCH", async () => {
@@ -158,7 +158,7 @@ describe("the post dispatcher", () => {
     child.post(runBody(7n, "double", '{"n":1}'));
     await settled();
     assert.equal(child.native.builds.length, 2);
-    assert.deepEqual(child.native.errors[0]?.[1].code, { kind: "library", code: "RETURN_TYPE_MISMATCH" });
+    assert.deepEqual(child.native.errors[0]?.[1].code, { kind: "builtIn", code: "RETURN_TYPE_MISMATCH" });
   });
 
   test("a cancel post aborts the body's signal with its cause", async () => {

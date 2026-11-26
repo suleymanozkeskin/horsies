@@ -118,7 +118,7 @@ describe("the decode of an h.taskOutcome parameter", () => {
 
     const failed = {
       kind: "failed",
-      error: { code: { kind: "user", code: "OTHER" }, message: null, data: null, exception: null, subWorkflow: null },
+      error: { kind: "custom", code: "OTHER", message: null, data: null, exception: null, subWorkflow: null },
     };
 
     assert.deepEqual(decodeParameters(parameters, text, "worker"), { ok: true, value: { price: failed } });
