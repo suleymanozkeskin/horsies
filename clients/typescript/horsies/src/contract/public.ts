@@ -14,6 +14,7 @@ export {
   type TaskDefinition,
   type UserCode,
   type UserFailure,
+  type WidenedCodes,
 } from "./define-task.ts";
 
 export { type IdRefused, TaskId, WorkflowId } from "./ids.ts";

@@ -11,11 +11,11 @@ import { catalogRefusal } from "../app/support.ts";
 const PASSED: CheckPassed = { taskCount: 2, declaredErrorCodes: new Map() };
 
 describe("the check report", () => {
-  test("each refusal with its code and help lines, then the count", () => {
+  test("each refusal with its catalog code and help lines, then the count", () => {
     const report = checkReport(
       "check",
       refusal("HRS-300", "tasks[1] charge", "the contract has no implementation in this entry", ["call app.implement"]),
-      [refusal("FIELD_BOUND", "broker.poolSize", "above 10000", [])],
+      [refusal("HRS-227", "payload.warnBytes.bytes", "below 1", [])],
     );
 
     assert.equal(
@@ -23,7 +23,7 @@ describe("the check report", () => {
       [
         "error[HRS-300]: tasks[1] charge: the contract has no implementation in this entry",
         "  = help: call app.implement",
-        "error: broker.poolSize: above 10000",
+        "error[HRS-227]: payload.warnBytes.bytes: below 1",
         "error: aborting due to 2 previous errors",
       ].join("\n"),
     );

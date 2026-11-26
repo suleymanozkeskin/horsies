@@ -2,11 +2,8 @@
 
 import type { ErrorCode } from "../_catalog/error_codes.ts";
 
-/**
- * The code of a refusal: a code of the core's catalog (`HRS-nnn`), or `FIELD_BOUND` for a field bound that has no
- * catalog code (the Python client refuses such a value through a field constraint).
- */
-export type RefusalCode = ErrorCode | "FIELD_BOUND";
+/** The code of a refusal: a code of the core's catalog (`HRS-nnn`). */
+export type RefusalCode = ErrorCode;
 
 /**
  * Why the app refuses a config field, a contract or a registration.

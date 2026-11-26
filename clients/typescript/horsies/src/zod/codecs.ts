@@ -3,7 +3,8 @@
 //
 // Each codec stores Python's text form of its kind: the decode and the encode call the same text functions as the
 // `h.*` kind, so a zod schema and an `h.*` schema store the same text. The adapter maps each codec to its `h.*` kind
-// (it finds the codec by its decode function), so the codec's reader and writer rules apply, not zod's.
+// (it finds the codec by the brand on its decode function, `brand.ts`), so the codec's reader and writer rules apply,
+// not zod's.
 
 import { z } from "zod";
 import type * as core from "zod/v4/core";
@@ -43,11 +44,11 @@ import {
 import { isResultOfKind } from "../wire/result-of.ts";
 import { ok, type Result } from "../wire/result.ts";
 import { kindOf, presenceOf } from "../wire/wire-type.ts";
+import { brandHz } from "./brand.ts";
 import type { zodWireSent } from "./infer.ts";
 
 /** A zod codec of horsies: stored as Python's text form of `T`, held as `T`. */
 export type TextCodec<T> = z.ZodCodec<z.ZodString, z.ZodCustom<T, T>>;
-
 
 /** A zod schema of an `h.*` wire type: zod's value type is the reader's value; the sender's value is `SentOf<W>`. */
 export type WireSchema<W extends RequiredWire> = z.ZodCustom<ValueOf<W>, ValueOf<W>> & {
@@ -89,10 +90,11 @@ type DecodeText<T> = (text: string, payload: core.ParsePayload<string>) => T;
 
 type EncodeText<T> = (value: T, payload: core.ParsePayload<T>) => string;
 
-/** One codec per kind: its decode and encode functions are built once, so the adapter finds the codec by them. */
+/** One codec per kind: its decode and encode functions are built once; the decode function carries the kind's brand. */
 type CodecFunctions<T> = { readonly decode: DecodeText<T>; readonly encode: EncodeText<T>; readonly form: TextForm<T> };
 
-function codecFunctions<T>(form: TextForm<T>): CodecFunctions<T> {
+/** The functions of the codec of `kind`. Effects: brands the decode function with `kind`. */
+function codecFunctions<T>(form: TextForm<T>, kind: Kind): CodecFunctions<T> {
   const decode: DecodeText<T> = (text, payload) => {
     const value = form.read(text);
 
@@ -116,6 +118,8 @@ function codecFunctions<T>(form: TextForm<T>): CodecFunctions<T> {
 
     return z.NEVER;
   };
+
+  brandHz(decode, kind);
 
   return Object.freeze({ decode, encode, form });
 }
@@ -143,62 +147,37 @@ function timeText(value: Temporal.PlainTime): Result<string, TemporalWriteRefuse
   return ok(plainTimeText(value));
 }
 
-const INSTANT = codecFunctions<Temporal.Instant>({ read: readInstant, write: instantText, isValue: isInstant });
+const INSTANT = codecFunctions<Temporal.Instant>(
+  { read: readInstant, write: instantText, isValue: isInstant },
+  INSTANT_KIND,
+);
 
-const OFFSET_DATE_TIME = codecFunctions<Temporal.ZonedDateTime>({
-  read: readOffsetDateTime,
-  write: offsetDateTimeText,
-  isValue: isZonedDateTime,
-});
+const OFFSET_DATE_TIME = codecFunctions<Temporal.ZonedDateTime>(
+  { read: readOffsetDateTime, write: offsetDateTimeText, isValue: isZonedDateTime },
+  OFFSET_DATE_TIME_KIND,
+);
 
-const PLAIN_DATE_TIME = codecFunctions<Temporal.PlainDateTime>({
-  read: readPlainDateTime,
-  write: plainDateTimeText,
-  isValue: isPlainDateTime,
-});
+const PLAIN_DATE_TIME = codecFunctions<Temporal.PlainDateTime>(
+  { read: readPlainDateTime, write: plainDateTimeText, isValue: isPlainDateTime },
+  PLAIN_DATE_TIME_KIND,
+);
 
-const PLAIN_DATE = codecFunctions<Temporal.PlainDate>({
-  read: readPlainDate,
-  write: plainDateText,
-  isValue: isPlainDate,
-});
+const PLAIN_DATE = codecFunctions<Temporal.PlainDate>(
+  { read: readPlainDate, write: plainDateText, isValue: isPlainDate },
+  PLAIN_DATE_KIND,
+);
 
-const PLAIN_TIME = codecFunctions<Temporal.PlainTime>({ read: readPlainTime, write: timeText, isValue: isPlainTime });
-const DECIMAL = codecFunctions<Decimal>({ read: readDecimal, write: decimalText, isValue: isDecimal });
+const PLAIN_TIME = codecFunctions<Temporal.PlainTime>(
+  { read: readPlainTime, write: timeText, isValue: isPlainTime },
+  PLAIN_TIME_KIND,
+);
 
-/** The kind of each `hz.*` codec, by its decode function. */
-const CODEC_KINDS: ReadonlyMap<object, Kind> = new Map<object, Kind>([
-  [INSTANT.decode, INSTANT_KIND],
-  [OFFSET_DATE_TIME.decode, OFFSET_DATE_TIME_KIND],
-  [PLAIN_DATE_TIME.decode, PLAIN_DATE_TIME_KIND],
-  [PLAIN_DATE.decode, PLAIN_DATE_KIND],
-  [PLAIN_TIME.decode, PLAIN_TIME_KIND],
-  [DECIMAL.decode, DECIMAL_KIND],
-]);
+const DECIMAL = codecFunctions<Decimal>({ read: readDecimal, write: decimalText, isValue: isDecimal }, DECIMAL_KIND);
 
-/** The kind of each `hz.wire()` schema, by its test function. Written once per `hz.wire()` call. */
-const WIRE_KINDS = new WeakMap<object, Kind>();
-
-/** The kind that an `hz.*` function names: found, or the function is not one of `hz.*`. */
-export type HzKind = { readonly found: "hz"; readonly kind: Kind } | { readonly found: "none" };
-
-const NOT_HZ: HzKind = Object.freeze({ found: "none" });
-
-/** The kind of an `hz.*` codec, by the decode function of a `z.codec()`. Pure. */
-export function codecKindOf(decode: object): HzKind {
-  const kind = CODEC_KINDS.get(decode);
-
-  return kind === undefined ? NOT_HZ : Object.freeze({ found: "hz", kind });
-}
-
-/** The kind of an `hz.wire()` schema, by the test function of a `z.custom()`. Pure. */
-export function wireKindOf(test: object): HzKind {
-  const kind = WIRE_KINDS.get(test);
-
-  return kind === undefined ? NOT_HZ : Object.freeze({ found: "hz", kind });
-}
-
-/** `hz.wire(w)`. A wire type that may be left out, or an upstream outcome, is a defect that the static types refuse. */
+/**
+ * `hz.wire(w)`: a `z.custom()` whose test function carries the brand of the wire type's kind. A wire type that may be
+ * left out, or an upstream outcome, is a defect that the static types refuse.
+ */
 function wireSchema<W extends RequiredWire>(wire: W): WireSchema<W> {
   const kind = kindOf(wire);
 
@@ -208,7 +187,7 @@ function wireSchema<W extends RequiredWire>(wire: W): WireSchema<W> {
 
   const schema = z.custom<ValueOf<W>>((value) => encodeValue(kind, value).ok);
 
-  WIRE_KINDS.set(schema._zod.def.fn, kind);
+  brandHz(schema._zod.def.fn, kind);
 
   // SAFETY: the sent type is type-only (`zodWireSent` does not exist at run time); the value is the zod schema.
   return schema as WireSchema<W>;
