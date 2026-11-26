@@ -34,6 +34,10 @@ tracing = "0.1"
 serde_json = "1"
 uuid = "1"
 chrono = "0.4"
+# The zone data of the core's scheduler (`horsies-core` reads zones with the
+# same version), so the zone check of `app.schedules` and the scheduler start
+# read one zone table.
+chrono-tz = "0.10"
 
 [build-dependencies]
 napi-build = "=2.7.0"

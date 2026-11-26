@@ -41,9 +41,11 @@ bun test
 # corpus of Python's texts) run on Node too (`node:test`). The task child code
 # (the body adapter, the runtime, the run store) runs on Node too, and so do
 # the workflow builder, its checks and the child spec answer, which a child
-# build runs in a task child.
-print_step_title "Run the codec, wire type, zod adapter, child, workflow and stored-form tests on Node"
-node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/unit/child/**/*.test.ts' 'tests/unit/workflow/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
+# build runs in a task child. The schedule checks read time zones through the
+# engine's Temporal (V8 on Node, JavaScriptCore on Bun), so the schedule tests
+# run on Node too.
+print_step_title "Run the codec, wire type, zod adapter, child, workflow, schedule and stored-form tests on Node"
+node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/unit/child/**/*.test.ts' 'tests/unit/workflow/**/*.test.ts' 'tests/unit/schedules/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
 
 # The lint rule package (eslint-plugin/) runs in ESLint, on Node: its
 # RuleTester cases, and ESLint and tsc of TypeScript 7 on its fixture project.

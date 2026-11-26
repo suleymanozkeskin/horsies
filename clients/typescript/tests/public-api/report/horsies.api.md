@@ -741,6 +741,58 @@ export type CreateRefused = {
 };
 
 // @public
+export type CronEnumTerm<T extends Month | Weekday> = {
+    readonly kind: "every";
+} | {
+    readonly kind: "enumValues";
+    readonly values: NonEmpty<T>;
+} | {
+    readonly kind: "enumRange";
+    readonly start: T;
+    readonly end: T;
+    readonly step?: number;
+} | {
+    readonly kind: "enumStep";
+    readonly step: number;
+};
+
+// @public
+export type CronMonthTerm = CronEnumTerm<Month>;
+
+// @public
+export type CronNumericTerm = {
+    readonly kind: "every";
+} | {
+    readonly kind: "step";
+    readonly step: number;
+} | {
+    readonly kind: "values";
+    readonly values: NonEmpty<number>;
+} | {
+    readonly kind: "range";
+    readonly start: number;
+    readonly end: number;
+    readonly step?: number;
+};
+
+// @public
+export interface CronSchedule {
+    // (undocumented)
+    readonly day: DaySelector;
+    // (undocumented)
+    readonly hour: NonEmpty<CronNumericTerm>;
+    // (undocumented)
+    readonly kind: "cron";
+    // (undocumented)
+    readonly minute: NonEmpty<CronNumericTerm>;
+    // (undocumented)
+    readonly month: NonEmpty<CronMonthTerm>;
+}
+
+// @public
+export type CronWeekdayTerm = CronEnumTerm<Weekday>;
+
+// @public
 export interface CustomQueueInput {
     // (undocumented)
     readonly maxConcurrency?: TaskCap;
@@ -751,10 +803,37 @@ export interface CustomQueueInput {
 }
 
 // @public
+export interface DailySchedule {
+    // (undocumented)
+    readonly at: Temporal.PlainTime;
+    // (undocumented)
+    readonly kind: "daily";
+}
+
+// @public
 export interface DatabasePing {
     // (undocumented)
     readonly latencyMs: number;
 }
+
+// @public
+export type DaySelector = {
+    readonly kind: "everyDay";
+} | {
+    readonly kind: "byMonthDay";
+    readonly dayOfMonth: NonEmpty<CronNumericTerm>;
+} | {
+    readonly kind: "byWeekday";
+    readonly dayOfWeek: NonEmpty<CronWeekdayTerm>;
+} | {
+    readonly kind: "eitherDay";
+    readonly dayOfMonth: NonEmpty<CronNumericTerm>;
+    readonly dayOfWeek: NonEmpty<CronWeekdayTerm>;
+} | {
+    readonly kind: "bothDays";
+    readonly dayOfMonth: NonEmpty<CronNumericTerm>;
+    readonly dayOfWeek: NonEmpty<CronWeekdayTerm>;
+};
 
 // @public
 export class Decimal {
@@ -1311,6 +1390,7 @@ export class Horsies {
     rerunIn(transaction: CallerTransaction, command: RerunCommand, policy: RerunPolicy): Promise<Result<RerunOutcome, CallerRerunError>>;
     retrySend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>;
     retryStart<R extends BuildReturn>(error: StartEnqueueFailed<R>): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>;
+    schedules<const T extends readonly AnyTaskContract[]>(entries: ScheduleEntries<T>, section?: ScheduleSection): void;
     send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, input: NoInfer<SendableInput<P>>, options?: SendOptions): Promise<Result<TaskHandle<SchemaValue<O>, E>, TaskSendError<SchemaValue<O>, E>>>;
     start<P extends ParameterSchemas, R extends BuildReturn>(workflow: WorkflowContract<P, R>, params: NoInfer<SendableInput<P>>, options?: StartOptions): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>;
     taskHandle<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, taskId: TaskId): TaskHandle<SchemaValue<O>, E>;
@@ -1322,6 +1402,15 @@ export type HorsiesConfig = AppConfigInput & {
     readonly tasks: readonly AnyTaskContract[];
     readonly workflows?: readonly AnyWorkflowContract[];
 };
+
+// @public
+export interface HourlySchedule {
+    // (undocumented)
+    readonly kind: "hourly";
+    // (undocumented)
+    readonly minute: number;
+    readonly second?: number;
+}
 
 // @public
 export type HoursRetention = {
@@ -1349,6 +1438,13 @@ export interface Implementation<P extends ParameterSchemas, O extends OutputSche
 // @public
 export interface ImplementOptions<E extends string> {
     readonly exceptions?: readonly ExceptionMapping<E>[];
+}
+
+// @public
+export interface IntervalSchedule {
+    readonly every: Temporal.Duration;
+    // (undocumented)
+    readonly kind: "interval";
 }
 
 // @public
@@ -1722,6 +1818,19 @@ export interface MonitoringWindow {
     readonly since?: Temporal.Instant;
     // (undocumented)
     readonly until?: Temporal.Instant;
+}
+
+// @public (undocumented)
+export type Month = "january" | "february" | "march" | "april" | "may" | "june" | "july" | "august" | "september" | "october" | "november" | "december";
+
+// @public
+export interface MonthlySchedule {
+    // (undocumented)
+    readonly at: Temporal.PlainTime;
+    // (undocumented)
+    readonly day: number;
+    // (undocumented)
+    readonly kind: "monthly";
 }
 
 // @public
@@ -2849,6 +2958,36 @@ export interface RunTimingUnavailableInfo {
     readonly reason: UnavailableReason;
 }
 
+// @public
+export type ScheduleEntries<T extends readonly AnyTaskContract[]> = {
+    readonly [K in keyof T]: ScheduleEntry<T[K]>;
+};
+
+// @public
+export interface ScheduleEntry<C> {
+    readonly catchUpMissed?: boolean;
+    readonly enabled?: boolean;
+    readonly input: NoInfer<ScheduleInput<C>>;
+    readonly maxCatchUpRuns?: number;
+    readonly name: string;
+    readonly pattern: SchedulePattern;
+    readonly queue?: string;
+    readonly task: C;
+    readonly timezone?: string;
+}
+
+// @public
+export type ScheduleInput<C> = C extends TaskContract<infer P, OutputSchema, string, ExecutionClass> ? SendableInput<P> : never;
+
+// @public
+export type SchedulePattern = IntervalSchedule | HourlySchedule | DailySchedule | WeeklySchedule | MonthlySchedule | CronSchedule;
+
+// @public
+export interface ScheduleSection {
+    readonly checkIntervalSeconds?: number;
+    readonly enabled?: boolean;
+}
+
 // @public (undocumented)
 export interface ScheduleStateInfo {
     // (undocumented)
@@ -3957,6 +4096,19 @@ export type ValueWire = Wire<unknown, unknown, Presence, "value">;
 
 // @public
 export function viewOnly(): MonitoringAuthPolicy;
+
+// @public (undocumented)
+export type Weekday = "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday";
+
+// @public
+export interface WeeklySchedule {
+    // (undocumented)
+    readonly at: Temporal.PlainTime;
+    // (undocumented)
+    readonly days: NonEmpty<Weekday>;
+    // (undocumented)
+    readonly kind: "weekly";
+}
 
 // @public
 export type WidenedCodes = "horsies: declare errors as literal codes, not as a string[]";

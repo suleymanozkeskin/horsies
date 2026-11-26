@@ -28,6 +28,8 @@ export * from "./cli/public.ts";
 
 export * from "./child/public.ts";
 
+export * from "./schedules/public.ts";
+
 export {
   configureLogging,
   LOGGER_NAMES,
