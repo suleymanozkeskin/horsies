@@ -32,8 +32,8 @@ use horsies_core::worker_manifest::{parse_worker_manifest, WorkerManifest, Worke
 use horsies_core::{
     node_failure_result, run_end_of, subworkflow_load_failed_error, AppConfig, ChildSpecFuture,
     ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ClientChildSpec, ClientFamily,
-    ExitDrain, ProcessExit, RunPhase, Worker, WorkerBootCause, WorkerFailCause, WorkerPlan,
-    WorkerPlanRefused, WorkerRunEnd, WorkerStop, EXIT_DRAIN_BOUND,
+    ExitDrain, HorsiesError, ProcessExit, RunPhase, Worker, WorkerBootCause, WorkerFailCause,
+    WorkerPlan, WorkerPlanRefused, WorkerRunEnd, WorkerStop, EXIT_DRAIN_BOUND,
 };
 use napi::bindgen_prelude::{BigInt, Object, ToNapiValue};
 use napi::Env;
@@ -163,7 +163,7 @@ fn preparation(app_config_json: &str, start_json: &str) -> Result<WorkerPreparat
             worker: PreparedWorker::of(plan),
         },
         Err(WorkerPlanRefused::Profile(refused)) => WorkerPreparation::ProfileRefused {
-            refusals: refused.errors().iter().map(CoreRefusal::of_error).collect(),
+            refusals: refused.errors().iter().map(coded_refusal).collect(),
         },
         Err(WorkerPlanRefused::ConnectionSettings { cause }) => {
             WorkerPreparation::ConnectionSettingsRefused { cause }
@@ -198,6 +198,28 @@ fn accepted_config(text: &str) -> Result<(AppConfig, ProducerManifest), NativeTh
     let config = serde_json::from_str::<AppConfig>(text)
         .map_err(|error| config_defect(&format!("the config text does not read: {error}")))?;
     Ok((config, producer))
+}
+
+/// The refusal record of a core error with its catalog code, message, notes
+/// and help. Pure.
+///
+/// Panics when the error has no catalog code: every error of a profile
+/// refusal and of the connection check has one, so an error with none is a
+/// defect of the core. In a bridge call, `sync_call` and `guard` turn the
+/// panic into `CORE_PANIC`.
+pub fn coded_refusal(error: &HorsiesError) -> CoreRefusal {
+    let code = error.code.unwrap_or_else(|| {
+        panic!(
+            "a core error of a worker check has no catalog code: {}",
+            error.message
+        )
+    });
+    CoreRefusal::coded(
+        code,
+        error.message.clone(),
+        error.notes.clone(),
+        error.help_text.iter().cloned().collect(),
+    )
 }
 
 fn config_defect(rule: &str) -> NativeThrown {
@@ -568,6 +590,31 @@ mod tests {
             panic!("a start with no profile is refused");
         };
         assert!(!refusals.is_empty());
+    }
+
+    #[test]
+    fn a_core_error_keeps_its_code_notes_and_help() {
+        let error = HorsiesError::new("unknown worker profile 'absent'")
+            .with_code(horsies_core::ErrorCode::CliInvalidArgs)
+            .with_note("the app defines the profiles: io")
+            .with_help("pass one of them to --profile");
+        assert_eq!(
+            coded_refusal(&error),
+            CoreRefusal {
+                code: horsies_core::ErrorCode::CliInvalidArgs
+                    .as_code_str()
+                    .to_owned(),
+                message: "unknown worker profile 'absent'".to_owned(),
+                notes: vec!["the app defines the profiles: io".to_owned()],
+                help: vec!["pass one of them to --profile".to_owned()],
+            }
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "has no catalog code")]
+    fn a_core_error_with_no_code_is_a_defect() {
+        let _refusal = coded_refusal(&HorsiesError::new("no code"));
     }
 
     #[test]
