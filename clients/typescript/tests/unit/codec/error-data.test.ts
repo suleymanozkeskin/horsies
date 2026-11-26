@@ -1,11 +1,11 @@
-// One test per outcome of the task error data writer, and the user-error vectors of result_envelope.json.
+// One test per outcome of the task error data writer. The user-error vectors of result_envelope.json are in
+// tests/stored-forms/.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { ERROR_DATA_DEPTH_LIMIT, MAX_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
 import { errorDataText, type StoredErrorData } from "../../../horsies/src/codec/error-data.ts";
-import { resultEnvelopeFile } from "./support/vectors.ts";
 
 function nested(levels: number): unknown {
   let value: unknown = 1;
@@ -31,14 +31,6 @@ function replacedCause<V>(data: V): string {
   assert.equal(stored.text, `{"data_refused":"${stored.cause}"}`);
 
   return stored.cause;
-}
-
-/** The core writes the error object of a user error (`error_envelope`); this test stands in for it. */
-function userErrorEnvelopeText(code: string, message: string | null, dataText: string): string {
-  const messageText = message === null ? "null" : JSON.stringify(message);
-  const error = `{"exception":null,"error_code":${JSON.stringify(code)},"data":${dataText},"message":${messageText}}`;
-
-  return `{"__h_task_result__":true,"ok":null,"err":${error}}`;
 }
 
 describe("task error data", () => {
@@ -96,33 +88,6 @@ describe("task error data", () => {
     assert.equal(replacedCause([nested(PYDANTIC_DUMP_LEVELS), "\ud800"]), "ValueValidationError");
     assert.equal(replacedCause([nested(PYDANTIC_DUMP_LEVELS), Number.NaN]), "StrictJsonError");
   });
-});
-
-describe("result_envelope.json user errors", () => {
-  for (const vector of resultEnvelopeFile().vectors) {
-    const error = vector.err;
-
-    if (error === undefined || !("user" in error.error_code)) {
-      continue;
-    }
-
-    const code = error.error_code.user;
-    const replacedByCore = vector.stored_data !== undefined;
-
-    test(`${vector.name}: the data text, in the error object that the core writes`, () => {
-      const data = errorDataText(error.data);
-
-      assert.equal(data.state, "stored");
-
-      if (replacedByCore) {
-        // The data holds an engine key: the core stores the replacement in `stored_data` around this text.
-        assert.equal(data.text, JSON.stringify(error.data));
-        assert.equal(JSON.stringify(vector.stored_data), '{"data_refused":"StrictJsonError"}');
-      } else {
-        assert.equal(userErrorEnvelopeText(code, error.message, data.text), vector.text);
-      }
-    });
-  }
 });
 
 describe("task error data: the check in front of the reader", () => {

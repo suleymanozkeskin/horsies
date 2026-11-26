@@ -1,0 +1,58 @@
+// The public names of the rerun. `src/index.ts` exports this module. The driver adapters have their
+// own entries: `horsies/rerun/pg` (`src/rerun/pg.ts`) and `horsies/rerun/postgres`
+// (`src/rerun/postgres.ts`).
+
+export type {
+  RerunCommand,
+  RerunDeadline,
+  RerunEnqueued,
+  RerunInputChoice,
+  RerunInputCorrupt,
+  RerunInputUnavailable,
+  RerunKeyConflict,
+  RerunKeyReplay,
+  RerunNotEligible,
+  RerunNotEligibleReason,
+  RerunOutcome,
+  RerunPolicy,
+  RerunRetention,
+  RerunSourceAbsent,
+  RerunSourceCorrupt,
+  RerunSourceLive,
+} from "./types.ts";
+
+export type {
+  CallerRerunError,
+  RerunCallerKeyRefused,
+  RerunClassNotRegistered,
+  RerunClientFamily,
+  RerunClientFamilyMismatch,
+  RerunConnectFailed,
+  RerunContractViolation,
+  RerunDriverFailed,
+  RerunError,
+  RerunFamilyCheckFailed,
+  RerunIdMintRefused,
+  RerunInvalidCommand,
+  RerunInvalidPolicy,
+  RerunRequestRefused,
+  RerunStatementFailed,
+  RerunStatementOutcome,
+  RerunStepRefused,
+  RerunStoredFamily,
+  RerunUnknownStoredFamily,
+} from "./errors.ts";
+
+export type {
+  CallerColumn,
+  CallerQueryFailure,
+  CallerRow,
+  CallerStatement,
+  CallerTransaction,
+  CallerType,
+  SqlText,
+} from "./caller.ts";
+
+export type { CoreFailure } from "../_catalog/error_detail.ts";
+
+export type { TaskAbsenceReason } from "../_catalog/history.ts";

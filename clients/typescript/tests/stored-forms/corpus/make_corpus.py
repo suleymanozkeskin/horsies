@@ -1,5 +1,5 @@
 # pyright: strict
-'''Write the corpus files of the TypeScript codec tests: Python's stored text of floats, decimals, date-times
+'''Write the corpus files of the TypeScript stored-form tests: Python's stored text of floats, decimals, date-times
 and times of day; the decimal texts that the Python client accepts and refuses; Python's whitespace and digit
 tables of `Decimal`.
 
@@ -7,7 +7,7 @@ Run from the repository root. The command installs only pydantic, in a cached en
 of the repository:
 
     uv run --no-project --python 3.13 --with pydantic==2.13.4 --with pydantic-core==2.46.4 \
-        python -I -B clients/typescript/tests/unit/codec/corpus/make_corpus.py clients/typescript/tests/unit/codec/corpus
+        python -I -B clients/typescript/tests/stored-forms/corpus/make_corpus.py clients/typescript/tests/stored-forms/corpus
 
 The steps are those of the Python client's typed encode (`clients/python/horsies/core/codec/typed.py`):
 `TypeAdapter(T).validate_python`, `dump_python(mode='json')`, then the text of `dumps_json`

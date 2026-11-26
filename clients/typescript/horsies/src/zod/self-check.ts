@@ -1,7 +1,11 @@
 // The self-check of the zod adapter: each rule runs once per process on a known schema, as Python's
 // `verify_shape_rules` does. zod gives no stability statement for its definition fields; a renamed field makes a
 // known schema compile to another kind or another refusal, and the self-check reports it. It never switches a rule
-// off: a failure refuses every zod schema until horsies reads the new field.
+// off: a failure refuses every zod schema until horsies reads the new field. A renamed field that the reader needs
+// makes the compile of a known schema throw; the self-check reports that throw as a failure of its case.
+//
+// The cases cover each accepted form and each refusal rule that the installed zod can build, also the forms of later
+// zod 4 releases (`z.xor()`, `z.looseRecord()`, `.exactOptional()`) when the installed zod has them.
 
 import { z } from "zod";
 
@@ -12,7 +16,7 @@ import { h } from "../wire/builders.ts";
 import type { Kind, Member, MemberPresence } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import { compileMember, type ZodMemberKind } from "./adapter.ts";
+import { compileMember, type SelfCheckPassed, type ZodMemberKind } from "./adapter.ts";
 import { hz } from "./codecs.ts";
 import type { ZodSchema } from "./definition.ts";
 import type { ZodRule } from "./rules.ts";
@@ -36,8 +40,12 @@ export type SelfCheckCase = {
 /** A case whose schema compiled to something else: `expected` and `found` are kind texts or rules. */
 export type SelfCheckFailure = { readonly name: string; readonly expected: string; readonly found: string };
 
-/** The outcome of a self-check run. */
-export type SelfCheckOutcome = Result<true, readonly SelfCheckFailure[]>;
+/** The outcome of a self-check run: the proof that it passed, which the adapter takes, or every failure. */
+export type SelfCheckOutcome = Result<SelfCheckPassed, readonly SelfCheckFailure[]>;
+
+// SAFETY: the self-check is the one maker of the proof. It compiles its own known schemas with it, and hands it out
+// only in a passed outcome.
+const PASSED = Object.freeze({}) as SelfCheckPassed;
 
 /** The self-check of this process: not run yet, or its outcome. */
 type SelfCheckState = { readonly state: "notRun" } | { readonly state: "ran"; readonly outcome: SelfCheckOutcome };
@@ -53,7 +61,7 @@ export function selfCheckOnce(): SelfCheckOutcome {
     case "ran":
       return processState.outcome;
     case "notRun": {
-      const outcome = runSelfCheck(knownCases());
+      const outcome = runSelfCheck(builtCases());
 
       processState = { state: "ran", outcome };
 
@@ -65,15 +73,38 @@ export function selfCheckOnce(): SelfCheckOutcome {
   }
 }
 
-/** The outcome of compiling each case and writing its probes. Fails with every case that differs. Pure. */
-export function runSelfCheck(cases: readonly SelfCheckCase[]): SelfCheckOutcome {
-  const failures = cases.flatMap(caseFailures);
-
-  return failures.length === 0 ? ok(true) : err(Object.freeze(failures));
+/** The known cases, or one failure when building them throws (a zod that lacks a builder of the range). */
+function builtCases(): readonly SelfCheckCase[] | SelfCheckFailure {
+  try {
+    return knownCases();
+  } catch (error) {
+    return { name: "known schemas", expected: "built", found: thrownText(error) };
+  }
 }
 
+/** The outcome of compiling each case and writing its probes. Fails with every case that differs. Pure. */
+export function runSelfCheck(cases: readonly SelfCheckCase[] | SelfCheckFailure): SelfCheckOutcome {
+  const failures = "name" in cases ? [cases] : cases.flatMap(caseFailures);
+
+  return failures.length === 0 ? ok(PASSED) : err(Object.freeze(failures));
+}
+
+/** The failures of one case. A throw of its compile is a failure: a renamed field that the reader needs. */
 function caseFailures(known: SelfCheckCase): readonly SelfCheckFailure[] {
-  const compiled = compileMember(known.schema);
+  try {
+    return compiledCaseFailures(known);
+  } catch (error) {
+    return [{ name: known.name, expected: expectedText(known.expected), found: thrownText(error) }];
+  }
+}
+
+/** The text of a throw, for a failure. */
+function thrownText(cause: unknown): string {
+  return `throws ${cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause)}`;
+}
+
+function compiledCaseFailures(known: SelfCheckCase): readonly SelfCheckFailure[] {
+  const compiled = compileMember(PASSED, known.schema);
   const expected = expectedText(known.expected);
   const found = compiled.ok ? memberText(compiled.value) : compiled.error.map((refused) => refused.rule).join(",");
 
@@ -153,8 +184,23 @@ export function kindText(kind: Kind, depth: number): string {
       return `${kind.node}(${inner(kind.inner)})`;
     case "conversion":
       return `conversion(${inner(kind.stored)})`;
-    default:
+    case "null":
+    case "boolean":
+    case "int":
+    case "bigint":
+    case "float":
+    case "string":
+    case "uuid":
+    case "decimal":
+    case "instant":
+    case "offsetDateTime":
+    case "plainDateTime":
+    case "plainDate":
+    case "plainTime":
+    case "json":
       return kind.node;
+    default:
+      return unreachable(kind, "kindText");
   }
 }
 
@@ -188,7 +234,32 @@ function refusedCase(name: string, schema: ZodSchema, rule: ZodRule): SelfCheckC
 
 /** The known schemas: one per accepted form, and one per refusal rule that a zod schema can reach. */
 export function knownCases(): readonly SelfCheckCase[] {
-  return [...acceptedCases(), ...containerCases(), ...refusedCases()];
+  return [...acceptedCases(), ...containerCases(), ...refusedCases(), ...laterCases()];
+}
+
+/** The result of a builder that only later zod 4 releases have, called with `args`; none on an older release. */
+function laterSchema(
+  holder: object,
+  name: string,
+  args: readonly (ZodSchema | readonly ZodSchema[])[],
+): readonly ZodSchema[] {
+  const builder: unknown = Reflect.get(holder, name);
+
+  // SAFETY: a zod builder of a schema returns a zod schema.
+  return builder instanceof Function ? [Reflect.apply(builder, holder, args) as ZodSchema] : [];
+}
+
+/** The forms of later zod 4 releases, when the installed zod has them. */
+function laterCases(): readonly SelfCheckCase[] {
+  const xor = laterSchema(z, "xor", [[z.literal("a"), z.string()]]);
+  const looseRecord = laterSchema(z, "looseRecord", [z.string(), z.string()]);
+  const exactOptional = laterSchema(z.string(), "exactOptional", []);
+
+  return [
+    ...xor.map((schema) => refusedCase("xor", schema, "EXCLUSIVE_UNION")),
+    ...looseRecord.map((schema) => refusedCase("loose record", schema, "LOOSE_OBJECT")),
+    ...exactOptional.map((schema) => kindCase("exact optional", schema, "?string")),
+  ];
 }
 
 function acceptedCases(): readonly SelfCheckCase[] {
@@ -198,8 +269,11 @@ function acceptedCases(): readonly SelfCheckCase[] {
     kindCase("string check", z.string().max(1), "checked(string)", [{ value: "ab", written: "refused" }]),
     kindCase("int", z.int32(), "checked(int)", [{ value: 2 ** 40, written: "refused" }]),
     kindCase("int check", z.number().int(), "checked(int)"),
+    kindCase("uint32", z.uint32(), "checked(int)", [{ value: -1, written: "refused" }]),
     kindCase("float", z.number(), "float"),
+    kindCase("float32", z.float32(), "checked(float)"),
     kindCase("bigint", z.bigint(), "bigint"),
+    kindCase("int64", z.int64(), "checked(bigint)"),
     kindCase("boolean", z.boolean(), "boolean"),
     kindCase("null", z.null(), "null"),
     kindCase("literal", z.literal(["a", 1]), 'literal("a",1)'),
@@ -262,6 +336,7 @@ function refusedCases(): readonly SelfCheckCase[] {
   return [
     refusedCase("any", z.any(), "UNTYPED"),
     refusedCase("transform", z.string().transform((text) => text.length), "TRANSFORM"),
+    refusedCase("coerce", z.coerce.number(), "TRANSFORM"),
     refusedCase("pipe", z.string().pipe(z.string()), "TRANSFORM"),
     refusedCase("trim", z.string().trim(), "TRANSFORM"),
     refusedCase("catch", z.string().catch(""), "CATCH"),
@@ -271,6 +346,11 @@ function refusedCases(): readonly SelfCheckCase[] {
     refusedCase("map", z.map(z.string(), z.string()), "NOT_DATA"),
     refusedCase("custom", z.custom<string>(), "NOT_DATA"),
     refusedCase("object union", z.union([z.object({}), z.string()]), "UNDISCRIMINATED_UNION"),
+    refusedCase(
+      "union fallback",
+      z.discriminatedUnion("kind", [optionA, optionB], { unionFallback: true }),
+      "UNDISCRIMINATED_UNION",
+    ),
     refusedCase("container union", z.union([z.array(z.string()), z.string()]), "MIXED_UNION"),
     refusedCase("int float union", z.union([z.int(), z.number()]), "INT_FLOAT_UNION"),
     refusedCase("record key", z.record(z.int(), z.string()), "RECORD_KEY"),
