@@ -1,0 +1,13 @@
+{
+  // The build of the published package: the TypeScript 7 compiler (`@typescript/native` of package.json) writes the
+  // JavaScript and the declarations of `src/` into `dist/`:
+  //   bun run --cwd eslint-plugin build
+  // It adds only the emit settings to tsconfig.json.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src"]
+}

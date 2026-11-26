@@ -143,7 +143,7 @@ describe("the post dispatcher", () => {
     const reasons: unknown[] = [];
 
     const body = async (_input: object, runtime: TaskRuntime): Promise<ReturnType<typeof wait.ok>> => {
-      runtime.spawn("flush", async (signal) => {
+      void runtime.spawn("flush", async (signal) => {
         await new Promise<void>((resolve) => {
           signal.addEventListener("abort", () => {
             reasons.push(signal.reason);

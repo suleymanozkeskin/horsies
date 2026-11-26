@@ -43,6 +43,18 @@ bun test
 print_step_title "Run the codec, wire type, zod adapter, child and stored-form tests on Node"
 node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/unit/child/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
 
+# The lint rule package (eslint-plugin/) runs in ESLint, on Node: its
+# RuleTester cases, and ESLint and tsc of TypeScript 7 on its fixture project.
+print_step_title "Run the lint rule package tests on Node"
+bun run --cwd eslint-plugin test
+
+# The ESLint config of the lint rule package (horsies/no-dropped-result and
+# @typescript-eslint/switch-exhaustiveness-check) on the client's own code:
+# the files of horsies/tsconfig.json and tests/tsconfig.json. A dropped Result
+# or a switch that misses a member of a union fails the step.
+print_step_title "Lint the client's own code with ESLint: dropped results and switch cases"
+node eslint-plugin/lint-client.ts
+
 # TypeScript 6.0 is the oldest compiler that the published types support.
 # This step type checks the workspace projects with it. Build mode reads the
 # project list of tsconfig.json, as `bun check` does; `--clean` then removes

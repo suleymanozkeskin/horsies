@@ -133,7 +133,7 @@ describe("the worker run", () => {
   test("the start members name the profile, each task and the child command", async () => {
     const { deps, steps } = fakeDeps();
 
-    await runWorkerOf(contextOf(implementedApp()), START, deps);
+    void (await runWorkerOf(contextOf(implementedApp()), START, deps));
 
     const prepared = steps.find((step) => step.kind === "prepare");
     const members: unknown = JSON.parse(prepared?.kind === "prepare" ? prepared.startJson : "null");
@@ -278,7 +278,7 @@ describe("the worker run", () => {
       telemetry: { handlers: () => [{ name: "alerts", eventType: "AttemptEnded" }], tracing: "otel" },
     };
 
-    await runWorkerOf(context, START, deps);
+    void (await runWorkerOf(context, START, deps));
 
     const prepared = steps.find((step) => step.kind === "prepare");
     const members: unknown = JSON.parse(prepared?.kind === "prepare" ? prepared.startJson : "null");
