@@ -23,7 +23,7 @@ import {
   type NodeDeadline,
   type SpecFinding,
 } from "./findings.ts";
-import { type CheckedInput, checkNodeInput, type SourceOutput } from "./node-input.ts";
+import { type CheckedInput, checkNodeInput, NO_STATIC_MEMBERS, type SourceOutput } from "./node-input.ts";
 
 /** What a node runs, for the reads of a handle: a task contract, or a child workflow contract. */
 export type NodeTarget =
@@ -170,7 +170,7 @@ function checkSubWorkflowNode(context: NodeContext, node: SubWorkflowRecordedNod
 /** The input of a child that takes no params: `{}` only (`HRS-022`). */
 function noParams(context: NodeContext, input: object): Result<CheckedInput, NonEmpty<SpecFinding>> {
   return Object.keys(input).length === 0
-    ? ok({ staticInput: "{}", argsFrom: new Map() })
+    ? ok({ staticInput: NO_STATIC_MEMBERS, argsFrom: new Map() })
     : err([
         finding(
           ErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH,

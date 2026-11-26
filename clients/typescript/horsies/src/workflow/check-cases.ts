@@ -5,7 +5,6 @@
 
 import { ErrorCode } from "../_catalog/error_codes.ts";
 import { refusal, type Refusal } from "../app/refusal.ts";
-import { jsonTextCheckedByCore } from "../codec/json-text.ts";
 import { decodeParameters } from "../codec/reader.ts";
 import { refusalText } from "../codec/refusal.ts";
 import { thrownFacts } from "../native/call/thrown-facts.ts";
@@ -135,7 +134,7 @@ function walk(
         refusals.push(...decision.refusals);
         break;
       case "walk": {
-        const params = decodeParameters(child.params, jsonTextCheckedByCore(node.staticInput), "worker");
+        const params = decodeParameters(child.params, node.staticInput, "worker");
 
         if (params.ok) {
           const built = checkedSpec(registry, child.record, Object(params.value), nodePath);

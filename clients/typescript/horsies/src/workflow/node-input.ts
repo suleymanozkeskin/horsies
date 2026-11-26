@@ -4,7 +4,9 @@
 // merges the node's result envelope into it at run time.
 
 import { ErrorCode } from "../_catalog/error_codes.ts";
+import type { JsonText } from "../codec/json-text.ts";
 import { encodeParametersWithReadBack } from "../codec/read-back.ts";
+import { encodeParameters } from "../codec/writer.ts";
 import { refusalText } from "../codec/refusal.ts";
 import { isPlainObject, setOwn } from "../codec/values.ts";
 import type { Kind, Member, ObjectKind } from "../wire/kinds.ts";
@@ -17,6 +19,19 @@ import { type BuildSession, nodeSlot } from "./builder.ts";
 import type { CheckedJoin, SpecFinding } from "./findings.ts";
 import { finding } from "./findings.ts";
 import { storedFormsMatch } from "./kind-match.ts";
+
+/** The stored input of a node with no static member: `{}`, as the codec's writer writes it. */
+export const NO_STATIC_MEMBERS: JsonText = noStaticMembers();
+
+function noStaticMembers(): JsonText {
+  const written = encodeParameters(objectKind([]), {});
+
+  if (!written.ok) {
+    throw new TypeError("noStaticMembers: the writer refuses an empty input");
+  }
+
+  return written.value;
+}
 
 /**
  * What a source node gives to an `h.resultOf` parameter: an output of a known kind, or one that the checks do not
@@ -40,7 +55,7 @@ export type NodeInputFacts = {
 
 /** The checked input of a node: the stored static members and the `args_from` sources, in declaration order. */
 export type CheckedInput = {
-  readonly staticInput: string;
+  readonly staticInput: JsonText;
   readonly argsFrom: ReadonlyMap<string, number>;
 };
 

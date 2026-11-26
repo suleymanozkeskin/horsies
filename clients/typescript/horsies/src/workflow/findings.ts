@@ -4,6 +4,7 @@
 import type { ErrorCode } from "../_catalog/error_codes.ts";
 import type { SpecOnError, SpecSubWorkflowParams } from "../_catalog/workflow_spec.ts";
 import type { RefusalCode } from "../app/refusal.ts";
+import type { JsonText } from "../codec/json-text.ts";
 
 /** A finding of the spec checks: the code, the place in the build (`nodes[2] charge`), the rule and the fixes. */
 export type SpecFinding = {
@@ -49,7 +50,7 @@ export type CheckedNode = {
   /** The task name, or the child's workflow name. */
   readonly name: string;
   /** The stored static members (`{}` for a child that takes no params). */
-  readonly staticInput: string;
+  readonly staticInput: JsonText;
   /** The parameter sources in the declaration order of the parameters, then `waitsFor`, each node once. */
   readonly dependencies: readonly number[];
   /** The parameter that each upstream node fills, in the declaration order of the parameters. */
