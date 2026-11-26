@@ -375,8 +375,8 @@ pub(super) struct NodeSeed {
     pub(super) input: String,
     pub(super) dependencies: Vec<i32>,
     pub(super) args_from: Option<serde_json::Value>,
-    pub(super) workflow_ctx_from: Option<Vec<String>>,
-    pub(super) allow_failed_deps: bool,
+    pub(super) workflow_context_from: Option<Vec<String>>,
+    pub(super) allow_failed_dependencies: bool,
     pub(super) join: JoinType,
     pub(super) min_success: Option<i32>,
     pub(super) task_options: Option<String>,
@@ -400,8 +400,8 @@ impl NodeSeed {
             input: "{}".to_owned(),
             dependencies: Vec::new(),
             args_from: None,
-            workflow_ctx_from: None,
-            allow_failed_deps: false,
+            workflow_context_from: None,
+            allow_failed_dependencies: false,
             join: JoinType::All,
             min_success: None,
             task_options: None,
@@ -459,8 +459,8 @@ impl NodeSeed {
         self
     }
 
-    pub(super) fn allow_failed_deps(mut self) -> Self {
-        self.allow_failed_deps = true;
+    pub(super) fn allow_failed_dependencies(mut self) -> Self {
+        self.allow_failed_dependencies = true;
         self
     }
 
@@ -534,8 +534,8 @@ pub(super) async fn seed_node(pool: &TestPool, seed: &NodeSeed) -> Uuid {
     .bind(&seed.input)
     .bind(&seed.dependencies)
     .bind(&seed.args_from)
-    .bind(&seed.workflow_ctx_from)
-    .bind(seed.allow_failed_deps)
+    .bind(&seed.workflow_context_from)
+    .bind(seed.allow_failed_dependencies)
     .bind(seed.join.to_string())
     .bind(min_success)
     .bind(&seed.task_options)
@@ -670,10 +670,10 @@ pub(super) fn task_node(index: usize, task_name: &str) -> AnyNode {
         input_json: "{}".to_owned(),
         dependencies: Vec::new(),
         args_from: std::collections::HashMap::new(),
-        workflow_ctx_from: None,
+        workflow_context_from: None,
         queue: Some(PORT_QUEUE.to_owned()),
         priority: Some(100),
-        allow_failed_deps: false,
+        allow_failed_dependencies: false,
         join: JoinType::All,
         min_success: None,
         good_until: None,

@@ -144,7 +144,7 @@ async fn test_args_from_multiple_dependencies() {
 }
 
 /// Python: `test_layer5_workflow_dataflow.py::test_failed_propagation`. With
-/// `allow_failed_deps`, the node runs and reads the upstream failure.
+/// `allow_failed_dependencies`, the node runs and reads the upstream failure.
 #[tokio::test]
 #[serial]
 async fn test_failed_propagation_via_args_from() {
@@ -152,7 +152,10 @@ async fn test_failed_propagation_via_args_from() {
     let _worker = suite.worker(Profile::Isolated1).await;
     let mut spec = builder(&suite, "failed_propagation");
     let a = add(&mut spec, fail(&suite, "a"));
-    let b = add(&mut spec, double(&suite, "b", a).allow_failed_deps(true));
+    let b = add(
+        &mut spec,
+        double(&suite, "b", a).allow_failed_dependencies(true),
+    );
     let _output = spec.output(b);
     let handle = start::<i64>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "FAILED").await;
@@ -189,7 +192,7 @@ async fn test_skipped_propagation() {
             .node()
             .node_id("c")
             .arg_from(workflow::check_upstream_skipped::params::input_result(), b)
-            .allow_failed_deps(true),
+            .allow_failed_dependencies(true),
     );
     let _output = spec.output(c);
     let handle = start::<String>(&suite, spec).await;
@@ -253,7 +256,7 @@ async fn test_dual_injection_same_node() {
             .arg_from(workflow::mixed_reader::params::from_args(), a)
             .set(workflow::mixed_reader::params::ctx_source(), "a".to_owned())
             .expect("a reader input")
-            .workflow_ctx_from([a]),
+            .workflow_context_from([a]),
     );
     let _output = spec.output(reader);
     let handle = start::<BTreeMap<String, i64>>(&suite, spec).await;
@@ -281,7 +284,7 @@ async fn test_workflow_ctx_single_dependency() {
             .set(workflow::ctx_reader::params::source(), "a".to_owned())
             .expect("a reader input")
             .waits_for(a)
-            .workflow_ctx_from([a]),
+            .workflow_context_from([a]),
     );
     let _output = spec.output(reader);
     let handle = start::<i64>(&suite, spec).await;
@@ -307,7 +310,7 @@ async fn test_workflow_ctx_multiple_dependencies() {
             .and_then(|node| node.set(workflow::ctx_sum::params::second(), "b".to_owned()))
             .expect("a sum input")
             .waits_for_all([a, b])
-            .workflow_ctx_from([a, b]),
+            .workflow_context_from([a, b]),
     );
     let _output = spec.output(sum);
     let handle = start::<i64>(&suite, spec).await;
@@ -333,7 +336,7 @@ async fn test_mixed_args_from_and_ctx() {
             .set(workflow::mixed_reader::params::ctx_source(), "b".to_owned())
             .expect("a reader input")
             .waits_for(b)
-            .workflow_ctx_from([b]),
+            .workflow_context_from([b]),
     );
     let _output = spec.output(reader);
     let handle = start::<BTreeMap<String, i64>>(&suite, spec).await;
@@ -396,7 +399,7 @@ async fn test_join_ctx_gating() {
             .expect("a reader input")
             .waits_for_all([a, b])
             .join_any()
-            .workflow_ctx_from([a, b]),
+            .workflow_context_from([a, b]),
     );
     let _output = spec.output(reader);
     let handle = start::<i64>(&suite, spec).await;

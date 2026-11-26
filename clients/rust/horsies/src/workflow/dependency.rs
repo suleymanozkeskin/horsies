@@ -7,7 +7,7 @@
 //! value that a result read returns: `Succeeded(S)` for the value the
 //! dependency returned, `Failed(TaskError<E>)` for its error or for a code
 //! the library recorded (`UPSTREAM_SKIPPED` for a skipped dependency with
-//! `allow_failed_deps`). `E` reads the user codes of the dependency's task;
+//! `allow_failed_dependencies`). `E` reads the user codes of the dependency's task;
 //! `UserCode` reads any user code.
 //!
 //! The serde form is the stored envelope:

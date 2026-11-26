@@ -183,16 +183,16 @@ class TestSpecIsolation:
         assert spec.tasks[1].args_from['data'] is spec.tasks[0]
         assert spec.tasks[1].args_from['data'] is not a
 
-    def test_workflow_ctx_from_remapped_to_copies(self) -> None:
-        """workflow_ctx_from refs point at the spec's own copies."""
+    def test_workflow_context_from_remapped_to_copies(self) -> None:
+        """workflow_context_from refs point at the spec's own copies."""
         a = TaskNode(fn=fn_a)
-        b = TaskNode(fn=fn_ctx, waits_for=[a], workflow_ctx_from=[a])
+        b = TaskNode(fn=fn_ctx, waits_for=[a], workflow_context_from=[a])
 
         spec = WorkflowSpec(name='wf', tasks=[a, b])
 
-        assert spec.tasks[1].workflow_ctx_from is not None
-        assert spec.tasks[1].workflow_ctx_from[0] is spec.tasks[0]
-        assert spec.tasks[1].workflow_ctx_from[0] is not a
+        assert spec.tasks[1].workflow_context_from is not None
+        assert spec.tasks[1].workflow_context_from[0] is spec.tasks[0]
+        assert spec.tasks[1].workflow_context_from[0] is not a
 
     def test_output_remapped_to_copy(self) -> None:
         """output ref points at the spec's own copy."""
@@ -301,7 +301,7 @@ class TestSpecIsolation:
         for this lookup to succeed.
         """
         a = TaskNode(fn=fn_a)
-        b = TaskNode(fn=fn_ctx, waits_for=[a], workflow_ctx_from=[a])
+        b = TaskNode(fn=fn_ctx, waits_for=[a], workflow_context_from=[a])
 
         spec = WorkflowSpec(name='wf', tasks=[a, b])
 
@@ -353,7 +353,7 @@ class TestSpecIsolation:
         b = TaskNode(
             fn=fn_ctx,
             waits_for=[a],
-            workflow_ctx_from=[a],
+            workflow_context_from=[a],
         )
 
         spec = WorkflowSpec(name='wf', tasks=[a, b])

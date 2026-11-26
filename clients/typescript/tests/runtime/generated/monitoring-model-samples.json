@@ -368,7 +368,7 @@
     "sub_workflow_id": null,
     "child_total": null,
     "child_failed": null,
-    "allow_failed_deps": false,
+    "allow_failed_dependencies": false,
     "timing": { "kind": "unavailable", "reason": "RUN_BEFORE_CAPTURE" }
   },
   "WorkflowRunDetail": {
@@ -394,7 +394,7 @@
         "sub_workflow_id": "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a61",
         "child_total": 3,
         "child_failed": 0,
-        "allow_failed_deps": true,
+        "allow_failed_dependencies": true,
         "timing": { "kind": "unavailable", "reason": "TIMING_BOUND_EXCEEDED" }
       }
     ],

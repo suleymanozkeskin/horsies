@@ -145,7 +145,7 @@ pub struct AnyNode {
 
     /// Node IDs of dependencies whose results should populate WorkflowContext.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub workflow_ctx_from: Option<Vec<String>>,
+    pub workflow_context_from: Option<Vec<String>>,
 
     /// Queue override (None = use default).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -156,7 +156,7 @@ pub struct AnyNode {
     pub priority: Option<i32>,
 
     /// If true, run even when upstream dependencies have failed.
-    pub allow_failed_deps: bool,
+    pub allow_failed_dependencies: bool,
 
     /// Join semantics for dependency resolution.
     pub join: JoinType,
@@ -254,10 +254,10 @@ mod tests {
             input_json: r#"{"url": "https://example.com"}"#.to_owned(),
             dependencies: vec![],
             args_from: HashMap::new(),
-            workflow_ctx_from: None,
+            workflow_context_from: None,
             queue: None,
             priority: None,
-            allow_failed_deps: false,
+            allow_failed_dependencies: false,
             join: JoinType::All,
             min_success: None,
             good_until: None,

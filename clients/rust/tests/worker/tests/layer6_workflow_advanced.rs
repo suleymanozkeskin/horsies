@@ -338,7 +338,7 @@ async fn test_quorum_ctx_gating() {
             .set(workflow::ctx_reader_str::params::source(), "c".to_owned())
             .expect("a reader input")
             .waits_for_all([a, b, c])
-            .workflow_ctx_from([c])
+            .workflow_context_from([c])
             .join_quorum(2),
     );
     let handle = start::<OutputlessResults>(&suite, spec).await;
@@ -740,7 +740,7 @@ async fn test_workflow_recovers_after_worker_crash() {
         &mut spec,
         recovery_step(&suite, "e", 50)
             .waits_for_all([c, d])
-            .allow_failed_deps(true)
+            .allow_failed_dependencies(true)
             .queue("recovery"),
     );
     let _f = add(

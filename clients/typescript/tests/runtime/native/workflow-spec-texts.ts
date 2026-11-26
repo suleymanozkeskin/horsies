@@ -9,8 +9,8 @@ export function subWorkflowRootText(input: string): string {
     input_json: input,
     dependencies: [],
     args_from: {},
-    workflow_ctx_from: [],
-    allow_failed_deps: false,
+    workflow_context_from: [],
+    allow_failed_dependencies: false,
     join: { kind: "ALL" },
     body: { kind: "SUB_WORKFLOW", definition_key: "tests.strict_child.v1", params: "GIVEN" },
   };
