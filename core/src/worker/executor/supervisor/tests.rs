@@ -499,6 +499,100 @@ async fn the_child_gets_its_socket_end_and_the_buffer_sizes() {
     stop(spawner);
 }
 
+/// Set only in the process that
+/// [`a_child_gets_the_standard_streams_that_the_worker_marked_close_on_exec`]
+/// starts.
+const STANDARD_STREAMS_PROBE_ENV: &str = "HORSIES_TEST_SPAWNER_STANDARD_STREAMS_PROBE";
+const STANDARD_STREAMS_PROBE_TEST: &str =
+    "worker::executor::supervisor::tests::standard_streams_probe";
+/// The lines that the child of the probe writes to its standard output and
+/// to its standard error.
+const CHILD_STDOUT_LINE: &str = "the child wrote this line to its standard output";
+const CHILD_STDERR_LINE: &str = "the child wrote this line to its standard error";
+
+/// The child of the probe. It exits 10 when its standard input is closed,
+/// 11 when it reads a line there (the input is not `/dev/null`), 12 or 13
+/// when a write to its standard output or standard error fails, else 0.
+fn standard_streams_child() -> ChildCommand {
+    shell(&format!(
+        r#"( exec 3<&0 ) 2>/dev/null || exit 10
+if IFS= read -r _; then exit 11; fi
+printf '%s\n' '{CHILD_STDOUT_LINE}' || exit 12
+printf '%s\n' '{CHILD_STDERR_LINE}' >&2 || exit 13
+exit 0"#
+    ))
+}
+
+/// Set close-on-exec on the open descriptor `fd` of this process.
+fn mark_close_on_exec(fd: libc::c_int) {
+    // SAFETY: fcntl with integer arguments.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    assert_ne!(
+        flags,
+        -1,
+        "F_GETFD of {fd}: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: as above.
+    let set = unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+    assert_ne!(
+        set,
+        -1,
+        "F_SETFD of {fd}: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+/// The body of the probe process: it marks its standard input, standard
+/// output and standard error close-on-exec, as Node does at its start, then
+/// spawns [`standard_streams_child`] and checks that it exits 0. The flags
+/// are set for the whole process, so only this process sets them. Without
+/// [`STANDARD_STREAMS_PROBE_ENV`] it returns at once.
+#[tokio::test]
+async fn standard_streams_probe() {
+    let Some(_probe) = std::env::var_os(STANDARD_STREAMS_PROBE_ENV) else {
+        return;
+    };
+    for stream in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+        mark_close_on_exec(stream);
+    }
+    let spawner = Spawner::start().unwrap();
+    let mut child = spawner
+        .handle()
+        .spawn(standard_streams_child())
+        .await
+        .unwrap();
+    assert_eq!(wait_for_exit(&mut child.exit, TEST_WAIT).await, exited(0));
+    stop(spawner);
+}
+
+/// A worker whose runtime marked its standard streams close-on-exec still
+/// gives a child its standard output and standard error; the standard
+/// input of the child is `/dev/null`.
+#[test]
+fn a_child_gets_the_standard_streams_that_the_worker_marked_close_on_exec() {
+    let output = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+        .args([
+            "--exact",
+            STANDARD_STREAMS_PROBE_TEST,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(STANDARD_STREAMS_PROBE_ENV, "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("the probe process runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the probe failed ({}).\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status,
+    );
+    assert!(stdout.contains(CHILD_STDOUT_LINE), "stdout:\n{stdout}");
+    assert!(stderr.contains(CHILD_STDERR_LINE), "stderr:\n{stderr}");
+}
+
 /// One descriptor of a process: its number and the target of its
 /// `/proc/<pid>/fd` entry, for example `pipe:[4026]`.
 #[cfg(target_os = "linux")]

@@ -859,31 +859,58 @@ fn spawn_error(error: &io::Error) -> SpawnError {
     }
 }
 
-/// Start the child: socket pair, then `exec` with the child end as the only
-/// passed descriptor. The arguments are the command's, the descriptor
-/// number of the child end, the worker pid, then `trailing`. Our copy of the
-/// child end closes when this returns.
+/// The standard output and the standard error. A child gets the two of the
+/// worker across `exec`; its standard input is `/dev/null`.
+const STANDARD_OUTPUTS: [RawFd; 2] = [libc::STDOUT_FILENO, libc::STDERR_FILENO];
+
+/// The descriptor numbers of the two ends of one child's socket.
+#[derive(Debug, Clone, Copy)]
+struct SocketEnds {
+    parent: RawFd,
+    child: RawFd,
+}
+
+/// What one standard output number of the worker holds in the forked child.
+#[derive(Debug, Clone, Copy)]
+enum StandardOutputSlot {
+    /// No descriptor: the worker closed this output.
+    Closed,
+    /// An end of the child's socket: the worker closed this output before
+    /// the socket pair was made, and the pair took its number.
+    SocketEnd,
+    /// The output of the worker, with its descriptor flags.
+    Output { flags: libc::c_int },
+}
+
+/// Start the child: socket pair, then `exec`. The child gets the child end
+/// of the socket, `/dev/null` as its standard input, and the standard
+/// output and the standard error of the worker. The arguments are the
+/// command's, the descriptor number of the child end, the worker pid, then
+/// `trailing`. Our copy of the child end closes when this returns.
 fn exec_child(
     command: &ChildCommand,
     worker_pid: u32,
     trailing: &[&str],
 ) -> Result<(ProcessId, UnixStream), SpawnError> {
     let pair = child_socket_pair().map_err(|error| spawn_error(&error))?;
-    let child_fd = pair.child.as_raw_fd();
+    let ends = SocketEnds {
+        parent: pair.parent.as_raw_fd(),
+        child: pair.child.as_raw_fd(),
+    };
     let parent_pid = libc::pid_t::try_from(worker_pid).map_err(|_| SpawnError::SpawnFailed {
         detail: format!("the worker pid {worker_pid} is not a pid_t"),
     })?;
     let mut process = Command::new(&command.program);
     process
         .args(&command.args)
-        .arg(child_fd.to_string())
+        .arg(ends.child.to_string())
         .arg(worker_pid.to_string())
         .args(trailing)
         .stdin(Stdio::null());
     // SAFETY: the hook runs in the forked child before `exec` and calls only
     // async-signal-safe functions (setsid, fcntl, prctl, getppid, _exit).
     unsafe {
-        process.pre_exec(move || prepare_child(child_fd, parent_pid));
+        process.pre_exec(move || prepare_child(ends, parent_pid));
     }
     let started = process.spawn().map_err(|error| spawn_error(&error))?;
     let pid = ProcessId::new(started.id()).ok_or_else(|| SpawnError::SpawnFailed {
@@ -896,22 +923,63 @@ fn exec_child(
 }
 
 /// In the forked child: lead a new session, keep the child end of the
-/// socket open across `exec`, and die with the worker.
-fn prepare_child(child_fd: RawFd, parent_pid: libc::pid_t) -> io::Result<()> {
+/// socket and the standard outputs of the worker open across `exec`, and
+/// die with the worker.
+fn prepare_child(ends: SocketEnds, parent_pid: libc::pid_t) -> io::Result<()> {
     // SAFETY: setsid takes no argument.
     if unsafe { libc::setsid() } == -1 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: fcntl on the open child end with integer arguments.
-    let flags = unsafe { libc::fcntl(child_fd, libc::F_GETFD) };
+    let flags = unsafe { libc::fcntl(ends.child, libc::F_GETFD) };
     if flags == -1 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: as above.
-    if unsafe { libc::fcntl(child_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } == -1 {
-        return Err(io::Error::last_os_error());
+    clear_close_on_exec(ends.child, flags)?;
+    for output in STANDARD_OUTPUTS {
+        keep_standard_output(output, ends)?;
     }
     set_parent_death_signal(parent_pid)
+}
+
+/// Clear close-on-exec on the open descriptor `fd`, whose flags are `flags`.
+fn clear_close_on_exec(fd: RawFd, flags: libc::c_int) -> io::Result<()> {
+    // SAFETY: fcntl on an open descriptor with integer arguments.
+    match unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } {
+        -1 => Err(io::Error::last_os_error()),
+        _ => Ok(()),
+    }
+}
+
+/// In the forked child: the standard output `output` of the worker stays
+/// open across `exec`, whatever close-on-exec flag the runtime of the
+/// worker put on it. Node marks its standard outputs close-on-exec at its
+/// start; Python and Rust leave the flag clear, so for them this changes
+/// nothing. A closed output stays closed. A socket end on that number keeps
+/// its own flag: it is not an output of the worker.
+fn keep_standard_output(output: RawFd, ends: SocketEnds) -> io::Result<()> {
+    match standard_output_slot(output, ends)? {
+        StandardOutputSlot::Closed | StandardOutputSlot::SocketEnd => Ok(()),
+        StandardOutputSlot::Output { flags } => clear_close_on_exec(output, flags),
+    }
+}
+
+/// What the standard output number `output` holds in the forked child.
+fn standard_output_slot(output: RawFd, ends: SocketEnds) -> io::Result<StandardOutputSlot> {
+    if output == ends.parent || output == ends.child {
+        return Ok(StandardOutputSlot::SocketEnd);
+    }
+    // SAFETY: fcntl with integer arguments; a number with no descriptor
+    // gives EBADF.
+    let flags = unsafe { libc::fcntl(output, libc::F_GETFD) };
+    if flags != -1 {
+        return Ok(StandardOutputSlot::Output { flags });
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EBADF) => Ok(StandardOutputSlot::Closed),
+        _ => Err(error),
+    }
 }
 
 /// Linux: `SIGKILL` when the spawner thread ends; then exit at once when
