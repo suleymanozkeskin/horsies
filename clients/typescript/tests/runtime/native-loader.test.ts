@@ -1,15 +1,28 @@
-// The outcomes of the addon loader that need no built addon. Runs on Node and on Bun.
+// The outcomes of the addon loader and of its dev-only entry that need no built addon. Runs on Node and
+// on Bun.
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { describe, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 
 import {
-  addonSource,
+  DEV_ADDON_PATH_VARIABLE,
+  devAddonPath,
+  devLoadFailureText,
+  devLoadOf,
+  loadDevAddon,
+} from "../../horsies/src/native/dev-addon.ts";
+import {
   linuxLibc,
+  loadedFrom,
   nativePlatform,
-  openAddon,
+  openAddonFile,
+  openPlatformPackage,
+  platformPackageName,
 } from "../../horsies/src/native/load.ts";
+import type { AddonLoad } from "../../horsies/src/native/load.ts";
 
 const GLIBC_MAPS = [
   "55d0c0a00000-55d0c0a01000 r--p 00000000 08:01 1 /usr/bin/node",
@@ -20,6 +33,57 @@ const MUSL_MAPS = [
   "55d0c0a00000-55d0c0a01000 r--p 00000000 08:01 1 /usr/local/bin/node",
   "7f1c2c000000-7f1c2c014000 r--p 00000000 08:01 2 /lib/ld-musl-x86_64.so.1",
 ].join("\n");
+
+/** An absolute path where no file exists. */
+const MISSING_BUILD_PATH = "/nonexistent/horsies-loader-check/horsies.node";
+
+/** The longest time a child case may take. */
+const CHILD_CASE_BOUND_MS = 30_000;
+
+const CHILD = fileURLToPath(new URL("native-loader-child.ts", import.meta.url));
+
+/**
+ * Run one case of `native-loader-child.ts` in a new process of this runtime, with the dev addon
+ * variable unset; its JSON line.
+ */
+function runChild(name: string): Readonly<Record<string, unknown>> {
+  const environment = { ...process.env };
+
+  delete environment[DEV_ADDON_PATH_VARIABLE];
+
+  const result = spawnSync(process.execPath, [CHILD, name], {
+    encoding: "utf8",
+    env: environment,
+    timeout: CHILD_CASE_BOUND_MS,
+  });
+
+  assert.equal(result.status, 0, `the child case ${name} ended with ${String(result.status)}: ${result.stderr}`);
+
+  // SAFETY: the child writes one JSON object (`CaseOutcome`) as its only stdout line.
+  return JSON.parse(result.stdout) as Readonly<Record<string, unknown>>;
+}
+
+/** The kind that a loader in a new worker thread answers; `loader` names the loader (see the worker). */
+async function workerAnswer(loader: "package" | "dev"): Promise<string> {
+  const worker = new Worker(new URL("native-loader-worker.ts", import.meta.url), { workerData: loader });
+
+  const answer = new Promise<string>((resolve, reject) => {
+    worker.once("message", (kind: string) => {
+      resolve(kind);
+    });
+    worker.once("error", reject);
+  });
+
+  const exited = new Promise<number>((resolve) => {
+    worker.once("exit", resolve);
+  });
+
+  const kind = await answer;
+
+  assert.equal(await exited, 0);
+
+  return kind;
+}
 
 describe("nativePlatform", () => {
   test("gives darwin-arm64 for macOS on arm64", () => {
@@ -112,62 +176,207 @@ describe("linuxLibc", () => {
   });
 });
 
-describe("addonSource", () => {
-  test("takes the path that the variable names, on any host", () => {
-    assert.deepEqual(addonSource("/builds/horsies.node", { kind: "unsupported", host: "win32-x64" }), {
-      kind: "pathVariable",
-      path: "/builds/horsies.node",
+describe("platformPackageName", () => {
+  test("is the napi package name with the platform", () => {
+    assert.equal(platformPackageName("linux-x64-gnu"), "@horsies/native-linux-x64-gnu");
+  });
+});
+
+describe("loadedFrom", () => {
+  test("an opened file is loaded from its source", () => {
+    const exports = {};
+
+    assert.deepEqual(loadedFrom({ kind: "devBuild", path: "/a.node" }, { kind: "opened", exports }), {
+      kind: "loaded",
+      exports,
+      source: { kind: "devBuild", path: "/a.node" },
     });
   });
 
-  test("takes the platform package of a supported host when the variable is unset", () => {
-    assert.deepEqual(addonSource(undefined, { kind: "supported", platform: "linux-x64-gnu" }), {
-      kind: "platformPackage",
-      packageName: "@horsies/native-linux-x64-gnu",
-    });
-  });
+  test("a file that did not open is loadFailed with its source and cause", () => {
+    const source = { kind: "platformPackage", packageName: "@horsies/native-linux-x64-gnu" } as const;
 
-  test("gives the unsupported host when the variable is unset", () => {
-    assert.deepEqual(addonSource(undefined, { kind: "unsupported", host: "win32-x64" }), {
-      kind: "unsupported",
-      host: "win32-x64",
+    assert.deepEqual(loadedFrom(source, { kind: "openFailed", cause: "no such file" }), {
+      kind: "loadFailed",
+      source,
+      cause: "no such file",
     });
   });
 });
 
-describe("openAddon", () => {
-  test("fails with the cause when the file does not exist", () => {
-    const path = "/nonexistent/horsies-loader-check/horsies.node";
-    const opened = openAddon({ kind: "pathVariable", path });
+describe("openAddonFile and openPlatformPackage", () => {
+  test("a file that does not exist fails with the cause", () => {
+    const opened = openAddonFile(MISSING_BUILD_PATH);
 
     assert.equal(opened.kind, "openFailed");
     assert.match(opened.kind === "openFailed" ? opened.cause : "", /horsies-loader-check/u);
   });
 
-  test("fails with the cause when the platform package is not installed", () => {
-    const opened = openAddon({ kind: "platformPackage", packageName: "@horsies/native-not-a-platform" });
+  test("a platform package that is not installed fails with the cause", () => {
+    const opened = openPlatformPackage("@horsies/native-not-a-platform");
 
     assert.equal(opened.kind, "openFailed");
     assert.match(opened.kind === "openFailed" ? opened.cause : "", /@horsies\/native-not-a-platform/u);
   });
 });
 
-describe("loadAddon", () => {
-  test("answers outsideMainThread in a worker thread and loads nothing", async () => {
-    const worker = new Worker(new URL("native-loader-worker.ts", import.meta.url));
-
-    const answer = new Promise<string>((resolve, reject) => {
-      worker.once("message", (kind: string) => {
-        resolve(kind);
-      });
-      worker.once("error", reject);
+describe("keptLoad", () => {
+  test("runs the first load once and gives its outcome to every later call", () => {
+    assert.deepEqual(runChild("kept-load"), {
+      first: "platformUnsupported",
+      later: "platformUnsupported",
+      same: true,
+      firstCalls: 1,
+      laterCalls: 0,
     });
+  });
 
-    const exited = new Promise<number>((resolve) => {
-      worker.once("exit", resolve);
+  test("the package loader answers outsideMainThread in a worker thread and loads nothing", async () => {
+    assert.equal(await workerAnswer("package"), "outsideMainThread");
+  });
+});
+
+describe("devAddonPath", () => {
+  test("an absolute path is named", () => {
+    assert.deepEqual(devAddonPath("/builds/horsies.node"), { kind: "named", path: "/builds/horsies.node" });
+  });
+
+  test("an unset variable is notSet", () => {
+    assert.deepEqual(devAddonPath(undefined), { kind: "notSet" });
+  });
+
+  test("a relative path is notAbsolute", () => {
+    assert.deepEqual(devAddonPath("bridge/horsies.node"), { kind: "notAbsolute", path: "bridge/horsies.node" });
+  });
+
+  test("an empty value is notAbsolute", () => {
+    assert.deepEqual(devAddonPath(""), { kind: "notAbsolute", path: "" });
+  });
+});
+
+describe("loadDevAddon", () => {
+  test("an unset variable is pathNotSet and loads nothing", () => {
+    assert.deepEqual(loadDevAddon(undefined), { kind: "pathNotSet" });
+  });
+
+  test("a relative path is pathNotAbsolute and loads nothing", () => {
+    assert.deepEqual(loadDevAddon("horsies.node"), { kind: "pathNotAbsolute", path: "horsies.node" });
+  });
+
+  test("a file that does not exist is loadFailed, and the package loader keeps that load", () => {
+    assert.deepEqual(runChild("dev-missing-file"), {
+      dev: "loadFailed",
+      causeNamesPath: true,
+      kept: "loadFailed",
+      keptSource: "devBuild",
     });
+  });
 
-    assert.equal(await answer, "outsideMainThread");
-    assert.equal(await exited, 0);
+  test("after a load of the platform package it is otherLoadKept with that load", () => {
+    const outcome = runChild("package-first");
+
+    assert.equal(outcome["dev"], "otherLoadKept");
+    assert.equal(outcome["keptIsSame"], true);
+    assert.ok(outcome["kept"] === "loadFailed" || outcome["kept"] === "platformUnsupported", JSON.stringify(outcome));
+  });
+
+  test("in a worker thread it is outsideMainThread and loads nothing", async () => {
+    assert.equal(await workerAnswer("dev"), "outsideMainThread");
+  });
+});
+
+describe("devLoadOf", () => {
+  const exports = {};
+  const devSource = { kind: "devBuild", path: MISSING_BUILD_PATH } as const;
+  const packageSource = { kind: "platformPackage", packageName: "@horsies/native-linux-x64-gnu" } as const;
+
+  test("a kept load of the same dev build is loaded", () => {
+    assert.deepEqual(devLoadOf(MISSING_BUILD_PATH, { kind: "loaded", exports, source: devSource }), {
+      kind: "loaded",
+      exports,
+      path: MISSING_BUILD_PATH,
+    });
+  });
+
+  test("a kept failure of the same dev build is loadFailed", () => {
+    assert.deepEqual(devLoadOf(MISSING_BUILD_PATH, { kind: "loadFailed", source: devSource, cause: "no file" }), {
+      kind: "loadFailed",
+      path: MISSING_BUILD_PATH,
+      cause: "no file",
+    });
+  });
+
+  test("a kept load of another dev build is otherLoadKept", () => {
+    const kept: AddonLoad = { kind: "loaded", exports, source: { kind: "devBuild", path: "/other/horsies.node" } };
+
+    assert.deepEqual(devLoadOf(MISSING_BUILD_PATH, kept), { kind: "otherLoadKept", kept });
+  });
+
+  test("a kept load or failure of the platform package is otherLoadKept", () => {
+    const loaded: AddonLoad = { kind: "loaded", exports, source: packageSource };
+    const failed: AddonLoad = { kind: "loadFailed", source: packageSource, cause: "not installed" };
+
+    assert.deepEqual(devLoadOf(MISSING_BUILD_PATH, loaded), { kind: "otherLoadKept", kept: loaded });
+    assert.deepEqual(devLoadOf(MISSING_BUILD_PATH, failed), { kind: "otherLoadKept", kept: failed });
+  });
+
+  test("a kept platformUnsupported is otherLoadKept", () => {
+    const kept: AddonLoad = { kind: "platformUnsupported", host: "win32-x64" };
+
+    assert.deepEqual(devLoadOf(MISSING_BUILD_PATH, kept), { kind: "otherLoadKept", kept });
+  });
+
+  test("a kept outsideMainThread is outsideMainThread", () => {
+    assert.deepEqual(devLoadOf(MISSING_BUILD_PATH, { kind: "outsideMainThread", threadId: 4 }), {
+      kind: "outsideMainThread",
+      threadId: 4,
+    });
+  });
+});
+
+describe("devLoadFailureText", () => {
+  test("names the variable when it is unset", () => {
+    assert.match(devLoadFailureText({ kind: "pathNotSet" }), /set HORSIES_NATIVE_ADDON_PATH/u);
+  });
+
+  test("names the variable and the relative path", () => {
+    assert.equal(
+      devLoadFailureText({ kind: "pathNotAbsolute", path: "horsies.node" }),
+      'HORSIES_NATIVE_ADDON_PATH must be an absolute path; it is "horsies.node"',
+    );
+  });
+
+  test("names the thread of a worker", () => {
+    assert.equal(
+      devLoadFailureText({ kind: "outsideMainThread", threadId: 4 }),
+      "the dev addon loads only on the main thread; this is thread 4",
+    );
+  });
+
+  test("names the path and the cause of a failed load", () => {
+    assert.equal(
+      devLoadFailureText({ kind: "loadFailed", path: "/a.node", cause: "no such file" }),
+      "the dev addon did not load from /a.node: no such file",
+    );
+  });
+
+  test("names the source of the load that the process kept", () => {
+    const kept: AddonLoad = {
+      kind: "loadFailed",
+      source: { kind: "platformPackage", packageName: "@horsies/native-linux-x64-gnu" },
+      cause: "not installed",
+    };
+
+    assert.equal(
+      devLoadFailureText({ kind: "otherLoadKept", kept }),
+      "this process loaded the addon from another source first: @horsies/native-linux-x64-gnu",
+    );
+  });
+
+  test("requireDevAddon throws the text when the variable is unset", () => {
+    const outcome = runChild("require-unset");
+
+    assert.equal(outcome["threw"], true);
+    assert.match(String(outcome["message"]), /set HORSIES_NATIVE_ADDON_PATH/u);
   });
 });

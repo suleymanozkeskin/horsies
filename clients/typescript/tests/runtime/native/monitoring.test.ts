@@ -5,8 +5,10 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
+import type { CoreAccess } from "../../../horsies/src/app/core-access.ts";
+import { TaskId, WorkflowId } from "../../../horsies/src/contract/ids.ts";
 import { createMonitoringArea, type MonitoringArea } from "../../../horsies/src/monitoring/app-area.ts";
-import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
+import { buildCoreHandle, type CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { processCoreAddon } from "../../../horsies/src/native/process-core/addon.ts";
 import { nativeValue } from "../../../horsies/src/native/call/envelope.ts";
 import { manifestJson, manifestJsonWithSchema, testDatabaseUrl } from "./manifest.ts";
@@ -14,15 +16,36 @@ import { manifestJson, manifestJsonWithSchema, testDatabaseUrl } from "./manifes
 /** A database URL whose connect is refused at once: nothing listens on port 1. */
 const REFUSED_DATABASE_URL = "postgresql://horsies@127.0.0.1:1/none";
 
-/** A UUIDv4: the detail read cannot classify its absence. */
-const UUID_V4 = "4b6d3a2e-8c1f-4e7a-9b5d-2f0c6e8a1d3b";
+/** A UUIDv4 text: the detail read cannot classify the absence of its task. */
+const UUID_V4_TEXT = "4b6d3a2e-8c1f-4e7a-9b5d-2f0c6e8a1d3b";
 
 /** The window of the pings of these tests, in milliseconds. */
 const PING_WINDOW_MS = 200;
 
+/** A parsed id, or a failed test. */
+function parsed<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
+  assert.ok(result.ok, "the fixture id is a canonical UUID text");
+
+  return result.value;
+}
+
+const UUID_V4 = parsed(TaskId.parse(UUID_V4_TEXT));
+const WORKFLOW_V4 = parsed(WorkflowId.parse(UUID_V4_TEXT));
+
+/** The core access of a main thread with `handle`; these tests make no send. */
+function access(handle: CoreHandle): CoreAccess {
+  const noSend = async (): Promise<never> => assert.fail("the monitoring tests make no send");
+
+  return {
+    kind: "addon",
+    handle,
+    producer: { prepareSend: noSend, enqueue: noSend, getResult: noSend, taskInfo: noSend, processRole: noSend },
+  };
+}
+
 /** The area of an app whose manifest names `databaseUrl`. */
 function area(databaseUrl: string): MonitoringArea {
-  return createMonitoringArea({ handle: buildCoreHandle(manifestJson(databaseUrl, false), "PRODUCER") });
+  return createMonitoringArea(access(buildCoreHandle(manifestJson(databaseUrl, false), "PRODUCER")));
 }
 
 /** The area of an installed test database. */
@@ -32,7 +55,7 @@ async function installedArea(): Promise<MonitoringArea> {
 
   assert.equal(installed.kind, "installed");
 
-  return createMonitoringArea({ handle });
+  return createMonitoringArea(access(handle));
 }
 
 describe("the reads of an installed database", () => {
@@ -77,7 +100,7 @@ describe("the reads of an installed database", () => {
       value: { kind: "notFound", taskId: UUID_V4, reason: "NOT_CLASSIFIED" },
     });
 
-    const read = await monitoring.taskDetail(minted.taskId);
+    const read = await monitoring.taskDetail(parsed(TaskId.parse(minted.taskId)));
 
     assert.ok(read.ok && read.value.kind === "notFound" && read.value.reason === "WITHIN_RETAINED_HISTORY");
   });
@@ -85,10 +108,13 @@ describe("the reads of an installed database", () => {
   test("an unknown workflow run and node are notFound", async () => {
     const { monitoring } = await installedArea();
 
-    assert.deepEqual(await monitoring.workflowRun(UUID_V4), { ok: true, value: { kind: "notFound", workflowId: UUID_V4 } });
-    assert.deepEqual(await monitoring.workflowNode(UUID_V4, 0), {
+    assert.deepEqual(await monitoring.workflowRun(WORKFLOW_V4), {
       ok: true,
-      value: { kind: "notFound", workflowId: UUID_V4, taskIndex: 0 },
+      value: { kind: "notFound", workflowId: WORKFLOW_V4 },
+    });
+    assert.deepEqual(await monitoring.workflowNode(WORKFLOW_V4, 0), {
+      ok: true,
+      value: { kind: "notFound", workflowId: WORKFLOW_V4, taskIndex: 0 },
     });
   });
 
@@ -157,7 +183,7 @@ describe("an unreachable database", () => {
       ["limit", await monitoring.taskBreakdown({ groupBy: "worker", limit: 501 })],
       ["limit", await monitoring.workflowRuns({ limit: 0 })],
       ["limit", await monitoring.workflowRuns({ limit: 201 })],
-      ["taskIndex", await monitoring.workflowNode(UUID_V4, 2 ** 31)],
+      ["taskIndex", await monitoring.workflowNode(WORKFLOW_V4, 2 ** 31)],
     ] as const;
 
     for (const [field, read] of refusals) {
@@ -182,7 +208,7 @@ describe("an unreachable database", () => {
 
   test("a ping on a handle with no listener is LISTENER_DISABLED before the connect", async () => {
     const handle = buildCoreHandle(manifestJsonWithSchema(REFUSED_DATABASE_URL, false, "ASSUME_INITIALIZED"), "PRODUCER");
-    const answer = await createMonitoringArea({ handle }).pingWorkers({ timeoutMs: PING_WINDOW_MS });
+    const answer = await createMonitoringArea(access(handle)).pingWorkers({ timeoutMs: PING_WINDOW_MS });
 
     assert.ok(!answer.ok && answer.error.code === "LISTENER_DISABLED");
   });

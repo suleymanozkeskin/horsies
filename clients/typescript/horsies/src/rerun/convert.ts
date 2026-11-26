@@ -2,8 +2,9 @@
 // and the caller statement and row in text form.
 
 import type { CoreFailure } from "../_catalog/error_detail.ts";
+import { type TaskId, taskIdFromCore } from "../contract/ids.ts";
 import { unreachable } from "../native/call/never.ts";
-import { coreFailure } from "../native/facades/catalog-record.ts";
+import { coreFailureOf } from "../send/catalog-value.ts";
 import type {
   AppRerunFailure,
   CallerRowArg,
@@ -16,9 +17,37 @@ import type { CallerRow, CallerStatement, SqlText } from "./caller.ts";
 import type { RerunError, RerunStepRefused } from "./errors.ts";
 import type { RerunOutcome } from "./types.ts";
 
-/** The public outcome of an outcome record. The record has the public form already. Pure. */
+/** The public outcome of an outcome record: the same fields, each id as a `TaskId`. Pure. */
 export function rerunOutcome(record: RerunOutcomeRecord): RerunOutcome {
-  return record;
+  const id = (text: string): TaskId => taskIdFromCore(text, "rerun");
+
+  switch (record.kind) {
+    case "enqueued":
+      return {
+        kind: "enqueued",
+        newTaskId: id(record.newTaskId),
+        sourceTaskId: id(record.sourceTaskId),
+        rerunRootTaskId: id(record.rerunRootTaskId),
+      };
+    case "sourceLive":
+      return { kind: "sourceLive", taskId: id(record.taskId) };
+    case "sourceAbsent":
+      return { kind: "sourceAbsent", taskId: id(record.taskId), reason: record.reason };
+    case "sourceCorrupt":
+      return { kind: "sourceCorrupt", taskId: id(record.taskId), detail: record.detail };
+    case "notEligible":
+      return { kind: "notEligible", taskId: id(record.taskId), reason: record.reason };
+    case "inputUnavailable":
+      return { kind: "inputUnavailable", taskId: id(record.taskId), disposition: record.disposition };
+    case "inputCorrupt":
+      return { kind: "inputCorrupt", taskId: id(record.taskId), detail: record.detail };
+    case "keyConflict":
+      return { kind: "keyConflict", taskId: id(record.taskId), reservedByTaskId: id(record.reservedByTaskId) };
+    case "keyReplay":
+      return { kind: "keyReplay", existingTaskId: id(record.existingTaskId) };
+    default:
+      return unreachable(record);
+  }
 }
 
 /** The public error of a failure of the rerun in the app's transaction. Pure. */
@@ -26,13 +55,13 @@ export function appRerunError(failure: AppRerunFailure): RerunError {
   switch (failure.code) {
     case "CONNECT_FAILED":
     case "FAMILY_CHECK_FAILED": {
-      const exception = coreFailure(failure.cause);
+      const exception = coreFailureOf(failure.cause);
 
       return { code: failure.code, retryable: failureRetryable(exception), message: failure.message, exception };
     }
 
     case "STATEMENT_FAILED": {
-      const exception = coreFailure(failure.cause);
+      const exception = coreFailureOf(failure.cause);
 
       return {
         code: "STATEMENT_FAILED",

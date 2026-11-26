@@ -114,7 +114,8 @@ describe("app.rerunIn", () => {
   test("refuses the request before any statement", async () => {
     const { bridge, calls } = fakeBridge(ENQUEUED_ANSWERS);
     const { transaction, statements } = fakeTransaction([]);
-    const answer = await rerunAreaOn(HOST, bridge).rerunIn(transaction, { ...COMMAND, sourceTaskId: "not a uuid" }, POLICY);
+    const lateDeadline = { kind: "until", at: Temporal.Instant.from("+010000-01-01T00:00:00Z") } as const;
+    const answer = await rerunAreaOn(HOST, bridge).rerunIn(transaction, { ...COMMAND, deadline: lateDeadline }, POLICY);
 
     assert.equal(!answer.ok && answer.error.code, "INVALID_COMMAND");
     assert.deepEqual(calls, []);

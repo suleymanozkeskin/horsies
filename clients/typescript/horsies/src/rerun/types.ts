@@ -2,14 +2,15 @@
 // terminal task.
 
 import type { TaskAbsenceReason } from "../_catalog/history.ts";
+import type { TaskId } from "../contract/ids.ts";
 
 /** The deadline of the new task: an instant, or the explicit choice of no deadline. */
 export type RerunDeadline = { readonly kind: "until"; readonly at: Temporal.Instant } | { readonly kind: "none" };
 
 /** One rerun request. */
 export interface RerunCommand {
-  /** The task to run again, as lower-case hyphenated UUID text. */
-  readonly sourceTaskId: string;
+  /** The task to run again. */
+  readonly sourceTaskId: TaskId;
   /** The deadline of the new task. A part below the microsecond is cut toward the past. */
   readonly deadline: RerunDeadline;
   /**
@@ -42,64 +43,64 @@ export type RerunNotEligibleReason = "COMPLETED_SOURCE" | "WORKFLOW_TASK";
 /** The new task exists. The source task is not changed. */
 export interface RerunEnqueued {
   readonly kind: "enqueued";
-  readonly newTaskId: string;
-  readonly sourceTaskId: string;
+  readonly newTaskId: TaskId;
+  readonly sourceTaskId: TaskId;
   /** The first task of the rerun chain: the source, or the root of the source. */
-  readonly rerunRootTaskId: string;
+  readonly rerunRootTaskId: TaskId;
 }
 
 /** The source task is live: its own lifecycle owns its retry. Nothing is written. */
 export interface RerunSourceLive {
   readonly kind: "sourceLive";
-  readonly taskId: string;
+  readonly taskId: TaskId;
 }
 
 /** No live or history record has the source id. `reason` says whether retention can explain it. Nothing is written. */
 export interface RerunSourceAbsent {
   readonly kind: "sourceAbsent";
-  readonly taskId: string;
+  readonly taskId: TaskId;
   readonly reason: TaskAbsenceReason;
 }
 
 /** The history row of the source does not decode. Nothing is written; a repeat gives the same answer. */
 export interface RerunSourceCorrupt {
   readonly kind: "sourceCorrupt";
-  readonly taskId: string;
+  readonly taskId: TaskId;
   readonly detail: string;
 }
 
 /** The source is a workflow task, or it completed. Nothing is written. */
 export interface RerunNotEligible {
   readonly kind: "notEligible";
-  readonly taskId: string;
+  readonly taskId: TaskId;
   readonly reason: RerunNotEligibleReason;
 }
 
 /** The source stores no input. `disposition` is the stored reason, for example `DECLINED_BY_POLICY`. Nothing is written. */
 export interface RerunInputUnavailable {
   readonly kind: "inputUnavailable";
-  readonly taskId: string;
+  readonly taskId: TaskId;
   readonly disposition: string;
 }
 
 /** The stored input or its options fail their checks. Nothing is written. */
 export interface RerunInputCorrupt {
   readonly kind: "inputCorrupt";
-  readonly taskId: string;
+  readonly taskId: TaskId;
   readonly detail: string;
 }
 
 /** The caller key holds another command, the source's own included. Nothing is written. */
 export interface RerunKeyConflict {
   readonly kind: "keyConflict";
-  readonly taskId: string;
-  readonly reservedByTaskId: string;
+  readonly taskId: TaskId;
+  readonly reservedByTaskId: TaskId;
 }
 
 /** The caller key holds this rerun command already, as `existingTaskId`. Nothing is written. */
 export interface RerunKeyReplay {
   readonly kind: "keyReplay";
-  readonly existingTaskId: string;
+  readonly existingTaskId: TaskId;
 }
 
 /** The outcome of one rerun. Only `enqueued` writes. */

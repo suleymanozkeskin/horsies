@@ -34,8 +34,7 @@ export type {
   PendingStream,
   PingTarget,
   PingWorkersOptions,
-  Recorded,
-  RecoveryConfig,
+  RecoveryConfigSnapshot,
   ShortageErrno,
   SlotHealth,
   SnapshotProfile,
@@ -192,20 +191,5 @@ export type {
   BrokerOperationFailedCode,
 } from "../_catalog/broker_errors.ts";
 
-export type {
-  CoreCause,
-  CoreConnectionError,
-  CoreContractViolation,
-  CoreFailure,
-  CorePreconditionFailed,
-  CoreServerError,
-  HistoryContractError,
-  JsonUnreadable,
-  NoCause,
-  OutcomeDecodeError,
-  RuleRefused,
-} from "../_catalog/error_detail.ts";
 
 export type { TaskAbsenceReason } from "../_catalog/history.ts";
-
-export type { TaskStatus } from "../_catalog/status.ts";

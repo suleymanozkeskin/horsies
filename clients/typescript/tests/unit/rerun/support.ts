@@ -7,6 +7,7 @@ import type {
   CallerStatementRecord,
   WriteDecodeRecord,
 } from "../../../horsies/src/native/facades/rerun.ts";
+import { TaskId } from "../../../horsies/src/contract/ids.ts";
 import type { NativeCoreHandle } from "../../../horsies/src/native/handle/addon.ts";
 import { CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import type { TraceArgument } from "../../../horsies/src/native/values/records.ts";
@@ -21,8 +22,19 @@ import type { RerunRequest } from "../../../horsies/src/rerun/parse.ts";
 import type { RerunCommand, RerunPolicy } from "../../../horsies/src/rerun/types.ts";
 import type { Result } from "../../../horsies/src/wire/result.ts";
 
-export const SOURCE_TASK_ID = "01890a5d-ac96-774b-bcce-b302099a8057";
-export const NEW_TASK_ID = "01890a5d-ac96-774b-bcce-b302099a8058";
+/** The task id of a canonical UUID text. */
+export function taskIdOf(text: string): TaskId {
+  const parsed = TaskId.parse(text);
+
+  if (!parsed.ok) {
+    throw new Error(`not a task id: ${text}`);
+  }
+
+  return parsed.value;
+}
+
+export const SOURCE_TASK_ID: TaskId = taskIdOf("01890a5d-ac96-774b-bcce-b302099a8057");
+export const NEW_TASK_ID: TaskId = taskIdOf("01890a5d-ac96-774b-bcce-b302099a8058");
 
 /** An unkeyed command with no deadline. */
 export const COMMAND: RerunCommand = { sourceTaskId: SOURCE_TASK_ID, deadline: { kind: "none" } };

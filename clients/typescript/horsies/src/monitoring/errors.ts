@@ -21,7 +21,7 @@ import type {
 } from "../_catalog/monitoring_errors.ts";
 import { monitoringQueryCoreErrorFromNative, taskActionCoreErrorFromNative } from "../_catalog/monitoring_errors.ts";
 import { raiseDefect } from "../native/call/defect.ts";
-import { nativeCatalogRecord } from "../native/facades/catalog-record.ts";
+import { nativeCatalogValue } from "../send/catalog-value.ts";
 import type { RawCatalogError } from "../native/values/records.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 
@@ -35,8 +35,6 @@ export type QueryRefusedField =
   | "workers"
   | "errorCodes"
   | "workflowName"
-  | "taskId"
-  | "workflowId"
   | "taskIndex"
   | "workerId";
 
@@ -52,7 +50,7 @@ export interface QueryRefused {
 export type MonitoringReadError = MonitoringQueryCoreError | QueryRefused;
 
 /** The error of a cancel. */
-export type CancelTaskError = TaskActionCoreError | QueryRefused;
+export type CancelTaskError = TaskActionCoreError;
 
 /** `BrokerOperationFailed` with one code of its subset. */
 export type BrokerOperationFailedWith<Code extends BrokerOperationFailed["code"]> = BrokerOperationFailed & {
@@ -87,21 +85,21 @@ export function queryRefused(field: QueryRefusedField, reason: string): QueryRef
 export function monitoringQueryError(raw: RawCatalogError): MonitoringQueryCoreError {
   // SAFETY: the read gives the record of a value of the core's `MonitoringQueryError`; the generated native types
   // name the classes and slots of the same core catalog, and the converter throws for a class it does not know.
-  return monitoringQueryCoreErrorFromNative(nativeCatalogRecord(raw) as NativeMonitoringQueryCoreError);
+  return monitoringQueryCoreErrorFromNative(nativeCatalogValue(raw) as NativeMonitoringQueryCoreError);
 }
 
 /** The task action error of a raw record of the core. */
 export function taskActionError(raw: RawCatalogError): TaskActionCoreError {
   // SAFETY: the cancel gives the record of a value of the core's `TaskActionError`; the generated native types name
   // the classes and slots of the same core catalog, and the converter throws for a class it does not know.
-  return taskActionCoreErrorFromNative(nativeCatalogRecord(raw) as NativeTaskActionCoreError);
+  return taskActionCoreErrorFromNative(nativeCatalogValue(raw) as NativeTaskActionCoreError);
 }
 
 /** The broker error of a raw record of the core. */
 export function brokerError(raw: RawCatalogError): BrokerCoreError {
   // SAFETY: the health reads give the record of a value of the core's `BrokerOperationError`; the generated native
   // types name the classes and slots of the same core catalog, and the converter throws for a class it does not know.
-  return brokerCoreErrorFromNative(nativeCatalogRecord(raw) as NativeBrokerCoreError);
+  return brokerCoreErrorFromNative(nativeCatalogValue(raw) as NativeBrokerCoreError);
 }
 
 /** The error of a database ping. Another code is a defect. */

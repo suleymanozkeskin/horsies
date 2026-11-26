@@ -7,6 +7,7 @@ import { before, describe, test } from "node:test";
 
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import type { CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
+import { TaskId } from "../../../horsies/src/contract/ids.ts";
 import { mintTaskId } from "../../../horsies/src/native/process-core/process-core.ts";
 import { NO_ACTIVE_CARRIER, createRerunArea } from "../../../horsies/src/rerun/app-area.ts";
 import type { RerunArea } from "../../../horsies/src/rerun/app-area.ts";
@@ -31,17 +32,26 @@ function areaOf(handle: CoreHandle): RerunArea {
   return createRerunArea({ coreHandle: () => handle, activeCarrier: () => NO_ACTIVE_CARRIER });
 }
 
+/** The task id of a canonical UUID text. */
+function taskIdOf(text: string): TaskId {
+  const parsed = TaskId.parse(text);
+
+  assert.ok(parsed.ok, "a canonical UUID text");
+
+  return parsed.value;
+}
+
 /** A UUIDv7 that no task has: minted now and never sent. */
-function unsentTaskId(): string {
+function unsentTaskId(): TaskId {
   const minted = mintTaskId();
 
-  assert.equal(minted.kind, "minted");
+  assert.ok(minted.kind === "minted");
 
-  return minted.kind === "minted" ? minted.taskId : "";
+  return taskIdOf(minted.taskId);
 }
 
 /** An unkeyed command for `sourceTaskId` with no deadline. */
-function commandFor(sourceTaskId: string): RerunCommand {
+function commandFor(sourceTaskId: TaskId): RerunCommand {
   return { sourceTaskId, deadline: { kind: "none" } };
 }
 
@@ -65,7 +75,7 @@ describe("app.rerun with a database", () => {
   });
 
   test("a UUIDv4 is sourceAbsent and not classified", async () => {
-    const taskId = randomUUID();
+    const taskId = taskIdOf(randomUUID());
 
     assert.deepEqual(await area.rerun(commandFor(taskId), POLICY), {
       ok: true,
@@ -89,7 +99,7 @@ describe("app.rerun with a database that cannot be reached", () => {
   const area = areaOf(buildCoreHandle(manifestJson(REFUSED_DATABASE_URL, false), "PRODUCER"));
 
   test("CONNECT_FAILED is retryable, with the connection cause", async () => {
-    const answer = await area.rerun(commandFor(randomUUID()), POLICY);
+    const answer = await area.rerun(commandFor(taskIdOf(randomUUID())), POLICY);
 
     assert.ok(!answer.ok && answer.error.code === "CONNECT_FAILED", JSON.stringify(answer));
     assert.equal(answer.error.retryable, true);
@@ -98,7 +108,7 @@ describe("app.rerun with a database that cannot be reached", () => {
 
   test("a window of 0 and of 31 days is INVALID_POLICY, not the connect failure", async () => {
     for (const days of [0, 31]) {
-      const answer = await area.rerun(commandFor(randomUUID()), {
+      const answer = await area.rerun(commandFor(taskIdOf(randomUUID())), {
         ...POLICY,
         reservationWindow: Temporal.Duration.from({ days }),
       });

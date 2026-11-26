@@ -1,0 +1,113 @@
+{
+  "$comment": [
+    "The platforms of the release: one row per platform that the Python wheel and the npm packages of the TypeScript client are built for.",
+    "Readers: the metadata job of release.yml (the wheel matrix: the rows whose release is publish) and clients/typescript/tests/packages/platforms.ts (the npm matrix of typescript-packages.yml: every row).",
+    "Row fields:",
+    "  name         the job name and the artifact name of the row",
+    "  release      publish: the release builds, checks and publishes the wheel and the npm platform package of this row, and the horsies npm package lists the platform package as an optional dependency.",
+    "               hold: typescript-packages.yml builds and checks the npm platform package; no wheel is built; nothing is published; horsies does not list the platform package.",
+    "  runner       a GitHub runner of the row's own CPU: the builds and the load checks run natively",
+    "  rust_target  the Rust target triple",
+    "  c_library    glibc, musl or libsystem (macOS)",
+    "  wheel        the wheel fields of release.yml: manylinux (Linux only), platform_tag, import_image (Linux only), web_ui_check",
+    "  npm          platform: the napi platform name, the suffix of the platform package @horsies/native-<platform>; cpu: the npm cpu value",
+    "               build: glibc-2.17-toolchain (napi build --use-napi-cross on the runner; glibc floor 2.17), manylinux-container (napi build in the manylinux image, as the wheel of the row; glibc_floor: its glibc), alpine-container (napi build in a node:<version>-<node_variant> container), runner (napi build on the runner)",
+    "               a glibc row builds with glibc-2.17-toolchain or manylinux-container, a musl row with alpine-container, a macOS row on the runner",
+    "               install: container (the install checks run in node:<version>-<node_variant> and oven/bun:<version>-<bun_variant>; the versions are in typescript-packages.yml), runner (the install checks run on the runner)"
+  ],
+  "platforms": [
+    {
+      "name": "linux-x86_64",
+      "release": "publish",
+      "runner": "ubuntu-latest",
+      "rust_target": "x86_64-unknown-linux-gnu",
+      "c_library": "glibc",
+      "wheel": {
+        "manylinux": "2_28",
+        "platform_tag": "manylinux_2_28_x86_64",
+        "import_image": "python:3.13-slim-trixie",
+        "web_ui_check": true
+      },
+      "npm": {
+        "platform": "linux-x64-gnu",
+        "cpu": "x64",
+        "build": { "kind": "glibc-2.17-toolchain" },
+        "install": { "kind": "container", "node_variant": "trixie-slim", "bun_variant": "debian" }
+      }
+    },
+    {
+      "name": "linux-aarch64",
+      "release": "publish",
+      "runner": "ubuntu-24.04-arm",
+      "rust_target": "aarch64-unknown-linux-gnu",
+      "c_library": "glibc",
+      "wheel": {
+        "manylinux": "2_28",
+        "platform_tag": "manylinux_2_28_aarch64",
+        "import_image": "python:3.13-slim-trixie",
+        "web_ui_check": false
+      },
+      "npm": {
+        "platform": "linux-arm64-gnu",
+        "cpu": "arm64",
+        "build": { "kind": "manylinux-container", "image": "quay.io/pypa/manylinux_2_28_aarch64:2026.11.21-1", "glibc_floor": "2.28" },
+        "install": { "kind": "container", "node_variant": "trixie-slim", "bun_variant": "debian" }
+      }
+    },
+    {
+      "name": "linux-musl-x86_64",
+      "release": "hold",
+      "runner": "ubuntu-latest",
+      "rust_target": "x86_64-unknown-linux-musl",
+      "c_library": "musl",
+      "wheel": {
+        "manylinux": "musllinux_1_2",
+        "platform_tag": "musllinux_1_2_x86_64",
+        "import_image": "python:3.13-alpine",
+        "web_ui_check": false
+      },
+      "npm": {
+        "platform": "linux-x64-musl",
+        "cpu": "x64",
+        "build": { "kind": "alpine-container", "node_variant": "alpine3.23" },
+        "install": { "kind": "container", "node_variant": "alpine3.23", "bun_variant": "alpine" }
+      }
+    },
+    {
+      "name": "linux-musl-aarch64",
+      "release": "hold",
+      "runner": "ubuntu-24.04-arm",
+      "rust_target": "aarch64-unknown-linux-musl",
+      "c_library": "musl",
+      "wheel": {
+        "manylinux": "musllinux_1_2",
+        "platform_tag": "musllinux_1_2_aarch64",
+        "import_image": "python:3.13-alpine",
+        "web_ui_check": false
+      },
+      "npm": {
+        "platform": "linux-arm64-musl",
+        "cpu": "arm64",
+        "build": { "kind": "alpine-container", "node_variant": "alpine3.23" },
+        "install": { "kind": "container", "node_variant": "alpine3.23", "bun_variant": "alpine" }
+      }
+    },
+    {
+      "name": "macos-arm64",
+      "release": "publish",
+      "runner": "macos-15",
+      "rust_target": "aarch64-apple-darwin",
+      "c_library": "libsystem",
+      "wheel": {
+        "platform_tag": "macosx_11_0_arm64",
+        "web_ui_check": false
+      },
+      "npm": {
+        "platform": "darwin-arm64",
+        "cpu": "arm64",
+        "build": { "kind": "runner" },
+        "install": { "kind": "runner" }
+      }
+    }
+  ]
+}

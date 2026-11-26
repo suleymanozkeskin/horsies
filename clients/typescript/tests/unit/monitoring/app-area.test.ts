@@ -9,10 +9,20 @@ import type { CancelAddon } from "../../../horsies/src/native/facades/cancel.ts"
 import type { HealthAddon } from "../../../horsies/src/native/facades/health.ts";
 import type { MonitoringReadsAddon } from "../../../horsies/src/native/facades/monitoring-reads.ts";
 import type { NativeCoreHandle } from "../../../horsies/src/native/handle/addon.ts";
-import { CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
-import { coreText, fakeHandle, sample, valueEnvelope } from "./support/fakes.ts";
+import { AddonOutsideMainThread } from "../../../horsies/src/thrown-errors.ts";
+import {
+  coreText,
+  fakeHandle,
+  mainThreadAccess,
+  sample,
+  taskIdOf,
+  valueEnvelope,
+  workflowIdOf,
+} from "./support/fakes.ts";
 
-const TASK_ID = "01890a5d-ac96-774b-bcce-b302099a8057";
+const ID_TEXT = "01890a5d-ac96-774b-bcce-b302099a8057";
+const TASK_ID = taskIdOf(ID_TEXT);
+const WORKFLOW_ID = workflowIdOf(ID_TEXT);
 
 /** Fake addons that log the name of each called function, and check the handle. */
 function fakeAddons(handle: NativeCoreHandle, called: string[]): MonitoringAddons {
@@ -73,7 +83,7 @@ describe("createMonitoringArea", () => {
   test("each member calls its addon function with the app's handle", async () => {
     const called: string[] = [];
     const native: NativeCoreHandle = { ...fakeHandle(), pingDatabase: async () => valueEnvelope({ kind: "done" as const, record: { latencyMs: 1 } }) };
-    const area = createMonitoringArea({ handle: new CoreHandle(native) }, fakeAddons(native, called));
+    const area = createMonitoringArea(mainThreadAccess(native), fakeAddons(native, called));
     const { monitoring } = area;
 
     const answers = [
@@ -84,8 +94,8 @@ describe("createMonitoringArea", () => {
       await monitoring.taskDetail(TASK_ID),
       await monitoring.workflowNames(),
       await monitoring.workflowRuns(),
-      await monitoring.workflowRun(TASK_ID),
-      await monitoring.workflowNode(TASK_ID, 0),
+      await monitoring.workflowRun(WORKFLOW_ID),
+      await monitoring.workflowNode(WORKFLOW_ID, 0),
       await monitoring.schedules(),
       await monitoring.workers(),
       await monitoring.worker("w1"),
@@ -125,8 +135,16 @@ describe("createMonitoringArea", () => {
 
   test("the area and its monitoring member are frozen", () => {
     const native = fakeHandle();
-    const area = createMonitoringArea({ handle: new CoreHandle(native) }, fakeAddons(native, []));
+    const area = createMonitoringArea(mainThreadAccess(native), fakeAddons(native, []));
 
     assert.ok(Object.isFrozen(area) && Object.isFrozen(area.monitoring));
+  });
+
+  test("a thread with no addon throws AddonOutsideMainThread at the call, not at the build", async () => {
+    const native = fakeHandle();
+    const area = createMonitoringArea({ kind: "noCore" }, fakeAddons(native, []));
+
+    await assert.rejects(area.monitoring.listTasks(), AddonOutsideMainThread);
+    await assert.rejects(area.pingDatabase(), AddonOutsideMainThread);
   });
 });

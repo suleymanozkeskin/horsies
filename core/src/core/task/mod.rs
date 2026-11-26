@@ -1,3 +1,4 @@
+pub mod declared_options;
 pub mod error;
 pub mod execution;
 pub mod fencing;
@@ -13,7 +14,7 @@ pub use error::{
     OutcomeCode, RetrievalCode, StoredErrorRefused, SubWorkflowFailure, TaskError, TaskErrorCode,
     TaskErrorKind, UserCode, UserCodeRefused, UNDECLARED_LABEL,
 };
-pub use execution::{Execution, ExecutionClass, InvalidExecution};
+pub use execution::{Execution, ExecutionClass, GraceUse, InvalidExecution, TimeoutUse};
 pub use fencing::{FencingToken, FencingTokenRefused};
 pub use fn_trait::{AsyncTaskFn, BlockingTaskFn, RawTaskResult, RegisteredTask};
 pub use info::{TaskAttemptInfo, TaskInfo};

@@ -1,12 +1,14 @@
 // The monitoring area of the app: `app.monitoring`, `app.pingDatabase` and `app.pingWorkers`.
 //
-// The app hub builds the area with the core handle of its process (in a worker child, the child's producer handle) and
-// puts its three members on the app. Each call loads the addon at its first use.
+// The app hub builds the area with the core access of its thread and puts its three members on the app. On a main
+// thread each call uses the app's core handle (in a worker child, the child's producer handle) and loads the addon at
+// its first use. In a worker thread a call throws `AddonOutsideMainThread`: the seat relay serves no facade operation.
 
+import { appCoreHandle, type CoreAccess } from "../app/core-access.ts";
+import type { TaskId, WorkflowId } from "../contract/ids.ts";
 import { cancelAddon, type CancelAddon } from "../native/facades/cancel.ts";
 import { healthAddon, type HealthAddon } from "../native/facades/health.ts";
 import { monitoringReadsAddon, type MonitoringReadsAddon } from "../native/facades/monitoring-reads.ts";
-import type { CoreHandle } from "../native/handle/core-handle.ts";
 import type { Result } from "../wire/result.ts";
 import type {
   Breakdown,
@@ -68,12 +70,6 @@ import {
   workflowRuns,
 } from "./reads.ts";
 
-/** What the monitoring area needs from the app. */
-export interface MonitoringHost {
-  /** The core handle of the app in this process. */
-  readonly handle: CoreHandle;
-}
-
 /** The addon functions of the area, each loaded at its first use. Tests pass their own. */
 export interface MonitoringAddons {
   readonly reads: () => MonitoringReadsAddon;
@@ -99,11 +95,11 @@ export interface Monitoring {
   taskFacets(query?: TaskFacetsQuery): Promise<Result<Facets, MonitoringReadError>>;
   taskBreakdown(query: TaskBreakdownQuery): Promise<Result<Breakdown, MonitoringReadError>>;
   listTasks(query?: TaskListQuery): Promise<Result<TaskListPage, MonitoringReadError>>;
-  taskDetail(taskId: string): Promise<Result<TaskDetailRead, MonitoringReadError>>;
+  taskDetail(taskId: TaskId): Promise<Result<TaskDetailRead, MonitoringReadError>>;
   workflowNames(): Promise<Result<readonly string[], MonitoringReadError>>;
   workflowRuns(query?: WorkflowRunsQuery): Promise<Result<readonly WorkflowRunSummary[], MonitoringReadError>>;
-  workflowRun(workflowId: string): Promise<Result<WorkflowRunRead, MonitoringReadError>>;
-  workflowNode(workflowId: string, taskIndex: number): Promise<Result<WorkflowNodeRead, MonitoringReadError>>;
+  workflowRun(workflowId: WorkflowId): Promise<Result<WorkflowRunRead, MonitoringReadError>>;
+  workflowNode(workflowId: WorkflowId, taskIndex: number): Promise<Result<WorkflowNodeRead, MonitoringReadError>>;
   schedules(): Promise<Result<readonly ScheduleStateInfo[], MonitoringReadError>>;
   workers(): Promise<Result<readonly WorkerStateSnapshot[], HealthReadError>>;
   worker(workerId: string): Promise<Result<WorkerStateRead, WorkerReadError>>;
@@ -115,7 +111,7 @@ export interface Monitoring {
   expiredTasks(): Promise<Result<BoundedTaskList<ExpiredTaskRow>, HealthReadError>>;
   classCoverage(): Promise<Result<ClassCoverage, HealthReadError>>;
   classReport(): Promise<Result<ClassReport, HealthReadError>>;
-  cancelTask(taskId: string, options: CancelTaskOptions): Promise<Result<TaskCancelled, CancelTaskError>>;
+  cancelTask(taskId: TaskId, options: CancelTaskOptions): Promise<Result<TaskCancelled, CancelTaskError>>;
 }
 
 /** The members that the area puts on the app. */
@@ -125,22 +121,21 @@ export interface MonitoringArea {
   pingWorkers(options?: PingWorkersOptions): Promise<Result<readonly WorkerPong[], PingWorkersError>>;
 }
 
-/** The monitoring area of the app of `host`. Starts nothing. */
-export function createMonitoringArea(host: MonitoringHost, addons: MonitoringAddons = NATIVE_ADDONS): MonitoringArea {
-  const handle = host.handle.native;
-  const reads = () => ({ addon: addons.reads(), handle });
-  const health = () => ({ addon: addons.health(), handle });
+/** The monitoring area of an app whose thread reaches the core through `core`. Starts nothing. */
+export function createMonitoringArea(core: CoreAccess, addons: MonitoringAddons = NATIVE_ADDONS): MonitoringArea {
+  const reads = () => ({ addon: addons.reads(), handle: appCoreHandle(core).native });
+  const health = () => ({ addon: addons.health(), handle: appCoreHandle(core).native });
 
   const monitoring: Monitoring = Object.freeze({
     taskStats: async (query: TaskStatsQuery = {}) => taskStats(reads(), query),
     taskFacets: async (query: TaskFacetsQuery = {}) => taskFacets(reads(), query),
     taskBreakdown: async (query: TaskBreakdownQuery) => taskBreakdown(reads(), query),
     listTasks: async (query: TaskListQuery = {}) => listTasks(reads(), query),
-    taskDetail: async (taskId: string) => taskDetail(reads(), taskId),
+    taskDetail: async (taskId: TaskId) => taskDetail(reads(), taskId),
     workflowNames: async () => workflowNames(reads()),
     workflowRuns: async (query: WorkflowRunsQuery = {}) => workflowRuns(reads(), query),
-    workflowRun: async (workflowId: string) => workflowRun(reads(), workflowId),
-    workflowNode: async (workflowId: string, taskIndex: number) => workflowNode(reads(), workflowId, taskIndex),
+    workflowRun: async (workflowId: WorkflowId) => workflowRun(reads(), workflowId),
+    workflowNode: async (workflowId: WorkflowId, taskIndex: number) => workflowNode(reads(), workflowId, taskIndex),
     schedules: async () => schedules(reads()),
     workers: async () => workers(health()),
     worker: async (workerId: string) => worker(health(), workerId),
@@ -150,13 +145,13 @@ export function createMonitoringArea(host: MonitoringHost, addons: MonitoringAdd
     expiredTasks: async () => expiredTasks(health()),
     classCoverage: async () => readClassCoverage(health()),
     classReport: async () => readClassReport(health()),
-    cancelTask: async (taskId: string, options: CancelTaskOptions) =>
-      cancelTask({ addon: addons.cancel(), handle }, taskId, options),
+    cancelTask: async (taskId: TaskId, options: CancelTaskOptions) =>
+      cancelTask({ addon: addons.cancel(), handle: appCoreHandle(core).native }, taskId, options),
   });
 
   return Object.freeze({
     monitoring,
-    pingDatabase: async () => pingDatabase(handle),
+    pingDatabase: async () => pingDatabase(appCoreHandle(core).native),
     pingWorkers: async (options: PingWorkersOptions = {}) => pingWorkers(health(), options),
   });
 }

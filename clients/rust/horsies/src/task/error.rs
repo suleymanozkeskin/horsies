@@ -5,19 +5,15 @@
 //! `exception`, `error_code`, `data`, `message`, and the two fields of a
 //! sub-workflow failure. This module converts in both directions.
 
-use horsies_core::core::codec::{check_user_value_text, StrictJsonError, UserValueRefused};
+use horsies_core::core::codec::{
+    check_user_value_text, StrictJsonError, UserValueRefused, STRICT_JSON_ERROR_CAUSE,
+};
 use horsies_core::core::task::error::{
     ExceptionRecord, TaskErrorKind, DATA_REFUSED_KEY, ERROR_DATA_DEPTH_LIMIT,
 };
 use horsies_core::{BuiltInTaskCode, JsonText, JsonTextRefused, SubWorkflowFailure};
 
 use super::user_code::{stored_user_code, UserErrorCode};
-
-/// The cause that Python stores in `data_refused` for a value that is not
-/// JSON-native: a non-finite float, a map key that is not a string, or a
-/// value that does not serialize (`_validate_json_native` raises
-/// `StrictJsonError`).
-const NOT_JSON_NATIVE_CAUSE: &str = "StrictJsonError";
 
 /// The code of a task error.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -219,7 +215,7 @@ fn error_data(data: &impl serde::Serialize) -> Result<JsonText, &'static str> {
 /// limit, or a value deeper than any stored text. Pure.
 fn written_data_cause(refused: &JsonTextRefused) -> &'static str {
     match refused {
-        JsonTextRefused::NotJsonNative(_) => NOT_JSON_NATIVE_CAUSE,
+        JsonTextRefused::NotJsonNative(_) => STRICT_JSON_ERROR_CAUSE,
         JsonTextRefused::NotStrictJson(StrictJsonError::IntegerTooLong { .. }) => {
             UserValueRefused::IntegerTooLong.stored_cause()
         }
