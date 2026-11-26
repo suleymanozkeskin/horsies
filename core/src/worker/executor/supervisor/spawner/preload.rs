@@ -328,8 +328,13 @@ impl SpawnerLoop {
         if self.children.len() >= MAX_LIVE_CHILDREN {
             return Err(SpawnError::TooManyChildren.to_string());
         }
-        let (pid, mut socket) = exec_child(&plan.command, self.worker_pid, &[plan.mode.argument()])
-            .map_err(|error| format!("the preload process did not start: {error}"))?;
+        let (pid, mut socket) = exec_child(
+            &plan.command,
+            self.worker_pid,
+            &[plan.mode.argument()],
+            &self.outputs,
+        )
+        .map_err(|error| format!("the preload process did not start: {error}"))?;
         let (child, _exit, _watch_error) = self.register(pid);
         let sent = send_init(&mut socket, &plan.init).and_then(|()| socket.set_nonblocking(true));
         match sent {
