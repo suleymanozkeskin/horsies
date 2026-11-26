@@ -18,6 +18,7 @@ use horsies_core::{
 use napi::bindgen_prelude::BigInt;
 use napi_derive::napi;
 
+use crate::sends::task_options::ExecutionName;
 use crate::values::boundary::{bigint_of_i64, bigint_of_u64, epoch_micros_of, text_of_uuid};
 
 /// One worker's reply to a ping.
@@ -41,15 +42,8 @@ impl From<WorkerPong> for WorkerPongRecord {
     }
 }
 
-/// An execution class, by its wire value.
-#[napi(string_enum = "UPPER_SNAKE")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExecutionName {
-    Isolated,
-    SharedAsync,
-    SharedThread,
-}
-
+/// The wire value of a class of a health read: the `ExecutionName` of the
+/// send options, so the addon declares one type.
 impl From<Execution> for ExecutionName {
     fn from(execution: Execution) -> Self {
         match execution {
