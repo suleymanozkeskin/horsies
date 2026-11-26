@@ -87,6 +87,7 @@ async function runCase(name: string | undefined): Promise<string> {
         return cause instanceof ClientDefect ? "ClientDefect" : String(cause);
       }
 
+    case undefined:
     default:
       return `unknown case ${String(name)}`;
   }
