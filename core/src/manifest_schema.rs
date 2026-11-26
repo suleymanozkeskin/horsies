@@ -1374,23 +1374,32 @@ mod tests {
         );
     }
 
-    /// One pattern text per pattern kind, and one cron text per day
-    /// selector, in the form of Python's `pattern.model_dump(mode='json')`:
-    /// every member in the order of Python's model, `null` for an unset
-    /// optional field, a time of day as `HH:MM:SS`. Together the texts hold
-    /// every variant of every tagged type of the pattern.
-    const PYTHON_PATTERN_TEXTS: [&str; 10] = [
-        r#"{"type":"interval","seconds":30,"minutes":null,"hours":null,"days":null}"#,
-        r#"{"type":"hourly","minute":15,"second":0}"#,
-        r#"{"type":"daily","time":"09:00:00"}"#,
-        r#"{"type":"weekly","days":["monday","friday"],"time":"09:30:00"}"#,
-        r#"{"type":"monthly","day":15,"time":"08:00:00"}"#,
-        r#"{"type":"cron","minute":[{"kind":"every"}],"hour":[{"kind":"values","values":[9,17]}],"month":[{"kind":"every"}],"day":{"kind":"every_day"}}"#,
-        r#"{"type":"cron","minute":[{"kind":"step","step":15}],"hour":[{"kind":"range","start":9,"end":17,"step":2}],"month":[{"kind":"enum_values","values":["january","july"]}],"day":{"kind":"by_month_day","day_of_month":[{"kind":"values","values":[1,15]}]}}"#,
-        r#"{"type":"cron","minute":[{"kind":"values","values":[0]}],"hour":[{"kind":"every"}],"month":[{"kind":"enum_range","start":"march","end":"june","step":1}],"day":{"kind":"by_weekday","day_of_week":[{"kind":"every"},{"kind":"enum_range","start":"monday","end":"friday","step":1}]}}"#,
-        r#"{"type":"cron","minute":[{"kind":"values","values":[30]}],"hour":[{"kind":"values","values":[12]}],"month":[{"kind":"enum_step","step":3}],"day":{"kind":"either_day","day_of_month":[{"kind":"values","values":[13]}],"day_of_week":[{"kind":"enum_values","values":["friday"]}]}}"#,
-        r#"{"type":"cron","minute":[{"kind":"values","values":[0]}],"hour":[{"kind":"values","values":[8]}],"month":[{"kind":"every"}],"day":{"kind":"both_days","day_of_month":[{"kind":"range","start":1,"end":7,"step":1}],"day_of_week":[{"kind":"enum_step","step":2}]}}"#,
-    ];
+    /// The shared fixture of the schedule pattern texts: one text per
+    /// pattern kind, and one cron text per day selector, in the form of
+    /// Python's `pattern.model_dump(mode='json')`: every member in the order
+    /// of Python's model, `null` for an unset optional field, a time of day
+    /// as `HH:MM:SS`. Together the texts hold every variant of every tagged
+    /// type of the pattern. The Python client (`crossclient/`) and the
+    /// TypeScript client read the same file.
+    const PATTERN_TEXTS_FIXTURE: &str =
+        include_str!("../tests/fixtures/schedule_pattern/pattern_texts.json");
+
+    /// The `text` of each row of [`PATTERN_TEXTS_FIXTURE`], in file order.
+    fn python_pattern_texts() -> Vec<String> {
+        let fixture: Value =
+            serde_json::from_str(PATTERN_TEXTS_FIXTURE).expect("the pattern texts fixture is JSON");
+        fixture["patterns"]
+            .as_array()
+            .expect("the fixture has a list of patterns")
+            .iter()
+            .map(|row| {
+                row["text"]
+                    .as_str()
+                    .expect("a pattern row has a text")
+                    .to_owned()
+            })
+            .collect()
+    }
 
     /// A scheduler manifest of one enabled schedule whose pattern text is
     /// `pattern_json`.
@@ -1528,11 +1537,11 @@ mod tests {
     #[test]
     fn each_python_pattern_text_parses_and_has_the_members_of_the_schema() {
         let mut seen: Vec<&'static str> = Vec::new();
-        for text in PYTHON_PATTERN_TEXTS {
-            let manifest = scheduler_manifest_with(text).to_string();
+        for text in python_pattern_texts() {
+            let manifest = scheduler_manifest_with(&text).to_string();
             let parsed = parse_scheduler_manifest(&manifest);
             assert!(parsed.is_ok(), "{parsed:?}\n{text}");
-            let value: Value = serde_json::from_str(text).expect("a pattern text is JSON");
+            let value: Value = serde_json::from_str(&text).expect("a pattern text is JSON");
             walk_value(
                 PythonValue::Named(SCHEDULE_PATTERN.root),
                 &value,

@@ -33,23 +33,23 @@ import {
 } from "../../../horsies/src/_catalog/monitoring_models.ts";
 
 import type {
+  AttemptClaimsInfo,
+  AttemptFinalizingInfo,
+  AttemptPhasesInfo,
+  AttemptPlacementInfo,
+  AttemptRecordedByInfo,
   MonitoringDecodeError,
-  TaskAttemptInfoPhases,
-  TaskAttemptInfoPhasesCapturedClaims,
-  TaskAttemptInfoPhasesCapturedFinalizing,
-  TaskAttemptInfoPhasesCapturedRecordedBy,
-  TaskAttemptInfoPhasesCapturedRecordedByWorkerPlacement,
-  WorkflowNodeInfoTiming,
-  WorkflowNodeInfoTimingExactEndpoint,
-  WorkflowNodeInfoTimingExactSegments,
-  WorkflowNodeInfoTimingExactSegmentsPhase,
-  WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaim,
-  WorkflowNodeInfoTimingExactSegmentsSource,
-  WorkflowNodeInfoTimingInconsistentConflict,
-  WorkflowRunDetailTiming,
-  WorkflowRunDetailTimingComposedCoverage,
-  WorkflowRunDetailTimingComposedCoverageInconsistentConflicts,
-  WorkflowRunDetailTimingComposedPauses,
+  NodeEndpointInfo,
+  NodeTimingInfo,
+  PauseIntervalInfo,
+  RunConflictInfo,
+  RunCoverageInfo,
+  RunTimingInfo,
+  SegmentClaimInfo,
+  SegmentPhaseInfo,
+  SegmentSourceInfo,
+  TimingConflictInfo,
+  TimingSegmentInfo,
 } from "../../../horsies/src/_catalog/monitoring_models.ts";
 import type { DecodeResult, WireJson } from "../../../horsies/src/_catalog/wire_json.ts";
 
@@ -197,7 +197,7 @@ function at(instant: Temporal.Instant): string {
   return instant.toString();
 }
 
-function claimsText(claims: TaskAttemptInfoPhasesCapturedClaims): string {
+function claimsText(claims: AttemptClaimsInfo): string {
   switch (claims.kind) {
     case "counted":
       return `counted(${claims.count}, ${at(claims.firstClaimedAt)})`;
@@ -211,7 +211,7 @@ function claimsText(claims: TaskAttemptInfoPhasesCapturedClaims): string {
   }
 }
 
-function finalizingText(finalizing: TaskAttemptInfoPhasesCapturedFinalizing): string {
+function finalizingText(finalizing: AttemptFinalizingInfo): string {
   switch (finalizing.kind) {
     case "marked":
       return `marked(${at(finalizing.finalizingAt)})`;
@@ -225,7 +225,7 @@ function finalizingText(finalizing: TaskAttemptInfoPhasesCapturedFinalizing): st
   }
 }
 
-function placementText(placement: TaskAttemptInfoPhasesCapturedRecordedByWorkerPlacement): string {
+function placementText(placement: AttemptPlacementInfo): string {
   switch (placement.kind) {
     case "placed":
       return `placed(${at(placement.placedAt)})`;
@@ -239,7 +239,7 @@ function placementText(placement: TaskAttemptInfoPhasesCapturedRecordedByWorkerP
   }
 }
 
-function recordedByText(recordedBy: TaskAttemptInfoPhasesCapturedRecordedBy): string {
+function recordedByText(recordedBy: AttemptRecordedByInfo): string {
   switch (recordedBy.kind) {
     case "worker":
       return `worker(${placementText(recordedBy.placement)})`;
@@ -256,7 +256,7 @@ function recordedByText(recordedBy: TaskAttemptInfoPhasesCapturedRecordedBy): st
 }
 
 /** The attempt phases as one line of text, for a compact comparison. */
-function phasesText(phases: TaskAttemptInfoPhases): string {
+function phasesText(phases: AttemptPhasesInfo): string {
   switch (phases.kind) {
     case "notCaptured":
       return "notCaptured";
@@ -275,7 +275,7 @@ function phasesText(phases: TaskAttemptInfoPhases): string {
   }
 }
 
-function claimText(claim: WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaim): string {
+function claimText(claim: SegmentClaimInfo): string {
   switch (claim.kind) {
     case "earlier":
       return `earlier(${claim.count})`;
@@ -291,7 +291,7 @@ function claimText(claim: WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaim):
   }
 }
 
-function segmentPhaseText(phase: WorkflowNodeInfoTimingExactSegmentsPhase): string {
+function segmentPhaseText(phase: SegmentPhaseInfo): string {
   switch (phase.kind) {
     case "claimed":
       return `claimed(${claimText(phase.claim)})`;
@@ -313,7 +313,7 @@ function segmentPhaseText(phase: WorkflowNodeInfoTimingExactSegmentsPhase): stri
   }
 }
 
-function sourceText(source: WorkflowNodeInfoTimingExactSegmentsSource): string {
+function sourceText(source: SegmentSourceInfo): string {
   switch (source.kind) {
     case "node":
       return "node";
@@ -329,13 +329,13 @@ function sourceText(source: WorkflowNodeInfoTimingExactSegmentsSource): string {
   }
 }
 
-function segmentText(segment: WorkflowNodeInfoTimingExactSegments): string {
+function segmentText(segment: TimingSegmentInfo): string {
   const end = segment.end.kind === "ended" ? `ended(${at(segment.end.at)})` : "open";
 
   return `${segmentPhaseText(segment.phase)} ${at(segment.startedAt)} ${end} ${sourceText(segment.source)}`;
 }
 
-function endpointText(endpoint: WorkflowNodeInfoTimingExactEndpoint): string {
+function endpointText(endpoint: NodeEndpointInfo): string {
   switch (endpoint.kind) {
     case "terminal":
       return `terminal(${endpoint.status}, ${at(endpoint.at)})`;
@@ -349,7 +349,7 @@ function endpointText(endpoint: WorkflowNodeInfoTimingExactEndpoint): string {
   }
 }
 
-function conflictText(conflict: WorkflowNodeInfoTimingInconsistentConflict): string {
+function conflictText(conflict: TimingConflictInfo): string {
   switch (conflict.kind) {
     case "clockOrder":
       return `clockOrder(${conflict.earlier} ${at(conflict.earlierAt)}, ${conflict.later} ${at(conflict.laterAt)})`;
@@ -366,7 +366,7 @@ function conflictText(conflict: WorkflowNodeInfoTimingInconsistentConflict): str
 }
 
 /** The node timing as lines of text, for a compact comparison. */
-function nodeTimingLines(timing: WorkflowNodeInfoTiming): ReadonlyArray<string> {
+function nodeTimingLines(timing: NodeTimingInfo): ReadonlyArray<string> {
   switch (timing.kind) {
     case "exact":
       return ["exact", ...timing.segments.map(segmentText), endpointText(timing.endpoint)];
@@ -388,7 +388,7 @@ function nodeTimingLines(timing: WorkflowNodeInfoTiming): ReadonlyArray<string> 
   }
 }
 
-function runConflictText(conflict: WorkflowRunDetailTimingComposedCoverageInconsistentConflicts): string {
+function runConflictText(conflict: RunConflictInfo): string {
   switch (conflict.kind) {
     case "node":
       return `node(${conflict.taskIndex})`;
@@ -402,7 +402,7 @@ function runConflictText(conflict: WorkflowRunDetailTimingComposedCoverageIncons
   }
 }
 
-function coverageText(coverage: WorkflowRunDetailTimingComposedCoverage): string {
+function coverageText(coverage: RunCoverageInfo): string {
   switch (coverage.kind) {
     case "exact":
       return "exact";
@@ -418,7 +418,7 @@ function coverageText(coverage: WorkflowRunDetailTimingComposedCoverage): string
   }
 }
 
-function pauseText(pause: WorkflowRunDetailTimingComposedPauses): string {
+function pauseText(pause: PauseIntervalInfo): string {
   switch (pause.end.kind) {
     case "resumed":
       return `${at(pause.startedAt)} resumed(${at(pause.end.at)})`;
@@ -435,7 +435,7 @@ function pauseText(pause: WorkflowRunDetailTimingComposedPauses): string {
 }
 
 /** The run timing as lines of text, for a compact comparison. */
-function runTimingLines(timing: WorkflowRunDetailTiming): ReadonlyArray<string> {
+function runTimingLines(timing: RunTimingInfo): ReadonlyArray<string> {
   switch (timing.kind) {
     case "unavailable":
       return [`unavailable(${timing.reason}, ${at(timing.asOf)}, ${at(timing.capturedSince)})`];

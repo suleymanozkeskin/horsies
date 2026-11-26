@@ -12,11 +12,15 @@
 //!   `"date-time"`;
 //! - `{"nullable": kind}`, `{"list": kind}`, `{"map": kind}` (an object
 //!   with text keys);
-//! - `{"enum": [value, ...]}`;
-//! - `{"model": {field: kind, ...}}`;
-//! - `{"union": {"tag": name, "variants": {tag value: {field: kind, ...}}}}`:
-//!   objects told apart by the text of the field `tag`, which the variant
-//!   fields leave out.
+//! - `{"enum": {"name": name, "values": [value, ...]}}`;
+//! - `{"model": {"fields": {field: kind, ...}, "name": name}}`;
+//! - `{"union": {"name": name, "tag": tag, "variants": {tag value:
+//!   {"fields": {field: kind, ...}, "name": name}}}}`: objects told apart
+//!   by the text of the field `tag`, which the variant fields leave out.
+//!
+//! Each enum, model, union and variant has the name of its Python and Rust
+//! type (the class name of a variant). The keys of a kind object are in
+//! code-point order, as the Python writer sorts them.
 //!
 //! The Python writer can also write `{"const": value}`. No model has one, so
 //! this module does not read it: a `const` kind is refused like any other
@@ -63,14 +67,23 @@ pub enum ContractKind {
     List(Box<ContractKind>),
     /// An object with text keys, each value of the inner kind.
     Map(Box<ContractKind>),
-    /// One of the texts, in file order. There is at least one, and no text
-    /// is given twice.
-    Enum(Vec<String>),
-    /// An object with these fields. There is at least one field.
-    Model(Vec<ContractField>),
-    /// An object whose field `tag` names its variant. There is at least
-    /// one variant, and no variant has a field named `tag`.
+    /// The enum `name`: one of the texts, in file order. There is at least
+    /// one, and no text is given twice.
+    Enum {
+        name: String,
+        values: Vec<String>,
+    },
+    /// The model `name`: an object with these fields. There is at least one
+    /// field.
+    Model {
+        name: String,
+        fields: Vec<ContractField>,
+    },
+    /// The union `name`: an object whose field `tag` names its variant.
+    /// There is at least one variant, and no variant has a field named
+    /// `tag`.
     Union {
+        name: String,
         tag: String,
         variants: Vec<ContractVariant>,
     },
@@ -89,6 +102,8 @@ pub struct ContractField {
 pub struct ContractVariant {
     /// The text of the tag field that names this variant.
     pub tag_value: String,
+    /// The name of the variant's type.
+    pub name: String,
     /// The fields of the variant, the tag left out. A variant can have none.
     pub fields: Vec<ContractField>,
 }
@@ -134,6 +149,18 @@ fn object_entries<'a>(place: &str, value: &'a WireValue) -> Vec<(&'a str, &'a Wi
         | WireValue::Number(_)
         | WireValue::String(_)
         | WireValue::Array(_) => panic!("{place}: an object is expected, not {value}"),
+    }
+}
+
+/// The text `value` at `place`. Another JSON value is a defect.
+fn text_of(place: &str, value: &WireValue) -> String {
+    match value {
+        WireValue::String(text) => text.clone(),
+        WireValue::Null
+        | WireValue::Bool(_)
+        | WireValue::Number(_)
+        | WireValue::Array(_)
+        | WireValue::Object(_) => panic!("{place}: a text is expected, not {value}"),
     }
 }
 
@@ -201,8 +228,8 @@ fn composite_kind(place: &str, value: &WireValue, depth: usize) -> ContractKind 
         "nullable" => ContractKind::Nullable(Box::new(non_null_kind(place, inner, depth))),
         "list" => ContractKind::List(Box::new(parse_kind(place, inner, depth + 1))),
         "map" => ContractKind::Map(Box::new(parse_kind(place, inner, depth + 1))),
-        "enum" => ContractKind::Enum(enum_values(place, inner)),
-        "model" => ContractKind::Model(model_fields(place, inner, depth + 1)),
+        "enum" => enum_kind(place, inner),
+        "model" => model_kind(place, inner, depth + 1),
         "union" => union_kind(place, inner, depth + 1),
         unknown => panic!("{place}: {unknown:?} is not a kind of the contract"),
     }
@@ -217,9 +244,22 @@ fn non_null_kind(place: &str, value: &WireValue, depth: usize) -> ContractKind {
         ContractKind::Leaf(_)
         | ContractKind::List(_)
         | ContractKind::Map(_)
-        | ContractKind::Enum(_)
-        | ContractKind::Model(_)
+        | ContractKind::Enum { .. }
+        | ContractKind::Model { .. }
         | ContractKind::Union { .. } => kind,
+    }
+}
+
+/// The enum at `place`: an object with the keys `name` and `values`.
+fn enum_kind(place: &str, value: &WireValue) -> ContractKind {
+    let entries = object_entries(place, value);
+    let [("name", name), ("values", values)] = entries.as_slice() else {
+        let keys: Vec<&str> = entries.iter().map(|(key, _)| *key).collect();
+        panic!("{place}: an enum has the keys [\"name\", \"values\"], not {keys:?}");
+    };
+    ContractKind::Enum {
+        name: text_of(place, name),
+        values: enum_values(place, values),
     }
 }
 
@@ -249,30 +289,53 @@ fn enum_values(place: &str, value: &WireValue) -> Vec<String> {
     values
 }
 
-/// The union at `place`: an object with the keys `tag` and `variants`.
+/// The model at `place`: an object with the keys `fields` and `name`.
+fn model_kind(place: &str, value: &WireValue, depth: usize) -> ContractKind {
+    let (name, fields) = named_fields(place, value);
+    ContractKind::Model {
+        name,
+        fields: model_fields(place, fields, depth),
+    }
+}
+
+/// The name and the field object of the named object `value` at `place`
+/// (a model or a variant): the keys `fields` and `name`.
+fn named_fields<'a>(place: &str, value: &'a WireValue) -> (String, &'a WireValue) {
+    let entries = object_entries(place, value);
+    let [("fields", fields), ("name", name)] = entries.as_slice() else {
+        let keys: Vec<&str> = entries.iter().map(|(key, _)| *key).collect();
+        panic!("{place}: a model or a variant has the keys [\"fields\", \"name\"], not {keys:?}");
+    };
+    (text_of(place, name), *fields)
+}
+
+/// The union at `place`: an object with the keys `name`, `tag` and
+/// `variants`.
 fn union_kind(place: &str, value: &WireValue, depth: usize) -> ContractKind {
     let entries = object_entries(place, value);
-    let [("tag", tag_value), ("variants", variants_value)] = entries.as_slice() else {
+    let [("name", name), ("tag", tag_value), ("variants", variants_value)] = entries.as_slice()
+    else {
         let keys: Vec<&str> = entries.iter().map(|(key, _)| *key).collect();
-        panic!("{place}: a union has the keys [\"tag\", \"variants\"], not {keys:?}");
+        panic!("{place}: a union has the keys [\"name\", \"tag\", \"variants\"], not {keys:?}");
     };
     let WireValue::String(tag) = tag_value else {
         panic!("{place}: the tag of a union is a text, not {tag_value}");
     };
     let variants: Vec<ContractVariant> = object_entries(place, variants_value)
         .into_iter()
-        .map(|(variant_tag, fields)| {
+        .map(|(variant_tag, variant_value)| {
             variant(
                 &format!("{place}::{variant_tag}"),
                 tag,
                 variant_tag,
-                fields,
+                variant_value,
                 depth,
             )
         })
         .collect();
     assert!(!variants.is_empty(), "{place}: a union has no variant");
     ContractKind::Union {
+        name: text_of(place, name),
         tag: tag.clone(),
         variants,
     }
@@ -284,9 +347,10 @@ fn variant(
     place: &str,
     tag: &str,
     tag_value: &str,
-    fields: &WireValue,
+    value: &WireValue,
     depth: usize,
 ) -> ContractVariant {
+    let (name, fields) = named_fields(place, value);
     let fields = field_list(place, fields, depth + 1);
     assert!(
         fields.iter().all(|field| field.key != tag),
@@ -294,6 +358,7 @@ fn variant(
     );
     ContractVariant {
         tag_value: tag_value.to_owned(),
+        name,
         fields,
     }
 }
@@ -362,12 +427,14 @@ mod tests {
     }
 
     #[test]
-    fn an_enum_a_model_and_a_union_keep_the_file_order() {
+    fn an_enum_a_model_and_a_union_keep_their_names_and_the_file_order() {
         let kinds = kinds_of(
             r#"{"Sample": {
-                "e": {"enum": ["B", "A"]},
-                "m": {"model": {"y": "string", "x": "integer"}},
-                "u": {"union": {"tag": "kind", "variants": {"one": {}, "two": {"at": "date-time"}}}}
+                "e": {"enum": {"name": "Mode", "values": ["B", "A"]}},
+                "m": {"model": {"fields": {"y": "string", "x": "integer"}, "name": "Total"}},
+                "u": {"union": {"name": "State", "tag": "kind", "variants": {
+                    "one": {"fields": {}, "name": "StateOne"},
+                    "two": {"fields": {"at": "date-time"}, "name": "StateTwo"}}}}
             }}"#,
         );
 
@@ -376,32 +443,41 @@ mod tests {
             vec![
                 (
                     "e".to_owned(),
-                    ContractKind::Enum(vec!["B".to_owned(), "A".to_owned()])
+                    ContractKind::Enum {
+                        name: "Mode".to_owned(),
+                        values: vec!["B".to_owned(), "A".to_owned()],
+                    }
                 ),
                 (
                     "m".to_owned(),
-                    ContractKind::Model(vec![
-                        ContractField {
-                            key: "y".to_owned(),
-                            kind: ContractKind::Leaf(LeafKind::Text),
-                        },
-                        ContractField {
-                            key: "x".to_owned(),
-                            kind: ContractKind::Leaf(LeafKind::Integer),
-                        },
-                    ])
+                    ContractKind::Model {
+                        name: "Total".to_owned(),
+                        fields: vec![
+                            ContractField {
+                                key: "y".to_owned(),
+                                kind: ContractKind::Leaf(LeafKind::Text),
+                            },
+                            ContractField {
+                                key: "x".to_owned(),
+                                kind: ContractKind::Leaf(LeafKind::Integer),
+                            },
+                        ],
+                    }
                 ),
                 (
                     "u".to_owned(),
                     ContractKind::Union {
+                        name: "State".to_owned(),
                         tag: "kind".to_owned(),
                         variants: vec![
                             ContractVariant {
                                 tag_value: "one".to_owned(),
+                                name: "StateOne".to_owned(),
                                 fields: Vec::new(),
                             },
                             ContractVariant {
                                 tag_value: "two".to_owned(),
+                                name: "StateTwo".to_owned(),
                                 fields: vec![ContractField {
                                     key: "at".to_owned(),
                                     kind: ContractKind::Leaf(LeafKind::DateTime),
@@ -484,47 +560,80 @@ mod tests {
     #[test]
     #[should_panic(expected = "Sample.mode: an enum has no value")]
     fn an_enum_without_a_value_is_a_defect() {
-        let _models = parse_contract(r#"{"Sample": {"mode": {"enum": []}}}"#);
+        let _models =
+            parse_contract(r#"{"Sample": {"mode": {"enum": {"name": "Mode", "values": []}}}}"#);
     }
 
     #[test]
     #[should_panic(expected = "Sample.mode: an enum value is a text")]
     fn an_enum_value_that_is_not_a_text_is_a_defect() {
-        let _models = parse_contract(r#"{"Sample": {"mode": {"enum": ["A", 1]}}}"#);
+        let _models = parse_contract(
+            r#"{"Sample": {"mode": {"enum": {"name": "Mode", "values": ["A", 1]}}}}"#,
+        );
     }
 
     #[test]
     #[should_panic(expected = "Sample.mode: an enum gives a value twice")]
     fn an_enum_that_gives_a_value_twice_is_a_defect() {
-        let _models = parse_contract(r#"{"Sample": {"mode": {"enum": ["A", "A"]}}}"#);
+        let _models = parse_contract(
+            r#"{"Sample": {"mode": {"enum": {"name": "Mode", "values": ["A", "A"]}}}}"#,
+        );
     }
 
     #[test]
-    #[should_panic(expected = "Sample.state: a union has the keys [\"tag\", \"variants\"]")]
-    fn a_union_without_its_two_keys_is_a_defect() {
-        let _models = parse_contract(r#"{"Sample": {"state": {"union": {"tag": "kind"}}}}"#);
+    #[should_panic(
+        expected = "Sample.state: a union has the keys [\"name\", \"tag\", \"variants\"]"
+    )]
+    fn a_union_without_its_three_keys_is_a_defect() {
+        let _models =
+            parse_contract(r#"{"Sample": {"state": {"union": {"name": "State", "tag": "kind"}}}}"#);
     }
 
     #[test]
     #[should_panic(expected = "Sample.state: the tag of a union is a text")]
     fn a_union_tag_that_is_not_a_text_is_a_defect() {
         let _models = parse_contract(
-            r#"{"Sample": {"state": {"union": {"tag": 1, "variants": {"on": {}}}}}}"#,
+            r#"{"Sample": {"state": {"union": {"name": "State", "tag": 1,
+                "variants": {"on": {"fields": {}, "name": "On"}}}}}}"#,
         );
     }
 
     #[test]
     #[should_panic(expected = "Sample.state: a union has no variant")]
     fn a_union_without_a_variant_is_a_defect() {
-        let _models =
-            parse_contract(r#"{"Sample": {"state": {"union": {"tag": "kind", "variants": {}}}}}"#);
+        let _models = parse_contract(
+            r#"{"Sample": {"state": {"union": {"name": "State", "tag": "kind", "variants": {}}}}}"#,
+        );
     }
 
     #[test]
     #[should_panic(expected = "Sample.state::on: a variant has a field named as the tag \"kind\"")]
     fn a_variant_field_named_as_the_tag_is_a_defect() {
         let _models = parse_contract(
-            r#"{"Sample": {"state": {"union": {"tag": "kind", "variants": {"on": {"kind": "string"}}}}}}"#,
+            r#"{"Sample": {"state": {"union": {"name": "State", "tag": "kind",
+                "variants": {"on": {"fields": {"kind": "string"}, "name": "On"}}}}}}"#,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Sample.mode: an object is expected")]
+    fn an_enum_without_its_name_is_a_defect() {
+        let _models = parse_contract(r#"{"Sample": {"mode": {"enum": ["A"]}}}"#);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Sample.total: a model or a variant has the keys [\"fields\", \"name\"], not [\"count\"]"
+    )]
+    fn a_model_without_its_name_is_a_defect() {
+        let _models = parse_contract(r#"{"Sample": {"total": {"model": {"count": "integer"}}}}"#);
+    }
+
+    #[test]
+    #[should_panic(expected = "Sample.total: a text is expected")]
+    fn a_name_that_is_not_a_text_is_a_defect() {
+        let _models = parse_contract(
+            r#"{"Sample": {"total": {"model": {"fields": {"count": "integer"}, "name": 1}}}}"#,
         );
     }
 

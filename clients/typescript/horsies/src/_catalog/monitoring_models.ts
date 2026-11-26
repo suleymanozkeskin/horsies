@@ -121,46 +121,8 @@ export type MonitoringDecodeError =
 export interface Breakdown {
   readonly groupBy: string;
   readonly groupCount: number;
-  readonly groups: ReadonlyArray<BreakdownGroups>;
-  readonly total: BreakdownTotal;
-}
-
-export interface BreakdownGroups {
-  readonly cancelled: number;
-  readonly claimed: number;
-  readonly completed: number;
-  readonly expired: number;
-  readonly failed: number;
-  readonly group: BreakdownGroupsGroup;
-  readonly pending: number;
-  readonly retried: number;
-  readonly running: number;
-  readonly total: number;
-}
-
-export type BreakdownGroupsGroup =
-  | BreakdownGroupsGroupUnclaimed
-  | BreakdownGroupsGroupValue;
-
-export interface BreakdownGroupsGroupUnclaimed {
-  readonly kind: "unclaimed";
-}
-
-export interface BreakdownGroupsGroupValue {
-  readonly kind: "value";
-  readonly value: string;
-}
-
-export interface BreakdownTotal {
-  readonly cancelled: number;
-  readonly claimed: number;
-  readonly completed: number;
-  readonly expired: number;
-  readonly failed: number;
-  readonly pending: number;
-  readonly retried: number;
-  readonly running: number;
-  readonly total: number;
+  readonly groups: ReadonlyArray<GroupRow>;
+  readonly total: BreakdownCounts;
 }
 
 export interface BreakdownCounts {
@@ -176,19 +138,14 @@ export interface BreakdownCounts {
 }
 
 export interface BudgetLoadInfo {
-  readonly budget: BudgetLoadInfoBudget;
+  readonly budget: Execution;
   readonly capacity: number;
   readonly free: number;
   readonly inFlight: number;
-  readonly serves: ReadonlyArray<BudgetLoadInfoServes>;
+  readonly serves: ReadonlyArray<Execution>;
 }
 
-export type BudgetLoadInfoBudget =
-  | "ISOLATED"
-  | "SHARED_ASYNC"
-  | "SHARED_THREAD";
-
-export type BudgetLoadInfoServes =
+export type Execution =
   | "ISOLATED"
   | "SHARED_ASYNC"
   | "SHARED_THREAD";
@@ -196,80 +153,9 @@ export type BudgetLoadInfoServes =
 export interface ClassReportInfo {
   readonly checkedAt: Temporal.Instant;
   readonly liveWindowS: number;
-  readonly streams: ReadonlyArray<ClassReportInfoStreams>;
-  readonly workers: ReadonlyArray<ClassReportInfoWorkers>;
+  readonly streams: ReadonlyArray<PendingStreamInfo>;
+  readonly workers: ReadonlyArray<WorkerClassLoadInfo>;
 }
-
-export interface ClassReportInfoStreams {
-  readonly coverage: ClassReportInfoStreamsCoverage;
-  readonly execution: ClassReportInfoStreamsExecution;
-  readonly queueName: string;
-  readonly wait: ClassReportInfoStreamsWait;
-}
-
-export type ClassReportInfoStreamsCoverage =
-  | ClassReportInfoStreamsCoverageNoCapacity
-  | ClassReportInfoStreamsCoverageServed
-  | ClassReportInfoStreamsCoverageUnserved;
-
-export interface ClassReportInfoStreamsCoverageNoCapacity {
-  readonly kind: "noCapacity";
-  readonly workers: number;
-}
-
-export interface ClassReportInfoStreamsCoverageServed {
-  readonly kind: "served";
-  readonly capacity: number;
-  readonly workers: number;
-}
-
-export interface ClassReportInfoStreamsCoverageUnserved {
-  readonly kind: "unserved";
-}
-
-export type ClassReportInfoStreamsExecution =
-  | "ISOLATED"
-  | "SHARED_ASYNC"
-  | "SHARED_THREAD";
-
-export type ClassReportInfoStreamsWait =
-  | ClassReportInfoStreamsWaitNoneDue
-  | ClassReportInfoStreamsWaitWaiting;
-
-export interface ClassReportInfoStreamsWaitNoneDue {
-  readonly kind: "noneDue";
-  readonly nextDueAt: Temporal.Instant;
-}
-
-export interface ClassReportInfoStreamsWaitWaiting {
-  readonly kind: "waiting";
-  readonly oldestDueAt: Temporal.Instant;
-  readonly waitS: number;
-}
-
-export interface ClassReportInfoWorkers {
-  readonly budgets: ReadonlyArray<ClassReportInfoWorkersBudgets>;
-  readonly snapshotAt: Temporal.Instant;
-  readonly workerId: string;
-}
-
-export interface ClassReportInfoWorkersBudgets {
-  readonly budget: ClassReportInfoWorkersBudgetsBudget;
-  readonly capacity: number;
-  readonly free: number;
-  readonly inFlight: number;
-  readonly serves: ReadonlyArray<ClassReportInfoWorkersBudgetsServes>;
-}
-
-export type ClassReportInfoWorkersBudgetsBudget =
-  | "ISOLATED"
-  | "SHARED_ASYNC"
-  | "SHARED_THREAD";
-
-export type ClassReportInfoWorkersBudgetsServes =
-  | "ISOLATED"
-  | "SHARED_ASYNC"
-  | "SHARED_THREAD";
 
 export interface DownSlotInfo {
   readonly cause: string;
@@ -292,31 +178,10 @@ export interface FacetValue {
 
 export interface Facets {
   readonly errorCategoryTotals: ReadonlyMap<string, number>;
-  readonly errorCodes: ReadonlyArray<FacetsErrorCodes>;
-  readonly queues: ReadonlyArray<FacetsQueues>;
-  readonly taskNames: ReadonlyArray<FacetsTaskNames>;
-  readonly workers: ReadonlyArray<FacetsWorkers>;
-}
-
-export interface FacetsErrorCodes {
-  readonly category: string;
-  readonly count: number;
-  readonly value: string;
-}
-
-export interface FacetsQueues {
-  readonly count: number;
-  readonly value: string;
-}
-
-export interface FacetsTaskNames {
-  readonly count: number;
-  readonly value: string;
-}
-
-export interface FacetsWorkers {
-  readonly count: number;
-  readonly value: string;
+  readonly errorCodes: ReadonlyArray<ErrorFacet>;
+  readonly queues: ReadonlyArray<FacetValue>;
+  readonly taskNames: ReadonlyArray<FacetValue>;
+  readonly workers: ReadonlyArray<FacetValue>;
 }
 
 export interface GroupRow {
@@ -325,22 +190,22 @@ export interface GroupRow {
   readonly completed: number;
   readonly expired: number;
   readonly failed: number;
-  readonly group: GroupRowGroup;
+  readonly group: BreakdownGroup;
   readonly pending: number;
   readonly retried: number;
   readonly running: number;
   readonly total: number;
 }
 
-export type GroupRowGroup =
-  | GroupRowGroupUnclaimed
-  | GroupRowGroupValue;
+export type BreakdownGroup =
+  | BreakdownUnclaimedGroup
+  | BreakdownValueGroup;
 
-export interface GroupRowGroupUnclaimed {
+export interface BreakdownUnclaimedGroup {
   readonly kind: "unclaimed";
 }
 
-export interface GroupRowGroupValue {
+export interface BreakdownValueGroup {
   readonly kind: "value";
   readonly value: string;
 }
@@ -350,7 +215,7 @@ export interface LeafTaskInfo {
   readonly enqueuedAt: Temporal.Instant | null;
   readonly errorCode: string | null;
   readonly execS: number | null;
-  readonly execution: LeafTaskInfoExecution | null;
+  readonly execution: Execution | null;
   readonly failedAt: Temporal.Instant | null;
   readonly failedReason: string | null;
   readonly goodUntil: Temporal.Instant | null;
@@ -364,66 +229,49 @@ export interface LeafTaskInfo {
   readonly workerHostname: string | null;
 }
 
-export type LeafTaskInfoExecution =
-  | "ISOLATED"
-  | "SHARED_ASYNC"
-  | "SHARED_THREAD";
-
 export interface LivenessReport {
   readonly dbLatencyMs: number | null;
   readonly dbReachable: boolean;
-  readonly workers: ReadonlyArray<LivenessReportWorkers>;
-}
-
-export interface LivenessReportWorkers {
-  readonly hostname: string;
-  readonly pid: number;
-  readonly roundTripMs: number;
-  readonly workerId: string;
+  readonly workers: ReadonlyArray<WorkerPingInfo>;
 }
 
 export interface PendingStreamInfo {
-  readonly coverage: PendingStreamInfoCoverage;
-  readonly execution: PendingStreamInfoExecution;
+  readonly coverage: StreamCoverageInfo;
+  readonly execution: Execution;
   readonly queueName: string;
-  readonly wait: PendingStreamInfoWait;
+  readonly wait: StreamWaitInfo;
 }
 
-export type PendingStreamInfoCoverage =
-  | PendingStreamInfoCoverageNoCapacity
-  | PendingStreamInfoCoverageServed
-  | PendingStreamInfoCoverageUnserved;
+export type StreamCoverageInfo =
+  | StreamNoCapacityInfo
+  | StreamServedInfo
+  | StreamUnservedInfo;
 
-export interface PendingStreamInfoCoverageNoCapacity {
+export interface StreamNoCapacityInfo {
   readonly kind: "noCapacity";
   readonly workers: number;
 }
 
-export interface PendingStreamInfoCoverageServed {
+export interface StreamServedInfo {
   readonly kind: "served";
   readonly capacity: number;
   readonly workers: number;
 }
 
-export interface PendingStreamInfoCoverageUnserved {
+export interface StreamUnservedInfo {
   readonly kind: "unserved";
 }
 
-export type PendingStreamInfoExecution =
-  | "ISOLATED"
-  | "SHARED_ASYNC"
-  | "SHARED_THREAD";
+export type StreamWaitInfo =
+  | StreamNoneDueInfo
+  | StreamWaitingInfo;
 
-export type PendingStreamInfoWait =
-  | PendingStreamInfoWaitNoneDue
-  | PendingStreamInfoWaitWaiting;
-
-export interface PendingStreamInfoWaitNoneDue {
+export interface StreamNoneDueInfo {
   readonly kind: "noneDue";
   readonly nextDueAt: Temporal.Instant;
 }
 
-export interface PendingStreamInfoWaitWaiting {
+export interface StreamWaitingInfo {
   readonly kind: "waiting";
   readonly oldestDueAt: Temporal.Instant;
   readonly waitS: number;
@@ -450,93 +298,93 @@ export interface TaskAttemptInfo {
   readonly failedReason: string | null;
   readonly finishedAt: Temporal.Instant | null;
   readonly outcome: string;
-  readonly phases: TaskAttemptInfoPhases;
+  readonly phases: AttemptPhasesInfo;
   readonly startedAt: Temporal.Instant | null;
   readonly willRetry: boolean;
   readonly workerHostname: string | null;
 }
 
-export type TaskAttemptInfoPhases =
-  | TaskAttemptInfoPhasesCaptured
-  | TaskAttemptInfoPhasesNotCaptured;
+export type AttemptPhasesInfo =
+  | PhasesCapturedInfo
+  | PhasesNotCapturedInfo;
 
-export interface TaskAttemptInfoPhasesCaptured {
+export interface PhasesCapturedInfo {
   readonly kind: "captured";
   readonly claimedAt: Temporal.Instant;
-  readonly claims: TaskAttemptInfoPhasesCapturedClaims;
+  readonly claims: AttemptClaimsInfo;
   readonly enqueuedAt: Temporal.Instant;
-  readonly finalizing: TaskAttemptInfoPhasesCapturedFinalizing;
-  readonly recordedBy: TaskAttemptInfoPhasesCapturedRecordedBy;
+  readonly finalizing: AttemptFinalizingInfo;
+  readonly recordedBy: AttemptRecordedByInfo;
 }
 
-export type TaskAttemptInfoPhasesCapturedClaims =
-  | TaskAttemptInfoPhasesCapturedClaimsCounted
-  | TaskAttemptInfoPhasesCapturedClaimsNotCounted;
+export type AttemptClaimsInfo =
+  | ClaimsCountedInfo
+  | ClaimsNotCountedInfo;
 
-export interface TaskAttemptInfoPhasesCapturedClaimsCounted {
+export interface ClaimsCountedInfo {
   readonly kind: "counted";
   readonly count: number;
   readonly firstClaimedAt: Temporal.Instant;
 }
 
-export interface TaskAttemptInfoPhasesCapturedClaimsNotCounted {
+export interface ClaimsNotCountedInfo {
   readonly kind: "notCounted";
 }
 
-export type TaskAttemptInfoPhasesCapturedFinalizing =
-  | TaskAttemptInfoPhasesCapturedFinalizingMarked
-  | TaskAttemptInfoPhasesCapturedFinalizingNotMarked;
+export type AttemptFinalizingInfo =
+  | FinalizingMarkedInfo
+  | FinalizingNotMarkedInfo;
 
-export interface TaskAttemptInfoPhasesCapturedFinalizingMarked {
+export interface FinalizingMarkedInfo {
   readonly kind: "marked";
   readonly finalizingAt: Temporal.Instant;
 }
 
-export interface TaskAttemptInfoPhasesCapturedFinalizingNotMarked {
+export interface FinalizingNotMarkedInfo {
   readonly kind: "notMarked";
 }
 
-export type TaskAttemptInfoPhasesCapturedRecordedBy =
-  | TaskAttemptInfoPhasesCapturedRecordedByCancel
-  | TaskAttemptInfoPhasesCapturedRecordedByRecovery
-  | TaskAttemptInfoPhasesCapturedRecordedByWorker;
+export type AttemptRecordedByInfo =
+  | RecordedByCancelInfo
+  | RecordedByRecoveryInfo
+  | RecordedByWorkerInfo;
 
-export interface TaskAttemptInfoPhasesCapturedRecordedByCancel {
+export interface RecordedByCancelInfo {
   readonly kind: "cancel";
 }
 
-export interface TaskAttemptInfoPhasesCapturedRecordedByRecovery {
+export interface RecordedByRecoveryInfo {
   readonly kind: "recovery";
   readonly lastSeenAt: Temporal.Instant;
 }
 
-export interface TaskAttemptInfoPhasesCapturedRecordedByWorker {
+export interface RecordedByWorkerInfo {
   readonly kind: "worker";
-  readonly placement: TaskAttemptInfoPhasesCapturedRecordedByWorkerPlacement;
+  readonly placement: AttemptPlacementInfo;
 }
 
-export type TaskAttemptInfoPhasesCapturedRecordedByWorkerPlacement =
-  | TaskAttemptInfoPhasesCapturedRecordedByWorkerPlacementNotObserved
-  | TaskAttemptInfoPhasesCapturedRecordedByWorkerPlacementPlaced;
+export type AttemptPlacementInfo =
+  | PlacementNotObservedInfo
+  | PlacementPlacedInfo;
 
-export interface TaskAttemptInfoPhasesCapturedRecordedByWorkerPlacementNotObserved {
+export interface PlacementNotObservedInfo {
   readonly kind: "notObserved";
 }
 
-export interface TaskAttemptInfoPhasesCapturedRecordedByWorkerPlacementPlaced {
+export interface PlacementPlacedInfo {
   readonly kind: "placed";
   readonly placedAt: Temporal.Instant;
 }
 
-export interface TaskAttemptInfoPhasesNotCaptured {
+export interface PhasesNotCapturedInfo {
   readonly kind: "notCaptured";
 }
 
 export interface TaskDetail {
-  readonly attempts: ReadonlyArray<TaskDetailAttempts>;
+  readonly attempts: ReadonlyArray<TaskAttemptInfo>;
   readonly errorCategory: string | null;
   readonly isWorkflowTask: boolean;
-  readonly leaf: TaskDetailLeaf;
+  readonly leaf: LeafTaskInfo;
   readonly priority: number;
   readonly queueName: string;
   readonly taskName: string;
@@ -544,143 +392,9 @@ export interface TaskDetail {
   readonly workflowTaskIndex: number | null;
 }
 
-export interface TaskDetailAttempts {
-  readonly attempt: number;
-  readonly errorCode: string | null;
-  readonly errorMessage: string | null;
-  readonly failedReason: string | null;
-  readonly finishedAt: Temporal.Instant | null;
-  readonly outcome: string;
-  readonly phases: TaskDetailAttemptsPhases;
-  readonly startedAt: Temporal.Instant | null;
-  readonly willRetry: boolean;
-  readonly workerHostname: string | null;
-}
-
-export type TaskDetailAttemptsPhases =
-  | TaskDetailAttemptsPhasesCaptured
-  | TaskDetailAttemptsPhasesNotCaptured;
-
-export interface TaskDetailAttemptsPhasesCaptured {
-  readonly kind: "captured";
-  readonly claimedAt: Temporal.Instant;
-  readonly claims: TaskDetailAttemptsPhasesCapturedClaims;
-  readonly enqueuedAt: Temporal.Instant;
-  readonly finalizing: TaskDetailAttemptsPhasesCapturedFinalizing;
-  readonly recordedBy: TaskDetailAttemptsPhasesCapturedRecordedBy;
-}
-
-export type TaskDetailAttemptsPhasesCapturedClaims =
-  | TaskDetailAttemptsPhasesCapturedClaimsCounted
-  | TaskDetailAttemptsPhasesCapturedClaimsNotCounted;
-
-export interface TaskDetailAttemptsPhasesCapturedClaimsCounted {
-  readonly kind: "counted";
-  readonly count: number;
-  readonly firstClaimedAt: Temporal.Instant;
-}
-
-export interface TaskDetailAttemptsPhasesCapturedClaimsNotCounted {
-  readonly kind: "notCounted";
-}
-
-export type TaskDetailAttemptsPhasesCapturedFinalizing =
-  | TaskDetailAttemptsPhasesCapturedFinalizingMarked
-  | TaskDetailAttemptsPhasesCapturedFinalizingNotMarked;
-
-export interface TaskDetailAttemptsPhasesCapturedFinalizingMarked {
-  readonly kind: "marked";
-  readonly finalizingAt: Temporal.Instant;
-}
-
-export interface TaskDetailAttemptsPhasesCapturedFinalizingNotMarked {
-  readonly kind: "notMarked";
-}
-
-export type TaskDetailAttemptsPhasesCapturedRecordedBy =
-  | TaskDetailAttemptsPhasesCapturedRecordedByCancel
-  | TaskDetailAttemptsPhasesCapturedRecordedByRecovery
-  | TaskDetailAttemptsPhasesCapturedRecordedByWorker;
-
-export interface TaskDetailAttemptsPhasesCapturedRecordedByCancel {
-  readonly kind: "cancel";
-}
-
-export interface TaskDetailAttemptsPhasesCapturedRecordedByRecovery {
-  readonly kind: "recovery";
-  readonly lastSeenAt: Temporal.Instant;
-}
-
-export interface TaskDetailAttemptsPhasesCapturedRecordedByWorker {
-  readonly kind: "worker";
-  readonly placement: TaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacement;
-}
-
-export type TaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacement =
-  | TaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementNotObserved
-  | TaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementPlaced;
-
-export interface TaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementNotObserved {
-  readonly kind: "notObserved";
-}
-
-export interface TaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementPlaced {
-  readonly kind: "placed";
-  readonly placedAt: Temporal.Instant;
-}
-
-export interface TaskDetailAttemptsPhasesNotCaptured {
-  readonly kind: "notCaptured";
-}
-
-export interface TaskDetailLeaf {
-  readonly completedAt: Temporal.Instant | null;
-  readonly enqueuedAt: Temporal.Instant | null;
-  readonly errorCode: string | null;
-  readonly execS: number | null;
-  readonly execution: TaskDetailLeafExecution | null;
-  readonly failedAt: Temporal.Instant | null;
-  readonly failedReason: string | null;
-  readonly goodUntil: Temporal.Instant | null;
-  readonly maxRetries: number;
-  readonly queueS: number | null;
-  readonly retryCount: number;
-  readonly startedAt: Temporal.Instant | null;
-  readonly status: string;
-  readonly taskId: string;
-  readonly traceId: string | null;
-  readonly workerHostname: string | null;
-}
-
-export type TaskDetailLeafExecution =
-  | "ISOLATED"
-  | "SHARED_ASYNC"
-  | "SHARED_THREAD";
-
 export interface TaskListPage {
-  readonly rows: ReadonlyArray<TaskListPageRows>;
+  readonly rows: ReadonlyArray<TaskSummary>;
   readonly total: number;
-}
-
-export interface TaskListPageRows {
-  readonly completedAt: Temporal.Instant | null;
-  readonly enqueuedAt: Temporal.Instant | null;
-  readonly errorCategory: string | null;
-  readonly errorCode: string | null;
-  readonly execS: number | null;
-  readonly failedAt: Temporal.Instant | null;
-  readonly id: string;
-  readonly isWorkflowTask: boolean;
-  readonly maxRetries: number;
-  readonly priority: number;
-  readonly queueName: string;
-  readonly queueS: number | null;
-  readonly retryCount: number;
-  readonly startedAt: Temporal.Instant | null;
-  readonly status: string;
-  readonly taskName: string;
-  readonly workerHostname: string | null;
-  readonly workerId: string | null;
 }
 
 export interface TaskSummary {
@@ -705,28 +419,10 @@ export interface TaskSummary {
 }
 
 export interface WorkerClassLoadInfo {
-  readonly budgets: ReadonlyArray<WorkerClassLoadInfoBudgets>;
+  readonly budgets: ReadonlyArray<BudgetLoadInfo>;
   readonly snapshotAt: Temporal.Instant;
   readonly workerId: string;
 }
-
-export interface WorkerClassLoadInfoBudgets {
-  readonly budget: WorkerClassLoadInfoBudgetsBudget;
-  readonly capacity: number;
-  readonly free: number;
-  readonly inFlight: number;
-  readonly serves: ReadonlyArray<WorkerClassLoadInfoBudgetsServes>;
-}
-
-export type WorkerClassLoadInfoBudgetsBudget =
-  | "ISOLATED"
-  | "SHARED_ASYNC"
-  | "SHARED_THREAD";
-
-export type WorkerClassLoadInfoBudgetsServes =
-  | "ISOLATED"
-  | "SHARED_ASYNC"
-  | "SHARED_THREAD";
 
 export interface WorkerHistoryPoint {
   readonly cpuPercent: number | null;
@@ -747,16 +443,16 @@ export interface WorkerPingInfo {
 export interface WorkerStateInfo {
   readonly clusterWideCap: number | null;
   readonly cpuPercent: number | null;
-  readonly downSlots: ReadonlyArray<WorkerStateInfoDownSlots>;
+  readonly downSlots: ReadonlyArray<DownSlotInfo>;
   readonly hostname: string;
   readonly memoryPercent: number | null;
   readonly memoryUsageMb: number | null;
   readonly pid: number;
   readonly processes: number;
-  readonly profile: WorkerStateInfoProfile;
+  readonly profile: SnapshotProfileInfo;
   readonly queueMaxConcurrency: ReadonlyMap<string, number>;
   readonly queues: ReadonlyArray<string>;
-  readonly slotHealth: WorkerStateInfoSlotHealth;
+  readonly slotHealth: SlotHealthKind;
   readonly snapshotAgeS: number | null;
   readonly snapshotAt: Temporal.Instant;
   readonly stale: boolean;
@@ -767,28 +463,20 @@ export interface WorkerStateInfo {
   readonly workerStartedAt: Temporal.Instant;
 }
 
-export interface WorkerStateInfoDownSlots {
-  readonly cause: string;
-  readonly detail: string;
-  readonly downSince: Temporal.Instant;
-  readonly failedBoots: number;
-  readonly slot: number;
-}
+export type SnapshotProfileInfo =
+  | ProfileNamedInfo
+  | ProfileNotRecordedInfo;
 
-export type WorkerStateInfoProfile =
-  | WorkerStateInfoProfileNamed
-  | WorkerStateInfoProfileNotRecorded;
-
-export interface WorkerStateInfoProfileNamed {
+export interface ProfileNamedInfo {
   readonly kind: "named";
   readonly name: string;
 }
 
-export interface WorkerStateInfoProfileNotRecorded {
+export interface ProfileNotRecordedInfo {
   readonly kind: "notRecorded";
 }
 
-export type WorkerStateInfoSlotHealth =
+export type SlotHealthKind =
   | "all_serving"
   | "slots_down";
 
@@ -810,188 +498,175 @@ export interface WorkflowNodeInfo {
   readonly subWorkflowId: string | null;
   readonly taskIndex: number;
   readonly taskName: string;
-  readonly timing: WorkflowNodeInfoTiming;
+  readonly timing: NodeTimingInfo;
 }
 
-export type WorkflowNodeInfoTiming =
-  | WorkflowNodeInfoTimingExact
-  | WorkflowNodeInfoTimingInconsistent
-  | WorkflowNodeInfoTimingPartial
-  | WorkflowNodeInfoTimingUnavailable;
+export type NodeTimingInfo =
+  | NodeTimingExactInfo
+  | NodeTimingInconsistentInfo
+  | NodeTimingPartialInfo
+  | NodeTimingUnavailableInfo;
 
-export interface WorkflowNodeInfoTimingExact {
+export interface NodeTimingExactInfo {
   readonly kind: "exact";
-  readonly endpoint: WorkflowNodeInfoTimingExactEndpoint;
-  readonly segments: ReadonlyArray<WorkflowNodeInfoTimingExactSegments>;
+  readonly endpoint: NodeEndpointInfo;
+  readonly segments: ReadonlyArray<TimingSegmentInfo>;
 }
 
-export type WorkflowNodeInfoTimingExactEndpoint =
-  | WorkflowNodeInfoTimingExactEndpointNotTerminal
-  | WorkflowNodeInfoTimingExactEndpointTerminal;
+export type NodeEndpointInfo =
+  | EndpointNotTerminalInfo
+  | EndpointTerminalInfo;
 
-export interface WorkflowNodeInfoTimingExactEndpointNotTerminal {
+export interface EndpointNotTerminalInfo {
   readonly kind: "notTerminal";
 }
 
-export interface WorkflowNodeInfoTimingExactEndpointTerminal {
+export interface EndpointTerminalInfo {
   readonly kind: "terminal";
   readonly at: Temporal.Instant;
-  readonly status: WorkflowNodeInfoTimingExactEndpointTerminalStatus;
+  readonly status: TerminalNodeStatus;
 }
 
-export type WorkflowNodeInfoTimingExactEndpointTerminalStatus =
+export type TerminalNodeStatus =
   | "COMPLETED"
   | "FAILED"
   | "SKIPPED";
 
-export interface WorkflowNodeInfoTimingExactSegments {
-  readonly end: WorkflowNodeInfoTimingExactSegmentsEnd;
-  readonly phase: WorkflowNodeInfoTimingExactSegmentsPhase;
-  readonly source: WorkflowNodeInfoTimingExactSegmentsSource;
+export interface TimingSegmentInfo {
+  readonly end: SegmentEndInfo;
+  readonly phase: SegmentPhaseInfo;
+  readonly source: SegmentSourceInfo;
   readonly startedAt: Temporal.Instant;
 }
 
-export type WorkflowNodeInfoTimingExactSegmentsEnd =
-  | WorkflowNodeInfoTimingExactSegmentsEndEnded
-  | WorkflowNodeInfoTimingExactSegmentsEndOpen;
+export type SegmentEndInfo =
+  | SegmentEndedInfo
+  | SegmentOpenInfo;
 
-export interface WorkflowNodeInfoTimingExactSegmentsEndEnded {
+export interface SegmentEndedInfo {
   readonly kind: "ended";
   readonly at: Temporal.Instant;
 }
 
-export interface WorkflowNodeInfoTimingExactSegmentsEndOpen {
+export interface SegmentOpenInfo {
   readonly kind: "open";
 }
 
-export type WorkflowNodeInfoTimingExactSegmentsPhase =
-  | WorkflowNodeInfoTimingExactSegmentsPhaseAdvancing
-  | WorkflowNodeInfoTimingExactSegmentsPhaseClaimed
-  | WorkflowNodeInfoTimingExactSegmentsPhaseEnqueued
-  | WorkflowNodeInfoTimingExactSegmentsPhaseFinalizing
-  | WorkflowNodeInfoTimingExactSegmentsPhasePending
-  | WorkflowNodeInfoTimingExactSegmentsPhaseReady
-  | WorkflowNodeInfoTimingExactSegmentsPhaseRetryWait
-  | WorkflowNodeInfoTimingExactSegmentsPhaseRunning
-  | WorkflowNodeInfoTimingExactSegmentsPhaseUnknown;
+export type SegmentPhaseInfo =
+  | PhaseAdvancingInfo
+  | PhaseClaimedInfo
+  | PhaseEnqueuedInfo
+  | PhaseFinalizingInfo
+  | PhasePendingInfo
+  | PhaseReadyInfo
+  | PhaseRetryWaitInfo
+  | PhaseRunningInfo
+  | PhaseUnknownInfo;
 
-export interface WorkflowNodeInfoTimingExactSegmentsPhaseAdvancing {
+export interface PhaseAdvancingInfo {
   readonly kind: "advancing";
 }
 
-export interface WorkflowNodeInfoTimingExactSegmentsPhaseClaimed {
+export interface PhaseClaimedInfo {
   readonly kind: "claimed";
-  readonly claim: WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaim;
+  readonly claim: SegmentClaimInfo;
 }
 
-export type WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaim =
-  | WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimEarlier
-  | WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimNotRecorded
-  | WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecorded;
+export type SegmentClaimInfo =
+  | ClaimEarlierInfo
+  | ClaimNotRecordedInfo
+  | ClaimRecordedInfo;
 
-export interface WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimEarlier {
+export interface ClaimEarlierInfo {
   readonly kind: "earlier";
   readonly count: number;
 }
 
-export interface WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimNotRecorded {
+export interface ClaimNotRecordedInfo {
   readonly kind: "notRecorded";
 }
 
-export interface WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecorded {
+export interface ClaimRecordedInfo {
   readonly kind: "recorded";
-  readonly placement: WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecordedPlacement;
+  readonly placement: AttemptPlacementInfo;
 }
 
-export type WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecordedPlacement =
-  | WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecordedPlacementNotObserved
-  | WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecordedPlacementPlaced;
-
-export interface WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecordedPlacementNotObserved {
-  readonly kind: "notObserved";
-}
-
-export interface WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecordedPlacementPlaced {
-  readonly kind: "placed";
-  readonly placedAt: Temporal.Instant;
-}
-
-export interface WorkflowNodeInfoTimingExactSegmentsPhaseEnqueued {
+export interface PhaseEnqueuedInfo {
   readonly kind: "enqueued";
 }
 
-export interface WorkflowNodeInfoTimingExactSegmentsPhaseFinalizing {
+export interface PhaseFinalizingInfo {
   readonly kind: "finalizing";
 }
 
-export interface WorkflowNodeInfoTimingExactSegmentsPhasePending {
+export interface PhasePendingInfo {
   readonly kind: "pending";
 }
 
-export interface WorkflowNodeInfoTimingExactSegmentsPhaseReady {
+export interface PhaseReadyInfo {
   readonly kind: "ready";
 }
 
-export interface WorkflowNodeInfoTimingExactSegmentsPhaseRetryWait {
+export interface PhaseRetryWaitInfo {
   readonly kind: "retryWait";
 }
 
-export interface WorkflowNodeInfoTimingExactSegmentsPhaseRunning {
+export interface PhaseRunningInfo {
   readonly kind: "running";
 }
 
-export interface WorkflowNodeInfoTimingExactSegmentsPhaseUnknown {
+export interface PhaseUnknownInfo {
   readonly kind: "unknown";
-  readonly reason: WorkflowNodeInfoTimingExactSegmentsPhaseUnknownReason;
+  readonly reason: UnknownReason;
 }
 
-export type WorkflowNodeInfoTimingExactSegmentsPhaseUnknownReason =
+export type UnknownReason =
   | "ATTEMPT_NOT_CAPTURED"
   | "CLAIMS_NOT_COUNTED"
   | "HISTORY_PRUNED"
   | "WORKER_LOST";
 
-export type WorkflowNodeInfoTimingExactSegmentsSource =
-  | WorkflowNodeInfoTimingExactSegmentsSourceAttempt
-  | WorkflowNodeInfoTimingExactSegmentsSourceNode
-  | WorkflowNodeInfoTimingExactSegmentsSourceTask;
+export type SegmentSourceInfo =
+  | SourceAttemptInfo
+  | SourceNodeInfo
+  | SourceTaskInfo;
 
-export interface WorkflowNodeInfoTimingExactSegmentsSourceAttempt {
+export interface SourceAttemptInfo {
   readonly kind: "attempt";
   readonly attempt: number;
   readonly generation: number;
   readonly taskId: string;
 }
 
-export interface WorkflowNodeInfoTimingExactSegmentsSourceNode {
+export interface SourceNodeInfo {
   readonly kind: "node";
 }
 
-export interface WorkflowNodeInfoTimingExactSegmentsSourceTask {
+export interface SourceTaskInfo {
   readonly kind: "task";
   readonly generation: number;
   readonly taskId: string;
 }
 
-export interface WorkflowNodeInfoTimingInconsistent {
+export interface NodeTimingInconsistentInfo {
   readonly kind: "inconsistent";
-  readonly conflict: WorkflowNodeInfoTimingInconsistentConflict;
+  readonly conflict: TimingConflictInfo;
 }
 
-export type WorkflowNodeInfoTimingInconsistentConflict =
-  | WorkflowNodeInfoTimingInconsistentConflictClockOrder
-  | WorkflowNodeInfoTimingInconsistentConflictMissingRecord
-  | WorkflowNodeInfoTimingInconsistentConflictUnexpectedEvent;
+export type TimingConflictInfo =
+  | ConflictClockOrderInfo
+  | ConflictMissingRecordInfo
+  | ConflictUnexpectedEventInfo;
 
-export interface WorkflowNodeInfoTimingInconsistentConflictClockOrder {
+export interface ConflictClockOrderInfo {
   readonly kind: "clockOrder";
-  readonly earlier: WorkflowNodeInfoTimingInconsistentConflictClockOrderEarlier;
+  readonly earlier: TimingBoundary;
   readonly earlierAt: Temporal.Instant;
-  readonly later: WorkflowNodeInfoTimingInconsistentConflictClockOrderLater;
+  readonly later: TimingBoundary;
   readonly laterAt: Temporal.Instant;
 }
 
-export type WorkflowNodeInfoTimingInconsistentConflictClockOrderEarlier =
+export type TimingBoundary =
   | "ATTEMPT_ENQUEUED"
   | "ATTEMPT_RECORDED"
   | "CHILD_COMPLETED"
@@ -1013,34 +688,12 @@ export type WorkflowNodeInfoTimingInconsistentConflictClockOrderEarlier =
   | "TASK_CREATED"
   | "TASK_MOVED";
 
-export type WorkflowNodeInfoTimingInconsistentConflictClockOrderLater =
-  | "ATTEMPT_ENQUEUED"
-  | "ATTEMPT_RECORDED"
-  | "CHILD_COMPLETED"
-  | "CHILD_CREATED"
-  | "CLAIM"
-  | "FINALIZING"
-  | "FIRST_CLAIM"
-  | "LAST_SEEN"
-  | "NODE_COMPLETED"
-  | "NODE_CREATED"
-  | "NODE_ENQUEUED"
-  | "NODE_READY"
-  | "PLACEMENT"
-  | "READ_TIME"
-  | "RUN_COMPLETED"
-  | "RUN_PAUSED"
-  | "RUN_RESUMED"
-  | "START"
-  | "TASK_CREATED"
-  | "TASK_MOVED";
-
-export interface WorkflowNodeInfoTimingInconsistentConflictMissingRecord {
+export interface ConflictMissingRecordInfo {
   readonly kind: "missingRecord";
-  readonly record: WorkflowNodeInfoTimingInconsistentConflictMissingRecordRecord;
+  readonly record: MissingRecord;
 }
 
-export type WorkflowNodeInfoTimingInconsistentConflictMissingRecordRecord =
+export type MissingRecord =
   | "ATTEMPT_ROW"
   | "CHILD_RUN"
   | "COMPLETION_TIME"
@@ -1049,821 +702,123 @@ export type WorkflowNodeInfoTimingInconsistentConflictMissingRecordRecord =
   | "OPEN_ATTEMPT"
   | "TASK_TIMES";
 
-export interface WorkflowNodeInfoTimingInconsistentConflictUnexpectedEvent {
+export interface ConflictUnexpectedEventInfo {
   readonly kind: "unexpectedEvent";
-  readonly event: WorkflowNodeInfoTimingInconsistentConflictUnexpectedEventEvent;
+  readonly event: WorkflowEventKind;
   readonly eventId: number;
 }
 
-export type WorkflowNodeInfoTimingInconsistentConflictUnexpectedEventEvent =
+export type WorkflowEventKind =
   | "NODE_ENQUEUED"
   | "NODE_READY"
   | "TASK_MOVED"
   | "WORKFLOW_PAUSED"
   | "WORKFLOW_RESUMED";
 
-export interface WorkflowNodeInfoTimingPartial {
+export interface NodeTimingPartialInfo {
   readonly kind: "partial";
-  readonly endpoint: WorkflowNodeInfoTimingPartialEndpoint;
-  readonly reasons: ReadonlyArray<WorkflowNodeInfoTimingPartialReasons>;
-  readonly segments: ReadonlyArray<WorkflowNodeInfoTimingPartialSegments>;
+  readonly endpoint: NodeEndpointInfo;
+  readonly reasons: ReadonlyArray<UnknownReason>;
+  readonly segments: ReadonlyArray<TimingSegmentInfo>;
 }
 
-export type WorkflowNodeInfoTimingPartialEndpoint =
-  | WorkflowNodeInfoTimingPartialEndpointNotTerminal
-  | WorkflowNodeInfoTimingPartialEndpointTerminal;
-
-export interface WorkflowNodeInfoTimingPartialEndpointNotTerminal {
-  readonly kind: "notTerminal";
-}
-
-export interface WorkflowNodeInfoTimingPartialEndpointTerminal {
-  readonly kind: "terminal";
-  readonly at: Temporal.Instant;
-  readonly status: WorkflowNodeInfoTimingPartialEndpointTerminalStatus;
-}
-
-export type WorkflowNodeInfoTimingPartialEndpointTerminalStatus =
-  | "COMPLETED"
-  | "FAILED"
-  | "SKIPPED";
-
-export type WorkflowNodeInfoTimingPartialReasons =
-  | "ATTEMPT_NOT_CAPTURED"
-  | "CLAIMS_NOT_COUNTED"
-  | "HISTORY_PRUNED"
-  | "WORKER_LOST";
-
-export interface WorkflowNodeInfoTimingPartialSegments {
-  readonly end: WorkflowNodeInfoTimingPartialSegmentsEnd;
-  readonly phase: WorkflowNodeInfoTimingPartialSegmentsPhase;
-  readonly source: WorkflowNodeInfoTimingPartialSegmentsSource;
-  readonly startedAt: Temporal.Instant;
-}
-
-export type WorkflowNodeInfoTimingPartialSegmentsEnd =
-  | WorkflowNodeInfoTimingPartialSegmentsEndEnded
-  | WorkflowNodeInfoTimingPartialSegmentsEndOpen;
-
-export interface WorkflowNodeInfoTimingPartialSegmentsEndEnded {
-  readonly kind: "ended";
-  readonly at: Temporal.Instant;
-}
-
-export interface WorkflowNodeInfoTimingPartialSegmentsEndOpen {
-  readonly kind: "open";
-}
-
-export type WorkflowNodeInfoTimingPartialSegmentsPhase =
-  | WorkflowNodeInfoTimingPartialSegmentsPhaseAdvancing
-  | WorkflowNodeInfoTimingPartialSegmentsPhaseClaimed
-  | WorkflowNodeInfoTimingPartialSegmentsPhaseEnqueued
-  | WorkflowNodeInfoTimingPartialSegmentsPhaseFinalizing
-  | WorkflowNodeInfoTimingPartialSegmentsPhasePending
-  | WorkflowNodeInfoTimingPartialSegmentsPhaseReady
-  | WorkflowNodeInfoTimingPartialSegmentsPhaseRetryWait
-  | WorkflowNodeInfoTimingPartialSegmentsPhaseRunning
-  | WorkflowNodeInfoTimingPartialSegmentsPhaseUnknown;
-
-export interface WorkflowNodeInfoTimingPartialSegmentsPhaseAdvancing {
-  readonly kind: "advancing";
-}
-
-export interface WorkflowNodeInfoTimingPartialSegmentsPhaseClaimed {
-  readonly kind: "claimed";
-  readonly claim: WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaim;
-}
-
-export type WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaim =
-  | WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimEarlier
-  | WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimNotRecorded
-  | WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecorded;
-
-export interface WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimEarlier {
-  readonly kind: "earlier";
-  readonly count: number;
-}
-
-export interface WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimNotRecorded {
-  readonly kind: "notRecorded";
-}
-
-export interface WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecorded {
-  readonly kind: "recorded";
-  readonly placement: WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecordedPlacement;
-}
-
-export type WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecordedPlacement =
-  | WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementNotObserved
-  | WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementPlaced;
-
-export interface WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementNotObserved {
-  readonly kind: "notObserved";
-}
-
-export interface WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementPlaced {
-  readonly kind: "placed";
-  readonly placedAt: Temporal.Instant;
-}
-
-export interface WorkflowNodeInfoTimingPartialSegmentsPhaseEnqueued {
-  readonly kind: "enqueued";
-}
-
-export interface WorkflowNodeInfoTimingPartialSegmentsPhaseFinalizing {
-  readonly kind: "finalizing";
-}
-
-export interface WorkflowNodeInfoTimingPartialSegmentsPhasePending {
-  readonly kind: "pending";
-}
-
-export interface WorkflowNodeInfoTimingPartialSegmentsPhaseReady {
-  readonly kind: "ready";
-}
-
-export interface WorkflowNodeInfoTimingPartialSegmentsPhaseRetryWait {
-  readonly kind: "retryWait";
-}
-
-export interface WorkflowNodeInfoTimingPartialSegmentsPhaseRunning {
-  readonly kind: "running";
-}
-
-export interface WorkflowNodeInfoTimingPartialSegmentsPhaseUnknown {
-  readonly kind: "unknown";
-  readonly reason: WorkflowNodeInfoTimingPartialSegmentsPhaseUnknownReason;
-}
-
-export type WorkflowNodeInfoTimingPartialSegmentsPhaseUnknownReason =
-  | "ATTEMPT_NOT_CAPTURED"
-  | "CLAIMS_NOT_COUNTED"
-  | "HISTORY_PRUNED"
-  | "WORKER_LOST";
-
-export type WorkflowNodeInfoTimingPartialSegmentsSource =
-  | WorkflowNodeInfoTimingPartialSegmentsSourceAttempt
-  | WorkflowNodeInfoTimingPartialSegmentsSourceNode
-  | WorkflowNodeInfoTimingPartialSegmentsSourceTask;
-
-export interface WorkflowNodeInfoTimingPartialSegmentsSourceAttempt {
-  readonly kind: "attempt";
-  readonly attempt: number;
-  readonly generation: number;
-  readonly taskId: string;
-}
-
-export interface WorkflowNodeInfoTimingPartialSegmentsSourceNode {
-  readonly kind: "node";
-}
-
-export interface WorkflowNodeInfoTimingPartialSegmentsSourceTask {
-  readonly kind: "task";
-  readonly generation: number;
-  readonly taskId: string;
-}
-
-export interface WorkflowNodeInfoTimingUnavailable {
+export interface NodeTimingUnavailableInfo {
   readonly kind: "unavailable";
-  readonly reason: WorkflowNodeInfoTimingUnavailableReason;
+  readonly reason: UnavailableReason;
 }
 
-export type WorkflowNodeInfoTimingUnavailableReason =
+export type UnavailableReason =
   | "RUN_BEFORE_CAPTURE"
   | "TIMING_BOUND_EXCEEDED";
 
 export interface WorkflowRunDetail {
-  readonly edges: ReadonlyArray<WorkflowRunDetailEdges>;
+  readonly edges: ReadonlyArray<WorkflowEdge>;
   readonly failedCount: number;
   readonly failedIndices: ReadonlyArray<number>;
-  readonly nodes: ReadonlyArray<WorkflowRunDetailNodes>;
-  readonly run: WorkflowRunDetailRun;
-  readonly timing: WorkflowRunDetailTiming;
+  readonly nodes: ReadonlyArray<WorkflowNodeInfo>;
+  readonly run: WorkflowRunSummary;
+  readonly timing: RunTimingInfo;
   readonly traceId: string | null;
 }
 
-export interface WorkflowRunDetailEdges {
-  readonly fromIndex: number;
-  readonly toIndex: number;
-}
-
-export interface WorkflowRunDetailNodes {
-  readonly allowFailedDeps: boolean;
-  readonly childFailed: number | null;
-  readonly childTotal: number | null;
-  readonly completedAt: Temporal.Instant | null;
-  readonly execS: number | null;
-  readonly isSubworkflow: boolean;
-  readonly nodeId: string | null;
-  readonly nodeStatus: string;
-  readonly startedAt: Temporal.Instant | null;
-  readonly subWorkflowId: string | null;
-  readonly taskIndex: number;
-  readonly taskName: string;
-  readonly timing: WorkflowRunDetailNodesTiming;
-}
-
-export type WorkflowRunDetailNodesTiming =
-  | WorkflowRunDetailNodesTimingExact
-  | WorkflowRunDetailNodesTimingInconsistent
-  | WorkflowRunDetailNodesTimingPartial
-  | WorkflowRunDetailNodesTimingUnavailable;
-
-export interface WorkflowRunDetailNodesTimingExact {
-  readonly kind: "exact";
-  readonly endpoint: WorkflowRunDetailNodesTimingExactEndpoint;
-  readonly segments: ReadonlyArray<WorkflowRunDetailNodesTimingExactSegments>;
-}
-
-export type WorkflowRunDetailNodesTimingExactEndpoint =
-  | WorkflowRunDetailNodesTimingExactEndpointNotTerminal
-  | WorkflowRunDetailNodesTimingExactEndpointTerminal;
-
-export interface WorkflowRunDetailNodesTimingExactEndpointNotTerminal {
-  readonly kind: "notTerminal";
-}
-
-export interface WorkflowRunDetailNodesTimingExactEndpointTerminal {
-  readonly kind: "terminal";
-  readonly at: Temporal.Instant;
-  readonly status: WorkflowRunDetailNodesTimingExactEndpointTerminalStatus;
-}
-
-export type WorkflowRunDetailNodesTimingExactEndpointTerminalStatus =
-  | "COMPLETED"
-  | "FAILED"
-  | "SKIPPED";
-
-export interface WorkflowRunDetailNodesTimingExactSegments {
-  readonly end: WorkflowRunDetailNodesTimingExactSegmentsEnd;
-  readonly phase: WorkflowRunDetailNodesTimingExactSegmentsPhase;
-  readonly source: WorkflowRunDetailNodesTimingExactSegmentsSource;
-  readonly startedAt: Temporal.Instant;
-}
-
-export type WorkflowRunDetailNodesTimingExactSegmentsEnd =
-  | WorkflowRunDetailNodesTimingExactSegmentsEndEnded
-  | WorkflowRunDetailNodesTimingExactSegmentsEndOpen;
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsEndEnded {
-  readonly kind: "ended";
-  readonly at: Temporal.Instant;
-}
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsEndOpen {
-  readonly kind: "open";
-}
-
-export type WorkflowRunDetailNodesTimingExactSegmentsPhase =
-  | WorkflowRunDetailNodesTimingExactSegmentsPhaseAdvancing
-  | WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimed
-  | WorkflowRunDetailNodesTimingExactSegmentsPhaseEnqueued
-  | WorkflowRunDetailNodesTimingExactSegmentsPhaseFinalizing
-  | WorkflowRunDetailNodesTimingExactSegmentsPhasePending
-  | WorkflowRunDetailNodesTimingExactSegmentsPhaseReady
-  | WorkflowRunDetailNodesTimingExactSegmentsPhaseRetryWait
-  | WorkflowRunDetailNodesTimingExactSegmentsPhaseRunning
-  | WorkflowRunDetailNodesTimingExactSegmentsPhaseUnknown;
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsPhaseAdvancing {
-  readonly kind: "advancing";
-}
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimed {
-  readonly kind: "claimed";
-  readonly claim: WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaim;
-}
-
-export type WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaim =
-  | WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimEarlier
-  | WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimNotRecorded
-  | WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecorded;
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimEarlier {
-  readonly kind: "earlier";
-  readonly count: number;
-}
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimNotRecorded {
-  readonly kind: "notRecorded";
-}
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecorded {
-  readonly kind: "recorded";
-  readonly placement: WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecordedPlacement;
-}
-
-export type WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecordedPlacement =
-  | WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecordedPlacementNotObserved
-  | WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecordedPlacementPlaced;
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecordedPlacementNotObserved {
-  readonly kind: "notObserved";
-}
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecordedPlacementPlaced {
-  readonly kind: "placed";
-  readonly placedAt: Temporal.Instant;
-}
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsPhaseEnqueued {
-  readonly kind: "enqueued";
-}
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsPhaseFinalizing {
-  readonly kind: "finalizing";
-}
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsPhasePending {
-  readonly kind: "pending";
-}
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsPhaseReady {
-  readonly kind: "ready";
-}
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsPhaseRetryWait {
-  readonly kind: "retryWait";
-}
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsPhaseRunning {
-  readonly kind: "running";
-}
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsPhaseUnknown {
-  readonly kind: "unknown";
-  readonly reason: WorkflowRunDetailNodesTimingExactSegmentsPhaseUnknownReason;
-}
-
-export type WorkflowRunDetailNodesTimingExactSegmentsPhaseUnknownReason =
-  | "ATTEMPT_NOT_CAPTURED"
-  | "CLAIMS_NOT_COUNTED"
-  | "HISTORY_PRUNED"
-  | "WORKER_LOST";
-
-export type WorkflowRunDetailNodesTimingExactSegmentsSource =
-  | WorkflowRunDetailNodesTimingExactSegmentsSourceAttempt
-  | WorkflowRunDetailNodesTimingExactSegmentsSourceNode
-  | WorkflowRunDetailNodesTimingExactSegmentsSourceTask;
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsSourceAttempt {
-  readonly kind: "attempt";
-  readonly attempt: number;
-  readonly generation: number;
-  readonly taskId: string;
-}
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsSourceNode {
-  readonly kind: "node";
-}
-
-export interface WorkflowRunDetailNodesTimingExactSegmentsSourceTask {
-  readonly kind: "task";
-  readonly generation: number;
-  readonly taskId: string;
-}
-
-export interface WorkflowRunDetailNodesTimingInconsistent {
-  readonly kind: "inconsistent";
-  readonly conflict: WorkflowRunDetailNodesTimingInconsistentConflict;
-}
-
-export type WorkflowRunDetailNodesTimingInconsistentConflict =
-  | WorkflowRunDetailNodesTimingInconsistentConflictClockOrder
-  | WorkflowRunDetailNodesTimingInconsistentConflictMissingRecord
-  | WorkflowRunDetailNodesTimingInconsistentConflictUnexpectedEvent;
-
-export interface WorkflowRunDetailNodesTimingInconsistentConflictClockOrder {
-  readonly kind: "clockOrder";
-  readonly earlier: WorkflowRunDetailNodesTimingInconsistentConflictClockOrderEarlier;
-  readonly earlierAt: Temporal.Instant;
-  readonly later: WorkflowRunDetailNodesTimingInconsistentConflictClockOrderLater;
-  readonly laterAt: Temporal.Instant;
-}
-
-export type WorkflowRunDetailNodesTimingInconsistentConflictClockOrderEarlier =
-  | "ATTEMPT_ENQUEUED"
-  | "ATTEMPT_RECORDED"
-  | "CHILD_COMPLETED"
-  | "CHILD_CREATED"
-  | "CLAIM"
-  | "FINALIZING"
-  | "FIRST_CLAIM"
-  | "LAST_SEEN"
-  | "NODE_COMPLETED"
-  | "NODE_CREATED"
-  | "NODE_ENQUEUED"
-  | "NODE_READY"
-  | "PLACEMENT"
-  | "READ_TIME"
-  | "RUN_COMPLETED"
-  | "RUN_PAUSED"
-  | "RUN_RESUMED"
-  | "START"
-  | "TASK_CREATED"
-  | "TASK_MOVED";
-
-export type WorkflowRunDetailNodesTimingInconsistentConflictClockOrderLater =
-  | "ATTEMPT_ENQUEUED"
-  | "ATTEMPT_RECORDED"
-  | "CHILD_COMPLETED"
-  | "CHILD_CREATED"
-  | "CLAIM"
-  | "FINALIZING"
-  | "FIRST_CLAIM"
-  | "LAST_SEEN"
-  | "NODE_COMPLETED"
-  | "NODE_CREATED"
-  | "NODE_ENQUEUED"
-  | "NODE_READY"
-  | "PLACEMENT"
-  | "READ_TIME"
-  | "RUN_COMPLETED"
-  | "RUN_PAUSED"
-  | "RUN_RESUMED"
-  | "START"
-  | "TASK_CREATED"
-  | "TASK_MOVED";
-
-export interface WorkflowRunDetailNodesTimingInconsistentConflictMissingRecord {
-  readonly kind: "missingRecord";
-  readonly record: WorkflowRunDetailNodesTimingInconsistentConflictMissingRecordRecord;
-}
-
-export type WorkflowRunDetailNodesTimingInconsistentConflictMissingRecordRecord =
-  | "ATTEMPT_ROW"
-  | "CHILD_RUN"
-  | "COMPLETION_TIME"
-  | "LINKED_TASK"
-  | "LINKED_WORK"
-  | "OPEN_ATTEMPT"
-  | "TASK_TIMES";
-
-export interface WorkflowRunDetailNodesTimingInconsistentConflictUnexpectedEvent {
-  readonly kind: "unexpectedEvent";
-  readonly event: WorkflowRunDetailNodesTimingInconsistentConflictUnexpectedEventEvent;
-  readonly eventId: number;
-}
-
-export type WorkflowRunDetailNodesTimingInconsistentConflictUnexpectedEventEvent =
-  | "NODE_ENQUEUED"
-  | "NODE_READY"
-  | "TASK_MOVED"
-  | "WORKFLOW_PAUSED"
-  | "WORKFLOW_RESUMED";
-
-export interface WorkflowRunDetailNodesTimingPartial {
-  readonly kind: "partial";
-  readonly endpoint: WorkflowRunDetailNodesTimingPartialEndpoint;
-  readonly reasons: ReadonlyArray<WorkflowRunDetailNodesTimingPartialReasons>;
-  readonly segments: ReadonlyArray<WorkflowRunDetailNodesTimingPartialSegments>;
-}
-
-export type WorkflowRunDetailNodesTimingPartialEndpoint =
-  | WorkflowRunDetailNodesTimingPartialEndpointNotTerminal
-  | WorkflowRunDetailNodesTimingPartialEndpointTerminal;
-
-export interface WorkflowRunDetailNodesTimingPartialEndpointNotTerminal {
-  readonly kind: "notTerminal";
-}
-
-export interface WorkflowRunDetailNodesTimingPartialEndpointTerminal {
-  readonly kind: "terminal";
-  readonly at: Temporal.Instant;
-  readonly status: WorkflowRunDetailNodesTimingPartialEndpointTerminalStatus;
-}
-
-export type WorkflowRunDetailNodesTimingPartialEndpointTerminalStatus =
-  | "COMPLETED"
-  | "FAILED"
-  | "SKIPPED";
-
-export type WorkflowRunDetailNodesTimingPartialReasons =
-  | "ATTEMPT_NOT_CAPTURED"
-  | "CLAIMS_NOT_COUNTED"
-  | "HISTORY_PRUNED"
-  | "WORKER_LOST";
-
-export interface WorkflowRunDetailNodesTimingPartialSegments {
-  readonly end: WorkflowRunDetailNodesTimingPartialSegmentsEnd;
-  readonly phase: WorkflowRunDetailNodesTimingPartialSegmentsPhase;
-  readonly source: WorkflowRunDetailNodesTimingPartialSegmentsSource;
-  readonly startedAt: Temporal.Instant;
-}
-
-export type WorkflowRunDetailNodesTimingPartialSegmentsEnd =
-  | WorkflowRunDetailNodesTimingPartialSegmentsEndEnded
-  | WorkflowRunDetailNodesTimingPartialSegmentsEndOpen;
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsEndEnded {
-  readonly kind: "ended";
-  readonly at: Temporal.Instant;
-}
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsEndOpen {
-  readonly kind: "open";
-}
-
-export type WorkflowRunDetailNodesTimingPartialSegmentsPhase =
-  | WorkflowRunDetailNodesTimingPartialSegmentsPhaseAdvancing
-  | WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimed
-  | WorkflowRunDetailNodesTimingPartialSegmentsPhaseEnqueued
-  | WorkflowRunDetailNodesTimingPartialSegmentsPhaseFinalizing
-  | WorkflowRunDetailNodesTimingPartialSegmentsPhasePending
-  | WorkflowRunDetailNodesTimingPartialSegmentsPhaseReady
-  | WorkflowRunDetailNodesTimingPartialSegmentsPhaseRetryWait
-  | WorkflowRunDetailNodesTimingPartialSegmentsPhaseRunning
-  | WorkflowRunDetailNodesTimingPartialSegmentsPhaseUnknown;
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsPhaseAdvancing {
-  readonly kind: "advancing";
-}
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimed {
-  readonly kind: "claimed";
-  readonly claim: WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaim;
-}
-
-export type WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaim =
-  | WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimEarlier
-  | WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimNotRecorded
-  | WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecorded;
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimEarlier {
-  readonly kind: "earlier";
-  readonly count: number;
-}
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimNotRecorded {
-  readonly kind: "notRecorded";
-}
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecorded {
-  readonly kind: "recorded";
-  readonly placement: WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecordedPlacement;
-}
-
-export type WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecordedPlacement =
-  | WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementNotObserved
-  | WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementPlaced;
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementNotObserved {
-  readonly kind: "notObserved";
-}
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementPlaced {
-  readonly kind: "placed";
-  readonly placedAt: Temporal.Instant;
-}
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsPhaseEnqueued {
-  readonly kind: "enqueued";
-}
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsPhaseFinalizing {
-  readonly kind: "finalizing";
-}
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsPhasePending {
-  readonly kind: "pending";
-}
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsPhaseReady {
-  readonly kind: "ready";
-}
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsPhaseRetryWait {
-  readonly kind: "retryWait";
-}
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsPhaseRunning {
-  readonly kind: "running";
-}
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsPhaseUnknown {
-  readonly kind: "unknown";
-  readonly reason: WorkflowRunDetailNodesTimingPartialSegmentsPhaseUnknownReason;
-}
-
-export type WorkflowRunDetailNodesTimingPartialSegmentsPhaseUnknownReason =
-  | "ATTEMPT_NOT_CAPTURED"
-  | "CLAIMS_NOT_COUNTED"
-  | "HISTORY_PRUNED"
-  | "WORKER_LOST";
-
-export type WorkflowRunDetailNodesTimingPartialSegmentsSource =
-  | WorkflowRunDetailNodesTimingPartialSegmentsSourceAttempt
-  | WorkflowRunDetailNodesTimingPartialSegmentsSourceNode
-  | WorkflowRunDetailNodesTimingPartialSegmentsSourceTask;
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsSourceAttempt {
-  readonly kind: "attempt";
-  readonly attempt: number;
-  readonly generation: number;
-  readonly taskId: string;
-}
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsSourceNode {
-  readonly kind: "node";
-}
-
-export interface WorkflowRunDetailNodesTimingPartialSegmentsSourceTask {
-  readonly kind: "task";
-  readonly generation: number;
-  readonly taskId: string;
-}
-
-export interface WorkflowRunDetailNodesTimingUnavailable {
-  readonly kind: "unavailable";
-  readonly reason: WorkflowRunDetailNodesTimingUnavailableReason;
-}
-
-export type WorkflowRunDetailNodesTimingUnavailableReason =
-  | "RUN_BEFORE_CAPTURE"
-  | "TIMING_BOUND_EXCEEDED";
-
-export interface WorkflowRunDetailRun {
-  readonly completedAt: Temporal.Instant | null;
-  readonly createdAt: Temporal.Instant | null;
-  readonly definitionKey: string | null;
-  readonly id: string;
-  readonly name: string;
-  readonly status: string;
-  readonly wallS: number | null;
-}
-
-export type WorkflowRunDetailTiming =
-  | WorkflowRunDetailTimingComposed
-  | WorkflowRunDetailTimingUnavailable;
-
-export interface WorkflowRunDetailTimingComposed {
+export type RunTimingInfo =
+  | RunTimingComposedInfo
+  | RunTimingUnavailableInfo;
+
+export interface RunTimingComposedInfo {
   readonly kind: "composed";
   readonly asOf: Temporal.Instant;
   readonly capturedSince: Temporal.Instant;
-  readonly coverage: WorkflowRunDetailTimingComposedCoverage;
+  readonly coverage: RunCoverageInfo;
   readonly openSegments: boolean;
-  readonly pauses: ReadonlyArray<WorkflowRunDetailTimingComposedPauses>;
+  readonly pauses: ReadonlyArray<PauseIntervalInfo>;
   readonly rangeEndedAt: Temporal.Instant;
   readonly rangeStartedAt: Temporal.Instant;
 }
 
-export type WorkflowRunDetailTimingComposedCoverage =
-  | WorkflowRunDetailTimingComposedCoverageExact
-  | WorkflowRunDetailTimingComposedCoverageInconsistent
-  | WorkflowRunDetailTimingComposedCoveragePartial;
+export type RunCoverageInfo =
+  | RunCoverageExactInfo
+  | RunCoverageInconsistentInfo
+  | RunCoveragePartialInfo;
 
-export interface WorkflowRunDetailTimingComposedCoverageExact {
+export interface RunCoverageExactInfo {
   readonly kind: "exact";
 }
 
-export interface WorkflowRunDetailTimingComposedCoverageInconsistent {
+export interface RunCoverageInconsistentInfo {
   readonly kind: "inconsistent";
-  readonly conflicts: ReadonlyArray<WorkflowRunDetailTimingComposedCoverageInconsistentConflicts>;
+  readonly conflicts: ReadonlyArray<RunConflictInfo>;
 }
 
-export type WorkflowRunDetailTimingComposedCoverageInconsistentConflicts =
-  | WorkflowRunDetailTimingComposedCoverageInconsistentConflictsNode
-  | WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPause;
+export type RunConflictInfo =
+  | RunConflictNodeInfo
+  | RunConflictPauseInfo;
 
-export interface WorkflowRunDetailTimingComposedCoverageInconsistentConflictsNode {
+export interface RunConflictNodeInfo {
   readonly kind: "node";
   readonly taskIndex: number;
 }
 
-export interface WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPause {
+export interface RunConflictPauseInfo {
   readonly kind: "pause";
-  readonly conflict: WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflict;
+  readonly conflict: TimingConflictInfo;
 }
 
-export type WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflict =
-  | WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictClockOrder
-  | WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictMissingRecord
-  | WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictUnexpectedEvent;
-
-export interface WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictClockOrder {
-  readonly kind: "clockOrder";
-  readonly earlier: WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictClockOrderEarlier;
-  readonly earlierAt: Temporal.Instant;
-  readonly later: WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictClockOrderLater;
-  readonly laterAt: Temporal.Instant;
-}
-
-export type WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictClockOrderEarlier =
-  | "ATTEMPT_ENQUEUED"
-  | "ATTEMPT_RECORDED"
-  | "CHILD_COMPLETED"
-  | "CHILD_CREATED"
-  | "CLAIM"
-  | "FINALIZING"
-  | "FIRST_CLAIM"
-  | "LAST_SEEN"
-  | "NODE_COMPLETED"
-  | "NODE_CREATED"
-  | "NODE_ENQUEUED"
-  | "NODE_READY"
-  | "PLACEMENT"
-  | "READ_TIME"
-  | "RUN_COMPLETED"
-  | "RUN_PAUSED"
-  | "RUN_RESUMED"
-  | "START"
-  | "TASK_CREATED"
-  | "TASK_MOVED";
-
-export type WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictClockOrderLater =
-  | "ATTEMPT_ENQUEUED"
-  | "ATTEMPT_RECORDED"
-  | "CHILD_COMPLETED"
-  | "CHILD_CREATED"
-  | "CLAIM"
-  | "FINALIZING"
-  | "FIRST_CLAIM"
-  | "LAST_SEEN"
-  | "NODE_COMPLETED"
-  | "NODE_CREATED"
-  | "NODE_ENQUEUED"
-  | "NODE_READY"
-  | "PLACEMENT"
-  | "READ_TIME"
-  | "RUN_COMPLETED"
-  | "RUN_PAUSED"
-  | "RUN_RESUMED"
-  | "START"
-  | "TASK_CREATED"
-  | "TASK_MOVED";
-
-export interface WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictMissingRecord {
-  readonly kind: "missingRecord";
-  readonly record: WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictMissingRecordRecord;
-}
-
-export type WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictMissingRecordRecord =
-  | "ATTEMPT_ROW"
-  | "CHILD_RUN"
-  | "COMPLETION_TIME"
-  | "LINKED_TASK"
-  | "LINKED_WORK"
-  | "OPEN_ATTEMPT"
-  | "TASK_TIMES";
-
-export interface WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictUnexpectedEvent {
-  readonly kind: "unexpectedEvent";
-  readonly event: WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictUnexpectedEventEvent;
-  readonly eventId: number;
-}
-
-export type WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictUnexpectedEventEvent =
-  | "NODE_ENQUEUED"
-  | "NODE_READY"
-  | "TASK_MOVED"
-  | "WORKFLOW_PAUSED"
-  | "WORKFLOW_RESUMED";
-
-export interface WorkflowRunDetailTimingComposedCoveragePartial {
+export interface RunCoveragePartialInfo {
   readonly kind: "partial";
-  readonly reasons: ReadonlyArray<WorkflowRunDetailTimingComposedCoveragePartialReasons>;
+  readonly reasons: ReadonlyArray<UnknownReason>;
 }
 
-export type WorkflowRunDetailTimingComposedCoveragePartialReasons =
-  | "ATTEMPT_NOT_CAPTURED"
-  | "CLAIMS_NOT_COUNTED"
-  | "HISTORY_PRUNED"
-  | "WORKER_LOST";
-
-export interface WorkflowRunDetailTimingComposedPauses {
-  readonly end: WorkflowRunDetailTimingComposedPausesEnd;
+export interface PauseIntervalInfo {
+  readonly end: PauseEndInfo;
   readonly startedAt: Temporal.Instant;
 }
 
-export type WorkflowRunDetailTimingComposedPausesEnd =
-  | WorkflowRunDetailTimingComposedPausesEndOpen
-  | WorkflowRunDetailTimingComposedPausesEndResumed
-  | WorkflowRunDetailTimingComposedPausesEndRunEnded;
+export type PauseEndInfo =
+  | PauseOpenInfo
+  | PauseResumedInfo
+  | PauseRunEndedInfo;
 
-export interface WorkflowRunDetailTimingComposedPausesEndOpen {
+export interface PauseOpenInfo {
   readonly kind: "open";
 }
 
-export interface WorkflowRunDetailTimingComposedPausesEndResumed {
+export interface PauseResumedInfo {
   readonly kind: "resumed";
   readonly at: Temporal.Instant;
 }
 
-export interface WorkflowRunDetailTimingComposedPausesEndRunEnded {
+export interface PauseRunEndedInfo {
   readonly kind: "runEnded";
   readonly at: Temporal.Instant;
 }
 
-export interface WorkflowRunDetailTimingUnavailable {
+export interface RunTimingUnavailableInfo {
   readonly kind: "unavailable";
   readonly asOf: Temporal.Instant;
   readonly capturedSince: Temporal.Instant;
-  readonly reason: WorkflowRunDetailTimingUnavailableReason;
+  readonly reason: UnavailableReason;
 }
-
-export type WorkflowRunDetailTimingUnavailableReason =
-  | "RUN_BEFORE_CAPTURE"
-  | "TIMING_BOUND_EXCEEDED";
 
 export interface WorkflowRunSummary {
   readonly completedAt: Temporal.Instant | null;
@@ -1876,128 +831,15 @@ export interface WorkflowRunSummary {
 }
 
 export interface WorkflowTaskDetail {
-  readonly attempts: ReadonlyArray<WorkflowTaskDetailAttempts>;
+  readonly attempts: ReadonlyArray<TaskAttemptInfo>;
   readonly isSubworkflow: boolean;
-  readonly leaf: WorkflowTaskDetailLeaf | null;
+  readonly leaf: LeafTaskInfo | null;
   readonly nodeError: string | null;
   readonly nodeId: string | null;
   readonly nodeStatus: string;
   readonly taskIndex: number;
   readonly taskName: string;
 }
-
-export interface WorkflowTaskDetailAttempts {
-  readonly attempt: number;
-  readonly errorCode: string | null;
-  readonly errorMessage: string | null;
-  readonly failedReason: string | null;
-  readonly finishedAt: Temporal.Instant | null;
-  readonly outcome: string;
-  readonly phases: WorkflowTaskDetailAttemptsPhases;
-  readonly startedAt: Temporal.Instant | null;
-  readonly willRetry: boolean;
-  readonly workerHostname: string | null;
-}
-
-export type WorkflowTaskDetailAttemptsPhases =
-  | WorkflowTaskDetailAttemptsPhasesCaptured
-  | WorkflowTaskDetailAttemptsPhasesNotCaptured;
-
-export interface WorkflowTaskDetailAttemptsPhasesCaptured {
-  readonly kind: "captured";
-  readonly claimedAt: Temporal.Instant;
-  readonly claims: WorkflowTaskDetailAttemptsPhasesCapturedClaims;
-  readonly enqueuedAt: Temporal.Instant;
-  readonly finalizing: WorkflowTaskDetailAttemptsPhasesCapturedFinalizing;
-  readonly recordedBy: WorkflowTaskDetailAttemptsPhasesCapturedRecordedBy;
-}
-
-export type WorkflowTaskDetailAttemptsPhasesCapturedClaims =
-  | WorkflowTaskDetailAttemptsPhasesCapturedClaimsCounted
-  | WorkflowTaskDetailAttemptsPhasesCapturedClaimsNotCounted;
-
-export interface WorkflowTaskDetailAttemptsPhasesCapturedClaimsCounted {
-  readonly kind: "counted";
-  readonly count: number;
-  readonly firstClaimedAt: Temporal.Instant;
-}
-
-export interface WorkflowTaskDetailAttemptsPhasesCapturedClaimsNotCounted {
-  readonly kind: "notCounted";
-}
-
-export type WorkflowTaskDetailAttemptsPhasesCapturedFinalizing =
-  | WorkflowTaskDetailAttemptsPhasesCapturedFinalizingMarked
-  | WorkflowTaskDetailAttemptsPhasesCapturedFinalizingNotMarked;
-
-export interface WorkflowTaskDetailAttemptsPhasesCapturedFinalizingMarked {
-  readonly kind: "marked";
-  readonly finalizingAt: Temporal.Instant;
-}
-
-export interface WorkflowTaskDetailAttemptsPhasesCapturedFinalizingNotMarked {
-  readonly kind: "notMarked";
-}
-
-export type WorkflowTaskDetailAttemptsPhasesCapturedRecordedBy =
-  | WorkflowTaskDetailAttemptsPhasesCapturedRecordedByCancel
-  | WorkflowTaskDetailAttemptsPhasesCapturedRecordedByRecovery
-  | WorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorker;
-
-export interface WorkflowTaskDetailAttemptsPhasesCapturedRecordedByCancel {
-  readonly kind: "cancel";
-}
-
-export interface WorkflowTaskDetailAttemptsPhasesCapturedRecordedByRecovery {
-  readonly kind: "recovery";
-  readonly lastSeenAt: Temporal.Instant;
-}
-
-export interface WorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorker {
-  readonly kind: "worker";
-  readonly placement: WorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacement;
-}
-
-export type WorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacement =
-  | WorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementNotObserved
-  | WorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementPlaced;
-
-export interface WorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementNotObserved {
-  readonly kind: "notObserved";
-}
-
-export interface WorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementPlaced {
-  readonly kind: "placed";
-  readonly placedAt: Temporal.Instant;
-}
-
-export interface WorkflowTaskDetailAttemptsPhasesNotCaptured {
-  readonly kind: "notCaptured";
-}
-
-export interface WorkflowTaskDetailLeaf {
-  readonly completedAt: Temporal.Instant | null;
-  readonly enqueuedAt: Temporal.Instant | null;
-  readonly errorCode: string | null;
-  readonly execS: number | null;
-  readonly execution: WorkflowTaskDetailLeafExecution | null;
-  readonly failedAt: Temporal.Instant | null;
-  readonly failedReason: string | null;
-  readonly goodUntil: Temporal.Instant | null;
-  readonly maxRetries: number;
-  readonly queueS: number | null;
-  readonly retryCount: number;
-  readonly startedAt: Temporal.Instant | null;
-  readonly status: string;
-  readonly taskId: string;
-  readonly traceId: string | null;
-  readonly workerHostname: string | null;
-}
-
-export type WorkflowTaskDetailLeafExecution =
-  | "ISOLATED"
-  | "SHARED_ASYNC"
-  | "SHARED_THREAD";
 
 /** Where a value is in the input: the model that the decode started from, and the path. */
 interface DecodePlace {
@@ -2314,7 +1156,14 @@ function mapOf<T>(decode: Decoder<T>): Decoder<ReadonlyMap<string, T>> {
 export function decodeBreakdown(
   value: WireJson,
 ): DecodeResult<Breakdown, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "Breakdown", path: "$" });
+  return readBreakdown(value, { model: "Breakdown", path: "$" });
+}
+
+function readBreakdown(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<Breakdown, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -2323,8 +1172,8 @@ export function decodeBreakdown(
   const results = {
     groupBy: fields.value.read("group_by", decodeString),
     groupCount: fields.value.read("group_count", decodeInteger),
-    groups: fields.value.read("groups", listOf(decodeBreakdownGroups)),
-    total: fields.value.read("total", decodeBreakdownTotal),
+    groups: fields.value.read("groups", listOf(readGroupRow)),
+    total: fields.value.read("total", readBreakdownCounts),
   };
 
   if (!allDecoded(results)) {
@@ -2347,173 +1196,17 @@ export function decodeBreakdown(
   );
 }
 
-function decodeBreakdownGroups(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<BreakdownGroups, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    cancelled: fields.value.read("cancelled", decodeInteger),
-    claimed: fields.value.read("claimed", decodeInteger),
-    completed: fields.value.read("completed", decodeInteger),
-    expired: fields.value.read("expired", decodeInteger),
-    failed: fields.value.read("failed", decodeInteger),
-    group: fields.value.read("group", decodeBreakdownGroupsGroup),
-    pending: fields.value.read("pending", decodeInteger),
-    retried: fields.value.read("retried", decodeInteger),
-    running: fields.value.read("running", decodeInteger),
-    total: fields.value.read("total", decodeInteger),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      cancelled: results.cancelled.value,
-      claimed: results.claimed.value,
-      completed: results.completed.value,
-      expired: results.expired.value,
-      failed: results.failed.value,
-      group: results.group.value,
-      pending: results.pending.value,
-      retried: results.retried.value,
-      running: results.running.value,
-      total: results.total.value,
-    }),
-  );
-}
-
-function decodeBreakdownGroupsGroup(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<BreakdownGroupsGroup, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "unclaimed":
-      return decodeBreakdownGroupsGroupUnclaimed(fields.value);
-    case "value":
-      return decodeBreakdownGroupsGroupValue(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeBreakdownGroupsGroupUnclaimed(
-  fields: FieldReader,
-): DecodeResult<BreakdownGroupsGroupUnclaimed, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "unclaimed",
-    }),
-  );
-}
-
-function decodeBreakdownGroupsGroupValue(
-  fields: FieldReader,
-): DecodeResult<BreakdownGroupsGroupValue, MonitoringDecodeError> {
-  const results = {
-    value: fields.read("value", decodeString),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "value",
-      value: results.value.value,
-    }),
-  );
-}
-
-function decodeBreakdownTotal(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<BreakdownTotal, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    cancelled: fields.value.read("cancelled", decodeInteger),
-    claimed: fields.value.read("claimed", decodeInteger),
-    completed: fields.value.read("completed", decodeInteger),
-    expired: fields.value.read("expired", decodeInteger),
-    failed: fields.value.read("failed", decodeInteger),
-    pending: fields.value.read("pending", decodeInteger),
-    retried: fields.value.read("retried", decodeInteger),
-    running: fields.value.read("running", decodeInteger),
-    total: fields.value.read("total", decodeInteger),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      cancelled: results.cancelled.value,
-      claimed: results.claimed.value,
-      completed: results.completed.value,
-      expired: results.expired.value,
-      failed: results.failed.value,
-      pending: results.pending.value,
-      retried: results.retried.value,
-      running: results.running.value,
-      total: results.total.value,
-    }),
-  );
-}
-
 export function decodeBreakdownCounts(
   value: WireJson,
 ): DecodeResult<BreakdownCounts, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "BreakdownCounts", path: "$" });
+  return readBreakdownCounts(value, { model: "BreakdownCounts", path: "$" });
+}
+
+function readBreakdownCounts(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<BreakdownCounts, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -2559,18 +1252,25 @@ export function decodeBreakdownCounts(
 export function decodeBudgetLoadInfo(
   value: WireJson,
 ): DecodeResult<BudgetLoadInfo, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "BudgetLoadInfo", path: "$" });
+  return readBudgetLoadInfo(value, { model: "BudgetLoadInfo", path: "$" });
+}
+
+function readBudgetLoadInfo(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<BudgetLoadInfo, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
   }
 
   const results = {
-    budget: fields.value.read("budget", decodeBudgetLoadInfoBudget),
+    budget: fields.value.read("budget", readExecution),
     capacity: fields.value.read("capacity", decodeInteger),
     free: fields.value.read("free", decodeInteger),
     inFlight: fields.value.read("in_flight", decodeInteger),
-    serves: fields.value.read("serves", listOf(decodeBudgetLoadInfoServes)),
+    serves: fields.value.read("serves", listOf(readExecution)),
   };
 
   if (!allDecoded(results)) {
@@ -2594,24 +1294,10 @@ export function decodeBudgetLoadInfo(
   );
 }
 
-function decodeBudgetLoadInfoBudget(
+function readExecution(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<BudgetLoadInfoBudget, MonitoringDecodeError> {
-  switch (value) {
-    case "ISOLATED":
-    case "SHARED_ASYNC":
-    case "SHARED_THREAD":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeBudgetLoadInfoServes(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<BudgetLoadInfoServes, MonitoringDecodeError> {
+): DecodeResult<Execution, MonitoringDecodeError> {
   switch (value) {
     case "ISOLATED":
     case "SHARED_ASYNC":
@@ -2625,7 +1311,14 @@ function decodeBudgetLoadInfoServes(
 export function decodeClassReportInfo(
   value: WireJson,
 ): DecodeResult<ClassReportInfo, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "ClassReportInfo", path: "$" });
+  return readClassReportInfo(value, { model: "ClassReportInfo", path: "$" });
+}
+
+function readClassReportInfo(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<ClassReportInfo, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -2634,8 +1327,8 @@ export function decodeClassReportInfo(
   const results = {
     checkedAt: fields.value.read("checked_at", decodeDateTime),
     liveWindowS: fields.value.read("live_window_s", decodeInteger),
-    streams: fields.value.read("streams", listOf(decodeClassReportInfoStreams)),
-    workers: fields.value.read("workers", listOf(decodeClassReportInfoWorkers)),
+    streams: fields.value.read("streams", listOf(readPendingStreamInfo)),
+    workers: fields.value.read("workers", listOf(readWorkerClassLoadInfo)),
   };
 
   if (!allDecoded(results)) {
@@ -2658,337 +1351,17 @@ export function decodeClassReportInfo(
   );
 }
 
-function decodeClassReportInfoStreams(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<ClassReportInfoStreams, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    coverage: fields.value.read("coverage", decodeClassReportInfoStreamsCoverage),
-    execution: fields.value.read("execution", decodeClassReportInfoStreamsExecution),
-    queueName: fields.value.read("queue_name", decodeString),
-    wait: fields.value.read("wait", decodeClassReportInfoStreamsWait),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      coverage: results.coverage.value,
-      execution: results.execution.value,
-      queueName: results.queueName.value,
-      wait: results.wait.value,
-    }),
-  );
-}
-
-function decodeClassReportInfoStreamsCoverage(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<ClassReportInfoStreamsCoverage, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "no_capacity":
-      return decodeClassReportInfoStreamsCoverageNoCapacity(fields.value);
-    case "served":
-      return decodeClassReportInfoStreamsCoverageServed(fields.value);
-    case "unserved":
-      return decodeClassReportInfoStreamsCoverageUnserved(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeClassReportInfoStreamsCoverageNoCapacity(
-  fields: FieldReader,
-): DecodeResult<ClassReportInfoStreamsCoverageNoCapacity, MonitoringDecodeError> {
-  const results = {
-    workers: fields.read("workers", decodeInteger),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "noCapacity",
-      workers: results.workers.value,
-    }),
-  );
-}
-
-function decodeClassReportInfoStreamsCoverageServed(
-  fields: FieldReader,
-): DecodeResult<ClassReportInfoStreamsCoverageServed, MonitoringDecodeError> {
-  const results = {
-    capacity: fields.read("capacity", decodeInteger),
-    workers: fields.read("workers", decodeInteger),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "served",
-      capacity: results.capacity.value,
-      workers: results.workers.value,
-    }),
-  );
-}
-
-function decodeClassReportInfoStreamsCoverageUnserved(
-  fields: FieldReader,
-): DecodeResult<ClassReportInfoStreamsCoverageUnserved, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "unserved",
-    }),
-  );
-}
-
-function decodeClassReportInfoStreamsExecution(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<ClassReportInfoStreamsExecution, MonitoringDecodeError> {
-  switch (value) {
-    case "ISOLATED":
-    case "SHARED_ASYNC":
-    case "SHARED_THREAD":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeClassReportInfoStreamsWait(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<ClassReportInfoStreamsWait, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "none_due":
-      return decodeClassReportInfoStreamsWaitNoneDue(fields.value);
-    case "waiting":
-      return decodeClassReportInfoStreamsWaitWaiting(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeClassReportInfoStreamsWaitNoneDue(
-  fields: FieldReader,
-): DecodeResult<ClassReportInfoStreamsWaitNoneDue, MonitoringDecodeError> {
-  const results = {
-    nextDueAt: fields.read("next_due_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "noneDue",
-      nextDueAt: results.nextDueAt.value,
-    }),
-  );
-}
-
-function decodeClassReportInfoStreamsWaitWaiting(
-  fields: FieldReader,
-): DecodeResult<ClassReportInfoStreamsWaitWaiting, MonitoringDecodeError> {
-  const results = {
-    oldestDueAt: fields.read("oldest_due_at", decodeDateTime),
-    waitS: fields.read("wait_s", decodeNumber),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "waiting",
-      oldestDueAt: results.oldestDueAt.value,
-      waitS: results.waitS.value,
-    }),
-  );
-}
-
-function decodeClassReportInfoWorkers(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<ClassReportInfoWorkers, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    budgets: fields.value.read("budgets", listOf(decodeClassReportInfoWorkersBudgets)),
-    snapshotAt: fields.value.read("snapshot_at", decodeDateTime),
-    workerId: fields.value.read("worker_id", decodeString),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      budgets: results.budgets.value,
-      snapshotAt: results.snapshotAt.value,
-      workerId: results.workerId.value,
-    }),
-  );
-}
-
-function decodeClassReportInfoWorkersBudgets(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<ClassReportInfoWorkersBudgets, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    budget: fields.value.read("budget", decodeClassReportInfoWorkersBudgetsBudget),
-    capacity: fields.value.read("capacity", decodeInteger),
-    free: fields.value.read("free", decodeInteger),
-    inFlight: fields.value.read("in_flight", decodeInteger),
-    serves: fields.value.read("serves", listOf(decodeClassReportInfoWorkersBudgetsServes)),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      budget: results.budget.value,
-      capacity: results.capacity.value,
-      free: results.free.value,
-      inFlight: results.inFlight.value,
-      serves: results.serves.value,
-    }),
-  );
-}
-
-function decodeClassReportInfoWorkersBudgetsBudget(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<ClassReportInfoWorkersBudgetsBudget, MonitoringDecodeError> {
-  switch (value) {
-    case "ISOLATED":
-    case "SHARED_ASYNC":
-    case "SHARED_THREAD":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeClassReportInfoWorkersBudgetsServes(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<ClassReportInfoWorkersBudgetsServes, MonitoringDecodeError> {
-  switch (value) {
-    case "ISOLATED":
-    case "SHARED_ASYNC":
-    case "SHARED_THREAD":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
 export function decodeDownSlotInfo(
   value: WireJson,
 ): DecodeResult<DownSlotInfo, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "DownSlotInfo", path: "$" });
+  return readDownSlotInfo(value, { model: "DownSlotInfo", path: "$" });
+}
+
+function readDownSlotInfo(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<DownSlotInfo, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -3026,7 +1399,14 @@ export function decodeDownSlotInfo(
 export function decodeErrorFacet(
   value: WireJson,
 ): DecodeResult<ErrorFacet, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "ErrorFacet", path: "$" });
+  return readErrorFacet(value, { model: "ErrorFacet", path: "$" });
+}
+
+function readErrorFacet(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<ErrorFacet, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -3060,7 +1440,14 @@ export function decodeErrorFacet(
 export function decodeFacetValue(
   value: WireJson,
 ): DecodeResult<FacetValue, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "FacetValue", path: "$" });
+  return readFacetValue(value, { model: "FacetValue", path: "$" });
+}
+
+function readFacetValue(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<FacetValue, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -3092,7 +1479,14 @@ export function decodeFacetValue(
 export function decodeFacets(
   value: WireJson,
 ): DecodeResult<Facets, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "Facets", path: "$" });
+  return readFacets(value, { model: "Facets", path: "$" });
+}
+
+function readFacets(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<Facets, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -3100,10 +1494,10 @@ export function decodeFacets(
 
   const results = {
     errorCategoryTotals: fields.value.read("error_category_totals", mapOf(decodeInteger)),
-    errorCodes: fields.value.read("error_codes", listOf(decodeFacetsErrorCodes)),
-    queues: fields.value.read("queues", listOf(decodeFacetsQueues)),
-    taskNames: fields.value.read("task_names", listOf(decodeFacetsTaskNames)),
-    workers: fields.value.read("workers", listOf(decodeFacetsWorkers)),
+    errorCodes: fields.value.read("error_codes", listOf(readErrorFacet)),
+    queues: fields.value.read("queues", listOf(readFacetValue)),
+    taskNames: fields.value.read("task_names", listOf(readFacetValue)),
+    workers: fields.value.read("workers", listOf(readFacetValue)),
   };
 
   if (!allDecoded(results)) {
@@ -3127,144 +1521,17 @@ export function decodeFacets(
   );
 }
 
-function decodeFacetsErrorCodes(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<FacetsErrorCodes, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    category: fields.value.read("category", decodeString),
-    count: fields.value.read("count", decodeInteger),
-    value: fields.value.read("value", decodeString),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      category: results.category.value,
-      count: results.count.value,
-      value: results.value.value,
-    }),
-  );
-}
-
-function decodeFacetsQueues(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<FacetsQueues, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    count: fields.value.read("count", decodeInteger),
-    value: fields.value.read("value", decodeString),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      count: results.count.value,
-      value: results.value.value,
-    }),
-  );
-}
-
-function decodeFacetsTaskNames(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<FacetsTaskNames, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    count: fields.value.read("count", decodeInteger),
-    value: fields.value.read("value", decodeString),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      count: results.count.value,
-      value: results.value.value,
-    }),
-  );
-}
-
-function decodeFacetsWorkers(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<FacetsWorkers, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    count: fields.value.read("count", decodeInteger),
-    value: fields.value.read("value", decodeString),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      count: results.count.value,
-      value: results.value.value,
-    }),
-  );
-}
-
 export function decodeGroupRow(
   value: WireJson,
 ): DecodeResult<GroupRow, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "GroupRow", path: "$" });
+  return readGroupRow(value, { model: "GroupRow", path: "$" });
+}
+
+function readGroupRow(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<GroupRow, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -3276,7 +1543,7 @@ export function decodeGroupRow(
     completed: fields.value.read("completed", decodeInteger),
     expired: fields.value.read("expired", decodeInteger),
     failed: fields.value.read("failed", decodeInteger),
-    group: fields.value.read("group", decodeGroupRowGroup),
+    group: fields.value.read("group", readBreakdownGroup),
     pending: fields.value.read("pending", decodeInteger),
     retried: fields.value.read("retried", decodeInteger),
     running: fields.value.read("running", decodeInteger),
@@ -3309,10 +1576,10 @@ export function decodeGroupRow(
   );
 }
 
-function decodeGroupRowGroup(
+function readBreakdownGroup(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<GroupRowGroup, MonitoringDecodeError> {
+): DecodeResult<BreakdownGroup, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -3327,17 +1594,17 @@ function decodeGroupRowGroup(
 
   switch (tag.value) {
     case "unclaimed":
-      return decodeGroupRowGroupUnclaimed(fields.value);
+      return readBreakdownUnclaimedGroup(fields.value);
     case "value":
-      return decodeGroupRowGroupValue(fields.value);
+      return readBreakdownValueGroup(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeGroupRowGroupUnclaimed(
+function readBreakdownUnclaimedGroup(
   fields: FieldReader,
-): DecodeResult<GroupRowGroupUnclaimed, MonitoringDecodeError> {
+): DecodeResult<BreakdownUnclaimedGroup, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -3351,9 +1618,9 @@ function decodeGroupRowGroupUnclaimed(
   );
 }
 
-function decodeGroupRowGroupValue(
+function readBreakdownValueGroup(
   fields: FieldReader,
-): DecodeResult<GroupRowGroupValue, MonitoringDecodeError> {
+): DecodeResult<BreakdownValueGroup, MonitoringDecodeError> {
   const results = {
     value: fields.read("value", decodeString),
   };
@@ -3379,7 +1646,14 @@ function decodeGroupRowGroupValue(
 export function decodeLeafTaskInfo(
   value: WireJson,
 ): DecodeResult<LeafTaskInfo, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "LeafTaskInfo", path: "$" });
+  return readLeafTaskInfo(value, { model: "LeafTaskInfo", path: "$" });
+}
+
+function readLeafTaskInfo(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<LeafTaskInfo, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -3390,7 +1664,7 @@ export function decodeLeafTaskInfo(
     enqueuedAt: fields.value.read("enqueued_at", nullableOf(decodeDateTime)),
     errorCode: fields.value.read("error_code", nullableOf(decodeString)),
     execS: fields.value.read("exec_s", nullableOf(decodeNumber)),
-    execution: fields.value.read("execution", nullableOf(decodeLeafTaskInfoExecution)),
+    execution: fields.value.read("execution", nullableOf(readExecution)),
     failedAt: fields.value.read("failed_at", nullableOf(decodeDateTime)),
     failedReason: fields.value.read("failed_reason", nullableOf(decodeString)),
     goodUntil: fields.value.read("good_until", nullableOf(decodeDateTime)),
@@ -3436,24 +1710,17 @@ export function decodeLeafTaskInfo(
   );
 }
 
-function decodeLeafTaskInfoExecution(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<LeafTaskInfoExecution, MonitoringDecodeError> {
-  switch (value) {
-    case "ISOLATED":
-    case "SHARED_ASYNC":
-    case "SHARED_THREAD":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
 export function decodeLivenessReport(
   value: WireJson,
 ): DecodeResult<LivenessReport, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "LivenessReport", path: "$" });
+  return readLivenessReport(value, { model: "LivenessReport", path: "$" });
+}
+
+function readLivenessReport(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<LivenessReport, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -3462,7 +1729,7 @@ export function decodeLivenessReport(
   const results = {
     dbLatencyMs: fields.value.read("db_latency_ms", nullableOf(decodeNumber)),
     dbReachable: fields.value.read("db_reachable", decodeBoolean),
-    workers: fields.value.read("workers", listOf(decodeLivenessReportWorkers)),
+    workers: fields.value.read("workers", listOf(readWorkerPingInfo)),
   };
 
   if (!allDecoded(results)) {
@@ -3484,10 +1751,16 @@ export function decodeLivenessReport(
   );
 }
 
-function decodeLivenessReportWorkers(
+export function decodePendingStreamInfo(
+  value: WireJson,
+): DecodeResult<PendingStreamInfo, MonitoringDecodeError> {
+  return readPendingStreamInfo(value, { model: "PendingStreamInfo", path: "$" });
+}
+
+function readPendingStreamInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<LivenessReportWorkers, MonitoringDecodeError> {
+): DecodeResult<PendingStreamInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -3495,46 +1768,10 @@ function decodeLivenessReportWorkers(
   }
 
   const results = {
-    hostname: fields.value.read("hostname", decodeString),
-    pid: fields.value.read("pid", decodeInteger),
-    roundTripMs: fields.value.read("round_trip_ms", decodeNumber),
-    workerId: fields.value.read("worker_id", decodeString),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      hostname: results.hostname.value,
-      pid: results.pid.value,
-      roundTripMs: results.roundTripMs.value,
-      workerId: results.workerId.value,
-    }),
-  );
-}
-
-export function decodePendingStreamInfo(
-  value: WireJson,
-): DecodeResult<PendingStreamInfo, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "PendingStreamInfo", path: "$" });
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    coverage: fields.value.read("coverage", decodePendingStreamInfoCoverage),
-    execution: fields.value.read("execution", decodePendingStreamInfoExecution),
+    coverage: fields.value.read("coverage", readStreamCoverageInfo),
+    execution: fields.value.read("execution", readExecution),
     queueName: fields.value.read("queue_name", decodeString),
-    wait: fields.value.read("wait", decodePendingStreamInfoWait),
+    wait: fields.value.read("wait", readStreamWaitInfo),
   };
 
   if (!allDecoded(results)) {
@@ -3557,10 +1794,10 @@ export function decodePendingStreamInfo(
   );
 }
 
-function decodePendingStreamInfoCoverage(
+function readStreamCoverageInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<PendingStreamInfoCoverage, MonitoringDecodeError> {
+): DecodeResult<StreamCoverageInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -3575,19 +1812,19 @@ function decodePendingStreamInfoCoverage(
 
   switch (tag.value) {
     case "no_capacity":
-      return decodePendingStreamInfoCoverageNoCapacity(fields.value);
+      return readStreamNoCapacityInfo(fields.value);
     case "served":
-      return decodePendingStreamInfoCoverageServed(fields.value);
+      return readStreamServedInfo(fields.value);
     case "unserved":
-      return decodePendingStreamInfoCoverageUnserved(fields.value);
+      return readStreamUnservedInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodePendingStreamInfoCoverageNoCapacity(
+function readStreamNoCapacityInfo(
   fields: FieldReader,
-): DecodeResult<PendingStreamInfoCoverageNoCapacity, MonitoringDecodeError> {
+): DecodeResult<StreamNoCapacityInfo, MonitoringDecodeError> {
   const results = {
     workers: fields.read("workers", decodeInteger),
   };
@@ -3610,9 +1847,9 @@ function decodePendingStreamInfoCoverageNoCapacity(
   );
 }
 
-function decodePendingStreamInfoCoverageServed(
+function readStreamServedInfo(
   fields: FieldReader,
-): DecodeResult<PendingStreamInfoCoverageServed, MonitoringDecodeError> {
+): DecodeResult<StreamServedInfo, MonitoringDecodeError> {
   const results = {
     capacity: fields.read("capacity", decodeInteger),
     workers: fields.read("workers", decodeInteger),
@@ -3637,9 +1874,9 @@ function decodePendingStreamInfoCoverageServed(
   );
 }
 
-function decodePendingStreamInfoCoverageUnserved(
+function readStreamUnservedInfo(
   fields: FieldReader,
-): DecodeResult<PendingStreamInfoCoverageUnserved, MonitoringDecodeError> {
+): DecodeResult<StreamUnservedInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -3653,24 +1890,10 @@ function decodePendingStreamInfoCoverageUnserved(
   );
 }
 
-function decodePendingStreamInfoExecution(
+function readStreamWaitInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<PendingStreamInfoExecution, MonitoringDecodeError> {
-  switch (value) {
-    case "ISOLATED":
-    case "SHARED_ASYNC":
-    case "SHARED_THREAD":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodePendingStreamInfoWait(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<PendingStreamInfoWait, MonitoringDecodeError> {
+): DecodeResult<StreamWaitInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -3685,17 +1908,17 @@ function decodePendingStreamInfoWait(
 
   switch (tag.value) {
     case "none_due":
-      return decodePendingStreamInfoWaitNoneDue(fields.value);
+      return readStreamNoneDueInfo(fields.value);
     case "waiting":
-      return decodePendingStreamInfoWaitWaiting(fields.value);
+      return readStreamWaitingInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodePendingStreamInfoWaitNoneDue(
+function readStreamNoneDueInfo(
   fields: FieldReader,
-): DecodeResult<PendingStreamInfoWaitNoneDue, MonitoringDecodeError> {
+): DecodeResult<StreamNoneDueInfo, MonitoringDecodeError> {
   const results = {
     nextDueAt: fields.read("next_due_at", decodeDateTime),
   };
@@ -3718,9 +1941,9 @@ function decodePendingStreamInfoWaitNoneDue(
   );
 }
 
-function decodePendingStreamInfoWaitWaiting(
+function readStreamWaitingInfo(
   fields: FieldReader,
-): DecodeResult<PendingStreamInfoWaitWaiting, MonitoringDecodeError> {
+): DecodeResult<StreamWaitingInfo, MonitoringDecodeError> {
   const results = {
     oldestDueAt: fields.read("oldest_due_at", decodeDateTime),
     waitS: fields.read("wait_s", decodeNumber),
@@ -3748,7 +1971,14 @@ function decodePendingStreamInfoWaitWaiting(
 export function decodeScheduleStateInfo(
   value: WireJson,
 ): DecodeResult<ScheduleStateInfo, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "ScheduleStateInfo", path: "$" });
+  return readScheduleStateInfo(value, { model: "ScheduleStateInfo", path: "$" });
+}
+
+function readScheduleStateInfo(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<ScheduleStateInfo, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -3788,7 +2018,14 @@ export function decodeScheduleStateInfo(
 export function decodeStatusCount(
   value: WireJson,
 ): DecodeResult<StatusCount, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "StatusCount", path: "$" });
+  return readStatusCount(value, { model: "StatusCount", path: "$" });
+}
+
+function readStatusCount(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<StatusCount, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -3820,7 +2057,14 @@ export function decodeStatusCount(
 export function decodeTaskAttemptInfo(
   value: WireJson,
 ): DecodeResult<TaskAttemptInfo, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "TaskAttemptInfo", path: "$" });
+  return readTaskAttemptInfo(value, { model: "TaskAttemptInfo", path: "$" });
+}
+
+function readTaskAttemptInfo(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<TaskAttemptInfo, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -3833,7 +2077,7 @@ export function decodeTaskAttemptInfo(
     failedReason: fields.value.read("failed_reason", nullableOf(decodeString)),
     finishedAt: fields.value.read("finished_at", nullableOf(decodeDateTime)),
     outcome: fields.value.read("outcome", decodeString),
-    phases: fields.value.read("phases", decodeTaskAttemptInfoPhases),
+    phases: fields.value.read("phases", readAttemptPhasesInfo),
     startedAt: fields.value.read("started_at", nullableOf(decodeDateTime)),
     willRetry: fields.value.read("will_retry", decodeBoolean),
     workerHostname: fields.value.read("worker_hostname", nullableOf(decodeString)),
@@ -3865,10 +2109,10 @@ export function decodeTaskAttemptInfo(
   );
 }
 
-function decodeTaskAttemptInfoPhases(
+function readAttemptPhasesInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<TaskAttemptInfoPhases, MonitoringDecodeError> {
+): DecodeResult<AttemptPhasesInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -3883,23 +2127,23 @@ function decodeTaskAttemptInfoPhases(
 
   switch (tag.value) {
     case "captured":
-      return decodeTaskAttemptInfoPhasesCaptured(fields.value);
+      return readPhasesCapturedInfo(fields.value);
     case "not_captured":
-      return decodeTaskAttemptInfoPhasesNotCaptured(fields.value);
+      return readPhasesNotCapturedInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeTaskAttemptInfoPhasesCaptured(
+function readPhasesCapturedInfo(
   fields: FieldReader,
-): DecodeResult<TaskAttemptInfoPhasesCaptured, MonitoringDecodeError> {
+): DecodeResult<PhasesCapturedInfo, MonitoringDecodeError> {
   const results = {
     claimedAt: fields.read("claimed_at", decodeDateTime),
-    claims: fields.read("claims", decodeTaskAttemptInfoPhasesCapturedClaims),
+    claims: fields.read("claims", readAttemptClaimsInfo),
     enqueuedAt: fields.read("enqueued_at", decodeDateTime),
-    finalizing: fields.read("finalizing", decodeTaskAttemptInfoPhasesCapturedFinalizing),
-    recordedBy: fields.read("recorded_by", decodeTaskAttemptInfoPhasesCapturedRecordedBy),
+    finalizing: fields.read("finalizing", readAttemptFinalizingInfo),
+    recordedBy: fields.read("recorded_by", readAttemptRecordedByInfo),
   };
 
   if (!allDecoded(results)) {
@@ -3924,10 +2168,10 @@ function decodeTaskAttemptInfoPhasesCaptured(
   );
 }
 
-function decodeTaskAttemptInfoPhasesCapturedClaims(
+function readAttemptClaimsInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<TaskAttemptInfoPhasesCapturedClaims, MonitoringDecodeError> {
+): DecodeResult<AttemptClaimsInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -3942,17 +2186,17 @@ function decodeTaskAttemptInfoPhasesCapturedClaims(
 
   switch (tag.value) {
     case "counted":
-      return decodeTaskAttemptInfoPhasesCapturedClaimsCounted(fields.value);
+      return readClaimsCountedInfo(fields.value);
     case "not_counted":
-      return decodeTaskAttemptInfoPhasesCapturedClaimsNotCounted(fields.value);
+      return readClaimsNotCountedInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeTaskAttemptInfoPhasesCapturedClaimsCounted(
+function readClaimsCountedInfo(
   fields: FieldReader,
-): DecodeResult<TaskAttemptInfoPhasesCapturedClaimsCounted, MonitoringDecodeError> {
+): DecodeResult<ClaimsCountedInfo, MonitoringDecodeError> {
   const results = {
     count: fields.read("count", decodeInteger),
     firstClaimedAt: fields.read("first_claimed_at", decodeDateTime),
@@ -3977,9 +2221,9 @@ function decodeTaskAttemptInfoPhasesCapturedClaimsCounted(
   );
 }
 
-function decodeTaskAttemptInfoPhasesCapturedClaimsNotCounted(
+function readClaimsNotCountedInfo(
   fields: FieldReader,
-): DecodeResult<TaskAttemptInfoPhasesCapturedClaimsNotCounted, MonitoringDecodeError> {
+): DecodeResult<ClaimsNotCountedInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -3993,10 +2237,10 @@ function decodeTaskAttemptInfoPhasesCapturedClaimsNotCounted(
   );
 }
 
-function decodeTaskAttemptInfoPhasesCapturedFinalizing(
+function readAttemptFinalizingInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<TaskAttemptInfoPhasesCapturedFinalizing, MonitoringDecodeError> {
+): DecodeResult<AttemptFinalizingInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -4011,17 +2255,17 @@ function decodeTaskAttemptInfoPhasesCapturedFinalizing(
 
   switch (tag.value) {
     case "marked":
-      return decodeTaskAttemptInfoPhasesCapturedFinalizingMarked(fields.value);
+      return readFinalizingMarkedInfo(fields.value);
     case "not_marked":
-      return decodeTaskAttemptInfoPhasesCapturedFinalizingNotMarked(fields.value);
+      return readFinalizingNotMarkedInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeTaskAttemptInfoPhasesCapturedFinalizingMarked(
+function readFinalizingMarkedInfo(
   fields: FieldReader,
-): DecodeResult<TaskAttemptInfoPhasesCapturedFinalizingMarked, MonitoringDecodeError> {
+): DecodeResult<FinalizingMarkedInfo, MonitoringDecodeError> {
   const results = {
     finalizingAt: fields.read("finalizing_at", decodeDateTime),
   };
@@ -4044,9 +2288,9 @@ function decodeTaskAttemptInfoPhasesCapturedFinalizingMarked(
   );
 }
 
-function decodeTaskAttemptInfoPhasesCapturedFinalizingNotMarked(
+function readFinalizingNotMarkedInfo(
   fields: FieldReader,
-): DecodeResult<TaskAttemptInfoPhasesCapturedFinalizingNotMarked, MonitoringDecodeError> {
+): DecodeResult<FinalizingNotMarkedInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -4060,10 +2304,10 @@ function decodeTaskAttemptInfoPhasesCapturedFinalizingNotMarked(
   );
 }
 
-function decodeTaskAttemptInfoPhasesCapturedRecordedBy(
+function readAttemptRecordedByInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<TaskAttemptInfoPhasesCapturedRecordedBy, MonitoringDecodeError> {
+): DecodeResult<AttemptRecordedByInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -4078,19 +2322,19 @@ function decodeTaskAttemptInfoPhasesCapturedRecordedBy(
 
   switch (tag.value) {
     case "cancel":
-      return decodeTaskAttemptInfoPhasesCapturedRecordedByCancel(fields.value);
+      return readRecordedByCancelInfo(fields.value);
     case "recovery":
-      return decodeTaskAttemptInfoPhasesCapturedRecordedByRecovery(fields.value);
+      return readRecordedByRecoveryInfo(fields.value);
     case "worker":
-      return decodeTaskAttemptInfoPhasesCapturedRecordedByWorker(fields.value);
+      return readRecordedByWorkerInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeTaskAttemptInfoPhasesCapturedRecordedByCancel(
+function readRecordedByCancelInfo(
   fields: FieldReader,
-): DecodeResult<TaskAttemptInfoPhasesCapturedRecordedByCancel, MonitoringDecodeError> {
+): DecodeResult<RecordedByCancelInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -4104,9 +2348,9 @@ function decodeTaskAttemptInfoPhasesCapturedRecordedByCancel(
   );
 }
 
-function decodeTaskAttemptInfoPhasesCapturedRecordedByRecovery(
+function readRecordedByRecoveryInfo(
   fields: FieldReader,
-): DecodeResult<TaskAttemptInfoPhasesCapturedRecordedByRecovery, MonitoringDecodeError> {
+): DecodeResult<RecordedByRecoveryInfo, MonitoringDecodeError> {
   const results = {
     lastSeenAt: fields.read("last_seen_at", decodeDateTime),
   };
@@ -4129,11 +2373,11 @@ function decodeTaskAttemptInfoPhasesCapturedRecordedByRecovery(
   );
 }
 
-function decodeTaskAttemptInfoPhasesCapturedRecordedByWorker(
+function readRecordedByWorkerInfo(
   fields: FieldReader,
-): DecodeResult<TaskAttemptInfoPhasesCapturedRecordedByWorker, MonitoringDecodeError> {
+): DecodeResult<RecordedByWorkerInfo, MonitoringDecodeError> {
   const results = {
-    placement: fields.read("placement", decodeTaskAttemptInfoPhasesCapturedRecordedByWorkerPlacement),
+    placement: fields.read("placement", readAttemptPlacementInfo),
   };
 
   if (!allDecoded(results)) {
@@ -4154,10 +2398,10 @@ function decodeTaskAttemptInfoPhasesCapturedRecordedByWorker(
   );
 }
 
-function decodeTaskAttemptInfoPhasesCapturedRecordedByWorkerPlacement(
+function readAttemptPlacementInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<TaskAttemptInfoPhasesCapturedRecordedByWorkerPlacement, MonitoringDecodeError> {
+): DecodeResult<AttemptPlacementInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -4172,17 +2416,17 @@ function decodeTaskAttemptInfoPhasesCapturedRecordedByWorkerPlacement(
 
   switch (tag.value) {
     case "not_observed":
-      return decodeTaskAttemptInfoPhasesCapturedRecordedByWorkerPlacementNotObserved(fields.value);
+      return readPlacementNotObservedInfo(fields.value);
     case "placed":
-      return decodeTaskAttemptInfoPhasesCapturedRecordedByWorkerPlacementPlaced(fields.value);
+      return readPlacementPlacedInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeTaskAttemptInfoPhasesCapturedRecordedByWorkerPlacementNotObserved(
+function readPlacementNotObservedInfo(
   fields: FieldReader,
-): DecodeResult<TaskAttemptInfoPhasesCapturedRecordedByWorkerPlacementNotObserved, MonitoringDecodeError> {
+): DecodeResult<PlacementNotObservedInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -4196,9 +2440,9 @@ function decodeTaskAttemptInfoPhasesCapturedRecordedByWorkerPlacementNotObserved
   );
 }
 
-function decodeTaskAttemptInfoPhasesCapturedRecordedByWorkerPlacementPlaced(
+function readPlacementPlacedInfo(
   fields: FieldReader,
-): DecodeResult<TaskAttemptInfoPhasesCapturedRecordedByWorkerPlacementPlaced, MonitoringDecodeError> {
+): DecodeResult<PlacementPlacedInfo, MonitoringDecodeError> {
   const results = {
     placedAt: fields.read("placed_at", decodeDateTime),
   };
@@ -4221,9 +2465,9 @@ function decodeTaskAttemptInfoPhasesCapturedRecordedByWorkerPlacementPlaced(
   );
 }
 
-function decodeTaskAttemptInfoPhasesNotCaptured(
+function readPhasesNotCapturedInfo(
   fields: FieldReader,
-): DecodeResult<TaskAttemptInfoPhasesNotCaptured, MonitoringDecodeError> {
+): DecodeResult<PhasesNotCapturedInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -4240,17 +2484,24 @@ function decodeTaskAttemptInfoPhasesNotCaptured(
 export function decodeTaskDetail(
   value: WireJson,
 ): DecodeResult<TaskDetail, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "TaskDetail", path: "$" });
+  return readTaskDetail(value, { model: "TaskDetail", path: "$" });
+}
+
+function readTaskDetail(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<TaskDetail, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
   }
 
   const results = {
-    attempts: fields.value.read("attempts", listOf(decodeTaskDetailAttempts)),
+    attempts: fields.value.read("attempts", listOf(readTaskAttemptInfo)),
     errorCategory: fields.value.read("error_category", nullableOf(decodeString)),
     isWorkflowTask: fields.value.read("is_workflow_task", decodeBoolean),
-    leaf: fields.value.read("leaf", decodeTaskDetailLeaf),
+    leaf: fields.value.read("leaf", readLeafTaskInfo),
     priority: fields.value.read("priority", decodeInteger),
     queueName: fields.value.read("queue_name", decodeString),
     taskName: fields.value.read("task_name", decodeString),
@@ -4283,513 +2534,24 @@ export function decodeTaskDetail(
   );
 }
 
-function decodeTaskDetailAttempts(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<TaskDetailAttempts, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    attempt: fields.value.read("attempt", decodeInteger),
-    errorCode: fields.value.read("error_code", nullableOf(decodeString)),
-    errorMessage: fields.value.read("error_message", nullableOf(decodeString)),
-    failedReason: fields.value.read("failed_reason", nullableOf(decodeString)),
-    finishedAt: fields.value.read("finished_at", nullableOf(decodeDateTime)),
-    outcome: fields.value.read("outcome", decodeString),
-    phases: fields.value.read("phases", decodeTaskDetailAttemptsPhases),
-    startedAt: fields.value.read("started_at", nullableOf(decodeDateTime)),
-    willRetry: fields.value.read("will_retry", decodeBoolean),
-    workerHostname: fields.value.read("worker_hostname", nullableOf(decodeString)),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      attempt: results.attempt.value,
-      errorCode: results.errorCode.value,
-      errorMessage: results.errorMessage.value,
-      failedReason: results.failedReason.value,
-      finishedAt: results.finishedAt.value,
-      outcome: results.outcome.value,
-      phases: results.phases.value,
-      startedAt: results.startedAt.value,
-      willRetry: results.willRetry.value,
-      workerHostname: results.workerHostname.value,
-    }),
-  );
-}
-
-function decodeTaskDetailAttemptsPhases(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<TaskDetailAttemptsPhases, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "captured":
-      return decodeTaskDetailAttemptsPhasesCaptured(fields.value);
-    case "not_captured":
-      return decodeTaskDetailAttemptsPhasesNotCaptured(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeTaskDetailAttemptsPhasesCaptured(
-  fields: FieldReader,
-): DecodeResult<TaskDetailAttemptsPhasesCaptured, MonitoringDecodeError> {
-  const results = {
-    claimedAt: fields.read("claimed_at", decodeDateTime),
-    claims: fields.read("claims", decodeTaskDetailAttemptsPhasesCapturedClaims),
-    enqueuedAt: fields.read("enqueued_at", decodeDateTime),
-    finalizing: fields.read("finalizing", decodeTaskDetailAttemptsPhasesCapturedFinalizing),
-    recordedBy: fields.read("recorded_by", decodeTaskDetailAttemptsPhasesCapturedRecordedBy),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "captured",
-      claimedAt: results.claimedAt.value,
-      claims: results.claims.value,
-      enqueuedAt: results.enqueuedAt.value,
-      finalizing: results.finalizing.value,
-      recordedBy: results.recordedBy.value,
-    }),
-  );
-}
-
-function decodeTaskDetailAttemptsPhasesCapturedClaims(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<TaskDetailAttemptsPhasesCapturedClaims, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "counted":
-      return decodeTaskDetailAttemptsPhasesCapturedClaimsCounted(fields.value);
-    case "not_counted":
-      return decodeTaskDetailAttemptsPhasesCapturedClaimsNotCounted(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeTaskDetailAttemptsPhasesCapturedClaimsCounted(
-  fields: FieldReader,
-): DecodeResult<TaskDetailAttemptsPhasesCapturedClaimsCounted, MonitoringDecodeError> {
-  const results = {
-    count: fields.read("count", decodeInteger),
-    firstClaimedAt: fields.read("first_claimed_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "counted",
-      count: results.count.value,
-      firstClaimedAt: results.firstClaimedAt.value,
-    }),
-  );
-}
-
-function decodeTaskDetailAttemptsPhasesCapturedClaimsNotCounted(
-  fields: FieldReader,
-): DecodeResult<TaskDetailAttemptsPhasesCapturedClaimsNotCounted, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notCounted",
-    }),
-  );
-}
-
-function decodeTaskDetailAttemptsPhasesCapturedFinalizing(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<TaskDetailAttemptsPhasesCapturedFinalizing, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "marked":
-      return decodeTaskDetailAttemptsPhasesCapturedFinalizingMarked(fields.value);
-    case "not_marked":
-      return decodeTaskDetailAttemptsPhasesCapturedFinalizingNotMarked(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeTaskDetailAttemptsPhasesCapturedFinalizingMarked(
-  fields: FieldReader,
-): DecodeResult<TaskDetailAttemptsPhasesCapturedFinalizingMarked, MonitoringDecodeError> {
-  const results = {
-    finalizingAt: fields.read("finalizing_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "marked",
-      finalizingAt: results.finalizingAt.value,
-    }),
-  );
-}
-
-function decodeTaskDetailAttemptsPhasesCapturedFinalizingNotMarked(
-  fields: FieldReader,
-): DecodeResult<TaskDetailAttemptsPhasesCapturedFinalizingNotMarked, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notMarked",
-    }),
-  );
-}
-
-function decodeTaskDetailAttemptsPhasesCapturedRecordedBy(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<TaskDetailAttemptsPhasesCapturedRecordedBy, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "cancel":
-      return decodeTaskDetailAttemptsPhasesCapturedRecordedByCancel(fields.value);
-    case "recovery":
-      return decodeTaskDetailAttemptsPhasesCapturedRecordedByRecovery(fields.value);
-    case "worker":
-      return decodeTaskDetailAttemptsPhasesCapturedRecordedByWorker(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeTaskDetailAttemptsPhasesCapturedRecordedByCancel(
-  fields: FieldReader,
-): DecodeResult<TaskDetailAttemptsPhasesCapturedRecordedByCancel, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "cancel",
-    }),
-  );
-}
-
-function decodeTaskDetailAttemptsPhasesCapturedRecordedByRecovery(
-  fields: FieldReader,
-): DecodeResult<TaskDetailAttemptsPhasesCapturedRecordedByRecovery, MonitoringDecodeError> {
-  const results = {
-    lastSeenAt: fields.read("last_seen_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "recovery",
-      lastSeenAt: results.lastSeenAt.value,
-    }),
-  );
-}
-
-function decodeTaskDetailAttemptsPhasesCapturedRecordedByWorker(
-  fields: FieldReader,
-): DecodeResult<TaskDetailAttemptsPhasesCapturedRecordedByWorker, MonitoringDecodeError> {
-  const results = {
-    placement: fields.read("placement", decodeTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacement),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "worker",
-      placement: results.placement.value,
-    }),
-  );
-}
-
-function decodeTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacement(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<TaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacement, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "not_observed":
-      return decodeTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementNotObserved(fields.value);
-    case "placed":
-      return decodeTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementPlaced(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementNotObserved(
-  fields: FieldReader,
-): DecodeResult<TaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementNotObserved, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notObserved",
-    }),
-  );
-}
-
-function decodeTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementPlaced(
-  fields: FieldReader,
-): DecodeResult<TaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementPlaced, MonitoringDecodeError> {
-  const results = {
-    placedAt: fields.read("placed_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "placed",
-      placedAt: results.placedAt.value,
-    }),
-  );
-}
-
-function decodeTaskDetailAttemptsPhasesNotCaptured(
-  fields: FieldReader,
-): DecodeResult<TaskDetailAttemptsPhasesNotCaptured, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notCaptured",
-    }),
-  );
-}
-
-function decodeTaskDetailLeaf(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<TaskDetailLeaf, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    completedAt: fields.value.read("completed_at", nullableOf(decodeDateTime)),
-    enqueuedAt: fields.value.read("enqueued_at", nullableOf(decodeDateTime)),
-    errorCode: fields.value.read("error_code", nullableOf(decodeString)),
-    execS: fields.value.read("exec_s", nullableOf(decodeNumber)),
-    execution: fields.value.read("execution", nullableOf(decodeTaskDetailLeafExecution)),
-    failedAt: fields.value.read("failed_at", nullableOf(decodeDateTime)),
-    failedReason: fields.value.read("failed_reason", nullableOf(decodeString)),
-    goodUntil: fields.value.read("good_until", nullableOf(decodeDateTime)),
-    maxRetries: fields.value.read("max_retries", decodeInteger),
-    queueS: fields.value.read("queue_s", nullableOf(decodeNumber)),
-    retryCount: fields.value.read("retry_count", decodeInteger),
-    startedAt: fields.value.read("started_at", nullableOf(decodeDateTime)),
-    status: fields.value.read("status", decodeString),
-    taskId: fields.value.read("task_id", decodeUuid),
-    traceId: fields.value.read("trace_id", nullableOf(decodeString)),
-    workerHostname: fields.value.read("worker_hostname", nullableOf(decodeString)),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      completedAt: results.completedAt.value,
-      enqueuedAt: results.enqueuedAt.value,
-      errorCode: results.errorCode.value,
-      execS: results.execS.value,
-      execution: results.execution.value,
-      failedAt: results.failedAt.value,
-      failedReason: results.failedReason.value,
-      goodUntil: results.goodUntil.value,
-      maxRetries: results.maxRetries.value,
-      queueS: results.queueS.value,
-      retryCount: results.retryCount.value,
-      startedAt: results.startedAt.value,
-      status: results.status.value,
-      taskId: results.taskId.value,
-      traceId: results.traceId.value,
-      workerHostname: results.workerHostname.value,
-    }),
-  );
-}
-
-function decodeTaskDetailLeafExecution(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<TaskDetailLeafExecution, MonitoringDecodeError> {
-  switch (value) {
-    case "ISOLATED":
-    case "SHARED_ASYNC":
-    case "SHARED_THREAD":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
 export function decodeTaskListPage(
   value: WireJson,
 ): DecodeResult<TaskListPage, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "TaskListPage", path: "$" });
+  return readTaskListPage(value, { model: "TaskListPage", path: "$" });
+}
+
+function readTaskListPage(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<TaskListPage, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
   }
 
   const results = {
-    rows: fields.value.read("rows", listOf(decodeTaskListPageRows)),
+    rows: fields.value.read("rows", listOf(readTaskSummary)),
     total: fields.value.read("total", decodeInteger),
   };
 
@@ -4811,75 +2573,17 @@ export function decodeTaskListPage(
   );
 }
 
-function decodeTaskListPageRows(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<TaskListPageRows, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    completedAt: fields.value.read("completed_at", nullableOf(decodeDateTime)),
-    enqueuedAt: fields.value.read("enqueued_at", nullableOf(decodeDateTime)),
-    errorCategory: fields.value.read("error_category", nullableOf(decodeString)),
-    errorCode: fields.value.read("error_code", nullableOf(decodeString)),
-    execS: fields.value.read("exec_s", nullableOf(decodeNumber)),
-    failedAt: fields.value.read("failed_at", nullableOf(decodeDateTime)),
-    id: fields.value.read("id", decodeUuid),
-    isWorkflowTask: fields.value.read("is_workflow_task", decodeBoolean),
-    maxRetries: fields.value.read("max_retries", decodeInteger),
-    priority: fields.value.read("priority", decodeInteger),
-    queueName: fields.value.read("queue_name", decodeString),
-    queueS: fields.value.read("queue_s", nullableOf(decodeNumber)),
-    retryCount: fields.value.read("retry_count", decodeInteger),
-    startedAt: fields.value.read("started_at", nullableOf(decodeDateTime)),
-    status: fields.value.read("status", decodeString),
-    taskName: fields.value.read("task_name", decodeString),
-    workerHostname: fields.value.read("worker_hostname", nullableOf(decodeString)),
-    workerId: fields.value.read("worker_id", nullableOf(decodeString)),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      completedAt: results.completedAt.value,
-      enqueuedAt: results.enqueuedAt.value,
-      errorCategory: results.errorCategory.value,
-      errorCode: results.errorCode.value,
-      execS: results.execS.value,
-      failedAt: results.failedAt.value,
-      id: results.id.value,
-      isWorkflowTask: results.isWorkflowTask.value,
-      maxRetries: results.maxRetries.value,
-      priority: results.priority.value,
-      queueName: results.queueName.value,
-      queueS: results.queueS.value,
-      retryCount: results.retryCount.value,
-      startedAt: results.startedAt.value,
-      status: results.status.value,
-      taskName: results.taskName.value,
-      workerHostname: results.workerHostname.value,
-      workerId: results.workerId.value,
-    }),
-  );
-}
-
 export function decodeTaskSummary(
   value: WireJson,
 ): DecodeResult<TaskSummary, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "TaskSummary", path: "$" });
+  return readTaskSummary(value, { model: "TaskSummary", path: "$" });
+}
+
+function readTaskSummary(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<TaskSummary, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -4943,14 +2647,21 @@ export function decodeTaskSummary(
 export function decodeWorkerClassLoadInfo(
   value: WireJson,
 ): DecodeResult<WorkerClassLoadInfo, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "WorkerClassLoadInfo", path: "$" });
+  return readWorkerClassLoadInfo(value, { model: "WorkerClassLoadInfo", path: "$" });
+}
+
+function readWorkerClassLoadInfo(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<WorkerClassLoadInfo, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
   }
 
   const results = {
-    budgets: fields.value.read("budgets", listOf(decodeWorkerClassLoadInfoBudgets)),
+    budgets: fields.value.read("budgets", listOf(readBudgetLoadInfo)),
     snapshotAt: fields.value.read("snapshot_at", decodeDateTime),
     workerId: fields.value.read("worker_id", decodeString),
   };
@@ -4974,77 +2685,17 @@ export function decodeWorkerClassLoadInfo(
   );
 }
 
-function decodeWorkerClassLoadInfoBudgets(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkerClassLoadInfoBudgets, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    budget: fields.value.read("budget", decodeWorkerClassLoadInfoBudgetsBudget),
-    capacity: fields.value.read("capacity", decodeInteger),
-    free: fields.value.read("free", decodeInteger),
-    inFlight: fields.value.read("in_flight", decodeInteger),
-    serves: fields.value.read("serves", listOf(decodeWorkerClassLoadInfoBudgetsServes)),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      budget: results.budget.value,
-      capacity: results.capacity.value,
-      free: results.free.value,
-      inFlight: results.inFlight.value,
-      serves: results.serves.value,
-    }),
-  );
-}
-
-function decodeWorkerClassLoadInfoBudgetsBudget(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkerClassLoadInfoBudgetsBudget, MonitoringDecodeError> {
-  switch (value) {
-    case "ISOLATED":
-    case "SHARED_ASYNC":
-    case "SHARED_THREAD":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkerClassLoadInfoBudgetsServes(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkerClassLoadInfoBudgetsServes, MonitoringDecodeError> {
-  switch (value) {
-    case "ISOLATED":
-    case "SHARED_ASYNC":
-    case "SHARED_THREAD":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
 export function decodeWorkerHistoryPoint(
   value: WireJson,
 ): DecodeResult<WorkerHistoryPoint, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "WorkerHistoryPoint", path: "$" });
+  return readWorkerHistoryPoint(value, { model: "WorkerHistoryPoint", path: "$" });
+}
+
+function readWorkerHistoryPoint(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<WorkerHistoryPoint, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -5084,7 +2735,14 @@ export function decodeWorkerHistoryPoint(
 export function decodeWorkerPingInfo(
   value: WireJson,
 ): DecodeResult<WorkerPingInfo, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "WorkerPingInfo", path: "$" });
+  return readWorkerPingInfo(value, { model: "WorkerPingInfo", path: "$" });
+}
+
+function readWorkerPingInfo(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<WorkerPingInfo, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -5120,7 +2778,14 @@ export function decodeWorkerPingInfo(
 export function decodeWorkerStateInfo(
   value: WireJson,
 ): DecodeResult<WorkerStateInfo, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "WorkerStateInfo", path: "$" });
+  return readWorkerStateInfo(value, { model: "WorkerStateInfo", path: "$" });
+}
+
+function readWorkerStateInfo(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<WorkerStateInfo, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -5129,16 +2794,16 @@ export function decodeWorkerStateInfo(
   const results = {
     clusterWideCap: fields.value.read("cluster_wide_cap", nullableOf(decodeInteger)),
     cpuPercent: fields.value.read("cpu_percent", nullableOf(decodeNumber)),
-    downSlots: fields.value.read("down_slots", listOf(decodeWorkerStateInfoDownSlots)),
+    downSlots: fields.value.read("down_slots", listOf(readDownSlotInfo)),
     hostname: fields.value.read("hostname", decodeString),
     memoryPercent: fields.value.read("memory_percent", nullableOf(decodeNumber)),
     memoryUsageMb: fields.value.read("memory_usage_mb", nullableOf(decodeNumber)),
     pid: fields.value.read("pid", decodeInteger),
     processes: fields.value.read("processes", decodeInteger),
-    profile: fields.value.read("profile", decodeWorkerStateInfoProfile),
+    profile: fields.value.read("profile", readSnapshotProfileInfo),
     queueMaxConcurrency: fields.value.read("queue_max_concurrency", mapOf(decodeInteger)),
     queues: fields.value.read("queues", listOf(decodeString)),
-    slotHealth: fields.value.read("slot_health", decodeWorkerStateInfoSlotHealth),
+    slotHealth: fields.value.read("slot_health", readSlotHealthKind),
     snapshotAgeS: fields.value.read("snapshot_age_s", nullableOf(decodeNumber)),
     snapshotAt: fields.value.read("snapshot_at", decodeDateTime),
     stale: fields.value.read("stale", decodeBoolean),
@@ -5185,49 +2850,10 @@ export function decodeWorkerStateInfo(
   );
 }
 
-function decodeWorkerStateInfoDownSlots(
+function readSnapshotProfileInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkerStateInfoDownSlots, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    cause: fields.value.read("cause", decodeString),
-    detail: fields.value.read("detail", decodeString),
-    downSince: fields.value.read("down_since", decodeDateTime),
-    failedBoots: fields.value.read("failed_boots", decodeInteger),
-    slot: fields.value.read("slot", decodeInteger),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      cause: results.cause.value,
-      detail: results.detail.value,
-      downSince: results.downSince.value,
-      failedBoots: results.failedBoots.value,
-      slot: results.slot.value,
-    }),
-  );
-}
-
-function decodeWorkerStateInfoProfile(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkerStateInfoProfile, MonitoringDecodeError> {
+): DecodeResult<SnapshotProfileInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -5242,17 +2868,17 @@ function decodeWorkerStateInfoProfile(
 
   switch (tag.value) {
     case "named":
-      return decodeWorkerStateInfoProfileNamed(fields.value);
+      return readProfileNamedInfo(fields.value);
     case "not_recorded":
-      return decodeWorkerStateInfoProfileNotRecorded(fields.value);
+      return readProfileNotRecordedInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeWorkerStateInfoProfileNamed(
+function readProfileNamedInfo(
   fields: FieldReader,
-): DecodeResult<WorkerStateInfoProfileNamed, MonitoringDecodeError> {
+): DecodeResult<ProfileNamedInfo, MonitoringDecodeError> {
   const results = {
     name: fields.read("name", decodeString),
   };
@@ -5275,9 +2901,9 @@ function decodeWorkerStateInfoProfileNamed(
   );
 }
 
-function decodeWorkerStateInfoProfileNotRecorded(
+function readProfileNotRecordedInfo(
   fields: FieldReader,
-): DecodeResult<WorkerStateInfoProfileNotRecorded, MonitoringDecodeError> {
+): DecodeResult<ProfileNotRecordedInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -5291,10 +2917,10 @@ function decodeWorkerStateInfoProfileNotRecorded(
   );
 }
 
-function decodeWorkerStateInfoSlotHealth(
+function readSlotHealthKind(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkerStateInfoSlotHealth, MonitoringDecodeError> {
+): DecodeResult<SlotHealthKind, MonitoringDecodeError> {
   switch (value) {
     case "all_serving":
     case "slots_down":
@@ -5307,7 +2933,14 @@ function decodeWorkerStateInfoSlotHealth(
 export function decodeWorkflowEdge(
   value: WireJson,
 ): DecodeResult<WorkflowEdge, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "WorkflowEdge", path: "$" });
+  return readWorkflowEdge(value, { model: "WorkflowEdge", path: "$" });
+}
+
+function readWorkflowEdge(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<WorkflowEdge, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -5339,7 +2972,14 @@ export function decodeWorkflowEdge(
 export function decodeWorkflowNodeInfo(
   value: WireJson,
 ): DecodeResult<WorkflowNodeInfo, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "WorkflowNodeInfo", path: "$" });
+  return readWorkflowNodeInfo(value, { model: "WorkflowNodeInfo", path: "$" });
+}
+
+function readWorkflowNodeInfo(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<WorkflowNodeInfo, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -5358,7 +2998,7 @@ export function decodeWorkflowNodeInfo(
     subWorkflowId: fields.value.read("sub_workflow_id", nullableOf(decodeString)),
     taskIndex: fields.value.read("task_index", decodeInteger),
     taskName: fields.value.read("task_name", decodeString),
-    timing: fields.value.read("timing", decodeWorkflowNodeInfoTiming),
+    timing: fields.value.read("timing", readNodeTimingInfo),
   };
 
   if (!allDecoded(results)) {
@@ -5390,10 +3030,10 @@ export function decodeWorkflowNodeInfo(
   );
 }
 
-function decodeWorkflowNodeInfoTiming(
+function readNodeTimingInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTiming, MonitoringDecodeError> {
+): DecodeResult<NodeTimingInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -5408,24 +3048,24 @@ function decodeWorkflowNodeInfoTiming(
 
   switch (tag.value) {
     case "exact":
-      return decodeWorkflowNodeInfoTimingExact(fields.value);
+      return readNodeTimingExactInfo(fields.value);
     case "inconsistent":
-      return decodeWorkflowNodeInfoTimingInconsistent(fields.value);
+      return readNodeTimingInconsistentInfo(fields.value);
     case "partial":
-      return decodeWorkflowNodeInfoTimingPartial(fields.value);
+      return readNodeTimingPartialInfo(fields.value);
     case "unavailable":
-      return decodeWorkflowNodeInfoTimingUnavailable(fields.value);
+      return readNodeTimingUnavailableInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeWorkflowNodeInfoTimingExact(
+function readNodeTimingExactInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExact, MonitoringDecodeError> {
+): DecodeResult<NodeTimingExactInfo, MonitoringDecodeError> {
   const results = {
-    endpoint: fields.read("endpoint", decodeWorkflowNodeInfoTimingExactEndpoint),
-    segments: fields.read("segments", listOf(decodeWorkflowNodeInfoTimingExactSegments)),
+    endpoint: fields.read("endpoint", readNodeEndpointInfo),
+    segments: fields.read("segments", listOf(readTimingSegmentInfo)),
   };
 
   if (!allDecoded(results)) {
@@ -5447,10 +3087,10 @@ function decodeWorkflowNodeInfoTimingExact(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactEndpoint(
+function readNodeEndpointInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingExactEndpoint, MonitoringDecodeError> {
+): DecodeResult<NodeEndpointInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -5465,17 +3105,17 @@ function decodeWorkflowNodeInfoTimingExactEndpoint(
 
   switch (tag.value) {
     case "not_terminal":
-      return decodeWorkflowNodeInfoTimingExactEndpointNotTerminal(fields.value);
+      return readEndpointNotTerminalInfo(fields.value);
     case "terminal":
-      return decodeWorkflowNodeInfoTimingExactEndpointTerminal(fields.value);
+      return readEndpointTerminalInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeWorkflowNodeInfoTimingExactEndpointNotTerminal(
+function readEndpointNotTerminalInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactEndpointNotTerminal, MonitoringDecodeError> {
+): DecodeResult<EndpointNotTerminalInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -5489,12 +3129,12 @@ function decodeWorkflowNodeInfoTimingExactEndpointNotTerminal(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactEndpointTerminal(
+function readEndpointTerminalInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactEndpointTerminal, MonitoringDecodeError> {
+): DecodeResult<EndpointTerminalInfo, MonitoringDecodeError> {
   const results = {
     at: fields.read("at", decodeDateTime),
-    status: fields.read("status", decodeWorkflowNodeInfoTimingExactEndpointTerminalStatus),
+    status: fields.read("status", readTerminalNodeStatus),
   };
 
   if (!allDecoded(results)) {
@@ -5516,10 +3156,10 @@ function decodeWorkflowNodeInfoTimingExactEndpointTerminal(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactEndpointTerminalStatus(
+function readTerminalNodeStatus(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingExactEndpointTerminalStatus, MonitoringDecodeError> {
+): DecodeResult<TerminalNodeStatus, MonitoringDecodeError> {
   switch (value) {
     case "COMPLETED":
     case "FAILED":
@@ -5530,10 +3170,10 @@ function decodeWorkflowNodeInfoTimingExactEndpointTerminalStatus(
   }
 }
 
-function decodeWorkflowNodeInfoTimingExactSegments(
+function readTimingSegmentInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingExactSegments, MonitoringDecodeError> {
+): DecodeResult<TimingSegmentInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -5541,9 +3181,9 @@ function decodeWorkflowNodeInfoTimingExactSegments(
   }
 
   const results = {
-    end: fields.value.read("end", decodeWorkflowNodeInfoTimingExactSegmentsEnd),
-    phase: fields.value.read("phase", decodeWorkflowNodeInfoTimingExactSegmentsPhase),
-    source: fields.value.read("source", decodeWorkflowNodeInfoTimingExactSegmentsSource),
+    end: fields.value.read("end", readSegmentEndInfo),
+    phase: fields.value.read("phase", readSegmentPhaseInfo),
+    source: fields.value.read("source", readSegmentSourceInfo),
     startedAt: fields.value.read("started_at", decodeDateTime),
   };
 
@@ -5567,10 +3207,10 @@ function decodeWorkflowNodeInfoTimingExactSegments(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsEnd(
+function readSegmentEndInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsEnd, MonitoringDecodeError> {
+): DecodeResult<SegmentEndInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -5585,17 +3225,17 @@ function decodeWorkflowNodeInfoTimingExactSegmentsEnd(
 
   switch (tag.value) {
     case "ended":
-      return decodeWorkflowNodeInfoTimingExactSegmentsEndEnded(fields.value);
+      return readSegmentEndedInfo(fields.value);
     case "open":
-      return decodeWorkflowNodeInfoTimingExactSegmentsEndOpen(fields.value);
+      return readSegmentOpenInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsEndEnded(
+function readSegmentEndedInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsEndEnded, MonitoringDecodeError> {
+): DecodeResult<SegmentEndedInfo, MonitoringDecodeError> {
   const results = {
     at: fields.read("at", decodeDateTime),
   };
@@ -5618,9 +3258,9 @@ function decodeWorkflowNodeInfoTimingExactSegmentsEndEnded(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsEndOpen(
+function readSegmentOpenInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsEndOpen, MonitoringDecodeError> {
+): DecodeResult<SegmentOpenInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -5634,10 +3274,10 @@ function decodeWorkflowNodeInfoTimingExactSegmentsEndOpen(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsPhase(
+function readSegmentPhaseInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhase, MonitoringDecodeError> {
+): DecodeResult<SegmentPhaseInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -5652,31 +3292,31 @@ function decodeWorkflowNodeInfoTimingExactSegmentsPhase(
 
   switch (tag.value) {
     case "advancing":
-      return decodeWorkflowNodeInfoTimingExactSegmentsPhaseAdvancing(fields.value);
+      return readPhaseAdvancingInfo(fields.value);
     case "claimed":
-      return decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimed(fields.value);
+      return readPhaseClaimedInfo(fields.value);
     case "enqueued":
-      return decodeWorkflowNodeInfoTimingExactSegmentsPhaseEnqueued(fields.value);
+      return readPhaseEnqueuedInfo(fields.value);
     case "finalizing":
-      return decodeWorkflowNodeInfoTimingExactSegmentsPhaseFinalizing(fields.value);
+      return readPhaseFinalizingInfo(fields.value);
     case "pending":
-      return decodeWorkflowNodeInfoTimingExactSegmentsPhasePending(fields.value);
+      return readPhasePendingInfo(fields.value);
     case "ready":
-      return decodeWorkflowNodeInfoTimingExactSegmentsPhaseReady(fields.value);
+      return readPhaseReadyInfo(fields.value);
     case "retry_wait":
-      return decodeWorkflowNodeInfoTimingExactSegmentsPhaseRetryWait(fields.value);
+      return readPhaseRetryWaitInfo(fields.value);
     case "running":
-      return decodeWorkflowNodeInfoTimingExactSegmentsPhaseRunning(fields.value);
+      return readPhaseRunningInfo(fields.value);
     case "unknown":
-      return decodeWorkflowNodeInfoTimingExactSegmentsPhaseUnknown(fields.value);
+      return readPhaseUnknownInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsPhaseAdvancing(
+function readPhaseAdvancingInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhaseAdvancing, MonitoringDecodeError> {
+): DecodeResult<PhaseAdvancingInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -5690,11 +3330,11 @@ function decodeWorkflowNodeInfoTimingExactSegmentsPhaseAdvancing(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimed(
+function readPhaseClaimedInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhaseClaimed, MonitoringDecodeError> {
+): DecodeResult<PhaseClaimedInfo, MonitoringDecodeError> {
   const results = {
-    claim: fields.read("claim", decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaim),
+    claim: fields.read("claim", readSegmentClaimInfo),
   };
 
   if (!allDecoded(results)) {
@@ -5715,10 +3355,10 @@ function decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimed(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaim(
+function readSegmentClaimInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaim, MonitoringDecodeError> {
+): DecodeResult<SegmentClaimInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -5733,19 +3373,19 @@ function decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaim(
 
   switch (tag.value) {
     case "earlier":
-      return decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimEarlier(fields.value);
+      return readClaimEarlierInfo(fields.value);
     case "not_recorded":
-      return decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimNotRecorded(fields.value);
+      return readClaimNotRecordedInfo(fields.value);
     case "recorded":
-      return decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecorded(fields.value);
+      return readClaimRecordedInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimEarlier(
+function readClaimEarlierInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimEarlier, MonitoringDecodeError> {
+): DecodeResult<ClaimEarlierInfo, MonitoringDecodeError> {
   const results = {
     count: fields.read("count", decodeInteger),
   };
@@ -5768,9 +3408,9 @@ function decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimEarlier(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimNotRecorded(
+function readClaimNotRecordedInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimNotRecorded, MonitoringDecodeError> {
+): DecodeResult<ClaimNotRecordedInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -5784,11 +3424,11 @@ function decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimNotRecorded(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecorded(
+function readClaimRecordedInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecorded, MonitoringDecodeError> {
+): DecodeResult<ClaimRecordedInfo, MonitoringDecodeError> {
   const results = {
-    placement: fields.read("placement", decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecordedPlacement),
+    placement: fields.read("placement", readAttemptPlacementInfo),
   };
 
   if (!allDecoded(results)) {
@@ -5809,76 +3449,9 @@ function decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecorded(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecordedPlacement(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecordedPlacement, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "not_observed":
-      return decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecordedPlacementNotObserved(fields.value);
-    case "placed":
-      return decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecordedPlacementPlaced(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecordedPlacementNotObserved(
+function readPhaseEnqueuedInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecordedPlacementNotObserved, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notObserved",
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecordedPlacementPlaced(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhaseClaimedClaimRecordedPlacementPlaced, MonitoringDecodeError> {
-  const results = {
-    placedAt: fields.read("placed_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "placed",
-      placedAt: results.placedAt.value,
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingExactSegmentsPhaseEnqueued(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhaseEnqueued, MonitoringDecodeError> {
+): DecodeResult<PhaseEnqueuedInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -5892,9 +3465,9 @@ function decodeWorkflowNodeInfoTimingExactSegmentsPhaseEnqueued(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsPhaseFinalizing(
+function readPhaseFinalizingInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhaseFinalizing, MonitoringDecodeError> {
+): DecodeResult<PhaseFinalizingInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -5908,9 +3481,9 @@ function decodeWorkflowNodeInfoTimingExactSegmentsPhaseFinalizing(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsPhasePending(
+function readPhasePendingInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhasePending, MonitoringDecodeError> {
+): DecodeResult<PhasePendingInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -5924,9 +3497,9 @@ function decodeWorkflowNodeInfoTimingExactSegmentsPhasePending(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsPhaseReady(
+function readPhaseReadyInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhaseReady, MonitoringDecodeError> {
+): DecodeResult<PhaseReadyInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -5940,9 +3513,9 @@ function decodeWorkflowNodeInfoTimingExactSegmentsPhaseReady(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsPhaseRetryWait(
+function readPhaseRetryWaitInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhaseRetryWait, MonitoringDecodeError> {
+): DecodeResult<PhaseRetryWaitInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -5956,9 +3529,9 @@ function decodeWorkflowNodeInfoTimingExactSegmentsPhaseRetryWait(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsPhaseRunning(
+function readPhaseRunningInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhaseRunning, MonitoringDecodeError> {
+): DecodeResult<PhaseRunningInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -5972,11 +3545,11 @@ function decodeWorkflowNodeInfoTimingExactSegmentsPhaseRunning(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsPhaseUnknown(
+function readPhaseUnknownInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhaseUnknown, MonitoringDecodeError> {
+): DecodeResult<PhaseUnknownInfo, MonitoringDecodeError> {
   const results = {
-    reason: fields.read("reason", decodeWorkflowNodeInfoTimingExactSegmentsPhaseUnknownReason),
+    reason: fields.read("reason", readUnknownReason),
   };
 
   if (!allDecoded(results)) {
@@ -5997,10 +3570,10 @@ function decodeWorkflowNodeInfoTimingExactSegmentsPhaseUnknown(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsPhaseUnknownReason(
+function readUnknownReason(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsPhaseUnknownReason, MonitoringDecodeError> {
+): DecodeResult<UnknownReason, MonitoringDecodeError> {
   switch (value) {
     case "ATTEMPT_NOT_CAPTURED":
     case "CLAIMS_NOT_COUNTED":
@@ -6012,10 +3585,10 @@ function decodeWorkflowNodeInfoTimingExactSegmentsPhaseUnknownReason(
   }
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsSource(
+function readSegmentSourceInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsSource, MonitoringDecodeError> {
+): DecodeResult<SegmentSourceInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -6030,19 +3603,19 @@ function decodeWorkflowNodeInfoTimingExactSegmentsSource(
 
   switch (tag.value) {
     case "attempt":
-      return decodeWorkflowNodeInfoTimingExactSegmentsSourceAttempt(fields.value);
+      return readSourceAttemptInfo(fields.value);
     case "node":
-      return decodeWorkflowNodeInfoTimingExactSegmentsSourceNode(fields.value);
+      return readSourceNodeInfo(fields.value);
     case "task":
-      return decodeWorkflowNodeInfoTimingExactSegmentsSourceTask(fields.value);
+      return readSourceTaskInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsSourceAttempt(
+function readSourceAttemptInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsSourceAttempt, MonitoringDecodeError> {
+): DecodeResult<SourceAttemptInfo, MonitoringDecodeError> {
   const results = {
     attempt: fields.read("attempt", decodeInteger),
     generation: fields.read("generation", decodeInteger),
@@ -6069,9 +3642,9 @@ function decodeWorkflowNodeInfoTimingExactSegmentsSourceAttempt(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsSourceNode(
+function readSourceNodeInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsSourceNode, MonitoringDecodeError> {
+): DecodeResult<SourceNodeInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -6085,9 +3658,9 @@ function decodeWorkflowNodeInfoTimingExactSegmentsSourceNode(
   );
 }
 
-function decodeWorkflowNodeInfoTimingExactSegmentsSourceTask(
+function readSourceTaskInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingExactSegmentsSourceTask, MonitoringDecodeError> {
+): DecodeResult<SourceTaskInfo, MonitoringDecodeError> {
   const results = {
     generation: fields.read("generation", decodeInteger),
     taskId: fields.read("task_id", decodeUuid),
@@ -6112,11 +3685,11 @@ function decodeWorkflowNodeInfoTimingExactSegmentsSourceTask(
   );
 }
 
-function decodeWorkflowNodeInfoTimingInconsistent(
+function readNodeTimingInconsistentInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingInconsistent, MonitoringDecodeError> {
+): DecodeResult<NodeTimingInconsistentInfo, MonitoringDecodeError> {
   const results = {
-    conflict: fields.read("conflict", decodeWorkflowNodeInfoTimingInconsistentConflict),
+    conflict: fields.read("conflict", readTimingConflictInfo),
   };
 
   if (!allDecoded(results)) {
@@ -6137,10 +3710,10 @@ function decodeWorkflowNodeInfoTimingInconsistent(
   );
 }
 
-function decodeWorkflowNodeInfoTimingInconsistentConflict(
+function readTimingConflictInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingInconsistentConflict, MonitoringDecodeError> {
+): DecodeResult<TimingConflictInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -6155,23 +3728,23 @@ function decodeWorkflowNodeInfoTimingInconsistentConflict(
 
   switch (tag.value) {
     case "clock_order":
-      return decodeWorkflowNodeInfoTimingInconsistentConflictClockOrder(fields.value);
+      return readConflictClockOrderInfo(fields.value);
     case "missing_record":
-      return decodeWorkflowNodeInfoTimingInconsistentConflictMissingRecord(fields.value);
+      return readConflictMissingRecordInfo(fields.value);
     case "unexpected_event":
-      return decodeWorkflowNodeInfoTimingInconsistentConflictUnexpectedEvent(fields.value);
+      return readConflictUnexpectedEventInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeWorkflowNodeInfoTimingInconsistentConflictClockOrder(
+function readConflictClockOrderInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingInconsistentConflictClockOrder, MonitoringDecodeError> {
+): DecodeResult<ConflictClockOrderInfo, MonitoringDecodeError> {
   const results = {
-    earlier: fields.read("earlier", decodeWorkflowNodeInfoTimingInconsistentConflictClockOrderEarlier),
+    earlier: fields.read("earlier", readTimingBoundary),
     earlierAt: fields.read("earlier_at", decodeDateTime),
-    later: fields.read("later", decodeWorkflowNodeInfoTimingInconsistentConflictClockOrderLater),
+    later: fields.read("later", readTimingBoundary),
     laterAt: fields.read("later_at", decodeDateTime),
   };
 
@@ -6196,10 +3769,10 @@ function decodeWorkflowNodeInfoTimingInconsistentConflictClockOrder(
   );
 }
 
-function decodeWorkflowNodeInfoTimingInconsistentConflictClockOrderEarlier(
+function readTimingBoundary(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingInconsistentConflictClockOrderEarlier, MonitoringDecodeError> {
+): DecodeResult<TimingBoundary, MonitoringDecodeError> {
   switch (value) {
     case "ATTEMPT_ENQUEUED":
     case "ATTEMPT_RECORDED":
@@ -6227,42 +3800,11 @@ function decodeWorkflowNodeInfoTimingInconsistentConflictClockOrderEarlier(
   }
 }
 
-function decodeWorkflowNodeInfoTimingInconsistentConflictClockOrderLater(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingInconsistentConflictClockOrderLater, MonitoringDecodeError> {
-  switch (value) {
-    case "ATTEMPT_ENQUEUED":
-    case "ATTEMPT_RECORDED":
-    case "CHILD_COMPLETED":
-    case "CHILD_CREATED":
-    case "CLAIM":
-    case "FINALIZING":
-    case "FIRST_CLAIM":
-    case "LAST_SEEN":
-    case "NODE_COMPLETED":
-    case "NODE_CREATED":
-    case "NODE_ENQUEUED":
-    case "NODE_READY":
-    case "PLACEMENT":
-    case "READ_TIME":
-    case "RUN_COMPLETED":
-    case "RUN_PAUSED":
-    case "RUN_RESUMED":
-    case "START":
-    case "TASK_CREATED":
-    case "TASK_MOVED":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowNodeInfoTimingInconsistentConflictMissingRecord(
+function readConflictMissingRecordInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingInconsistentConflictMissingRecord, MonitoringDecodeError> {
+): DecodeResult<ConflictMissingRecordInfo, MonitoringDecodeError> {
   const results = {
-    record: fields.read("record", decodeWorkflowNodeInfoTimingInconsistentConflictMissingRecordRecord),
+    record: fields.read("record", readMissingRecord),
   };
 
   if (!allDecoded(results)) {
@@ -6283,10 +3825,10 @@ function decodeWorkflowNodeInfoTimingInconsistentConflictMissingRecord(
   );
 }
 
-function decodeWorkflowNodeInfoTimingInconsistentConflictMissingRecordRecord(
+function readMissingRecord(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingInconsistentConflictMissingRecordRecord, MonitoringDecodeError> {
+): DecodeResult<MissingRecord, MonitoringDecodeError> {
   switch (value) {
     case "ATTEMPT_ROW":
     case "CHILD_RUN":
@@ -6301,11 +3843,11 @@ function decodeWorkflowNodeInfoTimingInconsistentConflictMissingRecordRecord(
   }
 }
 
-function decodeWorkflowNodeInfoTimingInconsistentConflictUnexpectedEvent(
+function readConflictUnexpectedEventInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingInconsistentConflictUnexpectedEvent, MonitoringDecodeError> {
+): DecodeResult<ConflictUnexpectedEventInfo, MonitoringDecodeError> {
   const results = {
-    event: fields.read("event", decodeWorkflowNodeInfoTimingInconsistentConflictUnexpectedEventEvent),
+    event: fields.read("event", readWorkflowEventKind),
     eventId: fields.read("event_id", decodeInteger),
   };
 
@@ -6328,10 +3870,10 @@ function decodeWorkflowNodeInfoTimingInconsistentConflictUnexpectedEvent(
   );
 }
 
-function decodeWorkflowNodeInfoTimingInconsistentConflictUnexpectedEventEvent(
+function readWorkflowEventKind(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingInconsistentConflictUnexpectedEventEvent, MonitoringDecodeError> {
+): DecodeResult<WorkflowEventKind, MonitoringDecodeError> {
   switch (value) {
     case "NODE_ENQUEUED":
     case "NODE_READY":
@@ -6344,13 +3886,13 @@ function decodeWorkflowNodeInfoTimingInconsistentConflictUnexpectedEventEvent(
   }
 }
 
-function decodeWorkflowNodeInfoTimingPartial(
+function readNodeTimingPartialInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartial, MonitoringDecodeError> {
+): DecodeResult<NodeTimingPartialInfo, MonitoringDecodeError> {
   const results = {
-    endpoint: fields.read("endpoint", decodeWorkflowNodeInfoTimingPartialEndpoint),
-    reasons: fields.read("reasons", listOf(decodeWorkflowNodeInfoTimingPartialReasons)),
-    segments: fields.read("segments", listOf(decodeWorkflowNodeInfoTimingPartialSegments)),
+    endpoint: fields.read("endpoint", readNodeEndpointInfo),
+    reasons: fields.read("reasons", listOf(readUnknownReason)),
+    segments: fields.read("segments", listOf(readTimingSegmentInfo)),
   };
 
   if (!allDecoded(results)) {
@@ -6373,691 +3915,11 @@ function decodeWorkflowNodeInfoTimingPartial(
   );
 }
 
-function decodeWorkflowNodeInfoTimingPartialEndpoint(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingPartialEndpoint, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "not_terminal":
-      return decodeWorkflowNodeInfoTimingPartialEndpointNotTerminal(fields.value);
-    case "terminal":
-      return decodeWorkflowNodeInfoTimingPartialEndpointTerminal(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowNodeInfoTimingPartialEndpointNotTerminal(
+function readNodeTimingUnavailableInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialEndpointNotTerminal, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notTerminal",
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialEndpointTerminal(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialEndpointTerminal, MonitoringDecodeError> {
+): DecodeResult<NodeTimingUnavailableInfo, MonitoringDecodeError> {
   const results = {
-    at: fields.read("at", decodeDateTime),
-    status: fields.read("status", decodeWorkflowNodeInfoTimingPartialEndpointTerminalStatus),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "terminal",
-      at: results.at.value,
-      status: results.status.value,
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialEndpointTerminalStatus(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingPartialEndpointTerminalStatus, MonitoringDecodeError> {
-  switch (value) {
-    case "COMPLETED":
-    case "FAILED":
-    case "SKIPPED":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowNodeInfoTimingPartialReasons(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingPartialReasons, MonitoringDecodeError> {
-  switch (value) {
-    case "ATTEMPT_NOT_CAPTURED":
-    case "CLAIMS_NOT_COUNTED":
-    case "HISTORY_PRUNED":
-    case "WORKER_LOST":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegments(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegments, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    end: fields.value.read("end", decodeWorkflowNodeInfoTimingPartialSegmentsEnd),
-    phase: fields.value.read("phase", decodeWorkflowNodeInfoTimingPartialSegmentsPhase),
-    source: fields.value.read("source", decodeWorkflowNodeInfoTimingPartialSegmentsSource),
-    startedAt: fields.value.read("started_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      end: results.end.value,
-      phase: results.phase.value,
-      source: results.source.value,
-      startedAt: results.startedAt.value,
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsEnd(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsEnd, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "ended":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsEndEnded(fields.value);
-    case "open":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsEndOpen(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsEndEnded(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsEndEnded, MonitoringDecodeError> {
-  const results = {
-    at: fields.read("at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "ended",
-      at: results.at.value,
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsEndOpen(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsEndOpen, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "open",
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhase(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhase, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "advancing":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsPhaseAdvancing(fields.value);
-    case "claimed":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsPhaseClaimed(fields.value);
-    case "enqueued":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsPhaseEnqueued(fields.value);
-    case "finalizing":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsPhaseFinalizing(fields.value);
-    case "pending":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsPhasePending(fields.value);
-    case "ready":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsPhaseReady(fields.value);
-    case "retry_wait":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsPhaseRetryWait(fields.value);
-    case "running":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsPhaseRunning(fields.value);
-    case "unknown":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsPhaseUnknown(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhaseAdvancing(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhaseAdvancing, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "advancing",
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhaseClaimed(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhaseClaimed, MonitoringDecodeError> {
-  const results = {
-    claim: fields.read("claim", decodeWorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaim),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "claimed",
-      claim: results.claim.value,
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaim(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaim, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "earlier":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimEarlier(fields.value);
-    case "not_recorded":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimNotRecorded(fields.value);
-    case "recorded":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecorded(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimEarlier(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimEarlier, MonitoringDecodeError> {
-  const results = {
-    count: fields.read("count", decodeInteger),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "earlier",
-      count: results.count.value,
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimNotRecorded(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimNotRecorded, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notRecorded",
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecorded(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecorded, MonitoringDecodeError> {
-  const results = {
-    placement: fields.read("placement", decodeWorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecordedPlacement),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "recorded",
-      placement: results.placement.value,
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecordedPlacement(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecordedPlacement, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "not_observed":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementNotObserved(fields.value);
-    case "placed":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementPlaced(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementNotObserved(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementNotObserved, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notObserved",
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementPlaced(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementPlaced, MonitoringDecodeError> {
-  const results = {
-    placedAt: fields.read("placed_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "placed",
-      placedAt: results.placedAt.value,
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhaseEnqueued(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhaseEnqueued, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "enqueued",
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhaseFinalizing(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhaseFinalizing, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "finalizing",
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhasePending(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhasePending, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "pending",
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhaseReady(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhaseReady, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "ready",
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhaseRetryWait(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhaseRetryWait, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "retryWait",
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhaseRunning(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhaseRunning, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "running",
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhaseUnknown(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhaseUnknown, MonitoringDecodeError> {
-  const results = {
-    reason: fields.read("reason", decodeWorkflowNodeInfoTimingPartialSegmentsPhaseUnknownReason),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "unknown",
-      reason: results.reason.value,
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsPhaseUnknownReason(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsPhaseUnknownReason, MonitoringDecodeError> {
-  switch (value) {
-    case "ATTEMPT_NOT_CAPTURED":
-    case "CLAIMS_NOT_COUNTED":
-    case "HISTORY_PRUNED":
-    case "WORKER_LOST":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsSource(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsSource, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "attempt":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsSourceAttempt(fields.value);
-    case "node":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsSourceNode(fields.value);
-    case "task":
-      return decodeWorkflowNodeInfoTimingPartialSegmentsSourceTask(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsSourceAttempt(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsSourceAttempt, MonitoringDecodeError> {
-  const results = {
-    attempt: fields.read("attempt", decodeInteger),
-    generation: fields.read("generation", decodeInteger),
-    taskId: fields.read("task_id", decodeUuid),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "attempt",
-      attempt: results.attempt.value,
-      generation: results.generation.value,
-      taskId: results.taskId.value,
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsSourceNode(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsSourceNode, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "node",
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingPartialSegmentsSourceTask(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingPartialSegmentsSourceTask, MonitoringDecodeError> {
-  const results = {
-    generation: fields.read("generation", decodeInteger),
-    taskId: fields.read("task_id", decodeUuid),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "task",
-      generation: results.generation.value,
-      taskId: results.taskId.value,
-    }),
-  );
-}
-
-function decodeWorkflowNodeInfoTimingUnavailable(
-  fields: FieldReader,
-): DecodeResult<WorkflowNodeInfoTimingUnavailable, MonitoringDecodeError> {
-  const results = {
-    reason: fields.read("reason", decodeWorkflowNodeInfoTimingUnavailableReason),
+    reason: fields.read("reason", readUnavailableReason),
   };
 
   if (!allDecoded(results)) {
@@ -7078,10 +3940,10 @@ function decodeWorkflowNodeInfoTimingUnavailable(
   );
 }
 
-function decodeWorkflowNodeInfoTimingUnavailableReason(
+function readUnavailableReason(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowNodeInfoTimingUnavailableReason, MonitoringDecodeError> {
+): DecodeResult<UnavailableReason, MonitoringDecodeError> {
   switch (value) {
     case "RUN_BEFORE_CAPTURE":
     case "TIMING_BOUND_EXCEEDED":
@@ -7094,19 +3956,26 @@ function decodeWorkflowNodeInfoTimingUnavailableReason(
 export function decodeWorkflowRunDetail(
   value: WireJson,
 ): DecodeResult<WorkflowRunDetail, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "WorkflowRunDetail", path: "$" });
+  return readWorkflowRunDetail(value, { model: "WorkflowRunDetail", path: "$" });
+}
+
+function readWorkflowRunDetail(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<WorkflowRunDetail, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
   }
 
   const results = {
-    edges: fields.value.read("edges", listOf(decodeWorkflowRunDetailEdges)),
+    edges: fields.value.read("edges", listOf(readWorkflowEdge)),
     failedCount: fields.value.read("failed_count", decodeInteger),
     failedIndices: fields.value.read("failed_indices", listOf(decodeInteger)),
-    nodes: fields.value.read("nodes", listOf(decodeWorkflowRunDetailNodes)),
-    run: fields.value.read("run", decodeWorkflowRunDetailRun),
-    timing: fields.value.read("timing", decodeWorkflowRunDetailTiming),
+    nodes: fields.value.read("nodes", listOf(readWorkflowNodeInfo)),
+    run: fields.value.read("run", readWorkflowRunSummary),
+    timing: fields.value.read("timing", readRunTimingInfo),
     traceId: fields.value.read("trace_id", nullableOf(decodeString)),
   };
 
@@ -7133,1842 +4002,10 @@ export function decodeWorkflowRunDetail(
   );
 }
 
-function decodeWorkflowRunDetailEdges(
+function readRunTimingInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowRunDetailEdges, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    fromIndex: fields.value.read("from_index", decodeInteger),
-    toIndex: fields.value.read("to_index", decodeInteger),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      fromIndex: results.fromIndex.value,
-      toIndex: results.toIndex.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodes(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodes, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    allowFailedDeps: fields.value.read("allow_failed_deps", decodeBoolean),
-    childFailed: fields.value.read("child_failed", nullableOf(decodeInteger)),
-    childTotal: fields.value.read("child_total", nullableOf(decodeInteger)),
-    completedAt: fields.value.read("completed_at", nullableOf(decodeDateTime)),
-    execS: fields.value.read("exec_s", nullableOf(decodeNumber)),
-    isSubworkflow: fields.value.read("is_subworkflow", decodeBoolean),
-    nodeId: fields.value.read("node_id", nullableOf(decodeString)),
-    nodeStatus: fields.value.read("node_status", decodeString),
-    startedAt: fields.value.read("started_at", nullableOf(decodeDateTime)),
-    subWorkflowId: fields.value.read("sub_workflow_id", nullableOf(decodeString)),
-    taskIndex: fields.value.read("task_index", decodeInteger),
-    taskName: fields.value.read("task_name", decodeString),
-    timing: fields.value.read("timing", decodeWorkflowRunDetailNodesTiming),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      allowFailedDeps: results.allowFailedDeps.value,
-      childFailed: results.childFailed.value,
-      childTotal: results.childTotal.value,
-      completedAt: results.completedAt.value,
-      execS: results.execS.value,
-      isSubworkflow: results.isSubworkflow.value,
-      nodeId: results.nodeId.value,
-      nodeStatus: results.nodeStatus.value,
-      startedAt: results.startedAt.value,
-      subWorkflowId: results.subWorkflowId.value,
-      taskIndex: results.taskIndex.value,
-      taskName: results.taskName.value,
-      timing: results.timing.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTiming(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTiming, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "exact":
-      return decodeWorkflowRunDetailNodesTimingExact(fields.value);
-    case "inconsistent":
-      return decodeWorkflowRunDetailNodesTimingInconsistent(fields.value);
-    case "partial":
-      return decodeWorkflowRunDetailNodesTimingPartial(fields.value);
-    case "unavailable":
-      return decodeWorkflowRunDetailNodesTimingUnavailable(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingExact(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExact, MonitoringDecodeError> {
-  const results = {
-    endpoint: fields.read("endpoint", decodeWorkflowRunDetailNodesTimingExactEndpoint),
-    segments: fields.read("segments", listOf(decodeWorkflowRunDetailNodesTimingExactSegments)),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "exact",
-      endpoint: results.endpoint.value,
-      segments: results.segments.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactEndpoint(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingExactEndpoint, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "not_terminal":
-      return decodeWorkflowRunDetailNodesTimingExactEndpointNotTerminal(fields.value);
-    case "terminal":
-      return decodeWorkflowRunDetailNodesTimingExactEndpointTerminal(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingExactEndpointNotTerminal(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactEndpointNotTerminal, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notTerminal",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactEndpointTerminal(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactEndpointTerminal, MonitoringDecodeError> {
-  const results = {
-    at: fields.read("at", decodeDateTime),
-    status: fields.read("status", decodeWorkflowRunDetailNodesTimingExactEndpointTerminalStatus),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "terminal",
-      at: results.at.value,
-      status: results.status.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactEndpointTerminalStatus(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingExactEndpointTerminalStatus, MonitoringDecodeError> {
-  switch (value) {
-    case "COMPLETED":
-    case "FAILED":
-    case "SKIPPED":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegments(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegments, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    end: fields.value.read("end", decodeWorkflowRunDetailNodesTimingExactSegmentsEnd),
-    phase: fields.value.read("phase", decodeWorkflowRunDetailNodesTimingExactSegmentsPhase),
-    source: fields.value.read("source", decodeWorkflowRunDetailNodesTimingExactSegmentsSource),
-    startedAt: fields.value.read("started_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      end: results.end.value,
-      phase: results.phase.value,
-      source: results.source.value,
-      startedAt: results.startedAt.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsEnd(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsEnd, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "ended":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsEndEnded(fields.value);
-    case "open":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsEndOpen(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsEndEnded(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsEndEnded, MonitoringDecodeError> {
-  const results = {
-    at: fields.read("at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "ended",
-      at: results.at.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsEndOpen(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsEndOpen, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "open",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhase(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhase, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "advancing":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseAdvancing(fields.value);
-    case "claimed":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseClaimed(fields.value);
-    case "enqueued":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseEnqueued(fields.value);
-    case "finalizing":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseFinalizing(fields.value);
-    case "pending":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsPhasePending(fields.value);
-    case "ready":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseReady(fields.value);
-    case "retry_wait":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseRetryWait(fields.value);
-    case "running":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseRunning(fields.value);
-    case "unknown":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseUnknown(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseAdvancing(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhaseAdvancing, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "advancing",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseClaimed(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimed, MonitoringDecodeError> {
-  const results = {
-    claim: fields.read("claim", decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaim),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "claimed",
-      claim: results.claim.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaim(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaim, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "earlier":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimEarlier(fields.value);
-    case "not_recorded":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimNotRecorded(fields.value);
-    case "recorded":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecorded(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimEarlier(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimEarlier, MonitoringDecodeError> {
-  const results = {
-    count: fields.read("count", decodeInteger),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "earlier",
-      count: results.count.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimNotRecorded(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimNotRecorded, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notRecorded",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecorded(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecorded, MonitoringDecodeError> {
-  const results = {
-    placement: fields.read("placement", decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecordedPlacement),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "recorded",
-      placement: results.placement.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecordedPlacement(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecordedPlacement, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "not_observed":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecordedPlacementNotObserved(fields.value);
-    case "placed":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecordedPlacementPlaced(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecordedPlacementNotObserved(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecordedPlacementNotObserved, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notObserved",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecordedPlacementPlaced(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecordedPlacementPlaced, MonitoringDecodeError> {
-  const results = {
-    placedAt: fields.read("placed_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "placed",
-      placedAt: results.placedAt.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseEnqueued(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhaseEnqueued, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "enqueued",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseFinalizing(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhaseFinalizing, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "finalizing",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhasePending(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhasePending, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "pending",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseReady(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhaseReady, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "ready",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseRetryWait(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhaseRetryWait, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "retryWait",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseRunning(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhaseRunning, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "running",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseUnknown(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhaseUnknown, MonitoringDecodeError> {
-  const results = {
-    reason: fields.read("reason", decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseUnknownReason),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "unknown",
-      reason: results.reason.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsPhaseUnknownReason(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsPhaseUnknownReason, MonitoringDecodeError> {
-  switch (value) {
-    case "ATTEMPT_NOT_CAPTURED":
-    case "CLAIMS_NOT_COUNTED":
-    case "HISTORY_PRUNED":
-    case "WORKER_LOST":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsSource(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsSource, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "attempt":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsSourceAttempt(fields.value);
-    case "node":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsSourceNode(fields.value);
-    case "task":
-      return decodeWorkflowRunDetailNodesTimingExactSegmentsSourceTask(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsSourceAttempt(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsSourceAttempt, MonitoringDecodeError> {
-  const results = {
-    attempt: fields.read("attempt", decodeInteger),
-    generation: fields.read("generation", decodeInteger),
-    taskId: fields.read("task_id", decodeUuid),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "attempt",
-      attempt: results.attempt.value,
-      generation: results.generation.value,
-      taskId: results.taskId.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsSourceNode(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsSourceNode, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "node",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingExactSegmentsSourceTask(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingExactSegmentsSourceTask, MonitoringDecodeError> {
-  const results = {
-    generation: fields.read("generation", decodeInteger),
-    taskId: fields.read("task_id", decodeUuid),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "task",
-      generation: results.generation.value,
-      taskId: results.taskId.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingInconsistent(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingInconsistent, MonitoringDecodeError> {
-  const results = {
-    conflict: fields.read("conflict", decodeWorkflowRunDetailNodesTimingInconsistentConflict),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "inconsistent",
-      conflict: results.conflict.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingInconsistentConflict(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingInconsistentConflict, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "clock_order":
-      return decodeWorkflowRunDetailNodesTimingInconsistentConflictClockOrder(fields.value);
-    case "missing_record":
-      return decodeWorkflowRunDetailNodesTimingInconsistentConflictMissingRecord(fields.value);
-    case "unexpected_event":
-      return decodeWorkflowRunDetailNodesTimingInconsistentConflictUnexpectedEvent(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingInconsistentConflictClockOrder(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingInconsistentConflictClockOrder, MonitoringDecodeError> {
-  const results = {
-    earlier: fields.read("earlier", decodeWorkflowRunDetailNodesTimingInconsistentConflictClockOrderEarlier),
-    earlierAt: fields.read("earlier_at", decodeDateTime),
-    later: fields.read("later", decodeWorkflowRunDetailNodesTimingInconsistentConflictClockOrderLater),
-    laterAt: fields.read("later_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "clockOrder",
-      earlier: results.earlier.value,
-      earlierAt: results.earlierAt.value,
-      later: results.later.value,
-      laterAt: results.laterAt.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingInconsistentConflictClockOrderEarlier(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingInconsistentConflictClockOrderEarlier, MonitoringDecodeError> {
-  switch (value) {
-    case "ATTEMPT_ENQUEUED":
-    case "ATTEMPT_RECORDED":
-    case "CHILD_COMPLETED":
-    case "CHILD_CREATED":
-    case "CLAIM":
-    case "FINALIZING":
-    case "FIRST_CLAIM":
-    case "LAST_SEEN":
-    case "NODE_COMPLETED":
-    case "NODE_CREATED":
-    case "NODE_ENQUEUED":
-    case "NODE_READY":
-    case "PLACEMENT":
-    case "READ_TIME":
-    case "RUN_COMPLETED":
-    case "RUN_PAUSED":
-    case "RUN_RESUMED":
-    case "START":
-    case "TASK_CREATED":
-    case "TASK_MOVED":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingInconsistentConflictClockOrderLater(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingInconsistentConflictClockOrderLater, MonitoringDecodeError> {
-  switch (value) {
-    case "ATTEMPT_ENQUEUED":
-    case "ATTEMPT_RECORDED":
-    case "CHILD_COMPLETED":
-    case "CHILD_CREATED":
-    case "CLAIM":
-    case "FINALIZING":
-    case "FIRST_CLAIM":
-    case "LAST_SEEN":
-    case "NODE_COMPLETED":
-    case "NODE_CREATED":
-    case "NODE_ENQUEUED":
-    case "NODE_READY":
-    case "PLACEMENT":
-    case "READ_TIME":
-    case "RUN_COMPLETED":
-    case "RUN_PAUSED":
-    case "RUN_RESUMED":
-    case "START":
-    case "TASK_CREATED":
-    case "TASK_MOVED":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingInconsistentConflictMissingRecord(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingInconsistentConflictMissingRecord, MonitoringDecodeError> {
-  const results = {
-    record: fields.read("record", decodeWorkflowRunDetailNodesTimingInconsistentConflictMissingRecordRecord),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "missingRecord",
-      record: results.record.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingInconsistentConflictMissingRecordRecord(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingInconsistentConflictMissingRecordRecord, MonitoringDecodeError> {
-  switch (value) {
-    case "ATTEMPT_ROW":
-    case "CHILD_RUN":
-    case "COMPLETION_TIME":
-    case "LINKED_TASK":
-    case "LINKED_WORK":
-    case "OPEN_ATTEMPT":
-    case "TASK_TIMES":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingInconsistentConflictUnexpectedEvent(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingInconsistentConflictUnexpectedEvent, MonitoringDecodeError> {
-  const results = {
-    event: fields.read("event", decodeWorkflowRunDetailNodesTimingInconsistentConflictUnexpectedEventEvent),
-    eventId: fields.read("event_id", decodeInteger),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "unexpectedEvent",
-      event: results.event.value,
-      eventId: results.eventId.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingInconsistentConflictUnexpectedEventEvent(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingInconsistentConflictUnexpectedEventEvent, MonitoringDecodeError> {
-  switch (value) {
-    case "NODE_ENQUEUED":
-    case "NODE_READY":
-    case "TASK_MOVED":
-    case "WORKFLOW_PAUSED":
-    case "WORKFLOW_RESUMED":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingPartial(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartial, MonitoringDecodeError> {
-  const results = {
-    endpoint: fields.read("endpoint", decodeWorkflowRunDetailNodesTimingPartialEndpoint),
-    reasons: fields.read("reasons", listOf(decodeWorkflowRunDetailNodesTimingPartialReasons)),
-    segments: fields.read("segments", listOf(decodeWorkflowRunDetailNodesTimingPartialSegments)),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "partial",
-      endpoint: results.endpoint.value,
-      reasons: results.reasons.value,
-      segments: results.segments.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialEndpoint(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialEndpoint, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "not_terminal":
-      return decodeWorkflowRunDetailNodesTimingPartialEndpointNotTerminal(fields.value);
-    case "terminal":
-      return decodeWorkflowRunDetailNodesTimingPartialEndpointTerminal(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialEndpointNotTerminal(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialEndpointNotTerminal, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notTerminal",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialEndpointTerminal(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialEndpointTerminal, MonitoringDecodeError> {
-  const results = {
-    at: fields.read("at", decodeDateTime),
-    status: fields.read("status", decodeWorkflowRunDetailNodesTimingPartialEndpointTerminalStatus),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "terminal",
-      at: results.at.value,
-      status: results.status.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialEndpointTerminalStatus(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialEndpointTerminalStatus, MonitoringDecodeError> {
-  switch (value) {
-    case "COMPLETED":
-    case "FAILED":
-    case "SKIPPED":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialReasons(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialReasons, MonitoringDecodeError> {
-  switch (value) {
-    case "ATTEMPT_NOT_CAPTURED":
-    case "CLAIMS_NOT_COUNTED":
-    case "HISTORY_PRUNED":
-    case "WORKER_LOST":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegments(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegments, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    end: fields.value.read("end", decodeWorkflowRunDetailNodesTimingPartialSegmentsEnd),
-    phase: fields.value.read("phase", decodeWorkflowRunDetailNodesTimingPartialSegmentsPhase),
-    source: fields.value.read("source", decodeWorkflowRunDetailNodesTimingPartialSegmentsSource),
-    startedAt: fields.value.read("started_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      end: results.end.value,
-      phase: results.phase.value,
-      source: results.source.value,
-      startedAt: results.startedAt.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsEnd(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsEnd, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "ended":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsEndEnded(fields.value);
-    case "open":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsEndOpen(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsEndEnded(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsEndEnded, MonitoringDecodeError> {
-  const results = {
-    at: fields.read("at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "ended",
-      at: results.at.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsEndOpen(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsEndOpen, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "open",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhase(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhase, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "advancing":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseAdvancing(fields.value);
-    case "claimed":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimed(fields.value);
-    case "enqueued":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseEnqueued(fields.value);
-    case "finalizing":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseFinalizing(fields.value);
-    case "pending":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsPhasePending(fields.value);
-    case "ready":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseReady(fields.value);
-    case "retry_wait":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseRetryWait(fields.value);
-    case "running":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseRunning(fields.value);
-    case "unknown":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseUnknown(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseAdvancing(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhaseAdvancing, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "advancing",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimed(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimed, MonitoringDecodeError> {
-  const results = {
-    claim: fields.read("claim", decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaim),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "claimed",
-      claim: results.claim.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaim(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaim, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "earlier":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimEarlier(fields.value);
-    case "not_recorded":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimNotRecorded(fields.value);
-    case "recorded":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecorded(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimEarlier(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimEarlier, MonitoringDecodeError> {
-  const results = {
-    count: fields.read("count", decodeInteger),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "earlier",
-      count: results.count.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimNotRecorded(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimNotRecorded, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notRecorded",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecorded(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecorded, MonitoringDecodeError> {
-  const results = {
-    placement: fields.read("placement", decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecordedPlacement),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "recorded",
-      placement: results.placement.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecordedPlacement(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecordedPlacement, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "not_observed":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementNotObserved(fields.value);
-    case "placed":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementPlaced(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementNotObserved(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementNotObserved, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notObserved",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementPlaced(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhaseClaimedClaimRecordedPlacementPlaced, MonitoringDecodeError> {
-  const results = {
-    placedAt: fields.read("placed_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "placed",
-      placedAt: results.placedAt.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseEnqueued(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhaseEnqueued, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "enqueued",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseFinalizing(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhaseFinalizing, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "finalizing",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhasePending(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhasePending, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "pending",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseReady(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhaseReady, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "ready",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseRetryWait(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhaseRetryWait, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "retryWait",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseRunning(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhaseRunning, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "running",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseUnknown(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhaseUnknown, MonitoringDecodeError> {
-  const results = {
-    reason: fields.read("reason", decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseUnknownReason),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "unknown",
-      reason: results.reason.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsPhaseUnknownReason(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsPhaseUnknownReason, MonitoringDecodeError> {
-  switch (value) {
-    case "ATTEMPT_NOT_CAPTURED":
-    case "CLAIMS_NOT_COUNTED":
-    case "HISTORY_PRUNED":
-    case "WORKER_LOST":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsSource(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsSource, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "attempt":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsSourceAttempt(fields.value);
-    case "node":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsSourceNode(fields.value);
-    case "task":
-      return decodeWorkflowRunDetailNodesTimingPartialSegmentsSourceTask(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsSourceAttempt(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsSourceAttempt, MonitoringDecodeError> {
-  const results = {
-    attempt: fields.read("attempt", decodeInteger),
-    generation: fields.read("generation", decodeInteger),
-    taskId: fields.read("task_id", decodeUuid),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "attempt",
-      attempt: results.attempt.value,
-      generation: results.generation.value,
-      taskId: results.taskId.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsSourceNode(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsSourceNode, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "node",
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingPartialSegmentsSourceTask(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingPartialSegmentsSourceTask, MonitoringDecodeError> {
-  const results = {
-    generation: fields.read("generation", decodeInteger),
-    taskId: fields.read("task_id", decodeUuid),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "task",
-      generation: results.generation.value,
-      taskId: results.taskId.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingUnavailable(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailNodesTimingUnavailable, MonitoringDecodeError> {
-  const results = {
-    reason: fields.read("reason", decodeWorkflowRunDetailNodesTimingUnavailableReason),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "unavailable",
-      reason: results.reason.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailNodesTimingUnavailableReason(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailNodesTimingUnavailableReason, MonitoringDecodeError> {
-  switch (value) {
-    case "RUN_BEFORE_CAPTURE":
-    case "TIMING_BOUND_EXCEEDED":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowRunDetailRun(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailRun, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    completedAt: fields.value.read("completed_at", nullableOf(decodeDateTime)),
-    createdAt: fields.value.read("created_at", nullableOf(decodeDateTime)),
-    definitionKey: fields.value.read("definition_key", nullableOf(decodeString)),
-    id: fields.value.read("id", decodeString),
-    name: fields.value.read("name", decodeString),
-    status: fields.value.read("status", decodeString),
-    wallS: fields.value.read("wall_s", nullableOf(decodeNumber)),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      completedAt: results.completedAt.value,
-      createdAt: results.createdAt.value,
-      definitionKey: results.definitionKey.value,
-      id: results.id.value,
-      name: results.name.value,
-      status: results.status.value,
-      wallS: results.wallS.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailTiming(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailTiming, MonitoringDecodeError> {
+): DecodeResult<RunTimingInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -8983,23 +4020,23 @@ function decodeWorkflowRunDetailTiming(
 
   switch (tag.value) {
     case "composed":
-      return decodeWorkflowRunDetailTimingComposed(fields.value);
+      return readRunTimingComposedInfo(fields.value);
     case "unavailable":
-      return decodeWorkflowRunDetailTimingUnavailable(fields.value);
+      return readRunTimingUnavailableInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeWorkflowRunDetailTimingComposed(
+function readRunTimingComposedInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowRunDetailTimingComposed, MonitoringDecodeError> {
+): DecodeResult<RunTimingComposedInfo, MonitoringDecodeError> {
   const results = {
     asOf: fields.read("as_of", decodeDateTime),
     capturedSince: fields.read("captured_since", decodeDateTime),
-    coverage: fields.read("coverage", decodeWorkflowRunDetailTimingComposedCoverage),
+    coverage: fields.read("coverage", readRunCoverageInfo),
     openSegments: fields.read("open_segments", decodeBoolean),
-    pauses: fields.read("pauses", listOf(decodeWorkflowRunDetailTimingComposedPauses)),
+    pauses: fields.read("pauses", listOf(readPauseIntervalInfo)),
     rangeEndedAt: fields.read("range_ended_at", decodeDateTime),
     rangeStartedAt: fields.read("range_started_at", decodeDateTime),
   };
@@ -9028,10 +4065,10 @@ function decodeWorkflowRunDetailTimingComposed(
   );
 }
 
-function decodeWorkflowRunDetailTimingComposedCoverage(
+function readRunCoverageInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowRunDetailTimingComposedCoverage, MonitoringDecodeError> {
+): DecodeResult<RunCoverageInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -9046,19 +4083,19 @@ function decodeWorkflowRunDetailTimingComposedCoverage(
 
   switch (tag.value) {
     case "exact":
-      return decodeWorkflowRunDetailTimingComposedCoverageExact(fields.value);
+      return readRunCoverageExactInfo(fields.value);
     case "inconsistent":
-      return decodeWorkflowRunDetailTimingComposedCoverageInconsistent(fields.value);
+      return readRunCoverageInconsistentInfo(fields.value);
     case "partial":
-      return decodeWorkflowRunDetailTimingComposedCoveragePartial(fields.value);
+      return readRunCoveragePartialInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeWorkflowRunDetailTimingComposedCoverageExact(
+function readRunCoverageExactInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowRunDetailTimingComposedCoverageExact, MonitoringDecodeError> {
+): DecodeResult<RunCoverageExactInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -9072,11 +4109,11 @@ function decodeWorkflowRunDetailTimingComposedCoverageExact(
   );
 }
 
-function decodeWorkflowRunDetailTimingComposedCoverageInconsistent(
+function readRunCoverageInconsistentInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowRunDetailTimingComposedCoverageInconsistent, MonitoringDecodeError> {
+): DecodeResult<RunCoverageInconsistentInfo, MonitoringDecodeError> {
   const results = {
-    conflicts: fields.read("conflicts", listOf(decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflicts)),
+    conflicts: fields.read("conflicts", listOf(readRunConflictInfo)),
   };
 
   if (!allDecoded(results)) {
@@ -9097,10 +4134,10 @@ function decodeWorkflowRunDetailTimingComposedCoverageInconsistent(
   );
 }
 
-function decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflicts(
+function readRunConflictInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowRunDetailTimingComposedCoverageInconsistentConflicts, MonitoringDecodeError> {
+): DecodeResult<RunConflictInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -9115,17 +4152,17 @@ function decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflicts(
 
   switch (tag.value) {
     case "node":
-      return decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsNode(fields.value);
+      return readRunConflictNodeInfo(fields.value);
     case "pause":
-      return decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPause(fields.value);
+      return readRunConflictPauseInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsNode(
+function readRunConflictNodeInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowRunDetailTimingComposedCoverageInconsistentConflictsNode, MonitoringDecodeError> {
+): DecodeResult<RunConflictNodeInfo, MonitoringDecodeError> {
   const results = {
     taskIndex: fields.read("task_index", decodeInteger),
   };
@@ -9148,11 +4185,11 @@ function decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsNode(
   );
 }
 
-function decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPause(
+function readRunConflictPauseInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPause, MonitoringDecodeError> {
+): DecodeResult<RunConflictPauseInfo, MonitoringDecodeError> {
   const results = {
-    conflict: fields.read("conflict", decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflict),
+    conflict: fields.read("conflict", readTimingConflictInfo),
   };
 
   if (!allDecoded(results)) {
@@ -9173,218 +4210,11 @@ function decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPause
   );
 }
 
-function decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflict(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflict, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "clock_order":
-      return decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictClockOrder(fields.value);
-    case "missing_record":
-      return decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictMissingRecord(fields.value);
-    case "unexpected_event":
-      return decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictUnexpectedEvent(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictClockOrder(
+function readRunCoveragePartialInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictClockOrder, MonitoringDecodeError> {
+): DecodeResult<RunCoveragePartialInfo, MonitoringDecodeError> {
   const results = {
-    earlier: fields.read("earlier", decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictClockOrderEarlier),
-    earlierAt: fields.read("earlier_at", decodeDateTime),
-    later: fields.read("later", decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictClockOrderLater),
-    laterAt: fields.read("later_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "clockOrder",
-      earlier: results.earlier.value,
-      earlierAt: results.earlierAt.value,
-      later: results.later.value,
-      laterAt: results.laterAt.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictClockOrderEarlier(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictClockOrderEarlier, MonitoringDecodeError> {
-  switch (value) {
-    case "ATTEMPT_ENQUEUED":
-    case "ATTEMPT_RECORDED":
-    case "CHILD_COMPLETED":
-    case "CHILD_CREATED":
-    case "CLAIM":
-    case "FINALIZING":
-    case "FIRST_CLAIM":
-    case "LAST_SEEN":
-    case "NODE_COMPLETED":
-    case "NODE_CREATED":
-    case "NODE_ENQUEUED":
-    case "NODE_READY":
-    case "PLACEMENT":
-    case "READ_TIME":
-    case "RUN_COMPLETED":
-    case "RUN_PAUSED":
-    case "RUN_RESUMED":
-    case "START":
-    case "TASK_CREATED":
-    case "TASK_MOVED":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictClockOrderLater(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictClockOrderLater, MonitoringDecodeError> {
-  switch (value) {
-    case "ATTEMPT_ENQUEUED":
-    case "ATTEMPT_RECORDED":
-    case "CHILD_COMPLETED":
-    case "CHILD_CREATED":
-    case "CLAIM":
-    case "FINALIZING":
-    case "FIRST_CLAIM":
-    case "LAST_SEEN":
-    case "NODE_COMPLETED":
-    case "NODE_CREATED":
-    case "NODE_ENQUEUED":
-    case "NODE_READY":
-    case "PLACEMENT":
-    case "READ_TIME":
-    case "RUN_COMPLETED":
-    case "RUN_PAUSED":
-    case "RUN_RESUMED":
-    case "START":
-    case "TASK_CREATED":
-    case "TASK_MOVED":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictMissingRecord(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictMissingRecord, MonitoringDecodeError> {
-  const results = {
-    record: fields.read("record", decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictMissingRecordRecord),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "missingRecord",
-      record: results.record.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictMissingRecordRecord(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictMissingRecordRecord, MonitoringDecodeError> {
-  switch (value) {
-    case "ATTEMPT_ROW":
-    case "CHILD_RUN":
-    case "COMPLETION_TIME":
-    case "LINKED_TASK":
-    case "LINKED_WORK":
-    case "OPEN_ATTEMPT":
-    case "TASK_TIMES":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictUnexpectedEvent(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictUnexpectedEvent, MonitoringDecodeError> {
-  const results = {
-    event: fields.read("event", decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictUnexpectedEventEvent),
-    eventId: fields.read("event_id", decodeInteger),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "unexpectedEvent",
-      event: results.event.value,
-      eventId: results.eventId.value,
-    }),
-  );
-}
-
-function decodeWorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictUnexpectedEventEvent(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailTimingComposedCoverageInconsistentConflictsPauseConflictUnexpectedEventEvent, MonitoringDecodeError> {
-  switch (value) {
-    case "NODE_ENQUEUED":
-    case "NODE_READY":
-    case "TASK_MOVED":
-    case "WORKFLOW_PAUSED":
-    case "WORKFLOW_RESUMED":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowRunDetailTimingComposedCoveragePartial(
-  fields: FieldReader,
-): DecodeResult<WorkflowRunDetailTimingComposedCoveragePartial, MonitoringDecodeError> {
-  const results = {
-    reasons: fields.read("reasons", listOf(decodeWorkflowRunDetailTimingComposedCoveragePartialReasons)),
+    reasons: fields.read("reasons", listOf(readUnknownReason)),
   };
 
   if (!allDecoded(results)) {
@@ -9405,25 +4235,10 @@ function decodeWorkflowRunDetailTimingComposedCoveragePartial(
   );
 }
 
-function decodeWorkflowRunDetailTimingComposedCoveragePartialReasons(
+function readPauseIntervalInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowRunDetailTimingComposedCoveragePartialReasons, MonitoringDecodeError> {
-  switch (value) {
-    case "ATTEMPT_NOT_CAPTURED":
-    case "CLAIMS_NOT_COUNTED":
-    case "HISTORY_PRUNED":
-    case "WORKER_LOST":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
-function decodeWorkflowRunDetailTimingComposedPauses(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailTimingComposedPauses, MonitoringDecodeError> {
+): DecodeResult<PauseIntervalInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -9431,7 +4246,7 @@ function decodeWorkflowRunDetailTimingComposedPauses(
   }
 
   const results = {
-    end: fields.value.read("end", decodeWorkflowRunDetailTimingComposedPausesEnd),
+    end: fields.value.read("end", readPauseEndInfo),
     startedAt: fields.value.read("started_at", decodeDateTime),
   };
 
@@ -9453,10 +4268,10 @@ function decodeWorkflowRunDetailTimingComposedPauses(
   );
 }
 
-function decodeWorkflowRunDetailTimingComposedPausesEnd(
+function readPauseEndInfo(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowRunDetailTimingComposedPausesEnd, MonitoringDecodeError> {
+): DecodeResult<PauseEndInfo, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -9471,19 +4286,19 @@ function decodeWorkflowRunDetailTimingComposedPausesEnd(
 
   switch (tag.value) {
     case "open":
-      return decodeWorkflowRunDetailTimingComposedPausesEndOpen(fields.value);
+      return readPauseOpenInfo(fields.value);
     case "resumed":
-      return decodeWorkflowRunDetailTimingComposedPausesEndResumed(fields.value);
+      return readPauseResumedInfo(fields.value);
     case "run_ended":
-      return decodeWorkflowRunDetailTimingComposedPausesEndRunEnded(fields.value);
+      return readPauseRunEndedInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function decodeWorkflowRunDetailTimingComposedPausesEndOpen(
+function readPauseOpenInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowRunDetailTimingComposedPausesEndOpen, MonitoringDecodeError> {
+): DecodeResult<PauseOpenInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -9497,9 +4312,9 @@ function decodeWorkflowRunDetailTimingComposedPausesEndOpen(
   );
 }
 
-function decodeWorkflowRunDetailTimingComposedPausesEndResumed(
+function readPauseResumedInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowRunDetailTimingComposedPausesEndResumed, MonitoringDecodeError> {
+): DecodeResult<PauseResumedInfo, MonitoringDecodeError> {
   const results = {
     at: fields.read("at", decodeDateTime),
   };
@@ -9522,9 +4337,9 @@ function decodeWorkflowRunDetailTimingComposedPausesEndResumed(
   );
 }
 
-function decodeWorkflowRunDetailTimingComposedPausesEndRunEnded(
+function readPauseRunEndedInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowRunDetailTimingComposedPausesEndRunEnded, MonitoringDecodeError> {
+): DecodeResult<PauseRunEndedInfo, MonitoringDecodeError> {
   const results = {
     at: fields.read("at", decodeDateTime),
   };
@@ -9547,13 +4362,13 @@ function decodeWorkflowRunDetailTimingComposedPausesEndRunEnded(
   );
 }
 
-function decodeWorkflowRunDetailTimingUnavailable(
+function readRunTimingUnavailableInfo(
   fields: FieldReader,
-): DecodeResult<WorkflowRunDetailTimingUnavailable, MonitoringDecodeError> {
+): DecodeResult<RunTimingUnavailableInfo, MonitoringDecodeError> {
   const results = {
     asOf: fields.read("as_of", decodeDateTime),
     capturedSince: fields.read("captured_since", decodeDateTime),
-    reason: fields.read("reason", decodeWorkflowRunDetailTimingUnavailableReason),
+    reason: fields.read("reason", readUnavailableReason),
   };
 
   if (!allDecoded(results)) {
@@ -9576,23 +4391,17 @@ function decodeWorkflowRunDetailTimingUnavailable(
   );
 }
 
-function decodeWorkflowRunDetailTimingUnavailableReason(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowRunDetailTimingUnavailableReason, MonitoringDecodeError> {
-  switch (value) {
-    case "RUN_BEFORE_CAPTURE":
-    case "TIMING_BOUND_EXCEEDED":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
-}
-
 export function decodeWorkflowRunSummary(
   value: WireJson,
 ): DecodeResult<WorkflowRunSummary, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "WorkflowRunSummary", path: "$" });
+  return readWorkflowRunSummary(value, { model: "WorkflowRunSummary", path: "$" });
+}
+
+function readWorkflowRunSummary(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<WorkflowRunSummary, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -9634,16 +4443,23 @@ export function decodeWorkflowRunSummary(
 export function decodeWorkflowTaskDetail(
   value: WireJson,
 ): DecodeResult<WorkflowTaskDetail, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "WorkflowTaskDetail", path: "$" });
+  return readWorkflowTaskDetail(value, { model: "WorkflowTaskDetail", path: "$" });
+}
+
+function readWorkflowTaskDetail(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<WorkflowTaskDetail, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
   }
 
   const results = {
-    attempts: fields.value.read("attempts", listOf(decodeWorkflowTaskDetailAttempts)),
+    attempts: fields.value.read("attempts", listOf(readTaskAttemptInfo)),
     isSubworkflow: fields.value.read("is_subworkflow", decodeBoolean),
-    leaf: fields.value.read("leaf", nullableOf(decodeWorkflowTaskDetailLeaf)),
+    leaf: fields.value.read("leaf", nullableOf(readLeafTaskInfo)),
     nodeError: fields.value.read("node_error", nullableOf(decodeString)),
     nodeId: fields.value.read("node_id", nullableOf(decodeString)),
     nodeStatus: fields.value.read("node_status", decodeString),
@@ -9673,500 +4489,4 @@ export function decodeWorkflowTaskDetail(
       taskName: results.taskName.value,
     }),
   );
-}
-
-function decodeWorkflowTaskDetailAttempts(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowTaskDetailAttempts, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    attempt: fields.value.read("attempt", decodeInteger),
-    errorCode: fields.value.read("error_code", nullableOf(decodeString)),
-    errorMessage: fields.value.read("error_message", nullableOf(decodeString)),
-    failedReason: fields.value.read("failed_reason", nullableOf(decodeString)),
-    finishedAt: fields.value.read("finished_at", nullableOf(decodeDateTime)),
-    outcome: fields.value.read("outcome", decodeString),
-    phases: fields.value.read("phases", decodeWorkflowTaskDetailAttemptsPhases),
-    startedAt: fields.value.read("started_at", nullableOf(decodeDateTime)),
-    willRetry: fields.value.read("will_retry", decodeBoolean),
-    workerHostname: fields.value.read("worker_hostname", nullableOf(decodeString)),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      attempt: results.attempt.value,
-      errorCode: results.errorCode.value,
-      errorMessage: results.errorMessage.value,
-      failedReason: results.failedReason.value,
-      finishedAt: results.finishedAt.value,
-      outcome: results.outcome.value,
-      phases: results.phases.value,
-      startedAt: results.startedAt.value,
-      willRetry: results.willRetry.value,
-      workerHostname: results.workerHostname.value,
-    }),
-  );
-}
-
-function decodeWorkflowTaskDetailAttemptsPhases(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowTaskDetailAttemptsPhases, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "captured":
-      return decodeWorkflowTaskDetailAttemptsPhasesCaptured(fields.value);
-    case "not_captured":
-      return decodeWorkflowTaskDetailAttemptsPhasesNotCaptured(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowTaskDetailAttemptsPhasesCaptured(
-  fields: FieldReader,
-): DecodeResult<WorkflowTaskDetailAttemptsPhasesCaptured, MonitoringDecodeError> {
-  const results = {
-    claimedAt: fields.read("claimed_at", decodeDateTime),
-    claims: fields.read("claims", decodeWorkflowTaskDetailAttemptsPhasesCapturedClaims),
-    enqueuedAt: fields.read("enqueued_at", decodeDateTime),
-    finalizing: fields.read("finalizing", decodeWorkflowTaskDetailAttemptsPhasesCapturedFinalizing),
-    recordedBy: fields.read("recorded_by", decodeWorkflowTaskDetailAttemptsPhasesCapturedRecordedBy),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "captured",
-      claimedAt: results.claimedAt.value,
-      claims: results.claims.value,
-      enqueuedAt: results.enqueuedAt.value,
-      finalizing: results.finalizing.value,
-      recordedBy: results.recordedBy.value,
-    }),
-  );
-}
-
-function decodeWorkflowTaskDetailAttemptsPhasesCapturedClaims(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowTaskDetailAttemptsPhasesCapturedClaims, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "counted":
-      return decodeWorkflowTaskDetailAttemptsPhasesCapturedClaimsCounted(fields.value);
-    case "not_counted":
-      return decodeWorkflowTaskDetailAttemptsPhasesCapturedClaimsNotCounted(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowTaskDetailAttemptsPhasesCapturedClaimsCounted(
-  fields: FieldReader,
-): DecodeResult<WorkflowTaskDetailAttemptsPhasesCapturedClaimsCounted, MonitoringDecodeError> {
-  const results = {
-    count: fields.read("count", decodeInteger),
-    firstClaimedAt: fields.read("first_claimed_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "counted",
-      count: results.count.value,
-      firstClaimedAt: results.firstClaimedAt.value,
-    }),
-  );
-}
-
-function decodeWorkflowTaskDetailAttemptsPhasesCapturedClaimsNotCounted(
-  fields: FieldReader,
-): DecodeResult<WorkflowTaskDetailAttemptsPhasesCapturedClaimsNotCounted, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notCounted",
-    }),
-  );
-}
-
-function decodeWorkflowTaskDetailAttemptsPhasesCapturedFinalizing(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowTaskDetailAttemptsPhasesCapturedFinalizing, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "marked":
-      return decodeWorkflowTaskDetailAttemptsPhasesCapturedFinalizingMarked(fields.value);
-    case "not_marked":
-      return decodeWorkflowTaskDetailAttemptsPhasesCapturedFinalizingNotMarked(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowTaskDetailAttemptsPhasesCapturedFinalizingMarked(
-  fields: FieldReader,
-): DecodeResult<WorkflowTaskDetailAttemptsPhasesCapturedFinalizingMarked, MonitoringDecodeError> {
-  const results = {
-    finalizingAt: fields.read("finalizing_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "marked",
-      finalizingAt: results.finalizingAt.value,
-    }),
-  );
-}
-
-function decodeWorkflowTaskDetailAttemptsPhasesCapturedFinalizingNotMarked(
-  fields: FieldReader,
-): DecodeResult<WorkflowTaskDetailAttemptsPhasesCapturedFinalizingNotMarked, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notMarked",
-    }),
-  );
-}
-
-function decodeWorkflowTaskDetailAttemptsPhasesCapturedRecordedBy(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowTaskDetailAttemptsPhasesCapturedRecordedBy, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "cancel":
-      return decodeWorkflowTaskDetailAttemptsPhasesCapturedRecordedByCancel(fields.value);
-    case "recovery":
-      return decodeWorkflowTaskDetailAttemptsPhasesCapturedRecordedByRecovery(fields.value);
-    case "worker":
-      return decodeWorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorker(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowTaskDetailAttemptsPhasesCapturedRecordedByCancel(
-  fields: FieldReader,
-): DecodeResult<WorkflowTaskDetailAttemptsPhasesCapturedRecordedByCancel, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "cancel",
-    }),
-  );
-}
-
-function decodeWorkflowTaskDetailAttemptsPhasesCapturedRecordedByRecovery(
-  fields: FieldReader,
-): DecodeResult<WorkflowTaskDetailAttemptsPhasesCapturedRecordedByRecovery, MonitoringDecodeError> {
-  const results = {
-    lastSeenAt: fields.read("last_seen_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "recovery",
-      lastSeenAt: results.lastSeenAt.value,
-    }),
-  );
-}
-
-function decodeWorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorker(
-  fields: FieldReader,
-): DecodeResult<WorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorker, MonitoringDecodeError> {
-  const results = {
-    placement: fields.read("placement", decodeWorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacement),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "worker",
-      placement: results.placement.value,
-    }),
-  );
-}
-
-function decodeWorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacement(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacement, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const tag = fields.value.read("kind", decodeString);
-
-  if (!tag.ok) {
-    return tag;
-  }
-
-  switch (tag.value) {
-    case "not_observed":
-      return decodeWorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementNotObserved(fields.value);
-    case "placed":
-      return decodeWorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementPlaced(fields.value);
-    default:
-      return tagUnknown(fields.value, "kind", tag.value);
-  }
-}
-
-function decodeWorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementNotObserved(
-  fields: FieldReader,
-): DecodeResult<WorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementNotObserved, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notObserved",
-    }),
-  );
-}
-
-function decodeWorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementPlaced(
-  fields: FieldReader,
-): DecodeResult<WorkflowTaskDetailAttemptsPhasesCapturedRecordedByWorkerPlacementPlaced, MonitoringDecodeError> {
-  const results = {
-    placedAt: fields.read("placed_at", decodeDateTime),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "placed",
-      placedAt: results.placedAt.value,
-    }),
-  );
-}
-
-function decodeWorkflowTaskDetailAttemptsPhasesNotCaptured(
-  fields: FieldReader,
-): DecodeResult<WorkflowTaskDetailAttemptsPhasesNotCaptured, MonitoringDecodeError> {
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "notCaptured",
-    }),
-  );
-}
-
-function decodeWorkflowTaskDetailLeaf(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowTaskDetailLeaf, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    completedAt: fields.value.read("completed_at", nullableOf(decodeDateTime)),
-    enqueuedAt: fields.value.read("enqueued_at", nullableOf(decodeDateTime)),
-    errorCode: fields.value.read("error_code", nullableOf(decodeString)),
-    execS: fields.value.read("exec_s", nullableOf(decodeNumber)),
-    execution: fields.value.read("execution", nullableOf(decodeWorkflowTaskDetailLeafExecution)),
-    failedAt: fields.value.read("failed_at", nullableOf(decodeDateTime)),
-    failedReason: fields.value.read("failed_reason", nullableOf(decodeString)),
-    goodUntil: fields.value.read("good_until", nullableOf(decodeDateTime)),
-    maxRetries: fields.value.read("max_retries", decodeInteger),
-    queueS: fields.value.read("queue_s", nullableOf(decodeNumber)),
-    retryCount: fields.value.read("retry_count", decodeInteger),
-    startedAt: fields.value.read("started_at", nullableOf(decodeDateTime)),
-    status: fields.value.read("status", decodeString),
-    taskId: fields.value.read("task_id", decodeUuid),
-    traceId: fields.value.read("trace_id", nullableOf(decodeString)),
-    workerHostname: fields.value.read("worker_hostname", nullableOf(decodeString)),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      completedAt: results.completedAt.value,
-      enqueuedAt: results.enqueuedAt.value,
-      errorCode: results.errorCode.value,
-      execS: results.execS.value,
-      execution: results.execution.value,
-      failedAt: results.failedAt.value,
-      failedReason: results.failedReason.value,
-      goodUntil: results.goodUntil.value,
-      maxRetries: results.maxRetries.value,
-      queueS: results.queueS.value,
-      retryCount: results.retryCount.value,
-      startedAt: results.startedAt.value,
-      status: results.status.value,
-      taskId: results.taskId.value,
-      traceId: results.traceId.value,
-      workerHostname: results.workerHostname.value,
-    }),
-  );
-}
-
-function decodeWorkflowTaskDetailLeafExecution(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowTaskDetailLeafExecution, MonitoringDecodeError> {
-  switch (value) {
-    case "ISOLATED":
-    case "SHARED_ASYNC":
-    case "SHARED_THREAD":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
-  }
 }

@@ -28,7 +28,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::worker::executor::slots::{PoolBoard, PoolHealth};
+use crate::worker::executor::slots::board::PoolHealth;
+use crate::worker::executor::slots::PoolBoard;
 use crate::worker::liveness::{LockHold, LockHoldView};
 
 /// The time that one pass of the claim loop, or the wake after one of its
