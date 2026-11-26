@@ -86,6 +86,7 @@ export function upstreamValueKind(kind: Kind, place: string): Kind {
     case "json":
     case "conversion":
     case "checked":
+    case "lazy":
       throw new TypeError(`horsies: the kind ${kind.node} of ${place} is not an upstream outcome`);
     default:
       return unreachable(kind, "upstreamValueKind");
@@ -122,6 +123,7 @@ export function isTaskOutcomeKind(kind: Kind): boolean {
     case "json":
     case "conversion":
     case "checked":
+    case "lazy":
       return false;
     default:
       return unreachable(kind, "isTaskOutcomeKind");

@@ -39,7 +39,9 @@ export type EncodeRefusalKind =
   /** A value that is not a member of a literal, an enum or a union, or a tag that names no union member. */
   | "NotAMember"
   /** A user-side conversion or check refused the value; `detail` names the issues (paths and codes). */
-  | "CheckFailed";
+  | "CheckFailed"
+  /** A default function gave a value that does not encode under its kind; `detail` names the writer's refusal. */
+  | "DefaultRefused";
 
 /** Why the reader refuses a stored text under the declared kind. */
 export type DecodeRefusalKind =
@@ -66,7 +68,12 @@ export type DecodeRefusalKind =
   /** A stored value that is not a member of a literal, an enum or a union, or a tag that names no union member. */
   | "NotAMember"
   /** A user-side conversion or check refused the read value; `detail` names the issues (paths and codes). */
-  | "CheckFailed";
+  | "CheckFailed"
+  /**
+   * A default function gave a value that does not encode under its kind, at a worker-form decode of a text that
+   * leaves the member out; `detail` names the writer's refusal.
+   */
+  | "DefaultRefused";
 
 /** The writer refuses a value. */
 export type EncodeRefused = {

@@ -166,29 +166,12 @@ describe("zod adapter: refusal rules", () => {
     assert.equal(compileMember(z.string().optional()).ok, true);
   });
 
-  test("CHANGING_DEFAULT: a function default whose value changes at each read", () => {
-    assert.deepEqual(refusals(z.object({ id: z.uuid().default(() => crypto.randomUUID()) })), [
-      ["CHANGING_DEFAULT", "$.id", "default"],
-    ]);
-    assert.equal(compileValue(z.object({ tags: z.array(z.string()).default(() => []) })).ok, true);
-  });
+  test("RECURSIVE_PRESENCE: a recursive schema that is .optional(), .default() or .prefault() at its top", () => {
+    const optional: z.ZodType = z.object({ next: z.lazy(() => optional) }).optional();
+    const defaulted: z.ZodType = z.object({ items: z.array(z.lazy(() => defaulted)) }).default({ items: [] });
 
-  test("RECURSIVE: a schema that contains itself, through z.lazy() and through a getter", () => {
-    const tree: z.ZodType = z.lazy(() => z.object({ children: z.array(tree) }));
-
-    const category = z.object({
-      name: z.string(),
-      get children(): z.ZodArray<typeof category> {
-        return z.array(category);
-      },
-    });
-
-    assert.deepEqual(refusals(tree), [["RECURSIVE", "$.children[*]", "lazy"]]);
-    assert.deepEqual(refusals(category), [["RECURSIVE", "$.children[*]", "object"]]);
-  });
-
-  test("TUPLE_REST: z.tuple([...], rest)", () => {
-    assert.deepEqual(refusals(z.tuple([z.string()], z.int())), [["TUPLE_REST", "$", "tuple"]]);
+    assert.deepEqual(refusals(z.object({ head: optional })), [["RECURSIVE_PRESENCE", "$.head", "optional"]]);
+    assert.deepEqual(refusals(z.object({ head: defaulted })), [["RECURSIVE_PRESENCE", "$.head", "default"]]);
   });
 
   test("LITERAL_MEMBER: a bigint or an undefined literal member", () => {
