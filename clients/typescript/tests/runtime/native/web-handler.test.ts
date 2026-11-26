@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { allowAll, viewOnly } from "../../../horsies/src/web/auth.ts";
 import type { MonitoringAuthPolicy } from "../../../horsies/src/web/auth.ts";
@@ -20,6 +21,9 @@ import { parseTraceLink } from "../../../horsies/src/web/trace-link.ts";
 import type { TraceLinkRefusal } from "../../../horsies/src/web/trace-link.ts";
 import { manifestJson, manifestJsonWithSchema, testDatabaseUrl } from "./manifest.ts";
 import { probedHandle, testApp } from "./web-probe.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 /** The heartbeat of the event stream tests. */
 const TEST_HEARTBEAT_MS = 200;
@@ -213,6 +217,8 @@ describe("the refusals of the build and of the broker", () => {
     assert.throws(() => createMonitoringHandler(testApp(handle), { auth: allowAll() }), { name: "ClientDefect" });
   });
 
+  // The core builds the broker with no connect (each pool connects at its first checkout), so a database that does
+  // not answer is the core's read failure, not a handler with no broker.
   test("a broker that cannot connect answers 503 with the cause", async () => {
     const handler = createMonitoringHandler(testApp(probedHandle(manifestJson(REFUSED_DATABASE_URL, false))), {
       auth: allowAll(),
@@ -223,7 +229,9 @@ describe("the refusals of the build and of the broker", () => {
 
     assert.equal(response.status, 503);
     assert.ok(body instanceof Object);
-    assert.match(String(Reflect.get(body, "detail")), /^The monitoring handler has no broker: /u);
+    const detail = String(Reflect.get(body, "detail"));
+    assert.match(detail, /^Task list query failed: /u);
+    assert.ok(detail.includes(`could not open a connection: connecting to ${REFUSED_DATABASE_URL} failed`), detail);
   });
 
   test("the core accepts a trace link template", () => {

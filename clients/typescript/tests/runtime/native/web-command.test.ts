@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
 
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { allowAll } from "../../../horsies/src/web/auth.ts";
 import { serveOnBun } from "../../../horsies/src/web/bun-server.ts";
@@ -13,6 +14,9 @@ import { serveOnNode } from "../../../horsies/src/web/node-server.ts";
 import type { HandlerFailureReport, RunningServer, ServeOutcome } from "../../../horsies/src/web/server.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
 import { probedHandle, testApp } from "./web-probe.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 /** Whether this process runs on Bun. */
 const notOnBun = process.versions["bun"] === undefined;

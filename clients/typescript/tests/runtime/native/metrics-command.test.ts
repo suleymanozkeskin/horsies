@@ -9,12 +9,16 @@ import { before, describe, test } from "node:test";
 
 import { EXIT_USAGE } from "../../../horsies/src/cli/usage.ts";
 import { metricsCommandDeps, runMetricsCommand } from "../../../horsies/src/cli/metrics-command.ts";
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { envelopeValue, nativeValueAsync } from "../../../horsies/src/native/call/envelope.ts";
 import { fleetMetricsAddon } from "../../../horsies/src/native/facades/fleet-metrics.ts";
 import type { NativeFleetMetricsServer } from "../../../horsies/src/native/facades/fleet-metrics.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import type { CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 /** How many times a test asks the endpoint before it gives up. */
 const MAX_ENDPOINT_TRIES = 50;
