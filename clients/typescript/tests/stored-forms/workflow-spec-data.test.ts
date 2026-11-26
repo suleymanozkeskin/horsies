@@ -35,8 +35,8 @@ const node = h.object({
   input_json: h.string(),
   dependencies: h.array(h.int()),
   args_from: h.record(h.int()),
-  workflow_ctx_from: h.array(h.string()),
-  allow_failed_deps: h.boolean(),
+  workflow_context_from: h.array(h.string()),
+  allow_failed_dependencies: h.boolean(),
   join,
   body,
 });
