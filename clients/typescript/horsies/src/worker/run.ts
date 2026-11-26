@@ -25,6 +25,7 @@ import type { CoreHandle } from "../native/handle/core-handle.ts";
 import { setPanicRule } from "../native/process-core/process-core.ts";
 import { checkAppConfig, checkTaskOptions, parseDeclaredErrorCodes } from "../native/sends/sends.ts";
 import { prepareWorker, requestWorkerStop, runWorker } from "../native/worker/worker.ts";
+import { appCoreHandle } from "../app/core-access.ts";
 import { configureLogging } from "../logging.ts";
 import { ClientDefect, CoreError } from "../thrown-errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
@@ -256,7 +257,7 @@ export const NATIVE_WORKER_CALLS: NativeWorkerCalls = Object.freeze({ prepareWor
 
 /**
  * The worker run of this process: the addon, the process facts and stderr; `stopOnSignals` from the command. The run
- * gets the core handle that `Horsies.create` built for the app (`appHandle`).
+ * gets the core handle that `Horsies.create` built for the app (`appCoreHandle`).
  */
 export function processWorkerRunDeps(
   context: AppContext,
@@ -272,27 +273,8 @@ export function processWorkerRunDeps(
       process.stderr.write(`${line}\n`);
     },
     prepare: (appConfigJson, startJson) => native.prepareWorker(appConfigJson, startJson),
-    run: async (worker) => native.runWorker(worker, appHandle(context)),
+    run: async (worker) => native.runWorker(worker, appCoreHandle(context.core)),
     requestStop: (worker) => native.requestWorkerStop(worker),
     stopOnSignals,
   };
-}
-
-/**
- * The core handle that `Horsies.create` built for the app on the main thread. The worker serves the child spec source
- * that the app registers on it, and the live check connects through it. A worker and its check run on a main thread,
- * so another core access is a defect.
- */
-export function appHandle(context: AppContext): CoreHandle {
-  switch (context.core.kind) {
-    case "addon":
-      return context.core.handle;
-    case "seatRelay":
-    case "noCore":
-      return raiseDefect(
-        new ClientDefect({ subject: "appHandle", rule: "a worker and its check run on a main thread, where the app holds its core handle" }),
-      );
-    default:
-      return unreachable(context.core);
-  }
 }

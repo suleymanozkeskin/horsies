@@ -1,8 +1,9 @@
 // The monitoring area of the app: `app.monitoring`, `app.pingDatabase` and `app.pingWorkers`.
 //
 // The app hub builds the area with the core access of its thread and puts its three members on the app. On a main
-// thread each call uses the app's core handle (in a worker child, the child's producer handle) and loads the addon at
-// its first use. In a worker thread a call throws `AddonOutsideMainThread`: the seat relay serves no facade operation.
+// thread each call uses the app's core handle (`appCoreHandle`; in a worker child, the child's producer handle) and
+// loads the addon at its first use. In a worker thread a call throws `AddonOutsideMainThread`: the seat relay serves no
+// facade operation (#2481).
 
 import { appCoreHandle, type CoreAccess } from "../app/core-access.ts";
 import type { TaskId, WorkflowId } from "../contract/ids.ts";
