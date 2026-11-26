@@ -124,7 +124,7 @@ mod tests {
                     max_concurrency: Some(5),
                 },
             ]),
-            broker: PostgresConfig {
+            database: PostgresConfig {
                 database_url: "postgresql://localhost/test".to_owned(),
                 session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
                 pgbouncer_transaction_mode: false,
@@ -221,7 +221,7 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: PostgresConfig {
+            database: PostgresConfig {
                 database_url: "postgresql://localhost/test".to_owned(),
                 session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
                 pgbouncer_transaction_mode: false,

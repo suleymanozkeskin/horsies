@@ -36,7 +36,7 @@ class TestEngineKwargsHideParameters:
         connectivity step and the worker connection step build no engine."""
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(database_url=RUNTIME_URL),
+                database=PostgresConfig(database_url=RUNTIME_URL),
                 worker_profiles={
                     'small': WorkerProfile(isolated=IsolatedChildren(count=1)),
                 },

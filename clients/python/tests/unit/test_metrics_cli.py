@@ -147,7 +147,7 @@ class TestLabelNames:
     """The label names are the queues and the schedules of the app config."""
 
     def test_a_default_config_has_the_default_queue_and_no_schedule(self) -> None:
-        app = Horsies(AppConfig(broker=broker_config()))
+        app = Horsies(AppConfig(database=broker_config()))
 
         assert fleet_label_names(app) == FleetLabelNames(
             queues=('default',), schedules=()
@@ -156,7 +156,7 @@ class TestLabelNames:
     def test_a_custom_config_has_its_queues_and_its_schedules(self) -> None:
         app = Horsies(
             AppConfig(
-                broker=broker_config(),
+                database=broker_config(),
                 queue_mode=QueueMode.CUSTOM,
                 custom_queues=[
                     CustomQueueConfig(name='fast'),
@@ -173,7 +173,7 @@ class TestLabelNames:
     def test_a_name_that_cannot_be_a_label_value_is_not_refused(self) -> None:
         app = Horsies(
             AppConfig(
-                broker=broker_config(),
+                database=broker_config(),
                 schedule=ScheduleConfig(
                     schedules=[daily('(unknown)'), daily('nightly')]
                 ),

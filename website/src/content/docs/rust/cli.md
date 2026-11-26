@@ -26,7 +26,7 @@ use std::process::ExitCode;
 use horsies::{AppConfig, Horsies, ValidationReport};
 
 fn build_app() -> Result<Horsies, ValidationReport> {
-    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+    let config = AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies");
     Horsies::new(config)
 }
 
@@ -60,7 +60,7 @@ use std::process::ExitCode;
 use horsies::{AppConfig, ChildHostExit, ChildMode, Horsies, ValidationReport, WorkerRunOptions};
 
 fn build_app() -> Result<Horsies, ValidationReport> {
-    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+    let config = AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies");
     Horsies::new(config)
 }
 
@@ -209,7 +209,7 @@ use horsies::cli::LogFormat;
 use horsies::{AppConfig, Horsies, ValidationReport};
 
 fn build_app() -> Result<Horsies, ValidationReport> {
-    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+    let config = AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies");
     Horsies::new(config)
 }
 
@@ -318,7 +318,7 @@ horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
 A config file:
 
 ```toml
-[broker]
+[database]
 database_url = "postgresql://app:secret@db.example.com:5432/horsies"
 ```
 

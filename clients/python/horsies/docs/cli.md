@@ -301,7 +301,7 @@ import os
 from pydantic import SecretStr
 
 config = AppConfig(
-    broker=PostgresConfig(database_url=SecretStr(os.environ["DATABASE_URL"])),
+    database=PostgresConfig(database_url=SecretStr(os.environ["DATABASE_URL"])),
 )
 ```
 

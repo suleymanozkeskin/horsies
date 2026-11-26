@@ -632,9 +632,9 @@ pub async fn check_worker_connections(
                 .collect()
         }
     };
-    match limit_read(&profiles, &config.broker) {
+    match limit_read(&profiles, &config.database) {
         LimitRead::NotNeeded => Vec::new(),
-        LimitRead::Needed => read_and_compare(&profiles, &config.broker, broker).await,
+        LimitRead::Needed => read_and_compare(&profiles, &config.database, broker).await,
     }
 }
 

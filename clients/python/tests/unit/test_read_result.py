@@ -237,7 +237,7 @@ def test_a_handle_keeps_only_final_reads(read: ReadResult[Any, TaskError], final
 @pytest.fixture
 def app() -> Generator[Horsies, None, None]:
     """An app whose broker cannot connect; its core handle records each call."""
-    app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))))
+    app = Horsies(AppConfig(database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))))
     broker = app.get_broker()
     broker._core_handle = MagicMock(wraps=broker._core_handle)
     yield app
@@ -390,7 +390,7 @@ def test_workflow_value_reads_as_succeeded() -> None:
 def worker_app(monkeypatch: pytest.MonkeyPatch) -> Horsies:
     """An app with a source task and a receiver task, bound as the app of
     this process for one test."""
-    app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))))
+    app = Horsies(AppConfig(database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))))
 
     @app.task('produce')
     def produce() -> Result[int, TaskError]:  # pyright: ignore[reportUnusedFunction]

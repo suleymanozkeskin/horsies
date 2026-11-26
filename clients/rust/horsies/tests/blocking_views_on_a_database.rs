@@ -232,7 +232,7 @@ where
 /// An app on the database of `url` with the tasks `echo` and `answer`, and
 /// the function of `echo`. No I/O.
 fn app_on(url: &str) -> (Horsies, TaskFunction<echo::Input, u32, Infallible>) {
-    let mut app = Horsies::new(AppConfig::for_database_url(url)).expect("the app");
+    let mut app = Horsies::new(AppConfig::from_database_url(url)).expect("the app");
     let echo_function = echo::register(&mut app).expect("register echo");
     let _answer_function = answer::register(&mut app).expect("register answer");
     (app, echo_function)

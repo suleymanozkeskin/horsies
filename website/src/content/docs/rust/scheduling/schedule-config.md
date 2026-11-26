@@ -50,7 +50,7 @@ fn schedules() -> Result<ScheduleConfig, Box<dyn std::error::Error>> {
 fn build_app(database_url: &str) -> Result<Horsies, Box<dyn std::error::Error>> {
     let config = AppConfig {
         schedule: Some(schedules()?),
-        ..AppConfig::for_database_url(database_url)
+        ..AppConfig::from_database_url(database_url)
     };
     let mut app = Horsies::new(config)?;
     let _report = build_report::register(&mut app)?;

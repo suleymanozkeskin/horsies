@@ -19,7 +19,7 @@ from horsies.core.types.result import Ok, Result
 def _make_app() -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://user:pass@localhost/db',
             ),
         )

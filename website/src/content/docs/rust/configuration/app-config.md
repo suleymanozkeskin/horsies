@@ -15,7 +15,7 @@ tags: [rust, configuration, AppConfig, Horsies, SchemaMode]
 use horsies::{AppConfig, Horsies, ValidationReport};
 
 fn build_app() -> Result<Horsies, ValidationReport> {
-    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+    let config = AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies");
     Horsies::new(config)
 }
 ```
@@ -31,17 +31,17 @@ fn build_app() -> Result<Horsies, ValidationReport> {
 | `Horsies::with_schema_mode(config, SchemaMode::AssumeInitialized)` | `AssumeInitialized` | Runs no schema DDL and uses no listener |
 | `Horsies::with_core_connection(config, connection)` | the mode of `connection` | Uses an `Arc<CoreConnection>` that another app or the caller shares. The connection settings are those of `connection` |
 
-See [Broker Config](/horsies/configuration/broker-config/#schema-initialization) for the install.
+See [Database Config](/horsies/configuration/broker-config/#schema-initialization) for the install.
 
 ## AppConfig
 
-`AppConfig` is the core's one config schema, which the Python client reads too. `AppConfig::for_database_url(url)` builds it with every default. The meaning, the default and the range of each field are on the shared pages.
+`AppConfig` is the core's one config schema, which the Python client reads too. `AppConfig::from_database_url(url)` builds it with every default. The meaning, the default and the range of each field are on the shared pages.
 
 | Field | Type | Meaning |
 |-------|------|---------|
 | `queue_mode` | `QueueMode` (`Default`, `Custom`) | [Queue Modes](/horsies/concepts/queue-modes/) |
 | `custom_queues` | `Option<Vec<CustomQueueConfig>>` (`name`, `priority`, `max_concurrency`) | [Queue Modes](/horsies/concepts/queue-modes/) |
-| `broker` | `PostgresConfig` | [Broker Config](/horsies/configuration/broker-config/) |
+| `database` | `PostgresConfig` | [Database Config](/horsies/configuration/broker-config/) |
 | `cluster_wide_cap` | `ClusterCapSetting::ClusterCap { tasks }` or `ClusterCapSetting::NoClusterCap` (default) | [Concurrency](/horsies/workers/concurrency/) |
 | `prefetch_buffer` | `u32` | [Concurrency](/horsies/workers/concurrency/) |
 | `claim_lease_ms` | `Option<u32>` | [Concurrency](/horsies/workers/concurrency/) |
@@ -64,7 +64,7 @@ fn build_app(database_url: &str) -> Result<Horsies, ValidationReport> {
             CustomQueueConfig { name: "critical".to_owned(), priority: 1, max_concurrency: None },
             CustomQueueConfig { name: "standard".to_owned(), priority: 50, max_concurrency: Some(10) },
         ]),
-        ..AppConfig::for_database_url(database_url)
+        ..AppConfig::from_database_url(database_url)
     };
     Horsies::new(config)
 }
@@ -72,7 +72,7 @@ fn build_app(database_url: &str) -> Result<Horsies, ValidationReport> {
 
 ### PostgresConfig
 
-`PostgresConfig::from_url(url)` builds the broker config with every default. Four fields are enums, as the Python classes:
+`PostgresConfig::from_database_url(url)` builds the database config with every default. Four fields are enums, as the Python classes:
 
 | Field | Type | Python classes |
 |-------|------|----------------|
@@ -83,7 +83,7 @@ fn build_app(database_url: &str) -> Result<Horsies, ValidationReport> {
 
 The keepalive and user timeout values are plain `u32` numbers. `Horsies::new` refuses a value outside its bound with `HRS-215` (`CONFIG_INVALID_KEEPALIVE`), and the message names the field, for example `tcp_keepalives.probes`. In a TOML file, a separate session database is `session_database = { kind = "SEPARATE", url = "postgresql://..." }`.
 
-The other fields have the names and the meanings of the [Broker Config](/horsies/configuration/broker-config/) table.
+The other fields have the names and the meanings of the [Database Config](/horsies/configuration/broker-config/) table.
 
 #### Pool Size
 
@@ -105,12 +105,12 @@ use horsies::{AppConfig, Horsies, PostgresConfig, ValidationReport};
 
 fn build_high_traffic_app(database_url: &str) -> Result<Horsies, ValidationReport> {
     let config = AppConfig {
-        broker: PostgresConfig {
+        database: PostgresConfig {
             pool_size: 20,
             max_overflow: 40,
-            ..PostgresConfig::from_url(database_url)
+            ..PostgresConfig::from_database_url(database_url)
         },
-        ..AppConfig::for_database_url(database_url)
+        ..AppConfig::from_database_url(database_url)
     };
     Horsies::new(config)
 }
@@ -122,7 +122,7 @@ fn build_high_traffic_app(database_url: &str) -> Result<Horsies, ValidationRepor
 
 | Config | Refusal |
 |--------|---------|
-| `broker.pool_size` outside 1 to 10,000, or `broker.max_overflow` above 10,000 | `HorsiesError` "invalid broker config: broker.<field>: ..." with no code |
+| `database.pool_size` outside 1 to 10,000, or `database.max_overflow` above 10,000 | `HorsiesError` "invalid database config: database.<field>: ..." with no code |
 | A worker profile whose `preload` is `ChildPreload::Library` or `ChildPreload::App` | `HRS-218` (`ConfigInvalidWorkerProfile`) with the path `worker_profiles.<name>.preload`. A Rust worker starts each child with `exec` of its own binary, so there is nothing to preload. A profile that does not set `preload` (`..WorkerProfile::default()`, or a config file without the key) has `ChildPreload::NoPreload` |
 
 ## Queues

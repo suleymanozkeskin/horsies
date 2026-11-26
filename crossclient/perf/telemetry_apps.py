@@ -129,7 +129,7 @@ def telemetry_drain_app(dsn: str, app_telemetry: AppTelemetry) -> DrainApp:
     providers in each child. No I/O."""
     app = Horsies(
         AppConfig(
-            broker=drain_broker(dsn),
+            database=drain_broker(dsn),
             worker_profiles=DRAIN_WORKER_PROFILES,
             tracing=tracing_setting(app_telemetry),
         ),
@@ -152,7 +152,7 @@ def telemetry_public_app(dsn: str, app_telemetry: AppTelemetry) -> Horsies:
     install_discarding_providers()
     return Horsies(
         AppConfig(
-            broker=public_call_broker(dsn),
+            database=public_call_broker(dsn),
             tracing=tracing_setting(app_telemetry),
         ),
     )

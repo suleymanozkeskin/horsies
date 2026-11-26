@@ -104,8 +104,8 @@ pub(crate) fn worker_manifest(
     })?;
     Ok(wire::WorkerManifest {
         manifest_version: wire::WorkerManifestVersion::CURRENT,
-        database: database_manifest(&config.broker),
-        send: send_manifest(&config.broker),
+        database: database_manifest(&config.database),
+        send: send_manifest(&config.database),
         profiles,
         profile,
         metrics_endpoint,
@@ -297,7 +297,7 @@ mod tests {
     }
 
     fn config() -> AppConfig {
-        let mut config = AppConfig::for_database_url("postgresql://app@db.example/horsies");
+        let mut config = AppConfig::from_database_url("postgresql://app@db.example/horsies");
         config.worker_profiles.insert("web".to_owned(), profile());
         config
     }

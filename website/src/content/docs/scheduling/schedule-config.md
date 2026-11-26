@@ -15,7 +15,7 @@ Top-level scheduler configuration added to `AppConfig`.
 from horsies.core.models.schedule import ScheduleConfig, TaskSchedule
 
 config = AppConfig(
-    broker=PostgresConfig(...),
+    database=PostgresConfig(...),
     schedule=ScheduleConfig(
         enabled=True,
         check_interval_seconds=1,

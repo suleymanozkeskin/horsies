@@ -17,7 +17,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, is_ok, is_err
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb"),
     ),
 ))

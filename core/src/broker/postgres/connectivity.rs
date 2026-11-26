@@ -258,7 +258,7 @@ mod tests {
         session_url: Option<&str>,
         transaction_mode: bool,
     ) -> PostgresConfig {
-        let mut config = PostgresConfig::from_url(database_url);
+        let mut config = PostgresConfig::from_database_url(database_url);
         config.session_database = match session_url {
             None => crate::core::config::SessionDatabase::SameAsDatabaseUrl,
             Some(url) => crate::core::config::SessionDatabase::Separate {

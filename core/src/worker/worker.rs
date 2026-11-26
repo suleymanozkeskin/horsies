@@ -1520,7 +1520,8 @@ impl Worker {
         // Server facts of the profile, before any claim: a warning, never a
         // refusal (Python `_log_connection_fit`).
         let _logged =
-            log_connection_fit_at_boot(&self.profile, &self.app_config.broker, &self.broker).await;
+            log_connection_fit_at_boot(&self.profile, &self.app_config.database, &self.broker)
+                .await;
         let batcher = match self.finalize_batcher() {
             Ok(batcher) => batcher,
             Err(error) => {
@@ -2130,7 +2131,7 @@ impl Worker {
         // stops the worker through its token.
         let beats_cancel = CancellationToken::new();
         let fail_closed_stop = FailClosedStop::new(self.cancel.clone());
-        let beat_pool = runner_beat_pool(&self.app_config.broker).map_err(|error| {
+        let beat_pool = runner_beat_pool(&self.app_config.database).map_err(|error| {
             WorkerError::Config(format!("the runner heartbeat pool is refused: {error}"))
         })?;
         let (runner_beat_watch, runner_beats) = launch_runner_beats(
@@ -2289,7 +2290,7 @@ impl Worker {
         &self,
         live: &LiveDispatches,
     ) -> Result<Option<StartedLivenessLock>, WorkerError> {
-        let plan = liveness_connect_plan(&self.app_config.broker)
+        let plan = liveness_connect_plan(&self.app_config.database)
             .map_err(|refused| WorkerError::LivenessLock(LivenessStartError::Plan(refused)))?;
         let plan = Arc::new(plan);
         let rule = LivenessRule::of_config(&self.app_config.recovery);
@@ -2471,7 +2472,7 @@ mod tests {
         use crate::worker::executor::protocol::{
             ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
         };
-        let database_url = DatabaseUrl::new(app_config.broker.database_url.clone());
+        let database_url = DatabaseUrl::new(app_config.database.database_url.clone());
         Worker::of_child_specs(
             broker,
             crate::test_support::child_specs::no_child_specs(),
@@ -2533,7 +2534,7 @@ mod tests {
                 pool.url(),
                 crate::ClientFamily::Rust,
             )),
-            AppConfig::for_database_url("postgresql://horsies@127.0.0.1:1/horsies"),
+            AppConfig::from_database_url("postgresql://horsies@127.0.0.1:1/horsies"),
             WorkerConfig::default(),
         );
 
@@ -2565,7 +2566,7 @@ mod tests {
         ));
         let worker = worker_of_one_idle_child(
             Arc::clone(&broker),
-            AppConfig::for_database_url("postgresql://horsies@127.0.0.1:1/horsies"),
+            AppConfig::from_database_url("postgresql://horsies@127.0.0.1:1/horsies"),
             WorkerConfig {
                 queues: vec!["listener_boot_q".to_owned()],
                 ..WorkerConfig::default()
@@ -3169,7 +3170,7 @@ mod tests {
             .expect("database start with retry");
         let connections = run
             .find(
-                "log_connection_fit_at_boot(&self.profile, &self.app_config.broker, &self.broker)",
+                "log_connection_fit_at_boot(&self.profile, &self.app_config.database, &self.broker)",
             )
             .expect("connection fit at boot");
         let banner = run.find("print_banner(").expect("startup banner");
@@ -3217,7 +3218,7 @@ mod tests {
                 crate::ClientFamily::Rust,
             )),
             crate::test_support::child_specs::no_child_specs(),
-            AppConfig::for_database_url(url),
+            AppConfig::from_database_url(url),
             WorkerConfig::default(),
             SelectedProfile {
                 name: "default".to_owned(),
@@ -3249,7 +3250,7 @@ mod tests {
                 crate::ClientFamily::Rust,
             )),
             crate::test_support::child_specs::no_child_specs(),
-            AppConfig::for_database_url(url),
+            AppConfig::from_database_url(url),
             WorkerConfig::default(),
             SelectedProfile {
                 name: "empty".to_owned(),
@@ -3295,7 +3296,7 @@ mod tests {
                     crate::ClientFamily::Rust,
                 )),
                 crate::test_support::child_specs::no_child_specs(),
-                AppConfig::for_database_url(url),
+                AppConfig::from_database_url(url),
                 WorkerConfig::default(),
                 SelectedProfile {
                     name: name.to_owned(),
@@ -3982,7 +3983,7 @@ mod tests {
     /// with no `claim_lease_ms`, claims carry the 60 s default lease.
     #[test]
     fn hard_cap_returns_default_lease() {
-        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        let mut app_config = AppConfig::from_database_url("postgresql://unused/test");
         assert_eq!(app_config.claim_lease_ms, None);
         assert_eq!(
             effective_claim_lease_ms(&app_config),
@@ -5451,7 +5452,7 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: PostgresConfig {
+            database: PostgresConfig {
                 database_url: config_url,
                 session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
                 pgbouncer_transaction_mode: false,

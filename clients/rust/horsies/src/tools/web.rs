@@ -32,7 +32,7 @@ client-supplied header makes this mode trivially spoofable, and horsies cannot d
 /// The arguments of `horsies web`.
 #[derive(Debug, Clone, Args)]
 pub(super) struct WebArgs {
-    /// A TOML file of AppConfig; its broker section names the database. Omit
+    /// A TOML file of AppConfig; its database section names the database. Omit
     /// it when using --database-url.
     #[arg(
         value_name = "CONFIG",
@@ -376,14 +376,14 @@ fn resolve_config(source: &ConfigSource<'_>) -> Result<AppConfig, WebError> {
             session_url,
             pgbouncer_transaction_mode,
         } => {
-            let mut config = AppConfig::for_database_url(*url);
-            config.broker.session_database = match session_url {
+            let mut config = AppConfig::from_database_url(*url);
+            config.database.session_database = match session_url {
                 None => SessionDatabase::SameAsDatabaseUrl,
                 Some(url) => SessionDatabase::Separate {
                     url: (*url).to_owned(),
                 },
             };
-            config.broker.pgbouncer_transaction_mode = *pgbouncer_transaction_mode;
+            config.database.pgbouncer_transaction_mode = *pgbouncer_transaction_mode;
             Ok(config)
         }
     }
@@ -480,17 +480,17 @@ mod tests {
     fn a_toml_config_keeps_its_broker_section() {
         let config = parse_config(
             Path::new("horsies.toml"),
-            "[broker]\ndatabase_url = \"postgresql://pool/horsies\"\npgbouncer_transaction_mode = \
-             true\n[broker.session_database]\nkind = \"SEPARATE\"\nurl = \
+            "[database]\ndatabase_url = \"postgresql://pool/horsies\"\npgbouncer_transaction_mode = \
+             true\n[database.session_database]\nkind = \"SEPARATE\"\nurl = \
              \"postgresql://direct/horsies\"\n",
         )
         .unwrap();
-        assert_eq!(config.broker.database_url, "postgresql://pool/horsies");
+        assert_eq!(config.database.database_url, "postgresql://pool/horsies");
         assert_eq!(
-            config.broker.effective_session_database_url(),
+            config.database.effective_session_database_url(),
             "postgresql://direct/horsies"
         );
-        assert!(config.broker.pgbouncer_transaction_mode);
+        assert!(config.database.pgbouncer_transaction_mode);
     }
 
     /// #553: a key that no config section has is refused by name.
@@ -498,11 +498,11 @@ mod tests {
     fn an_unknown_toml_key_is_refused_by_name() {
         for (text, key) in [
             (
-                "databse_url = \"x\"\n[broker]\ndatabase_url = \"postgresql://h/d\"\n",
+                "databse_url = \"x\"\n[database]\ndatabase_url = \"postgresql://h/d\"\n",
                 "databse_url",
             ),
             (
-                "[broker]\ndatabase_url = \"postgresql://h/d\"\npool_sise = 3\n",
+                "[database]\ndatabase_url = \"postgresql://h/d\"\npool_sise = 3\n",
                 "pool_sise",
             ),
         ] {
@@ -521,12 +521,12 @@ mod tests {
             pgbouncer_transaction_mode: true,
         })
         .unwrap();
-        assert_eq!(config.broker.database_url, "postgresql://pool/horsies");
+        assert_eq!(config.database.database_url, "postgresql://pool/horsies");
         assert_eq!(
-            config.broker.effective_session_database_url(),
+            config.database.effective_session_database_url(),
             "postgresql://direct/horsies"
         );
-        assert!(config.broker.pgbouncer_transaction_mode);
+        assert!(config.database.pgbouncer_transaction_mode);
     }
 
     #[test]

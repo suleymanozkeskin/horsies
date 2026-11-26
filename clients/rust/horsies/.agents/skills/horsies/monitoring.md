@@ -334,7 +334,7 @@ horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
 
 | Option | Default | Description |
 |---|---|---|
-| `CONFIG` | none | A TOML file of `AppConfig`; its `[broker]` section names the database. Give exactly one of `CONFIG` and `--database-url` |
+| `CONFIG` | none | A TOML file of `AppConfig`; its `[database]` section names the database. Give exactly one of `CONFIG` and `--database-url` |
 | `--database-url URL` | none | Monitor this database, with the default of every other setting |
 | `--session-database-url URL` | none | A direct or session-capable URL when `--database-url` is pooled |
 | `--pgbouncer-transaction-mode` | off | `--database-url` is a PgBouncer transaction-pool endpoint. Needs `--session-database-url` |

@@ -151,14 +151,14 @@ impl Instance {
 
     /// The configuration of the instance on `connection`.
     pub fn config(self, connection: &Connection) -> AppConfig {
-        let mut config = AppConfig::for_database_url(connection.database_url.clone());
-        config.broker.pool_size = POOL_SIZE;
-        config.broker.max_overflow = POOL_OVERFLOW;
+        let mut config = AppConfig::from_database_url(connection.database_url.clone());
+        config.database.pool_size = POOL_SIZE;
+        config.database.max_overflow = POOL_OVERFLOW;
         if let Some(session) = &connection.session_database_url {
-            config.broker.session_database = horsies::SessionDatabase::Separate {
+            config.database.session_database = horsies::SessionDatabase::Separate {
                 url: session.clone(),
             };
-            config.broker.pgbouncer_transaction_mode = true;
+            config.database.pgbouncer_transaction_mode = true;
         }
         config.worker_profiles = Profile::ALL
             .into_iter()

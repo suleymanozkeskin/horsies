@@ -28,7 +28,7 @@ fn fixture() -> wire::WorkerManifest {
 }
 
 fn config() -> AppConfig {
-    AppConfig::for_database_url("postgresql://app@db.example/horsies")
+    AppConfig::from_database_url("postgresql://app@db.example/horsies")
 }
 
 fn sections(config: &AppConfig) -> ConfigSections {

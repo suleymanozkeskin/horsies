@@ -63,7 +63,7 @@ NODE_ID: Final = f'{WORKFLOW_NAME}:0'
 APP: Final = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
+        database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
     ),
 )
 

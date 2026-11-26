@@ -382,7 +382,7 @@ class PostgresConfig(BaseModel):
         if not isinstance(data, dict):
             return data
         fields = cast('dict[str, object]', data)
-        report = ValidationReport('broker')
+        report = ValidationReport('database')
         for name, pool_argument in MOVED_TO_WORKER_PROFILE.items():
             if name in fields:
                 report.add(_moved_child_pool_field_error(name, pool_argument))

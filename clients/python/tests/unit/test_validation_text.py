@@ -511,7 +511,7 @@ class TestDefinitionTimeOptions:
     def test_refused_retry_policy_metadata_holds_no_value(self) -> None:
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(database_url=SecretStr('postgresql://x/y')),
+                database=PostgresConfig(database_url=SecretStr('postgresql://x/y')),
             ),
         )
         app.tasks['test.metadata'] = cast(Any, SimpleNamespace(

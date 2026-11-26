@@ -87,7 +87,7 @@ TASK_ID = '0b6f2f0e-6c1d-7f7a-9a52-3d2b1c0e9f82'
 def app() -> Generator[Horsies, None, None]:
     """An app whose broker cannot connect, and whose core handle records each
     call it forwards."""
-    app = Horsies(AppConfig(broker=PostgresConfig(
+    app = Horsies(AppConfig(database=PostgresConfig(
         database_url=SecretStr(UNREACHABLE_URL),
     )))
     broker = app.get_broker()

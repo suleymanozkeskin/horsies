@@ -346,7 +346,7 @@ app = Horsies(
     config=AppConfig(
         queue_mode=QueueMode.CUSTOM,
         custom_queues=QUEUES,
-        broker=PostgresConfig(database_url=SecretStr(DATABASE.url)),
+        database=PostgresConfig(database_url=SecretStr(DATABASE.url)),
         recovery=RECOVERY,
         retention=RETENTION,
         schedule=SCHEDULES,

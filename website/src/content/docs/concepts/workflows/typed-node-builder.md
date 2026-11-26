@@ -19,7 +19,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, Ok, Result, TaskError
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://...")),
 ))
 
 @app.task(task_name='compute_score')

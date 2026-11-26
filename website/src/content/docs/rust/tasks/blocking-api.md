@@ -22,7 +22,7 @@ async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = Horsies::new(AppConfig::for_database_url(
+    let mut app = Horsies::new(AppConfig::from_database_url(
         "postgresql://app:secret@db.example.com:5432/horsies",
     ))?;
     let add = add_numbers::register(&mut app)?;
@@ -45,7 +45,7 @@ With `DailyReport` and `register_daily_report` of [Workflow API](/horsies/rust/c
 use horsies::{AppConfig, Horsies, TaskOutcome, WaitLimit};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = Horsies::new(AppConfig::for_database_url(
+    let mut app = Horsies::new(AppConfig::from_database_url(
         "postgresql://app:secret@db.example.com:5432/horsies",
     ))?;
     let daily_report = register_daily_report(&mut app)?;

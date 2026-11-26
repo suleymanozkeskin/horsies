@@ -450,7 +450,7 @@ class TestCollectScheduleErrors:
 def _make_real_app(schedule: ScheduleConfig | None) -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://user:pass@localhost/db',
             ),
             schedule=schedule,
@@ -508,7 +508,7 @@ class TestCheckValidatesSchedules:
         schedule = _schedule(task_name='my_task', kwargs={'blob': 'x' * 2048})
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://user:pass@localhost/db',
                 ),
                 schedule=ScheduleConfig(schedules=[schedule]),

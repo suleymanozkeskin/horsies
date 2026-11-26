@@ -26,7 +26,7 @@ from pydantic import SecretStr
 from horsies import AppConfig, Horsies, OtelTracing, PostgresConfig
 
 config = AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
     ),
     tracing=OtelTracing(),
@@ -95,7 +95,7 @@ The client injects the carrier at a send and at a rerun of the app (`app.rerun_t
 from horsies import LinkedToSend
 
 linked_config = AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
     ),
     tracing=OtelTracing(parentage=LinkedToSend()),

@@ -51,7 +51,7 @@ fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
     };
     let config = AppConfig {
         worker_profiles: BTreeMap::from([("default".to_owned(), profile)]),
-        ..AppConfig::for_database_url(DATABASE_URL)
+        ..AppConfig::from_database_url(DATABASE_URL)
     };
     let mut app = Horsies::new(config)?;
     let _greet = greet::register(&mut app)?;

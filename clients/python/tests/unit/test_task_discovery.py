@@ -24,7 +24,7 @@ from horsies.core.models.broker import PostgresConfig, SessionDatabaseSeparate
 def _make_app() -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(database_url="postgresql://test:test@localhost/test"),
+            database=PostgresConfig(database_url="postgresql://test:test@localhost/test"),
         )
     )
 
@@ -524,7 +524,7 @@ def _core_check(answer: object) -> Generator[list[_CheckHandle], None, None]:
 def _pgbouncer_app() -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url="postgresql://test:test@pooler/test",
                 session_database=SessionDatabaseSeparate(url="postgresql://test:test@direct/test"),
                 pgbouncer_transaction_mode=True,

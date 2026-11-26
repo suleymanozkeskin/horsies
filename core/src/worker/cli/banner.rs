@@ -128,8 +128,8 @@ pub fn format_banner(info: &BannerInfo<'_>) -> String {
     );
 
     // Broker URL (password masked)
-    let masked_url = mask_broker_url(&info.app_config.broker.database_url);
-    write_kv(&mut buf, "broker", &masked_url);
+    let masked_url = mask_broker_url(&info.app_config.database.database_url);
+    write_kv(&mut buf, "database", &masked_url);
 
     // Cluster-wide cap
     if let crate::core::config::ClusterCapSetting::ClusterCap { tasks } =
@@ -370,7 +370,7 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: PostgresConfig::from_url("postgresql://localhost/test"),
+            database: PostgresConfig::from_database_url("postgresql://localhost/test"),
             cluster_wide_cap: crate::core::config::ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
@@ -410,7 +410,7 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: PostgresConfig::from_url("postgresql://user:secret@localhost/test"),
+            database: PostgresConfig::from_database_url("postgresql://user:secret@localhost/test"),
             cluster_wide_cap: crate::core::config::ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
@@ -459,7 +459,7 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: PostgresConfig::from_url("postgresql://localhost/test"),
+            database: PostgresConfig::from_database_url("postgresql://localhost/test"),
             cluster_wide_cap: crate::core::config::ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,

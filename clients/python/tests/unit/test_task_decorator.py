@@ -3006,7 +3006,7 @@ def _real_app() -> Any:
     from horsies.core.models.app import AppConfig
     from horsies.core.models.broker import PostgresConfig
 
-    return Horsies(AppConfig(broker=PostgresConfig(
+    return Horsies(AppConfig(database=PostgresConfig(
         database_url=SecretStr('postgresql://u:p@localhost:5432/db'),
     )))
 

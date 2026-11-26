@@ -19,7 +19,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, Err, Ok, Result, TaskError, JsonValue
 
 config = AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
 app = Horsies(config)
 
@@ -410,7 +410,7 @@ A mapper on `AppConfig` applies to all tasks:
 from pydantic import SecretStr
 
 config = AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://...")),
     exception_mapper={
         TimeoutError: "TIMEOUT",
         ConnectionError: "CONNECTION_ERROR",

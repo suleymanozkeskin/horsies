@@ -325,7 +325,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, Ok, Result, TaskError
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
 ))  # Auto-discovered
 
 @app.task("my_task")
@@ -389,7 +389,7 @@ from pydantic import SecretStr
 import os
 
 config = AppConfig(
-    broker=PostgresConfig(database_url=SecretStr(os.environ["DATABASE_URL"])),
+    database=PostgresConfig(database_url=SecretStr(os.environ["DATABASE_URL"])),
 )
 ```
 

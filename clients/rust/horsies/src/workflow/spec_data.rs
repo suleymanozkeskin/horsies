@@ -229,7 +229,7 @@ mod tests {
     use crate::{CustomQueueConfig, QueueMode};
 
     fn config() -> AppConfig {
-        AppConfig::for_database_url("postgresql://localhost/horsies")
+        AppConfig::from_database_url("postgresql://localhost/horsies")
     }
 
     fn charge() -> crate::TaskNode<f64, ChargeInput> {

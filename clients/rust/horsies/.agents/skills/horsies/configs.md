@@ -28,14 +28,14 @@ operation. Every process of a deployment builds the same app in `main`.
 
 ## `AppConfig`
 
-`AppConfig::for_database_url(url)` builds the config with every default.
+`AppConfig::from_database_url(url)` builds the config with every default.
 Change fields with struct update syntax.
 
 | Field | Type | Shared docs page |
 |---|---|---|
 | `queue_mode` | `QueueMode` (`Default`, `Custom`) | `concepts/queue-modes` |
 | `custom_queues` | `Option<Vec<CustomQueueConfig>>` (`name`, `priority`, `max_concurrency`) | `concepts/queue-modes` |
-| `broker` | `PostgresConfig` | `configuration/broker-config` |
+| `database` | `PostgresConfig` | `configuration/broker-config` |
 | `cluster_wide_cap` | `ClusterCapSetting::ClusterCap { tasks }` or `ClusterCapSetting::NoClusterCap` (default) | `workers/concurrency` |
 | `prefetch_buffer` | `u32` | `workers/concurrency` |
 | `claim_lease_ms` | `Option<u32>` | `workers/concurrency` |
@@ -58,7 +58,7 @@ fn build_app(database_url: &str) -> Result<Horsies, ValidationReport> {
             CustomQueueConfig { name: "critical".to_owned(), priority: 1, max_concurrency: None },
             CustomQueueConfig { name: "standard".to_owned(), priority: 50, max_concurrency: Some(10) },
         ]),
-        ..AppConfig::for_database_url(database_url)
+        ..AppConfig::from_database_url(database_url)
     };
     Horsies::new(config)
 }
@@ -66,7 +66,7 @@ fn build_app(database_url: &str) -> Result<Horsies, ValidationReport> {
 
 ### `PostgresConfig`
 
-`PostgresConfig::from_url(url)` builds the broker config with every
+`PostgresConfig::from_database_url(url)` builds the database config with every
 default. Four fields are enums, as the Python classes:
 
 | Field | Type |
@@ -105,12 +105,12 @@ use horsies::{AppConfig, Horsies, PostgresConfig, ValidationReport};
 
 fn build_high_traffic_app(database_url: &str) -> Result<Horsies, ValidationReport> {
     let config = AppConfig {
-        broker: PostgresConfig {
+        database: PostgresConfig {
             pool_size: 20,
             max_overflow: 40,
-            ..PostgresConfig::from_url(database_url)
+            ..PostgresConfig::from_database_url(database_url)
         },
-        ..AppConfig::for_database_url(database_url)
+        ..AppConfig::from_database_url(database_url)
     };
     Horsies::new(config)
 }
@@ -120,7 +120,7 @@ fn build_high_traffic_app(database_url: &str) -> Result<Horsies, ValidationRepor
 
 | Config | Refusal of `Horsies::new` |
 |---|---|
-| `broker.pool_size` outside 1 to 10,000, or `broker.max_overflow` above 10,000 | `HorsiesError` "invalid broker config: broker.<field>: ..." with no code |
+| `database.pool_size` outside 1 to 10,000, or `database.max_overflow` above 10,000 | `HorsiesError` "invalid database config: database.<field>: ..." with no code |
 | A worker profile whose `preload` is `ChildPreload::Library` or `ChildPreload::App` | `HRS-218` with the path `worker_profiles.<name>.preload`. A Rust worker starts each child with `exec` of its own binary. Do not set `preload`: the default is `ChildPreload::NoPreload` |
 
 ### Queues
@@ -374,7 +374,7 @@ use std::process::ExitCode;
 use horsies::{AppConfig, Horsies, ValidationReport};
 
 fn build_app() -> Result<Horsies, ValidationReport> {
-    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+    let config = AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies");
     Horsies::new(config)
 }
 
@@ -446,7 +446,7 @@ use std::process::ExitCode;
 use horsies::{AppConfig, ChildHostExit, ChildMode, Horsies, ValidationReport, WorkerRunOptions};
 
 fn build_app() -> Result<Horsies, ValidationReport> {
-    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+    let config = AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies");
     Horsies::new(config)
 }
 

@@ -91,7 +91,7 @@ async def test_each_child_kind_counts_its_own_pool_against_the_server(
     small = WorkerProfile(isolated=IsolatedChildren(count=1))
     app = Horsies(
         AppConfig(
-            broker=PostgresConfig(database_url=SecretStr(db_url)),
+            database=PostgresConfig(database_url=SecretStr(db_url)),
             worker_profiles={'big': big, 'small': small},
         ),
     )
@@ -150,7 +150,7 @@ async def test_the_parent_pool_of_the_profile_is_counted_against_the_server(
     )
     app = Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr(db_url),
                 pool_size=1,
                 max_overflow=0,

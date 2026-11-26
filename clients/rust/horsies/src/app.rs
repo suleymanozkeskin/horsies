@@ -134,7 +134,7 @@ impl Horsies {
     /// [`Self::new`].
     pub fn with_schema_mode(config: AppConfig, mode: SchemaMode) -> Result<Self, ValidationReport> {
         validate_config(&config)?;
-        let manifest = producer_manifest(&config.broker, mode)
+        let manifest = producer_manifest(&config.database, mode)
             .map_err(|refused| config_report(refused.to_horsies_error()))?;
         let install_coverage =
             CoverageRequest::of_retention(&config.retention).map_err(|refused| {
@@ -590,7 +590,7 @@ mod tests {
     use crate::{ChildPreload, ErrorCode, PostgresConfig, WorkerProfile};
 
     fn config() -> AppConfig {
-        AppConfig::for_database_url("postgresql://localhost/horsies")
+        AppConfig::from_database_url("postgresql://localhost/horsies")
     }
 
     #[derive(Debug, PartialEq)]
@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn an_invalid_config_is_refused_with_every_refusal() {
         let mut invalid = AppConfig {
-            broker: PostgresConfig::from_url("mysql://localhost/horsies"),
+            database: PostgresConfig::from_database_url("mysql://localhost/horsies"),
             ..config()
         };
         invalid.worker_profiles.insert(
@@ -648,16 +648,16 @@ mod tests {
     #[test]
     fn a_pool_size_outside_the_manifest_bounds_refuses_the_app() {
         let invalid = AppConfig {
-            broker: PostgresConfig {
+            database: PostgresConfig {
                 pool_size: 0,
-                ..PostgresConfig::from_url("postgresql://localhost/horsies")
+                ..PostgresConfig::from_database_url("postgresql://localhost/horsies")
             },
             ..config()
         };
         let refused = Horsies::new(invalid).unwrap_err();
         assert_eq!(refused.refusals().len(), 1, "{refused}");
         assert!(
-            refused.refusals()[0].message.contains("broker.pool_size"),
+            refused.refusals()[0].message.contains("database.pool_size"),
             "{refused}"
         );
     }

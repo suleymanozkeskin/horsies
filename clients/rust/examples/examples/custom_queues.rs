@@ -45,7 +45,7 @@ fn build_app() -> Result<Horsies, HorsiesError> {
             },
         ]),
         worker_profiles: BTreeMap::from([(DEFAULT_PROFILE.to_owned(), isolated_profile())]),
-        ..AppConfig::for_database_url(database_url())
+        ..AppConfig::from_database_url(database_url())
     };
     let mut app = Horsies::new(config)?;
     let _send_alert = send_alert::register(&mut app)?;

@@ -66,7 +66,7 @@ class OneConnectionApp:
 @pytest.fixture
 def one_connection_app(schema_ready: None) -> Generator[OneConnectionApp, None, None]:
     """App whose broker pool holds exactly one connection, with one task."""
-    app = Horsies(AppConfig(queue_mode=QueueMode.DEFAULT, broker=_one_connection_config()))
+    app = Horsies(AppConfig(queue_mode=QueueMode.DEFAULT, database=_one_connection_config()))
 
     @app.task('loop_sets_echo')
     def loop_sets_echo(*, value: int) -> Result[int, TaskError]:

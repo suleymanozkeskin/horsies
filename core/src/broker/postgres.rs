@@ -1051,7 +1051,7 @@ impl PostgresBroker {
     /// A URL whose scheme is not `postgresql://` or `postgres://` is refused
     /// with [`BrokerError::InvalidConnectionSettings`] before any connection.
     pub async fn connect(database_url: &str, family: ClientFamily) -> Result<Self, BrokerError> {
-        Self::connect_with(&PostgresConfig::from_url(database_url), family).await
+        Self::connect_with(&PostgresConfig::from_database_url(database_url), family).await
     }
 
     /// Connect using a `PostgresConfig` from horsies-core, for a client of
@@ -4388,7 +4388,7 @@ mod broker_operation_error_tests {
 
     #[tokio::test]
     async fn connect_with_refuses_a_config_rule_as_not_retryable() {
-        let config = PostgresConfig::from_url("mysql://horsies@127.0.0.1:1/horsies");
+        let config = PostgresConfig::from_database_url("mysql://horsies@127.0.0.1:1/horsies");
 
         let refused = PostgresBroker::connect_with(&config, crate::ClientFamily::Rust)
             .await
@@ -4572,7 +4572,7 @@ mod connect_tests {
 
     #[tokio::test]
     async fn a_worker_connect_with_a_split_session_url_opens_no_connection() {
-        let mut config = PostgresConfig::from_url(UNREACHABLE_URL);
+        let mut config = PostgresConfig::from_database_url(UNREACHABLE_URL);
         config.session_database = crate::core::config::SessionDatabase::Separate {
             url: "postgresql://horsies@127.0.0.1:2/horsies".to_owned(),
         };

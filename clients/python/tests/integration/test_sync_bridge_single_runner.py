@@ -64,7 +64,7 @@ def one_connection_app(schema_ready: None) -> Generator[OneConnectionApp, None, 
     """App whose broker pool holds exactly one connection, with one task."""
     app = Horsies(AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr(DB_URL),
             pool_size=1,
             max_overflow=0,

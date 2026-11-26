@@ -556,7 +556,7 @@ mod tests {
     }
 
     fn app() -> Horsies {
-        let mut app = Horsies::new(AppConfig::for_database_url(
+        let mut app = Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap();

@@ -538,7 +538,7 @@ _REAL_BROKER = PostgresConfig(
 
 
 def _real_app() -> Horsies:
-    return Horsies(config=AppConfig(broker=_REAL_BROKER))
+    return Horsies(config=AppConfig(database=_REAL_BROKER))
 
 
 @pytest.mark.unit

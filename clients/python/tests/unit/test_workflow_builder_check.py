@@ -36,7 +36,7 @@ pytestmark = pytest.mark.unit
 def _make_app() -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://user:pass@localhost/db',
             ),
         ),
@@ -730,7 +730,7 @@ def _make_custom_app(*queues: tuple[str, int]) -> Horsies:
     """CUSTOM-mode app with the given (name, priority) queues."""
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://user:pass@localhost/db',
             ),
             queue_mode=QueueMode.CUSTOM,

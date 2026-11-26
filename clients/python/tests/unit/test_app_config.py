@@ -729,7 +729,7 @@ class TestPrefetchBufferValidation:
         """prefetch_buffer=0 (hard cap mode) should be valid."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             prefetch_buffer=0,
         )
         assert config.prefetch_buffer == 0
@@ -741,7 +741,7 @@ class TestPrefetchBufferValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 prefetch_buffer=-1,
             )
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
@@ -753,7 +753,7 @@ class TestPrefetchBufferValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 prefetch_buffer=4,
                 claim_lease_ms=None,
             )
@@ -763,7 +763,7 @@ class TestPrefetchBufferValidation:
         """prefetch_buffer > 0 with valid claim_lease_ms should be valid."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             prefetch_buffer=4,
             claim_lease_ms=5000,
             recovery=SHORT_HB_RECOVERY,
@@ -780,7 +780,7 @@ class TestClaimLeaseMsValidation:
         """claim_lease_ms=None is valid when prefetch_buffer=0."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             prefetch_buffer=0,
             claim_lease_ms=None,
         )
@@ -790,7 +790,7 @@ class TestClaimLeaseMsValidation:
         """claim_lease_ms is allowed in hard-cap mode (overrides default 60s lease)."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             prefetch_buffer=0,
             claim_lease_ms=5000,
             recovery=SHORT_HB_RECOVERY,
@@ -804,7 +804,7 @@ class TestClaimLeaseMsValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 prefetch_buffer=4,
                 claim_lease_ms=0,
             )
@@ -817,7 +817,7 @@ class TestClaimLeaseMsValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 prefetch_buffer=4,
                 claim_lease_ms=-1000,
             )
@@ -827,7 +827,7 @@ class TestClaimLeaseMsValidation:
         """claim_lease_ms > 0 should be valid."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             prefetch_buffer=4,
             claim_lease_ms=5000,
             recovery=SHORT_HB_RECOVERY,
@@ -843,7 +843,7 @@ class TestMaxClaimRenewAgeMsValidation:
         """Default max_claim_renew_age_ms (180_000) should be accepted."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
         )
         assert config.max_claim_renew_age_ms == 180_000
 
@@ -855,7 +855,7 @@ class TestMaxClaimRenewAgeMsValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 max_claim_renew_age_ms=0,
             )
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
@@ -868,7 +868,7 @@ class TestMaxClaimRenewAgeMsValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 max_claim_renew_age_ms=-1000,
             )
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
@@ -881,7 +881,7 @@ class TestMaxClaimRenewAgeMsValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 claim_lease_ms=10_000,
                 max_claim_renew_age_ms=5_000,
                 recovery=RecoveryConfig(claimer_heartbeat_interval_ms=2_000),
@@ -892,7 +892,7 @@ class TestMaxClaimRenewAgeMsValidation:
         """max_claim_renew_age_ms == effective lease is the minimum valid value."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             claim_lease_ms=5_000,
             max_claim_renew_age_ms=5_000,
             recovery=SHORT_HB_RECOVERY,
@@ -903,7 +903,7 @@ class TestMaxClaimRenewAgeMsValidation:
         """max_claim_renew_age_ms > effective lease should be accepted."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             claim_lease_ms=5_000,
             max_claim_renew_age_ms=60_000,
             recovery=SHORT_HB_RECOVERY,
@@ -921,7 +921,7 @@ class TestMaxClaimRenewAgeMsValidation:
         ):
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 claim_lease_ms=None,
                 max_claim_renew_age_ms=30_000,
             )
@@ -935,7 +935,7 @@ class TestClusterWideCapPrefetchConflict:
         """cluster_wide_cap with prefetch_buffer=0 should be valid (hard cap mode)."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             cluster_wide_cap=ClusterCap(tasks=50),
             prefetch_buffer=0,
         )
@@ -949,7 +949,7 @@ class TestClusterWideCapPrefetchConflict:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 cluster_wide_cap=ClusterCap(tasks=50),
                 prefetch_buffer=4,
                 claim_lease_ms=5000,
@@ -961,7 +961,7 @@ class TestClusterWideCapPrefetchConflict:
         """No cluster_wide_cap with prefetch_buffer > 0 should be valid (soft cap mode)."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             cluster_wide_cap=NoClusterCap(),
             prefetch_buffer=4,
             claim_lease_ms=5000,
@@ -982,7 +982,7 @@ class TestClusterWideCapBoundaries:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 cluster_wide_cap=ClusterCap(tasks=0),
             )
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
@@ -994,7 +994,7 @@ class TestClusterWideCapBoundaries:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 cluster_wide_cap=ClusterCap(tasks=-1),
             )
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
@@ -1003,7 +1003,7 @@ class TestClusterWideCapBoundaries:
         """cluster_wide_cap=1 should be the minimum valid value."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             cluster_wide_cap=ClusterCap(tasks=1),
         )
         assert config.cluster_wide_cap == ClusterCap(tasks=1)
@@ -1013,7 +1013,7 @@ def _config_errors(**fields: object) -> list[HorsiesError]:
     """The errors that AppConfig validation raises for `fields`, one or
     collected; empty when the config is valid."""
     try:
-        AppConfig.model_validate({'broker': BROKER, **fields})
+        AppConfig.model_validate({'database': BROKER, **fields})
     except MultipleValidationErrors as collected:
         return list(collected.report.refusals)
     except HorsiesError as error:
@@ -1094,13 +1094,13 @@ class TestWorkerManifestBounds:
 
     def test_the_largest_values_that_fit_are_accepted(self) -> None:
         soft_cap = AppConfig(
-            broker=BROKER,
+            database=BROKER,
             prefetch_buffer=CLAIM_COUNT_MAX,
             claim_lease_ms=MILLISECONDS_MAX,
             max_claim_renew_age_ms=MILLISECONDS_MAX,
         )
         hard_cap = AppConfig(
-            broker=BROKER,
+            database=BROKER,
             cluster_wide_cap=ClusterCap(tasks=TASK_LIMIT_MAX),
             queue_mode=QueueMode.CUSTOM,
             custom_queues=[
@@ -1125,7 +1125,7 @@ class TestQueueModeValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 custom_queues=[CustomQueueConfig(name='q1')],
             )
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
@@ -1137,7 +1137,7 @@ class TestQueueModeValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.CUSTOM,
-                broker=BROKER,
+                database=BROKER,
                 custom_queues=None,
             )
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
@@ -1149,7 +1149,7 @@ class TestQueueModeValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.CUSTOM,
-                broker=BROKER,
+                database=BROKER,
                 custom_queues=[],
             )
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
@@ -1161,7 +1161,7 @@ class TestQueueModeValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.CUSTOM,
-                broker=BROKER,
+                database=BROKER,
                 custom_queues=[
                     CustomQueueConfig(name='q1'),
                     CustomQueueConfig(name='q1'),
@@ -1189,7 +1189,7 @@ class TestQueueModeValidation:
         """None renders as 'uncapped' in the startup banner, not 'None'."""
         config = AppConfig(
             queue_mode=QueueMode.CUSTOM,
-            broker=BROKER,
+            database=BROKER,
             custom_queues=[
                 CustomQueueConfig(name='bulk', max_concurrency=None),
             ],
@@ -1202,7 +1202,7 @@ class TestQueueModeValidation:
         """CUSTOM mode with valid unique queues should succeed."""
         config = AppConfig(
             queue_mode=QueueMode.CUSTOM,
-            broker=BROKER,
+            database=BROKER,
             custom_queues=[
                 CustomQueueConfig(name='high'),
                 CustomQueueConfig(name='low'),
@@ -1215,7 +1215,7 @@ class TestQueueModeValidation:
         """DEFAULT mode without custom_queues should succeed."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
         )
         assert config.queue_mode == QueueMode.DEFAULT
         assert config.custom_queues is None
@@ -1224,7 +1224,7 @@ class TestQueueModeValidation:
         """Queue names should be preserved exactly as provided."""
         config = AppConfig(
             queue_mode=QueueMode.CUSTOM,
-            broker=BROKER,
+            database=BROKER,
             custom_queues=[
                 CustomQueueConfig(name='priority'),
                 CustomQueueConfig(name='background'),
@@ -1243,7 +1243,7 @@ class TestDefaultBehavior:
         """Default config should use hard cap mode (prefetch_buffer=0)."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
         )
         assert config.prefetch_buffer == 0
         assert config.claim_lease_ms is None
@@ -1252,23 +1252,23 @@ class TestDefaultBehavior:
         """cluster_wide_cap should default to NoClusterCap() (no cap)."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
         )
         assert config.cluster_wide_cap == NoClusterCap()
 
     def test_queue_mode_defaults_to_default(self) -> None:
         """queue_mode should default to DEFAULT."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         assert config.queue_mode == QueueMode.DEFAULT
 
     def test_custom_queues_defaults_to_none(self) -> None:
         """custom_queues should default to None."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         assert config.custom_queues is None
 
     def test_default_unhandled_error_code_default(self) -> None:
         """default_unhandled_error_code should default to 'UNHANDLED_EXCEPTION'."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         assert config.default_unhandled_error_code == 'UNHANDLED_EXCEPTION'
 
 
@@ -1281,7 +1281,7 @@ class TestMultiErrorCollection:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 cluster_wide_cap=ClusterCap(tasks=-1),
                 prefetch_buffer=-5,
             )
@@ -1298,7 +1298,7 @@ class TestMultiErrorCollection:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 cluster_wide_cap=ClusterCap(tasks=-1),
             )
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
@@ -1308,7 +1308,7 @@ class TestMultiErrorCollection:
         with pytest.raises(HorsiesError):
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 cluster_wide_cap=ClusterCap(tasks=-1),
                 prefetch_buffer=-5,
             )
@@ -1318,7 +1318,7 @@ class TestMultiErrorCollection:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 cluster_wide_cap=ClusterCap(tasks=-1),
                 prefetch_buffer=-5,
                 default_unhandled_error_code='TimeoutError',
@@ -1331,7 +1331,7 @@ class TestMultiErrorCollection:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 cluster_wide_cap=ClusterCap(tasks=-1),
                 prefetch_buffer=-5,
                 default_unhandled_error_code='TimeoutError',
@@ -1355,7 +1355,7 @@ class TestRetryCodeValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 default_unhandled_error_code='TimeoutError',
             )
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
@@ -1368,7 +1368,7 @@ class TestRetryCodeValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 exception_mapper={ValueError: 'TimeoutError'},
             )
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
@@ -1377,7 +1377,7 @@ class TestRetryCodeValidation:
         """UPPER_SNAKE_CASE error codes should be accepted."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             default_unhandled_error_code='CUSTOM_CODE',
         )
         assert config.default_unhandled_error_code == 'CUSTOM_CODE'
@@ -1390,7 +1390,7 @@ class TestRetryCodeValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 default_unhandled_error_code='lowercase_code',
             )
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
@@ -1404,7 +1404,7 @@ class TestRetryCodeValidation:
         with pytest.raises(ValidationError, match='is_subclass_of'):
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 exception_mapper={str: 'SOME_CODE'},  # type: ignore[dict-item]
             )
 
@@ -1412,7 +1412,7 @@ class TestRetryCodeValidation:
         """Valid exception mapper entries should be accepted."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             exception_mapper={ValueError: 'VALUE_ERROR'},
         )
         assert ValueError in config.exception_mapper
@@ -1427,7 +1427,7 @@ class TestAppConfigImmutability:
         """AppConfig is frozen and should reject attribute assignment."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
         )
         with pytest.raises(ValidationError):
             config.prefetch_buffer = 1  # type: ignore[misc]
@@ -1464,7 +1464,7 @@ class TestLogConfig:
         """Formatted output should contain queue_mode."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
         )
         formatted = config._format_for_logging()
         assert 'queue_mode:' in formatted
@@ -1474,7 +1474,7 @@ class TestLogConfig:
         """CUSTOM mode should list queue names in formatted output."""
         config = AppConfig(
             queue_mode=QueueMode.CUSTOM,
-            broker=BROKER,
+            database=BROKER,
             custom_queues=[
                 CustomQueueConfig(name='fast', priority=1, max_concurrency=10),
                 CustomQueueConfig(name='slow', priority=2, max_concurrency=3),
@@ -1487,7 +1487,7 @@ class TestLogConfig:
 
     def test_log_config_skips_in_child_process(self) -> None:
         """log_config should not log when HORSIES_CHILD_PROCESS=1."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         logger = MagicMock()
         with patch.dict('os.environ', {'HORSIES_CHILD_PROCESS': '1'}):
             config.log_config(logger=logger)
@@ -1495,7 +1495,7 @@ class TestLogConfig:
 
     def test_log_config_uses_provided_logger(self) -> None:
         """log_config should call logger.info when provided."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         logger = MagicMock()
         with patch.dict('os.environ', {}, clear=False):
             # Ensure HORSIES_CHILD_PROCESS is not set
@@ -1512,7 +1512,7 @@ class TestLogConfig:
 
     def test_log_config_none_logger_uses_library_logger(self) -> None:
         """log_config with no logger should use the 'horsies' library logger."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         with patch.dict('os.environ', {}, clear=False):
             env = {
                 k: v
@@ -1534,20 +1534,20 @@ class TestFormatForLoggingExtended:
 
     def test_cluster_wide_cap_displayed(self) -> None:
         """cluster_wide_cap should appear in formatted output when set."""
-        config = AppConfig(broker=BROKER, cluster_wide_cap=ClusterCap(tasks=50))
+        config = AppConfig(database=BROKER, cluster_wide_cap=ClusterCap(tasks=50))
         formatted = config._format_for_logging()
         assert 'cluster_wide_cap: 50' in formatted
 
     def test_cluster_wide_cap_omitted_when_none(self) -> None:
         """cluster_wide_cap should not appear for NoClusterCap()."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         formatted = config._format_for_logging()
         assert 'cluster_wide_cap' not in formatted
 
     def test_claim_lease_ms_displayed(self) -> None:
         """claim_lease_ms should appear in formatted output when set."""
         config = AppConfig(
-            broker=BROKER,
+            database=BROKER,
             prefetch_buffer=4,
             claim_lease_ms=30_000,
             recovery=RecoveryConfig(claimer_heartbeat_interval_ms=10_000),
@@ -1557,14 +1557,14 @@ class TestFormatForLoggingExtended:
 
     def test_claim_lease_ms_omitted_when_none(self) -> None:
         """claim_lease_ms should not appear when None."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         formatted = config._format_for_logging()
         assert 'claim_lease_ms' not in formatted
 
     def test_exception_mapper_displayed(self) -> None:
         """Non-empty exception mapper should show mapping count."""
         config = AppConfig(
-            broker=BROKER,
+            database=BROKER,
             exception_mapper={ValueError: 'VALUE_ERROR', TypeError: 'TYPE_ERROR'},
         )
         formatted = config._format_for_logging()
@@ -1573,7 +1573,7 @@ class TestFormatForLoggingExtended:
     def test_custom_default_error_code_displayed(self) -> None:
         """Non-default unhandled error code should appear in output."""
         config = AppConfig(
-            broker=BROKER,
+            database=BROKER,
             default_unhandled_error_code='MY_ERROR',
         )
         formatted = config._format_for_logging()
@@ -1581,13 +1581,13 @@ class TestFormatForLoggingExtended:
 
     def test_default_error_code_omitted_when_default(self) -> None:
         """Default unhandled error code should not appear in output."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         formatted = config._format_for_logging()
         assert 'default_unhandled_error_code' not in formatted
 
     def test_retention_hours_displayed(self) -> None:
         """Retention hours should appear in formatted output."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         formatted = config._format_for_logging()
         assert 'retention_hours:' in formatted
         assert 'heartbeats' not in formatted.split('retention_hours:')[1].split('\n')[0]
@@ -1597,7 +1597,7 @@ class TestFormatForLoggingExtended:
     def test_schedule_displayed(self) -> None:
         """Schedule config should appear when set."""
         config = AppConfig(
-            broker=BROKER,
+            database=BROKER,
             schedule=ScheduleConfig(
                 enabled=True,
                 schedules=[
@@ -1620,7 +1620,7 @@ class TestFormatForLoggingExtended:
 
     def test_schedule_omitted_when_none(self) -> None:
         """Schedule section should not appear when schedule is None."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         formatted = config._format_for_logging()
         assert 'schedule:' not in formatted
 
@@ -1721,7 +1721,7 @@ class TestGetBrokerErrorHandling:
             pool_size=30,
             max_overflow=30,
         )
-        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=config))
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, database=config))
         app.set_role(AppRole.WORKER)
         app.set_task_send_pool(4)
 
@@ -1749,7 +1749,7 @@ class TestGetBrokerErrorHandling:
             pool_size=30,
             max_overflow=30,
         )
-        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=config))
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, database=config))
         app.set_role(role)
 
         with patch('horsies.core.app.PostgresBroker') as mock_broker_cls:
@@ -1762,7 +1762,7 @@ class TestGetBrokerErrorHandling:
     def test_a_task_send_pool_below_one_is_a_defect(self, connections: int) -> None:
         from horsies import Horsies
 
-        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER))
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, database=BROKER))
         with pytest.raises(AssertionError, match='connections must be >= 1'):
             app.set_task_send_pool(connections)
 
@@ -1770,7 +1770,7 @@ class TestGetBrokerErrorHandling:
         """Non-HorsiesError exceptions are wrapped with BROKER_INIT_FAILED."""
         from horsies import Horsies
 
-        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER))
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, database=BROKER))
         app._broker = None  # ensure fresh init path
 
         with patch(
@@ -1788,7 +1788,7 @@ class TestGetBrokerErrorHandling:
         """HorsiesError from broker init is re-raised, not double-wrapped."""
         from horsies import Horsies
 
-        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER))
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, database=BROKER))
         app._broker = None
 
         original = HorsiesError(
@@ -1901,7 +1901,7 @@ class TestWorkerStateSnapshotInterval:
             AppConfig.model_validate(
                 {
                     'queue_mode': QueueMode.DEFAULT,
-                    'broker': BROKER,
+                    'database': BROKER,
                     'recovery': {'worker_state_snapshot_interval_ms': 120_000},
                 },
             )
@@ -1995,7 +1995,7 @@ class TestPayloadPolicyWiring:
     """AppConfig carries a PayloadPolicy with warn-only defaults."""
 
     def test_default_policy(self) -> None:
-        config = AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER)
+        config = AppConfig(queue_mode=QueueMode.DEFAULT, database=BROKER)
         assert config.payload.warn_bytes == 1_048_576
         assert config.payload.reject_bytes is None
 
@@ -2021,7 +2021,7 @@ class TestQueueRetentionNamesARealQueue:
 
     def test_default_mode_accepts_the_default_queue(self) -> None:
         config = AppConfig(
-            broker=self._broker(),
+            database=self._broker(),
             queue_mode=QueueMode.DEFAULT,
             retention=RetentionConfig(
                 queue_retention={'default': timedelta(days=7)}
@@ -2033,7 +2033,7 @@ class TestQueueRetentionNamesARealQueue:
     def test_default_mode_refuses_any_other_queue(self) -> None:
         with pytest.raises(ConfigurationError) as caught:
             AppConfig(
-                broker=self._broker(),
+                database=self._broker(),
                 queue_mode=QueueMode.DEFAULT,
                 retention=RetentionConfig(
                     queue_retention={'emails': timedelta(days=7)}
@@ -2044,7 +2044,7 @@ class TestQueueRetentionNamesARealQueue:
 
     def test_custom_mode_accepts_a_configured_queue(self) -> None:
         config = AppConfig(
-            broker=self._broker(),
+            database=self._broker(),
             queue_mode=QueueMode.CUSTOM,
             custom_queues=[CustomQueueConfig(name='emails', priority=100)],
             retention=RetentionConfig(
@@ -2058,7 +2058,7 @@ class TestQueueRetentionNamesARealQueue:
         """The failure this guard exists for."""
         with pytest.raises(ConfigurationError) as caught:
             AppConfig(
-                broker=self._broker(),
+                database=self._broker(),
                 queue_mode=QueueMode.CUSTOM,
                 custom_queues=[CustomQueueConfig(name='emails', priority=100)],
                 retention=RetentionConfig(
@@ -2074,6 +2074,6 @@ class TestQueueRetentionNamesARealQueue:
         )
 
     def test_an_empty_mapping_is_unaffected(self) -> None:
-        config = AppConfig(broker=self._broker(), queue_mode=QueueMode.DEFAULT)
+        config = AppConfig(database=self._broker(), queue_mode=QueueMode.DEFAULT)
 
         assert config.retention.queue_retention == {}

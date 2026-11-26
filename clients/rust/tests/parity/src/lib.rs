@@ -304,10 +304,10 @@ pub struct ParityApp {
 ///
 /// Errors: the config refusal, or the first registration refusal.
 pub fn build_app(database_url: &str) -> Result<ParityApp, HorsiesError> {
-    let mut config = AppConfig::for_database_url(database_url);
-    config.broker.pool_size = 5;
-    config.broker.max_overflow = 5;
-    config.broker.retain_rerun_input_default = true;
+    let mut config = AppConfig::from_database_url(database_url);
+    config.database.pool_size = 5;
+    config.database.max_overflow = 5;
+    config.database.retain_rerun_input_default = true;
     config.worker_profiles = profiles();
     config.schedule = Some(schedules());
     let mut app = Horsies::new(config)?;

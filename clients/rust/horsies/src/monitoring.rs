@@ -293,7 +293,7 @@ mod tests {
 
     /// An app with no task and no workflow. Building it does no I/O.
     fn app() -> Horsies {
-        Horsies::new(AppConfig::for_database_url(
+        Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap()

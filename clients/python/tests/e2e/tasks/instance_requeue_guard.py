@@ -33,7 +33,7 @@ config = AppConfig(
     prefetch_buffer=2,
     claim_lease_ms=2_000,           # 2s lease — expires fast after renewal stops
     max_claim_renew_age_ms=5_000,   # 5s — stop renewing after 5s of CLAIMED
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=DB_URL,
         pool_size=2,
         max_overflow=2,
@@ -50,7 +50,7 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 

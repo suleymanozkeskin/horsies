@@ -42,7 +42,7 @@ LEVEL_WHERE_THE_NESTING_ENDS = 3
 def _app() -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr('postgresql://user:pass@localhost/db'),
             ),
             queue_mode=QueueMode.CUSTOM,

@@ -15,7 +15,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig
 
 app = Horsies(config=AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql://user:pass@host/db")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://user:pass@host/db")),
 ))
 ```
 
@@ -29,7 +29,7 @@ string validates at runtime, but strict type checkers reject it — wrap with
 |---|---|---|---|
 | `queue_mode` | `QueueMode` | `DEFAULT` | `DEFAULT` or `CUSTOM` |
 | `custom_queues` | `list[CustomQueueConfig] \| None` | `None` | Required if `CUSTOM` mode |
-| `broker` | `PostgresConfig` | required | Database connection config |
+| `database` | `PostgresConfig` | required | Database connection config |
 | `cluster_wide_cap` | `ClusterCap \| NoClusterCap` | `NoClusterCap()` | Max RUNNING tasks across the cluster: `ClusterCap(tasks=N)`, N >= 1, or `NoClusterCap()` |
 | `prefetch_buffer` | `int` | `0` | 0 = hard cap; >0 = soft cap with lease |
 | `claim_lease_ms` | `int \| None` | `None` | Claim lease duration; None uses default 60s |
@@ -737,7 +737,7 @@ config = AppConfig(
         CustomQueueConfig(name="critical", priority=1, max_concurrency=10),
         CustomQueueConfig(name="background", priority=50, max_concurrency=3),
     ],
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb"),
     ),
 )
@@ -774,7 +774,7 @@ from pydantic import SecretStr
 from horsies import AppConfig, PayloadPolicy, PostgresConfig
 
 AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql://user:pass@host/db")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://user:pass@host/db")),
     payload=PayloadPolicy(warn_bytes=1_048_576, reject_bytes=33_554_432),
 )
 ```
@@ -891,7 +891,7 @@ config = AppConfig(
         CustomQueueConfig(name="emails"),
         CustomQueueConfig(name="audit"),
     ],
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb"),
     ),
     retention=RetentionConfig(
@@ -1282,7 +1282,7 @@ Color priority: `HORSIES_FORCE_COLOR` → `NO_COLOR` → `isatty()` auto-detect.
 from horsies import (
     # App
     Horsies, AppConfig,
-    # Broker
+    # Database
     PostgresConfig,
     # Queue
     QueueMode, CustomQueueConfig,

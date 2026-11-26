@@ -150,7 +150,7 @@ def _send_manifest(
         retention_class_key=resolve_retention_class_key(
             resolve_queue_retention_class(app.config.retention, queue_name),
         ),
-        retain_rerun_input=app.config.broker.retain_rerun_input_default,
+        retain_rerun_input=app.config.database.retain_rerun_input_default,
     )
 
 

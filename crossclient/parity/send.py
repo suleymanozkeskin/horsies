@@ -189,7 +189,7 @@ async def _rerun_one(rerun: Rerun, sent: list[str]) -> str:
             pass
         case other:
             raise SendRefused(f'the rerun source {source} did not end with REFUSED: {other}')
-    database_url = parity.config.broker.database_url.get_secret_value()
+    database_url = parity.config.database.database_url.get_secret_value()
     engine = create_async_engine(sqlalchemy_url(database_url))
     try:
         async with engine.begin() as connection:

@@ -414,7 +414,7 @@ mod tests {
     /// refusal of the static check, not the connectivity refusal.
     #[tokio::test]
     async fn the_live_check_refuses_with_the_static_check_before_any_connect() {
-        let mut app = Horsies::new(AppConfig::for_database_url(
+        let mut app = Horsies::new(AppConfig::from_database_url(
             "postgresql://postgres@127.0.0.1:1/horsies",
         ))
         .unwrap();
@@ -574,7 +574,7 @@ mod tests {
 
     #[test]
     fn an_app_with_no_task_passes_and_counts_none() {
-        let app = Horsies::new(AppConfig::for_database_url(
+        let app = Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap();
@@ -589,7 +589,7 @@ mod tests {
 
     #[test]
     fn the_check_reports_the_declared_codes_of_each_task_in_name_order() {
-        let mut app = Horsies::new(AppConfig::for_database_url(
+        let mut app = Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap();

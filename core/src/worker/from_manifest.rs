@@ -461,8 +461,8 @@ async fn worker_broker(
 
 /// The app config of the worker: the queue mode and the claim settings of
 /// the claim section, the four config sections, every profile, and the
-/// broker config of the app's connection settings. Pure.
-fn app_config_of(manifest: &WorkerManifest, broker: PostgresConfig) -> AppConfig {
+/// database config of the app's connection settings. Pure.
+fn app_config_of(manifest: &WorkerManifest, database: PostgresConfig) -> AppConfig {
     let claim = &manifest.claim;
     let (queue_mode, custom_queues) = match &claim.queues {
         Queues::Default => (QueueMode::Default, None),
@@ -486,7 +486,7 @@ fn app_config_of(manifest: &WorkerManifest, broker: PostgresConfig) -> AppConfig
     AppConfig {
         queue_mode,
         custom_queues,
-        broker,
+        database,
         // The manifest keeps its own tags (`TASKS`, `NO_LIMIT`) for the two
         // config states.
         cluster_wide_cap: match claim.cluster_wide_cap {

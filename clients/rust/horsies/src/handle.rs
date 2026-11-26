@@ -1131,7 +1131,7 @@ mod tests {
     /// is kept.
     #[tokio::test]
     async fn a_get_above_the_bound_is_invalid_input_before_any_statement() {
-        let app = Horsies::new(AppConfig::for_database_url(
+        let app = Horsies::new(AppConfig::from_database_url(
             "postgresql://127.0.0.1:1/nothing",
         ))
         .unwrap();
@@ -1152,7 +1152,7 @@ mod tests {
     /// TypeScript; a later read within the bound returns the kept read.
     #[tokio::test]
     async fn a_kept_read_does_not_hide_a_limit_above_the_bound() {
-        let app = Horsies::new(AppConfig::for_database_url(
+        let app = Horsies::new(AppConfig::from_database_url(
             "postgresql://127.0.0.1:1/nothing",
         ))
         .unwrap();
@@ -1174,7 +1174,7 @@ mod tests {
     /// first, as `TaskHandle::get`.
     #[tokio::test]
     async fn the_reads_by_task_id_above_the_bound_are_invalid_input_before_any_statement() {
-        let app = Horsies::new(AppConfig::for_database_url(
+        let app = Horsies::new(AppConfig::from_database_url(
             "postgresql://127.0.0.1:1/nothing",
         ))
         .unwrap();
@@ -1204,7 +1204,7 @@ mod tests {
     /// connects to the address, which has no database.
     #[tokio::test]
     async fn a_kept_outcome_is_returned_again_and_clones_share_it() {
-        let app = Horsies::new(AppConfig::for_database_url(
+        let app = Horsies::new(AppConfig::from_database_url(
             "postgresql://127.0.0.1:1/nothing",
         ))
         .unwrap();

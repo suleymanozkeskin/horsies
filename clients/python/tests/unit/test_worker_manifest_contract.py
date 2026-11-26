@@ -150,7 +150,7 @@ WINDOW: Final = timedelta(hours=24)
 
 def _app_config(**overrides: Any) -> AppConfig:
     return AppConfig(
-        broker=PostgresConfig(database_url=SecretStr(MAIN_URL)),
+        database=PostgresConfig(database_url=SecretStr(MAIN_URL)),
         **overrides,
     )
 

@@ -577,7 +577,7 @@ class TracedProducer:
 def _traced_producer() -> TracedProducer:
     app = Horsies(
         AppConfig(
-            broker=PostgresConfig(database_url=SecretStr(instance.DB_URL)),
+            database=PostgresConfig(database_url=SecretStr(instance.DB_URL)),
             tracing=OtelTracing(),
         ),
     )

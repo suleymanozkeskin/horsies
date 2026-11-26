@@ -89,7 +89,7 @@ from horsies import AppConfig, Horsies, OtelTracing, PostgresConfig
 
 app = Horsies(
     AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
         ),
         tracing=OtelTracing(),

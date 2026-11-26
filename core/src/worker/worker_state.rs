@@ -792,7 +792,7 @@ mod tests {
         let health = new_reaper_health();
         let phase2 = json!({"applied": 2, "failed": 0});
         health.write().await.phase2_recovery = Some(phase2.clone());
-        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        let mut app_config = AppConfig::from_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 10;
         let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();
@@ -1227,7 +1227,7 @@ mod tests {
 
         let pool = crate::test_support::migrated_pool().await;
         let worker_id = uuid::Uuid::new_v4().to_string();
-        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        let mut app_config = AppConfig::from_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
         let worker_config = WorkerConfig::default();
         assert!(worker_config.queue_priorities.is_empty());
@@ -1337,7 +1337,7 @@ mod tests {
             "claimed-count-test".to_owned(),
             std::process::id() as i32,
             WorkerConfig::default(),
-            AppConfig::for_database_url("postgresql://unused/test"),
+            AppConfig::from_database_url("postgresql://unused/test"),
             new_reaper_health(),
             children,
             isolated_claim_columns(isolated),
@@ -1748,7 +1748,7 @@ mod tests {
             crate::ClientFamily::Rust,
         ));
         let worker_id = uuid::Uuid::new_v4().to_string();
-        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        let mut app_config = AppConfig::from_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
@@ -1820,7 +1820,7 @@ mod tests {
 
         let pool = crate::test_support::migrated_pool().await;
         let worker_id = uuid::Uuid::new_v4().to_string();
-        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        let mut app_config = AppConfig::from_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
         let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();

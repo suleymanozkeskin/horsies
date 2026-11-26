@@ -280,7 +280,7 @@ mod tests {
     /// An app with the profile `web`: two isolated children. The config
     /// check refuses a profile that starts no children.
     fn app() -> Horsies {
-        let mut config = AppConfig::for_database_url("postgresql://localhost/horsies");
+        let mut config = AppConfig::from_database_url("postgresql://localhost/horsies");
         let _previous = config.worker_profiles.insert(
             "web".to_owned(),
             WorkerProfile {
@@ -408,7 +408,7 @@ mod tests {
             ..WorkerProfile::default()
         };
         assert_eq!(profile.preload, ChildPreload::NoPreload);
-        let mut config = AppConfig::for_database_url("postgresql://localhost/horsies");
+        let mut config = AppConfig::from_database_url("postgresql://localhost/horsies");
         let _previous = config.worker_profiles.insert("web".to_owned(), profile);
         assert_web_starts_with_no_preload(config);
     }
@@ -421,7 +421,7 @@ mod tests {
     fn a_toml_profile_without_preload_starts() {
         let config: AppConfig = toml::from_str(
             r#"
-[broker]
+[database]
 database_url = "postgresql://localhost/horsies"
 
 [worker_profiles.web]

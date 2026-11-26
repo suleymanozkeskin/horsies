@@ -127,7 +127,7 @@ class AppConfig(BaseModel):
 
     queue_mode: QueueMode = QueueMode.DEFAULT
     custom_queues: Optional[List[CustomQueueConfig]] = None
-    broker: PostgresConfig
+    database: PostgresConfig
     # Cluster-wide cap on concurrently RUNNING tasks across all queues:
     # ClusterCap(tasks=N), or NoClusterCap() (the default).
     cluster_wide_cap: ClusterCapSetting = Field(default_factory=NoClusterCap)
@@ -475,19 +475,19 @@ class AppConfig(BaseModel):
         if self.claim_lease_ms is not None:
             lines.append(f'  claim_lease_ms: {self.claim_lease_ms}ms')
 
-        # Broker config with masked password
-        masked_url = mask_database_url(self.broker.database_url.get_secret_value())
-        lines.append(f'  broker:')
+        # Database config with masked password
+        masked_url = mask_database_url(self.database.database_url.get_secret_value())
+        lines.append('  database:')
         lines.append(f'    database_url: {masked_url}')
-        if self.broker.session_url_differs() or self.broker.pgbouncer_transaction_mode:
+        if self.database.session_url_differs() or self.database.pgbouncer_transaction_mode:
             lines.append(
-                f'    session_database: {mask_database_url(self.broker.effective_session_database_url)}'
+                f'    session_database: {mask_database_url(self.database.effective_session_database_url)}'
             )
         lines.append(
-            f'    pgbouncer_transaction_mode: {self.broker.pgbouncer_transaction_mode}'
+            f'    pgbouncer_transaction_mode: {self.database.pgbouncer_transaction_mode}'
         )
-        lines.append(f'    pool_size: {self.broker.pool_size}')
-        lines.append(f'    max_overflow: {self.broker.max_overflow}')
+        lines.append(f'    pool_size: {self.database.pool_size}')
+        lines.append(f'    max_overflow: {self.database.max_overflow}')
 
         # Recovery config
         lines.append('  recovery:')

@@ -32,7 +32,7 @@ use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{SdkTracerProvider, SpanExporter};
 
 fn build_app() -> Result<Horsies, ValidationReport> {
-    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+    let config = AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies");
     Horsies::new(config)
 }
 

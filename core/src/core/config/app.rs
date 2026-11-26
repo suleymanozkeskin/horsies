@@ -34,8 +34,8 @@ pub struct AppConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_queues: Option<Vec<CustomQueueConfig>>,
 
-    /// PostgreSQL broker configuration.
-    pub broker: PostgresConfig,
+    /// PostgreSQL database configuration.
+    pub database: PostgresConfig,
 
     /// Cluster-wide cap on concurrently RUNNING tasks. Default:
     /// [`ClusterCapSetting::NoClusterCap`].
@@ -149,7 +149,7 @@ pub enum AppConfigError {
     Prefetch(String),
     #[error("{0}")]
     Broker(String),
-    /// A TCP keepalive or user timeout value of the broker config outside
+    /// A TCP keepalive or user timeout value of the database config outside
     /// its bound.
     #[error("{0}")]
     Keepalive(String),
@@ -236,14 +236,14 @@ impl AppConfig {
     ///         priority: 1,
     ///         max_concurrency: Some(10),
     ///     }]),
-    ///     ..AppConfig::for_database_url("postgresql://localhost/mydb")
+    ///     ..AppConfig::from_database_url("postgresql://localhost/mydb")
     /// };
     /// ```
-    pub fn for_database_url(url: impl Into<String>) -> Self {
+    pub fn from_database_url(url: impl Into<String>) -> Self {
         Self {
             queue_mode: default_queue_mode(),
             custom_queues: None,
-            broker: PostgresConfig::from_url(url),
+            database: PostgresConfig::from_database_url(url),
             cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
@@ -295,18 +295,18 @@ impl AppConfig {
         }
 
         // Broker config with masked password
-        let masked_url = mask_database_url(&self.broker.database_url);
-        lines.push("  broker:".to_owned());
+        let masked_url = mask_database_url(&self.database.database_url);
+        lines.push("  database:".to_owned());
         lines.push(format!("    database_url: {}", masked_url));
-        if let super::broker::SessionDatabase::Separate { url } = &self.broker.session_database {
+        if let super::broker::SessionDatabase::Separate { url } = &self.database.session_database {
             lines.push(format!("    session_database: {}", mask_database_url(url)));
         }
         lines.push(format!(
             "    pgbouncer_transaction_mode: {}",
-            self.broker.pgbouncer_transaction_mode,
+            self.database.pgbouncer_transaction_mode,
         ));
-        lines.push(format!("    pool_size: {}", self.broker.pool_size));
-        lines.push(format!("    max_overflow: {}", self.broker.max_overflow));
+        lines.push(format!("    pool_size: {}", self.database.pool_size));
+        lines.push(format!("    max_overflow: {}", self.database.max_overflow));
 
         // Recovery config
         lines.push("  recovery:".to_owned());
@@ -542,7 +542,7 @@ impl AppConfig {
         }
 
         // Broker validation
-        match self.broker.validate() {
+        match self.database.validate() {
             Ok(()) => {}
             Err(PostgresConfigError::SocketValueOutOfBounds(refused)) => {
                 errors.push(AppConfigError::Keepalive(refused.to_string()));
@@ -626,7 +626,7 @@ mod tests {
     use crate::core::config::broker::PostgresConfig;
     use crate::core::config::resilience::WorkerResilienceConfig;
 
-    fn valid_broker() -> PostgresConfig {
+    fn valid_database() -> PostgresConfig {
         PostgresConfig {
             database_url: "postgresql://localhost/test".to_owned(),
             session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
@@ -650,7 +650,7 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: valid_broker(),
+            database: valid_database(),
             cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
@@ -683,7 +683,7 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: valid_broker(),
+            database: valid_database(),
             cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
@@ -727,7 +727,7 @@ mod tests {
                 priority: 1,
                 max_concurrency: Some(5),
             }]),
-            broker: valid_broker(),
+            database: valid_database(),
             cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
@@ -749,7 +749,7 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Custom,
             custom_queues: None,
-            broker: valid_broker(),
+            database: valid_database(),
             cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
@@ -771,7 +771,7 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: valid_broker(),
+            database: valid_database(),
             cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 5,
             claim_lease_ms: None,
@@ -793,7 +793,7 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: valid_broker(),
+            database: valid_database(),
             cluster_wide_cap: ClusterCapSetting::ClusterCap { tasks: 100 },
             prefetch_buffer: 5,
             // Must be >= 2x claimer_heartbeat_interval_ms (default 30_000ms).
@@ -816,7 +816,7 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Custom,
             custom_queues: None,
-            broker: PostgresConfig {
+            database: PostgresConfig {
                 database_url: "mysql://localhost/db".to_owned(),
                 session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
                 pgbouncer_transaction_mode: false,
@@ -843,7 +843,7 @@ mod tests {
             resend_on_transient_error: false,
         };
         let errors = config.validate();
-        // custom_queues missing + invalid broker url + cluster_wide_cap=0
+        // custom_queues missing + invalid database url + cluster_wide_cap=0
         assert_eq!(errors.len(), 3);
     }
 
@@ -857,7 +857,7 @@ mod tests {
                 priority: 0,
                 max_concurrency: Some(5),
             }]),
-            broker: valid_broker(),
+            database: valid_database(),
             cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
@@ -887,7 +887,7 @@ mod tests {
                 priority: 101,
                 max_concurrency: Some(5),
             }]),
-            broker: valid_broker(),
+            database: valid_database(),
             cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
@@ -948,7 +948,7 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: PostgresConfig {
+            database: PostgresConfig {
                 database_url: "postgresql://user:secret@localhost/db".to_owned(),
                 session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
                 pgbouncer_transaction_mode: false,
@@ -990,7 +990,7 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: valid_broker(),
+            database: valid_database(),
             cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
@@ -1061,10 +1061,10 @@ mod tests {
 
     #[test]
     fn for_database_url_uses_expected_defaults() {
-        let config = AppConfig::for_database_url("postgresql://localhost/test");
+        let config = AppConfig::from_database_url("postgresql://localhost/test");
         assert!(matches!(config.queue_mode, QueueMode::Default));
         assert!(config.custom_queues.is_none());
-        assert_eq!(config.broker.database_url, "postgresql://localhost/test");
+        assert_eq!(config.database.database_url, "postgresql://localhost/test");
         assert_eq!(config.prefetch_buffer, 0);
         assert!(config.claim_lease_ms.is_none());
         assert_eq!(config.max_claim_renew_age_ms, MAX_CLAIM_RENEW_AGE_MS);
@@ -1205,7 +1205,7 @@ mod tests {
     #[test]
     fn the_cluster_cap_json_form_is_tagged() {
         let capped: AppConfig = serde_json::from_str(
-            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+            r#"{"database": {"database_url": "postgresql://localhost/db"},
                 "cluster_wide_cap": {"kind": "cluster_cap", "tasks": 20}}"#,
         )
         .expect("a tagged cap parses");
@@ -1214,13 +1214,13 @@ mod tests {
             ClusterCapSetting::ClusterCap { tasks: 20 }
         );
         let uncapped: AppConfig = serde_json::from_str(
-            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+            r#"{"database": {"database_url": "postgresql://localhost/db"},
                 "cluster_wide_cap": {"kind": "no_cluster_cap"}}"#,
         )
         .expect("no cap parses");
         assert_eq!(uncapped.cluster_wide_cap, ClusterCapSetting::NoClusterCap);
         assert!(serde_json::from_str::<AppConfig>(
-            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+            r#"{"database": {"database_url": "postgresql://localhost/db"},
                 "cluster_wide_cap": 20}"#,
         )
         .is_err());
@@ -1231,7 +1231,7 @@ mod tests {
     #[test]
     fn a_keepalive_value_outside_its_bound_has_the_keepalive_code() {
         let mut config = default_config();
-        config.broker.tcp_keepalives = super::super::TcpKeepalivesConfig::On {
+        config.database.tcp_keepalives = super::super::TcpKeepalivesConfig::On {
             idle_seconds: 0,
             interval_seconds: 10,
             probes: 3,
@@ -1448,22 +1448,22 @@ mod tests {
     /// config or in a nested config is refused, not dropped.
     #[test]
     fn unknown_keys_are_refused_at_every_level() {
-        let accepted = r#"{"broker": {"database_url": "postgresql://localhost/db"}}"#;
+        let accepted = r#"{"database": {"database_url": "postgresql://localhost/db"}}"#;
         let config: AppConfig = serde_json::from_str(accepted).expect("known keys only");
         assert!(config.validate().is_empty());
 
         let refused = [
-            r#"{"broker": {"database_url": "postgresql://localhost/db"}, "prefetch": 1}"#,
-            r#"{"broker": {"database_url": "postgresql://localhost/db", "pool": 1}}"#,
-            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+            r#"{"database": {"database_url": "postgresql://localhost/db"}, "prefetch": 1}"#,
+            r#"{"database": {"database_url": "postgresql://localhost/db", "pool": 1}}"#,
+            r#"{"database": {"database_url": "postgresql://localhost/db"},
                 "queue_mode": "custom", "custom_queues": [{"name": "a", "prio": 1}]}"#,
-            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+            r#"{"database": {"database_url": "postgresql://localhost/db"},
                 "payload": {"reject": 10}}"#,
-            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+            r#"{"database": {"database_url": "postgresql://localhost/db"},
                 "resilience": {"db_retry_initial": 500}}"#,
-            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+            r#"{"database": {"database_url": "postgresql://localhost/db"},
                 "recovery": {"check_interval": 500}}"#,
-            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+            r#"{"database": {"database_url": "postgresql://localhost/db"},
                 "schedule": {"schedules": [], "interval": 1}}"#,
         ];
         for json in refused {
@@ -1479,29 +1479,29 @@ mod tests {
     /// One TOML document per config level that `AppConfig` reaches, with its
     /// row key. The line `EXTRA` sits in the table of that level; the key
     /// goes there. The names are Python's models; the socket settings and
-    /// `pool_recycle` of `broker` are Rust forms of Python's flat
+    /// `pool_recycle` of `database` are Rust forms of Python's flat
     /// `PostgresConfig` fields, with a row per variant. A new nested config
     /// type needs a row.
     const CONFIG_LEVELS: [(&str, &str); 37] = [
         (
             "extra_app_config",
             "EXTRA
-[broker]
+[database]
 database_url = \"postgresql://localhost/db\"
 ",
         ),
         (
             "extra_postgres_config",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 EXTRA
 ",
         ),
         (
             "extra_pool_recycle",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
-[broker.pool_recycle]
+[database.pool_recycle]
 kind = \"AFTER_SECONDS\"
 seconds = 1800
 EXTRA
@@ -1509,9 +1509,9 @@ EXTRA
         ),
         (
             "extra_tcp_keepalives",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
-[broker.tcp_keepalives]
+[database.tcp_keepalives]
 kind = \"ON\"
 idle_seconds = 30
 interval_seconds = 10
@@ -1521,9 +1521,9 @@ EXTRA
         ),
         (
             "extra_tcp_user_timeout",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
-[broker.tcp_user_timeout]
+[database.tcp_user_timeout]
 kind = \"AFTER\"
 milliseconds = 30000
 EXTRA
@@ -1531,27 +1531,27 @@ EXTRA
         ),
         (
             "extra_pool_recycle_never",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
-[broker.pool_recycle]
+[database.pool_recycle]
 kind = \"NEVER\"
 EXTRA
 ",
         ),
         (
             "extra_tcp_keepalives_off",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
-[broker.tcp_keepalives]
+[database.tcp_keepalives]
 kind = \"OFF\"
 EXTRA
 ",
         ),
         (
             "extra_tcp_user_timeout_system_default",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
-[broker.tcp_user_timeout]
+[database.tcp_user_timeout]
 kind = \"SYSTEM_DEFAULT\"
 EXTRA
 ",
@@ -1559,7 +1559,7 @@ EXTRA
         (
             "extra_custom_queue_config",
             "queue_mode = \"custom\"
-[broker]
+[database]
 database_url = \"postgresql://localhost/db\"
 [[custom_queues]]
 name = \"a\"
@@ -1568,7 +1568,7 @@ EXTRA
         ),
         (
             "extra_payload_policy",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [payload]
 EXTRA
@@ -1576,7 +1576,7 @@ EXTRA
         ),
         (
             "extra_recovery_config",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [recovery]
 EXTRA
@@ -1584,7 +1584,7 @@ EXTRA
         ),
         (
             "extra_retention_config",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [retention]
 EXTRA
@@ -1592,7 +1592,7 @@ EXTRA
         ),
         (
             "extra_worker_resilience_config",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [resilience]
 EXTRA
@@ -1600,7 +1600,7 @@ EXTRA
         ),
         (
             "extra_worker_profile",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default]
 EXTRA
@@ -1608,7 +1608,7 @@ EXTRA
         ),
         (
             "extra_isolated_children",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"isolated_children\"
@@ -1618,7 +1618,7 @@ EXTRA
         ),
         (
             "extra_no_isolated_children",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"no_isolated_children\"
@@ -1627,7 +1627,7 @@ EXTRA
         ),
         (
             "extra_isolated_recycle",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"isolated_children\"
@@ -1638,7 +1638,7 @@ EXTRA
         ),
         (
             "extra_task_limit",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"isolated_children\"
@@ -1651,7 +1651,7 @@ EXTRA
         ),
         (
             "extra_no_task_limit",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"isolated_children\"
@@ -1663,7 +1663,7 @@ EXTRA
         ),
         (
             "extra_memory_limit",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"isolated_children\"
@@ -1676,7 +1676,7 @@ EXTRA
         ),
         (
             "extra_no_memory_limit",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"isolated_children\"
@@ -1688,7 +1688,7 @@ EXTRA
         ),
         (
             "extra_isolated_pool",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"isolated_children\"
@@ -1699,7 +1699,7 @@ EXTRA
         ),
         (
             "extra_pool_size",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"isolated_children\"
@@ -1712,7 +1712,7 @@ EXTRA
         ),
         (
             "extra_shared_async_children",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_async]
 kind = \"shared_async_children\"
@@ -1723,7 +1723,7 @@ EXTRA
         ),
         (
             "extra_no_shared_async_children",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_async]
 kind = \"no_shared_async_children\"
@@ -1732,7 +1732,7 @@ EXTRA
         ),
         (
             "extra_shared_recycle",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_async]
 kind = \"shared_async_children\"
@@ -1744,7 +1744,7 @@ EXTRA
         ),
         (
             "extra_shared_pool",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_async]
 kind = \"shared_async_children\"
@@ -1756,7 +1756,7 @@ EXTRA
         ),
         (
             "extra_pool_size_setting",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_async]
 kind = \"shared_async_children\"
@@ -1770,7 +1770,7 @@ EXTRA
         ),
         (
             "extra_pool_size_from_seats",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_async]
 kind = \"shared_async_children\"
@@ -1783,7 +1783,7 @@ EXTRA
         ),
         (
             "extra_executor_threads",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_async]
 kind = \"shared_async_children\"
@@ -1797,7 +1797,7 @@ EXTRA
         ),
         (
             "extra_executor_threads_from_seats",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_async]
 kind = \"shared_async_children\"
@@ -1810,7 +1810,7 @@ EXTRA
         ),
         (
             "extra_shared_thread_children",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_thread]
 kind = \"shared_thread_children\"
@@ -1821,7 +1821,7 @@ EXTRA
         ),
         (
             "extra_no_shared_thread_children",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_thread]
 kind = \"no_shared_thread_children\"
@@ -1830,7 +1830,7 @@ EXTRA
         ),
         (
             "extra_parent_pool",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.pool]
 EXTRA
@@ -1838,7 +1838,7 @@ EXTRA
         ),
         (
             "extra_claim_limits",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.claim]
 EXTRA
@@ -1846,7 +1846,7 @@ EXTRA
         ),
         (
             "extra_schedule_config",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [schedule]
 EXTRA
@@ -1854,7 +1854,7 @@ EXTRA
         ),
         (
             "extra_task_schedule",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [[schedule.schedules]]
 name = \"a\"
@@ -1888,7 +1888,7 @@ EXTRA
 
     fn with_profiles(document: &str) -> AppConfig {
         serde_json::from_str(&format!(
-            r#"{{"broker": {{"database_url": "postgresql://localhost/db"}},
+            r#"{{"database": {{"database_url": "postgresql://localhost/db"}},
                 "worker_profiles": {document}}}"#
         ))
         .expect("the worker profiles parse")
@@ -1900,10 +1900,10 @@ EXTRA
     #[test]
     fn worker_profiles_default_to_none_and_are_kept_by_name() {
         let config: AppConfig =
-            serde_json::from_str(r#"{"broker": {"database_url": "postgresql://localhost/db"}}"#)
+            serde_json::from_str(r#"{"database": {"database_url": "postgresql://localhost/db"}}"#)
                 .expect("known keys only");
         assert!(config.worker_profiles.is_empty());
-        assert!(AppConfig::for_database_url("postgresql://localhost/db")
+        assert!(AppConfig::from_database_url("postgresql://localhost/db")
             .worker_profiles
             .is_empty());
 
@@ -2022,7 +2022,8 @@ EXTRA
             )),
             "{formatted}",
         );
-        let without = AppConfig::for_database_url("postgresql://localhost/db").format_for_logging();
+        let without =
+            AppConfig::from_database_url("postgresql://localhost/db").format_for_logging();
         assert!(!without.contains("worker_profiles"), "{without}");
     }
 

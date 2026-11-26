@@ -74,7 +74,7 @@ class TestConfigModelsForbidExtra:
         """A misspelled key inside a nested config raises extra_forbidden, not a silent drop."""
         with pytest.raises(ValidationError) as exc_info:
             AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr(
                         'postgresql://user:pass@localhost/db'
                     ),

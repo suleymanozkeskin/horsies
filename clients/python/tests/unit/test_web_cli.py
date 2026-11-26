@@ -232,7 +232,7 @@ class TestAppPathBootLoadsTheRegistry:
     ) -> None:
         broken = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr('postgresql://u:p@localhost/db'),
                 ),
             ),

@@ -474,7 +474,7 @@ fn open_pool(
 #[cfg(test)]
 pub(crate) fn handle_for_test_url(url: &str) -> CoreHandle {
     CoreHandle::open_with_environment(
-        &PostgresConfig::from_url(url),
+        &PostgresConfig::from_database_url(url),
         PoolProfile::Producer,
         ConnectionEnvironment::isolated(),
     )
@@ -487,7 +487,7 @@ pub(crate) fn handle_for_test_url(url: &str) -> CoreHandle {
 /// checkout.
 #[cfg(test)]
 pub(crate) fn core_pool_for_test_url(url: &str) -> CorePool {
-    let config = PostgresConfig::from_url(url);
+    let config = PostgresConfig::from_database_url(url);
     let plan = pool_plan(
         &config,
         PoolRole::Main,
@@ -510,7 +510,7 @@ pub(crate) fn core_pool_for_test_url(url: &str) -> CorePool {
 /// checkout.
 #[cfg(test)]
 pub(crate) fn worker_core_pool_for_test_url(url: &str, size: u32) -> CorePool {
-    let mut config = PostgresConfig::from_url(url);
+    let mut config = PostgresConfig::from_database_url(url);
     config.pool_size = size;
     config.max_overflow = 0;
     let plan = pool_plan(
@@ -534,7 +534,7 @@ pub(crate) fn worker_core_pool_for_test_url(url: &str, size: u32) -> CorePool {
 /// of a broker. Connects to nothing until the first checkout.
 #[cfg(test)]
 pub(crate) fn session_core_pool_for_test_url(url: &str, size: u32) -> CorePool {
-    let mut config = PostgresConfig::from_url(url);
+    let mut config = PostgresConfig::from_database_url(url);
     config.pool_size = size;
     config.max_overflow = 0;
     let plan = pool_plan(
@@ -595,7 +595,7 @@ mod tests {
 
     fn config() -> PostgresConfig {
         let mut config =
-            PostgresConfig::from_url("postgresql://horsies:secret@db.example:5432/app");
+            PostgresConfig::from_database_url("postgresql://horsies:secret@db.example:5432/app");
         config.pool_size = 5;
         config.max_overflow = 3;
         config.pool_timeout_seconds = 7;
@@ -1100,7 +1100,7 @@ mod kept_session_tests {
 
     /// A config of the test database whose pools hold one connection each.
     fn one_connection_config(database_url: &str) -> PostgresConfig {
-        let mut config = PostgresConfig::from_url(database_url);
+        let mut config = PostgresConfig::from_database_url(database_url);
         config.pool_size = 1;
         config.max_overflow = 0;
         config
@@ -1198,7 +1198,7 @@ mod kept_session_tests {
     #[tokio::test]
     async fn a_child_pool_opens_its_kept_connections_without_a_checkout() {
         let url = migrated_database_url().await;
-        let mut config = PostgresConfig::from_url(&url);
+        let mut config = PostgresConfig::from_database_url(&url);
         config.pool_size = 3;
         config.max_overflow = 0;
         let pools = BrokerPools::open_with_environment(

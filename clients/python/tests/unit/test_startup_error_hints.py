@@ -196,7 +196,7 @@ class TestEverySiteGivesACodeAndHelp:
 def _new_app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr(
                     'postgresql://user:password@localhost/unused',
                 ),

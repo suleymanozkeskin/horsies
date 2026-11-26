@@ -530,7 +530,7 @@ fn child_broker_config(
         pool_recycle: CHILD_POOL_MAX_AGE,
         tcp_keepalives: connection.tcp_keepalives.into(),
         tcp_user_timeout: connection.tcp_user_timeout.into(),
-        ..PostgresConfig::from_url(database_url).with_exact_pool(connections)
+        ..PostgresConfig::from_database_url(database_url).with_exact_pool(connections)
     }
 }
 

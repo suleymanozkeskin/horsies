@@ -29,7 +29,7 @@ from horsies.core.types.result import Ok, Result
 
 app = Horsies(
     config=AppConfig(
-        broker=PostgresConfig(database_url='postgresql://u:p@localhost/db'),  # pyright: ignore[reportArgumentType]
+        database=PostgresConfig(database_url='postgresql://u:p@localhost/db'),  # pyright: ignore[reportArgumentType]
     )
 )
 

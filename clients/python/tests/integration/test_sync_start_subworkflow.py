@@ -65,7 +65,7 @@ SEEN_LOCK = threading.Lock()
 APP: Final = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(database_url=SecretStr(DB_URL)),
+        database=PostgresConfig(database_url=SecretStr(DB_URL)),
     ),
 )
 

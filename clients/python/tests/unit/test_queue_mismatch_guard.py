@@ -32,13 +32,13 @@ BROKER = PostgresConfig(
 
 
 def _default_app() -> Horsies:
-    return Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER))
+    return Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, database=BROKER))
 
 
 def _custom_app(*queue_names: str) -> Horsies:
     return Horsies(config=AppConfig(
         queue_mode=QueueMode.CUSTOM,
-        broker=BROKER,
+        database=BROKER,
         custom_queues=[CustomQueueConfig(name=n) for n in queue_names],
     ))
 

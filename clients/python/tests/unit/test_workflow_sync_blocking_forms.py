@@ -69,7 +69,7 @@ CORE_REFUSAL: Final = core.TooManyPendingCalls('CoreHandle.call', 65_536)
 APP: Final = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
+        database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
     ),
 )
 

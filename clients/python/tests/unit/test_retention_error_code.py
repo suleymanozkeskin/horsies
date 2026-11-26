@@ -192,7 +192,7 @@ class TestEveryRefusalCarriesTheCode:
         """
         codes = _raised_codes(
             lambda: AppConfig(
-                broker=PostgresConfig(database_url=SecretStr(_DB_URL)),
+                database=PostgresConfig(database_url=SecretStr(_DB_URL)),
                 retention=RetentionConfig(
                     queue_retention={'absent': timedelta(days=1)}
                 ),
@@ -206,7 +206,7 @@ class TestEveryRefusalCarriesTheCode:
         """Proves the case above reaches the cross-check, not a neighbour."""
         with pytest.raises(ConfigurationError) as raised:
             AppConfig(
-                broker=PostgresConfig(database_url=SecretStr(_DB_URL)),
+                database=PostgresConfig(database_url=SecretStr(_DB_URL)),
                 retention=RetentionConfig(
                     queue_retention={'absent': timedelta(days=1)}
                 ),

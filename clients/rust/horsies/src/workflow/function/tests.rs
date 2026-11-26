@@ -10,7 +10,7 @@ use crate::AppConfig;
 use horsies_core::WorkflowStartErrorCode;
 
 fn app() -> Horsies {
-    Horsies::new(AppConfig::for_database_url(
+    Horsies::new(AppConfig::from_database_url(
         "postgresql://localhost/horsies",
     ))
     .unwrap()
@@ -19,7 +19,7 @@ fn app() -> Horsies {
 /// An app whose address has no database: a start that a defect lets past
 /// its lookup fails to connect, and writes to no local database.
 fn app_without_database() -> Horsies {
-    Horsies::new(AppConfig::for_database_url(
+    Horsies::new(AppConfig::from_database_url(
         "postgresql://127.0.0.1:1/nothing",
     ))
     .unwrap()

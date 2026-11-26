@@ -45,7 +45,7 @@ def _key(label: str) -> str:
 
 def _app_with_tasks() -> tuple[Horsies, TaskFunction[..., int]]:
     app = Horsies(AppConfig(
-        broker=PostgresConfig(database_url=SecretStr(DATABASE_URL)),
+        database=PostgresConfig(database_url=SecretStr(DATABASE_URL)),
     ))
 
     @app.task('success_policy_sub.work')

@@ -374,7 +374,7 @@ mod tests {
     }
 
     fn app_with(schedules: Vec<TaskSchedule>, enabled: bool) -> Horsies {
-        let mut config = AppConfig::for_database_url("postgresql://localhost/horsies");
+        let mut config = AppConfig::from_database_url("postgresql://localhost/horsies");
         config.schedule = Some(ScheduleConfig {
             enabled,
             schedules,
@@ -398,7 +398,7 @@ mod tests {
     /// connect, ends the run `Ok(SchedulerStopped)`, not `StartFailed`.
     #[tokio::test]
     async fn a_stop_before_the_connect_ends_the_run() {
-        let mut config = AppConfig::for_database_url("postgresql://127.0.0.1:1/horsies");
+        let mut config = AppConfig::from_database_url("postgresql://127.0.0.1:1/horsies");
         config.schedule = Some(ScheduleConfig {
             enabled: true,
             schedules: vec![schedule("every", "count", &json!({"count": 5}))],
@@ -515,7 +515,7 @@ mod tests {
     /// any connection, with the schedule and the queue named.
     #[test]
     fn a_schedule_on_a_queue_that_the_app_does_not_admit_names_the_schedule_and_the_queue() {
-        let mut config = AppConfig::for_database_url("postgresql://localhost/horsies");
+        let mut config = AppConfig::from_database_url("postgresql://localhost/horsies");
         config.queue_mode = crate::QueueMode::Custom;
         config.custom_queues = Some(vec![crate::CustomQueueConfig {
             name: "fast".to_owned(),
@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn an_input_over_the_reject_limit_is_refused() {
-        let mut config = AppConfig::for_database_url("postgresql://localhost/horsies");
+        let mut config = AppConfig::from_database_url("postgresql://localhost/horsies");
         config.payload = PayloadPolicy {
             reject_bytes: Some(4),
             ..PayloadPolicy::default()
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn no_schedule_section_and_a_disabled_one_are_refused() {
-        let app = Horsies::new(AppConfig::for_database_url(
+        let app = Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap();

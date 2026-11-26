@@ -608,13 +608,13 @@ mod tests {
     }
 
     fn config() -> AppConfig {
-        AppConfig::for_database_url("postgresql://localhost/horsies")
+        AppConfig::from_database_url("postgresql://localhost/horsies")
     }
 
     /// A config whose address has no database: a send that a defect lets
     /// past its checks fails to connect, and writes to no local database.
     fn config_without_database() -> AppConfig {
-        AppConfig::for_database_url("postgresql://127.0.0.1:1/nothing")
+        AppConfig::from_database_url("postgresql://127.0.0.1:1/nothing")
     }
 
     fn function(app: &Horsies) -> TaskFunction<Invoice, u32, Infallible> {

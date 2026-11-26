@@ -143,9 +143,9 @@ def to_worker_manifest(
     """
     return wire.WorkerManifest(
         manifest_version=wire.MANIFEST_VERSION,
-        database=worker_database_manifest(config.broker),
+        database=worker_database_manifest(config.database),
         send=wire.SendManifest(
-            retain_rerun_input_default=config.broker.retain_rerun_input_default,
+            retain_rerun_input_default=config.database.retain_rerun_input_default,
             idempotency_reservation_window=reservation_window_micros(
                 idempotency_reservation_window,
             ),

@@ -54,11 +54,11 @@ const CORE_URL_SCHEME: &str = "postgresql://";
 /// The short form of [`CORE_URL_SCHEME`] that the config also admits.
 const SHORT_URL_SCHEME: &str = "postgres://";
 
-/// A broker setting that passes `PostgresConfig::validate` but is outside
+/// A database setting that passes `PostgresConfig::validate` but is outside
 /// the bounds of the core's manifest. The cause names the bound, never the
 /// value.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("broker.{field}: {cause}")]
+#[error("database.{field}: {cause}")]
 pub(crate) struct BrokerSettingRefused {
     /// The `PostgresConfig` field.
     pub(crate) field: &'static str,
@@ -70,7 +70,7 @@ impl BrokerSettingRefused {
     /// The config refusal. It has no catalog code: Python refuses the same
     /// values through field bounds, which carry none.
     pub(crate) fn to_horsies_error(&self) -> HorsiesError {
-        HorsiesError::new(format!("invalid broker config: {self}"))
+        HorsiesError::new(format!("invalid database config: {self}"))
     }
 }
 
@@ -213,7 +213,7 @@ mod tests {
     use super::*;
 
     fn broker(url: &str) -> PostgresConfig {
-        PostgresConfig::from_url(url)
+        PostgresConfig::from_database_url(url)
     }
 
     fn manifest_round_trip(manifest: &ProducerManifest) -> ProducerManifest {
@@ -321,7 +321,7 @@ mod tests {
     /// `NoPreload` is not.
     #[test]
     fn a_profile_with_a_preload_is_refused_with_its_path() {
-        let mut config = AppConfig::for_database_url("postgresql://db/horsies");
+        let mut config = AppConfig::from_database_url("postgresql://db/horsies");
         for (name, preload) in [
             ("app", ChildPreload::App),
             ("library", ChildPreload::Library),
@@ -351,7 +351,7 @@ mod tests {
     /// path and its bounds.
     #[test]
     fn horsies_new_refuses_every_profile_value_outside_its_bound_at_once() {
-        let mut config = AppConfig::for_database_url("postgresql://db/horsies");
+        let mut config = AppConfig::from_database_url("postgresql://db/horsies");
         let _previous = config.worker_profiles.insert(
             "web".to_owned(),
             WorkerProfile {
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn a_config_without_profiles_has_no_rust_refusal() {
-        let config = AppConfig::for_database_url("postgresql://db/horsies");
+        let config = AppConfig::from_database_url("postgresql://db/horsies");
         assert!(rust_config_refusals(&config).is_empty());
     }
 }

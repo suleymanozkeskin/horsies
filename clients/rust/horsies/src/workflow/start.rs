@@ -278,7 +278,7 @@ mod tests {
     /// made passes the check of the start. No I/O.
     #[test]
     fn a_starter_made_before_a_registration_checks_against_it() {
-        let mut app = Horsies::new(AppConfig::for_database_url(
+        let mut app = Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap();

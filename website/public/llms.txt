@@ -43,7 +43,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### AppConfig
 - queue_mode: QueueMode (DEFAULT or CUSTOM)
 - custom_queues: list[CustomQueueConfig] | None (required for CUSTOM)
-- broker: PostgresConfig
+- database: PostgresConfig
 - cluster_wide_cap: ClusterCap(tasks) | NoClusterCap (default NoClusterCap(); max RUNNING tasks across cluster)
 - prefetch_buffer: int (0 = hard cap, >0 = soft cap with lease)
 - claim_lease_ms: int | None (required when prefetch_buffer > 0)

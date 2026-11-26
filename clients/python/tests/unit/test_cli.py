@@ -631,7 +631,7 @@ def _make_mock_app() -> MagicMock:
     resilience = WorkerResilienceConfig()
 
     app.config = MagicMock()
-    app.config.broker = PostgresConfig(
+    app.config.database = PostgresConfig(
         database_url='postgresql://user:pass@localhost/db',
     )
     app.config.queue_mode = queue_mode
@@ -2004,7 +2004,7 @@ class TestCheckCommandReportsEveryProfile:
             'from horsies import (AppConfig, ClaimLimits, Horsies, IsolatedChildren,\n'
             '    PostgresConfig, TaskLimit, WorkerProfile)\n'
             'app = Horsies(AppConfig(\n'
-            "    broker=PostgresConfig(database_url='postgresql://u:p@h/db'),\n"
+            "    database=PostgresConfig(database_url='postgresql://u:p@h/db'),\n"
             '    worker_profiles={\n'
             "        'empty': WorkerProfile(),\n"
             "        'greedy': WorkerProfile(\n"
@@ -2038,7 +2038,7 @@ SMALL_PARENT_POOL_APP: Final = (
     'from horsies import (AppConfig, Horsies, IsolatedChildren, ParentPool,\n'
     '    PoolSize, PostgresConfig, WorkerProfile)\n'
     'app = Horsies(AppConfig(\n'
-    "    broker=PostgresConfig(database_url='postgresql://u:p@h/db'),\n"
+    "    database=PostgresConfig(database_url='postgresql://u:p@h/db'),\n"
     '    worker_profiles={\n'
     "        'small': WorkerProfile(\n"
     '            isolated=IsolatedChildren(count=1),\n'

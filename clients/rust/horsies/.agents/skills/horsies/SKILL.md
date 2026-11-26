@@ -111,7 +111,7 @@ fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
     };
     let config = AppConfig {
         worker_profiles: BTreeMap::from([("default".to_owned(), profile)]),
-        ..AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies")
+        ..AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies")
     };
     let mut app = Horsies::new(config)?;
     let _add = add_numbers::register(&mut app)?;
@@ -163,7 +163,7 @@ async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = Horsies::new(AppConfig::for_database_url(
+    let mut app = Horsies::new(AppConfig::from_database_url(
         "postgresql://app:secret@db.example.com:5432/horsies",
     ))?;
     let add = add_numbers::register(&mut app)?;
@@ -212,7 +212,7 @@ async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = Horsies::new(AppConfig::for_database_url(
+    let mut app = Horsies::new(AppConfig::from_database_url(
         "postgresql://app:secret@db.example.com:5432/horsies",
     ))?;
     let add = add_numbers::register(&mut app)?;

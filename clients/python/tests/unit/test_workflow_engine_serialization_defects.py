@@ -48,7 +48,7 @@ DATABASE_URL = 'postgresql://u:p@localhost:5432/db'
 
 def _real_app() -> Horsies:
     return Horsies(AppConfig(
-        broker=PostgresConfig(database_url=SecretStr(DATABASE_URL)),
+        database=PostgresConfig(database_url=SecretStr(DATABASE_URL)),
     ))
 
 

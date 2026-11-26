@@ -77,7 +77,7 @@ _WINDOW: Final = MonitoringWindow(lower=_UPPER - timedelta(days=1), upper=_UPPER
 _APP: Final = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(database_url=SecretStr(_URL)),
+        database=PostgresConfig(database_url=SecretStr(_URL)),
     ),
 )
 
@@ -343,7 +343,7 @@ class TestAppLiveCheck:
     )
     @pytest.mark.parametrize('refusal', _refusals())
     def test_a_live_step_raises_the_refusal(self, step: str, refusal: CoreError) -> None:
-        app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(_URL))))
+        app = Horsies(AppConfig(database=PostgresConfig(database_url=SecretStr(_URL))))
 
         with _live_check(step, refusal) as built:
             with pytest.raises(type(refusal)) as raised:

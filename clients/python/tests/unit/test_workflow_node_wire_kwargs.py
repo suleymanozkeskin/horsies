@@ -43,7 +43,7 @@ _ROWS: list[tuple[str, Any, Any, Any]] = [
 def _app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(database_url='postgresql://u:p@localhost/x'),
+            database=PostgresConfig(database_url='postgresql://u:p@localhost/x'),
         ),
     )
 

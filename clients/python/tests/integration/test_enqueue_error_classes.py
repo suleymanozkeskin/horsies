@@ -94,7 +94,7 @@ def unreachable_app(unreachable_broker: PostgresBroker) -> Horsies:
     horsies_app = Horsies(
         AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
+            database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
         ),
     )
     horsies_app._broker = unreachable_broker  # pyright: ignore[reportPrivateUsage]

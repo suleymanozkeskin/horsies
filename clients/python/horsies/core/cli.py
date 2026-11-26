@@ -913,7 +913,7 @@ def _registryless_app(args: argparse.Namespace) -> Horsies:
             session_database = SessionDatabaseSeparate(url=SecretStr(url))
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr(args.database_url),
                 session_database=session_database,
                 pgbouncer_transaction_mode=args.pgbouncer_transaction_mode,

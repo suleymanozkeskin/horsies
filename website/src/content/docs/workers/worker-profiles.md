@@ -35,7 +35,7 @@ from horsies import (
 )
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
     ),
     worker_profiles={
@@ -123,7 +123,7 @@ from horsies import (
 )
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
     ),
     worker_profiles={
@@ -171,7 +171,7 @@ from horsies import (
 )
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
     ),
     worker_profiles={
@@ -216,7 +216,7 @@ from horsies import (
 )
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
     ),
     worker_profiles={

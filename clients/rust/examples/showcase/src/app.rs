@@ -103,7 +103,7 @@ pub fn build_app_with_config(
 /// The Acme config of the database at `url`: the four queues, the worker
 /// profile, the tuned recovery and retention settings, and the schedules.
 pub fn config_for_url(url: &str) -> AppConfig {
-    let mut config = AppConfig::for_database_url(url);
+    let mut config = AppConfig::from_database_url(url);
     config.queue_mode = QueueMode::Custom;
     config.custom_queues = Some(
         QUEUES

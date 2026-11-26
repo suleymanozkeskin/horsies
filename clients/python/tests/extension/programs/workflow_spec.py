@@ -37,7 +37,7 @@ PARENT_NAME: Final = 'tests.extension.parent'
 APP: Final = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://extension@127.0.0.1:1/never_connected'),
         ),
     ),

@@ -102,7 +102,7 @@ def _returning(make_answer: Callable[[], _T]) -> Callable[..., _T]:
 
 def _app() -> Horsies:
     """An app whose broker cannot connect, with one task whose ok type is int."""
-    app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))))
+    app = Horsies(AppConfig(database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))))
 
     @app.task(REGISTERED_TASK)
     def number(*, value: int) -> Result[int, TaskError]:

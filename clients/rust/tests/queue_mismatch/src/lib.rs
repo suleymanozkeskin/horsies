@@ -16,7 +16,7 @@ pub const UNUSED_DATABASE_URL: &str = "postgresql://guard_test:guard_test@localh
 
 /// `Default` queue mode: the one implicit queue `default`.
 pub fn default_mode_config(database_url: &str) -> AppConfig {
-    AppConfig::for_database_url(database_url)
+    AppConfig::from_database_url(database_url)
 }
 
 /// `Custom` queue mode with `fast` (priority 1, cap 10) and `slow`
@@ -36,7 +36,7 @@ pub fn custom_mode_config() -> AppConfig {
                 max_concurrency: Some(5),
             },
         ]),
-        ..AppConfig::for_database_url(UNUSED_DATABASE_URL)
+        ..AppConfig::from_database_url(UNUSED_DATABASE_URL)
     }
 }
 

@@ -17,7 +17,7 @@ SESSION_DB_URL = os.environ["HORSIES_TEST_DATABASE_URL_DIRECT"]
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=DB_URL,
         session_database=SessionDatabaseSeparate(url=SESSION_DB_URL),
         pgbouncer_transaction_mode=True,

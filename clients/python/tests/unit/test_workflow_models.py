@@ -2263,7 +2263,7 @@ class TestWorkflowDefinition:
         # Create minimal app (no broker connection needed for build)
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2293,7 +2293,7 @@ class TestWorkflowDefinition:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2321,7 +2321,7 @@ class TestWorkflowDefinition:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2351,7 +2351,7 @@ class TestWorkflowDefinition:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2380,7 +2380,7 @@ class TestWorkflowDefinition:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2406,7 +2406,7 @@ class TestWorkflowDefinition:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2430,7 +2430,7 @@ class TestWorkflowDefinition:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2455,7 +2455,7 @@ class TestWorkflowDefinition:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2483,7 +2483,7 @@ class TestWorkflowDefinition:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2527,7 +2527,7 @@ class TestWorkflowDefinition:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2556,7 +2556,7 @@ class TestWorkflowOutputTypeMismatch:
 
         return Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test',
                 ),
             ),
@@ -2735,7 +2735,7 @@ class TestWorkflowDefinitionConfig:
 
         return Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr('postgresql://test:test@localhost/test'),
                 ),
             ),
@@ -3770,7 +3770,7 @@ def _minimal_app() -> Any:
 
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr('postgresql://test:test@localhost/test'),
             ),
         )

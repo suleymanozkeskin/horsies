@@ -42,7 +42,7 @@ def _database_url() -> str:
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(database_url=SecretStr(_database_url())),
+    database=PostgresConfig(database_url=SecretStr(_database_url())),
     worker_profiles=E2E_WORKER_PROFILES,
 )
 

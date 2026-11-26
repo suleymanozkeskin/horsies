@@ -409,7 +409,7 @@ from pydantic import SecretStr
 
 app = Horsies(
     config=AppConfig(
-        broker=PostgresConfig(database_url=SecretStr('postgresql://...')),
+        database=PostgresConfig(database_url=SecretStr('postgresql://...')),
         # HRS-212: 'BROKER_ERROR' collides with OperationalErrorCode.BROKER_ERROR
         exception_mapper={ValueError: 'BROKER_ERROR'},
     ),

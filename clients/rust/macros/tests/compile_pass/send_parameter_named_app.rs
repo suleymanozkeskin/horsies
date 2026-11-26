@@ -8,7 +8,7 @@ async fn app_parameter(app: String) -> Result<usize, TaskError<std::convert::Inf
 }
 
 fn main() {
-    let Ok(horsies_app) = Horsies::new(AppConfig::for_database_url(
+    let Ok(horsies_app) = Horsies::new(AppConfig::from_database_url(
         "postgresql://localhost/horsies",
     )) else {
         return;

@@ -17,7 +17,7 @@ fn tasks() -> Arc<TaskFunctions> {
 }
 
 fn registry() -> WorkflowRegistry {
-    WorkflowRegistry::new(AppConfig::for_database_url(
+    WorkflowRegistry::new(AppConfig::from_database_url(
         "postgresql://localhost/horsies",
     ))
 }

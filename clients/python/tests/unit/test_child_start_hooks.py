@@ -36,7 +36,7 @@ pytestmark = [pytest.mark.unit]
 def _make_app() -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr('postgresql://user:pass@localhost/db'),
             ),
         )

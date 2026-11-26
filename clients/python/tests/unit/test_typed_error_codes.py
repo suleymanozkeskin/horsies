@@ -61,7 +61,7 @@ class OtherCode(Enum):
 
 def _app(mapper: dict[type[BaseException], str] | None = None) -> Horsies:
     return Horsies(AppConfig(
-        broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
+        database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
         exception_mapper=mapper or {},
     ))
 

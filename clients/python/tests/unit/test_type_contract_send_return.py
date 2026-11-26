@@ -72,7 +72,7 @@ def _mock_app() -> MagicMock:
 def _real_app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://user:password@localhost/unused',
             ),
         ),

@@ -37,7 +37,7 @@ def _app(
     **broker_fields: Any,
 ) -> Horsies:
     return Horsies(
-        AppConfig(broker=_broker(**broker_fields), worker_profiles=profiles),
+        AppConfig(database=_broker(**broker_fields), worker_profiles=profiles),
     )
 
 

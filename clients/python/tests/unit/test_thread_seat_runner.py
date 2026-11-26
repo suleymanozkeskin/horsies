@@ -77,7 +77,7 @@ TASK_ID: Final = uuid.UUID('0190f2d8-7c1e-7a3b-9f00-000000000041')
 
 APP = Horsies(
     AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://u:p@localhost/unused'),
         ),
     ),

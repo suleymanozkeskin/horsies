@@ -367,7 +367,7 @@ fn parent_pool_refusal(refusal: HorsiesError, note: &str) -> HorsiesError {
 pub fn removed_pool_field_refusal(
     fields: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), HorsiesError> {
-    let mut report = ValidationReport::new("broker");
+    let mut report = ValidationReport::new("database");
     for field in RemovedPoolField::ALL {
         if fields.contains_key(field.key()) {
             report.add(field.refusal());
@@ -432,7 +432,7 @@ impl PostgresConfig {
     /// all other fields.
     ///
     /// This mirrors the Python convenience of `PostgresConfig(database_url="...")`.
-    pub fn from_url(url: impl Into<String>) -> Self {
+    pub fn from_database_url(url: impl Into<String>) -> Self {
         Self {
             database_url: url.into(),
             session_database: SessionDatabase::SameAsDatabaseUrl,
@@ -465,7 +465,7 @@ impl PostgresConfig {
         database_url: impl Into<String>,
         session_database_url: impl Into<String>,
     ) -> Self {
-        let mut config = Self::from_url(database_url);
+        let mut config = Self::from_database_url(database_url);
         config.session_database = SessionDatabase::Separate {
             url: session_database_url.into(),
         };
@@ -664,13 +664,13 @@ mod tests {
     }
 
     /// A config that names no pool gets the general broker pool of 5
-    /// connections and 10 more under load, by serde and by `from_url`.
+    /// connections and 10 more under load, by serde and by `from_database_url`.
     #[test]
     fn the_general_broker_pool_default_is_5_and_10() {
         let parsed: PostgresConfig =
             serde_json::from_str(r#"{"database_url": "postgresql://localhost/db"}"#)
                 .expect("a config with only a URL is valid");
-        let built = PostgresConfig::from_url("postgresql://localhost/db");
+        let built = PostgresConfig::from_database_url("postgresql://localhost/db");
 
         assert_eq!((parsed.pool_size, parsed.max_overflow), (5, 10));
         assert_eq!((built.pool_size, built.max_overflow), (5, 10));
@@ -694,7 +694,7 @@ mod tests {
 
     #[test]
     fn pgbouncer_requires_session_database_url() {
-        let mut config = PostgresConfig::from_url("postgresql://user:pass@pooler/db");
+        let mut config = PostgresConfig::from_database_url("postgresql://user:pass@pooler/db");
         config.pgbouncer_transaction_mode = true;
 
         assert!(matches!(
@@ -707,7 +707,7 @@ mod tests {
     /// with the field path and the bound.
     #[test]
     fn a_socket_value_outside_its_bound_is_refused() {
-        let mut config = PostgresConfig::from_url("postgresql://user:pass@localhost/db");
+        let mut config = PostgresConfig::from_database_url("postgresql://user:pass@localhost/db");
         config.tcp_keepalives = TcpKeepalivesConfig::On {
             idle_seconds: 30,
             interval_seconds: 10,
@@ -761,7 +761,7 @@ mod tests {
         ));
 
         // Outside PgBouncer mode the two roles may share one URL.
-        let mut direct = PostgresConfig::from_url("postgresql://user:pass@direct/db");
+        let mut direct = PostgresConfig::from_database_url("postgresql://user:pass@direct/db");
         direct.session_database = SessionDatabase::Separate {
             url: "postgresql://user:pass@direct/db".to_owned(),
         };
@@ -1015,9 +1015,10 @@ mod tests {
                 "worker_max_overflow",
             ],
         );
-        let serialized =
-            serde_json::to_value(PostgresConfig::from_url("postgresql://localhost/db"))
-                .expect("the config serializes");
+        let serialized = serde_json::to_value(PostgresConfig::from_database_url(
+            "postgresql://localhost/db",
+        ))
+        .expect("the config serializes");
         let serialized = serialized.as_object().expect("the config is an object");
         for key in keys {
             assert!(!serialized.contains_key(key), "{key} is still a field");
@@ -1035,7 +1036,7 @@ mod tests {
 
     #[test]
     fn invalid_session_url_scheme() {
-        let mut config = PostgresConfig::from_url("postgresql://user:pass@pooler/db");
+        let mut config = PostgresConfig::from_database_url("postgresql://user:pass@pooler/db");
         config.session_database = SessionDatabase::Separate {
             url: "mysql://user:pass@direct/db".to_owned(),
         };
@@ -1050,7 +1051,8 @@ mod tests {
     /// the fix.
     #[test]
     fn a_driver_suffix_scheme_is_refused_with_the_fix() {
-        let config = PostgresConfig::from_url("postgresql+psycopg://user:secret@localhost/db");
+        let config =
+            PostgresConfig::from_database_url("postgresql+psycopg://user:secret@localhost/db");
 
         let error = config.validate().unwrap_err();
 
@@ -1068,7 +1070,7 @@ mod tests {
 
     #[test]
     fn a_driver_suffix_session_scheme_is_refused() {
-        let mut config = PostgresConfig::from_url("postgresql://user:pass@pooler/db");
+        let mut config = PostgresConfig::from_database_url("postgresql://user:pass@pooler/db");
         config.session_database = SessionDatabase::Separate {
             url: "postgres+asyncpg://user:pass@direct/db".to_owned(),
         };
@@ -1085,7 +1087,7 @@ mod tests {
     /// password.
     #[test]
     fn a_url_without_a_scheme_is_refused_without_echoing_it() {
-        let config = PostgresConfig::from_url("user:secret@localhost/db");
+        let config = PostgresConfig::from_database_url("user:secret@localhost/db");
 
         let error = config.validate().unwrap_err();
 

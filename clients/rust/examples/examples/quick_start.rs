@@ -24,7 +24,7 @@ async fn greet(name: String) -> Result<String, TaskError<Infallible>> {
 
 /// Every process builds the same app: the demo, the worker and each child.
 fn build_app() -> Result<Horsies, HorsiesError> {
-    let mut config = AppConfig::for_database_url(database_url());
+    let mut config = AppConfig::from_database_url(database_url());
     config.worker_profiles = BTreeMap::from([(DEFAULT_PROFILE.to_owned(), isolated_profile())]);
     let mut app = Horsies::new(config)?;
     let _greet = greet::register(&mut app)?;

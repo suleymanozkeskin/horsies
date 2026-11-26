@@ -14,7 +14,7 @@ from horsies import Horsies, AppConfig, PostgresConfig, QueueMode
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
 app = Horsies(config)
 ```
@@ -25,7 +25,7 @@ app = Horsies(config)
 |-------|------|---------|-------------|
 | `queue_mode` | `QueueMode` | `DEFAULT` | Queue operating mode |
 | `custom_queues` | `list[CustomQueueConfig]` | `None` | Queue definitions (CUSTOM mode only) |
-| `broker` | `PostgresConfig` | required | Database connection settings |
+| `database` | `PostgresConfig` | required | Database connection settings |
 | `cluster_wide_cap` | `ClusterCap \| NoClusterCap` | `NoClusterCap()` | Max in-flight tasks cluster-wide: `ClusterCap(tasks=N)`, or no cap |
 | `prefetch_buffer` | `int` | `0` | 0 = hard cap mode, >0 = soft cap with prefetch |
 | `claim_lease_ms` | `int` | `None` | Claim lease duration (required if prefetch_buffer > 0; optional override in hard cap mode) |
@@ -59,7 +59,7 @@ from horsies import QueueMode
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
 app = Horsies(config)
 
@@ -82,7 +82,7 @@ config = AppConfig(
         CustomQueueConfig(name="normal", priority=50, max_concurrency=5),
         CustomQueueConfig(name="low", priority=100, max_concurrency=2),
     ],
-    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
 app = Horsies(config)
 
@@ -130,7 +130,7 @@ Limit total in-flight tasks across all workers:
 ```python
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(...),
+    database=PostgresConfig(...),
     cluster_wide_cap=ClusterCap(tasks=100),  # Max 100 in-flight tasks (RUNNING + CLAIMED)
 )
 ```
@@ -147,13 +147,13 @@ Control whether workers can prefetch tasks beyond their running capacity:
 ```python
 # Hard cap mode (default) - strict enforcement, fair distribution
 config = AppConfig(
-    broker=PostgresConfig(...),
+    database=PostgresConfig(...),
     prefetch_buffer=0,  # No prefetch, workers only claim what they can run
 )
 
 # Soft cap mode - allows prefetch with lease expiry
 config = AppConfig(
-    broker=PostgresConfig(...),
+    database=PostgresConfig(...),
     prefetch_buffer=4,      # Prefetch up to 4 extra tasks per worker
     claim_lease_ms=5000,    # Prefetched claims expire after 5 seconds
 )
@@ -188,7 +188,7 @@ Coverage by boundary:
 from horsies import PayloadPolicy
 
 AppConfig(
-    broker=broker,
+    database=database,
     payload=PayloadPolicy(
         warn_bytes=1_048_576,      # warn above 1 MiB (default)
         reject_bytes=33_554_432,   # hard ceiling: reject above 32 MiB
@@ -210,7 +210,7 @@ Override crash recovery defaults. The fields, their defaults and their ranges ar
 from horsies import RecoveryConfig
 
 config = AppConfig(
-    broker=broker,
+    database=database,
     recovery=RecoveryConfig(
         # Claimer detection
         requeue_stale_claimed=True,
@@ -278,7 +278,7 @@ from datetime import timedelta
 from horsies import AppConfig, RetentionConfig
 
 config = AppConfig(
-    broker=broker,
+    database=database,
     retention=RetentionConfig(
         queue_retention={
             'emails': timedelta(days=7),
@@ -322,7 +322,7 @@ Configure worker retry/backoff and NOTIFY fallback polling. The fields and their
 from horsies import WorkerResilienceConfig
 
 config = AppConfig(
-    broker=broker,
+    database=database,
     resilience=WorkerResilienceConfig(
         database_retry_initial_ms=500,      # initial backoff on DB errors
         database_retry_max_ms=30_000,       # backoff cap
@@ -342,7 +342,7 @@ from horsies import ScheduleConfig, TaskSchedule, DailySchedule
 from datetime import time
 
 config = AppConfig(
-    broker=PostgresConfig(...),
+    database=PostgresConfig(...),
     schedule=ScheduleConfig(
         enabled=True,
         check_interval_seconds=1,
@@ -458,7 +458,7 @@ The limits that these configs set are on [Concurrency](/horsies/workers/concurre
 ```python
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(...),
+    database=PostgresConfig(...),
 )
 ```
 
@@ -475,7 +475,7 @@ The `default` profile holds `isolated=IsolatedChildren(count=8)`.
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
     cluster_wide_cap=ClusterCap(tasks=20),
-    broker=PostgresConfig(...),
+    database=PostgresConfig(...),
 )
 ```
 
@@ -501,7 +501,7 @@ config = AppConfig(
         CustomQueueConfig(name="reports", priority=100, max_concurrency=2),
     ],
     cluster_wide_cap=ClusterCap(tasks=15),
-    broker=PostgresConfig(...),
+    database=PostgresConfig(...),
 )
 ```
 
@@ -521,7 +521,7 @@ Output:
 ```
 AppConfig:
   queue_mode: DEFAULT
-  broker:
+  database:
     database_url: postgresql://user:***@localhost/db
     pool_size: 5
     max_overflow: 10

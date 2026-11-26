@@ -31,7 +31,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, WorkflowDefinition, WorkflowDefinitionConfig, TaskNode, Err, Failed, Ok, Result, Succeeded, TaskError, TaskOutcome, JsonValue
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
 ))
 
 @app.task(task_name="fetch_data")
@@ -1071,7 +1071,7 @@ from horsies import (
 )
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
 ))
 
 

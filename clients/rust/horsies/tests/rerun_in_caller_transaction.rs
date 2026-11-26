@@ -311,7 +311,7 @@ async fn a_family_row_that_holds_no_client_family_is_refused_with_its_value() {
     );
     transaction.rollback().await.unwrap();
 
-    let app = Horsies::new(AppConfig::for_database_url(database.url())).unwrap();
+    let app = Horsies::new(AppConfig::from_database_url(database.url())).unwrap();
     match app.rerun_task(command, policy()).await {
         Err(AppRerunError::Connect(BrokerError::UnknownStoredFamily(UnknownStoredFamily {
             stored,

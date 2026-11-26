@@ -558,7 +558,7 @@ fn the_labels_of_a_default_config_are_the_default_queue_and_no_schedule() {
     let Folded {
         declared: labels,
         folded,
-    } = FleetLabels::of_config(&AppConfig::for_database_url("postgresql://db/app"));
+    } = FleetLabels::of_config(&AppConfig::from_database_url("postgresql://db/app"));
     assert_eq!(folded, FoldedNames::none());
     assert_eq!(labels.queues.names().to_vec(), vec!["default".to_owned()]);
     assert_eq!(labels.schedules.names().to_vec(), Vec::<String>::new());
@@ -566,7 +566,7 @@ fn the_labels_of_a_default_config_are_the_default_queue_and_no_schedule() {
 
 #[test]
 fn the_labels_of_a_custom_config_are_its_queues_and_its_schedules() {
-    let mut config = AppConfig::for_database_url("postgresql://db/app");
+    let mut config = AppConfig::from_database_url("postgresql://db/app");
     config.queue_mode = QueueMode::Custom;
     config.custom_queues = Some(vec![
         CustomQueueConfig {
@@ -622,7 +622,7 @@ fn schedule(name: &str) -> TaskSchedule {
 /// the `(unknown)` series. A declared name keeps its own series.
 #[test]
 fn a_config_name_that_cannot_be_a_label_value_counts_in_the_unknown_series() {
-    let mut config = AppConfig::for_database_url("postgresql://db/app");
+    let mut config = AppConfig::from_database_url("postgresql://db/app");
     config.queue_mode = QueueMode::Custom;
     let mut queues = vec![queue("fast")];
     queues.extend((1..MAX_DECLARED_NAMES).map(|index| queue(&format!("queue_{index}"))));

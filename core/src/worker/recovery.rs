@@ -2468,7 +2468,7 @@ mod tests {
         insert_stale_running_task(&seed, task_id, "NULL").await;
 
         // Three connections: one for batch checkouts and the reserve of two.
-        let mut config = crate::core::config::PostgresConfig::from_url(
+        let mut config = crate::core::config::PostgresConfig::from_database_url(
             crate::test_support::database_of_this_test().await.url(),
         );
         config.pool_size = 3;

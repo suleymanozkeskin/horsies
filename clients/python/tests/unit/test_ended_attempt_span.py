@@ -764,7 +764,7 @@ class TestNoSpans:
     ) -> None:
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr('postgresql://user:pass@localhost/db'),
                 ),
                 tracing=tracing,

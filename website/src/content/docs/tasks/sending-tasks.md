@@ -348,12 +348,12 @@ Set `resend_on_transient_error=True` in `AppConfig` to resend a transient enqueu
 ```python
 from horsies import AppConfig, Horsies, QueueMode
 
-from myapp.config import broker_config
+from myapp.config import database_config
 
 app = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=broker_config,
+        database=database_config,
         resend_on_transient_error=True,
     )
 )

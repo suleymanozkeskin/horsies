@@ -25,7 +25,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, IsolatedChildren, PostgresConfig, WorkerProfile
 
 config = AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr("postgresql://user:password@localhost:5432/mydb"),
     ),
     worker_profiles={
@@ -48,7 +48,7 @@ for schema setup and `LISTEN`/`NOTIFY`.
 from horsies import Horsies, AppConfig, PostgresConfig, SessionDatabaseSeparate
 
 config = AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr(os.environ["DATABASE_URL_POOLED"]),
         session_database=SessionDatabaseSeparate(
             url=SecretStr(os.environ["DATABASE_URL_DIRECT"]),
@@ -80,7 +80,7 @@ config = AppConfig(
         CustomQueueConfig(name="standard", priority=50, max_concurrency=20),
         CustomQueueConfig(name="low", priority=100, max_concurrency=5),
     ],
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr("postgresql://user:password@localhost:5432/db_name"),
     ),
 )

@@ -469,7 +469,7 @@ class TestChildBoot:
         monkeypatch.delenv('HORSIES_CHILD_PROCESS', raising=False)
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr('postgresql://u:p@localhost/db'),
                     pool_size=30,
                     max_overflow=30,
@@ -666,7 +666,7 @@ class TestDiscardInheritedBroker:
     built in the child."""
 
     def test_without_a_broker_does_nothing(self) -> None:
-        app = Horsies(AppConfig(broker=PostgresConfig(
+        app = Horsies(AppConfig(database=PostgresConfig(
             database_url=SecretStr('postgresql://u:p@localhost:5432/db'),
         )))
         app._broker = None  # pyright: ignore[reportPrivateUsage]
@@ -945,7 +945,7 @@ class _Linked(BaseModel):
 def _registered_tasks() -> dict[str, Any]:
     """Registered tasks: the worker calls their wrapper, not a mock."""
     app = Horsies(AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://u:p@localhost:5432/db'),
         ),
     ))

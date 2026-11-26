@@ -1680,7 +1680,7 @@ class Horsies:
         """Run the live phases on one core handle of their own: the
         connectivity check, then, when it passed, the worker connections.
 
-        The handle is built from ``config.broker`` with the schema mode
+        The handle is built from ``config.database`` with the schema mode
         ``OBSERVE_ONLY`` (no schema step) and closed at the end; the app's
         broker is not built. On a thread that runs an event loop the
         blocking core calls cannot run, so the check reports
@@ -1709,7 +1709,7 @@ class Horsies:
         handle = CoreHandle(
             dump_producer_manifest(
                 to_producer_manifest(
-                    self.config.broker,
+                    self.config.database,
                     schema='OBSERVE_ONLY',
                     idempotency_reservation_window=IDEMPOTENCY_WINDOW_DEFAULT,
                 ),
@@ -1917,9 +1917,9 @@ class Horsies:
         """The config of the broker that ``get_broker()`` builds."""
         match self._broker_pool:
             case _ConfigBrokerPool():
-                return self.config.broker
+                return self.config.database
             case _TaskSendBrokerPool(connections=connections):
-                return self.config.broker.with_exact_pool(connections)
+                return self.config.database.with_exact_pool(connections)
             case _ as unreachable:
                 assert_never(unreachable)
 

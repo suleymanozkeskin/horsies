@@ -647,7 +647,7 @@ mod tests {
     #[tokio::test]
     async fn the_listener_of_a_broker_takes_the_socket_settings_of_its_config() {
         let session_url = "postgresql://horsies@127.0.0.1:2/horsies";
-        let mut config = crate::core::config::PostgresConfig::from_url(
+        let mut config = crate::core::config::PostgresConfig::from_database_url(
             "postgresql://horsies@127.0.0.1:1/horsies",
         );
         config.session_database = crate::core::config::SessionDatabase::Separate {

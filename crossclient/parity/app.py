@@ -102,7 +102,7 @@ def _database_url() -> str:
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr(_database_url()),
         pool_size=5,
         max_overflow=5,

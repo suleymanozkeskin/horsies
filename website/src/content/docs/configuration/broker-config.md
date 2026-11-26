@@ -1,12 +1,12 @@
 ---
-title: Broker Config
+title: Database Config
 section: shared
-summary: The PostgreSQL connection settings of the app - the broker fields, the URL format, PgBouncer transaction pooling, JIT, pool sizing and schema initialization.
+summary: The PostgreSQL connection settings of the app - the database fields, the URL format, PgBouncer transaction pooling, JIT, pool sizing and schema initialization.
 related: [broker-connections, ../rust/configuration/app-config, remote-postgres, ../troubleshooting/pgbouncer]
 tags: [configuration, PostgresConfig, database]
 ---
 
-The broker config is the `broker` field of the app config: the PostgreSQL URLs, the connection pool and the TCP settings.
+The database config is the `database` field of the app config: the PostgreSQL URLs, the connection pool and the TCP settings.
 
 The API is on the client pages: [Broker Connections](/horsies/configuration/broker-connections/) (Python: `PostgresConfig`, field types and refusals, psycopg and libpq, event loops and the connection ceiling) and [PostgresConfig](/horsies/rust/configuration/app-config/#postgresconfig) (Rust).
 

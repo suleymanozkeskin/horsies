@@ -36,7 +36,7 @@ from horsies.core.worker.row_class import registered_task_classes
 def _app() -> Horsies:
     """An app that never connects."""
     return Horsies(
-        AppConfig(broker=PostgresConfig(database_url=SecretStr('postgresql://u:p@localhost/db'))),
+        AppConfig(database=PostgresConfig(database_url=SecretStr('postgresql://u:p@localhost/db'))),
     )
 
 

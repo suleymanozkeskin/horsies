@@ -312,7 +312,7 @@ fn each_read_failure_has_python_s_code() {
 /// The limit at the bound passes the check.
 #[tokio::test]
 async fn a_get_above_the_bound_is_invalid_input_before_any_statement() {
-    let app = Horsies::new(AppConfig::for_database_url(
+    let app = Horsies::new(AppConfig::from_database_url(
         "postgresql://127.0.0.1:1/nothing",
     ))
     .unwrap();

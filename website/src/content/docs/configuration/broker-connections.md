@@ -8,7 +8,7 @@ tags: [configuration, PostgresConfig, psycopg, event loop, connections]
 
 # Broker Connections
 
-`PostgresConfig` is the `broker` field of `AppConfig`. The meaning, the default and the range of each field are on [Broker Config](/horsies/configuration/broker-config/).
+`PostgresConfig` is the `database` field of `AppConfig`. The meaning, the default and the range of each field are on [Database Config](/horsies/configuration/broker-config/).
 
 ## PostgresConfig
 
@@ -16,7 +16,7 @@ tags: [configuration, PostgresConfig, psycopg, event loop, connections]
 from pydantic import SecretStr
 from horsies import PostgresConfig
 
-broker = PostgresConfig(
+database = PostgresConfig(
     database_url=SecretStr("postgresql://user:password@localhost:5432/mydb"),
 )
 ```
@@ -83,7 +83,7 @@ PostgresConfig(
 from horsies import AppConfig, PostgresConfig, SessionDatabaseSeparate
 
 config = AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr(os.environ["DATABASE_URL_POOLED"]),
         session_database=SessionDatabaseSeparate(
             url=SecretStr(os.environ["DATABASE_URL_DIRECT"]),
@@ -111,7 +111,7 @@ from horsies import (
 )
 
 config = AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr(os.environ['DATABASE_URL']),
         worker_pool_pre_ping=True,
     ),
@@ -134,7 +134,7 @@ For a pooler that reaps idle connections in less than 30 seconds. See [TCP Keepa
 
 ```python
 config = AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr(os.environ['DATABASE_URL']),
         tcp_keepalives=TcpKeepalivesOn(idle_seconds=15, interval_seconds=5),
     ),

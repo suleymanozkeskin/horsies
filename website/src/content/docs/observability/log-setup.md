@@ -18,7 +18,7 @@ from pydantic import SecretStr
 from horsies import AppConfig, Horsies, JsonLogs, PostgresConfig
 
 config = AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
     ),
     log_format=JsonLogs(),

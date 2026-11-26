@@ -78,7 +78,7 @@ def _app_config(
     **overrides: Any,
 ) -> AppConfig:
     return AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://user:pass@localhost/db'),
         ),
         worker_profiles=profiles,

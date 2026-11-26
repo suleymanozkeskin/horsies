@@ -30,7 +30,7 @@ DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(database_url=DB_URL, pool_size=5, max_overflow=5),
+    database=PostgresConfig(database_url=DB_URL, pool_size=5, max_overflow=5),
     recovery=RecoveryConfig(
         runner_heartbeat_interval_ms=1_000,
         claimer_heartbeat_interval_ms=1_000,
@@ -44,7 +44,7 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 

@@ -160,7 +160,7 @@ def drain_app(dsn: str) -> DrainApp:
     return with_drain_task(
         Horsies(
             AppConfig(
-                broker=drain_broker(dsn),
+                database=drain_broker(dsn),
                 worker_profiles=DRAIN_WORKER_PROFILES,
             ),
         ),

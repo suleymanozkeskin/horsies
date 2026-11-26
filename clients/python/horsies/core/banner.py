@@ -172,25 +172,25 @@ def print_banner(
         queues_str = 'default'
     _write_kv(lines, 'queues', queues_str)
 
-    # Broker info (mask password)
+    # Database info (mask password)
     _write_kv(
         lines,
-        'broker',
-        mask_database_url(app.config.broker.database_url.get_secret_value()),
+        'database',
+        mask_database_url(app.config.database.database_url.get_secret_value()),
     )
     if (
-        app.config.broker.session_url_differs()
-        or app.config.broker.pgbouncer_transaction_mode
+        app.config.database.session_url_differs()
+        or app.config.database.pgbouncer_transaction_mode
     ):
         _write_kv(
             lines,
             'broker_session',
-            mask_database_url(app.config.broker.effective_session_database_url),
+            mask_database_url(app.config.database.effective_session_database_url),
         )
     _write_kv(
         lines,
         'pgbouncer_tx',
-        _format_bool(app.config.broker.pgbouncer_transaction_mode),
+        _format_bool(app.config.database.pgbouncer_transaction_mode),
     )
 
     # Cluster-wide cap

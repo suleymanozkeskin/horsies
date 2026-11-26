@@ -31,7 +31,7 @@ E2E_CLASS_KEY = period_class_key(E2E_CLASS_DURATION.days)
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=DB_URL,
         pool_size=5,
         max_overflow=5,
@@ -47,7 +47,7 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 

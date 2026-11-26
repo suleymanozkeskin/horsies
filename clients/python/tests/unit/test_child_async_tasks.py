@@ -71,7 +71,7 @@ class MappedError(Exception):
 def _app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr(
                     'postgresql://user:password@localhost/unused'
                 ),
@@ -475,7 +475,7 @@ class TestResultWaitsInsideAnAsyncTask:
         is refused before it reads anything. ``send_async()`` still enqueues."""
         monkeypatch.setattr(process_role_module, '_role', ProcessRole.RUNS_NO_TASK_BODIES)
         app = Horsies(
-            AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))),
+            AppConfig(database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))),
         )
         broker = app.get_broker()
         enqueued: list[UUID] = []
@@ -539,7 +539,7 @@ class TestTheSendPathLeavesNoLoopTask:
         the send path of horsies must leave none. Up to ``enqueue_async``,
         which the test replaces, the send runs its real code."""
         app = Horsies(
-            AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))),
+            AppConfig(database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))),
         )
         broker = app.get_broker()
         enqueued: list[UUID] = []
@@ -614,7 +614,7 @@ class TestASelfCancel:
     def _cancelling_app(mapper: dict[type[BaseException], str]) -> Horsies:
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr(
                         'postgresql://user:password@localhost/unused'
                     ),
@@ -680,7 +680,7 @@ class TestAGeneratorExitFromTheBody:
     def _raising_app(mapper: dict[type[BaseException], str]) -> Horsies:
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr(
                         'postgresql://user:password@localhost/unused'
                     ),

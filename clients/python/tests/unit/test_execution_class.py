@@ -56,7 +56,7 @@ pytestmark = [pytest.mark.unit]
 def _app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr(
                     'postgresql://user:pass@127.0.0.1:1/none'
                 ),
@@ -332,7 +332,7 @@ class TestDeclarationsThatAreRefused:
                 from horsies import AppConfig, Execution, Horsies, PostgresConfig
                 from horsies import Ok, Result, TaskError
 
-                app = Horsies(AppConfig(broker=PostgresConfig(
+                app = Horsies(AppConfig(database=PostgresConfig(
                     database_url=SecretStr(
                         'postgresql://user:pass@127.0.0.1:1/none',
                     ),
