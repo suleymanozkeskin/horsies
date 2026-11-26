@@ -32,3 +32,25 @@ export function runProcessSteps(thread: EntryThread, steps: () => void): Process
     }
   }
 }
+
+/** A start member of the app that marks each of its starts: the provider or the `onChildStart` hook. */
+export type StartMember = "provider" | "hook";
+
+/**
+ * The marker name of one start of `member` in process `pid`: `<member>-<pid>` on the main thread, and
+ * `<member>-<pid>-seat<threadId>` in a seat isolate. A `SHARED_THREAD` child runs the providers once in each of its seat
+ * isolates, so one process holds one start of a member per thread. Pure.
+ */
+export function startMarkerName(member: StartMember, pid: number, thread: EntryThread, threadId: number): string {
+  switch (thread) {
+    case "main":
+      return `${member}-${String(pid)}`;
+    case "seatIsolate":
+      return `${member}-${String(pid)}-seat${String(threadId)}`;
+    default: {
+      const unexpected: never = thread;
+
+      throw new TypeError(`the start marker: a thread outside its type: ${String(unexpected)}`);
+    }
+  }
+}

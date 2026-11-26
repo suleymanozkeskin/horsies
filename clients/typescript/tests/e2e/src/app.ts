@@ -2,9 +2,12 @@
 // provider and an `onChildStart` hook that mark each child start). The test process and every process of the worker
 // entry build the same app for one instance, so the stored input of a send decodes in the child that runs it.
 
+import { isMainThread, threadId } from "node:worker_threads";
+
 import { defineTask, h, Horsies } from "../../../horsies/src/index.ts";
 import { err, ok, type Result } from "../../../horsies/src/wire/result.ts";
 import type { Connection } from "./connection.ts";
+import { entryThread, type StartMember, startMarkerName } from "./entry-thread.ts";
 import { type Instance, instanceConfig } from "./instances.ts";
 import { createOnce, markerErrorText } from "./markers.ts";
 import { BASIC_CONTRACTS, implementBasic } from "./tasks/basic.ts";
@@ -102,16 +105,20 @@ function addFailingStartMember(app: Horsies, instance: Exclude<Instance, "custom
   }
 }
 
-/** Mark the start of `member` in this process with the marker `<member>-<pid>`. A second start throws. */
-function markedStart(member: "provider" | "hook"): ProvidedValue {
-  const created = createOnce(`${member}-${String(process.pid)}`, String(process.pid));
+/**
+ * Mark the start of `member` in this thread with the marker of `startMarkerName`: `<member>-<pid>` on the main thread,
+ * one marker per seat isolate in a `SHARED_THREAD` child. A second start in the same thread throws.
+ */
+function markedStart(member: StartMember): ProvidedValue {
+  const name = startMarkerName(member, process.pid, entryThread(isMainThread), threadId);
+  const created = createOnce(name, String(process.pid));
 
   if (!created.ok) {
     throw new Error(`the ${member} marker: ${markerErrorText(created.error)}`);
   }
 
   if (created.value === "existed") {
-    throw new Error(`the ${member} ran twice in process ${String(process.pid)}`);
+    throw new Error(`the ${member} ran twice in one thread: the marker ${name} exists`);
   }
 
   return { pid: process.pid };

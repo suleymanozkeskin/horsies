@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { isMainThread, Worker } from "node:worker_threads";
 
-import { entryThread, runProcessSteps } from "../src/entry-thread.ts";
+import { entryThread, runProcessSteps, startMarkerName } from "../src/entry-thread.ts";
 
 /** The longest wait for the answer of the worker thread. */
 const WORKER_ANSWER_BOUND_MS = 10_000;
@@ -65,5 +65,15 @@ describe("the thread rule of the worker entry", () => {
 
   test("a worker thread is a seat isolate and runs none of the steps", async () => {
     assert.deepEqual(await workerAnswer(), { thread: "seatIsolate", steps: "skipped", ran: 0 });
+  });
+});
+
+describe("the marker name of a start member", () => {
+  test("on the main thread it names the member and the process", () => {
+    assert.equal(startMarkerName("provider", 4012, "main", 0), "provider-4012");
+  });
+
+  test("in a seat isolate it names the isolate's thread too", () => {
+    assert.equal(startMarkerName("hook", 4012, "seatIsolate", 3), "hook-4012-seat3");
   });
 });
