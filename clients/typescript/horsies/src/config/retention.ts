@@ -1,6 +1,7 @@
 // The retention settings of the config: how long records stay, the history leaves kept ahead of writes, the periods
 // that sends may choose, and the retention of each queue (the core's `RetentionConfig`,
-// `core/src/core/config/retention.rs`).
+// `core/src/core/config/retention.rs`). A refusal of a retention field has the code of the retention config
+// (`HRS-216`).
 
 import { ErrorCode } from "../_catalog/error_codes.ts";
 import { PAUSED_AGE_MICROS_MAX, PAUSED_AGE_MICROS_MIN } from "../_catalog/worker_manifest.ts";
@@ -22,8 +23,8 @@ import {
   memberPath,
   optionalEntry,
   refused,
-  U32_FIELD,
-  U64_FIELD,
+  u32Field,
+  u64Field,
 } from "./checked.ts";
 
 /** How long a kind of record stays, in hours, or no pruning. */
@@ -65,11 +66,17 @@ const NANOSECONDS_PER_HOUR = 60n * NANOSECONDS_PER_MINUTE;
 const NANOSECONDS_PER_DAY = 24n * NANOSECONDS_PER_HOUR;
 const DAYS_PER_WEEK = 7n;
 
+/** A `u32` field of the retention config. */
+const RETENTION_U32 = u32Field(ErrorCode.CONFIG_INVALID_RETENTION);
+
+/** A `u64` field of the retention config. */
+const RETENTION_U64 = u64Field(ErrorCode.CONFIG_INVALID_RETENTION);
+
 /** A count of whole days whose seconds are a safe integer. */
 const DAY_COUNT: IntegerBound = Object.freeze({
   min: 0,
   max: Math.floor(Number.MAX_SAFE_INTEGER / SECONDS_PER_DAY),
-  code: "FIELD_BOUND",
+  code: ErrorCode.CONFIG_INVALID_RETENTION,
 });
 
 /** The core's `retention` object of `input`. Pure. */
@@ -92,12 +99,12 @@ export function retentionJson(input: RetentionConfigInput, path: string): Checke
     optionalEntry(
       "history_leaf_horizon_days",
       input.historyLeafHorizonDays,
-      integer("historyLeafHorizonDays", U32_FIELD),
+      integer("historyLeafHorizonDays", RETENTION_U32),
     ),
     optionalEntry(
       "heartbeat_leaf_horizon_hours",
       input.heartbeatLeafHorizonHours,
-      integer("heartbeatLeafHorizonHours", U32_FIELD),
+      integer("heartbeatLeafHorizonHours", RETENTION_U32),
     ),
     optionalEntry("retention_periods", input.retentionPeriods, (periods) =>
       periodsJson(periods, memberPath(path, "retentionPeriods")),
@@ -108,17 +115,17 @@ export function retentionJson(input: RetentionConfigInput, path: string): Checke
     optionalEntry(
       "partition_maintenance_interval_s",
       input.partitionMaintenanceIntervalSeconds,
-      integer("partitionMaintenanceIntervalSeconds", U64_FIELD),
+      integer("partitionMaintenanceIntervalSeconds", RETENTION_U64),
     ),
     optionalEntry(
       "retention_sweep_interval_s",
       input.retentionSweepIntervalSeconds,
-      integer("retentionSweepIntervalSeconds", U64_FIELD),
+      integer("retentionSweepIntervalSeconds", RETENTION_U64),
     ),
     optionalEntry(
       "retention_delete_batch_size",
       input.retentionDeleteBatchSize,
-      integer("retentionDeleteBatchSize", U32_FIELD),
+      integer("retentionDeleteBatchSize", RETENTION_U32),
     ),
   ]);
 }
@@ -127,7 +134,7 @@ export function retentionJson(input: RetentionConfigInput, path: string): Checke
 function hoursJson(retention: HoursRetention, path: string): Checked<ConfigJson> {
   switch (retention.kind) {
     case "hours":
-      return checkedInteger(retention.hours, U32_FIELD, path);
+      return checkedInteger(retention.hours, RETENTION_U32, path);
     case "noPruning":
       return accepted(null);
     default:
@@ -148,7 +155,7 @@ function queueRetentionJson(mapping: Readonly<Record<string, QueueRetention>>, p
   return checkedObject(
     Object.entries(mapping).map(([queue, retention]) => {
       const at = keyPath(path, queue);
-      const name = checkedText(queue, at);
+      const name = checkedText(queue, ErrorCode.CONFIG_INVALID_RETENTION, at);
 
       return name.kind === "refused" ? name : entry(queue, queueRetentionValue(retention, at));
     }),

@@ -23,7 +23,7 @@ use horsies_core::{
 use napi_derive::napi;
 
 use crate::call::guard::sync_call;
-use crate::call::thrown::Envelope;
+use crate::call::thrown::{Envelope, NativeThrown};
 use crate::sends::refusals::CoreRefusal;
 use crate::sends::send::SendRules;
 
@@ -89,9 +89,10 @@ pub enum DeclaredCodesCheck {
     Refused { refusals: Vec<CoreRefusal> },
 }
 
-/// Check the JSON text of the core's `AppConfig`: its reader, every rule of
+/// Check the JSON text of the core's `AppConfig`: every rule of
 /// `AppConfig::validate`, the manifest bounds of the broker settings and the
-/// coverage bounds of the retention. Starts nothing.
+/// coverage bounds of the retention. A text that the core's config reader
+/// refuses throws `CLIENT_DEFECT` ([`read_app_config`]). Starts nothing.
 #[napi(ts_return_type = "NativeEnvelope<AppConfigCheck>")]
 #[allow(
     clippy::needless_pass_by_value,
@@ -99,7 +100,21 @@ pub enum DeclaredCodesCheck {
 )]
 pub fn check_app_config(app_config_json: String) -> Envelope<AppConfigCheck> {
     sync_call("check_app_config", || {
-        Envelope::Value(app_config_check(&app_config_json))
+        match read_app_config(&app_config_json) {
+            Ok(config) => Envelope::Value(app_config_check(config)),
+            Err(defect) => Envelope::Thrown(defect),
+        }
+    })
+}
+
+/// The core's `AppConfig` of a config text, or the `CLIENT_DEFECT` of a text
+/// that the core's config reader refuses. The package writes the text from
+/// a parsed config, in the serde form of each field, so a refused text is a
+/// defect of the package, not a refusal of the user's config. Pure.
+fn read_app_config(text: &str) -> Result<AppConfig, NativeThrown> {
+    serde_json::from_str(text).map_err(|error| NativeThrown::ClientDefect {
+        subject: "checkAppConfig".to_owned(),
+        rule: format!("the config text reads as the core's AppConfig: {error}"),
     })
 }
 
@@ -157,27 +172,14 @@ impl CoverageCheck {
     }
 }
 
-/// The check of an app config text. Pure.
+/// The check of an app config. Pure.
 ///
 /// Order of the refusals: the rules of `AppConfig::validate` in its order,
 /// then the manifest bounds of the broker settings, then the coverage
 /// bounds of the retention.
-fn app_config_check(text: &str) -> AppConfigCheck {
-    let config: AppConfig = match serde_json::from_str(text) {
-        Ok(config) => config,
-        Err(error) => {
-            return AppConfigCheck::Refused {
-                refusals: vec![CoreRefusal::uncoded(format!(
-                    "the app config does not read: {error}"
-                ))],
-            }
-        }
-    };
+fn app_config_check(config: AppConfig) -> AppConfigCheck {
     let errors = config.validate();
-    let mut refusals: Vec<CoreRefusal> = errors
-        .iter()
-        .map(|error| CoreRefusal::of_error(&error.to_horsies_error()))
-        .collect();
+    let mut refusals: Vec<CoreRefusal> = errors.iter().map(CoreRefusal::of_config_error).collect();
     let manifest = producer_manifest(&config.broker);
     let coverage = match errors
         .iter()
@@ -230,8 +232,9 @@ fn coverage_check(retention: &RetentionConfig) -> CoverageCheck {
 
 /// The producer manifest of the broker settings `config`, or the refusal of
 /// a pool size outside 1 to 10,000 or an overflow above 10,000, which the
-/// manifest bounds and `PostgresConfig::validate` does not. No catalog code:
-/// Python refuses these values through field bounds. Pure.
+/// manifest bounds and `PostgresConfig::validate` does not. The refusal has
+/// the code of a broker pool value (`HRS-213`), as Python's pool field
+/// checks. Pure.
 fn producer_manifest(config: &PostgresConfig) -> Result<ProducerManifest, CoreRefusal> {
     Ok(ProducerManifest {
         manifest_version: ManifestVersion::CURRENT,
@@ -272,10 +275,15 @@ fn database_manifest(config: &PostgresConfig) -> Result<DatabaseManifest, CoreRe
     })
 }
 
-/// The refusal of a broker setting outside a manifest bound. The cause
-/// names the bound, never the value. Pure.
+/// The refusal of a broker pool setting outside a manifest bound
+/// (`HRS-213`). The cause names the bound, never the value. Pure.
 fn broker_setting_refused(field: &str, cause: &str) -> CoreRefusal {
-    CoreRefusal::uncoded(format!("invalid broker config: broker.{field}: {cause}"))
+    CoreRefusal::coded(
+        ErrorCode::ConfigInvalidBrokerPool,
+        format!("invalid broker config: broker.{field}: {cause}"),
+        Vec::new(),
+        Vec::new(),
+    )
 }
 
 /// `url` with the scheme that the core reads: `postgres://` becomes
@@ -295,7 +303,6 @@ fn core_database_url(url: &str) -> DatabaseUrl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sends::refusals::CoreRefusalCode;
 
     /// The JSON text of an app config with `broker` as its broker section.
     fn config_text(broker: &str) -> String {
@@ -303,6 +310,11 @@ mod tests {
     }
 
     const BROKER: &str = r#"{"database_url": "postgres://user:secret@127.0.0.1:55432/horsies"}"#;
+
+    /// The check of a config text that the core's config reader reads.
+    fn check_of(text: &str) -> AppConfigCheck {
+        app_config_check(read_app_config(text).expect("the config text reads"))
+    }
 
     fn refusals_of(check: AppConfigCheck) -> Vec<CoreRefusal> {
         match check {
@@ -317,7 +329,7 @@ mod tests {
             manifest_json,
             install_coverage,
             ..
-        } = app_config_check(&config_text(BROKER))
+        } = check_of(&config_text(BROKER))
         else {
             panic!("a config with a database URL is accepted");
         };
@@ -336,40 +348,55 @@ mod tests {
     }
 
     #[test]
-    fn a_text_that_the_config_reader_refuses_is_one_refusal_with_no_code() {
-        let refusals = refusals_of(app_config_check(r#"{"broker": {}, "unknown_key": 1}"#));
-        assert_eq!(refusals.len(), 1);
-        assert_eq!(refusals[0].code, CoreRefusalCode::NoCode);
+    fn a_text_that_the_config_reader_refuses_is_a_client_defect() {
+        let Err(NativeThrown::ClientDefect { subject, rule }) =
+            read_app_config(&format!(r#"{{"broker": {BROKER}, "unknown_key": 1}}"#))
+        else {
+            panic!("a text with an unknown key is a client defect");
+        };
+        assert_eq!(subject, "checkAppConfig");
         assert!(
-            refusals[0]
-                .message
-                .starts_with("the app config does not read: "),
-            "{}",
-            refusals[0].message
+            rule.starts_with("the config text reads as the core's AppConfig: "),
+            "{rule}"
         );
     }
 
     #[test]
     fn a_rule_of_the_core_validation_is_refused_with_its_catalog_code() {
         let text = format!(r#"{{"broker": {BROKER}, "queue_mode": "custom"}}"#);
-        let refusals = refusals_of(app_config_check(&text));
-        assert_eq!(
-            refusals[0].code,
-            CoreRefusalCode::Catalog {
-                code: "HRS-200".to_owned()
-            }
+        let refusals = refusals_of(check_of(&text));
+        assert_eq!(refusals[0].code, "HRS-200");
+    }
+
+    #[test]
+    fn a_payload_rule_is_refused_with_hrs_227() {
+        let text = format!(r#"{{"broker": {BROKER}, "payload": {{"warn_bytes": 0}}}}"#);
+        let refusals = refusals_of(check_of(&text));
+        assert_eq!(refusals.len(), 1, "{refusals:?}");
+        assert_eq!(refusals[0].code, "HRS-227");
+        assert!(
+            refusals[0].message.contains("payload.warn_bytes"),
+            "{}",
+            refusals[0].message
         );
     }
 
     #[test]
-    fn a_pool_size_above_the_manifest_bound_is_refused_with_no_code() {
-        let broker = r#"{"database_url": "postgresql://127.0.0.1/horsies", "pool_size": 10001}"#;
-        let refusals = refusals_of(app_config_check(&config_text(broker)));
-        let pool = refusals
-            .iter()
-            .find(|refusal| refusal.message.contains("broker.pool_size"))
-            .expect("the pool size is refused");
-        assert_eq!(pool.code, CoreRefusalCode::NoCode);
+    fn a_pool_size_or_overflow_above_the_manifest_bound_is_refused_with_hrs_213() {
+        for (setting, field) in [
+            (r#""pool_size": 10001"#, "broker.pool_size"),
+            (r#""max_overflow": 10001"#, "broker.max_overflow"),
+        ] {
+            let broker =
+                format!(r#"{{"database_url": "postgresql://127.0.0.1/horsies", {setting}}}"#);
+            let refusals = refusals_of(check_of(&config_text(&broker)));
+            let pool = refusals
+                .iter()
+                .find(|refusal| refusal.message.contains(field))
+                .unwrap_or_else(|| panic!("{field} is refused: {refusals:?}"));
+            assert_eq!(pool.code, "HRS-213");
+            assert!(pool.help.is_empty());
+        }
     }
 
     #[test]
@@ -378,12 +405,7 @@ mod tests {
         let DeclaredCodesCheck::Refused { refusals } = check else {
             panic!("a built-in name is refused");
         };
-        assert_eq!(
-            refusals[0].code,
-            CoreRefusalCode::Catalog {
-                code: "HRS-212".to_owned()
-            }
-        );
+        assert_eq!(refusals[0].code, "HRS-212");
         assert!(refusals[0].help.is_empty());
     }
 
@@ -397,19 +419,8 @@ mod tests {
         let DeclaredCodesCheck::Refused { refusals } = check else {
             panic!("a repeat and a bad text are refused");
         };
-        let codes: Vec<CoreRefusalCode> =
-            refusals.into_iter().map(|refusal| refusal.code).collect();
-        assert_eq!(
-            codes,
-            vec![
-                CoreRefusalCode::Catalog {
-                    code: "HRS-113".to_owned()
-                },
-                CoreRefusalCode::Catalog {
-                    code: "HRS-112".to_owned()
-                },
-            ]
-        );
+        let codes: Vec<String> = refusals.into_iter().map(|refusal| refusal.code).collect();
+        assert_eq!(codes, vec!["HRS-113".to_owned(), "HRS-112".to_owned()]);
     }
 
     #[test]

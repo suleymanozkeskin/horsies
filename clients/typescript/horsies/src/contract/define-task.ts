@@ -23,6 +23,9 @@ export type ReservedCode = LibraryTaskCode | (typeof RESERVED_NON_TASK_CODES)[nu
 /** A code that a task may choose. A built-in name fails typecheck with this text as the expected type. */
 export type UserCode<C extends string> = C extends ReservedCode ? `horsies: "${C}" is a built-in error code` : C;
 
+/** The element type of an `errors` list whose codes the types cannot know (`string[]`): no code fits it. */
+export type WidenedCodes = "horsies: declare errors as literal codes, not as a string[]";
+
 /** The error that a body returns: a code that the task chose, an optional message and optional data. */
 export type UserFailure<E extends string> = {
   readonly code: E;
@@ -69,8 +72,11 @@ export interface TaskDefinition<P extends ParameterSchemas, O extends OutputSche
   /** One schema per parameter, stored under its name. `{}` for a task with no parameters. */
   readonly input: P;
   readonly output: O;
-  /** The codes that the task may return. Left out: any code that is not a built-in name. */
-  readonly errors?: readonly UserCode<E>[];
+  /**
+   * The codes that the task may return, as literals (no `as const` needed). Left out: any code that is not a built-in
+   * name. A list of the type `string[]` fails typecheck: its codes would not be known to the types.
+   */
+  readonly errors?: string extends E ? readonly WidenedCodes[] : readonly UserCode<E>[];
   readonly execution?: X;
   readonly retry?: RetryPolicy<NoInfer<E>>;
 }

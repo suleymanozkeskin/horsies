@@ -4,7 +4,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import type { TaskSendCoreError } from "../../../horsies/src/_catalog/task_send_errors.ts";
 import { createHorsies } from "../../../horsies/src/app.ts";
 import { checkContractList, contractLookup } from "../../../horsies/src/app/contract-list.ts";
 import type { SendObserver } from "../../../horsies/src/app/observers.ts";
@@ -77,7 +76,7 @@ function harness(parts: HarnessParts = {}): Harness {
     resendOnTransientErr: parts.resend ?? false,
     core: { kind: "addon", producer },
     observer: parts.observer ?? NO_OP_OBSERVER,
-    suppression: new SuppressionState(parts.suppression ?? { kind: "open" }),
+    suppression: new SuppressionState(parts.suppression ?? { kind: "open" }, () => undefined),
     pause: async (milliseconds) => {
       pauses.push(milliseconds);
     },
@@ -102,9 +101,9 @@ function codeOf(outcome: TaskSendError<number, string> | "sent"): string {
 }
 
 function retryable(raw: Parameters<typeof sendErrorOfRaw>[0]): RetryableSendError<number, string> {
-  const error: TaskSendCoreError = sendErrorOfRaw(raw);
+  const error = sendErrorOfRaw(raw);
 
-  if (error.code !== "ENQUEUE_FAILED" && error.code !== "IDEMPOTENCY_KEY_CONFLICT") {
+  if (error.code !== "ENQUEUE_FAILED") {
     throw new Error(`not a retryable error: ${error.code}`);
   }
 
@@ -279,6 +278,8 @@ describe("the send error codes", () => {
     const error = await sendReport(context, { n: 1 }, { idempotencyKey: "key-1" });
 
     assert.equal(error !== "sent" && error.code === "IDEMPOTENCY_KEY_CONFLICT" ? error.ownerTaskId : "", "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5c");
+    assert.equal(error !== "sent" && error.code === "IDEMPOTENCY_KEY_CONFLICT" ? error.retryable : true, false);
+    assert.equal(error !== "sent" ? JSON.stringify(error).includes("payload") : true, false);
   });
 
   test("the payload of an error is not in JSON.stringify of the error", async () => {
@@ -365,15 +366,14 @@ describe("retrySend", () => {
     assert.equal(producer.prepares.length, 0);
   });
 
-  test("of IDEMPOTENCY_KEY_CONFLICT: one REPEAT enqueue under the same task id", async () => {
+  test("of IDEMPOTENCY_KEY_CONFLICT (not retryable): VALIDATION_FAILED and no enqueue", async () => {
     const { context, producer } = harness();
-    const retried = await retrySend(context, retryable(rawKeyConflict("report")));
+    const conflict = sendErrorOfRaw(rawKeyConflict("report"));
+    // SAFETY: a JavaScript caller can pass an error that the type of retrySend refuses.
+    const retried = await retrySend(context, conflict as unknown as RetryableSendError<number, string>);
 
-    assert.equal(retried.ok, true);
-    assert.deepEqual(
-      producer.enqueues.map((call) => [call.sendKind, call.request.taskId]),
-      [["REPEAT", TASK_ID]],
-    );
+    assert.equal(retried.ok ? "" : retried.error.code, "VALIDATION_FAILED");
+    assert.deepEqual(producer.enqueues, []);
   });
 
   test("of an error of another app instance whose task this app lists", async () => {
@@ -411,8 +411,8 @@ describe("retrySend", () => {
 });
 
 describe("the suppression of sends", () => {
-  async function sendInProcess(start: ProcessStart): Promise<string> {
-    const environment = fakeEnvironment({ start });
+  async function sendInProcess(start: ProcessStart, variables: Readonly<Record<string, string>> = {}): Promise<string> {
+    const environment = fakeEnvironment({ start, variables });
     const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [report] }, environment);
 
     if (!created.ok) {
@@ -436,9 +436,28 @@ describe("the suppression of sends", () => {
     assert.equal(await sendInProcess({ ...PLAIN_START, argumentAfterScript: "check" }), "SEND_SUPPRESSED");
   });
 
-  test("HORSIES_SUPPRESS_SENDS=1, and another value does not suppress", async () => {
-    assert.equal(await sendInProcess({ ...PLAIN_START, suppressVariable: "1" }), "SEND_SUPPRESSED");
-    assert.equal(await sendInProcess({ ...PLAIN_START, suppressVariable: "0" }), "sent");
+  test("HORSIES_SUPPRESS_SENDS=1, with whitespace around it, suppresses; another value does not", async () => {
+    assert.equal(await sendInProcess(PLAIN_START, { HORSIES_SUPPRESS_SENDS: "1" }), "SEND_SUPPRESSED");
+    assert.equal(await sendInProcess(PLAIN_START, { HORSIES_SUPPRESS_SENDS: " 1\n" }), "SEND_SUPPRESSED");
+    assert.equal(await sendInProcess(PLAIN_START, { HORSIES_SUPPRESS_SENDS: "0" }), "sent");
+  });
+
+  test("HORSIES_SUPPRESS_SENDS is read at each send: set after Horsies.create, it suppresses", async () => {
+    const variables: Record<string, string> = {};
+    const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [report] }, fakeEnvironment({ variables }));
+
+    if (!created.ok) {
+      throw new Error("the app is refused");
+    }
+
+    const before = await created.value.send(report, { n: 1 });
+
+    variables["HORSIES_SUPPRESS_SENDS"] = "1";
+
+    const after = await created.value.send(report, { n: 1 });
+
+    assert.equal(before.ok, true);
+    assert.equal(after.ok ? "" : after.error.code, "SEND_SUPPRESSED");
   });
 
   test("a plain process sends", async () => {
@@ -447,7 +466,7 @@ describe("the suppression of sends", () => {
 
   test("the start of serving opens a task child and a seat, not the check command or the variable", () => {
     const opened = (start: ProcessStart): SendSuppression => {
-      const state = new SuppressionState(initialSuppression(start));
+      const state = new SuppressionState(initialSuppression(start), () => undefined);
 
       state.startServing();
 
@@ -457,7 +476,6 @@ describe("the suppression of sends", () => {
     assert.deepEqual(opened({ ...PLAIN_START, argumentAfterScript: "--horsies-child" }), { kind: "open" });
     assert.deepEqual(opened({ ...PLAIN_START, seatIsolate: true }), { kind: "open" });
     assert.deepEqual(opened({ ...PLAIN_START, argumentAfterScript: "check" }), { kind: "suppressed", reason: "checkCommand" });
-    assert.deepEqual(opened({ ...PLAIN_START, suppressVariable: "1" }), { kind: "suppressed", reason: "environment" });
     assert.deepEqual(servingSuppression({ kind: "open" }), { kind: "open" });
   });
 });

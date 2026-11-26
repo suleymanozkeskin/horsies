@@ -1,6 +1,8 @@
 // The recovery settings of the config: stale claims and runs, orphaned workflow tasks, heartbeats and snapshots (the
-// core's `RecoveryConfig`, `core/src/core/config/recovery.rs`).
+// core's `RecoveryConfig`, `core/src/core/config/recovery.rs`). A refusal of a recovery field has the code of the
+// recovery config (`HRS-204`).
 
+import { ErrorCode } from "../_catalog/error_codes.ts";
 import {
   accepted,
   type Checked,
@@ -10,8 +12,8 @@ import {
   type IntegerBound,
   memberPath,
   optionalEntry,
-  U32_FIELD,
-  U64_FIELD,
+  u32Field,
+  u64Field,
 } from "./checked.ts";
 
 /** The recovery settings. Each field left out has the core's default; the core checks each range. */
@@ -32,6 +34,12 @@ export interface RecoveryConfigInput {
   readonly workerStateSnapshotIntervalMs?: number;
 }
 
+/** A `u32` field of the recovery config. */
+const RECOVERY_U32 = u32Field(ErrorCode.CONFIG_INVALID_RECOVERY);
+
+/** A `u64` field of the recovery config. */
+const RECOVERY_U64 = u64Field(ErrorCode.CONFIG_INVALID_RECOVERY);
+
 /** The core's `recovery` object of `input`. Pure. */
 export function recoveryJson(input: RecoveryConfigInput, path: string): Checked<ConfigJson> {
   const integer =
@@ -44,55 +52,55 @@ export function recoveryJson(input: RecoveryConfigInput, path: string): Checked<
     optionalEntry(
       "claimed_stale_threshold_ms",
       input.claimedStaleThresholdMs,
-      integer("claimedStaleThresholdMs", U64_FIELD),
+      integer("claimedStaleThresholdMs", RECOVERY_U64),
     ),
     optionalEntry("auto_fail_stale_running", input.autoFailStaleRunning, accepted),
     optionalEntry("auto_terminate_orphaned_workflow_tasks", input.autoTerminateOrphanedWorkflowTasks, accepted),
     optionalEntry(
       "orphan_task_audit_interval_ms",
       input.orphanTaskAuditIntervalMs,
-      integer("orphanTaskAuditIntervalMs", U64_FIELD),
+      integer("orphanTaskAuditIntervalMs", RECOVERY_U64),
     ),
     optionalEntry(
       "running_stale_threshold_ms",
       input.runningStaleThresholdMs,
-      integer("runningStaleThresholdMs", U64_FIELD),
+      integer("runningStaleThresholdMs", RECOVERY_U64),
     ),
     optionalEntry(
       "finalizing_stale_threshold_ms",
       input.finalizingStaleThresholdMs,
-      integer("finalizingStaleThresholdMs", U64_FIELD),
+      integer("finalizingStaleThresholdMs", RECOVERY_U64),
     ),
     optionalEntry(
       "crashed_worker_recovery_grace_ms",
       input.crashedWorkerRecoveryGraceMs,
-      integer("crashedWorkerRecoveryGraceMs", U64_FIELD),
+      integer("crashedWorkerRecoveryGraceMs", RECOVERY_U64),
     ),
     optionalEntry(
       "phase2_quarantine_after_attempts",
       input.phase2QuarantineAfterAttempts,
-      integer("phase2QuarantineAfterAttempts", U32_FIELD),
+      integer("phase2QuarantineAfterAttempts", RECOVERY_U32),
     ),
     optionalEntry(
       "workflow_recovery_failure_limit",
       input.workflowRecoveryFailureLimit,
-      integer("workflowRecoveryFailureLimit", U32_FIELD),
+      integer("workflowRecoveryFailureLimit", RECOVERY_U32),
     ),
-    optionalEntry("check_interval_ms", input.checkIntervalMs, integer("checkIntervalMs", U64_FIELD)),
+    optionalEntry("check_interval_ms", input.checkIntervalMs, integer("checkIntervalMs", RECOVERY_U64)),
     optionalEntry(
       "runner_heartbeat_interval_ms",
       input.runnerHeartbeatIntervalMs,
-      integer("runnerHeartbeatIntervalMs", U64_FIELD),
+      integer("runnerHeartbeatIntervalMs", RECOVERY_U64),
     ),
     optionalEntry(
       "claimer_heartbeat_interval_ms",
       input.claimerHeartbeatIntervalMs,
-      integer("claimerHeartbeatIntervalMs", U64_FIELD),
+      integer("claimerHeartbeatIntervalMs", RECOVERY_U64),
     ),
     optionalEntry(
       "worker_state_snapshot_interval_ms",
       input.workerStateSnapshotIntervalMs,
-      integer("workerStateSnapshotIntervalMs", U64_FIELD),
+      integer("workerStateSnapshotIntervalMs", RECOVERY_U64),
     ),
   ]);
 }
