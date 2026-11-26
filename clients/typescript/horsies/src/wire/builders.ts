@@ -77,9 +77,9 @@ export interface WireBuilders {
   /** A `Temporal.PlainTime`, a time of day stored as `09:10:12.654321`. */
   plainTime(): Wire<Temporal.PlainTime>;
   /**
-   * An object with declared members, stored in the key order of `members` (`Object.keys`: JavaScript puts an
-   * integer-like name such as `"10"` first, in ascending order, then the other names in source order). An undeclared
-   * key is refused.
+   * An object with declared members, stored in declaration order. An undeclared key is refused. `Horsies.create`
+   * refuses an integer-like member name such as `"10"` (`IntegerLikeMember`): JavaScript puts such a key first in an
+   * object, so its declaration order cannot hold.
    */
   object<const M extends WireMembers>(members: M): Wire<ObjectValue<M>, ObjectSent<M>>;
   /**
@@ -140,7 +140,10 @@ function requiredKindOf(wire: AnyWire, place: string): Kind {
   return valueKindOf(wire, place);
 }
 
-/** The members of an object or a task input, in the key order of `members` (`Object.keys`). Pure. */
+/**
+ * The members of an object or a task input, in the key order of `members` (`Object.keys`): the declaration order
+ * when no name is integer-like, which `checkKind` refuses. Pure.
+ */
 function membersOf(members: ParameterWires, kindOfMember: (wire: AnyWire) => Kind): readonly Member[] {
   return Object.keys(members).map((name) => {
     const wire = members[name];

@@ -49,6 +49,34 @@ describe("checkKind", () => {
     );
   });
 
+  test("IntegerLikeMember: an integer-like member name of h.object, at every depth", () => {
+    const refusals = checkKind(kindOf(h.array(h.object({ b: h.int(), "10": h.int() }))));
+
+    assert.deepEqual(
+      refusals.map((refusal) => [refusal.rule, refusal.path]),
+      [["IntegerLikeMember", "$[*].10"]],
+    );
+  });
+
+  test("IntegerLikeMember: exactly the names that JavaScript puts first in an object", () => {
+    for (const [name, integerLike] of [
+      ["0", true],
+      ["01", false],
+      ["4294967294", true],
+      ["4294967295", false],
+      ["-1", false],
+      ["1.0", false],
+      ["-0", false],
+      ["+1", false],
+      ["1e3", false],
+    ] as const) {
+      const rules = checkKind(kindOf(h.object({ b: h.int(), [name]: h.int() }))).map((refusal) => refusal.rule);
+
+      assert.deepEqual(rules, integerLike ? ["IntegerLikeMember"] : [], name);
+      assert.equal(Object.keys({ b: 1, [name]: 2 })[0] === name, integerLike, `the runtime's key order of ${name}`);
+    }
+  });
+
   test("AmbiguousUnion: an int-float union is refused at create, and a string with an instant", () => {
     const intFloat = checkKind(kindOf(h.union([h.int(), h.float()])));
 

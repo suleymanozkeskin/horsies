@@ -16,12 +16,24 @@ import {
 } from "./kinds.ts";
 import { unreachable } from "./unreachable.ts";
 
+/** The canonical decimal text of a non-negative integer of at most 10 digits: `0`, or digits with no leading zero. */
+const CANONICAL_INDEX_TEXT = /^(?:0|[1-9][0-9]{0,9})$/;
+
+/** The highest JavaScript array index, 2^32 - 2. A key of this value or lower is put first in an object. */
+const MAX_ARRAY_INDEX = 2 ** 32 - 2;
+
 /** Why a kind tree cannot be a task's wire type. */
 export type KindRule =
   /** The value of a `.default(value)` does not encode under its kind (for example `NaN` for `h.float()`). */
   | "DefaultNotStored"
   /** An object member has a name that only the engine writes. */
   | "EngineKeyMember"
+  /**
+   * An object member has an integer-like name: a JavaScript array index, the canonical decimal text of an integer
+   * from 0 to 2^32 - 2 (`"0"`, `"10"`). JavaScript puts such a key first in an object, so the declared member order
+   * of `h.object` cannot hold.
+   */
+  | "IntegerLikeMember"
   /** The kind nests more arrays and objects than a stored value may have, so no value fits it. */
   | "KindTooDeep"
   /** A number member of a literal that is not a safe integer. */
@@ -185,11 +197,25 @@ function walkMembers(members: readonly Member[], path: string, level: number, re
 
 /** The refusals of a member itself: its name and its default. */
 function memberRefusals(member: Member, path: string): readonly KindRefused[] {
-  const name: readonly KindRefused[] = isEngineKey(member.name)
+  return [...nameRefusals(member.name, path), ...defaultRefusals(member.presence, path)];
+}
+
+/** The refusals of a member name: a name that only the engine writes, an integer-like name. */
+function nameRefusals(name: string, path: string): readonly KindRefused[] {
+  const engineKey: readonly KindRefused[] = isEngineKey(name)
     ? [{ rule: "EngineKeyMember", path, detail: "a member name that only the engine writes" }]
     : [];
 
-  return [...name, ...defaultRefusals(member.presence, path)];
+  const integerLike: readonly KindRefused[] = isIntegerLikeName(name)
+    ? [{ rule: "IntegerLikeMember", path, detail: "an integer-like member name, which JavaScript puts first" }]
+    : [];
+
+  return [...engineKey, ...integerLike];
+}
+
+/** Whether a name is a JavaScript array index, which an object puts before its other keys. Pure. */
+function isIntegerLikeName(name: string): boolean {
+  return CANONICAL_INDEX_TEXT.test(name) && Number(name) <= MAX_ARRAY_INDEX;
 }
 
 /** The refusal of a default value that the writer refused. */
