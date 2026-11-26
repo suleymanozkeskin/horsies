@@ -12,6 +12,7 @@ import type {
   TaskInfoRead,
   WaitBound,
 } from "../native/sends/addon.ts";
+import type { CoreHandle } from "../native/handle/core-handle.ts";
 import type { TraceArgument } from "../native/values/records.ts";
 
 /**
@@ -61,8 +62,15 @@ export interface SeatRelay {
   ): Promise<SeatOperationMap[A]["reply"]>;
 }
 
+/**
+ * The core of an app on a main thread: its send and read operations, and the one core handle that `Horsies.create`
+ * built for the app. The worker run and the live check use that handle, so the child spec source that the app
+ * registers on it is the one that the worker serves.
+ */
+export type AddonCore = { readonly producer: ProducerCore; readonly handle: CoreHandle };
+
 /** How this thread reaches the core. */
 export type CoreAccess =
-  | { readonly kind: "addon"; readonly producer: ProducerCore }
+  | ({ readonly kind: "addon" } & AddonCore)
   | { readonly kind: "seatRelay"; readonly relay: SeatRelay }
   | { readonly kind: "noCore" };

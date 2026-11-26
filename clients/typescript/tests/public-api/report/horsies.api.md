@@ -23,6 +23,16 @@ export class AddonOutsideMainThread extends CoreDefect {
 export type AnyImplementation = Implementation<ParameterSchemas, OutputSchema, string, ExecutionClass>;
 
 // @public
+export interface AnyStateKey {
+    // (undocumented)
+    readonly [stateKeyMark]: "StateKey";
+    // (undocumented)
+    readonly kind: "stateKey";
+    // (undocumented)
+    readonly name: string;
+}
+
+// @public
 export type AnyTaskContract = TaskContract<ParameterSchemas, OutputSchema, string, ExecutionClass>;
 
 // @public
@@ -43,6 +53,24 @@ export type AppConfigInput = QueueConfigInput & {
 };
 
 // @public
+export type AttemptNumber = number & {
+    readonly [attemptBrand]: "AttemptNumber";
+};
+
+// @public
+export const AttemptNumber: {
+    readonly parse: (value: number) => Result<AttemptNumber, AttemptRefused>;
+    readonly MIN: number;
+    readonly MAX: number;
+};
+
+// @public
+export type AttemptRefused = {
+    readonly kind: "notAnAttempt";
+    readonly reason: string;
+};
+
+// @public
 export type BodyFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> = [
 X
 ] extends ["SHARED_ASYNC"] ? (input: BodyInput<P>, runtime: RuntimeOf<X>) => Promise<BodyResult<O, E>> : (input: BodyInput<P>, runtime: RuntimeOf<X>) => BodyResult<O, E> | Promise<BodyResult<O, E>>;
@@ -56,11 +84,11 @@ export type BodyResult<O extends OutputSchema, E extends string> = Ok<SchemaSent
 // @public
 export interface BodyRuntimes {
     // (undocumented)
-    readonly ISOLATED: never;
+    readonly ISOLATED: TaskRuntime;
     // (undocumented)
-    readonly SHARED_ASYNC: never;
+    readonly SHARED_ASYNC: TaskRuntime;
     // (undocumented)
-    readonly SHARED_THREAD: never;
+    readonly SHARED_THREAD: ThreadTaskRuntime;
 }
 
 // @public
@@ -121,6 +149,25 @@ export const BrokerErrorCode: {
 export type BrokerErrorCode = (typeof BrokerErrorCode)[keyof typeof BrokerErrorCode];
 
 // @public
+export type CancelCause = "DEADLINE" | "OPERATOR";
+
+// @public
+export type CancelReason = {
+    readonly cause: CancelCause;
+};
+
+// @public
+export type CancelState = {
+    readonly kind: "notRequested";
+} | {
+    readonly kind: "requested";
+    readonly cause: CancelCause;
+};
+
+// @public
+export type ChildStartHook = () => void | Promise<void>;
+
+// @public
 export interface ClaimLimitsInput {
     readonly claimedPerWorker?: TaskLimit;
     readonly perQueuePerPass?: TaskLimit;
@@ -135,6 +182,14 @@ export type ClaimMode = {
     readonly prefetchBuffer: number;
     readonly leaseMs: number;
 };
+
+// @public
+export interface Cli {
+    run(app: Horsies): Promise<number>;
+}
+
+// @public
+export const cli: Cli;
 
 // @public
 export class ClientDefect extends CoreDefect {
@@ -597,6 +652,12 @@ export type ExecutionRules<X extends ExecutionClass> = [X] extends ["SHARED_ASYN
 };
 
 // @public
+export type FencingToken = {
+    readonly taskId: TaskId;
+    readonly value: AttemptNumber;
+};
+
+// @public
 export type FinishedStatus = "COMPLETED" | "FAILED" | "EXPIRED";
 
 // @public
@@ -650,6 +711,8 @@ export interface HistoryContractError {
 export class Horsies {
     static create(config: HorsiesConfig): Result<Horsies, CreateRefused>;
     implement<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, body: NoInfer<BodyFor<P, O, E, X>>, options?: ImplementOptions<NoInfer<E>>): Implementation<P, O, E, X>;
+    onChildStart(hook: ChildStartHook): void;
+    provide<T>(factory: ProviderFactory<T>): StateKey<Awaited<T>>;
     retrySend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>;
     send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, input: NoInfer<SendableInput<P>>, options?: SendOptions): Promise<Result<TaskHandle<SchemaValue<O>, E>, TaskSendError<SchemaValue<O>, E>>>;
     taskHandle<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, taskId: TaskId): TaskHandle<SchemaValue<O>, E>;
@@ -680,6 +743,7 @@ export interface Implementation<P extends ParameterSchemas, O extends OutputSche
     readonly contract: TaskContract<P, O, E, X>;
     // (undocumented)
     readonly kind: "implementation";
+    run(input: BodyInput<P>, runtime: RuntimeOf<X>): Promise<TaskOutcome<SchemaValue<O>, E>>;
 }
 
 // @public
@@ -999,6 +1063,9 @@ export type Presence = "required" | "optional" | "defaulted";
 
 // @public
 export type PresenceOf<W extends AnyWire> = W[typeof wirePresence];
+
+// @public
+export type ProviderFactory<T> = () => T | Promise<T>;
 
 // @public
 export type QueueConfigInput = {
@@ -1348,6 +1415,17 @@ export interface SharedThreadChildrenInput {
 }
 
 // @public
+export type SpawnedWork<T> = (signal: AbortSignal) => Promise<T>;
+
+// @public
+export type SpawnRefused = {
+    readonly kind: "runEnded";
+} | {
+    readonly kind: "tooMuchWork";
+    readonly bound: number;
+};
+
+// @public
 export interface StandardSchemaMarker {
     // (undocumented)
     readonly "~standard": {
@@ -1358,6 +1436,15 @@ export interface StandardSchemaMarker {
 
 // @public
 export type StateAfter = "noChange" | "outcomeUnknown";
+
+// @public
+export interface StateKey<T> extends AnyStateKey {
+    // (undocumented)
+    readonly [stateValueType]?: (value: T) => T;
+}
+
+// @public
+export type StateValueOf<K extends AnyStateKey> = K extends StateKey<infer T> ? T : never;
 
 // @public
 export type SubWorkflowFailure = {
@@ -1557,6 +1644,17 @@ export type TaskOutcome<O, E extends string = string> = {
     readonly error: TaskError<E>;
 };
 
+// @public
+export class TaskRuntime {
+    cancelState(): CancelState;
+    readonly fencingToken: FencingToken;
+    static forTest<const Keys extends readonly AnyStateKey[]>(options: TestRuntimeOptions<Keys>): TaskRuntime;
+    readonly signal: AbortSignal;
+    spawn<T>(name: string, work: SpawnedWork<T>): Result<Promise<T>, SpawnRefused>;
+    state<T>(key: StateKey<T>): T;
+    readonly taskId: TaskId;
+}
+
 // @public (undocumented)
 export interface TaskSendEnqueueFailed {
     // (undocumented)
@@ -1692,6 +1790,26 @@ export type TcpUserTimeout = {
     readonly kind: "after";
     readonly milliseconds: number;
 };
+
+// @public
+export interface TestRuntimeOptions<Keys extends readonly AnyStateKey[]> {
+    // (undocumented)
+    readonly attempt: AttemptNumber;
+    readonly state?: TestStateEntries<Keys>;
+    // (undocumented)
+    readonly taskId: TaskId;
+}
+
+// @public
+export type TestStateEntries<Keys extends readonly AnyStateKey[]> = {
+    readonly [I in keyof Keys]: TestStateEntry<Keys[I]>;
+};
+
+// @public
+export type TestStateEntry<K extends AnyStateKey> = readonly [key: K, value: StateValueOf<K>];
+
+// @public
+export type ThreadTaskRuntime = Pick<TaskRuntime, "taskId" | "fencingToken" | "signal" | "cancelState" | "state">;
 
 // @public
 export class TooManyPendingCalls extends CoreError {
@@ -1836,6 +1954,11 @@ export type WorkflowNodeOnly = "horsies: this task takes an upstream result (h.r
 
 // @public
 export type WorkflowStatus = (typeof WORKFLOW_STATUSES)[number];
+
+// @public
+export type WorkStopReason = {
+    readonly cause: CancelCause | "LEFT_WORK";
+};
 
 // @public (undocumented)
 export type ZodContainerSent<S> = ZodDefOf<S> extends {
