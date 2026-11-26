@@ -8,7 +8,7 @@
 import type { CoreAccess } from "../app/core-access.ts";
 import type { SendObserver } from "../app/observers.ts";
 import type { SuppressionState } from "../app/suppression.ts";
-import type { TaskSendCoreError, TaskSendPayload } from "../_catalog/task_send_errors.ts";
+import type { TaskSendPayload } from "../_catalog/task_send_errors.ts";
 import { encodeParametersWithReadBack } from "../codec/read-back.ts";
 import { refusalText } from "../codec/refusal.ts";
 import type { CompiledContract } from "../contract/compile.ts";
@@ -24,6 +24,7 @@ import {
   preconditionFailed,
   type RetryableSendError,
   ruleRefused,
+  type SendFailure,
   sendErrorOfRaw,
   suppressedError,
   type TaskSendError,
@@ -93,6 +94,15 @@ export async function retrySend<O, E extends string>(
   context: SendContext,
   error: RetryableSendError<O, E>,
 ): Promise<SendOutcome<O, E>> {
+  // A JavaScript caller can pass another error than the type allows.
+  const code: string = error.code;
+
+  if (code !== "ENQUEUE_FAILED") {
+    const message = `retrySend takes ENQUEUE_FAILED only; ${code} is not retryable`;
+
+    return err(validationFailed(message, ruleRefused(message)));
+  }
+
   const listed = context.contracts.byName(error.payload.taskName);
 
   if (listed.kind === "notListed") {
@@ -108,7 +118,7 @@ export async function retrySend<O, E extends string>(
   return sentHandle<O, E>(context, listed.task, requestOfPayload(error.taskId, error.payload), "REPEAT");
 }
 
-function notListed(taskName: string): TaskSendCoreError {
+function notListed(taskName: string): SendFailure {
   const message = `the task ${taskName} is not in the tasks list of this app; add its contract to Horsies.create({ tasks })`;
 
   return validationFailed(message, preconditionFailed(message));
@@ -116,7 +126,7 @@ function notListed(taskName: string): TaskSendCoreError {
 
 function suppression(
   context: SendContext,
-): { readonly kind: "open" } | { readonly kind: "suppressed"; readonly error: TaskSendCoreError } {
+): { readonly kind: "open" } | { readonly kind: "suppressed"; readonly error: SendFailure } {
   const current = context.suppression.current();
 
   switch (current.kind) {
@@ -138,7 +148,7 @@ async function preparedRequest(
   task: ListedTask,
   input: object,
   options: SendOptions,
-): Promise<Result<EnqueueRequest, TaskSendCoreError>> {
+): Promise<Result<EnqueueRequest, SendFailure>> {
   const { compiled, route } = task;
   const taskName = compiled.record.name;
   const checked = checkSendOptions(options);
@@ -250,7 +260,7 @@ export async function enqueueWithResends(
   request: EnqueueRequest,
   firstKind: SendKind,
   trace: TraceArgument,
-): Promise<Result<TaskId, TaskSendCoreError>> {
+): Promise<Result<TaskId, SendFailure>> {
   let sent = await enqueueOnce(context, request, firstKind, trace);
 
   for (let resend = 0; resend < RESEND_COUNT && context.resendOnTransientErr && isTransient(sent); resend += 1) {
@@ -266,7 +276,7 @@ async function enqueueOnce(
   request: EnqueueRequest,
   sendKind: SendKind,
   trace: TraceArgument,
-): Promise<Result<TaskId, TaskSendCoreError>> {
+): Promise<Result<TaskId, SendFailure>> {
   const outcome = await enqueue(context.core, request, sendKind, trace);
 
   switch (outcome.kind) {
@@ -282,6 +292,6 @@ async function enqueueOnce(
   }
 }
 
-function isTransient(sent: Result<TaskId, TaskSendCoreError>): boolean {
+function isTransient(sent: Result<TaskId, SendFailure>): boolean {
   return !sent.ok && sent.error.code === "ENQUEUE_FAILED" && sent.error.retryable;
 }
