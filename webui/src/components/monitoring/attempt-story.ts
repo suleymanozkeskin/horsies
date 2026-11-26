@@ -9,7 +9,7 @@ import type { PhaseKey, TimingKind } from '@/components/workflows/phase';
 import { assertNever } from '@/lib/exhaustive';
 import { instantMs } from '@/lib/time-text';
 import type { AttemptClaims, AttemptPhases, AttemptRecordedBy } from '@/types/timing';
-import type { LeafTask, TaskAttempt } from '@/types/workflows';
+import type { TaskRow, TaskAttempt } from '@/types/workflows';
 
 /** What a phase of an attempt holds beyond its key. */
 export type AttemptPhaseDetail =
@@ -315,7 +315,7 @@ function readStatus(status: string): StatusRead {
 /** The attempt in progress of a task, or `not_live` for a task with none. */
 export type LiveRead = { kind: 'live'; attempt: LiveAttempt } | { kind: 'not_live' };
 
-function liveOf(status: LiveStatus, leaf: LeafTask): LiveAttempt {
+function liveOf(status: LiveStatus, leaf: TaskRow): LiveAttempt {
   const number = leaf.retry_count + 1;
   const dueMs = optionalMs(leaf.enqueued_at);
   const startedMs = optionalMs(leaf.started_at);
@@ -336,7 +336,7 @@ function liveOf(status: LiveStatus, leaf: LeafTask): LiveAttempt {
 }
 
 /** The live attempt of a task: its number is the retry count plus one. */
-export function liveAttempt(leaf: LeafTask): LiveRead {
+export function liveAttempt(leaf: TaskRow): LiveRead {
   const read = readStatus(leaf.status);
   switch (read.kind) {
     case 'not_live':
@@ -374,7 +374,7 @@ const dueOf = (attempt: TaskAttempt): number | null => {
 /** The due time of a live attempt, where the retry wait before it ends. The
  * retry wait of a pending attempt can still be open: its live entry shows the
  * due time instead. */
-const liveDueOf = (live: LiveAttempt, leaf: LeafTask): number | null => {
+const liveDueOf = (live: LiveAttempt, leaf: TaskRow): number | null => {
   switch (live.kind) {
     case 'pending':
       return null;
@@ -387,7 +387,7 @@ const liveDueOf = (live: LiveAttempt, leaf: LeafTask): number | null => {
   }
 };
 
-function liveItems(ordered: readonly TaskAttempt[], leaf: LeafTask | null): StoryItem[] {
+function liveItems(ordered: readonly TaskAttempt[], leaf: TaskRow | null): StoryItem[] {
   if (leaf === null) {
     return [];
   }
@@ -413,7 +413,7 @@ function liveItems(ordered: readonly TaskAttempt[], leaf: LeafTask | null): Stor
  * and the live attempt of a task that is not terminal. `leaf` is null when
  * the node has no task row.
  */
-export function attemptStory(attempts: readonly TaskAttempt[], leaf: LeafTask | null): AttemptStory {
+export function attemptStory(attempts: readonly TaskAttempt[], leaf: TaskRow | null): AttemptStory {
   const ordered = [...attempts].sort((a, b) => a.attempt - b.attempt);
   const recorded: StoryItem[] = ordered.flatMap((attempt, index) => [
     ...(index === 0 ? [] : retryWaitBetween(ordered[index - 1], attempt.attempt, dueOf(attempt))),

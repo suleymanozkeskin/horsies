@@ -69,14 +69,14 @@ handle, and runs the core's query. No function installs the schema.
 
 ```rust
 use horsies::monitoring::{
-    list_tasks, resolve_monitoring_window, task_stats, SortDirection, TaskFilters,
-    TaskListQuery, TaskSortField, TaskStatsQuery,
+    list_tasks, resolve_monitoring_window, task_status_counts, SortDirection, TaskFilters,
+    TaskListQuery, TaskSortField, TaskStatusCountsQuery,
 };
 use horsies::{Horsies, TaskStatus};
 
 async fn failed_tasks_of_last_day(app: &Horsies) -> Result<(), Box<dyn std::error::Error>> {
     let window = resolve_monitoring_window(None, None, None)?;
-    for count in task_stats(app, &TaskStatsQuery::new(window)).await? {
+    for count in task_status_counts(app, &TaskStatusCountsQuery::new(window)).await? {
         println!("{}: {}", count.status, count.count);
     }
     let filters = TaskFilters { statuses: vec![TaskStatus::Failed], ..TaskFilters::default() };
@@ -86,7 +86,7 @@ async fn failed_tasks_of_last_day(app: &Horsies) -> Result<(), Box<dyn std::erro
         .with_pagination(0, 50)?;
     let page = list_tasks(app, &query).await?;
     for task in &page.rows {
-        println!("{} {} {:?}", task.id, task.task_name, task.error_code);
+        println!("{} {} {:?}", task.task_id, task.task_name, task.error_code);
     }
     Ok(())
 }
@@ -94,7 +94,7 @@ async fn failed_tasks_of_last_day(app: &Horsies) -> Result<(), Box<dyn std::erro
 
 | Function | Returns (`MonitoringResult<_>`) |
 |---|---|
-| `task_stats(&app, &TaskStatsQuery)` | `Vec<StatusCount>`: each of the seven statuses, live table plus history window |
+| `task_status_counts(&app, &TaskStatusCountsQuery)` | `Vec<StatusCount>`: each of the seven statuses, live table plus history window |
 | `task_facets(&app, &TaskFacetsQuery)` | `Facets`: workers, task names, queues and error codes with counts |
 | `task_breakdown(&app, &TaskBreakdownQuery)` | `Breakdown`: counts per `TaskGroupBy` (`Worker`, `TaskName`, `Queue`) |
 | `list_tasks(&app, &TaskListQuery)` | `TaskListPage` (`rows: Vec<TaskSummary>`, `total`) |
@@ -102,17 +102,17 @@ async fn failed_tasks_of_last_day(app: &Horsies) -> Result<(), Box<dyn std::erro
 | `list_workflow_names(&app)` | `Vec<String>`, at most `LIST_ROW_BOUND` (10,000) |
 | `list_workflow_runs(&app, &WorkflowRunsQuery)` | `Vec<WorkflowRunSummary>`, newest first |
 | `get_workflow_run(&app, workflow_id)` | `Option<WorkflowRunDetail>`: nodes, edges and phase timing; `None` when no run has the id |
-| `get_workflow_node(&app, workflow_id, task_index)` | `Option<WorkflowTaskDetail>` |
+| `get_workflow_node(&app, workflow_id, node_index)` | `Option<WorkflowNodeDetail>` |
 | `list_schedules(&app)` | `Vec<ScheduleStateInfo>`, soonest next run first, at most `LIST_ROW_BOUND` (10,000) |
 
 Phase timing (the lifecycle record of migration 1001; one statement reads a run, none per node):
 
-- `TaskAttemptInfo.phases`: `AttemptPhasesInfo::NotCaptured` (a row written before the record) or
+- `TaskAttemptDetail.phases`: `AttemptPhasesInfo::NotCaptured` (a row written before the record) or
   `Captured { enqueued_at, claimed_at, claims, finalizing, recorded_by }`. `claims`: `Counted { count,
   first_claimed_at }` or `NotCounted`; `finalizing`: `Marked { finalizing_at }` or `NotMarked`;
   `recorded_by`: `Worker { placement: Placed { placed_at } | NotObserved }`, `Recovery { last_seen_at }` or
   `Cancel` (the cancel of a RUNNING task wrote the row, outcome `Cancelled`, `finished_at` = the cancel time).
-- `WorkflowNodeInfo.timing`: `NodeTimingInfo::Exact { segments, endpoint }`, `Partial { reasons, segments,
+- `WorkflowNodeSummary.timing`: `NodeTimingInfo::Exact { segments, endpoint }`, `Partial { reasons, segments,
   endpoint }`, `Unavailable { reason }` or `Inconsistent { conflict }`. A segment is `TimingSegmentInfo {
   phase, started_at, end: Closed { at } | Open, source: Node | Task { generation, task_id } | Attempt {
   generation, task_id, attempt } }`. Phases: `Pending`, `Ready`, `Enqueued`, `RetryWait`, `Claimed { claim:
@@ -131,17 +131,17 @@ Query builders:
 
 | Query | Builders |
 |---|---|
-| `TaskStatsQuery::new(window)` | `.with_filters(filters)` (the statuses filter is not used: the read counts every status) |
+| `TaskStatusCountsQuery::new(window)` | `.with_filters(filters)` (the statuses filter is not used: the read counts every status) |
 | `TaskFacetsQuery::new(window)` | `.with_filters`, `.with_statuses`, `.with_error_categories` |
 | `TaskBreakdownQuery::new(window, group_by)` | `.with_filters`, `.with_limit(1..=500)` (default 50) |
 | `TaskListQuery::new(window)` | `.with_filters`, `.with_sort(TaskSortField, SortDirection)`, `.with_pagination(offset, limit)`: limit 1 to 200, `offset + limit` at most 500 (`MAX_TASK_PAGE_REACH`) |
-| `WorkflowRunsQuery::new()` | `.with_name(Option<String>)`, `.with_status(Option<String>)`, `.with_limit(n)` (default 30) |
+| `WorkflowRunsQuery::new()` | `.with_workflow_name(Option<String>)`, `.with_status(Option<String>)`, `.with_limit(n)` (default 30) |
 
 - `TaskFilters` has `statuses`, `task_names`, `queues`, `workers`,
   `error_codes`, `error_categories` and `retried_only`.
-- A refused limit or offset is `PaginationRefused`.
+- A refused limit or offset is `PageRefused`.
 - `resolve_monitoring_window(since, until, now)` is the only constructor of
-  a `HistoryWindow`. The default is the last 24 hours
+  a `MonitoringWindow`. The default is the last 24 hours
   (`MONITORING_WINDOW_DEFAULT`). A span over 30 days
   (`MONITORING_WINDOW_MAX`), or bounds that do not increase, are
   `WindowRefused`.
@@ -159,21 +159,21 @@ Query builders:
 | Variant | When |
 |---|---|
 | `DbOperationFailed { retryable, .. }` | The database or the connect failed. `retryable` is the classification of the cause |
-| `HistoryContractViolation` | A history row does not decode (`task_stats`, `list_tasks`, `get_task_detail`, `get_workflow_node`); `source` is a `HistoryContractSource` that holds the error. Not retryable |
+| `HistoryContractViolation` | A history row does not decode (`task_status_counts`, `list_tasks`, `get_task_detail`, `get_workflow_node`); `source` is a `HistoryContractSource` that holds the error. Not retryable |
 
 ## Task Cancel
 
 ```rust
-use horsies::monitoring::{cancel_task, TaskActionError};
+use horsies::monitoring::{cancel_task, CancelPolicy, TaskActionError};
 use horsies::Horsies;
 use uuid::Uuid;
 
 async fn cancel_pending(app: &Horsies, task_id: Uuid) -> Result<bool, String> {
-    match cancel_task(app, task_id, false).await {
+    match cancel_task(app, task_id, CancelPolicy::PendingOrClaimedOnly).await {
         Ok(_cancelled) => Ok(true),
         Err(TaskActionError::NotCancellable { .. } | TaskActionError::NotFound { .. }) => Ok(false),
         Err(
-            error @ (TaskActionError::WorkflowTask { .. }
+            error @ (TaskActionError::IsWorkflowTask { .. }
             | TaskActionError::DbOperationFailed { .. }
             | TaskActionError::StoredDataInvalid { .. }),
         ) => Err(error.message().to_owned()),
@@ -181,13 +181,17 @@ async fn cancel_pending(app: &Horsies, task_id: Uuid) -> Result<bool, String> {
 }
 ```
 
-`cancel_task(&app, task_id, include_running)` returns
+`cancel_task(&app, task_id, policy)` returns
 `TaskActionResult<TaskCancelled>` (`task_id`, `was_status`):
 
 - One compare-and-set in one transaction. A committed `CANCELLED` is final:
   claim, finalize, retry and recovery cannot overwrite it.
+- `policy` is a `CancelPolicy`: `PendingOrClaimedOnly` or `IncludeRunning`.
+  The web body is `{"policy": "INCLUDE_RUNNING"}` or
+  `{"policy": "PENDING_OR_CLAIMED_ONLY"}`; a body with no `policy` key
+  cancels with `PendingOrClaimedOnly`.
 - PENDING and CLAIMED are cancelled. RUNNING is cancelled only with
-  `include_running = true`: one statement writes the attempt row with
+  `CancelPolicy::IncludeRunning`: one statement writes the attempt row with
   outcome `Cancelled` (`recorded_by` `Cancel`), moves the task to history,
   and sends a notice to the worker that holds the run. The worker gives the
   cancel to the task code (`TaskRuntime::cancelled()`, `is_cancelled()`,
@@ -206,8 +210,8 @@ and `task_id`; `code()`, `message()`, `retryable()`, `task_id()` and
 | Variant | HTTP | When |
 |---|---|---|
 | `NotFound` | 404 | No live or history row has the id. Nothing changed |
-| `NotCancellable { current_status, .. }` | 409 | Terminal, or RUNNING without `include_running`; `current_status` is the status found. Nothing changed |
-| `WorkflowTask { current_status, .. }` | 400 | The task belongs to a workflow. Nothing changed |
+| `NotCancellable { current_status, .. }` | 409 | Terminal, or RUNNING with `CancelPolicy::PendingOrClaimedOnly`; `current_status` is the status found. Nothing changed |
+| `IsWorkflowTask { current_status, .. }` | 400 | The task belongs to a workflow. Nothing changed |
 | `DbOperationFailed { retryable, cause, .. }` | 503 when `retryable`, else 500 | The statement or the connect failed; `cause` is the `Box<BrokerError>`. Nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `NotCancellable` with `CANCELLED` |
 | `StoredDataInvalid { cause, .. }` | 500 | Stored data does not parse; `cause` is the `OutcomeDecodeError`. Nothing changed |
 
@@ -221,7 +225,7 @@ returns.
 
 | Function | Web route |
 |---|---|
-| `cancel_task_action(&app, task_id, include_running)` | `POST /api/tasks/{id}/cancel` |
+| `cancel_task_action(&app, task_id, policy)` | `POST /api/tasks/{id}/cancel` |
 | `pause_workflow_action(&app, workflow_id)` | `POST /api/workflows/{id}/pause` |
 | `resume_workflow_action(&app, workflow_id)` | `POST /api/workflows/{id}/resume` |
 | `cancel_workflow_action(&app, workflow_id)` | `POST /api/workflows/{id}/cancel` |
@@ -491,16 +495,16 @@ use horsies::{
 };
 use horsies::monitoring::{
     // Queries
-    task_stats, task_facets, task_breakdown, list_tasks, get_task_detail, list_workflow_names,
+    task_status_counts, task_facets, task_breakdown, list_tasks, get_task_detail, list_workflow_names,
     list_workflow_runs, get_workflow_run, get_workflow_node, list_schedules,
-    TaskStatsQuery, TaskFacetsQuery, TaskBreakdownQuery, TaskListQuery, WorkflowRunsQuery,
-    TaskFilters, TaskSortField, SortDirection, TaskGroupBy, ErrorCategory, PaginationRefused,
-    HistoryWindow, WindowRefused, resolve_monitoring_window, MONITORING_WINDOW_DEFAULT,
+    TaskStatusCountsQuery, TaskFacetsQuery, TaskBreakdownQuery, TaskListQuery, WorkflowRunsQuery,
+    TaskFilters, TaskSortField, SortDirection, TaskGroupBy, ErrorCategory, PageRefused,
+    MonitoringWindow, WindowRefused, resolve_monitoring_window, MONITORING_WINDOW_DEFAULT,
     MONITORING_WINDOW_MAX, MAX_TASK_PAGE_REACH,
     // Results and errors
     MonitoringResult, MonitoringQueryError, MonitoringQueryErrorCode, StatusCount, Facets,
     Breakdown, TaskListPage, TaskSummary, TaskDetailRead, TaskDetail, TaskDetailNotFound,
-    WorkflowRunSummary, WorkflowRunDetail, WorkflowTaskDetail, ScheduleStateInfo,
+    WorkflowRunSummary, WorkflowRunDetail, WorkflowNodeDetail, ScheduleStateInfo,
     // Phase timing
     AttemptPhasesInfo, AttemptClaimsInfo, AttemptFinalizingInfo, AttemptPlacementInfo,
     AttemptRecordedByInfo, NodeTimingInfo, TimingSegmentInfo, SegmentPhaseInfo, SegmentClaimInfo,
@@ -509,7 +513,7 @@ use horsies::monitoring::{
     RunTimingInfo, RunCoverageInfo, RunConflictInfo, PauseIntervalInfo, PauseEndInfo,
     // Actions
     cancel_task, cancel_task_action, pause_workflow_action, resume_workflow_action,
-    cancel_workflow_action, TaskCancelled, TaskActionError, TaskActionErrorCode,
+    cancel_workflow_action, CancelPolicy, TaskCancelled, TaskActionError, TaskActionErrorCode,
     TaskActionResult, ActionOutcome, ActionBody, ActionResponse,
 };
 use horsies::events::{

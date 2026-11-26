@@ -261,7 +261,7 @@ function NameTags({ node }: { node: WorkflowNode }) {
   const tag = 'shrink-0 rounded-full bg-glass-inset px-1.25 py-px font-mono text-10 leading-tight text-muted-foreground';
   return (
     <>
-      {node.is_subworkflow && <span className={tag}>sub</span>}
+      {node.is_sub_workflow && <span className={tag}>sub</span>}
       {count.kind === 'attempts' && count.count > 1 && <span className={tag}>×{count.count}</span>}
       {count.kind === 'tasks' && <span className={tag}>{count.count} tasks</span>}
     </>

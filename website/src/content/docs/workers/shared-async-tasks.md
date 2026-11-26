@@ -86,7 +86,7 @@ A child that reported the second cancel of a task, or the cancel of the work tha
 
 ## An Operator Cancel
 
-An operator can cancel a running task (`cancel_task` with `include_running`, or the web UI). The cancel moves the task to history as `CANCELLED` and records its attempt as `CANCELLED` in one statement. Then the worker sends the cancel to the shared async child of the run. Here C is the time when the child gets the cancel, and G is `cancel_grace_ms`.
+An operator can cancel a running task (`cancel_task` with the policy `INCLUDE_RUNNING`, or the web UI). The cancel moves the task to history as `CANCELLED` and records its attempt as `CANCELLED` in one statement. Then the worker sends the cancel to the shared async child of the run. Here C is the time when the child gets the cancel, and G is `cancel_grace_ms`.
 
 1. **At C**, the child cancels the task: the task gets `asyncio.CancelledError` at its next `await` (Rust: `TaskRuntime::cancelled()` completes). The cancel state of its `TaskRuntime` is `OPERATOR`. A task whose code has not started yet does not start.
 2. **The run ends** when its coroutine has ended and no work that the task started is alive, as at the deadline. What the task returns after the cancel is dropped: the task stays `CANCELLED`.

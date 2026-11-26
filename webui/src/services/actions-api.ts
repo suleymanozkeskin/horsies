@@ -1,14 +1,18 @@
 import { apiPost } from '@/lib/http';
 import type { ActionKind, ActionResponse } from '@/types/actions';
 
-/** Mark a non-terminal task CANCELLED. `includeRunning` is required to touch a
- * RUNNING row, because the process keeps executing (§ confirm copy). */
+/** The task statuses that a task cancel acts on: the `policy` of the cancel
+ * body. Only `INCLUDE_RUNNING` touches a RUNNING row, because the process
+ * keeps executing (§ confirm copy). */
+export type CancelPolicy = 'PENDING_OR_CLAIMED_ONLY' | 'INCLUDE_RUNNING';
+
+/** Mark a non-terminal task CANCELLED with `policy`. */
 export const cancelTask = (
   taskId: string,
-  includeRunning: boolean
+  policy: CancelPolicy
 ): Promise<ActionResponse> =>
   apiPost<ActionResponse>(`/tasks/${encodeURIComponent(taskId)}/cancel`, {
-    include_running: includeRunning,
+    policy,
   });
 
 export const pauseWorkflow = (workflowId: string): Promise<ActionResponse> =>
@@ -34,7 +38,10 @@ export function invokeAction(
 ): Promise<ActionResponse> {
   switch (action) {
     case 'task-cancel':
-      return cancelTask(entityId, args.includeRunning);
+      return cancelTask(
+        entityId,
+        args.includeRunning ? 'INCLUDE_RUNNING' : 'PENDING_OR_CLAIMED_ONLY'
+      );
     case 'workflow-pause':
       return pauseWorkflow(entityId);
     case 'workflow-resume':

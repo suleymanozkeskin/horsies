@@ -1397,7 +1397,7 @@ fn run_coverage(
         .zip(timings)
         .filter_map(|(node, timing)| match timing {
             NodeTimingInfo::Inconsistent { .. } => Some(RunConflictInfo::Node {
-                task_index: node.task_index,
+                node_index: node.task_index,
             }),
             NodeTimingInfo::Exact { .. }
             | NodeTimingInfo::Partial { .. }

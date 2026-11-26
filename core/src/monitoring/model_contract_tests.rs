@@ -24,10 +24,10 @@ use serde_json::{Map, Value};
 
 use crate::monitoring::models::{
     Breakdown, BreakdownCounts, BudgetLoadInfo, ClassReportInfo, DownSlotInfo, ErrorFacet,
-    FacetValue, Facets, GroupRow, LeafTaskInfo, LivenessReport, PendingStreamInfo,
-    ScheduleStateInfo, StatusCount, TaskAttemptInfo, TaskDetail, TaskListPage, TaskSummary,
+    FacetValue, Facets, GroupRow, LivenessReport, PendingStreamInfo, ScheduleStateInfo,
+    StatusCount, TaskAttemptDetail, TaskDetail, TaskListPage, TaskRowInfo, TaskSummary,
     WorkerClassLoadInfo, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo, WorkflowEdge,
-    WorkflowNodeInfo, WorkflowRunDetail, WorkflowRunSummary, WorkflowTaskDetail,
+    WorkflowNodeDetail, WorkflowNodeSummary, WorkflowRunDetail, WorkflowRunSummary,
 };
 
 /// The contract of the Pydantic models, by model name.
@@ -56,9 +56,12 @@ enum CompatibleDifference {
 /// a named difference that no field has.
 const COMPATIBLE_DIFFERENCES: &[(&str, CompatibleDifference)] = &[
     ("TaskDetail.workflow_id", CompatibleDifference::UuidIntoText),
-    ("WorkflowRunSummary.id", CompatibleDifference::UuidIntoText),
     (
-        "WorkflowNodeInfo.sub_workflow_id",
+        "WorkflowRunSummary.workflow_id",
+        CompatibleDifference::UuidIntoText,
+    ),
+    (
+        "WorkflowNodeSummary.sub_workflow_id",
         CompatibleDifference::UuidIntoText,
     ),
     (
@@ -597,8 +600,8 @@ fn contract() -> Map<String, Value> {
 type Check = fn(&str, &Map<String, Value>) -> Comparison;
 
 const CHECKS: [(&str, Check); 27] = [
-    ("TaskAttemptInfo", compare::<TaskAttemptInfo>),
-    ("LeafTaskInfo", compare::<LeafTaskInfo>),
+    ("TaskAttemptDetail", compare::<TaskAttemptDetail>),
+    ("TaskRowInfo", compare::<TaskRowInfo>),
     ("StatusCount", compare::<StatusCount>),
     ("FacetValue", compare::<FacetValue>),
     ("ErrorFacet", compare::<ErrorFacet>),
@@ -610,10 +613,10 @@ const CHECKS: [(&str, Check); 27] = [
     ("TaskListPage", compare::<TaskListPage>),
     ("TaskDetail", compare::<TaskDetail>),
     ("WorkflowRunSummary", compare::<WorkflowRunSummary>),
-    ("WorkflowNodeInfo", compare::<WorkflowNodeInfo>),
+    ("WorkflowNodeSummary", compare::<WorkflowNodeSummary>),
     ("WorkflowEdge", compare::<WorkflowEdge>),
     ("WorkflowRunDetail", compare::<WorkflowRunDetail>),
-    ("WorkflowTaskDetail", compare::<WorkflowTaskDetail>),
+    ("WorkflowNodeDetail", compare::<WorkflowNodeDetail>),
     ("DownSlotInfo", compare::<DownSlotInfo>),
     ("WorkerStateInfo", compare::<WorkerStateInfo>),
     ("BudgetLoadInfo", compare::<BudgetLoadInfo>),

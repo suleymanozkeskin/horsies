@@ -15,12 +15,12 @@ use super::spec_support::{
 };
 use crate::broker::lifecycle_tests::support::{single_session_pool, WireProxy};
 use crate::broker::PostgresBroker;
-use crate::core::history::reads::pages::HistoryWindow;
+use crate::core::history::reads::pages::MonitoringWindow;
 use crate::core::task::error::{ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode};
 use crate::monitoring::{
-    list_tasks, task_breakdown, task_facets, task_stats, Breakdown, BreakdownGroup, ErrorCategory,
-    TaskBreakdownQuery, TaskFacetsQuery, TaskFilters, TaskGroupBy, TaskListQuery, TaskStatsQuery,
-    TaskSummary,
+    list_tasks, task_breakdown, task_facets, task_status_counts, Breakdown, BreakdownGroup,
+    ErrorCategory, TaskBreakdownQuery, TaskFacetsQuery, TaskFilters, TaskGroupBy, TaskListQuery,
+    TaskStatusCountsQuery, TaskSummary,
 };
 use crate::test_support::history::{covered_history_instant, stored_class_key, SeedInstant};
 use crate::test_support::sql::{self, TestPool};
@@ -146,7 +146,7 @@ async fn seed_one_failure_per_family(pool: &TestPool) {
 async fn stats_zero_fill_every_status_in_a_fixed_order() {
     let database = SpecDatabase::create().await;
 
-    let stats = task_stats(&database.broker(), &TaskStatsQuery::new(window()))
+    let stats = task_status_counts(&database.broker(), &TaskStatusCountsQuery::new(window()))
         .await
         .expect("read the stats");
 
@@ -793,9 +793,9 @@ async fn stats_and_breakdown_expand_a_category_the_same_way() {
         ..TaskFilters::default()
     };
 
-    let stats = task_stats(
+    let stats = task_status_counts(
         &broker,
-        &TaskStatsQuery::new(window()).with_filters(outcome_only.clone()),
+        &TaskStatusCountsQuery::new(window()).with_filters(outcome_only.clone()),
     )
     .await
     .expect("read the stats");
@@ -887,7 +887,7 @@ async fn the_history_window_holds_its_lower_bound_and_not_its_upper_bound() {
             .await
             .expect("date the history row");
     }
-    let window = HistoryWindow::new(lower, upper).expect("a window of one hour");
+    let window = MonitoringWindow::new(lower, upper).expect("a window of one hour");
     let names = TaskFilters {
         task_names: vec![
             at_lower.task_name.clone(),
@@ -904,9 +904,9 @@ async fn the_history_window_holds_its_lower_bound_and_not_its_upper_bound() {
     )
     .await
     .expect("read the list");
-    let stats = task_stats(
+    let stats = task_status_counts(
         &broker,
-        &TaskStatsQuery::new(window).with_filters(names.clone()),
+        &TaskStatusCountsQuery::new(window).with_filters(names.clone()),
     )
     .await
     .expect("read the stats");
@@ -920,7 +920,7 @@ async fn the_history_window_holds_its_lower_bound_and_not_its_upper_bound() {
 
     assert_eq!(list.total, 1);
     assert_eq!(
-        list.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        list.rows.iter().map(|row| row.task_id).collect::<Vec<_>>(),
         [at_lower.id]
     );
     assert_eq!(stats.iter().map(|row| row.count).sum::<i64>(), 1);

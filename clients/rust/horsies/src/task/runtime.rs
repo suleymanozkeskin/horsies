@@ -138,7 +138,7 @@ impl TaskRuntime {
     /// ([`Self::cancel_state`]):
     ///
     /// - An operator cancel, in every execution mode: `cancel_task` with
-    ///   `include_running` on a `RUNNING` task. The task is `CANCELLED`
+    ///   `CancelPolicy::IncludeRunning` on a `RUNNING` task. The task is `CANCELLED`
     ///   already, with its attempt recorded as `CANCELLED`; what the body
     ///   returns is dropped. In a `SHARED_ASYNC` run the body and the work it
     ///   started with [`Self::spawn`] have the task's `cancel_grace_ms` to

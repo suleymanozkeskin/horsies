@@ -523,7 +523,7 @@ A `SHARED_THREAD` task on a shared thread child cannot be stopped from outside. 
 
 ### Cancellation
 
-An operator can cancel a running task: `cancel_task(broker, task_id, include_running=True)`, or the web UI. The cancel moves the task to history as `CANCELLED` at once, and records its attempt as `CANCELLED`. Then the worker gives the cancel to the task code, and the code decides when to stop. What the task returns after the cancel is dropped. The rules of each task status are on [Action Semantics](/horsies/monitoring/action-semantics/#cancelling-a-running-task).
+An operator can cancel a running task: `cancel_task(app, task_id, policy=CancelPolicy.INCLUDE_RUNNING)`, or the web UI. The cancel moves the task to history as `CANCELLED` at once, and records its attempt as `CANCELLED`. Then the worker gives the cancel to the task code, and the code decides when to stop. What the task returns after the cancel is dropped. The rules of each task status are on [Action Semantics](/horsies/monitoring/action-semantics/#cancelling-a-running-task).
 
 An `async def` task gets `asyncio.CancelledError` at its next `await`, in an isolated child and in a shared async child. Let it propagate. Catch it only to clean up, then raise it again:
 
@@ -577,7 +577,7 @@ def import_batches(runtime: TaskRuntime, *, batch_ids: list[str]) -> Result[int,
 <!-- members: CancelCause -->
 | `CancelCause` | The cancel came from |
 | ------------- | -------------------- |
-| `OPERATOR` | An operator cancel of the task: `cancel_task` with `include_running=True`, or the web UI |
+| `OPERATOR` | An operator cancel of the task: `cancel_task` with `policy=CancelPolicy.INCLUDE_RUNNING`, or the web UI |
 | `DEADLINE` | The deadline of the run: a `SHARED_ASYNC` task or a `SHARED_THREAD` task at its `timeout_ms` |
 
 The first cause stays: a deadline after an operator cancel does not change it. An `async def` task can read `cancel_state()` too, for example to tell the two causes apart while it cleans up.

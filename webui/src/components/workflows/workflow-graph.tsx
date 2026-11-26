@@ -87,10 +87,10 @@ function chainEdgeIds(taskIndices: readonly number[]): Set<string> {
 }
 
 const nodeLabel = (node: WorkflowNode): string =>
-  node.node_id ?? node.task_name ?? `#${node.task_index}`;
+  node.node_id ?? node.task_name ?? `#${node.node_index}`;
 
 const drillableId = (node: WorkflowNode): string | null =>
-  node.is_subworkflow && node.sub_workflow_id ? node.sub_workflow_id : null;
+  node.is_sub_workflow && node.sub_workflow_id ? node.sub_workflow_id : null;
 
 /** The facts of a node that the graph draws with a mark: the dashed border
  * of a tolerant join, the layers icon and the count of a sub-workflow, and
@@ -105,7 +105,7 @@ export function graphNodeFacts(node: WorkflowNode, runStatus: string): string[] 
     facts.push('Tolerant join (dashed border): the node runs even when a dependency failed.');
   }
   const rollup = childRollupBadge(node.child_total, node.child_failed);
-  if (node.is_subworkflow) {
+  if (node.is_sub_workflow) {
     facts.push(
       `Sub-workflow${rollup === null ? '' : `: ${rollup.title}`}.` +
         (drillableId(node) === null ? '' : ' Double-click to open it.')
@@ -192,8 +192,8 @@ export function WorkflowGraph({
     let completed = 0;
     let running = 0;
     for (const node of detail.nodes) {
-      index.set(node.task_index, node);
-      statusByIndex.set(node.task_index, node.node_status);
+      index.set(node.node_index, node);
+      statusByIndex.set(node.node_index, node.node_status);
       if (node.node_status === 'COMPLETED') {
         completed += 1;
       }
@@ -205,8 +205,8 @@ export function WorkflowGraph({
         (nodeLabel(node).toLowerCase().includes(query) ||
           node.task_name.toLowerCase().includes(query))
       ) {
-        matched.add(node.task_index);
-        matches.push(node.task_index);
+        matched.add(node.node_index);
+        matches.push(node.node_index);
       }
     }
 
@@ -215,14 +215,14 @@ export function WorkflowGraph({
         label: nodeLabel(node),
         taskName: node.task_name,
         status: node.node_status,
-        isSubworkflow: node.is_subworkflow,
+        isSubworkflow: node.is_sub_workflow,
         allowFailedDependencies: node.allow_failed_dependencies,
-        execS: node.exec_s,
+        execS: node.execution_seconds,
         drillable: drillableId(node) !== null,
         childTotal: node.child_total,
         childFailed: node.child_failed,
         dimmed:
-          (query !== '' && !matched.has(node.task_index)) ||
+          (query !== '' && !matched.has(node.node_index)) ||
           (statusFiltering && !statusFilter.has(node.node_status)),
         // The run payload has no backing-task status, so only the cancelled-run
         // "draining" case is detectable here; "finishing" surfaces in the node
@@ -232,15 +232,15 @@ export function WorkflowGraph({
         readClock,
       };
       return {
-        id: String(node.task_index),
+        id: String(node.node_index),
         type: 'workflow',
-        position: layout.positions.get(node.task_index) ?? { x: 0, y: 0 },
+        position: layout.positions.get(node.node_index) ?? { x: 0, y: 0 },
         data,
         // The phase times in the name are those of the read, without the
         // one-second clock of the card.
         ariaLabel: `${nodeLabel(node)}, ${statusLabel(node.node_status)}, ${nodeTimingText(node.timing, readClock.asOfMs)}`,
         selected:
-          node.task_index === selectedIndex || node.task_index === focusedIndex,
+          node.node_index === selectedIndex || node.node_index === focusedIndex,
         draggable: false,
       };
     });
@@ -301,7 +301,7 @@ export function WorkflowGraph({
     setSearchCursor(0);
   }, [search]);
 
-  /** Pan the viewport to center a node by task_index. */
+  /** Pan the viewport to center a node by node_index. */
   const centerOn = (taskIndex: number): void => {
     const position = positions.get(taskIndex);
     if (position && instanceRef.current) {
@@ -544,17 +544,17 @@ function GraphTooltip({
     case 'none':
       return null;
     case 'node': {
-      const node = detail.nodes.find(candidate => candidate.task_index === hover.taskIndex);
+      const node = detail.nodes.find(candidate => candidate.node_index === hover.taskIndex);
       // A refetch can remove the node under the pointer.
       return node === undefined ? null : (
         <FloatingTooltip id={id} xPx={hover.xPx} yPx={hover.yPx}>
           <NodeTooltip
-            workflowId={detail.run.id}
+            workflowId={detail.run.workflow_id}
             node={node}
             drawAtMs={drawAtMs}
             membership={chainMembership(
               longestChain(detail.nodes, detail.edges, drawAtMs),
-              node.task_index
+              node.node_index
             )}
             focus={{ kind: 'node' }}
             pause={{ kind: 'not_in_pause' }}
@@ -564,8 +564,8 @@ function GraphTooltip({
       );
     }
     case 'edge': {
-      const from = detail.nodes.find(candidate => candidate.task_index === hover.fromIndex);
-      const to = detail.nodes.find(candidate => candidate.task_index === hover.toIndex);
+      const from = detail.nodes.find(candidate => candidate.node_index === hover.fromIndex);
+      const to = detail.nodes.find(candidate => candidate.node_index === hover.toIndex);
       return from === undefined || to === undefined ? null : (
         <FloatingTooltip id={id} xPx={hover.xPx} yPx={hover.yPx}>
           <EdgeText

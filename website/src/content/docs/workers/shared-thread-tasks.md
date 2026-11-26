@@ -65,7 +65,7 @@ The worker keeps one more timer per task, at `timeout_ms + 10 seconds`. A child 
 
 ## An Operator Cancel
 
-An operator can cancel a running task (`cancel_task` with `include_running`, or the web UI). The cancel moves the task to history as `CANCELLED` and records its attempt as `CANCELLED` in one statement. Then the worker sends the cancel to the shared thread child of the run:
+An operator can cancel a running task (`cancel_task` with the policy `INCLUDE_RUNNING`, or the web UI). The cancel moves the task to history as `CANCELLED` and records its attempt as `CANCELLED` in one statement. Then the worker sends the cancel to the shared thread child of the run:
 
 1. The child sets the cancel state of the `TaskRuntime` of the task to the cause `OPERATOR`. A task whose code has not started yet does not start.
 2. The thread runs on. Code that reads the cancel state (Python `runtime.cancel_state()`, Rust `rt.is_cancelled()` or `rt.cancel_state()`) can stop at its next read.

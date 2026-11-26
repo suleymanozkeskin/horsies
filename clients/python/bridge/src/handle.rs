@@ -27,7 +27,7 @@ use crate::bridge::completion_queue::{call_async, done_future};
 use crate::bridge::CallKind;
 use crate::child_spec::{PythonChildSpecSource, RaisedExceptions, RegisteredSource};
 use crate::errors::{refusal_error, ManifestRefused};
-use crate::operations::cancel::cancel_task_operation;
+use crate::operations::cancel::{cancel_policy, cancel_task_operation};
 use crate::operations::claim::{claim_pass_operation, ClaimPassRequest};
 use crate::operations::claim_settle::{settle_claimed_workflow_tasks_operation, SettleRequest};
 use crate::operations::connectivity::check_connectivity_operation;
@@ -43,9 +43,9 @@ use crate::operations::failed_attempt::{
 };
 use crate::operations::monitoring_reads::{
     list_tasks_operation, schedules_operation, task_breakdown_operation, task_detail_operation,
-    task_facets_operation, task_stats_operation, workflow_names_operation, workflow_node_operation,
-    workflow_run_operation, workflow_runs_operation, TaskBreakdownQuery, TaskFacetsQuery,
-    TaskListQuery, TaskStatsQuery, WorkflowRunsQuery,
+    task_facets_operation, task_status_counts_operation, workflow_names_operation,
+    workflow_node_operation, workflow_run_operation, workflow_runs_operation, TaskBreakdownQuery,
+    TaskFacetsQuery, TaskListQuery, TaskStatusCountsQuery, WorkflowRunsQuery,
 };
 use crate::operations::paused_expiry::expire_paused_workflows_operation;
 use crate::operations::pruning::prune_expired_partitions_operation;
@@ -700,27 +700,29 @@ impl CoreHandle {
 
     /// Cancel one plain task (`horsies_cancel_task`): `TaskCancelledRecord`,
     /// or a generated `TaskActionCoreError` class (`TaskActionNotFound`,
-    /// `TaskActionNotCancellable`, `TaskActionWorkflowTask`,
+    /// `TaskActionNotCancellable`, `TaskActionIsWorkflowTask`,
     /// `TaskActionDbOperationFailed` or `TaskActionStoredDataInvalid`). A
-    /// RUNNING task is cancelled only with `include_running`. Writes, in one
-    /// statement.
+    /// RUNNING task is cancelled only with the policy `INCLUDE_RUNNING`;
+    /// `PENDING_OR_CLAIMED_ONLY` refuses it. Writes, in one statement.
     /// Awaitable only: its caller, `horsies.monitoring.task_actions.cancel_task`,
-    /// is a coroutine. An outcome that contradicts the function raises
-    /// `PanicException`.
-    #[pyo3(signature = (task_id, *, include_running))]
+    /// is a coroutine. A policy text that is not one of the two raises
+    /// `ValueError`, and nothing runs. An outcome that contradicts the
+    /// function raises `PanicException`.
+    #[pyo3(signature = (task_id, *, policy))]
     fn cancel_task_async<'py>(
         &self,
         py: Python<'py>,
         task_id: Uuid,
-        include_running: bool,
+        policy: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let policy = cancel_policy(policy).map_err(PyValueError::new_err)?;
         let core = checked_core(py)?;
         call_async(
             py,
             core,
             "CoreHandle.cancel_task_async",
             CallKind::Write,
-            cancel_task_operation(self.connection(), task_id, include_running),
+            cancel_task_operation(self.connection(), task_id, policy),
         )
     }
 
@@ -1442,20 +1444,20 @@ impl CoreHandle {
     /// The count of each task status (`horsies_monitoring_task_stats`):
     /// `MonitoringJson` of the core's `Vec<StatusCount>`, or
     /// a generated `MonitoringQueryCoreError` class. Reads only, in one statement. Awaitable only: its
-    /// caller, `horsies.monitoring.task_stats`, is a coroutine. A cancelled
+    /// caller, `horsies.monitoring.task_status_counts`, is a coroutine. A cancelled
     /// await drops the read.
-    fn monitoring_task_stats_async<'py>(
+    fn monitoring_task_status_counts_async<'py>(
         &self,
         py: Python<'py>,
-        query: &Bound<'_, TaskStatsQuery>,
+        query: &Bound<'_, TaskStatusCountsQuery>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;
         call_async(
             py,
             core,
-            "CoreHandle.monitoring_task_stats_async",
+            "CoreHandle.monitoring_task_status_counts_async",
             CallKind::Read,
-            task_stats_operation(self.connection(), query.get().query()),
+            task_status_counts_operation(self.connection(), query.get().query()),
         )
     }
 
@@ -1535,17 +1537,17 @@ impl CoreHandle {
     }
 
     /// One node with its task (`horsies_monitoring_workflow_node`):
-    /// `MonitoringJson` of the core's `Option<WorkflowTaskDetail>` (`null`
+    /// `MonitoringJson` of the core's `Option<WorkflowNodeDetail>` (`null`
     /// when the run has no node at the index), or a generated
     /// `MonitoringQueryCoreError` class. Reads
     /// only, in one statement. Awaitable only. A cancelled await drops the
     /// read. An index outside 32 bits raises `OverflowError`.
-    #[pyo3(signature = (workflow_id, *, task_index))]
+    #[pyo3(signature = (workflow_id, *, node_index))]
     fn monitoring_workflow_node_async<'py>(
         &self,
         py: Python<'py>,
         workflow_id: Uuid,
-        task_index: i32,
+        node_index: i32,
     ) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;
         call_async(
@@ -1553,7 +1555,7 @@ impl CoreHandle {
             core,
             "CoreHandle.monitoring_workflow_node_async",
             CallKind::Read,
-            workflow_node_operation(self.connection(), workflow_id, task_index),
+            workflow_node_operation(self.connection(), workflow_id, node_index),
         )
     }
 

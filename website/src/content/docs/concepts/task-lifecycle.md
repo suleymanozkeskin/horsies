@@ -118,7 +118,7 @@ Not drawn: an operator cancel moves a `PENDING` or `CLAIMED` task to
 
 ### RUNNING → CANCELLED
 
-- An operator cancel with `include_running`
+- An operator cancel with the policy `INCLUDE_RUNNING`
 - One statement writes the attempt row with outcome `CANCELLED` and moves the
   task to history
 - The worker that holds the run gives the cancel to the task code. The code

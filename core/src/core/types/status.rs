@@ -136,7 +136,7 @@ pub enum TaskAttemptOutcome {
     /// Worker process crashed without producing a result.
     WorkerFailure,
     /// An operator cancelled the task while the attempt ran
-    /// (`cancel_task` with `include_running`). The cancel statement
+    /// (`cancel_task` with the policy `INCLUDE_RUNNING`). The cancel statement
     /// records the attempt; it never retries.
     Cancelled,
 }

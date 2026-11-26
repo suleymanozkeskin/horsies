@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::broker::attempt_writes::{AttemptFailure, AttemptFailureKind};
 use crate::broker::PostgresBroker;
-use crate::core::history::reads::pages::HistoryWindow;
+use crate::core::history::reads::pages::MonitoringWindow;
 use crate::core::lifecycle::TerminalizationOutcome;
 use crate::monitoring::resolve_monitoring_window;
 use crate::test_support::history::{covered_history_instant, stored_class_key, SeedInstant};
@@ -79,7 +79,7 @@ impl SpecDatabase {
 
 /// A window wide enough that every seeded row is inside it (Python
 /// `_test_window`: 29 days back, one hour ahead).
-pub(super) fn window() -> HistoryWindow {
+pub(super) fn window() -> MonitoringWindow {
     let now = Utc::now();
     resolve_monitoring_window(
         Some(now - Duration::days(29)),

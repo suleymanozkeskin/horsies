@@ -44,6 +44,7 @@ from horsies.core.workflows.lifecycle import (
 from horsies.monitoring import (
     BreakdownLimit,
     MonitoringWindow,
+    SortDirection,
     TaskPage,
     WorkflowRunsLimit,
     cancel_task,
@@ -56,7 +57,7 @@ from horsies.monitoring import (
     list_workflow_runs,
     task_breakdown,
     task_facets,
-    task_stats,
+    task_status_counts,
 )
 from horsies.web.schema import SchemaProbe
 
@@ -118,6 +119,14 @@ def broker() -> Iterator[PostgresBroker]:
     yield built
 
 
+def _app_of(broker: PostgresBroker) -> Horsies:
+    """An app whose broker is ``broker``: the monitoring reads and the
+    cancel take the app."""
+    app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(_URL))))
+    app._broker = broker  # pyright: ignore[reportPrivateUsage]
+    return app
+
+
 def _raising(broker: PostgresBroker, method: str, refusal: CoreError) -> MagicMock:
     """Make ``method`` of the broker's core handle raise ``refusal``."""
     call = _core_call(method, refusal)
@@ -137,6 +146,7 @@ def _assert_raises_once(
 
 
 BrokerCall = Callable[[PostgresBroker], object]
+AppCall = Callable[[Horsies], object]
 
 _TASK_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
     'get_task_info_async': (
@@ -435,11 +445,11 @@ class TestWorkflowLifecycle:
         _assert_raises_once(refusal, call, lambda: run(broker))
 
 
-_MONITORING_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
-    'task_stats': (
-        'monitoring_task_stats_async',
-        lambda b: asyncio.run(task_stats(
-            b,
+_MONITORING_READS: Final[dict[str, tuple[str, AppCall]]] = {
+    'task_status_counts': (
+        'monitoring_task_status_counts_async',
+        lambda app: asyncio.run(task_status_counts(
+            app,
             window=_WINDOW,
             task_names=[],
             queues=[],
@@ -451,14 +461,14 @@ _MONITORING_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
     ),
     'task_facets': (
         'monitoring_task_facets_async',
-        lambda b: asyncio.run(task_facets(
-            b, window=_WINDOW, statuses=[], error_categories=[], retried_only=False,
+        lambda app: asyncio.run(task_facets(
+            app, window=_WINDOW, statuses=[], error_categories=[], retried_only=False,
         )),
     ),
     'task_breakdown': (
         'monitoring_task_breakdown_async',
-        lambda b: asyncio.run(task_breakdown(
-            b,
+        lambda app: asyncio.run(task_breakdown(
+            app,
             window=_WINDOW,
             group_by='worker',
             statuses=[],
@@ -473,8 +483,8 @@ _MONITORING_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
     ),
     'list_tasks': (
         'monitoring_list_tasks_async',
-        lambda b: asyncio.run(list_tasks(
-            b,
+        lambda app: asyncio.run(list_tasks(
+            app,
             window=_WINDOW,
             statuses=[],
             task_names=[],
@@ -483,31 +493,32 @@ _MONITORING_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='enqueued_at',
-            sort_dir='desc',
+            sort_field='enqueued_at',
+            sort_direction=SortDirection.DESCENDING,
             page=TaskPage(offset=0, limit=50),
         )),
     ),
     'get_task_detail': (
-        'monitoring_task_detail_async', lambda b: asyncio.run(get_task_detail(b, _TASK_ID)),
+        'monitoring_task_detail_async', lambda app: asyncio.run(get_task_detail(app, _TASK_ID)),
     ),
     'list_workflow_names': (
-        'monitoring_workflow_names_async', lambda b: asyncio.run(list_workflow_names(b)),
+        'monitoring_workflow_names_async', lambda app: asyncio.run(list_workflow_names(app)),
     ),
     'list_workflow_runs': (
         'monitoring_workflow_runs_async',
-        lambda b: asyncio.run(list_workflow_runs(
-            b, name=None, status=None, limit=WorkflowRunsLimit(value=30),
+        lambda app: asyncio.run(list_workflow_runs(
+            app, workflow_name=None, status=None, limit=WorkflowRunsLimit(value=30),
         )),
     ),
     'get_workflow_run': (
-        'monitoring_workflow_run_async', lambda b: asyncio.run(get_workflow_run(b, _WORKFLOW_ID)),
+        'monitoring_workflow_run_async',
+        lambda app: asyncio.run(get_workflow_run(app, _WORKFLOW_ID)),
     ),
     'get_workflow_node': (
         'monitoring_workflow_node_async',
-        lambda b: asyncio.run(get_workflow_node(b, _WORKFLOW_ID, 0)),
+        lambda app: asyncio.run(get_workflow_node(app, _WORKFLOW_ID, 0)),
     ),
-    'list_schedules': ('monitoring_schedules_async', lambda b: asyncio.run(list_schedules(b))),
+    'list_schedules': ('monitoring_schedules_async', lambda app: asyncio.run(list_schedules(app))),
 }
 
 
@@ -520,7 +531,7 @@ class TestMonitoringReads:
         method, run = _MONITORING_READS[form]
         call = _raising(broker, method, refusal)
 
-        _assert_raises_once(refusal, call, lambda: run(broker))
+        _assert_raises_once(refusal, call, lambda: run(_app_of(broker)))
 
 
 class TestTaskActions:
@@ -531,7 +542,7 @@ class TestTaskActions:
         call = _raising(broker, 'cancel_task_async', refusal)
 
         _assert_raises_once(
-            refusal, call, lambda: asyncio.run(cancel_task(broker, _TASK_ID)),
+            refusal, call, lambda: asyncio.run(cancel_task(_app_of(broker), _TASK_ID)),
         )
 
 

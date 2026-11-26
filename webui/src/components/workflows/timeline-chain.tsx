@@ -31,10 +31,10 @@ export function chainLinksOf(chain: LongestChain, nodes: readonly WorkflowNode[]
     case 'no_timing':
       return [];
     case 'chain': {
-      const rowOf = new Map(nodes.map((node, row) => [node.task_index, row]));
+      const rowOf = new Map(nodes.map((node, row) => [node.node_index, row]));
       return chain.taskIndices.slice(1).flatMap((toIndex, step) => {
         const fromIndex = chain.taskIndices[step];
-        const fromNode = nodes.find(node => node.task_index === fromIndex);
+        const fromNode = nodes.find(node => node.node_index === fromIndex);
         const fromRow = fromIndex === undefined ? undefined : rowOf.get(fromIndex);
         const toRow = rowOf.get(toIndex);
         if (fromIndex === undefined || fromNode === undefined || fromRow === undefined || toRow === undefined) {

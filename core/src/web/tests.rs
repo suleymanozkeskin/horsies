@@ -459,12 +459,17 @@ async fn the_task_cancel_body_refuses_an_unknown_key_and_accepts_the_known_body(
 
     for (body, key, input) in [
         (
-            r#"{"include_runing": true}"#,
-            "include_runing",
+            r#"{"include_running": true}"#,
+            "include_running",
             serde_json::json!(true),
         ),
         (
-            r#"{"include_running": true, "zeta": 1, "alpha": 2}"#,
+            r#"{"polcy": "INCLUDE_RUNNING"}"#,
+            "polcy",
+            serde_json::json!("INCLUDE_RUNNING"),
+        ),
+        (
+            r#"{"policy": "INCLUDE_RUNNING", "zeta": 1, "alpha": 2}"#,
             "zeta",
             serde_json::json!(1),
         ),
@@ -484,14 +489,14 @@ async fn the_task_cancel_body_refuses_an_unknown_key_and_accepts_the_known_body(
             unknown_key_refusal(
                 key,
                 &input,
-                &format!("Unknown key \"{key}\". Known keys: \"include_running\"."),
-                &serde_json::json!(["include_running"]),
+                &format!("Unknown key \"{key}\". Known keys: \"policy\"."),
+                &serde_json::json!(["policy"]),
             ),
             "{body}"
         );
     }
 
-    for body in [r#"{"include_running": true}"#, "{}", ""] {
+    for body in [r#"{"policy": "INCLUDE_RUNNING"}"#, "{}", ""] {
         let response = router
             .clone()
             .oneshot(json_action_request("/api/tasks/not-a-uuid/cancel", body))
@@ -505,21 +510,34 @@ async fn the_task_cancel_body_refuses_an_unknown_key_and_accepts_the_known_body(
         );
     }
 
-    let wrong_type = router
-        .clone()
-        .oneshot(json_action_request(&path, r#"{"include_running": "yes"}"#))
-        .await
-        .unwrap();
-    assert_eq!(wrong_type.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let wrong_type = json(wrong_type).await;
-    assert_eq!(wrong_type["detail"][0]["type"], "value_error");
-    assert_eq!(wrong_type["detail"][0]["loc"], serde_json::json!(["body"]));
-    assert!(
-        wrong_type["detail"][0]["msg"]
-            .as_str()
-            .is_some_and(|message| message.starts_with("invalid type: string \"yes\"")),
-        "{wrong_type}"
-    );
+    for (body, start) in [
+        (r#"{"policy": true}"#, "invalid type: boolean `true`"),
+        (r#"{"policy": "yes"}"#, "unknown variant `yes`"),
+    ] {
+        let wrong_value = router
+            .clone()
+            .oneshot(json_action_request(&path, body))
+            .await
+            .unwrap();
+        assert_eq!(
+            wrong_value.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{body}"
+        );
+        let wrong_value = json(wrong_value).await;
+        assert_eq!(wrong_value["detail"][0]["type"], "value_error", "{body}");
+        assert_eq!(
+            wrong_value["detail"][0]["loc"],
+            serde_json::json!(["body"]),
+            "{body}"
+        );
+        assert!(
+            wrong_value["detail"][0]["msg"]
+                .as_str()
+                .is_some_and(|message| message.starts_with(start)),
+            "{wrong_value}"
+        );
+    }
 
     for body in ["[true]", "true", "null"] {
         let response = router
@@ -555,7 +573,10 @@ async fn assert_the_workflow_body_has_no_keys(action: &str) {
 
     let response = router
         .clone()
-        .oneshot(json_action_request(&path, r#"{"include_running": true}"#))
+        .oneshot(json_action_request(
+            &path,
+            r#"{"policy": "INCLUDE_RUNNING"}"#,
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -566,9 +587,9 @@ async fn assert_the_workflow_body_has_no_keys(action: &str) {
     assert_eq!(
         json(response).await,
         unknown_key_refusal(
-            "include_running",
-            &serde_json::json!(true),
-            "Unknown key \"include_running\". Known keys: none.",
+            "policy",
+            &serde_json::json!("INCLUDE_RUNNING"),
+            "Unknown key \"policy\". Known keys: none.",
             &serde_json::json!([]),
         ),
         "{action}"
@@ -615,12 +636,12 @@ async fn the_workflow_cancel_body_refuses_every_key() {
 /// `{}`.
 #[test]
 fn the_workflow_body_type_refuses_every_key() {
-    let refused = serde_json::from_str::<WorkflowActionBody>(r#"{"include_running": true}"#)
+    let refused = serde_json::from_str::<WorkflowActionBody>(r#"{"policy": "INCLUDE_RUNNING"}"#)
         .expect_err("a key that the type does not declare");
     assert!(
         refused
             .to_string()
-            .starts_with("unknown field `include_running`, there are no fields"),
+            .starts_with("unknown field `policy`, there are no fields"),
         "{refused}"
     );
     assert_eq!(
@@ -1406,16 +1427,16 @@ fn worker_list_ages_are_measured_to_the_read_time() {
         Some("default".to_owned()),
     ));
 
-    assert_eq!(fresh.snapshot_age_s, Some(fresh_age));
+    assert_eq!(fresh.snapshot_age_seconds, Some(fresh_age));
     assert!(!fresh.stale);
     assert_eq!(
-        fresh.uptime_s,
+        fresh.uptime_seconds,
         Some(chrono::TimeDelta::hours(1) + fresh_age)
     );
-    assert_eq!(at_threshold.snapshot_age_s, Some(threshold));
+    assert_eq!(at_threshold.snapshot_age_seconds, Some(threshold));
     assert!(!at_threshold.stale, "stale only past the live window");
     assert_eq!(
-        past_threshold.snapshot_age_s,
+        past_threshold.snapshot_age_seconds,
         Some(threshold + one_microsecond)
     );
     assert!(
@@ -1423,8 +1444,8 @@ fn worker_list_ages_are_measured_to_the_read_time() {
         "stale one microsecond past the live window"
     );
     let encoded = serde_json::to_value(&fresh).expect("serialize the worker state");
-    assert_eq!(encoded["snapshot_age_s"], serde_json::json!(30.00025));
-    assert_eq!(encoded["uptime_s"], serde_json::json!(3630.00025));
+    assert_eq!(encoded["snapshot_age_seconds"], serde_json::json!(30.00025));
+    assert_eq!(encoded["uptime_seconds"], serde_json::json!(3630.00025));
 }
 
 /// The `profile` of a worker state is an object tagged by `kind`: a stored
@@ -1560,15 +1581,17 @@ async fn a_snapshot_ten_minutes_old_in_database_time_is_stale() {
         .expect("the worker is listed");
     assert_eq!(worker["stale"], true);
     assert!(
-        worker["snapshot_age_s"].is_f64() && worker["uptime_s"].is_f64(),
+        worker["snapshot_age_seconds"].is_f64() && worker["uptime_seconds"].is_f64(),
         "the durations are JSON floats: {worker}"
     );
-    let age = worker["snapshot_age_s"]
+    let age = worker["snapshot_age_seconds"]
         .as_f64()
         .expect("an age in seconds");
-    assert!(age >= 600.0, "snapshot_age_s {age}");
-    let uptime = worker["uptime_s"].as_f64().expect("an uptime in seconds");
-    assert!(uptime >= 3_600.0, "uptime_s {uptime}");
+    assert!(age >= 600.0, "snapshot_age_seconds {age}");
+    let uptime = worker["uptime_seconds"]
+        .as_f64()
+        .expect("an uptime in seconds");
+    assert!(uptime >= 3_600.0, "uptime_seconds {uptime}");
 }
 
 /// Python `test_web_api.py::TestWorkerReads::test_class_report_answers_with_streams_and_budgets`.
@@ -2552,7 +2575,7 @@ async fn the_run_route_answers_the_run_its_failed_indices_and_its_edges() {
         .unwrap();
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["run"]["id"], run_id.to_string());
+    assert_eq!(body["run"]["workflow_id"], run_id.to_string());
     assert_eq!(body["failed_indices"], serde_json::json!([0]));
     assert_eq!(body["edges"], serde_json::json!([]));
     // The run and each node carry their timing. The run began 120 s before

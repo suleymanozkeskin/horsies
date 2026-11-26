@@ -75,11 +75,11 @@ fn query_vocabulary_and_bounds_are_exhaustive() {
         BTreeSet::from([
             "completed_at",
             "enqueued_at",
-            "exec_s",
+            "execution_seconds",
             "failed_at",
             "priority",
-            "queue_name",
-            "queue_s",
+            "queue",
+            "queue_seconds",
             "retry_count",
             "started_at",
             "status",
@@ -207,9 +207,9 @@ fn helpers_and_error_taxonomy_are_exact() {
         elapsed(Some(end), Some(start)),
         Some(Duration::milliseconds(-1_999))
     );
-    assert_eq!(span(Some(start), None, false), None);
+    assert_eq!(duration(Some(start), None, false), None);
     assert_eq!(
-        span(Some(start), Some(end), false),
+        duration(Some(start), Some(end), false),
         Some(Duration::milliseconds(1_999))
     );
 }
@@ -256,7 +256,7 @@ fn keys(value: impl Serialize) -> Vec<String> {
 fn every_w2_model_serializes_the_contract_field_set() {
     let now = Utc.with_ymd_and_hms(2026, 8, 8, 12, 0, 0).unwrap();
     let task_id = uuid::Uuid::nil();
-    let attempt = TaskAttemptInfo {
+    let attempt = TaskAttemptDetail {
         attempt: 1,
         outcome: "FAILED".to_owned(),
         will_retry: false,
@@ -268,7 +268,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
         finished_at: Some(now),
         phases: AttemptPhasesInfo::NotCaptured,
     };
-    let leaf = LeafTaskInfo {
+    let task_row = TaskRowInfo {
         task_id,
         status: "FAILED".to_owned(),
         error_code: None,
@@ -279,17 +279,17 @@ fn every_w2_model_serializes_the_contract_field_set() {
         started_at: None,
         completed_at: None,
         failed_at: Some(now),
-        queue_s: Some(Duration::zero()),
-        exec_s: None,
+        queue_seconds: Some(Duration::zero()),
+        execution_seconds: None,
         worker_hostname: None,
         good_until: None,
         execution: None,
         trace_id: Some("0af7651916cd43dd8448eb211c80319c".to_owned()),
     };
     let summary = TaskSummary {
-        id: task_id,
+        task_id,
         task_name: "t".to_owned(),
-        queue_name: "q".to_owned(),
+        queue: "q".to_owned(),
         status: "FAILED".to_owned(),
         priority: 100,
         retry_count: 0,
@@ -303,8 +303,8 @@ fn every_w2_model_serializes_the_contract_field_set() {
         started_at: None,
         completed_at: None,
         failed_at: Some(now),
-        queue_s: Some(Duration::zero()),
-        exec_s: None,
+        queue_seconds: Some(Duration::zero()),
+        execution_seconds: None,
     };
     let counts = BreakdownCounts {
         total: 0,
@@ -324,25 +324,25 @@ fn every_w2_model_serializes_the_contract_field_set() {
         },
     };
     let run = WorkflowRunSummary {
-        id: task_id,
-        name: "w".to_owned(),
+        workflow_id: task_id,
+        workflow_name: "w".to_owned(),
         definition_key: None,
         status: "RUNNING".to_owned(),
         created_at: Some(now),
         completed_at: None,
-        wall_s: Some(Duration::zero()),
+        wall_seconds: Some(Duration::zero()),
     };
-    let node = WorkflowNodeInfo {
-        task_index: 0,
+    let node = WorkflowNodeSummary {
+        node_index: 0,
         node_id: None,
         task_name: "t".to_owned(),
         node_status: "PENDING".to_owned(),
-        is_subworkflow: false,
+        is_sub_workflow: false,
         sub_workflow_id: None,
         allow_failed_dependencies: false,
         started_at: None,
         completed_at: None,
-        exec_s: None,
+        execution_seconds: None,
         child_total: None,
         child_failed: None,
         timing: NodeTimingInfo::Unavailable {
@@ -454,7 +454,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
         ),
         (keys(pause), vec!["started_at", "end"]),
         (
-            keys(leaf.clone()),
+            keys(task_row.clone()),
             vec![
                 "task_id",
                 "status",
@@ -466,8 +466,8 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 "started_at",
                 "completed_at",
                 "failed_at",
-                "queue_s",
-                "exec_s",
+                "queue_seconds",
+                "execution_seconds",
                 "worker_hostname",
                 "good_until",
                 "execution",
@@ -555,9 +555,9 @@ fn every_w2_model_serializes_the_contract_field_set() {
         (
             keys(summary.clone()),
             vec![
-                "id",
+                "task_id",
                 "task_name",
-                "queue_name",
+                "queue",
                 "status",
                 "priority",
                 "retry_count",
@@ -571,8 +571,8 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 "started_at",
                 "completed_at",
                 "failed_at",
-                "queue_s",
-                "exec_s",
+                "queue_seconds",
+                "execution_seconds",
             ],
         ),
         (
@@ -584,53 +584,53 @@ fn every_w2_model_serializes_the_contract_field_set() {
         ),
         (
             keys(TaskDetail {
-                leaf,
+                task_row,
                 task_name: "t".to_owned(),
-                queue_name: "q".to_owned(),
+                queue: "q".to_owned(),
                 priority: 100,
                 is_workflow_task: false,
                 error_category: None,
                 attempts: vec![attempt],
                 workflow_id: None,
-                workflow_task_index: None,
+                workflow_node_index: None,
             }),
             vec![
-                "leaf",
+                "task_row",
                 "task_name",
-                "queue_name",
+                "queue",
                 "priority",
                 "is_workflow_task",
                 "error_category",
                 "attempts",
                 "workflow_id",
-                "workflow_task_index",
+                "workflow_node_index",
             ],
         ),
         (
             keys(run.clone()),
             vec![
-                "id",
-                "name",
+                "workflow_id",
+                "workflow_name",
                 "definition_key",
                 "status",
                 "created_at",
                 "completed_at",
-                "wall_s",
+                "wall_seconds",
             ],
         ),
         (
             keys(node.clone()),
             vec![
-                "task_index",
+                "node_index",
                 "node_id",
                 "task_name",
                 "node_status",
-                "is_subworkflow",
+                "is_sub_workflow",
                 "sub_workflow_id",
                 "allow_failed_dependencies",
                 "started_at",
                 "completed_at",
-                "exec_s",
+                "execution_seconds",
                 "child_total",
                 "child_failed",
                 "timing",
@@ -668,24 +668,24 @@ fn every_w2_model_serializes_the_contract_field_set() {
             ],
         ),
         (
-            keys(WorkflowTaskDetail {
-                task_index: 0,
+            keys(WorkflowNodeDetail {
+                node_index: 0,
                 node_id: None,
                 task_name: "t".to_owned(),
                 node_status: "PENDING".to_owned(),
-                is_subworkflow: false,
+                is_sub_workflow: false,
                 node_error: None,
-                leaf: None,
+                task_row: None,
                 attempts: vec![],
             }),
             vec![
-                "task_index",
+                "node_index",
                 "node_id",
                 "task_name",
                 "node_status",
-                "is_subworkflow",
+                "is_sub_workflow",
                 "node_error",
-                "leaf",
+                "task_row",
                 "attempts",
             ],
         ),
@@ -695,10 +695,10 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 hostname: "h".to_owned(),
                 pid: 1,
                 snapshot_at: now,
-                snapshot_age_s: Some(Duration::zero()),
+                snapshot_age_seconds: Some(Duration::zero()),
                 stale: false,
                 worker_started_at: now,
-                uptime_s: Some(Duration::zero()),
+                uptime_seconds: Some(Duration::zero()),
                 processes: 1,
                 queues: vec![],
                 queue_max_concurrency: BTreeMap::new(),
@@ -723,10 +723,10 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 "hostname",
                 "pid",
                 "snapshot_at",
-                "snapshot_age_s",
+                "snapshot_age_seconds",
                 "stale",
                 "worker_started_at",
-                "uptime_s",
+                "uptime_seconds",
                 "processes",
                 "queues",
                 "queue_max_concurrency",
@@ -848,8 +848,8 @@ fn every_w2_model_serializes_the_contract_field_set() {
         json!({"kind": "missing_record", "record": "COMPLETION_TIME"})
     );
     assert_eq!(
-        serde_json::to_value(RunConflictInfo::Node { task_index: 3 }).unwrap(),
-        json!({"kind": "node", "task_index": 3})
+        serde_json::to_value(RunConflictInfo::Node { node_index: 3 }).unwrap(),
+        json!({"kind": "node", "node_index": 3})
     );
     assert_eq!(
         serde_json::to_value(PauseEndInfo::RunEnded { at: now }).unwrap(),
@@ -1055,8 +1055,8 @@ async fn clean_w2(pool: &TestPool, scope: &TestScope) {
     }
 }
 
-fn test_window() -> crate::core::history::reads::pages::HistoryWindow {
-    crate::core::history::reads::pages::HistoryWindow::new(
+fn test_window() -> crate::core::history::reads::pages::MonitoringWindow {
+    crate::core::history::reads::pages::MonitoringWindow::new(
         Utc::now() - Duration::days(29),
         Utc::now() + Duration::hours(1),
     )
@@ -1176,7 +1176,7 @@ async fn live_and_history_aggregates_merge_before_caps() {
     .await
     .expect("age W2 history outside window");
 
-    let bounded_window = crate::core::history::reads::pages::HistoryWindow::new(
+    let bounded_window = crate::core::history::reads::pages::MonitoringWindow::new(
         Utc::now() - Duration::minutes(1),
         Utc::now() + Duration::hours(1),
     )
@@ -1185,9 +1185,9 @@ async fn live_and_history_aggregates_merge_before_caps() {
         queues: vec![scope.queue.clone()],
         ..TaskFilters::default()
     };
-    let stats = task_stats(
+    let stats = task_status_counts(
         &broker,
-        &TaskStatsQuery::new(bounded_window).with_filters(scoped_filters.clone()),
+        &TaskStatusCountsQuery::new(bounded_window).with_filters(scoped_filters.clone()),
     )
     .await
     .expect("W2 stats");
@@ -1401,9 +1401,9 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
 
 /// The count of each status under `filters`, by status text.
 async fn stats_by_status(broker: &PostgresBroker, filters: TaskFilters) -> BTreeMap<String, i64> {
-    task_stats(
+    task_status_counts(
         broker,
-        &TaskStatsQuery::new(test_window()).with_filters(filters),
+        &TaskStatusCountsQuery::new(test_window()).with_filters(filters),
     )
     .await
     .expect("filtered W2 stats")
@@ -1491,16 +1491,16 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
     .expect("filtered W2 list");
     assert_eq!(rows.total, 3);
     assert_eq!(
-        rows.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        rows.rows.iter().map(|row| row.task_id).collect::<Vec<_>>(),
         vec![history_match.id, wrong_code.id, live_match.id]
     );
-    assert_eq!(rows.rows[0].queue_s, Some(Duration::seconds(30)));
+    assert_eq!(rows.rows[0].queue_seconds, Some(Duration::seconds(30)));
     assert!(rows.rows[0]
-        .exec_s
+        .execution_seconds
         .is_some_and(|exec| exec >= Duration::seconds(60)));
-    assert_eq!(rows.rows[2].queue_s, Some(Duration::seconds(20)));
+    assert_eq!(rows.rows[2].queue_seconds, Some(Duration::seconds(20)));
     assert!(rows.rows[2]
-        .exec_s
+        .execution_seconds
         .is_some_and(|exec| exec >= Duration::seconds(40)));
 
     let history_rows = list_tasks(
@@ -1516,7 +1516,7 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
         history_rows
             .rows
             .iter()
-            .map(|row| row.id)
+            .map(|row| row.task_id)
             .collect::<Vec<_>>(),
         vec![history_match.id]
     );
@@ -1537,9 +1537,9 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
     .pop()
     .expect("pending duration row");
     assert!(pending_row
-        .queue_s
+        .queue_seconds
         .is_some_and(|queue| queue >= Duration::seconds(30)));
-    assert_eq!(pending_row.exec_s, None);
+    assert_eq!(pending_row.execution_seconds, None);
 
     // Only the status and `retried_only` scope the facets: the two FAILED
     // retried rows of the name count, the live rows do not.
@@ -1704,9 +1704,9 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
             .await
             .expect("live detail"),
     );
-    assert_eq!(live.leaf.status, "RUNNING");
+    assert_eq!(live.task_row.status, "RUNNING");
     assert_eq!(live.workflow_id, Some(workflow_id));
-    assert_eq!(live.workflow_task_index, Some(3));
+    assert_eq!(live.workflow_node_index, Some(3));
     assert_eq!(
         live.attempts
             .iter()
@@ -1725,9 +1725,9 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
             .await
             .expect("history detail"),
     );
-    assert_eq!(history.leaf.status, "FAILED");
-    assert!(history.leaf.failed_at.is_some());
-    assert_eq!(history.leaf.completed_at, None);
+    assert_eq!(history.task_row.status, "FAILED");
+    assert!(history.task_row.failed_at.is_some());
+    assert_eq!(history.task_row.completed_at, None);
     assert_eq!(history.attempts.len(), 2);
     assert_eq!(
         history.attempts[1].worker_hostname.as_deref(),
@@ -1739,7 +1739,9 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
         .expect("history node detail")
         .expect("workflow node");
     assert_eq!(
-        node.leaf.as_ref().map(|leaf| leaf.status.as_str()),
+        node.task_row
+            .as_ref()
+            .map(|task_row| task_row.status.as_str()),
         Some("FAILED")
     );
     assert_eq!(node.attempts.len(), 2);
@@ -1820,15 +1822,15 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
     let runs = list_workflow_runs(
         &broker,
         &WorkflowRunsQuery::new()
-            .with_name(Some(root_name.clone()))
+            .with_workflow_name(Some(root_name.clone()))
             .with_status(Some("RUNNING".to_owned())),
     )
     .await
     .expect("W2 workflow runs");
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].id, root);
+    assert_eq!(runs[0].workflow_id, root);
     assert!(runs[0]
-        .wall_s
+        .wall_seconds
         .is_some_and(|wall| wall >= Duration::seconds(120)));
     assert!(list_workflow_runs(
         &broker,
@@ -1846,7 +1848,7 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
         detail
             .nodes
             .iter()
-            .map(|node| node.task_index)
+            .map(|node| node.node_index)
             .collect::<Vec<_>>(),
         vec![0, 1, 2]
     );
@@ -1868,9 +1870,12 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
         (detail.nodes[1].child_total, detail.nodes[1].child_failed),
         (None, None)
     );
-    assert_eq!(detail.nodes[0].exec_s, Some(Duration::seconds(20)));
+    assert_eq!(
+        detail.nodes[0].execution_seconds,
+        Some(Duration::seconds(20))
+    );
     assert!(detail.nodes[2]
-        .exec_s
+        .execution_seconds
         .is_some_and(|exec| exec >= Duration::seconds(30)));
     assert!(get_workflow_run(&broker, Uuid::new_v4())
         .await
@@ -1884,8 +1889,8 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
         .await
         .unwrap()
         .expect("subworkflow node");
-    assert!(subworkflow.is_subworkflow);
-    assert!(subworkflow.leaf.is_none());
+    assert!(subworkflow.is_sub_workflow);
+    assert!(subworkflow.task_row.is_none());
     assert!(subworkflow.attempts.is_empty());
 
     // The baseline row names every column: a schedule that ran has its last

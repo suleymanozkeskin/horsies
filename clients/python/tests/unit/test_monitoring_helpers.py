@@ -1,9 +1,9 @@
 """Unit tests for the monitoring query API's derivation helpers.
 
 Covers:
-- ``nz`` empty-text normalization
+- ``none_if_blank`` empty-text normalization
 - ``as_utc`` awareness coercion
-- ``elapsed_s`` / ``span_s`` duration semantics (exact seconds), including the
+- ``elapsed_seconds`` / ``duration_seconds`` duration semantics (exact seconds), including the
   open-span rule
 - ``categorize_error_code`` taxonomy mapping and its drift guards
 """
@@ -24,9 +24,9 @@ from horsies.monitoring import (
     ErrorCategory,
     as_utc,
     categorize_error_code,
-    elapsed_s,
-    nz,
-    span_s,
+    duration_seconds,
+    elapsed_seconds,
+    none_if_blank,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -34,7 +34,7 @@ pytestmark = [pytest.mark.unit]
 UTC = timezone.utc
 
 
-class TestNz:
+class TestNoneIfBlank:
     """Empty and whitespace-only text normalizes to None."""
 
     @pytest.mark.parametrize(
@@ -49,7 +49,7 @@ class TestNz:
         ],
     )
     def test_normalizes(self, value: str | None, expected: str | None) -> None:
-        assert nz(value) == expected
+        assert none_if_blank(value) == expected
 
 
 class TestAsUtc:
@@ -69,20 +69,20 @@ class TestAsUtc:
         naive_start = datetime(2026, 7, 26, 12, 0, 0)
         aware_end = datetime(2026, 7, 26, 12, 0, 30, tzinfo=UTC)
 
-        assert elapsed_s(naive_start, aware_end) == 30.0
+        assert elapsed_seconds(naive_start, aware_end) == 30.0
 
 
-class TestElapsedS:
+class TestElapsedSeconds:
     """Seconds between two instants, exact to the microsecond."""
 
     def test_none_start_is_none(self) -> None:
-        assert elapsed_s(None, datetime.now(UTC)) is None
+        assert elapsed_seconds(None, datetime.now(UTC)) is None
 
     def test_whole_seconds_are_a_float(self) -> None:
         start = datetime(2026, 7, 26, 12, 0, 0, tzinfo=UTC)
         end = start + timedelta(seconds=90)
 
-        measured = elapsed_s(start, end)
+        measured = elapsed_seconds(start, end)
 
         assert isinstance(measured, float)
         assert measured == 90.0
@@ -91,40 +91,40 @@ class TestElapsedS:
         start = datetime(2026, 7, 26, 12, 0, 0, tzinfo=UTC)
         end = start + timedelta(seconds=1, microseconds=999_999)
 
-        assert elapsed_s(start, end) == 1.999999
+        assert elapsed_seconds(start, end) == 1.999999
 
     def test_end_before_start_is_negative(self) -> None:
         start = datetime(2026, 7, 26, 12, 0, 0, tzinfo=UTC)
         end = start - timedelta(seconds=1, microseconds=500_000)
 
-        assert elapsed_s(start, end) == -1.5
+        assert elapsed_seconds(start, end) == -1.5
 
     def test_missing_end_counts_to_now(self) -> None:
         start = datetime.now(UTC) - timedelta(seconds=20)
 
-        measured = elapsed_s(start, None)
+        measured = elapsed_seconds(start, None)
 
         assert measured is not None
         assert 20 <= measured <= 120
 
 
-class TestSpanS:
+class TestDurationSeconds:
     """An open span counts up only when the caller says it is still live."""
 
     def test_none_start_is_none(self) -> None:
-        assert span_s(None, datetime.now(UTC), live=True) is None
+        assert duration_seconds(None, datetime.now(UTC), live=True) is None
 
     def test_closed_span_ignores_live(self) -> None:
         start = datetime(2026, 7, 26, 12, 0, 0, tzinfo=UTC)
         end = start + timedelta(seconds=5)
 
-        assert span_s(start, end, live=False) == 5.0
-        assert span_s(start, end, live=True) == 5.0
+        assert duration_seconds(start, end, live=False) == 5.0
+        assert duration_seconds(start, end, live=True) == 5.0
 
     def test_open_span_when_live_counts_up(self) -> None:
         start = datetime.now(UTC) - timedelta(seconds=15)
 
-        measured = span_s(start, None, live=True)
+        measured = duration_seconds(start, None, live=True)
 
         assert measured is not None
         assert 15 <= measured <= 120
@@ -132,7 +132,7 @@ class TestSpanS:
     def test_open_span_when_not_live_is_none(self) -> None:
         start = datetime.now(UTC) - timedelta(seconds=15)
 
-        assert span_s(start, None, live=False) is None
+        assert duration_seconds(start, None, live=False) is None
 
 
 class TestCategorizeErrorCode:

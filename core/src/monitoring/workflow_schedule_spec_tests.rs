@@ -21,7 +21,7 @@ use crate::core::task::error::{OutcomeCode, TaskError};
 use crate::core::task::result::TaskResult;
 use crate::monitoring::{
     get_workflow_node, get_workflow_run, list_schedules, list_workflow_names, list_workflow_runs,
-    MonitoringQueryErrorCode, WorkflowNodeInfo, WorkflowRunsQuery,
+    MonitoringQueryErrorCode, WorkflowNodeSummary, WorkflowRunsQuery,
 };
 use crate::test_support::connect_collecting_notices;
 use crate::test_support::sql::{self, TestPool};
@@ -44,8 +44,8 @@ fn failed_result(message: &str) -> String {
     serde_json::to_string(&result).expect("encode the stored node result")
 }
 
-fn nodes_by_index(nodes: &[WorkflowNodeInfo]) -> BTreeMap<i32, &WorkflowNodeInfo> {
-    nodes.iter().map(|node| (node.task_index, node)).collect()
+fn nodes_by_index(nodes: &[WorkflowNodeSummary]) -> BTreeMap<i32, &WorkflowNodeSummary> {
+    nodes.iter().map(|node| (node.node_index, node)).collect()
 }
 
 /// Insert one schedule state row. A schedule that ran carries its last run
@@ -128,7 +128,7 @@ async fn runs_come_newest_first_without_child_runs() {
         .await
         .expect("list the runs");
 
-    let names: Vec<&str> = runs.iter().map(|run| run.name.as_str()).collect();
+    let names: Vec<&str> = runs.iter().map(|run| run.workflow_name.as_str()).collect();
     assert_eq!(names, ["beta_flow", "alpha_flow"]);
     database.drop().await;
 }
@@ -178,7 +178,7 @@ async fn wall_time_counts_up_until_the_run_completes() {
 
     let walls: BTreeMap<&str, Option<TimeDelta>> = runs
         .iter()
-        .map(|run| (run.name.as_str(), run.wall_s))
+        .map(|run| (run.workflow_name.as_str(), run.wall_seconds))
         .collect();
     assert_eq!(walls["closed_flow"], Some(TimeDelta::seconds(60)));
     let open_wall = walls["open_flow"].expect("an open run has a wall time");
@@ -263,7 +263,7 @@ async fn the_run_and_its_node_carry_the_trace_id_of_their_start() {
 
     assert_eq!(traced_run.trace_id, Some("c3".repeat(16)));
     assert_eq!(untraced_run.trace_id, None);
-    let leaf = node.leaf.expect("the node has a backing task");
+    let leaf = node.task_row.expect("the node has a backing task");
     assert_eq!(leaf.trace_id, Some("c3".repeat(16)));
     database.drop().await;
 }
@@ -341,7 +341,7 @@ async fn a_child_run_is_read_by_the_run_detail() {
         .expect("read the child run")
         .expect("the child run exists");
 
-    assert_eq!(detail.run.id, child.id);
+    assert_eq!(detail.run.workflow_id, child.id);
     assert_eq!(detail.nodes.len(), 1);
     database.drop().await;
 }
@@ -373,14 +373,16 @@ async fn node_execution_time_follows_the_node_status() {
         .expect("the run exists");
 
     let nodes = nodes_by_index(&detail.nodes);
-    let running = nodes[&0].exec_s.expect("a running node counts up");
+    let running = nodes[&0]
+        .execution_seconds
+        .expect("a running node counts up");
     assert!(
         (TimeDelta::seconds(35)..=LIVE_SPAN_CEILING).contains(&running),
         "{running}"
     );
-    assert_eq!(nodes[&1].exec_s, Some(TimeDelta::seconds(30)));
-    assert_eq!(nodes[&2].exec_s, None);
-    assert_eq!(nodes[&3].exec_s, None);
+    assert_eq!(nodes[&1].execution_seconds, Some(TimeDelta::seconds(30)));
+    assert_eq!(nodes[&2].execution_seconds, None);
+    assert_eq!(nodes[&3].execution_seconds, None);
     database.drop().await;
 }
 
@@ -426,7 +428,7 @@ async fn a_node_reports_its_id_error_backing_task_and_attempts() {
 
     assert_eq!(detail.node_id.as_deref(), Some("step-one"));
     assert_eq!(detail.node_error.as_deref(), Some("node blew up"));
-    let leaf = detail.leaf.expect("the node has its task");
+    let leaf = detail.task_row.expect("the node has its task");
     assert_eq!(leaf.task_id, task.id);
     let attempts: Vec<i32> = detail
         .attempts
@@ -489,7 +491,7 @@ async fn a_node_whose_task_is_gone_still_resolves_without_a_leaf() {
         .expect("read the node")
         .expect("the node exists");
 
-    assert!(detail.leaf.is_none(), "{:?}", detail.leaf);
+    assert!(detail.task_row.is_none(), "{:?}", detail.task_row);
     assert!(detail.attempts.is_empty(), "{:?}", detail.attempts);
     database.drop().await;
 }

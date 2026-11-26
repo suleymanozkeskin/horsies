@@ -190,7 +190,7 @@ function WorkerCard({
           claimed
         </span>
         <span className="ml-auto" title={formatTime(worker.worker_started_at)}>
-          up {formatDuration(worker.uptime_s)}
+          up {formatDuration(worker.uptime_seconds)}
         </span>
       </div>
 
@@ -252,7 +252,7 @@ function WorkerFocus({
           </div>
           <span className="font-mono text-xs text-muted-foreground">
             {profileText(worker.profile)} · pid {worker.pid} ·{' '}
-            {worker.processes} proc · up {formatDuration(worker.uptime_s)}
+            {worker.processes} proc · up {formatDuration(worker.uptime_seconds)}
           </span>
         </div>
         <span
@@ -458,7 +458,7 @@ export function WorkerOverview() {
     return [...workers].sort(
       (a, b) =>
         rank(a) - rank(b) ||
-        (a.snapshot_age_s ?? 1e9) - (b.snapshot_age_s ?? 1e9)
+        (a.snapshot_age_seconds ?? 1e9) - (b.snapshot_age_seconds ?? 1e9)
     );
   }, [workers, responsiveIds]);
 

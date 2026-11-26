@@ -25,7 +25,7 @@ use crate::core::lifecycle::{
     AttemptWriteRefusal, FailedAttemptOutcome, GuardEvidence, OwnedClaim, TerminalizationCommand,
     TerminalizationKind, TerminalizationOutcome, WorkerOwned, WorkflowSuccessOutcome,
 };
-use crate::monitoring::cancel_task;
+use crate::monitoring::{cancel_task, CancelPolicy};
 use crate::test_support::sql::{self, TestConnection, TestPool};
 use crate::test_support::terminal_writes::{self, StaleFailure};
 
@@ -314,7 +314,10 @@ async fn a_failure_finalize_waits_for_a_monitoring_cancel_that_holds_its_locks()
         .expect("take the task lock");
 
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
-    let cancel = tokio::spawn(async move { cancel_task(&broker, task_id, true).await });
+    let cancel =
+        tokio::spawn(
+            async move { cancel_task(&broker, task_id, CancelPolicy::IncludeRunning).await },
+        );
     let waited = a_backend_waits_on(&pool, finalizer_pid).await;
     let mut probe = pool.begin().await.expect("begin the probe");
     let row_free = sql::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE NOWAIT")
