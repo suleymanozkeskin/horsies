@@ -6,10 +6,14 @@ import { writeSync } from "node:fs";
 import { configureLogging } from "../../../horsies/src/logging.ts";
 import { addonSettlement, settlingCallback } from "../../../horsies/src/native/call/callback.ts";
 import { envelopeValue } from "../../../horsies/src/native/call/envelope.ts";
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { setPanicRule } from "../../../horsies/src/native/process-core/process-core.ts";
 import { probeAddon } from "./callback-probe.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 /** How long the throwing-sink case waits after the sink ran, so the forwarder writes its stderr lines. */
 const STDERR_WRITE_WAIT_MS = 500;
