@@ -129,10 +129,10 @@ fn each_element_of_the_command_changes_the_fingerprint() {
         ("dependencies", |c| c.nodes[1].dependencies = "[]"),
         ("args_from", |c| c.nodes[1].args_from = None),
         ("workflow_context_from", |c| {
-            c.nodes[1].workflow_context_from = None
+            c.nodes[1].workflow_context_from = None;
         }),
         ("allow_failed_dependencies", |c| {
-            c.nodes[1].allow_failed_dependencies = true
+            c.nodes[1].allow_failed_dependencies = true;
         }),
         ("join_type", |c| c.nodes[1].join_type = "any"),
         ("min_success", |c| c.nodes[1].min_success = Some(1)),
