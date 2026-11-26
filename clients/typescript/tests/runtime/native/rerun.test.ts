@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { before, describe, test } from "node:test";
 
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import type { CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { TaskId } from "../../../horsies/src/contract/ids.ts";
@@ -13,6 +14,9 @@ import { NO_ACTIVE_CARRIER, createRerunArea } from "../../../horsies/src/rerun/a
 import type { RerunArea } from "../../../horsies/src/rerun/app-area.ts";
 import type { RerunCommand, RerunPolicy } from "../../../horsies/src/rerun/types.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 /** A database URL whose connect is refused at once: nothing listens on port 1. */
 const REFUSED_DATABASE_URL = "postgresql://horsies@127.0.0.1:1/none";

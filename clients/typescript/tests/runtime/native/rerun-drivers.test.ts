@@ -7,6 +7,7 @@
 import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
 
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { mintTaskId } from "../../../horsies/src/native/process-core/process-core.ts";
 import { TaskId } from "../../../horsies/src/contract/ids.ts";
@@ -20,6 +21,9 @@ import type { PostgresTransactionSql } from "../../../horsies/src/rerun/postgres
 import type { RerunCommand, RerunOutcome, RerunPolicy } from "../../../horsies/src/rerun/types.ts";
 import type { Result } from "../../../horsies/src/wire/result.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 /** The part of a `pg` client that the tests call. */
 interface PgTestClient {
