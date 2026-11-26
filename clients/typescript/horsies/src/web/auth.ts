@@ -14,6 +14,9 @@ import type { Result } from "../wire/result.ts";
 /**
  * The access policy of a monitoring handler. User code, called per request. Only an answer of
  * `true` allows; every other answer refuses. A throw or a rejection answers the request with 500.
+ *
+ * The `request` of a verdict has the method, the URL, the headers and the signal of the incoming
+ * request, and no body: the core reads the body.
  */
 export interface MonitoringAuthPolicy {
   /** Whether this request may read monitoring data. */
@@ -42,6 +45,9 @@ export const HEADER_NAME_RULE = "a header name is one or more of the characters 
 /** The characters of an HTTP token. */
 const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;
 
+/** The separator of the values of a repeated header: `Headers.get` joins them with `", "`. */
+const HEADER_VALUE_SEPARATOR = ",";
+
 /**
  * Allow every request to read and to act. For a mount that sits behind the host application's own
  * authentication: choosing it states that something in front of the handler authenticated the
@@ -57,9 +63,10 @@ export function viewOnly(): MonitoringAuthPolicy {
 }
 
 /**
- * Allow a request whose header `headerName` has a value that is not blank: the reverse proxy in
- * front of the handler authenticates the caller and sets the header. With `actions: "enabled"` such
- * a request may act too.
+ * Allow a request whose header `headerName` has a value with no blank member between its commas: the
+ * reverse proxy in front of the handler authenticates the caller and sets the header. With
+ * `actions: "enabled"` such a request may act too. A request with the header two times, one of them
+ * blank, is refused (`Headers.get` joins the values with `", "`).
  *
  * SECURITY: the proxy must strip or overwrite this header on incoming requests. A proxy that
  * forwards a header that the client set makes this policy trivial to spoof, and horsies cannot
@@ -79,7 +86,7 @@ export function trustedHeader(
     return err({ kind: "invalidHeaderName", headerName, rule: HEADER_NAME_RULE });
   }
 
-  const identified = (request: Request): boolean => (request.headers.get(headerName)?.trim() ?? "") !== "";
+  const identified = (request: Request): boolean => identityPresent(request.headers.get(headerName));
 
   switch (options.actions) {
     case "enabled":
@@ -89,6 +96,16 @@ export function trustedHeader(
     default:
       return unreachable(options.actions);
   }
+}
+
+/**
+ * Whether `value`, the value of the identity header that `Headers.get` gives, names an identity: the
+ * header is present and no member between its commas is blank. Python and Rust read the first value
+ * of a repeated header and refuse a blank one; the joined value holds that blank value as a blank
+ * member. An identity that holds a comma passes when no member is blank. Pure.
+ */
+function identityPresent(value: string | null): boolean {
+  return value === null ? false : value.split(HEADER_VALUE_SEPARATOR).every((member) => member.trim() !== "");
 }
 
 /** The text of a refusal of `trustedHeader`. Pure. */

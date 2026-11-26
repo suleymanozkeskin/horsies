@@ -12,8 +12,8 @@ import {
 } from "../../../horsies/src/web/auth.ts";
 import type { MonitoringAuthPolicy } from "../../../horsies/src/web/auth.ts";
 
-/** A request with the headers `headers`. */
-function request(headers: Record<string, string>): Request {
+/** A request with the headers `headers`: a record, or name and value pairs that may repeat a name. */
+function request(headers: Record<string, string> | [string, string][]): Request {
   return new Request("http://monitoring.test/api/tasks", { headers });
 }
 
@@ -49,11 +49,40 @@ describe("trustedHeader", () => {
     assert.deepEqual(await verdicts(accepted("X-Forwarded-User", "disabled"), withHeader), [true, false]);
   });
 
-  test("a request without the header, or with a blank value, may do nothing", async () => {
+  test("a request without the header may do nothing", async () => {
+    assert.deepEqual(await verdicts(accepted("X-Forwarded-User", "enabled"), request({})), [false, false]);
+  });
+
+  test("a request with a blank value may do nothing", async () => {
     const policy = accepted("X-Forwarded-User", "enabled");
 
-    assert.deepEqual(await verdicts(policy, request({})), [false, false]);
     assert.deepEqual(await verdicts(policy, request({ "X-Forwarded-User": "  " })), [false, false]);
+  });
+
+  test("a request with the header two times, both blank, may do nothing", async () => {
+    const incoming = request([
+      ["X-Forwarded-User", " "],
+      ["X-Forwarded-User", " "],
+    ]);
+
+    assert.equal(incoming.headers.get("X-Forwarded-User"), ", ");
+    assert.deepEqual(await verdicts(accepted("X-Forwarded-User", "enabled"), incoming), [false, false]);
+  });
+
+  test("a request with a blank value before a name may do nothing", async () => {
+    const incoming = request([
+      ["X-Forwarded-User", " "],
+      ["X-Forwarded-User", "alice"],
+    ]);
+
+    assert.equal(incoming.headers.get("X-Forwarded-User"), ", alice");
+    assert.deepEqual(await verdicts(accepted("X-Forwarded-User", "enabled"), incoming), [false, false]);
+  });
+
+  test("an identity that holds a comma and no blank member may view and act", async () => {
+    const incoming = request({ "X-Forwarded-User": "Doe, Jane" });
+
+    assert.deepEqual(await verdicts(accepted("X-Forwarded-User", "enabled"), incoming), [true, true]);
   });
 
   test("the header name is read in any case", async () => {
