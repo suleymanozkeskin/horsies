@@ -60,8 +60,10 @@ class RerunErrorCode(str, Enum):
     period first. Nothing was written.
     """
 
-    CALLER_KEY_REFUSED = 'CALLER_KEY_REFUSED'
-    """The caller key is not a valid idempotency key. Nothing was written."""
+    IDEMPOTENCY_KEY_REFUSED = 'IDEMPOTENCY_KEY_REFUSED'
+    """The idempotency key of the command is not a valid idempotency key.
+    Nothing was written.
+    """
 
     ID_MINT_REFUSED = 'ID_MINT_REFUSED'
     """The task id source refused to mint the id of the new task. Nothing
