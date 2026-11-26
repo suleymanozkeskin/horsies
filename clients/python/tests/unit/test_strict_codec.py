@@ -564,7 +564,7 @@ class TestEntryPoints:
         schedule = TaskSchedule(
             name='nightly',
             task_name='schedule_read_back',
-            pattern=IntervalSchedule(hours=1),
+            pattern=IntervalSchedule(every=datetime.timedelta(hours=1)),
             kwargs={'order': value},
         )
 

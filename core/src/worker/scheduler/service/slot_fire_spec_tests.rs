@@ -91,8 +91,10 @@ fn schedule_plan(schedule_name: &str, task_name: &str) -> ActivePlan {
         cancel_grace_ms: None,
     };
     let pattern_json = format!(
-        "{{\"type\":\"interval\",\"seconds\":{SCHEDULE_INTERVAL_SECONDS},\"minutes\":null,\
-         \"hours\":null,\"days\":null}}"
+        "{{\"kind\":\"interval\",\"every\":\"{}\"}}",
+        crate::core::config::schedule::interval_text(std::time::Duration::from_secs(u64::from(
+            SCHEDULE_INTERVAL_SECONDS
+        )))
     );
     let document = json!({
         "manifest_version": 1,
@@ -108,7 +110,7 @@ fn schedule_plan(schedule_name: &str, task_name: &str) -> ActivePlan {
                 "max_catch_up_runs": 100,
                 "send": {
                     "task_name": task_name,
-                    "queue_name": "default",
+                    "queue": "default",
                     "priority": 100,
                     "input_json": "{\"value\":1}",
                     "task_options": {"kind": "ENCODED", "json": options.stored_options_text()},

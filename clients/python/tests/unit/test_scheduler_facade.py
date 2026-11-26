@@ -12,7 +12,7 @@ import json
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import time
+from datetime import time, timedelta
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -99,7 +99,7 @@ def _nightly(**overrides: object) -> TaskSchedule:
     values: dict[str, object] = {
         'name': 'nightly',
         'task_name': _REPORT_TASK,
-        'pattern': IntervalSchedule(seconds=60),
+        'pattern': IntervalSchedule(every=timedelta(seconds=60)),
         'kwargs': {'day': 'monday', 'limit': 5},
         'timezone': 'Europe/Berlin',
         'catch_up_missed': True,
@@ -160,15 +160,13 @@ class TestToSchedulerManifest:
         [schedule] = manifest.schedules
         assert schedule.name == 'nightly'
         assert _enabled(schedule) == ScheduleActivationEnabled(
-            pattern_json=(
-                '{"type":"interval","seconds":60,"minutes":null,"hours":null,"days":null}'
-            ),
+            pattern_json='{"kind":"interval","every":"PT1M"}',
             timezone='Europe/Berlin',
             catch_up_missed=True,
             max_catch_up_runs=7,
             send=ScheduleSendManifest(
                 task_name=_REPORT_TASK,
-                queue_name='default',
+                queue='default',
                 priority=100,
                 input_json='{"day":"monday","limit":5}',
                 task_options=ScheduleTaskOptionsEncoded(
@@ -184,7 +182,7 @@ class TestToSchedulerManifest:
 
         [schedule] = manifest.schedules
         enabled = _enabled(schedule)
-        assert enabled.pattern_json == '{"type":"daily","time":"09:30:00"}'
+        assert enabled.pattern_json == '{"kind":"daily","time":"09:30:00"}'
         assert enabled.send.input_json == '{}'
         assert enabled.send.retain_rerun_input is False
 
@@ -276,7 +274,7 @@ class TestOptionsThatDoNotEncode:
         schedule = TaskSchedule(
             name='every_minute',
             task_name=_OPTIONS_TASK,
-            pattern=IntervalSchedule(seconds=60),
+            pattern=IntervalSchedule(every=timedelta(seconds=60)),
             kwargs={'value': 1},
         )
         schedule_config = ScheduleConfig(schedules=[schedule])

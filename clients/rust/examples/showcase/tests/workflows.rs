@@ -233,8 +233,7 @@ async fn compressed_schedule_sends_a_due_task() {
         format!("s3-compressed-{}", Uuid::new_v4().simple()),
         "prewarm_search",
         SchedulePattern::Interval(IntervalSchedule {
-            seconds: Some(1),
-            ..IntervalSchedule::default()
+            every: Duration::from_secs(1),
         }),
     )
     .input(&json!({ "campaign_id": marker.as_str() }))

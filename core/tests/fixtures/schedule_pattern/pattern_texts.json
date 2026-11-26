@@ -1,15 +1,17 @@
 {
   "form": "schedule pattern",
   "patterns": [
-    {"name": "interval", "text": "{\"type\":\"interval\",\"seconds\":30,\"minutes\":null,\"hours\":null,\"days\":null}"},
-    {"name": "hourly", "text": "{\"type\":\"hourly\",\"minute\":15,\"second\":0}"},
-    {"name": "daily", "text": "{\"type\":\"daily\",\"time\":\"09:00:00\"}"},
-    {"name": "weekly", "text": "{\"type\":\"weekly\",\"days\":[\"monday\",\"friday\"],\"time\":\"09:30:00\"}"},
-    {"name": "monthly", "text": "{\"type\":\"monthly\",\"day\":15,\"time\":\"08:00:00\"}"},
-    {"name": "cron_every_day", "text": "{\"type\":\"cron\",\"minute\":[{\"kind\":\"every\"}],\"hour\":[{\"kind\":\"values\",\"values\":[9,17]}],\"month\":[{\"kind\":\"every\"}],\"day\":{\"kind\":\"every_day\"}}"},
-    {"name": "cron_by_month_day", "text": "{\"type\":\"cron\",\"minute\":[{\"kind\":\"step\",\"step\":15}],\"hour\":[{\"kind\":\"range\",\"start\":9,\"end\":17,\"step\":2}],\"month\":[{\"kind\":\"enum_values\",\"values\":[\"january\",\"july\"]}],\"day\":{\"kind\":\"by_month_day\",\"day_of_month\":[{\"kind\":\"values\",\"values\":[1,15]}]}}"},
-    {"name": "cron_by_weekday", "text": "{\"type\":\"cron\",\"minute\":[{\"kind\":\"values\",\"values\":[0]}],\"hour\":[{\"kind\":\"every\"}],\"month\":[{\"kind\":\"enum_range\",\"start\":\"march\",\"end\":\"june\",\"step\":1}],\"day\":{\"kind\":\"by_weekday\",\"day_of_week\":[{\"kind\":\"every\"},{\"kind\":\"enum_range\",\"start\":\"monday\",\"end\":\"friday\",\"step\":1}]}}"},
-    {"name": "cron_either_day", "text": "{\"type\":\"cron\",\"minute\":[{\"kind\":\"values\",\"values\":[30]}],\"hour\":[{\"kind\":\"values\",\"values\":[12]}],\"month\":[{\"kind\":\"enum_step\",\"step\":3}],\"day\":{\"kind\":\"either_day\",\"day_of_month\":[{\"kind\":\"values\",\"values\":[13]}],\"day_of_week\":[{\"kind\":\"enum_values\",\"values\":[\"friday\"]}]}}"},
-    {"name": "cron_both_days", "text": "{\"type\":\"cron\",\"minute\":[{\"kind\":\"values\",\"values\":[0]}],\"hour\":[{\"kind\":\"values\",\"values\":[8]}],\"month\":[{\"kind\":\"every\"}],\"day\":{\"kind\":\"both_days\",\"day_of_month\":[{\"kind\":\"range\",\"start\":1,\"end\":7,\"step\":1}],\"day_of_week\":[{\"kind\":\"enum_step\",\"step\":2}]}}"}
+    {"name": "interval", "text": "{\"kind\":\"interval\",\"every\":\"PT30S\"}"},
+    {"name": "interval_days_and_time", "text": "{\"kind\":\"interval\",\"every\":\"P1DT2H30M15S\"}"},
+    {"name": "interval_365_days", "text": "{\"kind\":\"interval\",\"every\":\"P365D\"}"},
+    {"name": "hourly", "text": "{\"kind\":\"hourly\",\"minute\":15,\"second\":0}"},
+    {"name": "daily", "text": "{\"kind\":\"daily\",\"time\":\"09:00:00\"}"},
+    {"name": "weekly", "text": "{\"kind\":\"weekly\",\"weekdays\":[\"monday\",\"friday\"],\"time\":\"09:30:00\"}"},
+    {"name": "monthly", "text": "{\"kind\":\"monthly\",\"day_of_month\":15,\"time\":\"08:00:00\"}"},
+    {"name": "cron_every_day", "text": "{\"kind\":\"cron\",\"minute\":[{\"kind\":\"every\"}],\"hour\":[{\"kind\":\"values\",\"values\":[9,17]}],\"month\":[{\"kind\":\"every\"}],\"day\":{\"kind\":\"every_day\"}}"},
+    {"name": "cron_by_month_day", "text": "{\"kind\":\"cron\",\"minute\":[{\"kind\":\"step\",\"step\":15}],\"hour\":[{\"kind\":\"range\",\"start\":9,\"end\":17,\"step\":2}],\"month\":[{\"kind\":\"enum_values\",\"values\":[\"january\",\"july\"]}],\"day\":{\"kind\":\"by_month_day\",\"day_of_month\":[{\"kind\":\"values\",\"values\":[1,15]}]}}"},
+    {"name": "cron_by_weekday", "text": "{\"kind\":\"cron\",\"minute\":[{\"kind\":\"values\",\"values\":[0]}],\"hour\":[{\"kind\":\"every\"}],\"month\":[{\"kind\":\"enum_range\",\"start\":\"march\",\"end\":\"june\",\"step\":1}],\"day\":{\"kind\":\"by_weekday\",\"day_of_week\":[{\"kind\":\"every\"},{\"kind\":\"enum_range\",\"start\":\"monday\",\"end\":\"friday\",\"step\":1}]}}"},
+    {"name": "cron_either_day", "text": "{\"kind\":\"cron\",\"minute\":[{\"kind\":\"values\",\"values\":[30]}],\"hour\":[{\"kind\":\"values\",\"values\":[12]}],\"month\":[{\"kind\":\"enum_step\",\"step\":3}],\"day\":{\"kind\":\"either_day\",\"day_of_month\":[{\"kind\":\"values\",\"values\":[13]}],\"day_of_week\":[{\"kind\":\"enum_values\",\"values\":[\"friday\"]}]}}"},
+    {"name": "cron_both_days", "text": "{\"kind\":\"cron\",\"minute\":[{\"kind\":\"values\",\"values\":[0]}],\"hour\":[{\"kind\":\"values\",\"values\":[8]}],\"month\":[{\"kind\":\"every\"}],\"day\":{\"kind\":\"both_days\",\"day_of_month\":[{\"kind\":\"range\",\"start\":1,\"end\":7,\"step\":1}],\"day_of_week\":[{\"kind\":\"enum_step\",\"step\":2}]}}"}
   ]
 }

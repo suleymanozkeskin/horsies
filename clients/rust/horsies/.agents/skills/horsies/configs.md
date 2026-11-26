@@ -261,6 +261,7 @@ nothing.
 
 ```rust
 use std::convert::Infallible;
+use std::time::Duration;
 
 use chrono::NaiveTime;
 use horsies::{
@@ -285,7 +286,7 @@ fn with_schedules(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Er
     let cache_cleanup = TaskSchedule::new(
         "cache-cleanup",
         "clean_cache",
-        SchedulePattern::Interval(IntervalSchedule { minutes: Some(15), ..IntervalSchedule::default() }),
+        SchedulePattern::Interval(IntervalSchedule { every: Duration::from_secs(15 * 60) }),
     );
     Ok(AppConfig {
         schedule: Some(ScheduleConfig::new(vec![nightly_report, cache_cleanup])),
@@ -299,8 +300,8 @@ fn with_schedules(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Er
 | Item | Fields and builders |
 |---|---|
 | `ScheduleConfig` | `enabled` (default `true`), `schedules`, `check_interval_seconds` (1 to 60). `ScheduleConfig::new(schedules)`, `.enabled(bool)`, `.check_interval_seconds(n)` |
-| `TaskSchedule::new(name, task_name, pattern)` | `.input(&value)` (`Result<TaskSchedule, JsonTextRefused>`), `.queue(name)`, `.enabled(bool)`, `.timezone(name)` (default `UTC`), `.catch_up_missed(bool)`, `.max_catch_up_runs(n)` (default 100) |
-| `SchedulePattern` | `Interval(IntervalSchedule { seconds, minutes, hours, days })`, `Hourly(HourlySchedule { minute, second })`, `Daily(DailySchedule { time })`, `Weekly(WeeklySchedule { days, time })`, `Monthly(MonthlySchedule { day, time })`, `Cron(CronSchedule)` |
+| `TaskSchedule::new(name, task_name, pattern)` | `.input(&value)` (`Result<TaskSchedule, JsonTextRefused>`), `.queue(queue)` (field `queue`; `None` uses the task's queue), `.enabled(bool)`, `.timezone(name)` (default `UTC`), `.catch_up_missed(bool)`, `.max_catch_up_runs(n)` (default 100) |
+| `SchedulePattern` | `Interval(IntervalSchedule { every })`, `Hourly(HourlySchedule { minute, second })`, `Daily(DailySchedule { time })`, `Weekly(WeeklySchedule { weekdays, time })`, `Monthly(MonthlySchedule { day_of_month, time })`, `Cron(CronSchedule)` |
 
 - `input` is the task input in the stored form: one member per task
   parameter, by name. A schedule without input stores `{}`.
@@ -313,6 +314,15 @@ fn with_schedules(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Er
   as its value, written by the same strict writer. In a config file, an
   integer of `input` must fit `i64` or `u64`; set an input with a wider
   integer in code with `.input(&value)`.
+- `IntervalSchedule.every` is a `std::time::Duration` in whole seconds,
+  1 second to 365 days (`INTERVAL_EVERY_SECONDS`). `validate()` refuses a
+  fraction of a second, zero, and a length above 365 days.
+- In a config file, a pattern names its kind in `kind`, and `every` is
+  ISO 8601 duration text with days, hours, minutes and seconds only:
+  `pattern = { kind = "interval", every = "PT15M" }` (`PT30S`, `PT1M30S`,
+  `P1DT2H`). The reader refuses years, months, weeks, a fraction, a sign
+  and a text without a part. A key that the config does not declare
+  (`type`, `queue_name`, `days`, `day`, `seconds`) is refused.
 - A time of day is a chrono `NaiveTime` in whole seconds, in the
   schedule's time zone. `Weekday` and `Month` are enums of the crate.
 - The scheduler checks each enabled schedule before it connects: its task

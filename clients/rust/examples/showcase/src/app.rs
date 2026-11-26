@@ -6,6 +6,7 @@
 //! server. Building it does no I/O.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use chrono::NaiveTime;
 use horsies::{
@@ -141,15 +142,13 @@ fn at(hour: u32, minute: u32) -> NaiveTime {
 
 fn interval_seconds(seconds: u64) -> SchedulePattern {
     SchedulePattern::Interval(IntervalSchedule {
-        seconds: Some(u32::try_from(seconds).unwrap_or(u32::MAX)),
-        ..IntervalSchedule::default()
+        every: Duration::from_secs(seconds),
     })
 }
 
 fn interval_minutes(minutes: u64) -> SchedulePattern {
     SchedulePattern::Interval(IntervalSchedule {
-        minutes: Some(u32::try_from(minutes).unwrap_or(u32::MAX)),
-        ..IntervalSchedule::default()
+        every: Duration::from_secs(minutes.saturating_mul(60)),
     })
 }
 
@@ -163,16 +162,16 @@ fn daily(hour: u32, minute: u32) -> SchedulePattern {
     })
 }
 
-fn weekly(days: Vec<Weekday>, hour: u32, minute: u32) -> SchedulePattern {
+fn weekly(weekdays: Vec<Weekday>, hour: u32, minute: u32) -> SchedulePattern {
     SchedulePattern::Weekly(WeeklySchedule {
-        days,
+        weekdays,
         time: at(hour, minute),
     })
 }
 
-fn monthly(day: u32, hour: u32, minute: u32) -> SchedulePattern {
+fn monthly(day_of_month: u32, hour: u32, minute: u32) -> SchedulePattern {
     SchedulePattern::Monthly(MonthlySchedule {
-        day,
+        day_of_month,
         time: at(hour, minute),
     })
 }

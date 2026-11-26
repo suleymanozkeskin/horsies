@@ -11,7 +11,8 @@
 //!   variant.
 //!
 //! A field's value is `ManifestValue::PYTHON` of its Rust type. An integer
-//! field whose bound is a rule of the type that holds it names that bound,
+//! field, or a length of time in whole seconds, whose bound is a rule of the
+//! type that holds it names that bound,
 //! `#[manifest_schema(int_bound = <IntBound constant>)]`; its value is then
 //! `bounded_int::<FieldType>(bound)`.
 //!
@@ -661,7 +662,7 @@ mod tests {
     #[test]
     fn a_newtype_variant_under_a_tag_holds_the_fields_of_its_record() {
         let text = derive_text(syn::parse_quote! {
-            #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+            #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
             enum SchedulePattern {
                 Interval(IntervalSchedule),
             }
@@ -719,16 +720,36 @@ mod tests {
     fn an_optional_field_written_as_null_names_its_bound() {
         let text = derive_text(syn::parse_quote! {
             #[serde(deny_unknown_fields)]
-            struct IntervalSchedule {
+            struct Window {
                 #[serde(skip_serializing_if = "Option::is_none")]
-                #[manifest_schema(int_bound = INTERVAL_SECONDS)]
+                #[manifest_schema(int_bound = WINDOW_SECONDS)]
                 seconds: Option<u32>,
             }
         })
         .expect("the derive accepts the struct");
         assert!(
             text.contains(
-                "value:::horsies_core::manifest_schema::bounded_int::<Option<u32>>(INTERVAL_SECONDS),default:::horsies_core::manifest_schema::MemberDefault::NoDefault,"
+                "value:::horsies_core::manifest_schema::bounded_int::<Option<u32>>(WINDOW_SECONDS),default:::horsies_core::manifest_schema::MemberDefault::NoDefault,"
+            ),
+            "{text}"
+        );
+    }
+
+    /// A length of time that names its bound takes the bound of its whole
+    /// seconds: the derive writes the same call for every field type, and
+    /// the field type picks the form.
+    #[test]
+    fn a_length_of_time_names_the_bound_of_its_seconds() {
+        let text = derive_text(syn::parse_quote! {
+            struct IntervalSchedule {
+                #[manifest_schema(int_bound = INTERVAL_EVERY_SECONDS)]
+                every: Duration,
+            }
+        })
+        .expect("the derive accepts the struct");
+        assert!(
+            text.contains(
+                "value:::horsies_core::manifest_schema::bounded_int::<Duration>(INTERVAL_EVERY_SECONDS),default:::horsies_core::manifest_schema::MemberDefault::NoDefault,"
             ),
             "{text}"
         );

@@ -1216,13 +1216,10 @@ mod tests {
                 name: "daily-job".to_owned(),
                 task_name: "my_task".to_owned(),
                 pattern: SchedulePattern::Interval(IntervalSchedule {
-                    seconds: Some(60),
-                    minutes: None,
-                    hours: None,
-                    days: None,
+                    every: std::time::Duration::from_secs(60),
                 }),
                 input: None,
-                queue_name: None,
+                queue: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
                 catch_up_missed: false,
@@ -1338,8 +1335,7 @@ mod tests {
                 name,
                 "my_task",
                 SchedulePattern::Interval(IntervalSchedule {
-                    seconds: Some(60),
-                    ..IntervalSchedule::default()
+                    every: std::time::Duration::from_secs(60),
                 }),
             )
         };

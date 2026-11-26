@@ -16,7 +16,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -420,7 +420,7 @@ class TestProducerPaths:
         schedule = TaskSchedule(
             name='runtime_schedule',
             task_name='runtime.token',
-            pattern=IntervalSchedule(seconds=60),
+            pattern=IntervalSchedule(every=timedelta(seconds=60)),
             kwargs={'order_id': 'o-1'},
         )
 
@@ -430,7 +430,7 @@ class TestProducerPaths:
         schedule = TaskSchedule(
             name='runtime_schedule_kwarg',
             task_name='runtime.token',
-            pattern=IntervalSchedule(seconds=60),
+            pattern=IntervalSchedule(every=timedelta(seconds=60)),
             kwargs={'order_id': 'o-1', 'runtime': 1},
         )
 

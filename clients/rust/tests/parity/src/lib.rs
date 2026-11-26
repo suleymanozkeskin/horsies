@@ -48,9 +48,9 @@ const SEND_RETRIES: usize = 2;
 pub const SCHEDULE_NAME: &str = "parity_slots";
 /// The task of each slot of the schedule.
 pub const SLOT_TASK_NAME: &str = "parity.add";
-/// The interval of the schedule, in hours: longer than any run, so a slot
+/// The interval of the schedule, one hour: longer than any run, so a slot
 /// is due only after the runner moves the schedule back.
-const SCHEDULE_INTERVAL_HOURS: u32 = 1;
+const SCHEDULE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const SCHEDULE_MAX_CATCH_UP_RUNS: u32 = 2;
 const SCHEDULE_CHECK_INTERVAL_S: u32 = 1;
 
@@ -335,8 +335,7 @@ pub fn build_app(database_url: &str) -> Result<ParityApp, HorsiesError> {
 /// scheduler process of the `schedule_slots` scenario runs it.
 fn schedules() -> ScheduleConfig {
     let every_hour = SchedulePattern::Interval(IntervalSchedule {
-        hours: Some(SCHEDULE_INTERVAL_HOURS),
-        ..IntervalSchedule::default()
+        every: SCHEDULE_INTERVAL,
     });
     ScheduleConfig::new(vec![TaskSchedule::new(
         SCHEDULE_NAME,

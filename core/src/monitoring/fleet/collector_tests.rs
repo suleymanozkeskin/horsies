@@ -591,7 +591,9 @@ fn the_labels_of_a_custom_config_are_its_queues_and_its_schedules() {
     config.schedule = Some(ScheduleConfig::new(vec![TaskSchedule::new(
         "nightly",
         "cleanup",
-        SchedulePattern::Interval(IntervalSchedule::default()),
+        SchedulePattern::Interval(IntervalSchedule {
+            every: std::time::Duration::from_secs(60),
+        }),
     )]));
     let Folded {
         declared: labels,
@@ -620,7 +622,9 @@ fn schedule(name: &str) -> TaskSchedule {
     TaskSchedule::new(
         name,
         "cleanup",
-        SchedulePattern::Interval(IntervalSchedule::default()),
+        SchedulePattern::Interval(IntervalSchedule {
+            every: std::time::Duration::from_secs(60),
+        }),
     )
 }
 

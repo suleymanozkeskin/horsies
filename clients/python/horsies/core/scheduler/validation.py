@@ -178,7 +178,7 @@ def _resolve_queue_error(
     task = app.tasks.get(schedule.task_name)
     task_queue = task.task_queue_name if task is not None else None
     queue_name = (
-        schedule.queue_name if schedule.queue_name is not None else task_queue
+        schedule.queue if schedule.queue is not None else task_queue
     )
     try:
         app.validate_queue_name(queue_name)
@@ -187,7 +187,7 @@ def _resolve_queue_error(
             message=f"invalid queue configuration for schedule '{schedule.name}'",
             code=ErrorCode.CONFIG_INVALID_SCHEDULE,
             notes=[f'underlying error: {exc}'],
-            help_text='check queue_name in schedule matches app.config queue settings',
+            help_text='check queue in schedule matches app.config queue settings',
         )
     return None
 
