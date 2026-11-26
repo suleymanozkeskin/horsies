@@ -2,8 +2,10 @@
 // codec's functions. Each run goes through zod's own parse (`zod/v4/core`), so zod decides the order, the `when` and
 // `abort` rules of its checks, and the issues.
 //
-// A check runs only the checks of its own node: the kinds below it are walked by the codec, so a container's check
-// sees the value that the user holds (codec outputs, defaults filled), as zod's checks see it in both directions.
+// A check runs only the checks of its own node: the kinds below it are walked by the codec. As in zod, a check sees a
+// value of its node's structure, with codec outputs and defaults filled: at encode the writer writes the node's kind
+// first and gives the check the sent value with its defaults filled (`codec/check-view.ts`); at decode the reader
+// gives the worker-form value.
 
 import * as core from "zod/v4/core";
 
@@ -43,7 +45,7 @@ export function checksRun(checks: readonly ZodCheck[]): ValueCheck {
   return (value) => accepted(guarded(() => core.safeParse(checkOnly, value)));
 }
 
-/** A check that runs the whole parse of a leaf schema (a template literal: its pattern is its parse). */
+/** A check that runs the whole parse of a leaf schema (a template literal without its checks: the pattern test). */
 export function parseRun(schema: ZodSchema): ValueCheck {
   return (value) => accepted(guarded(() => core.safeParse(schema, value)));
 }

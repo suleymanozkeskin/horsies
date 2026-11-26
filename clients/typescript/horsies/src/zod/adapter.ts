@@ -56,7 +56,7 @@ import {
   type ZodSchema,
   zodTypeOf,
 } from "./definition.ts";
-import { type ZodRule, type ZodSchemaRefused, zodRefused } from "./rules.ts";
+import { type NamedZodRule, type ZodRule, type ZodSchemaRefused, zodPartRefused, zodRefused } from "./rules.ts";
 import { checksRun, codecRuns, decodeRun, parseRun, recordKeysRun } from "./runs.ts";
 
 /** The nodes of one level of a stored value that the walk allows for: the array or object, and four wrappers. */
@@ -84,21 +84,30 @@ type Walk = { readonly path: string; readonly depth: number; readonly onPath: Re
 
 const START: Walk = Object.freeze({ path: ROOT_PATH, depth: 0, onPath: new Set<ZodSchema>() });
 
+/** Type-only key of the proof of a passed self-check. It does not exist at run time. */
+declare const selfCheckPassed: unique symbol;
+
 /**
- * The kind and the presence of a schema as an object member or a task input parameter.
+ * The proof that the self-check of this process passed. Only the self-check makes one (`self-check.ts`), so a kind
+ * from the adapter always follows a passed self-check. The self-check uses one for its own known schemas.
+ */
+export type SelfCheckPassed = { readonly [selfCheckPassed]: "passed" };
+
+/**
+ * The kind and the presence of a schema as an object member or a task input parameter, after a passed self-check.
  *
  * Fails with every refusal of the schema, in walk order. Reads each default value twice (a function default runs
  * twice) and calls the getter of each `z.lazy()` once. Does no I/O.
  */
-export function compileMember(schema: ZodSchema): Compiled<ZodMemberKind> {
+export function compileMember(_passed: SelfCheckPassed, schema: ZodSchema): Compiled<ZodMemberKind> {
   return compileNode(schema, START);
 }
 
 /**
- * The kind of a schema as a whole value (a task output, a workflow parameter value): `.optional()`, `.default()` and
- * `.prefault()` are refused at its top. Fails and reads as `compileMember`.
+ * The kind of a schema as a whole value (a task output, a workflow parameter value), after a passed self-check:
+ * `.optional()`, `.default()` and `.prefault()` are refused at its top. Fails and reads as `compileMember`.
  */
-export function compileValue(schema: ZodSchema): Compiled<Kind> {
+export function compileValue(_passed: SelfCheckPassed, schema: ZodSchema): Compiled<Kind> {
   return valueAt(schema, START);
 }
 
@@ -148,6 +157,10 @@ function withChecks(compiled: ZodMemberKind, definition: ZodDefinition, path: st
         break;
       case "overwrite":
         return refused("TRANSFORM", path, definition.zodType);
+      case "unknownCheck":
+        return partRefused("UNKNOWN_CHECK", path, definition.zodType, read.name);
+      case "unknownFormat":
+        return partRefused("UNKNOWN_FORMAT", path, definition.zodType, read.name);
       default:
         return unreachable(read, "withChecks");
     }
@@ -173,7 +186,7 @@ function compileForm(definition: ZodDefinition, schema: ZodSchema, walk: Walk): 
     case "literal":
       return requiredOf(literalKind(definition.members, walk.path, definition.zodType));
     case "templateLiteral":
-      return required(checkedKind(STRING_KIND, parseRun(definition.schema)));
+      return required(checkedKind(STRING_KIND, parseRun(definition.pattern)));
     case "object":
       return requiredOf(compileObject(definition, walk));
     case "array":
@@ -222,11 +235,13 @@ function compileWrapper(definition: ZodDefinition, schema: ZodSchema, walk: Walk
 }
 
 function refusedForm(definition: ZodDefinition, path: string): Compiled<ZodMemberKind> {
-  return refused(ruleOf(definition), path, definition.zodType);
+  return definition.form === "unknownField"
+    ? partRefused("UNKNOWN_DEFINITION_FIELD", path, definition.zodType, definition.field)
+    : refused(ruleOf(definition), path, definition.zodType);
 }
 
 /** The rule of a form that has no kind. A form that has one is a defect of the caller. */
-function ruleOf(form: DefinitionForm): ZodRule {
+function ruleOf(form: DefinitionForm): Exclude<ZodRule, NamedZodRule> {
   switch (form.form) {
     case "untyped":
       return "UNTYPED";
@@ -242,6 +257,11 @@ function ruleOf(form: DefinitionForm): ZodRule {
       return "NOT_DATA";
     case "unknownDefinition":
       return "UNKNOWN_DEFINITION";
+    case "coerced":
+      return "TRANSFORM";
+    case "exclusiveUnion":
+      return "EXCLUSIVE_UNION";
+    case "unknownField":
     case "string":
     case "number":
     case "bigint":
@@ -264,7 +284,7 @@ function ruleOf(form: DefinitionForm): ZodRule {
     case "lazy":
     case "codec":
     case "custom":
-      throw new TypeError(`ruleOf: the form ${form.form} has a kind`);
+      throw new TypeError(`ruleOf: the form ${form.form} has a kind or a named rule`);
     default:
       return unreachable(form, "ruleOf");
   }
@@ -274,8 +294,12 @@ function at(walk: Walk, path: string): Walk {
   return { ...walk, path };
 }
 
-function refused(rule: ZodRule, path: string, zodType: string): Compiled<never> {
+function refused(rule: Exclude<ZodRule, NamedZodRule>, path: string, zodType: string): Compiled<never> {
   return err([zodRefused(rule, path, zodType)]);
+}
+
+function partRefused(rule: NamedZodRule, path: string, zodType: string, name: string): Compiled<never> {
+  return err([zodPartRefused(rule, path, zodType, name)]);
 }
 
 function required(kind: Kind): Compiled<ZodMemberKind> {
@@ -321,10 +345,9 @@ function compileObject(definition: FormOf<"object">, walk: Walk): Compiled<Kind>
   return refusals.length > 0 || !compiled.ok ? err(refusals) : ok(objectKind(compiled.value));
 }
 
-/** The refusal of an object or a record that keeps undeclared keys. A stripping object refuses them at decode. */
+/** The refusal of an object or a record that keeps undeclared keys. */
 function otherKeysRefusals(otherKeys: OtherKeys, path: string, zodType: string): Refusals {
   switch (otherKeys) {
-    case "stripped":
     case "refused":
       return [];
     case "kept":
@@ -366,9 +389,10 @@ function compileRecord(definition: FormOf<"record">, walk: Walk): Compiled<Kind>
   const key = valueAt(definition.key, walk);
   const value = valueAt(definition.value, at(walk, `${walk.path}.*`));
   const loose = otherKeysRefusals(definition.otherKeys, walk.path, definition.zodType);
+  const keys = key.ok ? recordKeyOf(key.value) : NOT_STRING_KEY;
 
   const keyRefusals: Refusals =
-    key.ok && !isStringKey(key.value) ? [zodRefused("RECORD_KEY", walk.path, definition.zodType)] : [];
+    keys.keys === "notString" ? [zodRefused("RECORD_KEY", walk.path, definition.zodType)] : [];
 
   const refusals = [...loose, ...(key.ok ? keyRefusals : key.error), ...(value.ok ? [] : value.error)];
 
@@ -377,7 +401,7 @@ function compileRecord(definition: FormOf<"record">, walk: Walk): Compiled<Kind>
   }
 
   const record: Kind = Object.freeze({ node: "record", value: value.value });
-  const requiredKeys = definition.keyCoverage === "everyEnumKey" ? literalStrings(key.value) : [];
+  const requiredKeys = definition.keyCoverage === "everyEnumKey" && keys.keys === "literal" ? keys.members : [];
 
   return ok(
     key.value.node === "string" && requiredKeys.length === 0
@@ -387,27 +411,53 @@ function compileRecord(definition: FormOf<"record">, walk: Walk): Compiled<Kind>
 }
 
 /** A key kind that a record stores as it is: a string, maybe checked, or a literal of strings. */
-function isStringKey(kind: Kind): boolean {
+/** What a record key kind stores as it is: any string, the strings of a literal, or no string key. */
+type RecordKey =
+  | { readonly keys: "anyString" }
+  | { readonly keys: "literal"; readonly members: readonly string[] }
+  | { readonly keys: "notString" };
+
+const ANY_STRING_KEY: RecordKey = Object.freeze({ keys: "anyString" });
+
+const NOT_STRING_KEY: RecordKey = Object.freeze({ keys: "notString" });
+
+function recordKeyOf(kind: Kind): RecordKey {
   switch (kind.node) {
     case "string":
-      return true;
+      return ANY_STRING_KEY;
     case "checked":
-      return isStringKey(kind.inner);
-    case "literal":
-      return kind.members.every(isString);
-    default:
-      return false;
-  }
-}
+      return recordKeyOf(kind.inner);
+    case "literal": {
+      const members = kind.members.filter(isString);
 
-function literalStrings(kind: Kind): readonly string[] {
-  switch (kind.node) {
-    case "literal":
-      return kind.members.filter(isString);
-    case "checked":
-      return literalStrings(kind.inner);
+      return members.length === kind.members.length ? { keys: "literal", members } : NOT_STRING_KEY;
+    }
+
+    case "null":
+    case "boolean":
+    case "int":
+    case "bigint":
+    case "float":
+    case "uuid":
+    case "decimal":
+    case "instant":
+    case "offsetDateTime":
+    case "plainDateTime":
+    case "plainDate":
+    case "plainTime":
+    case "union":
+    case "taggedUnion":
+    case "nullable":
+    case "array":
+    case "tuple":
+    case "record":
+    case "object":
+    case "json":
+    case "resultOf":
+    case "conversion":
+      return NOT_STRING_KEY;
     default:
-      return [];
+      return unreachable(kind, "recordKeyOf");
   }
 }
 
@@ -532,8 +582,31 @@ function variantsOf(
       return kind.tag === tag
         ? ok(kind.variants.map((object) => ({ object, checks })))
         : refused("UNION_OPTION", path, zodType);
-    default:
+    case "null":
+    case "boolean":
+    case "int":
+    case "bigint":
+    case "float":
+    case "string":
+    case "uuid":
+    case "decimal":
+    case "instant":
+    case "offsetDateTime":
+    case "plainDateTime":
+    case "plainDate":
+    case "plainTime":
+    case "literal":
+    case "union":
+    case "nullable":
+    case "array":
+    case "tuple":
+    case "record":
+    case "json":
+    case "resultOf":
+    case "conversion":
       return refused("UNION_OPTION", path, zodType);
+    default:
+      return unreachable(kind, "variantsOf");
   }
 }
 

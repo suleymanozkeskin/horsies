@@ -36,9 +36,10 @@ print_step_title "Run the tests with bun test"
 bun test
 
 # The codec runs in a task child and in a seat isolate on Node as well as on
-# Bun, so the codec and wire type tests run on Node too (`node:test`).
-print_step_title "Run the codec and wire type tests on Node"
-node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts'
+# Bun, and the zod adapter runs where a contract is checked, so the codec, wire
+# type and zod adapter tests run on Node too (`node:test`).
+print_step_title "Run the codec, wire type and zod adapter tests on Node"
+node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts'
 
 # TypeScript 6.0 is the oldest compiler that the published types support.
 # This step type checks the workspace projects with it. Build mode reads the
