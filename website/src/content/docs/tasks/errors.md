@@ -3,7 +3,7 @@ title: Errors Reference
 section: shared
 summary: The error codes of horsies - the codes a task can end with, the codes of the client calls, and the HRS codes of config and definition errors.
 related: [error-handling, error-types, ../rust/tasks/errors, ../concepts/result-handling]
-tags: [errors, BuiltInTaskCode, ErrorCode, reference]
+tags: [errors, BuiltInTaskCode, HorsiesErrorCode, reference]
 ---
 
 # Errors Reference
@@ -20,17 +20,17 @@ A task ends with its own code or with a library code. A task that ends `FAILED` 
 
 All library-defined error codes are grouped into four families. The umbrella type alias `BuiltInTaskCode` is the union of all four enums. User code should handle these explicitly.
 
-#### OperationalErrorCode
+#### OperationalCode
 
 Errors from task execution, broker, and worker internals.
 
-<!-- members: OperationalErrorCode -->
+<!-- members: OperationalCode -->
 | Code | Description | Auto-Retry? |
 | ---- | ----------- | ----------- |
 | `UNHANDLED_EXCEPTION` | Uncaught exception in task code, wrapped to `UNHANDLED_EXCEPTION` by library  | Yes, if in `auto_retry_for` |
 | `TASK_EXCEPTION` | The worker caught an exception outside the task wrapper, or a validator raised on a default | Yes, if in `auto_retry_for` |
 | `WORKER_CRASHED` | Worker process died during execution | Yes, if in `auto_retry_for` |
-| `BROKER_ERROR` | Database or broker failure during operation | No |
+| `DATABASE_ERROR` | Database or broker failure during operation | No |
 | `WORKER_RESOLUTION_ERROR` | Failed to resolve task by name | No |
 | `WORKER_SERIALIZATION_ERROR` | Failed to serialize/deserialize task data: the stored arguments, a stored timeout (or the stored cancel grace of a `SHARED_ASYNC` row) that the worker cannot use, or a stored `retry_policy` that does not validate as `RetryPolicy` (this failure does not retry). No user code ran. A stored-data cause does not clear on a retry | Yes, if in `auto_retry_for` |
 | `RESULT_DESERIALIZATION_ERROR` | A stored result or a stored workflow error is corrupt or could not be deserialized | No |
@@ -51,7 +51,7 @@ Errors from type/schema validation and structural contracts.
 | ---- | ----------- | ----------- |
 | `RETURN_TYPE_MISMATCH` | The task returned a value that does not fit its declared type, or something that is not a task result (in Python: not an `Ok` or an `Err`), including `None` | Yes, if in `auto_retry_for` |
 | `NO_TYPE_AVAILABLE` | A successful result could not be decoded because the caller does not have the task's or workflow's declared success type locally registered | No |
-| `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID | No |
+| `WORKFLOW_CONTEXT_MISSING_ID` | Workflow context is missing required ID | No |
 
 A return that is not a task result has `variant` `'not_a_task_result'`, an empty `validation_errors` and a count of 0. It no longer goes through `exception_mapper` or `default_unhandled_error_code`, so it is not retried unless a policy lists `RETURN_TYPE_MISMATCH`.
 
@@ -88,7 +88,7 @@ Terminal outcome codes for tasks and workflows.
 | `WORKFLOW_FAILED` | Workflow failed | No |
 | `WORKFLOW_CANCELLED` | Workflow was cancelled | No |
 | `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped | No |
-| `SUBWORKFLOW_FAILED` | Subworkflow failed | No |
+| `SUB_WORKFLOW_FAILED` | Subworkflow failed | No |
 | `WORKFLOW_SUCCESS_CASE_NOT_MET` | Workflow success condition was not satisfied | No |
 | `WORKFLOW_OUTPUT_SKIPPED` | A `COMPLETED` workflow has no output: its output node, or a terminal node of an outputless workflow, is SKIPPED, and a success case does not require that node; `data` names the workflow and the node | No |
 
@@ -96,20 +96,20 @@ Terminal outcome codes for tasks and workflows.
 
 Workflow-specific error codes are distributed across the four families above:
 
-- **OperationalErrorCode**: `WORKFLOW_ENQUEUE_FAILED`, `SUBWORKFLOW_LOAD_FAILED`, `WORKFLOW_RECOVERY_LIMIT_REACHED`, `SUBWORKFLOW_DEPTH_LIMIT_REACHED`
-- **ContractCode**: `WORKFLOW_CTX_MISSING_ID`
+- **OperationalCode**: `WORKFLOW_ENQUEUE_FAILED`, `SUBWORKFLOW_LOAD_FAILED`, `WORKFLOW_RECOVERY_LIMIT_REACHED`, `SUBWORKFLOW_DEPTH_LIMIT_REACHED`
+- **ContractCode**: `WORKFLOW_CONTEXT_MISSING_ID`
 - **RetrievalCode**: `WORKFLOW_NOT_FOUND`
-- **OutcomeCode**: `WORKFLOW_PAUSED`, `WORKFLOW_EXPIRED`, `WORKFLOW_FAILED`, `WORKFLOW_CANCELLED`, `UPSTREAM_SKIPPED`, `SUBWORKFLOW_FAILED`, `WORKFLOW_SUCCESS_CASE_NOT_MET`, `WORKFLOW_OUTPUT_SKIPPED`
+- **OutcomeCode**: `WORKFLOW_PAUSED`, `WORKFLOW_EXPIRED`, `WORKFLOW_FAILED`, `WORKFLOW_CANCELLED`, `UPSTREAM_SKIPPED`, `SUB_WORKFLOW_FAILED`, `WORKFLOW_SUCCESS_CASE_NOT_MET`, `WORKFLOW_OUTPUT_SKIPPED`
 
 ### Reserved Codes
 
-Every code of the four families is reserved: a task's own code must not have the name of a library code. `WORKFLOW_STOPPED` is reserved too; it is not a task code. A client refuses a reserved name as a task's own code, as an `auto_retry_for` entry of a user code, and in the config. A library code is stored in a tagged form, `{"__builtin_task_code__": "BROKER_ERROR"}`, and a task's own code as plain text, so a stored code reads back as the same kind. The client rules: [Python](/horsies/tasks/error-types/#reserved-built-in-code-enforcement), [Rust](/horsies/rust/tasks/errors/#the-code-type).
+Every code of the four families is reserved: a task's own code must not have the name of a library code. `WORKFLOW_STOPPED` is reserved too; it is not a task code. A client refuses a reserved name as a task's own code, as an `auto_retry_for` entry of a user code, and in the config. A library code is stored in a tagged form, `{"__builtin_task_code__": "DATABASE_ERROR"}`, and a task's own code as plain text, so a stored code reads back as the same kind. The client rules: [Python](/horsies/tasks/error-types/#reserved-built-in-code-enforcement), [Rust](/horsies/rust/tasks/errors/#the-code-type).
 
 ### Declared Error Codes
 
 A task can declare its own error codes. The declared codes close the set of values of the `error_code` label of the task's worker metrics:
 
-- each built-in code, by its value (`BROKER_ERROR`);
+- each built-in code, by its value (`DATABASE_ERROR`);
 - each code that the task declares (`CARD_DECLINED`);
 - `undeclared`, for every other user code of the task.
 
@@ -156,20 +156,20 @@ The codes of the client calls. The error types that carry them are on the client
 
 ### Workflow Handle Error Codes
 
-<!-- members: HandleErrorCode -->
+<!-- members: WorkflowHandleErrorCode -->
 | Code | Variant | Other fields | Retryable | When |
 |---|---|---|---|---|
-| `WORKFLOW_NOT_FOUND` | `HandleWorkflowNotFound` | – | No | No workflow has this id; nothing changed |
-| `DB_OPERATION_FAILED` | `HandleDbOperationFailed` | `exception: BaseException` | The core's classification of the cause | A database or driver error. A read changed nothing; `cancel()`, `pause()` and `resume()` before its commit rolled back, or the commit outcome is unknown |
-| `STORED_DATA_INVALID` | `HandleStoredDataInvalid` | `exception: BaseException` | No | A stored workflow status that is not a `WorkflowStatus` (`status()`, `cancel()`), or a subworkflow summary that is not valid (`tasks()`); nothing changed, and a repeat returns the same error |
-| `RESUME_RECOVERY_FAILED` | `HandleResumeRecoveryFailed` | `exception: BaseException` | No | `resume()` committed, and the recovery pass for the workflow tree, which runs after the commit, failed with a database error. The workflow is `RUNNING`; the worker reaper runs the same pass over all workflows. A repeated `resume()` returns `Ok(False)` |
-| `ASYNC_CONTEXT` | `HandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran. Call the `*_async` form (sync `get()` / `result_for()` return the read error `ASYNC_CONTEXT` instead) |
+| `WORKFLOW_NOT_FOUND` | `WorkflowHandleNotFound` | – | No | No workflow has this id; nothing changed |
+| `DATABASE_OPERATION_FAILED` | `WorkflowHandleDatabaseOperationFailed` | `exception: BaseException` | The core's classification of the cause | A database or driver error. A read changed nothing; `cancel()`, `pause()` and `resume()` before its commit rolled back, or the commit outcome is unknown |
+| `STORED_DATA_INVALID` | `WorkflowHandleStoredDataInvalid` | `exception: BaseException` | No | A stored workflow status that is not a `WorkflowStatus` (`status()`, `cancel()`), or a subworkflow summary that is not valid (`tasks()`); nothing changed, and a repeat returns the same error |
+| `RESUME_RECOVERY_FAILED` | `WorkflowHandleResumeRecoveryFailed` | `exception: BaseException` | No | `resume()` committed, and the recovery pass for the workflow tree, which runs after the commit, failed with a database error. The workflow is `RUNNING`; the worker reaper runs the same pass over all workflows. A repeated `resume()` returns `Ok(False)` |
+| `ASYNC_CONTEXT` | `WorkflowHandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran. Call the `*_async` form (sync `get()` / `result_for()` return the read error `ASYNC_CONTEXT` instead) |
 
-`get()` returns a status read failure as a read error. `WORKFLOW_NOT_FOUND` becomes `Err(WorkflowNotFound(...))`. `DB_OPERATION_FAILED` and `STORED_DATA_INVALID` become `Err(BrokerError(...))`.
+`get()` returns a status read failure as a read error. `WORKFLOW_NOT_FOUND` becomes `Err(WorkflowNotFound(...))`. `DATABASE_OPERATION_FAILED` and `STORED_DATA_INVALID` become `Err(ReadDatabaseError(...))`.
 
 ## Config Error Codes (HorsiesError)
 
-A config, task definition or workflow definition that breaks a rule stops the app before it runs: the worker or the scheduler does not start and takes no task. Each refusal carries an `ErrorCode` (`HRS-xxx`), its category, a message, notes and help text.
+A config, task definition or workflow definition that breaks a rule stops the app before it runs: the worker or the scheduler does not start and takes no task. Each refusal carries an `HorsiesErrorCode` (`HRS-xxx`), its category, a message, notes and help text.
 
 ### PgBouncer Configuration Errors
 
@@ -210,7 +210,7 @@ Postgres URL or a session-pooling URL for `session_database_url`.
 See [PgBouncer Troubleshooting](/horsies/troubleshooting/pgbouncer/) for the full
 deployment pattern.
 
-### ErrorCode Categories
+### HorsiesErrorCode Categories
 
 | Range | Category | Description |
 | ----- | -------- | ----------- |
@@ -221,7 +221,7 @@ deployment pattern.
 
 ### Workflow Validation (HRS-001-HRS-099)
 
-<!-- members: ErrorCode part -->
+<!-- members: HorsiesErrorCode part -->
 | Code | Name | Description |
 | ---- | ---- | ----------- |
 | HRS-001 | `WORKFLOW_NO_NAME` | Workflow has no name |
@@ -232,8 +232,8 @@ deployment pattern.
 | HRS-006 | `WORKFLOW_INVALID_DEPENDENCY` | Invalid dependency reference |
 | HRS-007 | `WORKFLOW_CYCLE_DETECTED` | Cycle detected in workflow DAG |
 | HRS-008 | `WORKFLOW_INVALID_ARGS_FROM` | Invalid args_from reference |
-| HRS-009 | `WORKFLOW_INVALID_CTX_FROM` | Invalid ctx_from reference |
-| HRS-010 | `WORKFLOW_CTX_PARAM_MISSING` | Context parameter missing |
+| HRS-009 | `WORKFLOW_INVALID_CONTEXT_FROM` | Invalid ctx_from reference |
+| HRS-010 | `WORKFLOW_CONTEXT_PARAMETER_MISSING` | Context parameter missing |
 | HRS-011 | `WORKFLOW_INVALID_OUTPUT` | Invalid output specification |
 | HRS-012 | `WORKFLOW_INVALID_SUCCESS_POLICY` | Invalid success policy |
 | HRS-013 | `WORKFLOW_INVALID_JOIN` | Invalid join configuration |
@@ -264,7 +264,7 @@ deployment pattern.
 
 ### Task Definition (HRS-100-HRS-199)
 
-<!-- members: ErrorCode part -->
+<!-- members: HorsiesErrorCode part -->
 | Code | Name | Description |
 | ---- | ---- | ----------- |
 | HRS-100 | `TASK_NO_RETURN_TYPE` | Task function missing return type |
@@ -283,23 +283,23 @@ deployment pattern.
 
 ### Configuration (HRS-200-HRS-299)
 
-<!-- members: ErrorCode part -->
+<!-- members: HorsiesErrorCode part -->
 | Code | Name | Description |
 | ---- | ---- | ----------- |
 | HRS-200 | `CONFIG_INVALID_QUEUE_MODE` | Invalid queue mode or custom queue list: `custom_queues` in `DEFAULT` mode, missing or duplicate `custom_queues` in `CUSTOM` mode, or a `CustomQueueConfig.name` that is empty, has whitespace at the start or the end, is longer than 52 bytes of UTF-8 text (`QUEUE_NAME_MAX_BYTES`), or has no UTF-8 text |
 | HRS-201 | `CONFIG_INVALID_CLUSTER_CAP` | Invalid cluster capacity |
 | HRS-202 | `CONFIG_INVALID_PREFETCH` | Invalid prefetch setting |
-| HRS-203 | `BROKER_INVALID_URL` | Invalid broker URL |
+| HRS-203 | `DATABASE_INVALID_URL` | Invalid broker URL |
 | HRS-204 | `CONFIG_INVALID_RECOVERY` | Invalid recovery configuration |
 | HRS-205 | `CONFIG_INVALID_SCHEDULE` | Invalid schedule configuration |
 | HRS-206 | `CLI_INVALID_ARGS` | Invalid CLI arguments |
 | HRS-207 | `WORKER_INVALID_LOCATOR` | Invalid worker locator |
 | HRS-208 | `CONFIG_INVALID_RESILIENCE` | Invalid resilience configuration |
 | HRS-209 | `CONFIG_INVALID_EXCEPTION_MAPPER` | Invalid exception mapper |
-| HRS-210 | `MODULE_EXEC_ERROR` | Module raised an error during import |
-| HRS-211 | `BROKER_INIT_FAILED` | Broker failed to initialize |
+| HRS-210 | `MODULE_IMPORT_ERROR` | Module raised an error during import |
+| HRS-211 | `DATABASE_INIT_FAILED` | Broker failed to initialize |
 | HRS-212 | `CHECK_RESERVED_CODE_COLLISION` | User config value collides with a reserved built-in error code, or a task declares a built-in code or a reserved name as its own error code |
-| HRS-213 | `CONFIG_INVALID_BROKER_POOL` | A `PostgresConfig` pool value outside its range: `pool_size` outside 1 to 10,000, `max_overflow` outside 0 to 10,000, `pool_timeout` outside 0 to 4,294,967,295 s, or `pool_recycle` that is not -1 or 0 to 4,294,967,295 s. `pool_size=0` and `max_overflow=-1` (no limit in SQLAlchemy) are refused, and the help says to give a number. Also a `PostgresConfig` that sets a pool field removed in 0.7.0: `worker_pool_size` or `worker_max_overflow` (the help names `WorkerProfile.pool`), or `worker_child_pool_min_size`, `worker_child_pool_max_size` or `worker_child_pool_check` (the help names the `pool` field of each child kind that replaces it) |
+| HRS-213 | `CONFIG_INVALID_DATABASE_POOL` | A `PostgresConfig` pool value outside its range: `pool_size` outside 1 to 10,000, `max_overflow` outside 0 to 10,000, `pool_timeout` outside 0 to 4,294,967,295 s, or `pool_recycle` that is not -1 or 0 to 4,294,967,295 s. `pool_size=0` and `max_overflow=-1` (no limit in SQLAlchemy) are refused, and the help says to give a number. Also a `PostgresConfig` that sets a pool field removed in 0.7.0: `worker_pool_size` or `worker_max_overflow` (the help names `WorkerProfile.pool`), or `worker_child_pool_min_size`, `worker_child_pool_max_size` or `worker_child_pool_check` (the help names the `pool` field of each child kind that replaces it) |
 | HRS-214 | `CONFIG_INVALID_CHILD_HOOK` | `on_child_process_start` or `on_handler_child_start` received a value that is not callable, or an async function |
 | HRS-215 | `CONFIG_INVALID_KEEPALIVE` | A TCP value outside its range: while `tcp_keepalives` is on, `tcp_keepalives_idle` or `tcp_keepalives_interval` outside 1 to 32,767 s, or `tcp_keepalives_count` outside 1 to 127; or a `tcp_user_timeout_ms` that is not 0 or 1 to 2,147,483,647 ms. The first value out of range is refused, in field order |
 | HRS-216 | `CONFIG_INVALID_RETENTION` | Invalid retention configuration |
@@ -317,7 +317,7 @@ deployment pattern.
 
 ### Registry (HRS-300-HRS-399)
 
-<!-- members: ErrorCode part -->
+<!-- members: HorsiesErrorCode part -->
 | Code | Name | Description |
 | ---- | ---- | ----------- |
 | HRS-300 | `TASK_NOT_REGISTERED` | Task not found in registry |

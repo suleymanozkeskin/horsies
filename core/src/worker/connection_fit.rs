@@ -50,7 +50,7 @@ use crate::core::config::worker_profile::{
     SharedAsyncSetting, SharedThreadSetting, WorkerProfile,
 };
 use crate::core::config::{AppConfig, PostgresConfig};
-use crate::core::error::{ErrorCode, HorsiesError};
+use crate::core::error::{HorsiesErrorCode, HorsiesError};
 use crate::db::{CheckoutClass, CorePool, StatementBound, TypedStatement};
 use crate::handle::CoreHandle;
 
@@ -537,7 +537,7 @@ fn exceeds_server_error(
         profile_path(name),
         exceeds_server_text(need, limit)
     ))
-    .with_code(ErrorCode::CheckWorkerConnections)
+    .with_code(HorsiesErrorCode::CheckWorkerConnections)
     .with_note(need.formula())
     .with_note(need.task_sends_note())
     .with_help(CONNECTIONS_HELP)
@@ -567,7 +567,7 @@ pub fn worker_connection_errors(
 /// The error of a limit that was not read. Pure.
 pub fn connection_limit_unreadable_error(cause: &ConnectionLimitUnreadable) -> HorsiesError {
     HorsiesError::new("the server connection limit could not be read")
-        .with_code(ErrorCode::CheckWorkerConnections)
+        .with_code(HorsiesErrorCode::CheckWorkerConnections)
         .with_note(cause.to_string())
         .with_help(LIMIT_UNREADABLE_HELP)
 }

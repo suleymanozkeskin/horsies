@@ -37,7 +37,7 @@ fn command(task_id: Uuid, failure: Failure) -> FinishFailedAttempt {
     let (retry, error_code, kind) = match failure {
         Failure::WorkerLevel => (
             RetryRequest::NoRetry,
-            "BROKER_ERROR",
+            "DATABASE_ERROR",
             AttemptFailureKind::WorkerFailure,
         ),
         Failure::TaskError { error_code, retry } => (retry, error_code, AttemptFailureKind::Failed),

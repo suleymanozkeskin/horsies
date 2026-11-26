@@ -56,6 +56,14 @@ class TaskSendSuppressed:
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.SEND_SUPPRESSED
     message: str = field(repr=False)
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
 class TaskSendAsyncContext:
@@ -71,6 +79,14 @@ class TaskSendAsyncContext:
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
 class TaskSendValidationFailed:
@@ -82,7 +98,15 @@ class TaskSendValidationFailed:
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.VALIDATION_FAILED
     message: str = field(repr=False)
-    exception: BaseException | NoCause = field(repr=False)
+    cause: BaseException | NoCause = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
@@ -100,7 +124,15 @@ class TaskSendEnqueueFailed:
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
     retryable: bool
-    exception: BaseException | NoCause = field(repr=False)
+    cause: BaseException | NoCause = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
@@ -115,6 +147,14 @@ class TaskSendPayloadMismatch:
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
 class TaskSendPayloadTooLarge:
@@ -128,6 +168,14 @@ class TaskSendPayloadTooLarge:
     message: str = field(repr=False)
     size_bytes: int
     limit_bytes: int
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
 
 
 @dataclass(slots=True, frozen=True)
@@ -146,6 +194,14 @@ class TaskSendIdempotencyKeyConflict:
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
     owner_task_id: uuid.UUID
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
 
 
 type TaskSendCoreError = (

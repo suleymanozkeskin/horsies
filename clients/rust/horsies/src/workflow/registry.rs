@@ -40,7 +40,7 @@ use super::spec_data::client_spec;
 use super::sub_workflow::NodeParams;
 use crate::send::TaskFunctions;
 use crate::task::body::{decode_checked, raw_value_of, value_parts, DecodeFailure, ValueParts};
-use crate::{AppConfig, ErrorCode, HorsiesError, ValidationReport};
+use crate::{AppConfig, HorsiesErrorCode, HorsiesError, ValidationReport};
 
 /// The hook that builds a child from params, as the error texts of a child
 /// start name it: the definition's `build_with`.
@@ -207,7 +207,7 @@ impl WorkflowRegistry {
         if definition.name.trim().is_empty() {
             return Err(
                 HorsiesError::new("workflow definition name must not be empty")
-                    .with_code(ErrorCode::WorkflowNoName),
+                    .with_code(HorsiesErrorCode::WorkflowNoName),
             );
         }
         if definition.definition_key.trim().is_empty() {
@@ -215,7 +215,7 @@ impl WorkflowRegistry {
                 "workflow definition '{}' has an empty definition key",
                 definition.name
             ))
-            .with_code(ErrorCode::WorkflowNoDefinitionKey));
+            .with_code(HorsiesErrorCode::WorkflowNoDefinitionKey));
         }
         // A spec without params converts now, so a task queue that the app
         // does not admit is refused at its registration.
@@ -315,7 +315,7 @@ impl WorkflowRegistry {
                         "workflow builder '{}' refused a check case",
                         case.builder_name
                     ))
-                    .with_code(ErrorCode::WorkflowCheckCaseInvalid)
+                    .with_code(HorsiesErrorCode::WorkflowCheckCaseInvalid)
                     .with_note(refused.to_string()),
                 ),
                 Err(panic) => findings.push(
@@ -323,7 +323,7 @@ impl WorkflowRegistry {
                         "workflow builder '{}' panicked on a check case",
                         case.builder_name
                     ))
-                    .with_code(ErrorCode::WorkflowCheckBuilderException)
+                    .with_code(HorsiesErrorCode::WorkflowCheckBuilderException)
                     .with_note(panic_text(panic.as_ref()))
                     .with_help("workflow builders must return a spec or a HorsiesError"),
                 ),
@@ -717,7 +717,7 @@ fn child_for_check(
             Err(ParamsBuildRefused::Member { key, cause }) => {
                 findings.push(
                     HorsiesError::new("subworkflow params do not fit build_with")
-                        .with_code(ErrorCode::WorkflowKwargsNotSerializable)
+                        .with_code(HorsiesErrorCode::WorkflowKwargsNotSerializable)
                         .with_note(format!("node '{}': param '{key}': {cause}", node.node_id))
                         .with_help("fix the param, or the params type of the definition"),
                 );
@@ -725,7 +725,7 @@ fn child_for_check(
             }
             Err(ParamsBuildRefused::Undecodable { text }) => {
                 findings.push(
-                    HorsiesError::new(text).with_code(ErrorCode::WorkflowKwargsNotSerializable),
+                    HorsiesError::new(text).with_code(HorsiesErrorCode::WorkflowKwargsNotSerializable),
                 );
                 None
             }
@@ -742,7 +742,7 @@ fn duplicate(definition: &Definition, cause: &str) -> HorsiesError {
         "workflow definition '{}' ({}) is registered twice: {cause}",
         definition.name, definition.definition_key
     ))
-    .with_code(ErrorCode::WorkflowDuplicateDefinitionKey)
+    .with_code(HorsiesErrorCode::WorkflowDuplicateDefinitionKey)
     .with_help("give each workflow definition its own name and definition key")
 }
 
@@ -754,7 +754,7 @@ fn keyless_spec(spec: &WorkflowSpec) -> Option<HorsiesError> {
         Some(key) if !key.is_empty() => None,
         Some(_) | None => Some(
             HorsiesError::new("WorkflowSpec is missing definition_key")
-                .with_code(ErrorCode::WorkflowNoDefinitionKey)
+                .with_code(HorsiesErrorCode::WorkflowNoDefinitionKey)
                 .with_note(format!(
                     "workflow '{}' has no stable definition_key",
                     spec.name()
@@ -770,7 +770,7 @@ fn unregistered_child(spec: &WorkflowSpec, node: &SpecNode, definition_key: &str
          registered",
         spec.name, node.node_id, node.name
     ))
-    .with_code(ErrorCode::WorkflowMissingRequiredParams)
+    .with_code(HorsiesErrorCode::WorkflowMissingRequiredParams)
     .with_help(
         "register the child definition on the app: register_workflow_definition or \
          workflow_template",
@@ -793,7 +793,7 @@ fn params_without_build_with(
     match (kind, gives_params) {
         (DefinitionKind::WithoutParams(_), true) => Some(
             HorsiesError::new("subworkflow params require overriding build_with")
-                .with_code(ErrorCode::WorkflowSubworkflowParamsRequireBuildWith)
+                .with_code(HorsiesErrorCode::WorkflowSubworkflowParamsRequireBuildWith)
                 .with_note(format!(
                     "workflow '{}' node '{}': subworkflow '{}' gets params but its definition \
                      takes none",
@@ -870,7 +870,7 @@ fn decide_nesting(path: &[NestingStep], node_id: &str, step: NestingStep) -> Nes
         return match starts_for_certain(&walked[index + 1..]) {
             true => NestingDecision::StopWithFinding(
                 HorsiesError::new("a subworkflow includes itself with the same params")
-                    .with_code(ErrorCode::WorkflowSubworkflowSelfNesting)
+                    .with_code(HorsiesErrorCode::WorkflowSubworkflowSelfNesting)
                     .with_note(format!(
                         "node '{node_id}': definition '{}' with these params is already on the \
                          path from the root, and no node between the two waits for other nodes",
@@ -885,7 +885,7 @@ fn decide_nesting(path: &[NestingStep], node_id: &str, step: NestingStep) -> Nes
         return match starts_for_certain(&walked) {
             true => NestingDecision::StopWithFinding(
                 HorsiesError::new("subworkflow nesting passes the depth limit")
-                    .with_code(ErrorCode::WorkflowSubworkflowDepthLimit)
+                    .with_code(HorsiesErrorCode::WorkflowSubworkflowDepthLimit)
                     .with_note(format!(
                         "node '{node_id}': its child workflow would have depth {}; the limit is \
                          {MAX_SUBWORKFLOW_DEPTH}, and no node on the path waits for other nodes",

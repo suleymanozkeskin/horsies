@@ -12,7 +12,7 @@ from typing import (
     Literal,
 )
 
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 
 from .enums import (
     CodeT_co,
@@ -215,7 +215,7 @@ class TaskNode(Generic[OkT_co, CodeT_co]):
             raise WorkflowValidationError(
                 'TaskNode node_id is not set. Ensure WorkflowSpec assigns node_id '
                 'or provide an explicit node_id.',
-                code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
+                code=HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID,
                 help_text='set node_id on the node, or read its key after a WorkflowSpec holds it',
             )
         return NodeKey(self.node_id)
@@ -236,7 +236,7 @@ class SubWorkflowNode(Generic[OkT_co]):
 
     When the child workflow completes:
     - COMPLETED: parent node receives Succeeded(output), a TaskOutcome[OkT, TaskError]
-    - FAILED: parent node receives Failed(SubWorkflowError) with its SubWorkflowSummary
+    - FAILED: parent node receives Failed(SubWorkflowFailure) with its SubWorkflowSummary
 
     Example:
         class DataPipeline(WorkflowDefinition[ProcessedData]):
@@ -377,7 +377,7 @@ class SubWorkflowNode(Generic[OkT_co]):
             raise WorkflowValidationError(
                 'SubWorkflowNode node_id is not set. Ensure WorkflowSpec assigns node_id '
                 'or provide an explicit node_id.',
-                code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
+                code=HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID,
                 help_text='set node_id on the node, or read its key after a WorkflowSpec holds it',
             )
         return NodeKey(self.node_id)

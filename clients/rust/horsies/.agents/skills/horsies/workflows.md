@@ -451,16 +451,16 @@ with the error's id.
 | `InvalidInput { workflow_id, cause }` | `INVALID_INPUT` | `get`: the `Within` limit is above `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms); `cause` is `WaitLimitRefused`. The first check, before any statement |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A wait in a worker child. Nothing was read |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking `get` or `result_for` on a thread that runs a tokio runtime. Nothing was read |
-| `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
+| `Database { code, message, retryable }` | `DATABASE_ERROR` | The database or the connection failed. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
 
-`HandleOperationError` (from `status`, `results`, `tasks`, `cancel`,
+`WorkflowHandleError` (from `status`, `results`, `tasks`, `cancel`,
 `pause`, `resume`) is an enum with one variant per state; every variant
-has `message` and `workflow_id`, and `DbOperationFailed` has `retryable`.
-`DbOperationFailed`, `StoredDataInvalid` and `ResumeRecoveryFailed` carry
+has `message` and `workflow_id`, and `DatabaseOperationFailed` has `retryable`.
+`DatabaseOperationFailed`, `StoredDataInvalid` and `ResumeRecoveryFailed` carry
 their `cause`, the `WorkflowError`. A failure's message starts with the
 operation's label: `Status failed for workflow <id>: <cause>`.
 The methods `code()`, `message()`, `retryable()`, `workflow_id()` and
-`failure_cause()` read every variant. The operations document these codes: `WorkflowNotFound`, `DbOperationFailed`,
+`failure_cause()` read every variant. The operations document these codes: `WorkflowNotFound`, `DatabaseOperationFailed`,
 `StoredDataInvalid` (`status`, `tasks`, `resume`), and
 `ResumeRecoveryFailed` (`resume` committed and the work after it failed:
 the workflow is RUNNING). A blocking form (`handle.blocking()`) on a thread
@@ -598,7 +598,7 @@ use horsies::{
     WorkflowStartError, WorkflowStartErrorCode,
     // Handle
     WorkflowHandle, WorkflowReadError, NodeResult, WorkflowNodeInfo, WorkflowStatus,
-    WorkflowTaskStatus, HandleOperationError, HandleErrorCode, HandleResult,
+    WorkflowTaskStatus, WorkflowHandleError, WorkflowHandleErrorCode, HandleResult,
     TaskOutcome, UserCode, WaitLimit,
 };
 ```

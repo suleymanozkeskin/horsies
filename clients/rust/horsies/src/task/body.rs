@@ -21,7 +21,7 @@ use horsies_core::core::codec::{
     MAX_JSON_DEPTH,
 };
 use horsies_core::core::task::RawTaskResult;
-use horsies_core::{OperationalErrorCode, TaskErrorKind, TaskResult};
+use horsies_core::{OperationalCode, TaskErrorKind, TaskResult};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -580,7 +580,7 @@ fn serialization_error<V>(message: String) -> StoredTaskError {
     StoredTaskError {
         exception: None,
         error_code: horsies_core::TaskErrorCode::from(
-            OperationalErrorCode::WorkerSerializationError,
+            OperationalCode::WorkerSerializationError,
         ),
         data: Some(
             horsies_core::JsonText::of(&serde_json::Value::Object(data))
@@ -662,7 +662,7 @@ mod tests {
     fn assert_serialization_error(error: &StoredTaskError) {
         assert_eq!(
             error.error_code,
-            horsies_core::TaskErrorCode::from(OperationalErrorCode::WorkerSerializationError)
+            horsies_core::TaskErrorCode::from(OperationalCode::WorkerSerializationError)
         );
     }
 

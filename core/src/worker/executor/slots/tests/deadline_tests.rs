@@ -218,7 +218,7 @@ async fn a_lost_child_names_its_exit_in_the_crash_reason() {
     let write = killed_child_write(
         &claimed,
         "worker-1",
-        OperationalErrorCode::WorkerCrashed.into(),
+        OperationalCode::WorkerCrashed.into(),
         reason.as_str().to_owned(),
         RetryPlacement::SameClass,
         crate::core::lifecycle::AttemptPlacement::NotObserved,

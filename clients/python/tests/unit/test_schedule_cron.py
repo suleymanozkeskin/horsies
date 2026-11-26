@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     MultipleValidationErrors,
 )
 from horsies.core.models.schedule import (
@@ -86,7 +86,7 @@ class TestCronScheduleValidationSingle:
     def _assert_config_error(self, **kwargs: object) -> None:
         with pytest.raises(ConfigurationError) as exc_info:
             CronSchedule(**kwargs)  # type: ignore[arg-type]
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
 
     def test_minute_out_of_domain(self) -> None:
         """Minute value above 59 is rejected."""
@@ -175,7 +175,7 @@ class TestCronScheduleStepSpan:
                 month=[CronEvery()],
                 day=EveryDay(),
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
 
     def test_day_of_month_step_at_span_allowed(self) -> None:
         """Day-of-month step at span (30) is allowed -> {1, 31}."""
@@ -236,7 +236,7 @@ class TestCronScheduleSatisfiability:
                 month=[CronEnumValues[Month](values=[Month.FEBRUARY])],
                 day=ByMonthDay(day_of_month=[CronValues(values=[30])]),
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
 
     def test_february_29_allowed(self) -> None:
         """February + day 29 is valid (leap years exist)."""

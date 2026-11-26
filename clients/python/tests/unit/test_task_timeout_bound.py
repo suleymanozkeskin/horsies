@@ -6,7 +6,7 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from horsies.core.app import Horsies
-from horsies.core.errors import ErrorCode, TaskDefinitionError
+from horsies.core.errors import HorsiesErrorCode, TaskDefinitionError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
@@ -75,5 +75,5 @@ class TestTaskDecorator:
             def above_the_limit(*, n: int) -> Result[int, TaskError]:  # pyright: ignore[reportUnusedFunction]
                 return Ok(n)
 
-        assert raised.value.code is ErrorCode.TASK_INVALID_OPTIONS
+        assert raised.value.code is HorsiesErrorCode.TASK_INVALID_OPTIONS
         assert str(MAX_TASK_TIMEOUT_MS) in str(raised.value)

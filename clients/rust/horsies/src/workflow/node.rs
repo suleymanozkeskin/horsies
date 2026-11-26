@@ -26,7 +26,7 @@ use crate::task::body::{
     decode_checked, decode_unit, encode_read_back, raw_value_of, unread_member,
     value_free_encode_text, value_parts, DecodeFailure, ValueParts,
 };
-use crate::{ErrorCode, HorsiesError, TaskFunction, TaskOutcome, UserErrorCode};
+use crate::{HorsiesErrorCode, HorsiesError, TaskFunction, TaskOutcome, UserErrorCode};
 
 // ---------------------------------------------------------------------------
 // Types and references
@@ -427,7 +427,7 @@ pub(crate) fn input_refused(owner: &str, refused: &InputRefused) -> HorsiesError
         InputRefused::NotAnObject => HorsiesError::new(format!(
             "the input of node {owner} is not a JSON object"
         ))
-        .with_code(ErrorCode::WorkflowPositionalArgsNotSupported)
+        .with_code(HorsiesErrorCode::WorkflowPositionalArgsNotSupported)
         .with_help(
             "a workflow node takes its input as named members: give the task a struct input or \
              several parameters",
@@ -437,7 +437,7 @@ pub(crate) fn input_refused(owner: &str, refused: &InputRefused) -> HorsiesError
             "the input of node {owner} has the member '{name}', a name that only the engine \
              writes"
         ))
-        .with_code(ErrorCode::WorkflowInvalidKwargKey)
+        .with_code(HorsiesErrorCode::WorkflowInvalidKwargKey)
         .with_help("keys that start with __h_ or __horsies_, and __builtin_task_code__, belong to the engine"),
     }
 }
@@ -446,7 +446,7 @@ fn not_serializable(owner: &str, cause: &str) -> HorsiesError {
     HorsiesError::new(format!(
         "the input of node {owner} does not serialize: {cause}"
     ))
-    .with_code(ErrorCode::WorkflowKwargsNotSerializable)
+    .with_code(HorsiesErrorCode::WorkflowKwargsNotSerializable)
 }
 
 /// A serde_json error kind as text, with no value and no position.
@@ -846,7 +846,7 @@ pub(crate) mod tests {
         let refused = task_node::<u32, ChargeInput>("charge")
             .set(amount(), f64::NAN)
             .unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowKwargsNotSerializable));
         assert!(refused.message.contains("'charge'"), "{refused}");
     }
 
@@ -863,14 +863,14 @@ pub(crate) mod tests {
         let refused = task_node::<u32, u64>("double").set_input(5).unwrap_err();
         assert_eq!(
             refused.code,
-            Some(ErrorCode::WorkflowPositionalArgsNotSupported)
+            Some(HorsiesErrorCode::WorkflowPositionalArgsNotSupported)
         );
         let refused = task_node::<u32, u64>("double")
             .input_json("[1, 2]")
             .unwrap_err();
         assert_eq!(
             refused.code,
-            Some(ErrorCode::WorkflowPositionalArgsNotSupported)
+            Some(HorsiesErrorCode::WorkflowPositionalArgsNotSupported)
         );
     }
 
@@ -879,7 +879,7 @@ pub(crate) mod tests {
         let refused = task_node::<u32, ChargeInput>("charge")
             .input_json(r#"{"__h_workflow_meta__": {}}"#)
             .unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowInvalidKwargKey));
     }
 
     #[test]

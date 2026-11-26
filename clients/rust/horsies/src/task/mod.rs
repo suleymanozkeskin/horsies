@@ -39,7 +39,7 @@ pub use horsies_core::{CancelCause, RunCancelState};
 // The library's code catalogs, with Python's names and wire values.
 pub use horsies_core::core::task::error::ExceptionRecord;
 pub use horsies_core::{
-    BuiltInTaskCode, ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode,
+    BuiltInTaskCode, ContractCode, OperationalCode, OutcomeCode, RetrievalCode,
     SubWorkflowFailure,
 };
 

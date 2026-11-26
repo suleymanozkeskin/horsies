@@ -53,7 +53,7 @@ The read checks the limit first. A `Within` limit above `MAX_WAIT_LIMIT_MS` (4,2
 | `InvalidInput { task_id, cause }` | `INVALID_INPUT` | The `Within` limit is above `MAX_WAIT_LIMIT_MS`. `cause` is `WaitLimitRefused`. Nothing was read | Refuses the same limit again. A limit within the bound reads |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A result wait in a process that runs task bodies. Nothing was read. Compose the tasks with a workflow | – |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking read on a thread where a tokio runtime is current. Nothing was read. See [Blocking API](/horsies/rust/tasks/blocking-api/#on-a-runtime-thread) | – |
-| `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed; `retryable` is the classification of the cause | May succeed |
+| `Database { code, message, retryable }` | `DATABASE_ERROR` | The database or the connection failed; `retryable` is the classification of the cause | May succeed |
 
 `ReadError::code()` returns the library code of the failure.
 

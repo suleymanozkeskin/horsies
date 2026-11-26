@@ -57,27 +57,27 @@ class ClassShape(NamedTuple):
 
 
 SHAPES: Final[tuple[ClassShape, ...]] = (
-    ClassShape(result_types.BrokerOperationFailed, broker_errors.BrokerOperationFailed, (('code', True), ('message', False), ('retryable', True), ('exception', False),), None, never_retryable=False),
-    ClassShape(result_types.BrokerEnqueueFailed, broker_errors.BrokerEnqueueFailed, (('message', False), ('retryable', True), ('exception', False),), 'ENQUEUE_FAILED', never_retryable=False),
-    ClassShape(result_types.BrokerPayloadMismatch, broker_errors.BrokerPayloadMismatch, (('message', False),), 'PAYLOAD_MISMATCH', never_retryable=True),
-    ClassShape(result_types.BrokerIdempotencyKeyConflict, broker_errors.BrokerIdempotencyKeyConflict, (('message', False), ('owner_task_id', True),), 'IDEMPOTENCY_KEY_CONFLICT', never_retryable=True),
-    ClassShape(result_types.BrokerInvalidJsonPayload, broker_errors.BrokerInvalidJsonPayload, (('message', False), ('exception', False),), 'INVALID_JSON_PAYLOAD', never_retryable=True),
-    ClassShape(result_types.BrokerInvalidTaskOptions, broker_errors.BrokerInvalidTaskOptions, (('message', False), ('exception', False),), 'INVALID_TASK_OPTIONS', never_retryable=True),
-    ClassShape(result_types.BrokerInvalidInput, broker_errors.BrokerInvalidInput, (('message', False), ('exception', False),), 'INVALID_INPUT', never_retryable=True),
-    ClassShape(result_types.BrokerAsyncContext, broker_errors.BrokerAsyncContext, (('message', False),), 'ASYNC_CONTEXT', never_retryable=True),
-    ClassShape(result_types.BrokerListenerDisabled, broker_errors.BrokerListenerDisabled, (('message', False),), 'LISTENER_DISABLED', never_retryable=True),
-    ClassShape(result_types.BrokerWaitInsideTask, broker_errors.BrokerWaitInsideTask, (('message', False),), 'WAIT_INSIDE_TASK', never_retryable=True),
-    ClassShape(handle_types.HandleWorkflowNotFound, workflow_handle_errors.HandleWorkflowNotFound, (('message', False), ('workflow_id', True),), 'WORKFLOW_NOT_FOUND', never_retryable=True),
-    ClassShape(handle_types.HandleDbOperationFailed, workflow_handle_errors.HandleDbOperationFailed, (('message', False), ('retryable', True), ('workflow_id', True), ('exception', False),), 'DB_OPERATION_FAILED', never_retryable=False),
-    ClassShape(handle_types.HandleStoredDataInvalid, workflow_handle_errors.HandleStoredDataInvalid, (('message', False), ('workflow_id', True), ('exception', False),), 'STORED_DATA_INVALID', never_retryable=True),
-    ClassShape(handle_types.HandleResumeRecoveryFailed, workflow_handle_errors.HandleResumeRecoveryFailed, (('message', False), ('workflow_id', True), ('exception', False),), 'RESUME_RECOVERY_FAILED', never_retryable=True),
-    ClassShape(handle_types.HandleAsyncContext, workflow_handle_errors.HandleAsyncContext, (('message', False), ('workflow_id', True),), 'ASYNC_CONTEXT', never_retryable=True),
-    ClassShape(errors.MonitoringQueryDbOperationFailed, monitoring_errors.MonitoringQueryDbOperationFailed, (('message', False), ('retryable', True), ('exception', False),), 'DB_OPERATION_FAILED', never_retryable=False),
+    ClassShape(result_types.DatabaseOperationFailed, broker_errors.DatabaseOperationFailed, (('code', True), ('message', False), ('retryable', True), ('exception', False),), None, never_retryable=False),
+    ClassShape(result_types.DatabaseEnqueueFailed, broker_errors.DatabaseEnqueueFailed, (('message', False), ('retryable', True), ('exception', False),), 'ENQUEUE_FAILED', never_retryable=False),
+    ClassShape(result_types.DatabasePayloadMismatch, broker_errors.DatabasePayloadMismatch, (('message', False),), 'PAYLOAD_MISMATCH', never_retryable=True),
+    ClassShape(result_types.DatabaseIdempotencyKeyConflict, broker_errors.DatabaseIdempotencyKeyConflict, (('message', False), ('owner_task_id', True),), 'IDEMPOTENCY_KEY_CONFLICT', never_retryable=True),
+    ClassShape(result_types.DatabaseInvalidJsonPayload, broker_errors.DatabaseInvalidJsonPayload, (('message', False), ('exception', False),), 'INVALID_JSON_PAYLOAD', never_retryable=True),
+    ClassShape(result_types.DatabaseInvalidTaskOptions, broker_errors.DatabaseInvalidTaskOptions, (('message', False), ('exception', False),), 'INVALID_TASK_OPTIONS', never_retryable=True),
+    ClassShape(result_types.DatabaseInvalidInput, broker_errors.DatabaseInvalidInput, (('message', False), ('exception', False),), 'INVALID_INPUT', never_retryable=True),
+    ClassShape(result_types.DatabaseAsyncContext, broker_errors.DatabaseAsyncContext, (('message', False),), 'ASYNC_CONTEXT', never_retryable=True),
+    ClassShape(result_types.DatabaseListenerDisabled, broker_errors.DatabaseListenerDisabled, (('message', False),), 'LISTENER_DISABLED', never_retryable=True),
+    ClassShape(result_types.DatabaseWaitInsideTask, broker_errors.DatabaseWaitInsideTask, (('message', False),), 'WAIT_INSIDE_TASK', never_retryable=True),
+    ClassShape(handle_types.WorkflowHandleNotFound, workflow_handle_errors.WorkflowHandleNotFound, (('message', False), ('workflow_id', True),), 'WORKFLOW_NOT_FOUND', never_retryable=True),
+    ClassShape(handle_types.WorkflowHandleDatabaseOperationFailed, workflow_handle_errors.WorkflowHandleDatabaseOperationFailed, (('message', False), ('retryable', True), ('workflow_id', True), ('exception', False),), 'DATABASE_OPERATION_FAILED', never_retryable=False),
+    ClassShape(handle_types.WorkflowHandleStoredDataInvalid, workflow_handle_errors.WorkflowHandleStoredDataInvalid, (('message', False), ('workflow_id', True), ('exception', False),), 'STORED_DATA_INVALID', never_retryable=True),
+    ClassShape(handle_types.WorkflowHandleResumeRecoveryFailed, workflow_handle_errors.WorkflowHandleResumeRecoveryFailed, (('message', False), ('workflow_id', True), ('exception', False),), 'RESUME_RECOVERY_FAILED', never_retryable=True),
+    ClassShape(handle_types.WorkflowHandleAsyncContext, workflow_handle_errors.WorkflowHandleAsyncContext, (('message', False), ('workflow_id', True),), 'ASYNC_CONTEXT', never_retryable=True),
+    ClassShape(errors.MonitoringQueryDatabaseOperationFailed, monitoring_errors.MonitoringQueryDatabaseOperationFailed, (('message', False), ('retryable', True), ('exception', False),), 'DATABASE_OPERATION_FAILED', never_retryable=False),
     ClassShape(errors.MonitoringQueryHistoryContractViolation, monitoring_errors.MonitoringQueryHistoryContractViolation, (('message', False), ('exception', False),), 'HISTORY_CONTRACT_VIOLATION', never_retryable=True),
     ClassShape(task_actions.TaskActionNotFound, monitoring_errors.TaskActionNotFound, (('message', False), ('task_id', True),), 'TASK_NOT_FOUND', never_retryable=True),
     ClassShape(task_actions.TaskActionNotCancellable, monitoring_errors.TaskActionNotCancellable, (('message', False), ('task_id', True), ('current_status', True),), 'TASK_NOT_CANCELLABLE', never_retryable=True),
     ClassShape(task_actions.TaskActionWorkflowTask, monitoring_errors.TaskActionWorkflowTask, (('message', False), ('task_id', True), ('current_status', True),), 'TASK_IS_WORKFLOW_TASK', never_retryable=True),
-    ClassShape(task_actions.TaskActionDbOperationFailed, monitoring_errors.TaskActionDbOperationFailed, (('message', False), ('retryable', True), ('task_id', True), ('exception', False),), 'DB_OPERATION_FAILED', never_retryable=False),
+    ClassShape(task_actions.TaskActionDatabaseOperationFailed, monitoring_errors.TaskActionDatabaseOperationFailed, (('message', False), ('retryable', True), ('task_id', True), ('exception', False),), 'DATABASE_OPERATION_FAILED', never_retryable=False),
     ClassShape(task_actions.TaskActionStoredDataInvalid, monitoring_errors.TaskActionStoredDataInvalid, (('message', False), ('task_id', True), ('exception', False),), 'STORED_DATA_INVALID', never_retryable=True),
     ClassShape(start_types.WorkflowStartValidationFailed, workflow_start_errors.WorkflowStartValidationFailed, (('message', False), ('workflow_name', True), ('workflow_id', True), ('exception', False),), 'VALIDATION_FAILED', never_retryable=True),
     ClassShape(start_types.WorkflowStartIdConflict, workflow_start_errors.WorkflowStartIdConflict, (('message', False), ('workflow_name', True), ('workflow_id', True), ('existing_workflow_name', True),), 'WORKFLOW_ID_CONFLICT', never_retryable=True),
@@ -175,13 +175,13 @@ def test_no_cause_is_the_generated_class_without_fields() -> None:
 
 
 def test_each_public_union_is_the_generated_union_and_its_client_only_classes() -> None:
-    assert result_types.BrokerOperationError.__value__ == (
-        broker_errors.BrokerCoreError
-        | result_types.BrokerNotAttached
-        | result_types.BrokerNoTypeAvailable
+    assert result_types.DatabaseOperationError.__value__ == (
+        broker_errors.DatabaseCoreError
+        | result_types.DatabaseNotAttached
+        | result_types.DatabaseNoTypeAvailable
     )
-    assert result_types.BrokerEnqueueError.__value__ is broker_errors.BrokerCoreEnqueueError
-    assert handle_types.HandleOperationError.__value__ is workflow_handle_errors.HandleCoreError
+    assert result_types.DatabaseEnqueueError.__value__ is broker_errors.DatabaseCoreEnqueueError
+    assert handle_types.WorkflowHandleError.__value__ is workflow_handle_errors.HandleCoreError
     assert errors.MonitoringQueryError.__value__ is monitoring_errors.MonitoringQueryCoreError
     assert task_actions.TaskActionError.__value__ is monitoring_errors.TaskActionCoreError
     assert start_types.WorkflowStartError.__value__ == (

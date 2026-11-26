@@ -228,7 +228,7 @@ mod tests {
 
     use super::*;
     use crate::workflow::node::BuilderId;
-    use crate::ErrorCode;
+    use crate::HorsiesErrorCode;
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     struct RegionParams {
@@ -293,7 +293,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             refused.code,
-            Some(ErrorCode::WorkflowPositionalArgsNotSupported)
+            Some(HorsiesErrorCode::WorkflowPositionalArgsNotSupported)
         );
     }
 }

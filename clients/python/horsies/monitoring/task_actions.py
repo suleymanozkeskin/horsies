@@ -45,7 +45,7 @@ from typing import assert_never
 from horsies._catalog.monitoring import TaskActionErrorCode as TaskActionErrorCode
 from horsies._catalog.monitoring_errors import (
     TaskActionCoreError as TaskActionCoreError,
-    TaskActionDbOperationFailed as TaskActionDbOperationFailed,
+    TaskActionDatabaseOperationFailed as TaskActionDatabaseOperationFailed,
     TaskActionNotCancellable as TaskActionNotCancellable,
     TaskActionNotFound as TaskActionNotFound,
     TaskActionStoredDataInvalid as TaskActionStoredDataInvalid,
@@ -76,10 +76,10 @@ def _db_err(
     message: str,
     retryable: bool,
     exc: BaseException,
-) -> Err[TaskActionDbOperationFailed]:
+) -> Err[TaskActionDatabaseOperationFailed]:
     """The core of this process could not run the cancel."""
     return Err(
-        TaskActionDbOperationFailed(
+        TaskActionDatabaseOperationFailed(
             message=f'Task cancel failed: {message}',
             retryable=retryable,
             task_id=task_id,
@@ -105,7 +105,7 @@ def _cancel_answer(
             TaskActionNotFound()
             | TaskActionNotCancellable()
             | TaskActionWorkflowTask()
-            | TaskActionDbOperationFailed()
+            | TaskActionDatabaseOperationFailed()
             | TaskActionStoredDataInvalid()
         ):
             return Err(outcome)

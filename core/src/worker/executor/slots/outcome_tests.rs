@@ -13,7 +13,7 @@ use uuid::Uuid;
 use super::*;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
-use crate::core::task::error::{OperationalErrorCode, TaskErrorCode};
+use crate::core::task::error::{OperationalCode, TaskErrorCode};
 use crate::core::task::result::{read_task_result_text, TaskResultText};
 use crate::events::AttemptStart;
 use crate::test_support::migrated_pool;
@@ -317,7 +317,7 @@ async fn a_result_that_is_json_but_not_an_envelope_fails_the_task_as_a_serializa
     match read_task_result_text(&stored) {
         Ok(TaskResultText::Err(error)) => assert_eq!(
             error.error_code,
-            TaskErrorCode::from(OperationalErrorCode::WorkerSerializationError),
+            TaskErrorCode::from(OperationalCode::WorkerSerializationError),
         ),
         other => panic!("the stored result is the worker's error envelope, got {other:?}"),
     }

@@ -8,7 +8,7 @@
 //! (`TASK_WORKFLOW_NODE_READ_END`).
 
 use horsies_core::{
-    BrokerOperationError, BrokerOperationFailedCode, BrokerOperationSource, TaskWorkflowNode,
+    DatabaseOperationError, DatabaseOperationFailedCode, BrokerOperationSource, TaskWorkflowNode,
 };
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
@@ -82,8 +82,8 @@ pub fn node_outcome(task_id: Uuid, node: TaskWorkflowNode) -> TaskWorkflowNodeOu
 fn read_failed(task_id: Uuid, source: BrokerOperationSource) -> TaskWorkflowNodeOutcome {
     TaskWorkflowNodeOutcome::Failed(BrokerFailure::of_operation_error(
         SUBJECT,
-        BrokerOperationError::operation_failed(
-            BrokerOperationFailedCode::TaskInfoQueryFailed,
+        DatabaseOperationError::operation_failed(
+            DatabaseOperationFailedCode::TaskInfoQueryFailed,
             format!("task_workflow_node failed for {task_id}: {source}"),
             source,
         ),

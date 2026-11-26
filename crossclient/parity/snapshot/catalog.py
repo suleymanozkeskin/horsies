@@ -126,7 +126,7 @@ def stored_error_paths(error: tuple[PathStep, ...]) -> tuple[JsonPath, ...]:
       and ``data.detected_at``, as in the result envelope;
     - ``data.workflow_id``: the workflow of the recovery limit error and of
       the output-skipped error (``WORKFLOW_OUTPUT_SKIPPED``);
-    - ``sub_workflow_id``: the child of a ``SUBWORKFLOW_FAILED`` error;
+    - ``sub_workflow_id``: the child of a ``SUB_WORKFLOW_FAILED`` error;
     - ``message`` and ``sub_workflow_summary.error_summary``: texts that name
       a workflow by its id (``Subworkflow <id> failed``, ``Workflow <id> is
       COMPLETED and has no output: ...``).

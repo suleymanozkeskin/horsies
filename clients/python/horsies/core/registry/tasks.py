@@ -1,7 +1,7 @@
 # app/core/registry/tasks.py
 from __future__ import annotations
 from typing import Dict, Iterator, MutableMapping, Generic, TypeVar
-from horsies.core.errors import RegistryError, ErrorCode
+from horsies.core.errors import RegistryError, HorsiesErrorCode
 
 T = TypeVar('T')
 
@@ -17,7 +17,7 @@ class NotRegistered(RegistryError, KeyError):
         RegistryError.__init__(
             self,
             message=f"task '{task_name}' not registered",
-            code=ErrorCode.TASK_NOT_REGISTERED,
+            code=HorsiesErrorCode.TASK_NOT_REGISTERED,
             notes=[f"requested task: '{task_name}'"],
             help_text='ensure the task is defined with @app.task() before use\nor make sure that task is discovered by the app',
         )
@@ -30,7 +30,7 @@ class DuplicateTaskNameError(RegistryError):
     def __init__(self, task_name: str, context: str = '') -> None:
         super().__init__(
             message=f"duplicate task name '{task_name}'",
-            code=ErrorCode.TASK_DUPLICATE_NAME,
+            code=HorsiesErrorCode.TASK_DUPLICATE_NAME,
             notes=[context] if context else [],
             help_text='each task name must be unique within a horsies instance',
         )

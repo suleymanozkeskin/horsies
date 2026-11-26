@@ -24,10 +24,10 @@
 //!   its catalog, as a Python sync call inside a running event loop does:
 //!   `TaskSendError::AsyncContext` (with the prepared task id and payload,
 //!   so `retry_send(&error).await` completes the same send),
-//!   `ReadError::AsyncContext`, `BrokerOperationError::AsyncContext`, a
+//!   `ReadError::AsyncContext`, `DatabaseOperationError::AsyncContext`, a
 //!   `CheckReport` with `HRS-217`,
 //!   `WorkflowStartErrorCode::AsyncContext` with the workflow id of the
-//!   start, `HandleErrorCode::AsyncContext`, or
+//!   start, `WorkflowHandleErrorCode::AsyncContext`, or
 //!   `WorkflowReadError::AsyncContext`.
 //! - A read that takes a `WaitLimit` checks it first, on any thread: a
 //!   `Within` limit above `MAX_WAIT_LIMIT_MS` is `ReadError::InvalidInput`
@@ -54,8 +54,8 @@ use std::time::Duration;
 
 use horsies_core::process_runtime::ProcessRuntimeRefusal;
 use horsies_core::{
-    process_role, thread_role, BrokerError, BrokerErrorCode, BrokerOperationError,
-    BrokerOperationFailedCode, BrokerOperationSource, ClassCoverage, ClassReport, DatabasePing,
+    process_role, thread_role, BrokerError, DatabaseErrorCode, DatabaseOperationError,
+    DatabaseOperationFailedCode, BrokerOperationSource, ClassCoverage, ClassReport, DatabasePing,
     FailureCause, ProcessRole, SendKind, TaskSendError, ThreadRole, WorkerPong,
     WorkerStateSnapshot,
 };
@@ -68,7 +68,7 @@ use crate::check::{connectivity_report, CHECK};
 use crate::handle::checked_task_wait;
 use crate::process_state::{runtime_for, RuntimeStartFailed};
 use crate::{
-    CheckPassed, CheckReport, ErrorCode, Horsies, HorsiesError, PingTarget, ReadError,
+    CheckPassed, CheckReport, HorsiesErrorCode, Horsies, HorsiesError, PingTarget, ReadError,
     StoredResult, TaskFunction, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome, TaskSendOptions,
     UserErrorCode, WaitLimit, WorkerHistoryLimit,
 };
@@ -318,7 +318,7 @@ fn block_read<V>(
             message: async_context_message(blocking_call, async_call),
         }),
         Place::RuntimeStartFailed(failed) => Err(ReadError::Database {
-            code: BrokerErrorCode::TaskInfoQueryFailed,
+            code: DatabaseErrorCode::TaskInfoQueryFailed,
             message: format!("the read did not start: {failed}"),
             retryable: true,
         }),
@@ -333,17 +333,17 @@ fn block_read<V>(
 ///
 /// In a fork ([`place`]).
 fn block_health<V>(
-    read: impl Future<Output = Result<V, BrokerOperationError>>,
-    code: BrokerOperationFailedCode,
+    read: impl Future<Output = Result<V, DatabaseOperationError>>,
+    code: DatabaseOperationFailedCode,
     blocking_call: &str,
     async_call: &str,
-) -> Result<V, BrokerOperationError> {
+) -> Result<V, DatabaseOperationError> {
     match place(format_args!("blocking {blocking_call}")) {
         Place::Runs(runtime) => runtime.block_on(read),
-        Place::AsyncContext => Err(BrokerOperationError::AsyncContext {
+        Place::AsyncContext => Err(DatabaseOperationError::AsyncContext {
             message: async_context_message(blocking_call, async_call),
         }),
-        Place::RuntimeStartFailed(failed) => Err(BrokerOperationError::operation_failed(
+        Place::RuntimeStartFailed(failed) => Err(DatabaseOperationError::operation_failed(
             code,
             format!("the read did not start: {failed}"),
             BrokerOperationSource::Broker(BrokerError::ProcessRuntime(
@@ -419,10 +419,10 @@ impl HorsiesView<'_> {
     }
 
     /// `Horsies::ping_database`, blocking.
-    pub fn ping_database(&self) -> Result<DatabasePing, BrokerOperationError> {
+    pub fn ping_database(&self) -> Result<DatabasePing, DatabaseOperationError> {
         block_health(
             self.app.ping_database(),
-            BrokerOperationFailedCode::DbPingFailed,
+            DatabaseOperationFailedCode::DatabasePingFailed,
             "Horsies::ping_database()",
             "app.ping_database()",
         )
@@ -434,20 +434,20 @@ impl HorsiesView<'_> {
         target: PingTarget,
         timeout: Duration,
         min_responses: Option<NonZeroUsize>,
-    ) -> Result<Vec<WorkerPong>, BrokerOperationError> {
+    ) -> Result<Vec<WorkerPong>, DatabaseOperationError> {
         block_health(
             self.app.ping_workers(target, timeout, min_responses),
-            BrokerOperationFailedCode::WorkerPingFailed,
+            DatabaseOperationFailedCode::WorkerPingFailed,
             "Horsies::ping_workers()",
             "app.ping_workers(target, timeout, min_responses)",
         )
     }
 
     /// `Horsies::list_worker_states`, blocking.
-    pub fn list_worker_states(&self) -> Result<Vec<WorkerStateSnapshot>, BrokerOperationError> {
+    pub fn list_worker_states(&self) -> Result<Vec<WorkerStateSnapshot>, DatabaseOperationError> {
         block_health(
             self.app.list_worker_states(),
-            BrokerOperationFailedCode::MonitoringQueryFailed,
+            DatabaseOperationFailedCode::MonitoringQueryFailed,
             "Horsies::list_worker_states()",
             "app.list_worker_states()",
         )
@@ -457,10 +457,10 @@ impl HorsiesView<'_> {
     pub fn get_worker_state(
         &self,
         worker_id: &str,
-    ) -> Result<Option<WorkerStateSnapshot>, BrokerOperationError> {
+    ) -> Result<Option<WorkerStateSnapshot>, DatabaseOperationError> {
         block_health(
             self.app.get_worker_state(worker_id),
-            BrokerOperationFailedCode::MonitoringQueryFailed,
+            DatabaseOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_worker_state()",
             "app.get_worker_state(worker_id)",
         )
@@ -471,30 +471,30 @@ impl HorsiesView<'_> {
         &self,
         worker_id: &str,
         limit: WorkerHistoryLimit,
-    ) -> Result<Vec<WorkerStateSnapshot>, BrokerOperationError> {
+    ) -> Result<Vec<WorkerStateSnapshot>, DatabaseOperationError> {
         block_health(
             self.app.get_worker_state_history(worker_id, limit),
-            BrokerOperationFailedCode::MonitoringQueryFailed,
+            DatabaseOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_worker_state_history()",
             "app.get_worker_state_history(worker_id, limit)",
         )
     }
 
     /// `Horsies::get_class_coverage`, blocking.
-    pub fn get_class_coverage(&self) -> Result<ClassCoverage, BrokerOperationError> {
+    pub fn get_class_coverage(&self) -> Result<ClassCoverage, DatabaseOperationError> {
         block_health(
             self.app.get_class_coverage(),
-            BrokerOperationFailedCode::MonitoringQueryFailed,
+            DatabaseOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_class_coverage()",
             "app.get_class_coverage()",
         )
     }
 
     /// `Horsies::get_class_report`, blocking.
-    pub fn get_class_report(&self) -> Result<ClassReport, BrokerOperationError> {
+    pub fn get_class_report(&self) -> Result<ClassReport, DatabaseOperationError> {
         block_health(
             self.app.get_class_report(),
-            BrokerOperationFailedCode::MonitoringQueryFailed,
+            DatabaseOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_class_report()",
             "app.get_class_report()",
         )
@@ -523,7 +523,7 @@ fn live_check_in_async_context() -> CheckReport {
         vec![HorsiesError::new(
             "live broker check cannot run on a thread that runs a tokio runtime",
         )
-        .with_code(ErrorCode::CheckLiveAsyncContext)
+        .with_code(HorsiesErrorCode::CheckLiveAsyncContext)
         .with_note(
             "check_live was called on a thread that runs a tokio runtime; the connectivity \
              check did not run",
@@ -655,7 +655,7 @@ mod tests {
     #[tokio::test]
     async fn a_blocking_health_read_on_a_runtime_thread_has_the_async_context_code() {
         let refused = app().blocking().ping_database().unwrap_err();
-        assert_eq!(refused.code(), BrokerErrorCode::AsyncContext);
+        assert_eq!(refused.code(), DatabaseErrorCode::AsyncContext);
         assert!(!refused.retryable());
     }
 
@@ -664,7 +664,7 @@ mod tests {
         let report = app().blocking().check_live().unwrap_err();
         assert_eq!(
             report.errors()[0].code,
-            Some(ErrorCode::CheckLiveAsyncContext)
+            Some(HorsiesErrorCode::CheckLiveAsyncContext)
         );
     }
 

@@ -864,7 +864,7 @@ mod tests {
         let exception = error
             .slot_values()
             .into_iter()
-            .find(|slot| slot.name == "exception")
+            .find(|slot| slot.name == "cause")
             .map(|slot| slot.value);
         assert_eq!(
             exception,
@@ -890,7 +890,7 @@ mod tests {
             error
                 .slot_values()
                 .into_iter()
-                .find(|slot| slot.name == "exception")
+                .find(|slot| slot.name == "cause")
                 .map(|slot| slot.value)
         }
         let by_check = refused(StartRefusalCause::Check);

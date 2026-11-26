@@ -24,7 +24,7 @@ from horsies.core import cli
 from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.web import NoTraceLink, TraceLinkTemplate
 from horsies.web.auth import AllowAll, TrustedHeader, ViewOnly
 
@@ -304,7 +304,7 @@ class TestTraceLink:
         with pytest.raises(ConfigurationError) as raised:
             TraceLinkTemplate(template=template)
 
-        assert raised.value.code is ErrorCode.CONFIG_INVALID_TRACE_LINK
+        assert raised.value.code is HorsiesErrorCode.CONFIG_INVALID_TRACE_LINK
         assert raised.value.code.value == 'HRS-221'
         assert len(raised.value.notes) == 1
         assert rule in raised.value.notes[0]

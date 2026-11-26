@@ -18,7 +18,7 @@ use tokio::time::Instant;
 
 use super::{TelemetryOn, WorkerTelemetry};
 use crate::core::task::error::{
-    error_code_label, OperationalErrorCode, OutcomeCode, TaskErrorCode,
+    error_code_label, OperationalCode, OutcomeCode, TaskErrorCode,
 };
 use crate::events::{
     self, AttemptEnded, AttemptErrorCode, AttemptNotStarted, AttemptRecord, AttemptRecorded,
@@ -131,7 +131,7 @@ fn kind_of(end: EndView<'_>) -> EndKind<'_> {
 }
 
 /// The code of a built-in failure.
-fn built_in(code: OperationalErrorCode) -> TaskErrorCode {
+fn built_in(code: OperationalCode) -> TaskErrorCode {
     TaskErrorCode::BuiltIn(code.into())
 }
 
@@ -198,7 +198,7 @@ fn child_result(read: &ResultRead) -> ChildResult {
         },
         ResultRead::Unreadable => ChildResult::Failed {
             error_code: AttemptErrorCode::BuiltIn {
-                code: OperationalErrorCode::WorkerSerializationError.into(),
+                code: OperationalCode::WorkerSerializationError.into(),
             },
         },
     }
@@ -371,10 +371,10 @@ impl TelemetryOn {
             RanEnd::Result {
                 read: ResultRead::Unreadable,
                 ..
-            } => failed(&built_in(OperationalErrorCode::WorkerSerializationError)),
+            } => failed(&built_in(OperationalCode::WorkerSerializationError)),
             RanEnd::WorkerFailure { .. } => RanOutcome::Known(
                 TaskAttemptOutcome::WorkerFailure,
-                self.code_label(task_name, &built_in(OperationalErrorCode::BrokerError)),
+                self.code_label(task_name, &built_in(OperationalCode::DatabaseError)),
             ),
             RanEnd::TimedOutInChild { .. } => {
                 failed(&TaskErrorCode::BuiltIn(OutcomeCode::TaskTimeout.into()))

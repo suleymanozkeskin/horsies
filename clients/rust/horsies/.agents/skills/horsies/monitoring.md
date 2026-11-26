@@ -12,9 +12,9 @@ web UI, so the Python app and the Rust app answer alike.
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use horsies::{BrokerOperationError, Horsies, PingTarget};
+use horsies::{DatabaseOperationError, Horsies, PingTarget};
 
-async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
+async fn check_health(app: &Horsies) -> Result<(), DatabaseOperationError> {
     let ping = app.ping_database().await?;
     let pongs = app
         .ping_workers(PingTarget::EveryWorker, Duration::from_secs(2), NonZeroUsize::new(1))
@@ -36,9 +36,9 @@ async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
 | `get_class_coverage()` | `ClassCoverage`: whether a live worker can run each pending execution class |
 | `get_class_report()` | `ClassReport`: the load of each execution class |
 
-- Every read returns `Result<_, BrokerOperationError>`: one variant per
+- Every read returns `Result<_, DatabaseOperationError>`: one variant per
   state, with `code()`, `message()` and `retryable()`. A failed read is
-  `OperationFailed` with its `BrokerOperationFailedCode`; a refused
+  `OperationFailed` with its `DatabaseOperationFailedCode`; a refused
   argument is `InvalidInput`; an app with no listener is
   `ListenerDisabled`. The message is Python's: `ping_database failed:
   <cause>`, `ping_workers failed: <cause>`, `<read> failed: <cause>`.
@@ -158,7 +158,7 @@ Query builders:
 
 | Variant | When |
 |---|---|
-| `DbOperationFailed { retryable, .. }` | The database or the connect failed. `retryable` is the classification of the cause |
+| `DatabaseOperationFailed { retryable, .. }` | The database or the connect failed. `retryable` is the classification of the cause |
 | `HistoryContractViolation` | A history row does not decode (`task_stats`, `list_tasks`, `get_task_detail`, `get_workflow_node`); `source` is a `HistoryContractSource` that holds the error. Not retryable |
 
 ## Task Cancel
@@ -174,7 +174,7 @@ async fn cancel_pending(app: &Horsies, task_id: Uuid) -> Result<bool, String> {
         Err(TaskActionError::NotCancellable { .. } | TaskActionError::NotFound { .. }) => Ok(false),
         Err(
             error @ (TaskActionError::WorkflowTask { .. }
-            | TaskActionError::DbOperationFailed { .. }
+            | TaskActionError::DatabaseOperationFailed { .. }
             | TaskActionError::StoredDataInvalid { .. }),
         ) => Err(error.message().to_owned()),
     }
@@ -208,7 +208,7 @@ and `task_id`; `code()`, `message()`, `retryable()`, `task_id()` and
 | `NotFound` | 404 | No live or history row has the id. Nothing changed |
 | `NotCancellable { current_status, .. }` | 409 | Terminal, or RUNNING without `include_running`; `current_status` is the status found. Nothing changed |
 | `WorkflowTask { current_status, .. }` | 400 | The task belongs to a workflow. Nothing changed |
-| `DbOperationFailed { retryable, cause, .. }` | 503 when `retryable`, else 500 | The statement or the connect failed; `cause` is the `Box<BrokerError>`. Nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `NotCancellable` with `CANCELLED` |
+| `DatabaseOperationFailed { retryable, cause, .. }` | 503 when `retryable`, else 500 | The statement or the connect failed; `cause` is the `Box<BrokerError>`. Nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `NotCancellable` with `CANCELLED` |
 | `StoredDataInvalid { cause, .. }` | 500 | Stored data does not parse; `cause` is the `OutcomeDecodeError`. Nothing changed |
 
 There is no manual retry action. Re-execution is a rerun (see `tasks.md`).
@@ -486,7 +486,7 @@ use horsies::{
     // Health reads
     PingTarget, WorkerHistoryLimit, DatabasePing, WorkerPong, WorkerStateSnapshot,
     SnapshotProfile, StaleMinutes, StaleThresholdRefusal, StaleTaskRow, ExpiredTaskRow,
-    BoundedTaskList, ClassCoverage, ClassReport, BrokerOperationError, BrokerErrorCode,
+    BoundedTaskList, ClassCoverage, ClassReport, DatabaseOperationError, DatabaseErrorCode,
     TASK_LIST_BOUND, MAX_STALE_THRESHOLD_MINUTES,
 };
 use horsies::monitoring::{

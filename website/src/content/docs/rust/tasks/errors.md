@@ -44,7 +44,7 @@ The derive refuses a built-in or reserved name and a repeated code at compile ti
 ## TaskError
 
 ```rust
-use horsies::{task, OperationalErrorCode, TaskError, UserErrorCode};
+use horsies::{task, OperationalCode, TaskError, UserErrorCode};
 
 #[derive(Debug, Clone, PartialEq, UserErrorCode)]
 enum ChargeCode {
@@ -54,7 +54,7 @@ enum ChargeCode {
 #[task("charge_card")]
 async fn charge_card(amount_cents: u64) -> Result<String, TaskError<ChargeCode>> {
     if amount_cents == 0 {
-        return Err(TaskError::library(OperationalErrorCode::TaskException, "nothing to charge"));
+        return Err(TaskError::library(OperationalCode::TaskException, "nothing to charge"));
     }
     Err(TaskError::user(ChargeCode::CardDeclined, "the issuer declined the card")
         .with_data(serde_json::json!({ "amount_cents": amount_cents })))
@@ -74,7 +74,7 @@ async fn charge_card(amount_cents: u64) -> Result<String, TaskError<ChargeCode>>
 
 `TaskErrorCode::text()` returns the stored code text. The fields of `TaskError` are private. The exception record and the sub-workflow failure are set only by the library.
 
-The library code catalogs are `BuiltInTaskCode` and its four families, `OperationalErrorCode`, `ContractCode`, `RetrievalCode` and `OutcomeCode`, with the names and the wire values of the shared catalog.
+The library code catalogs are `BuiltInTaskCode` and its four families, `OperationalCode`, `ContractCode`, `RetrievalCode` and `OutcomeCode`, with the names and the wire values of the shared catalog.
 
 ## Data
 

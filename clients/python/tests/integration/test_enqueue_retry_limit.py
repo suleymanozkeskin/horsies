@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerResult
+from horsies.core.brokers.result_types import DatabaseErrorCode, DatabaseResult
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import MAX_RETRY_ATTEMPTS
 from horsies.core.types.result import Err, is_err
@@ -34,7 +34,7 @@ __all__ = ['make_database']
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 
-async def _enqueue(broker: PostgresBroker, task_options: str) -> BrokerResult[str]:
+async def _enqueue(broker: PostgresBroker, task_options: str) -> DatabaseResult[str]:
     return await broker.enqueue_async(
         'retry.limit.task',
         task_id=uuid.uuid4(),
@@ -113,7 +113,7 @@ async def test_a_malformed_policy_is_refused_without_a_row(
         await broker.close_async()
 
     assert isinstance(outcome, Err), outcome
-    assert outcome.err_value.code == BrokerErrorCode.INVALID_TASK_OPTIONS
+    assert outcome.err_value.code == DatabaseErrorCode.INVALID_TASK_OPTIONS
     assert outcome.err_value.retryable is False
     assert await _stored_limits(url) == []
 

@@ -30,7 +30,7 @@ from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.types.status import TaskStatus
 from horsies.monitoring.task_actions import (
     TaskActionCoreError,
-    TaskActionDbOperationFailed,
+    TaskActionDatabaseOperationFailed,
     TaskActionError,
     TaskActionErrorCode,
     TaskActionNotCancellable,
@@ -60,7 +60,7 @@ def _every_variant(cause: BaseException) -> list[TaskActionError]:
         TaskActionWorkflowTask(
             message=message, task_id=TASK_ID, current_status=TaskStatus.FAILED,
         ),
-        TaskActionDbOperationFailed(
+        TaskActionDatabaseOperationFailed(
             message=message, retryable=True, task_id=TASK_ID, exception=cause,
         ),
         TaskActionStoredDataInvalid(message=message, task_id=TASK_ID, exception=cause),
@@ -119,7 +119,7 @@ class TestVariantCatalog:
         self, error: TaskActionError,
     ) -> None:
         match error:
-            case TaskActionDbOperationFailed():
+            case TaskActionDatabaseOperationFailed():
                 assert error.retryable is True
             case _:
                 assert error.retryable is False
@@ -176,7 +176,7 @@ def _core_errors() -> list[TaskActionError]:
             task_id=TASK_ID,
             current_status=TaskStatus.PENDING,
         ),
-        TaskActionDbOperationFailed(
+        TaskActionDatabaseOperationFailed(
             message=f'Task cancel failed: connection failed: {CAUSE_MARKER}',
             retryable=True,
             task_id=TASK_ID,
@@ -247,7 +247,7 @@ class TestCancelFailures:
 
         assert is_err(result)
         failed = result.err_value
-        assert isinstance(failed, TaskActionDbOperationFailed)
+        assert isinstance(failed, TaskActionDatabaseOperationFailed)
         assert failed.exception is error
         assert failed.retryable is retryable
 

@@ -1,7 +1,7 @@
 """``get_stale_tasks`` and ``get_expired_tasks`` through the core handle.
 
 The core returns ``TaskListComplete``, ``TaskListTruncated`` or its
-generated broker class (``BrokerOperationFailed``, ``BrokerInvalidInput``);
+generated broker class (``DatabaseOperationFailed``, ``DatabaseInvalidInput``);
 the broker returns the rows, logs a cut list on ``horsies.broker``, and
 returns a failure as it is. The stale threshold is
 checked by the handle before any core call, with Python's rule and text: a
@@ -25,9 +25,9 @@ from horsies._core import (
 )
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
-    BrokerErrorCode,
-    BrokerInvalidInput,
-    BrokerOperationFailed,
+    DatabaseErrorCode,
+    DatabaseInvalidInput,
+    DatabaseOperationFailed,
 )
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok
@@ -94,7 +94,7 @@ class TestThreshold:
         result = await broker.get_stale_tasks(stale_threshold_minutes=cast(int, minutes))
 
         match result:
-            case Err(BrokerInvalidInput(message=message, exception=NoCause())):
+            case Err(DatabaseInvalidInput(message=message, exception=NoCause())):
                 assert message == f'{cause}; give whole minutes from 0 to 525600'
             case _:
                 raise AssertionError(f'expected INVALID_INPUT, got {result!r}')
@@ -149,14 +149,14 @@ class TestAnswers:
         cause = CoreConnectionError('get_expired_tasks', 'connection refused', retryable)
         broker = _broker_answering(
             'expired_tasks_async',
-            BrokerOperationFailed(code=BrokerErrorCode.MONITORING_QUERY_FAILED, message=message, retryable=retryable, exception=cause),
+            DatabaseOperationFailed(code=DatabaseErrorCode.MONITORING_QUERY_FAILED, message=message, retryable=retryable, exception=cause),
         )
 
         result = await broker.get_expired_tasks()
 
         match result:
-            case Err(BrokerOperationFailed() as error):
-                assert error.code is BrokerErrorCode.MONITORING_QUERY_FAILED
+            case Err(DatabaseOperationFailed() as error):
+                assert error.code is DatabaseErrorCode.MONITORING_QUERY_FAILED
                 assert error.message == message
                 assert error.retryable is retryable
                 assert error.exception is cause
@@ -171,8 +171,8 @@ class TestAnswers:
         result = await broker.get_stale_tasks()
 
         match result:
-            case Err(BrokerOperationFailed() as error):
-                assert error.code is BrokerErrorCode.MONITORING_QUERY_FAILED
+            case Err(DatabaseOperationFailed() as error):
+                assert error.code is DatabaseErrorCode.MONITORING_QUERY_FAILED
                 assert error.exception is raised
                 assert error.retryable is True
                 assert error.message.startswith('get_stale_tasks failed: ')
@@ -183,8 +183,8 @@ class TestAnswers:
     async def test_another_code_from_the_core_is_a_defect(self) -> None:
         broker = _broker_answering(
             'expired_tasks_async',
-            BrokerOperationFailed(code=BrokerErrorCode.DB_PING_FAILED, message='x', retryable=False, exception=CoreConnectionError('test_operation', 'x', True)),
+            DatabaseOperationFailed(code=DatabaseErrorCode.DATABASE_PING_FAILED, message='x', retryable=False, exception=CoreConnectionError('test_operation', 'x', True)),
         )
 
-        with pytest.raises(AssertionError, match='DB_PING_FAILED'):
+        with pytest.raises(AssertionError, match='DATABASE_PING_FAILED'):
             await broker.get_expired_tasks()

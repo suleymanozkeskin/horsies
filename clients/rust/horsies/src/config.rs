@@ -14,7 +14,7 @@ use horsies_core::manifest::{
     WholeSeconds,
 };
 
-use crate::{ErrorCode, HorsiesError};
+use crate::{HorsiesErrorCode, HorsiesError};
 
 mod scheduler_manifest;
 mod worker_manifest;
@@ -186,7 +186,7 @@ fn preload_refusal(profile_name: &str, preload: ChildPreload) -> HorsiesError {
         "worker_profiles.{profile_name}.preload: '{}' is not available to a Rust worker",
         preload.as_str()
     ))
-    .with_code(ErrorCode::ConfigInvalidWorkerProfile)
+    .with_code(HorsiesErrorCode::ConfigInvalidWorkerProfile)
     .with_note(
         "a Rust worker starts each child with exec of its own binary, which holds every \
          task, so there is nothing to preload",
@@ -329,7 +329,7 @@ mod tests {
         assert!(messages[1].starts_with("worker_profiles.library.preload"));
         assert!(refusals
             .iter()
-            .all(|error| error.code == Some(ErrorCode::ConfigInvalidWorkerProfile)));
+            .all(|error| error.code == Some(HorsiesErrorCode::ConfigInvalidWorkerProfile)));
     }
 
     /// `Horsies::new` refuses a config with two profile values outside
@@ -349,7 +349,7 @@ mod tests {
 
         let refused = crate::Horsies::new(config).expect_err("two values are outside their bounds");
 
-        assert_eq!(refused.code, Some(ErrorCode::ConfigInvalidWorkerProfile));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::ConfigInvalidWorkerProfile));
         assert_eq!(refused.notes.len(), 2, "{refused}");
         assert!(
             refused.notes[0].contains(

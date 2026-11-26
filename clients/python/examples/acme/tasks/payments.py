@@ -16,7 +16,7 @@ from horsies import (
     Err,
     Failed,
     Ok,
-    OperationalErrorCode,
+    OperationalCode,
     Result,
     RetryPolicy,
     Succeeded,
@@ -75,7 +75,7 @@ def _stored_authorization(
     retry_policy=RetryPolicy.exponential(
         base_seconds=tuning.PSP_RETRY_BASE_SECONDS,
         max_retries=tuning.PSP_MAX_RETRIES,
-        auto_retry_for=[PSP_UNAVAILABLE, OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[PSP_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
     ),
 )
 def authorize_payment(
@@ -165,7 +165,7 @@ def authorize_payment(
     queue_name=QUEUE_PAYMENTS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def capture_payment(
@@ -259,7 +259,7 @@ def _capture_of(
     queue_name=QUEUE_PAYMENTS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def refund_payment(
@@ -303,7 +303,7 @@ def refund_payment(
     queue_name=QUEUE_PAYMENTS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def reconcile_payments(*, window: str) -> Result[ReconciliationReport, TaskError]:

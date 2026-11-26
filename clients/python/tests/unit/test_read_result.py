@@ -23,7 +23,7 @@ from pydantic import SecretStr
 
 from horsies import (
     AsyncContext,
-    BrokerError,
+    ReadDatabaseError,
     Failed,
     InvalidInput,
     NoTypeAvailable,
@@ -39,14 +39,14 @@ from horsies import (
 from horsies.core import process_role as process_role_module
 from horsies.core.app import Horsies
 from horsies.core.brokers.result_types import (
-    BrokerAsyncContext,
-    BrokerErrorCode,
-    BrokerInvalidInput,
-    BrokerInvalidJsonPayload,
-    BrokerNoTypeAvailable,
-    BrokerOperationFailed,
-    BrokerResult,
-    BrokerWaitInsideTask,
+    DatabaseAsyncContext,
+    DatabaseErrorCode,
+    DatabaseInvalidInput,
+    DatabaseInvalidJsonPayload,
+    DatabaseNoTypeAvailable,
+    DatabaseOperationFailed,
+    DatabaseResult,
+    DatabaseWaitInsideTask,
     RawResultRecord,
 )
 from horsies.core.models.app import AppConfig
@@ -81,7 +81,7 @@ WAIT_ABOVE_LIMIT_MS = 2**32
 """One more than the largest wait, 4,294,967,295 ms: every read refuses it."""
 
 
-def _record(status: TaskStatus, raw_result: dict[str, Any] | None) -> BrokerResult[RawResultRecord | None]:
+def _record(status: TaskStatus, raw_result: dict[str, Any] | None) -> DatabaseResult[RawResultRecord | None]:
     return Ok(RawResultRecord(
         task_id=TASK_ID, task_name='produce', status=status, raw_result=raw_result,
     ))
@@ -100,7 +100,7 @@ def _err_envelope(code: str) -> dict[str, Any]:
 
 
 def _read(
-    answer: BrokerResult[RawResultRecord | None], ok_type: object | None = int,
+    answer: DatabaseResult[RawResultRecord | None], ok_type: object | None = int,
 ) -> ReadResult[Any, TaskError]:
     return read_of_record(TASK_ID, answer, ok_type, 1_000, TextCodes())
 
@@ -174,38 +174,38 @@ def test_stored_error_reads_without_a_declared_type() -> None:
 
 def test_broker_failure_is_broker_error_with_its_cause_and_class() -> None:
     cause = ConnectionError('lost')
-    answer: BrokerResult[RawResultRecord | None] = Err(BrokerOperationFailed(
-        code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+    answer: DatabaseResult[RawResultRecord | None] = Err(DatabaseOperationFailed(
+        code=DatabaseErrorCode.TASK_INFO_QUERY_FAILED,
         message='read failed',
         retryable=True,
         exception=cause,
     ))
     error = _read_error(_read(answer))
-    assert isinstance(error, BrokerError)
+    assert isinstance(error, ReadDatabaseError)
     assert error.exception is cause
     assert error.retryable is True
     assert 'TASK_INFO_QUERY_FAILED' in error.message
 
 
 def test_broker_payload_refusal_is_result_deserialization_error() -> None:
-    answer: BrokerResult[RawResultRecord | None] = Err(BrokerInvalidJsonPayload(
+    answer: DatabaseResult[RawResultRecord | None] = Err(DatabaseInvalidJsonPayload(
         message='not JSON', exception=NoCause(),
     ))
     assert isinstance(_read_error(_read(answer)), ResultDeserializationError)
 
 
 def test_broker_missing_type_is_no_type_available() -> None:
-    answer: BrokerResult[RawResultRecord | None] = Err(BrokerNoTypeAvailable(message='no type'))
+    answer: DatabaseResult[RawResultRecord | None] = Err(DatabaseNoTypeAvailable(message='no type'))
     assert isinstance(_read_error(_read(answer)), NoTypeAvailable)
 
 
 def test_broker_wait_inside_task_is_wait_inside_task() -> None:
-    answer: BrokerResult[RawResultRecord | None] = Err(BrokerWaitInsideTask(message='inside'))
+    answer: DatabaseResult[RawResultRecord | None] = Err(DatabaseWaitInsideTask(message='inside'))
     assert isinstance(_read_error(_read(answer)), WaitInsideTask)
 
 
 def test_broker_async_context_is_a_defect() -> None:
-    answer: BrokerResult[RawResultRecord | None] = Err(BrokerAsyncContext(message='loop'))
+    answer: DatabaseResult[RawResultRecord | None] = Err(DatabaseAsyncContext(message='loop'))
     with pytest.raises(AssertionError, match='ASYNC_CONTEXT'):
         _ = _read(answer)
 
@@ -220,7 +220,7 @@ def test_broker_async_context_is_a_defect() -> None:
         (Err(NoTypeAvailable(message='m')), True),
         (Err(WaitTimeout(message='m')), False),
         (Err(TaskNotFound(message='m')), False),
-        (Err(BrokerError(message='m', retryable=True, exception=NoCause())), False),
+        (Err(ReadDatabaseError(message='m', retryable=True, exception=NoCause())), False),
         (Err(WaitInsideTask(message='m')), False),
         (Err(InvalidInput(message='m')), False),
     ],
@@ -304,14 +304,14 @@ def test_valid_wait_inside_a_task_is_wait_inside_task(app: Horsies, read_name: s
 @pytest.mark.parametrize('read_name', ['get_raw_result', 'get_raw_result_async'])
 @pytest.mark.usefixtures('task_process')
 def test_bad_raw_wait_inside_a_task_is_invalid_input(app: Horsies, read_name: str) -> None:
-    read: Callable[[Horsies], BrokerResult[Any]] = {
+    read: Callable[[Horsies], DatabaseResult[Any]] = {
         'get_raw_result': lambda a: a.get_raw_result(TASK_ID, WAIT_ABOVE_LIMIT_MS),
         'get_raw_result_async': lambda a: asyncio.run(
             a.get_raw_result_async(TASK_ID, WAIT_ABOVE_LIMIT_MS),
         ),
     }[read_name]
     answer = read(app)
-    assert isinstance(answer, Err) and isinstance(answer.err_value, BrokerInvalidInput)
+    assert isinstance(answer, Err) and isinstance(answer.err_value, DatabaseInvalidInput)
     assert _nothing_ran(app)
 
 

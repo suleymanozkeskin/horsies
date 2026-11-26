@@ -19,7 +19,7 @@ use horsies::rerun::{
     rerun_task_in, RerunEnqueuePolicy, RerunOutcome, RerunTask, TokioPostgresCaller,
 };
 use horsies::{AppConfig, Horsies};
-use horsies_core::{OperationalErrorCode, TaskError, TaskResult};
+use horsies_core::{OperationalCode, TaskError, TaskResult};
 use opentelemetry::global;
 use opentelemetry::trace::{
     FutureExt, SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
@@ -106,7 +106,7 @@ async fn seed_failed_source(database: &TestDatabase) -> Uuid {
         .unwrap();
     assert_eq!(inserted, 1);
     let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
-        TaskError::builtin(OperationalErrorCode::TaskException, "carrier source"),
+        TaskError::builtin(OperationalCode::TaskException, "carrier source"),
     ))
     .unwrap();
     let finished: i64 = client

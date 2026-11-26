@@ -17,7 +17,7 @@ import pytest
 from pydantic import SecretStr
 
 from horsies.core.app import Horsies
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.boot_failure import ThreadStartRefused, ThreadStartRefusedError
 from horsies.core.types.result import Err, Ok
@@ -86,7 +86,7 @@ class TestRegistration:
 
         with pytest.raises(ConfigurationError) as exc_info:
             app.on_child_process_start(async_hook)  # type: ignore[arg-type]
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CHILD_HOOK
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK
         assert app.get_child_process_start_hooks() == []
 
     def test_non_callable_rejected(self) -> None:
@@ -94,7 +94,7 @@ class TestRegistration:
 
         with pytest.raises(ConfigurationError) as exc_info:
             app.on_child_process_start('not a function')  # type: ignore[arg-type]
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CHILD_HOOK
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK
 
     def test_snapshot_is_a_copy(self) -> None:
         app = _make_app()
@@ -261,7 +261,7 @@ class TestSharedAsyncHookRegistration:
 
         with pytest.raises(ConfigurationError) as raised:
             app.on_shared_async_child_start(sync_hook)  # type: ignore[arg-type]
-        assert raised.value.code == ErrorCode.CONFIG_INVALID_CHILD_HOOK
+        assert raised.value.code == HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK
         assert 'must be async def' in raised.value.message
         assert app.get_shared_async_child_start_hooks() == []
 
@@ -269,7 +269,7 @@ class TestSharedAsyncHookRegistration:
         app = _make_app()
         with pytest.raises(ConfigurationError) as raised:
             app.on_shared_async_child_start('nope')  # type: ignore[arg-type]
-        assert raised.value.code == ErrorCode.CONFIG_INVALID_CHILD_HOOK
+        assert raised.value.code == HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK
 
     def test_an_object_with_an_async_call_is_registered(self) -> None:
         app = _make_app()
@@ -307,7 +307,7 @@ class TestSharedAsyncHookRegistration:
         with pytest.raises(ConfigurationError) as raised:
             app.on_shared_async_child_start(hook)
 
-        assert raised.value.code == ErrorCode.CONFIG_INVALID_CHILD_HOOK
+        assert raised.value.code == HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK
         assert app.get_shared_async_child_start_hooks() == []
 
     def test_a_second_registration_of_one_hook_is_ignored(self) -> None:

@@ -22,7 +22,7 @@ pub enum TaskActionErrorCode {
     TaskNotFound,
     TaskNotCancellable,
     TaskIsWorkflowTask,
-    DbOperationFailed,
+    DatabaseOperationFailed,
     /// Stored task data does not parse: a history status that is not a task
     /// status, or a cancel outcome row that does not decode. Nothing changed:
     /// the cancel refused the task. Not retryable: a repeat gives the same
@@ -110,11 +110,11 @@ pub enum TaskActionError {
     /// ``CANCELLED``.
     #[error("{message}")]
     #[error_class(
-        class = "TaskActionDbOperationFailed",
-        code = "DbOperationFailed",
+        class = "TaskActionDatabaseOperationFailed",
+        code = "DatabaseOperationFailed",
         exception = "BaseException"
     )]
-    DbOperationFailed {
+    DatabaseOperationFailed {
         #[error_slot(python = "Str", hidden)]
         message: String,
         #[error_slot(python = "Bool")]
@@ -155,7 +155,7 @@ impl TaskActionError {
     /// check or statement. Nothing was written, or the statement's outcome
     /// is unknown. `retryable` is the cause's retry rule. Pure.
     pub fn cancel_failed(task_id: Uuid, cause: BrokerError) -> Self {
-        Self::DbOperationFailed {
+        Self::DatabaseOperationFailed {
             message: format!("Task cancel failed: {cause}"),
             retryable: cause.is_retryable(),
             task_id,
@@ -174,7 +174,7 @@ impl TaskActionError {
             Self::NotFound { message, .. }
             | Self::NotCancellable { message, .. }
             | Self::WorkflowTask { message, .. }
-            | Self::DbOperationFailed { message, .. }
+            | Self::DatabaseOperationFailed { message, .. }
             | Self::StoredDataInvalid { message, .. } => message,
         }
     }
@@ -183,7 +183,7 @@ impl TaskActionError {
     /// of the cause of a database failure; every refusal stays. Pure.
     pub fn retryable(&self) -> bool {
         match self {
-            Self::DbOperationFailed { retryable, .. } => *retryable,
+            Self::DatabaseOperationFailed { retryable, .. } => *retryable,
             Self::NotFound { .. }
             | Self::NotCancellable { .. }
             | Self::WorkflowTask { .. }
@@ -197,7 +197,7 @@ impl TaskActionError {
             Self::NotFound { task_id, .. }
             | Self::NotCancellable { task_id, .. }
             | Self::WorkflowTask { task_id, .. }
-            | Self::DbOperationFailed { task_id, .. }
+            | Self::DatabaseOperationFailed { task_id, .. }
             | Self::StoredDataInvalid { task_id, .. } => *task_id,
         }
     }
@@ -207,7 +207,7 @@ impl TaskActionError {
     /// precondition that does not hold. Pure.
     pub fn failure_cause(&self) -> FailureCause {
         match self {
-            Self::DbOperationFailed { cause, .. } => cause.failure_cause(),
+            Self::DatabaseOperationFailed { cause, .. } => cause.failure_cause(),
             Self::StoredDataInvalid { .. } => FailureCause::ContractViolation,
             Self::NotFound { .. } | Self::NotCancellable { .. } | Self::WorkflowTask { .. } => {
                 FailureCause::PreconditionFailed
@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(failed.failure_cause(), FailureCause::Connection);
         assert!(matches!(
             &failed,
-            TaskActionError::DbOperationFailed { cause, .. }
+            TaskActionError::DatabaseOperationFailed { cause, .. }
                 if matches!(**cause, BrokerError::ConnectionFailed(_))
         ));
 

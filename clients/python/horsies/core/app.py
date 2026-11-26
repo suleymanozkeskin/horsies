@@ -23,7 +23,7 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskOptions,
     RetryPolicy,
-    OperationalErrorCode,
+    OperationalCode,
 )
 from horsies.core.task_decorator import (
     create_task_wrapper,
@@ -75,7 +75,7 @@ from horsies.core.errors import (
     HorsiesError,
     MultipleValidationErrors,
     TaskDefinitionError,
-    ErrorCode,
+    HorsiesErrorCode,
     SourceLocation,
     ValidationReport,
     raise_collected,
@@ -161,7 +161,7 @@ if TYPE_CHECKING:
     from horsies.core.task_runtime import TaskRuntime
     from horsies.core.models.tasks import TaskInfo, TaskError
     from horsies.core.models.outcome import ReadResult
-    from horsies.core.brokers.result_types import BrokerResult, RawResultRecord
+    from horsies.core.brokers.result_types import DatabaseResult, RawResultRecord
     from horsies.core.models.class_coverage import ClassCoverage, ClassReport
     from horsies.core.models.health import (
         DatabasePing,
@@ -333,7 +333,7 @@ def _declared_error_codes_or_raise(
         case CodeSetFormRefused(given=given):
             raise TaskDefinitionError(
                 message='invalid error_codes',
-                code=ErrorCode.TASK_INVALID_OPTIONS,
+                code=HorsiesErrorCode.TASK_INVALID_OPTIONS,
                 location=location,
                 notes=[
                     f"task '{task_label}'",
@@ -368,18 +368,18 @@ def _declared_code_error(
     """The definition error of one refused entry of `error_codes`."""
     match refusal:
         case CodeTextRefused(detail=detail):
-            code = ErrorCode.TASK_INVALID_ERROR_CODE
+            code = HorsiesErrorCode.TASK_INVALID_ERROR_CODE
             message = detail
             help_text = 'use UPPER_SNAKE_CASE error codes, for example RATE_LIMITED'
         case ReservedNameRefused(detail=detail):
-            code = ErrorCode.CHECK_RESERVED_CODE_COLLISION
+            code = HorsiesErrorCode.CHECK_RESERVED_CODE_COLLISION
             message = detail
             help_text = (
                 'use a different UPPER_SNAKE_CASE code that does not match a '
                 'built-in library code'
             )
         case RepeatedCodeRefused(code=repeated):
-            code = ErrorCode.TASK_DUPLICATE_ERROR_CODE
+            code = HorsiesErrorCode.TASK_DUPLICATE_ERROR_CODE
             message = f"error_codes value '{repeated}' is given more than once"
             help_text = 'list each code once'
         case _ as unreachable:
@@ -399,7 +399,7 @@ def _connectivity_failed(cause: str) -> ConfigurationError:
     return _no_location(
         ConfigurationError(
             message='broker connectivity check failed',
-            code=ErrorCode.BROKER_INVALID_URL,
+            code=HorsiesErrorCode.DATABASE_INVALID_URL,
             notes=[cause],
             help_text='check database_url in PostgresConfig',
         )
@@ -419,10 +419,10 @@ def _worker_connection_error(refusal: WorkerConnectionError) -> ConfigurationErr
     (``HRS-219``, ``CHECK_WORKER_CONNECTIONS``). Pure.
 
     Raises:
-        ValueError: a core code that ``ErrorCode`` does not have, a defect of
+        ValueError: a core code that ``HorsiesErrorCode`` does not have, a defect of
             the pairing of the core and this package.
     """
-    code = None if refusal.code is None else ErrorCode(refusal.code)
+    code = None if refusal.code is None else HorsiesErrorCode(refusal.code)
     return _no_location(
         ConfigurationError(
             message=refusal.message,
@@ -439,7 +439,7 @@ def _worker_connections_unchecked(cause: str) -> ConfigurationError:
     return _no_location(
         ConfigurationError(
             message='the server connection limit could not be read',
-            code=ErrorCode.CHECK_WORKER_CONNECTIONS,
+            code=HorsiesErrorCode.CHECK_WORKER_CONNECTIONS,
             notes=[cause],
             help_text=_LIMIT_UNREADABLE_HELP,
         )
@@ -546,14 +546,14 @@ class Horsies:
         if not callable(fn):
             raise ConfigurationError(
                 message='on_child_process_start requires a callable',
-                code=ErrorCode.CONFIG_INVALID_CHILD_HOOK,
+                code=HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK,
                 notes=[f'got {type(fn).__name__!r}'],
                 help_text='register a zero-argument sync function',
             )
         if inspect.iscoroutinefunction(fn):
             raise ConfigurationError(
                 message='on_child_process_start hooks must be sync',
-                code=ErrorCode.CONFIG_INVALID_CHILD_HOOK,
+                code=HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK,
                 notes=[
                     f"hook '{getattr(fn, '__name__', repr(fn))}' is an async function",
                     'hooks run during child-process boot, before any event loop exists',
@@ -602,7 +602,7 @@ class Horsies:
         if not callable(fn):
             raise ConfigurationError(
                 message='on_shared_async_child_start requires a callable',
-                code=ErrorCode.CONFIG_INVALID_CHILD_HOOK,
+                code=HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK,
                 notes=[f'got {type(fn).__name__!r}'],
                 help_text='register a zero-argument async def function',
             )
@@ -612,7 +612,7 @@ class Horsies:
             case _HookIsSync():
                 raise ConfigurationError(
                     message='on_shared_async_child_start hooks must be async def',
-                    code=ErrorCode.CONFIG_INVALID_CHILD_HOOK,
+                    code=HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK,
                     notes=[
                         f"hook '{getattr(fn, '__name__', repr(fn))}' is not an "
                         'async function, and its return annotation is not '
@@ -700,14 +700,14 @@ class Horsies:
         if not callable(fn):
             raise ConfigurationError(
                 message='on_handler_child_start requires a callable',
-                code=ErrorCode.CONFIG_INVALID_CHILD_HOOK,
+                code=HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK,
                 notes=[f'got {type(fn).__name__!r}'],
                 help_text='register a zero-argument sync function',
             )
         if inspect.iscoroutinefunction(fn):
             raise ConfigurationError(
                 message='on_handler_child_start hooks must be sync',
-                code=ErrorCode.CONFIG_INVALID_CHILD_HOOK,
+                code=HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK,
                 notes=[
                     f"hook '{getattr(fn, '__name__', repr(fn))}' is an async function",
                     'the hook runs at the boot of the handler child, before any '
@@ -736,7 +736,7 @@ class Horsies:
             if queue_name is not None:
                 raise ConfigurationError(
                     message='cannot specify queue_name in DEFAULT mode',
-                    code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                    code=HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE,
                     notes=[
                         f"queue_name='{queue_name}' was specified",
                         'but app is configured with QueueMode.DEFAULT',
@@ -748,7 +748,7 @@ class Horsies:
             if queue_name is None:
                 raise ConfigurationError(
                     message='queue_name is required in CUSTOM mode',
-                    code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                    code=HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE,
                     notes=['app is configured with QueueMode.CUSTOM'],
                     help_text='specify queue_name from configured queues',
                 )
@@ -756,7 +756,7 @@ class Horsies:
             if queue_name not in valid_queues:
                 raise ConfigurationError(
                     message=f"invalid queue_name '{queue_name}'",
-                    code=ErrorCode.TASK_INVALID_QUEUE,
+                    code=HorsiesErrorCode.TASK_INVALID_QUEUE,
                     notes=[f'valid queues: {valid_queues}'],
                     help_text='use one of the configured queue names',
                 )
@@ -977,7 +977,7 @@ class Horsies:
             if task_name == '':
                 raise TaskDefinitionError(
                     message='task name is empty',
-                    code=ErrorCode.TASK_INVALID_OPTIONS,
+                    code=HorsiesErrorCode.TASK_INVALID_OPTIONS,
                     location=fn_location,
                     notes=[
                         f"task '{fn.__name__}'",
@@ -989,7 +989,7 @@ class Horsies:
             if 'auto_retry_for' in task_options_kwargs:
                 raise TaskDefinitionError(
                     message='invalid task options',
-                    code=ErrorCode.TASK_INVALID_OPTIONS,
+                    code=HorsiesErrorCode.TASK_INVALID_OPTIONS,
                     location=fn_location,
                     notes=[
                         f"task '{fn.__name__}'",
@@ -1027,7 +1027,7 @@ class Horsies:
             if good_until_value is not None:
                 raise TaskDefinitionError(
                     message='good_until must be set when sending a task',
-                    code=ErrorCode.TASK_INVALID_OPTIONS,
+                    code=HorsiesErrorCode.TASK_INVALID_OPTIONS,
                     location=fn_location,
                     notes=[
                         f"task '{fn.__name__}'",
@@ -1048,7 +1048,7 @@ class Horsies:
                 if mapper_errors:
                     raise TaskDefinitionError(
                         message='invalid exception_mapper',
-                        code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+                        code=HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
                         location=fn_location,
                         notes=[f"task '{fn.__name__}'", *mapper_errors],
                         help_text='keys must be BaseException subclasses, values must be UPPER_SNAKE_CASE error codes',
@@ -1063,7 +1063,7 @@ class Horsies:
                 if code_error is not None:
                     raise TaskDefinitionError(
                         message='invalid default_unhandled_error_code',
-                        code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+                        code=HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
                         location=fn_location,
                         notes=[f"task '{fn.__name__}'", code_error],
                         help_text='use UPPER_SNAKE_CASE error codes',
@@ -1075,7 +1075,7 @@ class Horsies:
             except Exception as e:
                 raise TaskDefinitionError(
                     message=f'invalid task options',
-                    code=ErrorCode.TASK_INVALID_OPTIONS,
+                    code=HorsiesErrorCode.TASK_INVALID_OPTIONS,
                     location=fn_location,
                     notes=[f"task '{fn.__name__}'", exception_text(e)],
                     help_text='check task decorator arguments',
@@ -1234,7 +1234,7 @@ class Horsies:
                                 _no_location(
                                     ConfigurationError(
                                         message=f'task module not found: {module_path}',
-                                        code=ErrorCode.CLI_INVALID_ARGS,
+                                        code=HorsiesErrorCode.CLI_INVALID_ARGS,
                                         notes=[f'resolved path: {abs_path}'],
                                         help_text=(
                                             'remove it from app.discover_tasks([...]) or fix the path; \n'
@@ -1256,7 +1256,7 @@ class Horsies:
                         _no_location(
                             ConfigurationError(
                                 message=f'failed to import module: {module_path}',
-                                code=ErrorCode.CLI_INVALID_ARGS,
+                                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                                 notes=[str(exc)],
                                 help_text=(
                                     'ensure the module is importable; '
@@ -1271,7 +1271,7 @@ class Horsies:
                         _no_location(
                             ConfigurationError(
                                 message=f'error while importing module: {module_path}',
-                                code=ErrorCode.MODULE_EXEC_ERROR,
+                                code=HorsiesErrorCode.MODULE_IMPORT_ERROR,
                                 notes=[f'{type(exc).__name__}: {exc}'],
                                 help_text=(
                                     'the module was found but raised an error during import;\n'
@@ -1342,7 +1342,7 @@ class Horsies:
                 errors.append(
                     WorkflowValidationError(
                         message='subworkflow build_with cannot cross the wire',
-                        code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+                        code=HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
                         notes=[
                             f"node '{name}'",
                             refusal.detail.headline,
@@ -1366,7 +1366,7 @@ class Horsies:
                 _no_location(
                     ConfigurationError(
                         message=msg,
-                        code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+                        code=HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
                         notes=['app config'],
                         help_text='exception_mapper must be a mapping with exception-class keys and UPPER_SNAKE_CASE code values',
                     )
@@ -1385,7 +1385,7 @@ class Horsies:
                                     f"exception_mapper value '{code_str}' collides with "
                                     f'reserved built-in {type(builtin).__name__}.{builtin.name}'
                                 ),
-                                code=ErrorCode.CHECK_RESERVED_CODE_COLLISION,
+                                code=HorsiesErrorCode.CHECK_RESERVED_CODE_COLLISION,
                                 notes=['app config', f'key: {exc_cls.__name__}'],
                                 help_text='use a different UPPER_SNAKE_CASE code that does not match a built-in library code',
                             )
@@ -1401,7 +1401,7 @@ class Horsies:
                 _no_location(
                     ConfigurationError(
                         message=global_default_error,
-                        code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+                        code=HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
                         notes=['app config'],
                         help_text='use UPPER_SNAKE_CASE error codes',
                     )
@@ -1415,7 +1415,7 @@ class Horsies:
         if (
             isinstance(global_default, str)
             and global_default in BUILTIN_CODE_REGISTRY
-            and global_default != OperationalErrorCode.UNHANDLED_EXCEPTION.value
+            and global_default != OperationalCode.UNHANDLED_EXCEPTION.value
         ):
             builtin = BUILTIN_CODE_REGISTRY[global_default]
             errors.append(
@@ -1425,7 +1425,7 @@ class Horsies:
                             f"default_unhandled_error_code '{global_default}' collides with "
                             f'reserved built-in {type(builtin).__name__}.{builtin.name}'
                         ),
-                        code=ErrorCode.CHECK_RESERVED_CODE_COLLISION,
+                        code=HorsiesErrorCode.CHECK_RESERVED_CODE_COLLISION,
                         notes=['app config'],
                         help_text='use a different UPPER_SNAKE_CASE code that does not match a built-in library code',
                     )
@@ -1444,7 +1444,7 @@ class Horsies:
                         _no_location(
                             ConfigurationError(
                                 message=code_error,
-                                code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+                                code=HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
                                 notes=[f"task '{task_name}'"],
                                 help_text='use UPPER_SNAKE_CASE error codes',
                             )
@@ -1453,7 +1453,7 @@ class Horsies:
                 elif (
                     isinstance(task_default, str)
                     and task_default in BUILTIN_CODE_REGISTRY
-                    and task_default != OperationalErrorCode.UNHANDLED_EXCEPTION.value
+                    and task_default != OperationalCode.UNHANDLED_EXCEPTION.value
                 ):
                     builtin = BUILTIN_CODE_REGISTRY[task_default]
                     errors.append(
@@ -1463,7 +1463,7 @@ class Horsies:
                                     f"default_unhandled_error_code '{task_default}' collides with "
                                     f'reserved built-in {type(builtin).__name__}.{builtin.name}'
                                 ),
-                                code=ErrorCode.CHECK_RESERVED_CODE_COLLISION,
+                                code=HorsiesErrorCode.CHECK_RESERVED_CODE_COLLISION,
                                 notes=[f"task '{task_name}'"],
                                 help_text='use a different UPPER_SNAKE_CASE code that does not match a built-in library code',
                             )
@@ -1484,7 +1484,7 @@ class Horsies:
                                         f"exception_mapper value '{code_str}' collides with "
                                         f'reserved built-in {type(builtin).__name__}.{builtin.name}'
                                     ),
-                                    code=ErrorCode.CHECK_RESERVED_CODE_COLLISION,
+                                    code=HorsiesErrorCode.CHECK_RESERVED_CODE_COLLISION,
                                     notes=[
                                         f"task '{task_name}'",
                                         f'key: {exc_cls.__name__}'
@@ -1506,7 +1506,7 @@ class Horsies:
                     _no_location(
                         ConfigurationError(
                             message='invalid task_options_json',
-                            code=ErrorCode.TASK_INVALID_OPTIONS,
+                            code=HorsiesErrorCode.TASK_INVALID_OPTIONS,
                             notes=[
                                 f"task '{task_name}'",
                                 str(options_result.err_value),
@@ -1522,7 +1522,7 @@ class Horsies:
                     _no_location(
                         ConfigurationError(
                             message='task_options_json must be an object',
-                            code=ErrorCode.TASK_INVALID_OPTIONS,
+                            code=HorsiesErrorCode.TASK_INVALID_OPTIONS,
                             notes=[
                                 f"task '{task_name}'",
                                 f'task_options_json={options!r}',
@@ -1540,7 +1540,7 @@ class Horsies:
                     _no_location(
                         ConfigurationError(
                             message='retry_policy must be an object',
-                            code=ErrorCode.TASK_INVALID_OPTIONS,
+                            code=HorsiesErrorCode.TASK_INVALID_OPTIONS,
                             notes=[
                                 f"task '{task_name}'",
                                 f'retry_policy={retry_policy_raw!r}',
@@ -1556,7 +1556,7 @@ class Horsies:
                     _no_location(
                         ConfigurationError(
                             message='retry_policy.auto_retry_for is required',
-                            code=ErrorCode.TASK_INVALID_OPTIONS,
+                            code=HorsiesErrorCode.TASK_INVALID_OPTIONS,
                             notes=[f"task '{task_name}'"],
                             help_text='configure retry triggers in RetryPolicy(auto_retry_for=[...])',
                         )
@@ -1568,7 +1568,7 @@ class Horsies:
                     _no_location(
                         ConfigurationError(
                             message='auto_retry_for must be a list',
-                            code=ErrorCode.TASK_INVALID_OPTIONS,
+                            code=HorsiesErrorCode.TASK_INVALID_OPTIONS,
                             notes=[
                                 f"task '{task_name}'",
                                 f'auto_retry_for={auto_retry_for!r}',
@@ -1583,7 +1583,7 @@ class Horsies:
                     _no_location(
                         ConfigurationError(
                             message='auto_retry_for must not be empty',
-                            code=ErrorCode.TASK_INVALID_OPTIONS,
+                            code=HorsiesErrorCode.TASK_INVALID_OPTIONS,
                             notes=[f"task '{task_name}'"],
                             help_text='provide at least one UPPER_SNAKE_CASE error code',
                         )
@@ -1598,7 +1598,7 @@ class Horsies:
                         _no_location(
                             ConfigurationError(
                                 message='auto_retry_for entries must be strings',
-                                code=ErrorCode.TASK_INVALID_OPTIONS,
+                                code=HorsiesErrorCode.TASK_INVALID_OPTIONS,
                                 notes=[
                                     f"task '{task_name}'",
                                     f'auto_retry_for[{idx}]={entry!r}',
@@ -1619,7 +1619,7 @@ class Horsies:
                     _no_location(
                         ConfigurationError(
                             message=code_error,
-                            code=ErrorCode.TASK_INVALID_OPTIONS,
+                            code=HorsiesErrorCode.TASK_INVALID_OPTIONS,
                             notes=[f"task '{task_name}'"],
                             help_text='replace exception names with explicit error codes',
                         )
@@ -1636,7 +1636,7 @@ class Horsies:
                     _no_location(
                         ConfigurationError(
                             message='invalid retry_policy metadata',
-                            code=ErrorCode.TASK_INVALID_OPTIONS,
+                            code=HorsiesErrorCode.TASK_INVALID_OPTIONS,
                             notes=[f"task '{task_name}'", exception_text(exc)],
                             help_text='ensure retry_policy matches RetryPolicy schema',
                         )
@@ -1663,7 +1663,7 @@ class Horsies:
                 _no_location(
                     ConfigurationError(
                         message='live broker check cannot run inside a running event loop',
-                        code=ErrorCode.CHECK_LIVE_ASYNC_CONTEXT,
+                        code=HorsiesErrorCode.CHECK_LIVE_ASYNC_CONTEXT,
                         notes=[
                             'check(live=True) was called on a thread that runs an '
                             'event loop; the connectivity check did not run',
@@ -1703,7 +1703,7 @@ class Horsies:
         URL that must receive a NOTIFY within 2 s. Runs on ``handle``, the
         live check's own handle.
 
-        Returns at most one error, ``BROKER_INVALID_URL``: "broker listener
+        Returns at most one error, ``DATABASE_INVALID_URL``: "broker listener
         capability check failed" for the probe, "broker connectivity check
         failed" for every other step and for a core that cannot run the
         call. Nothing is written but the probe's one NOTIFY. Raises
@@ -1721,7 +1721,7 @@ class Horsies:
                     _no_location(
                         ConfigurationError(
                             message='broker listener capability check failed',
-                            code=ErrorCode.BROKER_INVALID_URL,
+                            code=HorsiesErrorCode.DATABASE_INVALID_URL,
                             notes=[
                                 'session_database_url appears to be transaction-pooled; '
                                 'LISTEN notification was not delivered',
@@ -1852,7 +1852,7 @@ class Horsies:
         every class that the app's sends can stamp.
 
         Raises:
-            HorsiesError: broker construction failed (BROKER_INIT_FAILED;
+            HorsiesError: broker construction failed (DATABASE_INIT_FAILED;
                 non-HorsiesError causes are wrapped). Construction happens
                 once per process — callers treat this as fail-fast
                 configuration error, not a retryable condition.
@@ -1877,7 +1877,7 @@ class Horsies:
         except Exception as e:
             raise HorsiesError(
                 message=f'Failed to initialize broker: {e}',
-                code=ErrorCode.BROKER_INIT_FAILED,
+                code=HorsiesErrorCode.DATABASE_INIT_FAILED,
                 notes=[str(e)],
                 help_text='check database_url in PostgresConfig; the note holds the cause',
             ) from e
@@ -1898,7 +1898,7 @@ class Horsies:
         self,
         task_id: UUID,
         timeout_ms: int | None = None,
-    ) -> 'BrokerResult[dict[str, Any] | None]':
+    ) -> 'DatabaseResult[dict[str, Any] | None]':
         """Fetch the raw stored result envelope without typed decode.
 
         Thin wrapper around ``broker.get_raw_result_record_async``.
@@ -1909,8 +1909,8 @@ class Horsies:
 
         The first check is the wait limit: a timeout_ms that is not None or
         an int from 0 to MAX_TASK_TIMEOUT_MS returns
-        ``Err(BrokerInvalidInput)``. Then, in a process that runs task
-        bodies, it returns ``Err(BrokerWaitInsideTask)``. Neither does I/O.
+        ``Err(DatabaseInvalidInput)``. Then, in a process that runs task
+        bodies, it returns ``Err(DatabaseWaitInsideTask)``. Neither does I/O.
         """
         from horsies.core.types.result import Err, Ok, is_err
 
@@ -1934,12 +1934,12 @@ class Horsies:
         self,
         task_id: UUID,
         timeout_ms: int | None = None,
-    ) -> 'BrokerResult[dict[str, Any] | None]':
+    ) -> 'DatabaseResult[dict[str, Any] | None]':
         """Synchronous version of ``get_raw_result_async``.
 
         The checks before any I/O come in this order: the wait limit
-        (``Err(BrokerInvalidInput)``), a process that runs task bodies
-        (``Err(BrokerWaitInsideTask)``), and a thread that runs an event loop
+        (``Err(DatabaseInvalidInput)``), a process that runs task bodies
+        (``Err(DatabaseWaitInsideTask)``), and a thread that runs an event loop
         (``Err(ASYNC_CONTEXT)``).
         """
         from horsies.core.types.result import Err, Ok, is_err
@@ -1977,7 +1977,7 @@ class Horsies:
         ``NoTypeAvailable`` when the ok slot is populated and ``task_name``
         isn't in the local registry; ``TaskNotFound``, ``WaitTimeout``,
         ``ResultNotAvailable``, ``ResultDeserializationError`` and
-        ``BrokerError`` as ``TaskHandle.get``.
+        ``ReadDatabaseError`` as ``TaskHandle.get``.
 
         The first check is the wait limit: a timeout_ms that is not None or
         an int from 0 to MAX_TASK_TIMEOUT_MS returns ``Err(InvalidInput)``.
@@ -1998,7 +1998,7 @@ class Horsies:
         self,
         task_id: UUID,
         timeout_ms: int | None,
-        record_result: 'BrokerResult[RawResultRecord | None]',
+        record_result: 'DatabaseResult[RawResultRecord | None]',
     ) -> 'ReadResult[Any, TaskError[Any]]':
         """The answer of ``get_result`` and ``get_result_async`` for the
         broker's result read (``read_of_record``). Pure apart from the lookup
@@ -2055,7 +2055,7 @@ class Horsies:
         include_result: bool = False,
         include_failed_reason: bool = False,
         include_attempts: bool = False,
-    ) -> 'BrokerResult[TaskInfo | None]':
+    ) -> 'DatabaseResult[TaskInfo | None]':
         """Fetch task metadata, including typed-decoded result when possible.
 
         Wraps ``broker.get_task_info_async`` and adds the
@@ -2074,8 +2074,8 @@ class Horsies:
         self,
         task_id: UUID,
         include_result: bool,
-        info_result: 'BrokerResult[TaskInfo | None]',
-    ) -> 'BrokerResult[TaskInfo | None]':
+        info_result: 'DatabaseResult[TaskInfo | None]',
+    ) -> 'DatabaseResult[TaskInfo | None]':
         """The answer of ``get_task_info`` and ``get_task_info_async`` for the
         broker's task info read: the info with its result decoded when
         ``include_result`` asked for it. Sets ``decoded_result`` and
@@ -2083,7 +2083,7 @@ class Horsies:
         apart from the lookup of the task's ``task_ok_type`` in the registry.
         """
         from horsies.core.brokers.result_types import (
-            BrokerInvalidJsonPayload,
+            DatabaseInvalidJsonPayload,
         )
         from horsies.core.codec.json_value import StrictJsonError
         from horsies.core.codec.typed import (
@@ -2108,7 +2108,7 @@ class Horsies:
         try:
             envelope = validate_task_result_envelope(info.raw_result)
         except StrictJsonError as exc:
-            return Err(BrokerInvalidJsonPayload(
+            return Err(DatabaseInvalidJsonPayload(
                 message=(
                     f'TaskResult envelope invalid for {task_id}: {exc}'
                 ),
@@ -2123,7 +2123,7 @@ class Horsies:
             try:
                 err_value = decode_task_error(err_slot)
             except (StrictJsonError, ValueValidationError) as exc:
-                return Err(BrokerInvalidJsonPayload(
+                return Err(DatabaseInvalidJsonPayload(
                     message=(
                         f'TaskError decode failed for {task_id}: {exc}'
                     ),
@@ -2144,7 +2144,7 @@ class Horsies:
         try:
             decoded = decode_task_result(info.raw_result, ok_type)
         except (StrictJsonError, ValueValidationError) as exc:
-            return Err(BrokerInvalidJsonPayload(
+            return Err(DatabaseInvalidJsonPayload(
                 message=(
                     f'get_task_info decode failed for {task_id}: {exc}'
                 ),
@@ -2161,7 +2161,7 @@ class Horsies:
         include_result: bool = False,
         include_failed_reason: bool = False,
         include_attempts: bool = False,
-    ) -> 'BrokerResult[TaskInfo | None]':
+    ) -> 'DatabaseResult[TaskInfo | None]':
         """Synchronous version of ``get_task_info_async``: the broker's
         blocking read (``PostgresBroker.get_task_info``) on the calling
         thread, with the GIL released.
@@ -2199,16 +2199,16 @@ class Horsies:
 
     def _raw_wait_refused(
         self, label: str, task_id: UUID, timeout_ms: object,
-    ) -> 'BrokerResult[Any] | None':
-        """``Err(BrokerInvalidInput)`` for a wait limit that no wait can use,
+    ) -> 'DatabaseResult[Any] | None':
+        """``Err(DatabaseInvalidInput)`` for a wait limit that no wait can use,
         or None to go on. The first check of a raw result read. Pure."""
-        from horsies.core.brokers.result_types import BrokerInvalidInput
+        from horsies.core.brokers.result_types import DatabaseInvalidInput
         from horsies.core.types.error_detail import NoCause
         from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
         match wait_timeout_seconds(timeout_ms):
             case Err(err_value=refused):
-                return Err(BrokerInvalidInput(
+                return Err(DatabaseInvalidInput(
                     message=f'app.{label}() for task {task_id}: {refused.message}',
                     exception=NoCause(),
                 ))
@@ -2225,33 +2225,33 @@ class Horsies:
             message=wait_inside_task_message(f'app.{label}() for task {task_id}'),
         ))
 
-    def _wait_inside_task_err(self, label: str, task_id: UUID) -> 'BrokerResult[Any]':
+    def _wait_inside_task_err(self, label: str, task_id: UUID) -> 'DatabaseResult[Any]':
         """Refuse a raw result wait in a process that runs task bodies. Nothing ran."""
-        from horsies.core.brokers.result_types import BrokerWaitInsideTask
+        from horsies.core.brokers.result_types import DatabaseWaitInsideTask
         from horsies.core.types.result import Err
 
-        return Err(BrokerWaitInsideTask(
+        return Err(DatabaseWaitInsideTask(
             message=wait_inside_task_message(f'app.{label}() for task {task_id}'),
         ))
 
-    def _async_context_err(self, label: str) -> 'BrokerResult[Any]':
+    def _async_context_err(self, label: str) -> 'DatabaseResult[Any]':
         """Refuse a sync facade called inside a running event loop. Nothing ran."""
         from horsies.core.brokers.result_types import (
-            BrokerAsyncContext,
+            DatabaseAsyncContext,
         )
         from horsies.core.types.result import Err
 
-        return Err(BrokerAsyncContext(
+        return Err(DatabaseAsyncContext(
             message=async_context_message(
                 f'app.{label}()', f'app.{label}_async(...)',
             ),
         ))
 
-    async def ping_database_async(self) -> 'BrokerResult[DatabasePing]':
+    async def ping_database_async(self) -> 'DatabaseResult[DatabasePing]':
         """Probe Postgres reachability + latency through the live pool."""
         return await self.get_broker().ping_database_async()
 
-    def ping_database(self) -> 'BrokerResult[DatabasePing]':
+    def ping_database(self) -> 'DatabaseResult[DatabasePing]':
         """Synchronous version of ``ping_database_async``: the core's blocking
         ping on the calling thread, with the GIL released.
 
@@ -2268,7 +2268,7 @@ class Horsies:
         target_worker_id: str | None = None,
         timeout_seconds: float = 2.0,
         min_responses: int | None = None,
-    ) -> 'BrokerResult[list[WorkerPong]]':
+    ) -> 'DatabaseResult[list[WorkerPong]]':
         """Active ping-pong: collect live workers' replies within a window.
 
         Pass ``min_responses=1`` for a fast fail-open liveness gate — returns on
@@ -2286,7 +2286,7 @@ class Horsies:
         target_worker_id: str | None = None,
         timeout_seconds: float = 2.0,
         min_responses: int | None = None,
-    ) -> 'BrokerResult[list[WorkerPong]]':
+    ) -> 'DatabaseResult[list[WorkerPong]]':
         """Synchronous version of ``ping_workers_async``: the core's blocking
         ping on the calling thread, with the GIL released, and the same
         outcomes. The call is bounded by the window plus the core's bound of a
@@ -2305,11 +2305,11 @@ class Horsies:
 
     async def list_worker_states_async(
         self,
-    ) -> 'BrokerResult[list[WorkerStateSnapshot]]':
+    ) -> 'DatabaseResult[list[WorkerStateSnapshot]]':
         """Latest state snapshot per worker (including idle workers)."""
         return await self.get_broker().list_worker_states_async()
 
-    def list_worker_states(self) -> 'BrokerResult[list[WorkerStateSnapshot]]':
+    def list_worker_states(self) -> 'DatabaseResult[list[WorkerStateSnapshot]]':
         """Synchronous version of ``list_worker_states_async``: the core's blocking
         read on the calling thread, with the GIL released, and the same
         outcomes.
@@ -2324,14 +2324,14 @@ class Horsies:
     async def get_worker_state_async(
         self,
         worker_id: str,
-    ) -> 'BrokerResult[WorkerStateSnapshot | None]':
+    ) -> 'DatabaseResult[WorkerStateSnapshot | None]':
         """Latest state snapshot for one worker, or ``None`` if unknown."""
         return await self.get_broker().get_worker_state_async(worker_id)
 
     def get_worker_state(
         self,
         worker_id: str,
-    ) -> 'BrokerResult[WorkerStateSnapshot | None]':
+    ) -> 'DatabaseResult[WorkerStateSnapshot | None]':
         """Synchronous version of ``get_worker_state_async``: the core's blocking
         read on the calling thread, with the GIL released, and the same
         outcomes.
@@ -2348,7 +2348,7 @@ class Horsies:
         worker_id: str,
         *,
         limit: int | None = None,
-    ) -> 'BrokerResult[list[WorkerStateSnapshot]]':
+    ) -> 'DatabaseResult[list[WorkerStateSnapshot]]':
         """Timeseries snapshots for one worker, newest first."""
         return await self.get_broker().get_worker_state_history_async(
             worker_id, limit=limit
@@ -2359,7 +2359,7 @@ class Horsies:
         worker_id: str,
         *,
         limit: int | None = None,
-    ) -> 'BrokerResult[list[WorkerStateSnapshot]]':
+    ) -> 'DatabaseResult[list[WorkerStateSnapshot]]':
         """Synchronous version of ``get_worker_state_history_async``: the core's blocking
         read on the calling thread, with the GIL released, and the same
         outcomes.
@@ -2373,14 +2373,14 @@ class Horsies:
             worker_id, limit=limit,
         )
 
-    async def get_class_coverage_async(self) -> 'BrokerResult[ClassCoverage]':
+    async def get_class_coverage_async(self) -> 'DatabaseResult[ClassCoverage]':
         """For each (queue, class) with PENDING rows, whether a live worker serves it.
 
         See ``PostgresBroker.get_class_coverage_async``.
         """
         return await self.get_broker().get_class_coverage_async()
 
-    def get_class_coverage(self) -> 'BrokerResult[ClassCoverage]':
+    def get_class_coverage(self) -> 'DatabaseResult[ClassCoverage]':
         """Synchronous version of ``get_class_coverage_async``: the core's blocking
         read on the calling thread, with the GIL released, and the same
         outcomes.
@@ -2392,7 +2392,7 @@ class Horsies:
             return self._async_context_err('get_class_coverage')
         return self.get_broker()._get_class_coverage_blocking()  # pyright: ignore[reportPrivateUsage]
 
-    async def get_class_report_async(self) -> 'BrokerResult[ClassReport]':
+    async def get_class_report_async(self) -> 'DatabaseResult[ClassReport]':
         """Pending streams with their oldest wait and coverage, and the budget
         load of each live worker.
 
@@ -2400,7 +2400,7 @@ class Horsies:
         """
         return await self.get_broker().get_class_report_async()
 
-    def get_class_report(self) -> 'BrokerResult[ClassReport]':
+    def get_class_report(self) -> 'DatabaseResult[ClassReport]':
         """Synchronous version of ``get_class_report_async``: the core's blocking
         read on the calling thread, with the GIL released, and the same
         outcomes.
@@ -2787,7 +2787,7 @@ class Horsies:
             errors.append(
                 ConfigurationError(
                     message=f"builder '{fn_name}' signature is not introspectable",
-                    code=ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
+                    code=HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
                     location=meta.location,
                     notes=[f'inspect.signature failed: {exc}'],
                     help_text='register a plain function (or functools.partial with a resolvable signature) as the builder',
@@ -2818,7 +2818,7 @@ class Horsies:
             errors.append(
                 ConfigurationError(
                     message=f"parameterized builder '{fn_name}' missing cases",
-                    code=ErrorCode.WORKFLOW_CHECK_CASES_REQUIRED,
+                    code=HorsiesErrorCode.WORKFLOW_CHECK_CASES_REQUIRED,
                     location=meta.location,
                     notes=[
                         f'required params: {[p.name for p in required_params]}',
@@ -2838,7 +2838,7 @@ class Horsies:
                 errors.append(
                     ConfigurationError(
                         message=f"builder '{fn_name}' case[{idx}] is not a dict",
-                        code=ErrorCode.WORKFLOW_CHECK_CASE_INVALID,
+                        code=HorsiesErrorCode.WORKFLOW_CHECK_CASE_INVALID,
                         location=meta.location,
                         notes=[f'got {type(case).__name__}'],
                         help_text='each case must be a dict of keyword arguments',
@@ -2852,7 +2852,7 @@ class Horsies:
                 errors.append(
                     ConfigurationError(
                         message=f"builder '{fn_name}' case[{idx}] has unknown keys",
-                        code=ErrorCode.WORKFLOW_CHECK_CASE_INVALID,
+                        code=HorsiesErrorCode.WORKFLOW_CHECK_CASE_INVALID,
                         location=meta.location,
                         notes=[
                             f'unknown: {sorted(unknown_keys)}',
@@ -2869,7 +2869,7 @@ class Horsies:
                 errors.append(
                     ConfigurationError(
                         message=f"builder '{fn_name}' case[{idx}] missing required keys",
-                        code=ErrorCode.WORKFLOW_CHECK_CASE_INVALID,
+                        code=HorsiesErrorCode.WORKFLOW_CHECK_CASE_INVALID,
                         location=meta.location,
                         notes=[
                             f'missing: {sorted(missing_keys)}',
@@ -2900,7 +2900,7 @@ class Horsies:
                     _no_location(
                         ConfigurationError(
                             message=f"builder '{fn_name}' returned non-WorkflowSpec{case_summary}",
-                            code=ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
+                            code=HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
                             location=location,
                             notes=[f'got {type(result).__name__}'],
                             help_text='workflow builders must return a WorkflowSpec instance',
@@ -2920,7 +2920,7 @@ class Horsies:
                 _no_location(
                     ConfigurationError(
                         message=f"builder '{fn_name}' raised an unexpected exception{case_summary}",
-                        code=ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
+                        code=HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
                         location=location,
                         notes=[f'{type(exc).__name__}: {exc}'],
                         help_text='workflow builders must not raise non-horsies exceptions during check',
@@ -3023,7 +3023,7 @@ class Horsies:
             # At run time this fails the parent node, so it is a finding.
             errors.append(WorkflowValidationError(
                 message='subworkflow kwargs do not fit build_with',
-                code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+                code=HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
                 notes=[f"node '{node.name}': {exc}"],
                 help_text='fix the kwarg, or the default of the parameter',
             ))
@@ -3109,7 +3109,7 @@ class Horsies:
                 errors.append(
                     ConfigurationError(
                         message=f"undecorated workflow builder '{fn_name}'",
-                        code=ErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER,
+                        code=HorsiesErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER,
                         location=location,
                         notes=[
                             f"function '{fn_name}' returns WorkflowSpec but is not decorated with @app.workflow_builder",

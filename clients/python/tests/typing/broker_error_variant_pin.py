@@ -8,9 +8,9 @@ another code, a cause that ``raise ... from`` accepts without a match, or a
 field on the wrong variant fails the check.
 
 The enqueue path and ``ensure_schema_initialized`` return a subset of
-``BrokerOperationError``. Each narrowed return type has an assignment to
+``DatabaseOperationError``. Each narrowed return type has an assignment to
 its declared type, which fails when the type widens. The public methods
-also have a ``BrokerOperationFailed`` arm that must be reported as never
+also have a ``DatabaseOperationFailed`` arm that must be reported as never
 matched.
 
 The mapping from a broker error to a send error takes only the enqueue
@@ -24,17 +24,17 @@ from typing import assert_never
 from uuid import UUID
 
 from horsies import (
-    BrokerAsyncContext,
-    BrokerEnqueueError,
-    BrokerEnqueueFailed,
-    BrokerErrorCode,
-    BrokerIdempotencyKeyConflict,
-    BrokerInvalidInput,
-    BrokerInvalidTaskOptions,
-    BrokerOperationError,
-    BrokerOperationFailed,
-    BrokerPayloadMismatch,
-    BrokerSyncCallError,
+    DatabaseAsyncContext,
+    DatabaseEnqueueError,
+    DatabaseEnqueueFailed,
+    DatabaseErrorCode,
+    DatabaseIdempotencyKeyConflict,
+    DatabaseInvalidInput,
+    DatabaseInvalidTaskOptions,
+    DatabaseOperationError,
+    DatabaseOperationFailed,
+    DatabasePayloadMismatch,
+    DatabaseSyncCallError,
     Err,
     NoCause,
     Ok,
@@ -56,39 +56,39 @@ TASK_ID = UUID('0198c0de-0000-7000-8000-000000000001')
 
 
 def operation_codes() -> None:
-    _ = BrokerOperationFailed(
-        code=BrokerErrorCode.DB_PING_FAILED,
+    _ = DatabaseOperationFailed(
+        code=DatabaseErrorCode.DATABASE_PING_FAILED,
         message='ping failed',
         retryable=True,
         exception=ConnectionError('lost'),
     )
-    _ = BrokerOperationFailed(
-        code=BrokerErrorCode.ENQUEUE_FAILED,  # pyright: ignore[reportArgumentType]
+    _ = DatabaseOperationFailed(
+        code=DatabaseErrorCode.ENQUEUE_FAILED,  # pyright: ignore[reportArgumentType]
         message='enqueue failed',
         retryable=True,
         exception=ConnectionError('lost'),
     )
-    _ = BrokerOperationFailed(
-        code=BrokerErrorCode.CLOSE_FAILED,
+    _ = DatabaseOperationFailed(
+        code=DatabaseErrorCode.CLOSE_FAILED,
         message='close failed',
         retryable=False,
         exception=NoCause(),  # pyright: ignore[reportArgumentType]
     )
 
 
-def chain_the_operation_cause(operation: BrokerOperationFailed) -> None:
+def chain_the_operation_cause(operation: DatabaseOperationFailed) -> None:
     raise RuntimeError('operation failed') from operation.exception
 
 
-def chain_the_enqueue_cause(enqueue: BrokerEnqueueFailed) -> None:
+def chain_the_enqueue_cause(enqueue: DatabaseEnqueueFailed) -> None:
     raise RuntimeError('enqueue failed') from enqueue.exception  # pyright: ignore[reportGeneralTypeIssues]
 
 
-def chain_the_refusal_cause(refused: BrokerInvalidInput) -> None:
+def chain_the_refusal_cause(refused: DatabaseInvalidInput) -> None:
     raise RuntimeError('refused') from refused.exception  # pyright: ignore[reportGeneralTypeIssues]
 
 
-def chain_the_matched_cause(error: BrokerOperationError) -> None:
+def chain_the_matched_cause(error: DatabaseOperationError) -> None:
     match broker_error_cause(error):
         case NoCause():
             raise RuntimeError(error.message)
@@ -97,8 +97,8 @@ def chain_the_matched_cause(error: BrokerOperationError) -> None:
 
 
 def owner_only_on_the_conflict(
-    conflict: BrokerIdempotencyKeyConflict,
-    mismatch: BrokerPayloadMismatch,
+    conflict: DatabaseIdempotencyKeyConflict,
+    mismatch: DatabasePayloadMismatch,
 ) -> None:
     _ = conflict.owner_task_id
     _ = mismatch.owner_task_id  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
@@ -106,7 +106,7 @@ def owner_only_on_the_conflict(
 
 
 async def enqueue_async_returns_only_enqueue_errors(broker: PostgresBroker) -> None:
-    declared: Result[UUID, BrokerEnqueueError] = await broker.enqueue_async(
+    declared: Result[UUID, DatabaseEnqueueError] = await broker.enqueue_async(
         'report', task_id=TASK_ID, send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc),
     )
     _ = declared
@@ -115,14 +115,14 @@ async def enqueue_async_returns_only_enqueue_errors(broker: PostgresBroker) -> N
             pass
         case Err(error):
             match error:
-                case BrokerOperationFailed():  # pyright: ignore[reportUnnecessaryComparison]
+                case DatabaseOperationFailed():  # pyright: ignore[reportUnnecessaryComparison]
                     pass
                 case _:
                     pass
 
 
 def enqueue_returns_only_enqueue_and_sync_call_errors(broker: PostgresBroker) -> None:
-    declared: Result[UUID, BrokerEnqueueError | BrokerSyncCallError] = broker.enqueue(
+    declared: Result[UUID, DatabaseEnqueueError | DatabaseSyncCallError] = broker.enqueue(
         'report', task_id=TASK_ID, send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc),
     )
     _ = declared
@@ -131,7 +131,7 @@ def enqueue_returns_only_enqueue_and_sync_call_errors(broker: PostgresBroker) ->
             pass
         case Err(error):
             match error:
-                case BrokerOperationFailed():  # pyright: ignore[reportUnnecessaryComparison]
+                case DatabaseOperationFailed():  # pyright: ignore[reportUnnecessaryComparison]
                     pass
                 case _:
                     pass
@@ -140,7 +140,7 @@ def enqueue_returns_only_enqueue_and_sync_call_errors(broker: PostgresBroker) ->
 async def schema_init_returns_only_the_operation_failure(
     broker: PostgresBroker,
 ) -> None:
-    declared: Result[None, BrokerOperationFailed] = (
+    declared: Result[None, DatabaseOperationFailed] = (
         await broker.ensure_schema_initialized()
     )
     _ = declared
@@ -149,45 +149,45 @@ async def schema_init_returns_only_the_operation_failure(
             pass
         case Err(error):
             match error:
-                case BrokerEnqueueFailed():  # pyright: ignore[reportUnnecessaryComparison]
+                case DatabaseEnqueueFailed():  # pyright: ignore[reportUnnecessaryComparison]
                     pass
                 case _:
                     pass
 
 
 def every_enqueue_variant_is_matched(
-    error: BrokerEnqueueError | BrokerSyncCallError,
+    error: DatabaseEnqueueError | DatabaseSyncCallError,
 ) -> str:
     match error:
-        case BrokerEnqueueFailed():
+        case DatabaseEnqueueFailed():
             return 'write failed or not confirmed'
-        case BrokerPayloadMismatch():
+        case DatabasePayloadMismatch():
             return 'payload mismatch'
-        case BrokerIdempotencyKeyConflict():
+        case DatabaseIdempotencyKeyConflict():
             return 'key conflict'
-        case BrokerInvalidTaskOptions():
+        case DatabaseInvalidTaskOptions():
             return 'task options refused'
-        case BrokerInvalidInput():
+        case DatabaseInvalidInput():
             return 'input refused'
-        case BrokerAsyncContext():
+        case DatabaseAsyncContext():
             return 'async context'
         case _ as unreachable:
             assert_never(unreachable)
 
 
 def enqueue_helpers_return_their_subsets() -> None:
-    stored_input: Result[str, BrokerInvalidInput] = _parse_enqueue_input(
+    stored_input: Result[str, DatabaseInvalidInput] = _parse_enqueue_input(
         'report', None,
     )
-    async_context: Err[BrokerAsyncContext] = _async_context_err(
+    async_context: Err[DatabaseAsyncContext] = _async_context_err(
         'PostgresBroker.enqueue()', 'broker.enqueue_async(...)',
     )
     _ = (stored_input, async_context)
 
 
 def send_mapping_refuses_the_operation_error(
-    enqueue_error: BrokerEnqueueError,
-    operation_error: BrokerOperationFailed,
+    enqueue_error: DatabaseEnqueueError,
+    operation_error: DatabaseOperationFailed,
     payload: TaskSendPayload,
 ) -> None:
     _ = _map_broker_err(enqueue_error, TASK_ID, payload)

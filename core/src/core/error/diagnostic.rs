@@ -1,7 +1,7 @@
 use miette::{Diagnostic, SourceSpan};
 use thiserror::Error;
 
-use super::ErrorCode;
+use super::HorsiesErrorCode;
 
 /// A miette-compatible diagnostic error for rich terminal output.
 ///
@@ -64,8 +64,8 @@ pub fn format_report_diagnostic(report: &super::ValidationReport) -> String {
     parts.join("\n")
 }
 
-impl From<ErrorCode> for String {
-    fn from(code: ErrorCode) -> Self {
+impl From<HorsiesErrorCode> for String {
+    fn from(code: HorsiesErrorCode) -> Self {
         code.as_code_str().to_owned()
     }
 }
@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn diagnostic_from_error() {
         let err = HorsiesError::new("test error")
-            .with_code(ErrorCode::WorkflowCycleDetected)
+            .with_code(HorsiesErrorCode::WorkflowCycleDetected)
             .with_help("fix the cycle");
 
         let diag = HorsiesDiagnostic::from_horsies_error(&err);
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn format_diagnostic_produces_output() {
         let err =
-            HorsiesError::new("something went wrong").with_code(ErrorCode::ConfigInvalidQueueMode);
+            HorsiesError::new("something went wrong").with_code(HorsiesErrorCode::ConfigInvalidQueueMode);
 
         let output = format_diagnostic(&err);
         assert!(!output.is_empty());

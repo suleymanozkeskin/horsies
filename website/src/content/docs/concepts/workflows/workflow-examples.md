@@ -108,7 +108,7 @@ match await spec.start_async():
 # ... workflow pauses due to task failure ...
 
 # Resume the workflow
-resumed = await handle.resume_async()  # Ok(bool) or Err(HandleOperationError): match on it
+resumed = await handle.resume_async()  # Ok(bool) or Err(WorkflowHandleError): match on it
 ```
 
 See [Resume](/horsies/concepts/workflows/workflow-semantics/#resume) for what a resume does and how it can fail.
@@ -177,7 +177,7 @@ The entry for a dependency with no stored result:
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 Failed(TaskError(
-    error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+    error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
     message="Dependency node <node_id> (index <index>, task <task_name>) is <status> with no stored result",
     data={"dependency_index": <index>},
 ))
@@ -387,7 +387,7 @@ match await spec.start_async():
 await handle.get_async(timeout_ms=30000)
 
 # Now safe to access individual results (node_id keys)
-# results() returns Ok(dict) or Err(HandleOperationError)
+# results() returns Ok(dict) or Err(WorkflowHandleError)
 match handle.results():
     case Err(results_error):
         raise RuntimeError(results_error.message)

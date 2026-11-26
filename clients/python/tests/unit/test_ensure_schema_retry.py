@@ -9,7 +9,7 @@ import pytest
 
 from psycopg import InterfaceError, OperationalError
 
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerOperationFailed
+from horsies.core.brokers.result_types import DatabaseErrorCode, DatabaseOperationError, DatabaseOperationFailed
 from horsies.core.cli import _ensure_schema_with_retry
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.types.result import Err, Ok
@@ -20,10 +20,10 @@ def _schema_err(
     *,
     retryable: bool = True,
     exception: BaseException | None = None,
-) -> Err[BrokerOperationError]:
+) -> Err[DatabaseOperationError]:
     """Build an Err for schema init failure in tests."""
-    return Err(BrokerOperationFailed(
-        code=BrokerErrorCode.SCHEMA_INIT_FAILED,
+    return Err(DatabaseOperationFailed(
+        code=DatabaseErrorCode.SCHEMA_INIT_FAILED,
         message=message,
         retryable=retryable,
         exception=exception or ConnectionError(message),
@@ -112,7 +112,7 @@ class TestEnsureSchemaWithRetry:
         """max_attempts=0 means infinite retries; verify it keeps going."""
         call_count = 0
 
-        def fail_then_succeed() -> Ok[None] | Err[BrokerOperationError]:
+        def fail_then_succeed() -> Ok[None] | Err[DatabaseOperationError]:
             nonlocal call_count
             call_count += 1
             if call_count <= 10:

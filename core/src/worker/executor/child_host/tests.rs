@@ -17,7 +17,7 @@ use super::seats::{
     InFlightRuns, PollWatch, RunGate,
 };
 use super::*;
-use crate::core::task::error::{OperationalErrorCode, TaskError};
+use crate::core::task::error::{OperationalCode, TaskError};
 use crate::core::task::result::TaskResult;
 use crate::events::AttemptStart;
 use crate::process_exit::{ExitDrain, ProcessExit};
@@ -131,7 +131,7 @@ fn a_value_that_is_not_json_is_a_serialization_error() {
 
 #[test]
 fn a_task_error_becomes_the_error_envelope() {
-    let error = TaskError::builtin(OperationalErrorCode::TaskException, "boom");
+    let error = TaskError::builtin(OperationalCode::TaskException, "boom");
     let envelope = envelope_of(result_end(TaskResult::Err(error)));
     assert!(
         envelope.starts_with(r#"{"__h_task_result__":true,"ok":null,"err":{"#),

@@ -6,11 +6,11 @@
 //! again. The core's refusals that need no connection run first, then the
 //! first send of a handle installs the schema once, as Python's broker does.
 //! The outcome is `Enqueued`, or the broker catalog's class of the failure
-//! (`horsies._catalog.broker_errors`: `BrokerInvalidInput`,
-//! `BrokerInvalidTaskOptions`, `BrokerEnqueueFailed`,
-//! `BrokerPayloadMismatch` or `BrokerIdempotencyKeyConflict`), built in Rust
+//! (`horsies._catalog.broker_errors`: `DatabaseInvalidInput`,
+//! `DatabaseInvalidTaskOptions`, `DatabaseEnqueueFailed`,
+//! `DatabasePayloadMismatch` or `DatabaseIdempotencyKeyConflict`), built in Rust
 //! (`catalog_errors`). The core decides the code, the message and the cause
-//! of each failure (`BrokerOperationError::enqueue_error`), so the Python
+//! of each failure (`DatabaseOperationError::enqueue_error`), so the Python
 //! client returns the class as it is.
 
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
-    BrokerError, BrokerOperationError, CheckedSend, EnqueueRefusal, EnqueueRetention, SendKind,
+    BrokerError, DatabaseOperationError, CheckedSend, EnqueueRefusal, EnqueueRetention, SendKind,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -236,17 +236,17 @@ fn send_retention(class_key: &str) -> Result<EnqueueRetention, BrokerError> {
 
 /// The outcome of a send of `task_name` that failed with `error`: the
 /// broker catalog's class that the core decides
-/// (`BrokerOperationError::enqueue_error`). Pure.
+/// (`DatabaseOperationError::enqueue_error`). Pure.
 fn refused(task_name: &str, error: BrokerError) -> SendOutcome {
     Outcome::Failed(BrokerFailure::of_operation_error(
         ENQUEUE_SUBJECT,
-        BrokerOperationError::enqueue_error(task_name, error),
+        DatabaseOperationError::enqueue_error(task_name, error),
     ))
 }
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::{BrokerErrorCode, EnqueueRefusalCause, SendPart};
+    use horsies_core::{DatabaseErrorCode, EnqueueRefusalCause, SendPart};
 
     use super::*;
 
@@ -285,7 +285,7 @@ mod tests {
         }
         let failure = failure_of(refused("send.task", empty));
         assert_eq!(failure.subject, ENQUEUE_SUBJECT);
-        assert_eq!(failure.error.code(), BrokerErrorCode::InvalidInput);
+        assert_eq!(failure.error.code(), DatabaseErrorCode::InvalidInput);
         assert_eq!(
             failure.error.message(),
             "enqueue input refused for send.task: retention_class_key must be non-empty"
@@ -298,7 +298,7 @@ mod tests {
         );
         let failure = failure_of(refused("send.task", underived));
         assert_eq!(failure.subject, ENQUEUE_SUBJECT);
-        assert_eq!(failure.error.code(), BrokerErrorCode::EnqueueFailed);
+        assert_eq!(failure.error.code(), DatabaseErrorCode::EnqueueFailed);
         assert!(!failure.error.retryable());
         assert!(
             failure.error.message().starts_with(
@@ -319,8 +319,8 @@ mod tests {
     #[test]
     fn a_core_refusal_has_the_code_of_its_part() {
         for (part, code) in [
-            (SendPart::Input, BrokerErrorCode::InvalidInput),
-            (SendPart::TaskOptions, BrokerErrorCode::InvalidTaskOptions),
+            (SendPart::Input, DatabaseErrorCode::InvalidInput),
+            (SendPart::TaskOptions, DatabaseErrorCode::InvalidTaskOptions),
         ] {
             let refusal = EnqueueRefusal::by_rule(part, "refused".to_owned());
             let failure = failure_of(refused("t", BrokerError::EnqueueContract(refusal)));

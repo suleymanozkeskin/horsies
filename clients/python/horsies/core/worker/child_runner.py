@@ -82,7 +82,7 @@ from horsies.core.models.tasks import (
     RetrievalCode,
     CustomCodeType,
     TaskError,
-    OperationalErrorCode,
+    OperationalCode,
     custom_code_text,
 )
 from horsies.core.worker.stored_timeout import (
@@ -248,7 +248,7 @@ def error_code_text(code: object) -> str:
     text of a custom code (``custom_code_text``: the ``str``, or the value of
     the member). Pure."""
     match code:
-        case OperationalErrorCode() | ContractCode() | RetrievalCode() | OutcomeCode():
+        case OperationalCode() | ContractCode() | RetrievalCode() | OutcomeCode():
             return code.value
         case _:
             return custom_code_text(code)
@@ -283,7 +283,7 @@ def _serialization_error_response(
     """Build a WORKER_SERIALIZATION_ERROR response for a serde failure."""
     logger.error(f'Serialization error for task {task_name}: {error}')
     task_error = TaskError(
-        error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+        error_code=OperationalCode.WORKER_SERIALIZATION_ERROR,
         message=str(error),
         data={'task_name': task_name},
     )
@@ -321,14 +321,14 @@ def _stored_timeout_refusal_response(
             assert_never(unreachable)
     logger.error(f'Stored timeout refused for task {task_name}: {reason}')
     task_error = TaskError(
-        error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+        error_code=OperationalCode.WORKER_SERIALIZATION_ERROR,
         message=reason,
         data=data,
     )
     return _encoded_error(task_error)
 
 
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.logging import get_logger
 from horsies.core.process_role import mark_process_runs_task_bodies
 from horsies.core.worker.current import get_current_app, set_current_app
@@ -428,7 +428,7 @@ def _locate_app(app_locator: str) -> Horsies:
     if not app_locator or ':' not in app_locator:
         raise ConfigurationError(
             message='invalid app locator format',
-            code=ErrorCode.WORKER_INVALID_LOCATOR,
+            code=HorsiesErrorCode.WORKER_INVALID_LOCATOR,
             notes=[f'got: {app_locator!r}'],
             help_text="use 'module.path:app' or '/path/to/file.py:app'",
         )
@@ -441,7 +441,7 @@ def _locate_app(app_locator: str) -> Horsies:
     if not isinstance(obj, Horsies):
         raise ConfigurationError(
             message='app locator did not resolve to Horsies instance',
-            code=ErrorCode.WORKER_INVALID_LOCATOR,
+            code=HorsiesErrorCode.WORKER_INVALID_LOCATOR,
             notes=[
                 f'locator: {app_locator!r}',
                 f'resolved to: {type(obj).__name__}',
@@ -1158,7 +1158,7 @@ def async_task_presence(app: Horsies) -> AsyncTaskPresence:
 def _resolution_failure(task_name: str, message: str) -> EncodedResult:
     """The result of a task the worker cannot resolve: WORKER_RESOLUTION_ERROR."""
     task_error = TaskError(
-        error_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR,
+        error_code=OperationalCode.WORKER_RESOLUTION_ERROR,
         message=message,
         data={'task_name': task_name},
     )
@@ -1474,7 +1474,7 @@ def _prepare_task_call(
                     # typed value.
                     results_by_id[node_id] = Failed(
                         TaskError(
-                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'workflow_ctx result for node '
                                 f'{node_id!r} unavailable (source '
@@ -1489,7 +1489,7 @@ def _prepare_task_call(
                 if not isinstance(source_task_name, str):
                     results_by_id[node_id] = Failed(
                         TaskError(
-                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'workflow_ctx missing task_name for '
                                 f'node {node_id!r}; cannot decode'
@@ -1515,7 +1515,7 @@ def _prepare_task_call(
                 if source_ok_type is None:
                     results_by_id[node_id] = Failed(
                         TaskError(
-                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'workflow_ctx source '
                                 f'{source_task_name!r} not '
@@ -1545,7 +1545,7 @@ def _prepare_task_call(
                 except (StrictJsonError, ValueValidationError) as exc:
                     results_by_id[node_id] = Failed(
                         TaskError(
-                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'decode_task_result failed for '
                                 f'workflow_ctx node {node_id!r}: '
@@ -1640,7 +1640,7 @@ def _context_entry(
             return typed
         case Err(err_value=unknown):
             return Failed(TaskError(
-                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                 message=f'workflow_ctx node {node_id!r}: {unknown.message}',
                 data={'node_id': node_id, 'custom_code': unknown.custom_code},
             ))
@@ -1651,7 +1651,7 @@ def _task_exception_response(task_name: str, e: BaseException) -> EncodedResult:
     logger.error(f'Task exception: {task_name}: {exception_text(e)}')
     # If the task raised an exception, we wrap it in a TaskError
     task_error = TaskError(
-        error_code=OperationalErrorCode.TASK_EXCEPTION,
+        error_code=OperationalCode.TASK_EXCEPTION,
         message=f'{type(e).__name__}: {exception_text(e)}',
         data={'task_name': task_name},
         exception=e,  # pydantic will accept and we flatten on serialization if needed elsewhere

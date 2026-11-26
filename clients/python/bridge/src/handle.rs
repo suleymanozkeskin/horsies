@@ -15,7 +15,7 @@ use horsies_core::handle::{CoreHandle as LazyHandle, HandleConnection};
 use horsies_core::manifest::{parse_producer_manifest, ProducerManifest, SchemaMode};
 use horsies_core::worker_manifest::parse_worker_profiles;
 use horsies_core::{
-    BrokerError, BrokerOperationError, ClientFamily, CoverageRequest, PoolProfile, PostgresBroker,
+    BrokerError, DatabaseOperationError, ClientFamily, CoverageRequest, PoolProfile, PostgresBroker,
 };
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -319,7 +319,7 @@ impl CoreHandle {
     }
 
     /// Ping the database: `DatabasePingRecord` or the generated broker error class with
-    /// `DB_PING_FAILED`.
+    /// `DATABASE_PING_FAILED`.
     fn ping_database(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
         call_blocking(
@@ -436,7 +436,7 @@ impl CoreHandle {
     }
 
     /// Enqueue one task: `Enqueued`, or the generated broker error class of
-    /// the failure (`BrokerCoreEnqueueError`). Writes.
+    /// the failure (`DatabaseCoreEnqueueError`). Writes.
     fn enqueue(&self, py: Python<'_>, request: &Bound<'_, EnqueueRequest>) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
         call_blocking(
@@ -701,7 +701,7 @@ impl CoreHandle {
     /// Cancel one plain task (`horsies_cancel_task`): `TaskCancelledRecord`,
     /// or a generated `TaskActionCoreError` class (`TaskActionNotFound`,
     /// `TaskActionNotCancellable`, `TaskActionWorkflowTask`,
-    /// `TaskActionDbOperationFailed` or `TaskActionStoredDataInvalid`). A
+    /// `TaskActionDatabaseOperationFailed` or `TaskActionStoredDataInvalid`). A
     /// RUNNING task is cancelled only with `include_running`. Writes, in one
     /// statement.
     /// Awaitable only: its caller, `horsies.monitoring.task_actions.cancel_task`,
@@ -761,7 +761,7 @@ impl CoreHandle {
 
     /// Pause one workflow tree (`horsies_workflow_pause`): `WorkflowPaused`,
     /// `WorkflowNotRunning`, `WorkflowAbsent`, or a generated handle error
-    /// class (`HandleDbOperationFailed`, `HandleStoredDataInvalid`). Writes, in
+    /// class (`WorkflowHandleDatabaseOperationFailed`, `WorkflowHandleStoredDataInvalid`). Writes, in
     /// one statement; a caller that leaves does not stop it. A row outside
     /// the function's contract raises `PanicException`.
     fn pause_workflow(&self, py: Python<'_>, workflow_id: Uuid) -> PyResult<Py<PyAny>> {
@@ -836,8 +836,8 @@ impl CoreHandle {
 
     /// Resume one workflow tree (`horsies_workflow_resume`): `WorkflowResumed`,
     /// `WorkflowNotPaused`, `WorkflowAbsent`, or a generated handle error
-    /// class (`HandleDbOperationFailed`, `HandleStoredDataInvalid`,
-    /// `HandleResumeRecoveryFailed`). Writes; a caller that leaves does not
+    /// class (`WorkflowHandleDatabaseOperationFailed`, `WorkflowHandleStoredDataInvalid`,
+    /// `WorkflowHandleResumeRecoveryFailed`). Writes; a caller that leaves does not
     /// stop it. The
     /// child starts it owes build their children through the child spec
     /// source, which runs on the callback thread while this thread waits
@@ -1007,8 +1007,8 @@ impl CoreHandle {
 
     /// Cancel one workflow tree (`horsies_workflow_cancel`):
     /// `WorkflowCancelled`, `WorkflowNotCancellable`, `WorkflowAbsent`, or a
-    /// generated handle error class (`HandleDbOperationFailed`,
-    /// `HandleStoredDataInvalid`). Writes, in one statement; a caller that leaves does
+    /// generated handle error class (`WorkflowHandleDatabaseOperationFailed`,
+    /// `WorkflowHandleStoredDataInvalid`). Writes, in one statement; a caller that leaves does
     /// not stop it. A row outside the function's contract raises
     /// `PanicException`.
     fn cancel_workflow(&self, py: Python<'_>, workflow_id: Uuid) -> PyResult<Py<PyAny>> {
@@ -1875,7 +1875,7 @@ async fn ping_database_operation(connection: BrokerConnection) -> Outcome<Databa
         Err(error) => {
             return Outcome::Failed(BrokerFailure::of_operation_error(
                 "ping_database",
-                BrokerOperationError::db_ping_failed(error),
+                DatabaseOperationError::database_ping_failed(error),
             ))
         }
     };

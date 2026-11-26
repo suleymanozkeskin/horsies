@@ -15,7 +15,7 @@ use tokio::time::Instant;
 
 use crate::broker::class_coverage::{ClassCoverage, StreamCoverage, StreamCoverageState};
 use crate::broker::class_coverage_reads::read_class_coverage;
-use crate::broker::result_types::BrokerResult;
+use crate::broker::result_types::DatabaseResult;
 use crate::broker::PostgresBroker;
 use crate::core::task::Execution;
 
@@ -209,7 +209,7 @@ impl ClassCoverageLog {
     /// - a failed read: one warning `Class coverage check failed: <message>`.
     pub(crate) fn lines(
         &mut self,
-        coverage: &BrokerResult<ClassCoverage>,
+        coverage: &DatabaseResult<ClassCoverage>,
         now: Instant,
     ) -> Vec<CoverageLogLine> {
         match coverage {
@@ -254,7 +254,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
-    use crate::broker::result_types::BrokerOperationError;
+    use crate::broker::result_types::DatabaseOperationError;
 
     fn stream(queue: &str, execution: Execution, state: StreamCoverageState) -> StreamCoverage {
         StreamCoverage {
@@ -298,7 +298,7 @@ mod tests {
         }
     }
 
-    fn coverage(streams: Vec<StreamCoverage>) -> BrokerResult<ClassCoverage> {
+    fn coverage(streams: Vec<StreamCoverage>) -> DatabaseResult<ClassCoverage> {
         Ok(ClassCoverage {
             checked_at: Utc
                 .with_ymd_and_hms(2026, 11, 10, 12, 0, 0)
@@ -492,8 +492,8 @@ mod tests {
     fn a_failed_check_logs_one_warning_per_interval() {
         let now = Instant::now();
         let mut log = due_log(now);
-        let failed: BrokerResult<ClassCoverage> =
-            Err(BrokerOperationError::monitoring_query_refused(
+        let failed: DatabaseResult<ClassCoverage> =
+            Err(DatabaseOperationError::monitoring_query_refused(
                 "get_class_coverage",
                 crate::broker::class_coverage::ClassReadRefused {
                     reason: "worker w1 ...".to_owned(),

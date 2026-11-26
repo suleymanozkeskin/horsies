@@ -13,9 +13,9 @@ The app has the health reads of the Python app. Each read connects the app's han
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use horsies::{BrokerOperationError, Horsies, PingTarget};
+use horsies::{DatabaseOperationError, Horsies, PingTarget};
 
-async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
+async fn check_health(app: &Horsies) -> Result<(), DatabaseOperationError> {
     let ping = app.ping_database().await?;
     let pongs = app
         .ping_workers(PingTarget::EveryWorker, Duration::from_secs(2), NonZeroUsize::new(1))
@@ -29,7 +29,7 @@ async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
 
 | Method | Returns | Failure code |
 |--------|---------|--------------|
-| `ping_database()` | `DatabasePing`: the latency of a timed `SELECT 1` round trip | `DB_PING_FAILED` |
+| `ping_database()` | `DatabasePing`: the latency of a timed `SELECT 1` round trip | `DATABASE_PING_FAILED` |
 | `ping_workers(target, timeout, min_responses)` | `Vec<WorkerPong>`: the distinct replies by worker id | `INVALID_INPUT` for a zero `timeout`, with no statement; `LISTENER_DISABLED` for an app whose schema mode has no listener; `WORKER_PING_FAILED` |
 | `list_worker_states()` | `Vec<WorkerStateSnapshot>`: the latest snapshot of every worker that reported one, idle workers included | `MONITORING_QUERY_FAILED` |
 | `get_worker_state(worker_id)` | `Option<WorkerStateSnapshot>`: `None` when the worker never reported one | `MONITORING_QUERY_FAILED` |
@@ -39,7 +39,7 @@ async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
 | `get_class_coverage()` | `ClassCoverage`: for each pending stream of an execution class, whether a live worker can run it | `MONITORING_QUERY_FAILED` |
 | `get_class_report()` | `ClassReport`: the load of each execution class over the live workers | `MONITORING_QUERY_FAILED` |
 
-Every read returns `Result<_, BrokerOperationError>`, an enum with one variant per state and the methods `code()`, `message()` and `retryable()`. A failed read is `OperationFailed` with the `BrokerOperationFailedCode` of the read, a refused argument is `InvalidInput`, and an app with no listener is `ListenerDisabled`. A failed connect or schema install has the code of the read. The message is Python's: `ping_database failed: <cause>`, `ping_workers failed: <cause>`, `<read> failed: <cause>`. `OperationFailed` carries its `cause`, a `Box<BrokerOperationSource>` (the `BrokerError`, a refused class read, a snapshot that does not read, a refused subscription); `InvalidInput` carries `BrokerRefusalCause::Check`. A stored worker snapshot of another shape is `MONITORING_QUERY_FAILED`, and the message names the worker and the column.
+Every read returns `Result<_, DatabaseOperationError>`, an enum with one variant per state and the methods `code()`, `message()` and `retryable()`. A failed read is `OperationFailed` with the `DatabaseOperationFailedCode` of the read, a refused argument is `InvalidInput`, and an app with no listener is `ListenerDisabled`. A failed connect or schema install has the code of the read. The message is Python's: `ping_database failed: <cause>`, `ping_workers failed: <cause>`, `<read> failed: <cause>`. `OperationFailed` carries its `cause`, a `Box<BrokerOperationSource>` (the `BrokerError`, a refused class read, a snapshot that does not read, a refused subscription); `InvalidInput` carries `BrokerRefusalCause::Check`. A stored worker snapshot of another shape is `MONITORING_QUERY_FAILED`, and the message names the worker and the column.
 
 ## Arguments
 

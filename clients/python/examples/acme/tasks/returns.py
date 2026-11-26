@@ -19,7 +19,7 @@ from horsies import (
     Err,
     Failed,
     Ok,
-    OperationalErrorCode,
+    OperationalCode,
     Result,
     RetryPolicy,
     Succeeded,
@@ -45,7 +45,7 @@ from . import store_failure
     queue_name=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def receive_return(
@@ -86,7 +86,7 @@ def receive_return(
     queue_name=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def inspect_item(*, return_id: str) -> Result[Inspection, TaskError]:
@@ -147,7 +147,7 @@ def inspect_item(*, return_id: str) -> Result[Inspection, TaskError]:
     queue_name=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def restock_or_writeoff(

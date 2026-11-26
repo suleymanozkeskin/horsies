@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.workflow.limits import MAX_SUBWORKFLOW_DEPTH
 from horsies.core.models.workflow.nodes import SubWorkflowNode
 
@@ -142,7 +142,7 @@ def _self_nesting_finding(
 ) -> WorkflowValidationError:
     return WorkflowValidationError(
         message='a subworkflow includes itself with the same kwargs',
-        code=ErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING,
+        code=HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING,
         notes=[
             f"node '{node_name}': definition '{definition_key}' with these "
             'kwargs is already on the path from the root, and no node between '
@@ -155,7 +155,7 @@ def _self_nesting_finding(
 def _depth_limit_finding(node_name: str, child_depth: int) -> WorkflowValidationError:
     return WorkflowValidationError(
         message='subworkflow nesting passes the depth limit',
-        code=ErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT,
+        code=HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT,
         notes=[
             f"node '{node_name}': its child workflow would have depth "
             f'{child_depth}; the limit is {MAX_SUBWORKFLOW_DEPTH}, and no node '

@@ -12,7 +12,7 @@ import pytest
 
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     HorsiesError,
     MultipleValidationErrors,
     RegistryError,
@@ -123,14 +123,14 @@ class TestHorsiesError:
     def test_creation_with_code(self) -> None:
         err = HorsiesError(
             message='invalid node id',
-            code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
+            code=HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID,
         )
-        assert err.code == ErrorCode.WORKFLOW_INVALID_NODE_ID
+        assert err.code == HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID
 
     def test_creation_with_notes_and_help(self) -> None:
         err = HorsiesError(
             message='cycle detected',
-            code=ErrorCode.WORKFLOW_CYCLE_DETECTED,
+            code=HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED,
             notes=['task A waits for B', 'task B waits for A'],
             help_text='remove circular dependency',
         )
@@ -176,15 +176,15 @@ class TestHorsiesError:
 
     def test_format_rust_style_basic(self) -> None:
         err = HorsiesError(message='something went wrong')
-        formatted = err.format_rust_style(use_colors=False)
+        formatted = err.format_diagnostic(use_colors=False)
         assert 'error: something went wrong' in formatted
 
     def test_format_rust_style_with_code(self) -> None:
         err = HorsiesError(
             message='cycle detected',
-            code=ErrorCode.WORKFLOW_CYCLE_DETECTED,
+            code=HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED,
         )
-        formatted = err.format_rust_style(use_colors=False)
+        formatted = err.format_diagnostic(use_colors=False)
         assert 'error[HRS-007]:' in formatted
         assert 'cycle detected' in formatted
 
@@ -200,7 +200,7 @@ class TestHorsiesError:
                 message='error occurred',
                 location=SourceLocation(file=temp_path, line=2),
             )
-            formatted = err.format_rust_style(use_colors=False)
+            formatted = err.format_diagnostic(use_colors=False)
             assert '-->' in formatted
             assert temp_path in formatted
             assert 'raise SomeError()' in formatted
@@ -221,7 +221,7 @@ class TestHorsiesError:
                     file=temp_path, line=1, column=16, end_column=24,
                 ),
             )
-            formatted = err.format_rust_style(use_colors=False)
+            formatted = err.format_diagnostic(use_colors=False)
             # 24 - 16 = 8 carets
             assert '^^^^^^^^' in formatted
             assert 'some_variable = bad_call()' in formatted
@@ -239,7 +239,7 @@ class TestHorsiesError:
                 message='err',
                 location=SourceLocation(file=temp_path, line=1, column=4),
             )
-            formatted = err.format_rust_style(use_colors=False)
+            formatted = err.format_diagnostic(use_colors=False)
             # width = max(1, (4+1) - 4) = 1 → single caret at column 4
             assert '^' in formatted
         finally:
@@ -251,7 +251,7 @@ class TestHorsiesError:
             message='gone',
             location=SourceLocation(file='/nonexistent/deleted.py', line=10),
         )
-        formatted = err.format_rust_style(use_colors=False)
+        formatted = err.format_diagnostic(use_colors=False)
         assert '-->' in formatted
         assert '/nonexistent/deleted.py:10' in formatted
         # No source line or underline should appear
@@ -262,7 +262,7 @@ class TestHorsiesError:
             message='error',
             notes=['first note', 'second note'],
         )
-        formatted = err.format_rust_style(use_colors=False)
+        formatted = err.format_diagnostic(use_colors=False)
         assert '= note: first note' in formatted
         assert '= note: second note' in formatted
 
@@ -272,7 +272,7 @@ class TestHorsiesError:
             message='error',
             notes=['line 1\nline 2\nline 3'],
         )
-        formatted = err.format_rust_style(use_colors=False)
+        formatted = err.format_diagnostic(use_colors=False)
         assert '= note: line 1' in formatted
         assert 'line 2' in formatted
         assert 'line 3' in formatted
@@ -282,7 +282,7 @@ class TestHorsiesError:
             message='error',
             help_text='try doing this instead',
         )
-        formatted = err.format_rust_style(use_colors=False)
+        formatted = err.format_diagnostic(use_colors=False)
         assert '= help:' in formatted
         assert 'try doing this instead' in formatted
 
@@ -291,7 +291,7 @@ class TestHorsiesError:
             message='error',
             help_text='line 1\nline 2\nline 3',
         )
-        formatted = err.format_rust_style(use_colors=False)
+        formatted = err.format_diagnostic(use_colors=False)
         assert '= help:' in formatted
         assert 'line 1' in formatted
         assert 'line 2' in formatted
@@ -300,7 +300,7 @@ class TestHorsiesError:
     def test_format_rust_style_with_colors(self) -> None:
         """use_colors=True emits ANSI escape codes."""
         err = HorsiesError(message='colored error')
-        formatted = err.format_rust_style(use_colors=True)
+        formatted = err.format_diagnostic(use_colors=True)
         assert '\033[' in formatted
         assert 'colored error' in formatted
 
@@ -308,7 +308,7 @@ class TestHorsiesError:
         """use_colors=None delegates to _should_use_colors()."""
         err = HorsiesError(message='auto')
         with mock.patch('horsies.core.errors._should_use_colors', return_value=False):
-            formatted = err.format_rust_style(use_colors=None)
+            formatted = err.format_diagnostic(use_colors=None)
         assert '\033[' not in formatted
 
     def test_str_uses_rust_format(self) -> None:
@@ -337,14 +337,14 @@ class TestWorkflowValidationError:
     def test_full_error_format(self) -> None:
         err = WorkflowValidationError(
             message='args_from references task not in waits_for',
-            code=ErrorCode.WORKFLOW_INVALID_ARGS_FROM,
+            code=HorsiesErrorCode.WORKFLOW_INVALID_ARGS_FROM,
             notes=[
                 "task 'process' args_from['data'] references 'fetch'",
                 "'fetch' must be in waits_for to inject its result",
             ],
             help_text="add 'fetch' to waits_for list",
         )
-        formatted = err.format_rust_style(use_colors=False)
+        formatted = err.format_diagnostic(use_colors=False)
 
         assert 'error[HRS-008]:' in formatted
         assert 'args_from references task not in waits_for' in formatted
@@ -369,17 +369,17 @@ class TestTaskDefinitionError:
     def test_basic_creation(self) -> None:
         err = TaskDefinitionError(
             message='missing return type',
-            code=ErrorCode.TASK_NO_RETURN_TYPE,
+            code=HorsiesErrorCode.TASK_NO_RETURN_TYPE,
         )
         assert err.message == 'missing return type'
-        assert err.code == ErrorCode.TASK_NO_RETURN_TYPE
+        assert err.code == HorsiesErrorCode.TASK_NO_RETURN_TYPE
 
     def test_format_rust_style(self) -> None:
         err = TaskDefinitionError(
             message='invalid return type',
-            code=ErrorCode.TASK_INVALID_RETURN_TYPE,
+            code=HorsiesErrorCode.TASK_INVALID_RETURN_TYPE,
         )
-        formatted = err.format_rust_style(use_colors=False)
+        formatted = err.format_diagnostic(use_colors=False)
         assert 'error[HRS-101]:' in formatted
         assert 'invalid return type' in formatted
 
@@ -400,17 +400,17 @@ class TestRegistryError:
     def test_basic_creation(self) -> None:
         err = RegistryError(
             message='task not found',
-            code=ErrorCode.TASK_NOT_REGISTERED,
+            code=HorsiesErrorCode.TASK_NOT_REGISTERED,
         )
         assert err.message == 'task not found'
-        assert err.code == ErrorCode.TASK_NOT_REGISTERED
+        assert err.code == HorsiesErrorCode.TASK_NOT_REGISTERED
 
     def test_format_rust_style(self) -> None:
         err = RegistryError(
             message='duplicate name',
-            code=ErrorCode.TASK_DUPLICATE_NAME,
+            code=HorsiesErrorCode.TASK_DUPLICATE_NAME,
         )
-        formatted = err.format_rust_style(use_colors=False)
+        formatted = err.format_diagnostic(use_colors=False)
         assert 'error[HRS-301]:' in formatted
         assert 'duplicate name' in formatted
 
@@ -431,10 +431,10 @@ class TestConfigurationError:
     def test_basic_creation(self) -> None:
         err = ConfigurationError(
             message='invalid broker URL',
-            code=ErrorCode.BROKER_INVALID_URL,
+            code=HorsiesErrorCode.DATABASE_INVALID_URL,
         )
         assert err.message == 'invalid broker URL'
-        assert err.code == ErrorCode.BROKER_INVALID_URL
+        assert err.code == HorsiesErrorCode.DATABASE_INVALID_URL
 
 
 # =============================================================================
@@ -498,41 +498,41 @@ class TestEnvironmentVariables:
 
 
 class TestErrorCode:
-    """Tests for ErrorCode enum."""
+    """Tests for HorsiesErrorCode enum."""
 
     def test_workflow_error_codes_in_range(self) -> None:
         workflow_codes = [
-            ErrorCode.WORKFLOW_NO_NAME,
-            ErrorCode.WORKFLOW_NO_NODES,
-            ErrorCode.WORKFLOW_INVALID_NODE_ID,
-            ErrorCode.WORKFLOW_DUPLICATE_NODE_ID,
-            ErrorCode.WORKFLOW_NO_ROOT_TASKS,
-            ErrorCode.WORKFLOW_INVALID_DEPENDENCY,
-            ErrorCode.WORKFLOW_CYCLE_DETECTED,
-            ErrorCode.WORKFLOW_INVALID_ARGS_FROM,
-            ErrorCode.WORKFLOW_INVALID_CTX_FROM,
-            ErrorCode.WORKFLOW_CTX_PARAM_MISSING,
-            ErrorCode.WORKFLOW_INVALID_OUTPUT,
-            ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY,
-            ErrorCode.WORKFLOW_INVALID_JOIN,
-            ErrorCode.WORKFLOW_UNRESOLVED_QUEUE,
-            ErrorCode.WORKFLOW_UNRESOLVED_PRIORITY,
-            ErrorCode.WORKFLOW_NO_DEFINITION_KEY,
-            ErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY,
-            ErrorCode.WORKFLOW_SUBWORKFLOW_APP_MISSING,
-            ErrorCode.WORKFLOW_INVALID_KWARG_KEY,
-            ErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS,
-            ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP,
-            ErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH,
-            ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
-            ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
-            ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED,
-            ErrorCode.WORKFLOW_CHECK_CASES_REQUIRED,
-            ErrorCode.WORKFLOW_CHECK_CASE_INVALID,
-            ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
-            ErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER,
-            ErrorCode.WORKFLOW_INVALID_PRIORITY,
-            ErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL,
+            HorsiesErrorCode.WORKFLOW_NO_NAME,
+            HorsiesErrorCode.WORKFLOW_NO_NODES,
+            HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID,
+            HorsiesErrorCode.WORKFLOW_DUPLICATE_NODE_ID,
+            HorsiesErrorCode.WORKFLOW_NO_ROOT_TASKS,
+            HorsiesErrorCode.WORKFLOW_INVALID_DEPENDENCY,
+            HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED,
+            HorsiesErrorCode.WORKFLOW_INVALID_ARGS_FROM,
+            HorsiesErrorCode.WORKFLOW_INVALID_CONTEXT_FROM,
+            HorsiesErrorCode.WORKFLOW_CONTEXT_PARAMETER_MISSING,
+            HorsiesErrorCode.WORKFLOW_INVALID_OUTPUT,
+            HorsiesErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY,
+            HorsiesErrorCode.WORKFLOW_INVALID_JOIN,
+            HorsiesErrorCode.WORKFLOW_UNRESOLVED_QUEUE,
+            HorsiesErrorCode.WORKFLOW_UNRESOLVED_PRIORITY,
+            HorsiesErrorCode.WORKFLOW_NO_DEFINITION_KEY,
+            HorsiesErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY,
+            HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_APP_MISSING,
+            HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY,
+            HorsiesErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS,
+            HorsiesErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP,
+            HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH,
+            HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
+            HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
+            HorsiesErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED,
+            HorsiesErrorCode.WORKFLOW_CHECK_CASES_REQUIRED,
+            HorsiesErrorCode.WORKFLOW_CHECK_CASE_INVALID,
+            HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
+            HorsiesErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER,
+            HorsiesErrorCode.WORKFLOW_INVALID_PRIORITY,
+            HorsiesErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL,
         ]
         for code in workflow_codes:
             # HRS-001-HRS-099 range
@@ -541,17 +541,17 @@ class TestErrorCode:
 
     def test_task_error_codes_in_range(self) -> None:
         task_codes = [
-            ErrorCode.TASK_NO_RETURN_TYPE,
-            ErrorCode.TASK_INVALID_RETURN_TYPE,
-            ErrorCode.TASK_INVALID_OPTIONS,
-            ErrorCode.TASK_INVALID_QUEUE,
-            ErrorCode.TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF,
-            ErrorCode.TASK_SHARED_THREAD_REQUIRES_DEF,
-            ErrorCode.TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT,
-            ErrorCode.TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC,
-            ErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE,
-            ErrorCode.TASK_INVALID_ERROR_CODE,
-            ErrorCode.TASK_DUPLICATE_ERROR_CODE,
+            HorsiesErrorCode.TASK_NO_RETURN_TYPE,
+            HorsiesErrorCode.TASK_INVALID_RETURN_TYPE,
+            HorsiesErrorCode.TASK_INVALID_OPTIONS,
+            HorsiesErrorCode.TASK_INVALID_QUEUE,
+            HorsiesErrorCode.TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF,
+            HorsiesErrorCode.TASK_SHARED_THREAD_REQUIRES_DEF,
+            HorsiesErrorCode.TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT,
+            HorsiesErrorCode.TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC,
+            HorsiesErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE,
+            HorsiesErrorCode.TASK_INVALID_ERROR_CODE,
+            HorsiesErrorCode.TASK_DUPLICATE_ERROR_CODE,
         ]
         for code in task_codes:
             # HRS-100-HRS-199 range
@@ -560,18 +560,18 @@ class TestErrorCode:
 
     def test_config_broker_error_codes_in_range(self) -> None:
         config_codes = [
-            ErrorCode.CONFIG_INVALID_QUEUE_MODE,
-            ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
-            ErrorCode.CONFIG_INVALID_PREFETCH,
-            ErrorCode.BROKER_INVALID_URL,
-            ErrorCode.CONFIG_INVALID_RECOVERY,
-            ErrorCode.CONFIG_INVALID_SCHEDULE,
-            ErrorCode.CLI_INVALID_ARGS,
-            ErrorCode.WORKER_INVALID_LOCATOR,
-            ErrorCode.CONFIG_INVALID_RESILIENCE,
-            ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
-            ErrorCode.CONFIG_INVALID_RETENTION,
-            ErrorCode.CHECK_LIVE_ASYNC_CONTEXT,
+            HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE,
+            HorsiesErrorCode.CONFIG_INVALID_CLUSTER_CAP,
+            HorsiesErrorCode.CONFIG_INVALID_PREFETCH,
+            HorsiesErrorCode.DATABASE_INVALID_URL,
+            HorsiesErrorCode.CONFIG_INVALID_RECOVERY,
+            HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
+            HorsiesErrorCode.CLI_INVALID_ARGS,
+            HorsiesErrorCode.WORKER_INVALID_LOCATOR,
+            HorsiesErrorCode.CONFIG_INVALID_RESILIENCE,
+            HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+            HorsiesErrorCode.CONFIG_INVALID_RETENTION,
+            HorsiesErrorCode.CHECK_LIVE_ASYNC_CONTEXT,
         ]
         for code in config_codes:
             # HRS-200-HRS-299 range
@@ -580,8 +580,8 @@ class TestErrorCode:
 
     def test_registry_error_codes_in_range(self) -> None:
         registry_codes = [
-            ErrorCode.TASK_NOT_REGISTERED,
-            ErrorCode.TASK_DUPLICATE_NAME,
+            HorsiesErrorCode.TASK_NOT_REGISTERED,
+            HorsiesErrorCode.TASK_DUPLICATE_NAME,
         ]
         for code in registry_codes:
             # HRS-300-HRS-399 range
@@ -589,8 +589,8 @@ class TestErrorCode:
             assert 300 <= num <= 399, f'{code} should be in HRS-300-HRS-399 range'
 
     def test_error_code_is_string_enum(self) -> None:
-        """ErrorCode values are strings like 'HRS-001'."""
-        for code in ErrorCode:
+        """HorsiesErrorCode values are strings like 'HRS-001'."""
+        for code in HorsiesErrorCode:
             assert isinstance(code.value, str)
             assert code.value.startswith('HRS-')
             assert code.value[4:].isdigit()
@@ -627,7 +627,7 @@ class TestValidationReport:
         report = ValidationReport('test')
         report.add(ConfigurationError(message='first error'))
         report.add(ConfigurationError(message='second error'))
-        formatted = report.format_rust_style(use_colors=False)
+        formatted = report.format_diagnostic(use_colors=False)
         assert 'first error' in formatted
         assert 'second error' in formatted
         assert 'aborting due to 2 previous errors' in formatted
@@ -635,14 +635,14 @@ class TestValidationReport:
     def test_format_rust_style_empty_report(self) -> None:
         """Formatting an empty report still produces the summary line."""
         report = ValidationReport('empty')
-        formatted = report.format_rust_style(use_colors=False)
+        formatted = report.format_diagnostic(use_colors=False)
         assert 'aborting due to 0 previous errors' in formatted
 
     def test_format_rust_style_with_colors(self) -> None:
         """Colored output contains ANSI escape codes."""
         report = ValidationReport('test')
         report.add(ConfigurationError(message='err'))
-        formatted = report.format_rust_style(use_colors=True)
+        formatted = report.format_diagnostic(use_colors=True)
         assert '\033[' in formatted
 
     def test_str_delegates_to_format(self) -> None:
@@ -678,7 +678,7 @@ class TestMultipleValidationErrors:
         exc = MultipleValidationErrors(
             message='aborting due to 2 previous errors', report=report,
         )
-        formatted = exc.format_rust_style(use_colors=False)
+        formatted = exc.format_diagnostic(use_colors=False)
         assert 'err1' in formatted
         assert 'err2' in formatted
         assert 'aborting due to 2 previous errors' in formatted
@@ -735,12 +735,12 @@ class TestRaiseCollected:
         report.add(
             WorkflowValidationError(
                 message='err',
-                code=ErrorCode.WORKFLOW_CYCLE_DETECTED,
+                code=HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED,
             ),
         )
         with pytest.raises(WorkflowValidationError) as exc_info:
             raise_collected(report)
-        assert exc_info.value.code == ErrorCode.WORKFLOW_CYCLE_DETECTED
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED
 
     def test_two_errors_raises_multiple(self) -> None:
         report = ValidationReport('test')
@@ -808,4 +808,4 @@ class TestRetiredErrorCodes:
 
     @pytest.mark.parametrize('number', ['HRS-023', 'HRS-106'])
     def test_no_member_takes_a_retired_number(self, number: str) -> None:
-        assert number not in {code.value for code in ErrorCode}
+        assert number not in {code.value for code in HorsiesErrorCode}

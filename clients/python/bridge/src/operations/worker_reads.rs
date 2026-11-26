@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, TimeDelta, Utc};
 use horsies_core::{
-    checked_history_limit, worker_history_limit_refused, BrokerOperationError,
+    checked_history_limit, worker_history_limit_refused, DatabaseOperationError,
     BrokerOperationSource, BudgetLoad, ClassBudget, ClassCoverage, ClassReport, ClearableBootCause,
     DownSlot, Execution, PendingStream, SlotHealth, SnapshotProfile, StreamCoverage,
     StreamCoverageState, StreamWait, WorkerClassLoad, WorkerStateSnapshot,
@@ -530,7 +530,7 @@ pub fn history_limit(value: &Bound<'_, PyAny>) -> PyResult<Result<Option<i64>, B
 fn limit_statement_refused(limit: &str) -> BrokerFailure {
     BrokerFailure::of_operation_error(
         HISTORY_SUBJECT,
-        BrokerOperationError::monitoring_query_failed(
+        DatabaseOperationError::monitoring_query_failed(
             HISTORY_SUBJECT,
             BrokerOperationSource::ArgumentUnreadable(format!(
                 "limit {limit} is not a bigint value"

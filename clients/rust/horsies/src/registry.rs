@@ -16,7 +16,7 @@
 use horsies_core::core::task::error::CodeTextRefusal;
 use horsies_core::{DeclaredCodeRefusal, DeclaredErrorCodes, RegisteredTask, TaskRegistry};
 
-use crate::{AppConfig, ErrorCode, HorsiesError, QueueMode, ValidationReport};
+use crate::{AppConfig, HorsiesErrorCode, HorsiesError, QueueMode, ValidationReport};
 
 /// The one queue of `Default` mode.
 pub(crate) const DEFAULT_QUEUE: &str = "default";
@@ -82,14 +82,14 @@ pub(crate) fn resolve_task_queue(
         (QueueMode::Default, Some(queue)) => Err(HorsiesError::new(
             "cannot specify a queue in Default queue mode",
         )
-        .with_code(ErrorCode::ConfigInvalidQueueMode)
+        .with_code(HorsiesErrorCode::ConfigInvalidQueueMode)
         .with_note(format!("queue '{queue}' was specified"))
         .with_note("the app is configured with QueueMode::Default")
         .with_help("either remove the queue or switch to QueueMode::Custom")),
         (QueueMode::Custom, None) => Err(HorsiesError::new(
             "a queue is required in Custom queue mode",
         )
-        .with_code(ErrorCode::ConfigInvalidQueueMode)
+        .with_code(HorsiesErrorCode::ConfigInvalidQueueMode)
         .with_note("the app is configured with QueueMode::Custom")
         .with_help("name one of the configured queues")),
         (QueueMode::Custom, Some(queue)) => match is_configured_queue(config, queue) {
@@ -141,7 +141,7 @@ fn is_configured_queue(config: &AppConfig, queue: &str) -> bool {
 
 fn unknown_queue(config: &AppConfig, queue: &str) -> HorsiesError {
     HorsiesError::new(format!("invalid queue '{queue}'"))
-        .with_code(ErrorCode::TaskInvalidQueue)
+        .with_code(HorsiesErrorCode::TaskInvalidQueue)
         .with_note(format!("valid queues: {:?}", valid_queue_names(config)))
         .with_help("use one of the configured queue names")
 }
@@ -155,7 +155,7 @@ fn refuse_definition_deadline(name: &str, task: &RegisteredTask) -> Result<(), H
         Some(_) => Err(HorsiesError::new(format!(
             "task '{name}' sets good_until in its definition"
         ))
-        .with_code(ErrorCode::TaskInvalidOptions)
+        .with_code(HorsiesErrorCode::TaskInvalidOptions)
         .with_help(
             "set good_until per send with TaskSendOptions, or per workflow node with \
              good_until on the node",
@@ -295,7 +295,7 @@ mod tests {
             let refused = resolve_task_queue(&default_config(), Some(queue)).unwrap_err();
             assert_eq!(
                 refused.code,
-                Some(ErrorCode::ConfigInvalidQueueMode),
+                Some(HorsiesErrorCode::ConfigInvalidQueueMode),
                 "{queue}"
             );
         }
@@ -304,13 +304,13 @@ mod tests {
     #[test]
     fn custom_mode_refuses_a_task_without_a_queue() {
         let refused = resolve_task_queue(&custom_config(), None).unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::ConfigInvalidQueueMode));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::ConfigInvalidQueueMode));
     }
 
     #[test]
     fn custom_mode_refuses_an_unknown_queue_and_names_the_valid_ones() {
         let refused = resolve_task_queue(&custom_config(), Some("other")).unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::TaskInvalidQueue));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::TaskInvalidQueue));
         assert!(refused.notes.iter().any(|note| note.contains("critical")));
     }
 
@@ -355,7 +355,7 @@ mod tests {
             QueueSource::TaskOptions,
         )
         .unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::TaskInvalidOptions));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::TaskInvalidOptions));
         assert!(tasks.is_empty());
     }
 
@@ -379,7 +379,7 @@ mod tests {
             QueueSource::TaskOptions,
         )
         .unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::TaskDuplicateName));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::TaskDuplicateName));
     }
 
     fn task_declaring(codes: &'static [&'static str]) -> RegisteredTask {
@@ -416,13 +416,13 @@ mod tests {
     #[test]
     fn a_built_in_or_reserved_name_is_refused_with_hrs_212_and_nothing_is_registered() {
         let cases: [&'static [&'static str]; 2] =
-            [&["FINE", "BROKER_ERROR"], &["WORKFLOW_STOPPED"]];
+            [&["FINE", "DATABASE_ERROR"], &["WORKFLOW_STOPPED"]];
         for codes in cases {
             let (tasks, registered) = register_declaring(codes);
             let refused = registered.unwrap_err();
             assert_eq!(
                 refused.code,
-                Some(ErrorCode::CheckReservedCodeCollision),
+                Some(HorsiesErrorCode::CheckReservedCodeCollision),
                 "{codes:?}"
             );
             assert!(
@@ -443,7 +443,7 @@ mod tests {
             let refused = registered.unwrap_err();
             assert_eq!(
                 refused.code,
-                Some(ErrorCode::TaskInvalidErrorCode),
+                Some(HorsiesErrorCode::TaskInvalidErrorCode),
                 "{codes:?}"
             );
             assert!(tasks.is_empty());
@@ -454,7 +454,7 @@ mod tests {
     fn a_repeated_code_is_refused_with_hrs_113() {
         let (tasks, registered) = register_declaring(&["RATE_LIMITED", "RATE_LIMITED"]);
         let refused = registered.unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::TaskDuplicateErrorCode));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::TaskDuplicateErrorCode));
         assert!(
             refused.message.contains("RATE_LIMITED"),
             "{}",
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn every_refused_code_is_named_in_one_error() {
-        let (_tasks, registered) = register_declaring(&["bad", "BROKER_ERROR", "OK", "OK"]);
+        let (_tasks, registered) = register_declaring(&["bad", "DATABASE_ERROR", "OK", "OK"]);
         let refused = registered.unwrap_err();
         assert_eq!(refused.notes.len(), 3, "{refused}");
         assert_eq!(refused.code, None);
@@ -498,7 +498,7 @@ mod tests {
         assert!(check_queue(&default_config(), "default").is_ok());
         assert_eq!(
             check_queue(&default_config(), "bulk").unwrap_err().code,
-            Some(ErrorCode::TaskInvalidQueue)
+            Some(HorsiesErrorCode::TaskInvalidQueue)
         );
         assert!(check_queue(&custom_config(), "bulk").is_ok());
         assert!(check_queue(&custom_config(), "default").is_err());

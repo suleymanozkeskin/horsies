@@ -29,7 +29,7 @@ from pydantic import BaseModel
 from horsies import (
     Err,
     Ok,
-    OperationalErrorCode,
+    OperationalCode,
     Result,
     RetryPolicy,
     TaskError,
@@ -117,7 +117,7 @@ def _bundle_discount_cents(order: Order) -> int:
     queue_name=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def apply_promotions(*, order_id: str) -> Result[PromotionOutcome, TaskError]:
@@ -174,7 +174,7 @@ def _tier_name(lifetime_points: int) -> str:
     default_unhandled_error_code=LOYALTY_ENGINE_BUG,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def compute_loyalty_points(
@@ -216,7 +216,7 @@ def compute_loyalty_points(
     queue_name=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def publish_cdn(*, campaign_id: str, sku: str) -> Result[PricePush, TaskError]:
@@ -241,7 +241,7 @@ def publish_cdn(*, campaign_id: str, sku: str) -> Result[PricePush, TaskError]:
     queue_name=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def publish_origin(*, campaign_id: str, sku: str) -> Result[PricePush, TaskError]:
@@ -266,7 +266,7 @@ def publish_origin(*, campaign_id: str, sku: str) -> Result[PricePush, TaskError
     queue_name=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def prewarm_search(*, campaign_id: str) -> Result[SearchPrewarm, TaskError]:
@@ -299,7 +299,7 @@ def prewarm_search(*, campaign_id: str) -> Result[SearchPrewarm, TaskError]:
     queue_name=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def warm_cache_edge(*, campaign_id: str) -> Result[CacheWarm, TaskError]:
@@ -328,7 +328,7 @@ def warm_cache_edge(*, campaign_id: str) -> Result[CacheWarm, TaskError]:
     queue_name=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def update_price(*, sku: str, campaign_id: str) -> Result[PriceUpdate, TaskError]:

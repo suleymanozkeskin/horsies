@@ -20,11 +20,11 @@ import pytest
 from tests.union_members import union_members
 from horsies.core.telemetry.send_telemetry import NO_SEND_TELEMETRY
 from horsies.core.brokers.result_types import (
-    BrokerEnqueueFailed,
-    BrokerOperationError,
+    DatabaseEnqueueFailed,
+    DatabaseOperationError,
 )
 from horsies.core.codec.validation_errors import ValueValidationError
-from horsies.core.errors import ErrorCode, HorsiesError
+from horsies.core.errors import HorsiesErrorCode, HorsiesError
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import (
     TaskSendAsyncContext,
@@ -113,7 +113,7 @@ def _wrapper(app: MagicMock) -> Any:
     return create_task_wrapper(good_fn, app, 'test.good_fn')
 
 
-def _broker_returning(app: MagicMock, error: BrokerOperationError) -> MagicMock:
+def _broker_returning(app: MagicMock, error: DatabaseOperationError) -> MagicMock:
     broker = MagicMock()
     broker.enqueue.return_value = Err(error)
     app.get_broker.return_value = broker
@@ -189,7 +189,7 @@ class TestValidationFailedCause:
 class TestEnqueueFailedCause:
     def test_broker_data_check_without_exception_gives_no_cause(self) -> None:
         app = _make_app()
-        _broker_returning(app, BrokerEnqueueFailed(
+        _broker_returning(app, DatabaseEnqueueFailed(
             message='task row is gone before the key was bound',
             retryable=False,
             exception=NoCause(),
@@ -205,7 +205,7 @@ class TestEnqueueFailedCause:
     def test_broker_exception_is_kept(self) -> None:
         app = _make_app()
         cause = ConnectionError('db gone')
-        _broker_returning(app, BrokerEnqueueFailed(
+        _broker_returning(app, DatabaseEnqueueFailed(
             message='db gone',
             retryable=True,
             exception=cause,
@@ -220,7 +220,7 @@ class TestEnqueueFailedCause:
 
     @pytest.mark.parametrize('form', ['send', 'send_async', 'schedule', 'schedule_async'])
     def test_broker_init_failure_propagates(self, form: str) -> None:
-        """``get_broker()`` raises ``BROKER_INIT_FAILED`` as a fail-fast error.
+        """``get_broker()`` raises ``DATABASE_INIT_FAILED`` as a fail-fast error.
 
         Every send and schedule form lets it propagate; no form turns it
         into ``TaskSendEnqueueFailed``.
@@ -228,7 +228,7 @@ class TestEnqueueFailedCause:
         app = _make_app()
         init_failure = HorsiesError(
             message='Failed to initialize broker: bad url',
-            code=ErrorCode.BROKER_INIT_FAILED,
+            code=HorsiesErrorCode.DATABASE_INIT_FAILED,
         )
         app.get_broker.side_effect = init_failure
         wrapper = _wrapper(app)

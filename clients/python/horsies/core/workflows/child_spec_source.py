@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, assert_never
 
 from horsies._core import ChildSpecBuilt, ChildSpecRefused, ChildSpecRequest
 from horsies.core.models.outcome import TaskOutcome
-from horsies.core.models.tasks import OperationalErrorCode, TaskError
+from horsies.core.models.tasks import OperationalCode, TaskError
 from horsies.core.types.result import Err, Ok
 from horsies.core.workflows.child_build import (
     ChildBuildFailed,
@@ -114,7 +114,7 @@ def build_child_spec(
                         node.workflow_id,
                         node.task_index,
                         f'Child workflow {spec.name} does not encode as spec data: {refused}',
-                        OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
+                        OperationalCode.WORKFLOW_ENQUEUE_FAILED,
                     ))
                 case _ as unreachable:
                     assert_never(unreachable)

@@ -33,32 +33,32 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies._core import CoreCallTimedOut
 from horsies.core.brokers.result_types import (
-    BrokerAsyncContext,
-    BrokerErrorCode,
-    BrokerOperationFailed,
+    DatabaseAsyncContext,
+    DatabaseErrorCode,
+    DatabaseOperationFailed,
 )
-from horsies.core.errors import ErrorCode
+from horsies.core.errors import HorsiesErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.outcome import (
     AsyncContext,
-    BrokerError,
+    ReadDatabaseError,
     ReadResult,
     Succeeded,
     TaskNotFound,
 )
 from horsies.core.models.task_send_types import TaskSendAsyncContext
 from horsies.core.models.tasks import (
-    OperationalErrorCode,
+    OperationalCode,
     TaskError,
 )
 from horsies.core.models.workflow import NodeKey
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow.handle_types import (
-    HandleAsyncContext,
-    HandleDbOperationFailed,
-    HandleErrorCode,
+    WorkflowHandleAsyncContext,
+    WorkflowHandleDatabaseOperationFailed,
+    WorkflowHandleErrorCode,
 )
 from horsies.core.task_decorator import TaskHandle, create_task_wrapper
 from horsies.core.models.tasks import TextCodes
@@ -112,7 +112,7 @@ def _assert_nothing_ran(broker: PostgresBroker) -> None:
 
 
 # =============================================================================
-# BrokerErrorCode.ASYNC_CONTEXT
+# DatabaseErrorCode.ASYNC_CONTEXT
 # =============================================================================
 
 
@@ -143,7 +143,7 @@ def test_broker_facade_returns_async_context(app: Horsies, name: str) -> None:
     result = _inside_loop(lambda: call(broker))
 
     assert is_err(result)
-    assert result.err_value.code is BrokerErrorCode.ASYNC_CONTEXT
+    assert result.err_value.code is DatabaseErrorCode.ASYNC_CONTEXT
     assert result.err_value.retryable is False
     assert async_form in result.err_value.message
     _assert_nothing_ran(broker)
@@ -156,7 +156,7 @@ def test_broker_close_returns_async_context(app: Horsies) -> None:
     result = _inside_loop(broker.close)
 
     assert is_err(result)
-    assert result.err_value.code is BrokerErrorCode.ASYNC_CONTEXT
+    assert result.err_value.code is DatabaseErrorCode.ASYNC_CONTEXT
     assert 'close_async' in result.err_value.message
     _assert_nothing_ran(broker)
 
@@ -179,7 +179,7 @@ def test_app_facade_returns_async_context(app: Horsies, name: str) -> None:
     result = _inside_loop(lambda: APP_CALLS[name](app))
 
     assert is_err(result)
-    assert result.err_value.code is BrokerErrorCode.ASYNC_CONTEXT
+    assert result.err_value.code is DatabaseErrorCode.ASYNC_CONTEXT
     assert result.err_value.retryable is False
     assert '_async' in result.err_value.message
     _assert_nothing_ran(app.get_broker())
@@ -210,7 +210,7 @@ def test_task_handle_info_returns_async_context(app: Horsies) -> None:
     result = _inside_loop(handle.info)
 
     assert is_err(result)
-    assert result.err_value.code is BrokerErrorCode.ASYNC_CONTEXT
+    assert result.err_value.code is DatabaseErrorCode.ASYNC_CONTEXT
     assert 'await handle.info_async(' in result.err_value.message
     _assert_nothing_ran(app.get_broker())
 
@@ -276,7 +276,7 @@ def test_send_maps_broker_async_context_to_send_async_context() -> None:
         return Ok(x)
 
     broker = MagicMock()
-    broker.enqueue.return_value = Err(BrokerAsyncContext(
+    broker.enqueue.return_value = Err(DatabaseAsyncContext(
         message='refused',
     ))
     wrapper = create_task_wrapper(echo, _send_app(broker), 'test.echo')
@@ -289,7 +289,7 @@ def test_send_maps_broker_async_context_to_send_async_context() -> None:
 
 
 # =============================================================================
-# HandleErrorCode.ASYNC_CONTEXT and the read failure AsyncContext
+# WorkflowHandleErrorCode.ASYNC_CONTEXT and the read failure AsyncContext
 # =============================================================================
 
 
@@ -307,7 +307,7 @@ def test_workflow_handle_wrap_method_returns_async_context(
     result = _inside_loop(getattr(handle, name))
 
     assert is_err(result)
-    assert result.err_value.code is HandleErrorCode.ASYNC_CONTEXT
+    assert result.err_value.code is WorkflowHandleErrorCode.ASYNC_CONTEXT
     assert result.err_value.retryable is False
     assert result.err_value.workflow_id == WORKFLOW_ID
     assert f'{name}_async' in result.err_value.message
@@ -350,7 +350,7 @@ def test_lifecycle_sync_wrapper_returns_async_context(
     result = _inside_loop(lambda: operation(broker, WORKFLOW_ID))
 
     assert is_err(result)
-    assert result.err_value.code is HandleErrorCode.ASYNC_CONTEXT
+    assert result.err_value.code is WorkflowHandleErrorCode.ASYNC_CONTEXT
     assert result.err_value.retryable is False
     assert result.err_value.workflow_id == WORKFLOW_ID
     _assert_nothing_ran(broker)
@@ -432,7 +432,7 @@ def test_start_workflow_returns_async_context(app: Horsies) -> None:
 def test_result_read_mapping_asserts_on_async_context() -> None:
     """``TaskHandle.get()`` and ``app.get_result()`` refuse the loop before the
     broker call, so the mapping of the broker's read never sees it."""
-    broker_result = Err(BrokerAsyncContext(
+    broker_result = Err(DatabaseAsyncContext(
         message='refused',
     ))
 
@@ -448,7 +448,7 @@ def test_result_read_mapping_asserts_on_async_context() -> None:
 def test_live_check_inside_loop_reports_its_own_code(app: Horsies) -> None:
     errors = _inside_loop(lambda: app.check(live=True))
 
-    assert [error.code for error in errors] == [ErrorCode.CHECK_LIVE_ASYNC_CONTEXT]
+    assert [error.code for error in errors] == [HorsiesErrorCode.CHECK_LIVE_ASYNC_CONTEXT]
     assert 'asyncio.to_thread' in (errors[0].help_text or '')
 
 
@@ -478,92 +478,92 @@ class BlockingSite:
 
 BLOCKING_SITES: dict[str, BlockingSite] = {
     'broker.close': BlockingSite(
-        lambda app, broker: broker.close(), 'close', BrokerErrorCode.CLOSE_FAILED,
+        lambda app, broker: broker.close(), 'close', DatabaseErrorCode.CLOSE_FAILED,
     ),
     'app.get_result': BlockingSite(
         lambda app, broker: app.get_result(UUID(TASK_ID), 0),
         'raw_result_record',
-        OperationalErrorCode.BROKER_ERROR,
+        OperationalCode.DATABASE_ERROR,
     ),
     'app.get_task_info': BlockingSite(
         lambda app, broker: app.get_task_info(UUID(TASK_ID)),
         'task_info',
-        BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+        DatabaseErrorCode.TASK_INFO_QUERY_FAILED,
     ),
     'app.ping_database': BlockingSite(
         lambda app, broker: app.ping_database(),
         'ping_database',
-        BrokerErrorCode.DB_PING_FAILED,
+        DatabaseErrorCode.DATABASE_PING_FAILED,
     ),
     'app.ping_workers': BlockingSite(
         lambda app, broker: app.ping_workers(),
         'ping_workers',
-        BrokerErrorCode.WORKER_PING_FAILED,
+        DatabaseErrorCode.WORKER_PING_FAILED,
     ),
     'app.list_worker_states': BlockingSite(
         lambda app, broker: app.list_worker_states(),
         'worker_states',
-        BrokerErrorCode.MONITORING_QUERY_FAILED,
+        DatabaseErrorCode.MONITORING_QUERY_FAILED,
     ),
     'app.get_worker_state': BlockingSite(
         lambda app, broker: app.get_worker_state('worker-1'),
         'worker_state',
-        BrokerErrorCode.MONITORING_QUERY_FAILED,
+        DatabaseErrorCode.MONITORING_QUERY_FAILED,
     ),
     'app.get_worker_state_history': BlockingSite(
         lambda app, broker: app.get_worker_state_history('worker-1'),
         'worker_state_history',
-        BrokerErrorCode.MONITORING_QUERY_FAILED,
+        DatabaseErrorCode.MONITORING_QUERY_FAILED,
     ),
     'app.get_class_coverage': BlockingSite(
         lambda app, broker: app.get_class_coverage(),
         'class_coverage',
-        BrokerErrorCode.MONITORING_QUERY_FAILED,
+        DatabaseErrorCode.MONITORING_QUERY_FAILED,
     ),
     'app.get_class_report': BlockingSite(
         lambda app, broker: app.get_class_report(),
         'class_report',
-        BrokerErrorCode.MONITORING_QUERY_FAILED,
+        DatabaseErrorCode.MONITORING_QUERY_FAILED,
     ),
     'WorkflowHandle.status': BlockingSite(
         lambda app, broker: _workflow_handle(broker).status(),
         'workflow_status',
-        HandleErrorCode.DB_OPERATION_FAILED,
+        WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED,
     ),
     'WorkflowHandle.results': BlockingSite(
         lambda app, broker: _workflow_handle(broker).results(),
         'workflow_node_results',
-        HandleErrorCode.DB_OPERATION_FAILED,
+        WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED,
     ),
     'WorkflowHandle.tasks': BlockingSite(
         lambda app, broker: _workflow_handle(broker).tasks(),
         'workflow_nodes',
-        HandleErrorCode.DB_OPERATION_FAILED,
+        WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED,
     ),
     'WorkflowHandle.cancel': BlockingSite(
         lambda app, broker: _workflow_handle(broker).cancel(),
         'cancel_workflow',
-        HandleErrorCode.DB_OPERATION_FAILED,
+        WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED,
     ),
     'WorkflowHandle.pause': BlockingSite(
         lambda app, broker: _workflow_handle(broker).pause(),
         'pause_workflow',
-        HandleErrorCode.DB_OPERATION_FAILED,
+        WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED,
     ),
     'WorkflowHandle.resume': BlockingSite(
         lambda app, broker: _workflow_handle(broker).resume(),
         'resume_workflow',
-        HandleErrorCode.DB_OPERATION_FAILED,
+        WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED,
     ),
     'WorkflowHandle.get': BlockingSite(
         lambda app, broker: _workflow_handle(broker).get(timeout_ms=0),
         'wait_workflow_result',
-        OperationalErrorCode.BROKER_ERROR,
+        OperationalCode.DATABASE_ERROR,
     ),
     'WorkflowHandle.result_for': BlockingSite(
         lambda app, broker: _workflow_handle(broker).result_for(NODE_KEY),
         'workflow_node_result',
-        OperationalErrorCode.BROKER_ERROR,
+        OperationalCode.DATABASE_ERROR,
     ),
     'start_workflow': BlockingSite(
         lambda app, broker: _spec(app).start(WORKFLOW_ID),
@@ -573,12 +573,12 @@ BLOCKING_SITES: dict[str, BlockingSite] = {
     'pause_workflow_sync': BlockingSite(
         lambda app, broker: pause_workflow_sync(broker, uuid.UUID(WORKFLOW_ID)),
         'pause_workflow',
-        HandleErrorCode.DB_OPERATION_FAILED,
+        WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED,
     ),
     'resume_workflow_sync': BlockingSite(
         lambda app, broker: resume_workflow_sync(broker, uuid.UUID(WORKFLOW_ID)),
         'resume_workflow',
-        HandleErrorCode.DB_OPERATION_FAILED,
+        WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED,
     ),
 }
 
@@ -594,10 +594,10 @@ def _core_error_failure(result: object) -> tuple[object, BaseException | NoCause
     """The code of a failed facade result and its exception."""
     match result:
         case Err(err_value=(
-            BrokerOperationFailed(code=code, exception=exception)
-            | HandleDbOperationFailed(code=code, exception=exception)
+            DatabaseOperationFailed(code=code, exception=exception)
+            | WorkflowHandleDatabaseOperationFailed(code=code, exception=exception)
             | WorkflowStartEnqueueFailed(code=code, exception=exception)
-            | BrokerError(code=code, exception=exception)
+            | ReadDatabaseError(code=code, exception=exception)
         )):
             return code, exception
         case _:
@@ -732,8 +732,8 @@ def _refusal_message(result: object) -> str:
     """The ASYNC_CONTEXT message of an Err."""
     match result:
         case Err(
-            BrokerAsyncContext()
-            | HandleAsyncContext()
+            DatabaseAsyncContext()
+            | WorkflowHandleAsyncContext()
             | WorkflowStartAsyncContext()
             | AsyncContext() as error
         ):

@@ -26,7 +26,15 @@ class WorkflowStartValidationFailed:
     message: str = field(repr=False)
     workflow_name: str
     workflow_id: str
-    exception: BaseException | NoCause = field(repr=False)
+    cause: BaseException | NoCause = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
@@ -44,6 +52,14 @@ class WorkflowStartIdConflict:
     workflow_name: str
     workflow_id: str
     existing_workflow_name: str
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
 
 
 @dataclass(slots=True, frozen=True)
@@ -65,6 +81,14 @@ class WorkflowStartCommandConflict:
     workflow_name: str
     workflow_id: str
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
 class WorkflowStartEnqueueFailed:
@@ -82,7 +106,15 @@ class WorkflowStartEnqueueFailed:
     retryable: bool
     workflow_name: str
     workflow_id: str
-    exception: BaseException = field(repr=False)
+    cause: BaseException = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
@@ -99,6 +131,14 @@ class WorkflowStartAsyncContext:
     message: str = field(repr=False)
     workflow_name: str
     workflow_id: str
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
 
 
 type WorkflowStartCoreError = (

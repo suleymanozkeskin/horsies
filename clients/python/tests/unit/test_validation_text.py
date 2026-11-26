@@ -45,7 +45,7 @@ from horsies.core.codec.validation_errors import (
     validation_summary,
     without_validation_input,
 )
-from horsies.core.errors import ErrorCode, TaskDefinitionError
+from horsies.core.errors import HorsiesErrorCode, TaskDefinitionError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.payload import PayloadPolicy
@@ -504,7 +504,7 @@ class TestDefinitionTimeOptions:
             app.task(task_name='test.bad_timeout', **refused_options)(task_fn)
 
         notes = ' '.join(caught.value.notes)
-        assert caught.value.code == ErrorCode.TASK_INVALID_OPTIONS
+        assert caught.value.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
         assert MARKER not in notes
         assert 'timeout_ms: Input should be a valid integer' in notes
 

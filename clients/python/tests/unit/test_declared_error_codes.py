@@ -28,7 +28,7 @@ from horsies.core.declared_error_codes import (
     with_mapper_codes,
 )
 from horsies.core.errors import (
-    ErrorCode,
+    HorsiesErrorCode,
     MultipleValidationErrors,
     TaskDefinitionError,
 )
@@ -131,12 +131,12 @@ class TestParse:
         assert "'declined'" in refusals[0].detail
 
     def test_a_built_in_name_is_refused(self) -> None:
-        refusals = _refusals(('BROKER_ERROR',))
+        refusals = _refusals(('DATABASE_ERROR',))
         assert len(refusals) == 1
         refusal = refusals[0]
         assert isinstance(refusal, ReservedNameRefused)
-        assert refusal.code == 'BROKER_ERROR'
-        assert 'OperationalErrorCode.BROKER_ERROR' in refusal.detail
+        assert refusal.code == 'DATABASE_ERROR'
+        assert 'OperationalCode.DATABASE_ERROR' in refusal.detail
 
     def test_a_reserved_name_is_refused(self) -> None:
         refusals = _refusals(('WORKFLOW_STOPPED',))
@@ -152,7 +152,7 @@ class TestParse:
         )
 
     def test_every_refused_entry_is_named_in_input_order(self) -> None:
-        refusals = _refusals(('bad', 'BROKER_ERROR', 'bad', 'GOOD', 'GOOD'))
+        refusals = _refusals(('bad', 'DATABASE_ERROR', 'bad', 'GOOD', 'GOOD'))
         assert [type(refusal) for refusal in refusals] == [
             CodeTextRefused,
             ReservedNameRefused,
@@ -241,13 +241,13 @@ class TestDecorator:
     def test_a_value_of_another_form_is_hrs_102(self) -> None:
         with pytest.raises(TaskDefinitionError) as raised:
             _declare(_app(), ['RATE_LIMITED'])
-        assert raised.value.code is ErrorCode.TASK_INVALID_OPTIONS
+        assert raised.value.code is HorsiesErrorCode.TASK_INVALID_OPTIONS
         assert any('list' in note for note in raised.value.notes)
 
     def test_a_code_outside_the_code_text_rule_is_hrs_112(self) -> None:
         with pytest.raises(TaskDefinitionError) as raised:
             _declare(_app(), ('rate_limited',))
-        assert raised.value.code is ErrorCode.TASK_INVALID_ERROR_CODE
+        assert raised.value.code is HorsiesErrorCode.TASK_INVALID_ERROR_CODE
         assert raised.value.code.value == 'HRS-112'
         assert "'rate_limited'" in raised.value.message
         assert "task 'charge'" in raised.value.notes
@@ -256,23 +256,23 @@ class TestDecorator:
     def test_a_built_in_or_reserved_name_is_hrs_212(self, code: str) -> None:
         with pytest.raises(TaskDefinitionError) as raised:
             _declare(_app(), (code,))
-        assert raised.value.code is ErrorCode.CHECK_RESERVED_CODE_COLLISION
+        assert raised.value.code is HorsiesErrorCode.CHECK_RESERVED_CODE_COLLISION
         assert code in raised.value.message
 
     def test_a_repeated_code_is_hrs_113(self) -> None:
         with pytest.raises(TaskDefinitionError) as raised:
             _declare(_app(), ('RATE_LIMITED', 'RATE_LIMITED'))
-        assert raised.value.code is ErrorCode.TASK_DUPLICATE_ERROR_CODE
+        assert raised.value.code is HorsiesErrorCode.TASK_DUPLICATE_ERROR_CODE
         assert raised.value.code.value == 'HRS-113'
 
     def test_several_refused_codes_come_in_one_report(self) -> None:
         with pytest.raises(MultipleValidationErrors) as raised:
-            _declare(_app(), ('bad', 'BROKER_ERROR', 'OK', 'OK'))
+            _declare(_app(), ('bad', 'DATABASE_ERROR', 'OK', 'OK'))
         codes = [error.code for error in raised.value.report.errors]
         assert codes == [
-            ErrorCode.TASK_INVALID_ERROR_CODE,
-            ErrorCode.CHECK_RESERVED_CODE_COLLISION,
-            ErrorCode.TASK_DUPLICATE_ERROR_CODE,
+            HorsiesErrorCode.TASK_INVALID_ERROR_CODE,
+            HorsiesErrorCode.CHECK_RESERVED_CODE_COLLISION,
+            HorsiesErrorCode.TASK_DUPLICATE_ERROR_CODE,
         ]
 
     def test_a_refused_set_registers_nothing(self) -> None:

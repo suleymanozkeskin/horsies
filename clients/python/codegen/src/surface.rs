@@ -424,16 +424,16 @@ const CORE_SCHEDULER_PARAMETERS: &[StubParameter] = &[
     positional("manifest_json", "str"),
 ];
 
-const PING_OUTCOME: &str = "DatabasePingRecord | BrokerOperationFailed";
-const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | BrokerOperationFailed";
+const PING_OUTCOME: &str = "DatabasePingRecord | DatabaseOperationFailed";
+const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | DatabaseOperationFailed";
 /// A refused or failed send is a generated class of
 /// `horsies._catalog.broker_errors`, built in Rust.
-const SEND_OUTCOME: &str = "Enqueued | BrokerCoreEnqueueError";
+const SEND_OUTCOME: &str = "Enqueued | DatabaseCoreEnqueueError";
 const TASK_INFO_OUTCOME: &str =
-    "TaskInfoRecord | TaskInfoNotFound | BrokerOperationFailed | BrokerInvalidJsonPayload";
+    "TaskInfoRecord | TaskInfoNotFound | DatabaseOperationFailed | DatabaseInvalidJsonPayload";
 const TASK_WORKFLOW_NODE_OUTCOME: &str =
-    "TaskWorkflowNodeLinked | TaskWorkflowNodeNotLinked | BrokerOperationFailed";
-const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | BrokerOperationFailed | BrokerInvalidJsonPayload | BrokerInvalidInput";
+    "TaskWorkflowNodeLinked | TaskWorkflowNodeNotLinked | DatabaseOperationFailed";
+const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | DatabaseOperationFailed | DatabaseInvalidJsonPayload | DatabaseInvalidInput";
 const REQUEUE_STALE_CLAIMED_OUTCOME: &str =
     "StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed";
 const RELEASE_CLAIMS_OUTCOME: &str = "ClaimsReleased | ReleaseFailed";
@@ -489,7 +489,7 @@ const CHILD_SPEC_REFUSED_PARAMETERS: &[StubParameter] =
 /// A failed handle operation is a generated class of
 /// `horsies._catalog.workflow_handle_errors`, built in Rust.
 const RESUME_WORKFLOW_OUTCOME: &str = "WorkflowResumed | WorkflowNotPaused | WorkflowAbsent | \
-     HandleDbOperationFailed | HandleStoredDataInvalid | HandleResumeRecoveryFailed";
+     WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid | WorkflowHandleResumeRecoveryFailed";
 const FINISH_WORKFLOW_NODE_PARAMETERS: &[StubParameter] =
     &[positional("request", "NodeFinishRequest")];
 const ADVANCE_WORKFLOW_PARENTS_PARAMETERS: &[StubParameter] =
@@ -512,20 +512,20 @@ const RECOVER_WORKFLOW_PHASE2_PARAMETERS: &[StubParameter] = &[
     keyword("quarantine_after_attempts", "int"),
 ];
 const PAUSE_WORKFLOW_OUTCOME: &str = "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | \
-     HandleDbOperationFailed | HandleStoredDataInvalid";
+     WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 const CANCEL_WORKFLOW_OUTCOME: &str = "WorkflowCancelled | WorkflowNotCancellable | \
-     WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
+     WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 const WORKFLOW_STATUS_OUTCOME: &str =
-    "WorkflowStatusRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
+    "WorkflowStatusRead | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 const WAIT_WORKFLOW_RESULT_OUTCOME: &str = "WorkflowCompletedRead | WorkflowEndedRead | \
-     WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleDbOperationFailed | \
-     HandleStoredDataInvalid";
+     WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | \
+     WorkflowHandleStoredDataInvalid";
 const WORKFLOW_NODE_RESULTS_OUTCOME: &str = "WorkflowNodeResultsRead | WorkflowAbsent | \
-     HandleDbOperationFailed | HandleStoredDataInvalid";
+     WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 const WORKFLOW_NODE_RESULT_OUTCOME: &str = "StoredNodeResultRecord | NodeResultNotStored | \
-     HandleDbOperationFailed | HandleStoredDataInvalid";
+     WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 const WORKFLOW_NODES_OUTCOME: &str =
-    "WorkflowNodesRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
+    "WorkflowNodesRead | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 
 const START_ATTEMPT_OUTCOME: &str =
     "AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed";
@@ -972,14 +972,14 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
 /// `horsies._catalog.monitoring_errors`, built in Rust.
 const MONITORING_READ_OUTCOME: &str = "MonitoringJson | MonitoringQueryCoreError";
 const PING_WORKERS_OUTCOME: &str =
-    "WorkerPongsRecord | BrokerOperationFailed | BrokerInvalidInput | BrokerListenerDisabled";
+    "WorkerPongsRecord | DatabaseOperationFailed | DatabaseInvalidInput | DatabaseListenerDisabled";
 const WORKER_STATES_OUTCOME: &str =
-    "WorkerStatesRecord | BrokerOperationFailed | BrokerInvalidInput";
-const WORKER_STATE_OUTCOME: &str = "WorkerStateRecord | WorkerStateAbsent | BrokerOperationFailed";
-const CLASS_COVERAGE_OUTCOME: &str = "ClassCoverageRecord | BrokerOperationFailed";
-const CLASS_REPORT_OUTCOME: &str = "ClassReportRecord | BrokerOperationFailed";
+    "WorkerStatesRecord | DatabaseOperationFailed | DatabaseInvalidInput";
+const WORKER_STATE_OUTCOME: &str = "WorkerStateRecord | WorkerStateAbsent | DatabaseOperationFailed";
+const CLASS_COVERAGE_OUTCOME: &str = "ClassCoverageRecord | DatabaseOperationFailed";
+const CLASS_REPORT_OUTCOME: &str = "ClassReportRecord | DatabaseOperationFailed";
 const TASK_LIST_OUTCOME: &str =
-    "TaskListComplete | TaskListTruncated | BrokerOperationFailed | BrokerInvalidInput";
+    "TaskListComplete | TaskListTruncated | DatabaseOperationFailed | DatabaseInvalidInput";
 const MONITORING_DETAIL_OUTCOME: &str =
     "MonitoringJson | TaskDetailAbsent | MonitoringQueryCoreError";
 
@@ -3996,11 +3996,11 @@ const IMPORTS: &[StubImport] = &[
     StubImport {
         module: "horsies._catalog.broker_errors",
         names: &[
-            "BrokerCoreEnqueueError",
-            "BrokerInvalidInput",
-            "BrokerInvalidJsonPayload",
-            "BrokerListenerDisabled",
-            "BrokerOperationFailed",
+            "DatabaseCoreEnqueueError",
+            "DatabaseInvalidInput",
+            "DatabaseInvalidJsonPayload",
+            "DatabaseListenerDisabled",
+            "DatabaseOperationFailed",
         ],
     },
     StubImport {
@@ -4010,9 +4010,9 @@ const IMPORTS: &[StubImport] = &[
     StubImport {
         module: "horsies._catalog.workflow_handle_errors",
         names: &[
-            "HandleDbOperationFailed",
-            "HandleResumeRecoveryFailed",
-            "HandleStoredDataInvalid",
+            "WorkflowHandleDatabaseOperationFailed",
+            "WorkflowHandleResumeRecoveryFailed",
+            "WorkflowHandleStoredDataInvalid",
         ],
     },
     StubImport {

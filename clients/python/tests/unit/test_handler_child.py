@@ -39,8 +39,8 @@ from pydantic import SecretStr
 
 from horsies import _core as core
 from horsies._catalog import events
-from horsies._catalog.broker import BrokerErrorCode
-from horsies._catalog.broker_errors import BrokerOperationFailed
+from horsies._catalog.broker import DatabaseErrorCode
+from horsies._catalog.broker_errors import DatabaseOperationFailed
 from horsies.core.app import Horsies
 from horsies.core.event_handlers import EventHandler
 from horsies.core.models.app import AppConfig
@@ -1287,8 +1287,8 @@ class TestTheNodeReaderOfTheApp:
     TASK_ID: Final = uuid.UUID('0190f2d8-7c1e-7a3b-9f00-000000000a17')
 
     def test_a_failed_read_names_its_code_and_its_message(self) -> None:
-        failed = BrokerOperationFailed(
-            code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+        failed = DatabaseOperationFailed(
+            code=DatabaseErrorCode.TASK_INFO_QUERY_FAILED,
             message='task_workflow_node failed: the pool is closed',
             retryable=True,
             exception=RuntimeError('the pool is closed'),

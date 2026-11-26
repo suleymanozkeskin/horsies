@@ -45,7 +45,7 @@ from horsies.monitoring import (
     BreakdownValueGroup,
     ErrorCategory,
     Facets,
-    MonitoringQueryDbOperationFailed,
+    MonitoringQueryDatabaseOperationFailed,
     MonitoringQueryHistoryContractViolation,
     MonitoringResult,
     MonitoringWindow,
@@ -215,10 +215,10 @@ class TestAnswers:
         assert result == Ok(TaskDetailNotFound(task_id=TASK_ID, reason=reason))
 
 
-def _core_failures() -> list[MonitoringQueryDbOperationFailed | MonitoringQueryHistoryContractViolation]:
+def _core_failures() -> list[MonitoringQueryDatabaseOperationFailed | MonitoringQueryHistoryContractViolation]:
     """One value of each class that the core builds for a failed read."""
     return [
-        MonitoringQueryDbOperationFailed(
+        MonitoringQueryDatabaseOperationFailed(
             message=MESSAGE,
             retryable=True,
             exception=CoreConnectionError('task list query', 'connection refused', True),
@@ -282,7 +282,7 @@ class TestFailures:
     async def test_every_read_returns_the_core_s_failure_as_it_is(
         self,
         read: tuple[str, Callable[[MagicMock], Awaitable[MonitoringResult[Any]]]],
-        failure: MonitoringQueryDbOperationFailed | MonitoringQueryHistoryContractViolation,
+        failure: MonitoringQueryDatabaseOperationFailed | MonitoringQueryHistoryContractViolation,
     ) -> None:
         method, call = read
         broker, _ = _broker(method, failure)
@@ -322,7 +322,7 @@ class TestFailures:
         result, _ = await _list(raised)
 
         match result:
-            case Err(MonitoringQueryDbOperationFailed() as error):
+            case Err(MonitoringQueryDatabaseOperationFailed() as error):
                 assert error.exception is raised
                 assert error.retryable is retryable
                 assert error.message.startswith('task list query failed: ')

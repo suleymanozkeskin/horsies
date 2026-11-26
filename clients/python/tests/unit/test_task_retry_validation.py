@@ -9,7 +9,7 @@ import pytest
 from horsies.core.app import Horsies
 from horsies.core.codec.task_options import serialize_task_options
 from pydantic import ValidationError
-from horsies.core.errors import TaskDefinitionError, ErrorCode
+from horsies.core.errors import TaskDefinitionError, HorsiesErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError, TaskOptions, RetryPolicy
@@ -119,7 +119,7 @@ class TestTaskDecoratorValidation:
             def deprecated_auto_retry_for() -> Result[str, TaskError]:
                 return Ok('ok')
 
-        assert exc_info.value.code == ErrorCode.TASK_INVALID_OPTIONS
+        assert exc_info.value.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
 
     def test_unknown_task_option_rejected(self) -> None:
         """Unknown task option is rejected with TASK_INVALID_OPTIONS."""
@@ -130,7 +130,7 @@ class TestTaskDecoratorValidation:
             def bad_option() -> Result[str, TaskError]:
                 return Ok('ok')
 
-        assert exc_info.value.code == ErrorCode.TASK_INVALID_OPTIONS
+        assert exc_info.value.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
         assert 'bad_option' not in app.list_tasks()
 
     def test_default_unhandled_error_code_exception_name_rejected(self) -> None:
@@ -147,7 +147,7 @@ class TestTaskDecoratorValidation:
             def bad_default_error_code() -> Result[str, TaskError]:
                 return Ok('ok')
 
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
 
     def test_exception_mapper_must_be_mapping(self) -> None:
         """Non-mapping exception_mapper is rejected with CONFIG_INVALID_EXCEPTION_MAPPER."""
@@ -163,7 +163,7 @@ class TestTaskDecoratorValidation:
             def bad_mapper_type() -> Result[str, TaskError]:
                 return Ok('ok')
 
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
 
     def test_inner_decorator_with_wraps_rejected(self) -> None:
         """Task pre-decorated with @wraps wrapper is rejected."""
@@ -183,7 +183,7 @@ class TestTaskDecoratorValidation:
             def predecorated_with_wraps() -> Result[str, TaskError]:
                 return Ok('ok')
 
-        assert exc_info.value.code == ErrorCode.TASK_PREDECORATED_NOT_SUPPORTED
+        assert exc_info.value.code == HorsiesErrorCode.TASK_PREDECORATED_NOT_SUPPORTED
 
     def test_async_task_function_registers_with_its_options(self) -> None:
         """`@app.task()` registers an `async def` function like a `def` one."""
@@ -215,7 +215,7 @@ class TestTaskDecoratorValidation:
             def predecorated_no_wraps() -> Result[str, TaskError]:
                 return Ok('ok')
 
-        assert exc_info.value.code == ErrorCode.TASK_NO_RETURN_TYPE
+        assert exc_info.value.code == HorsiesErrorCode.TASK_NO_RETURN_TYPE
 
 
 @pytest.mark.unit
@@ -237,7 +237,7 @@ class TestCheckRuntimePolicyValidation:
         errors = app.check(live=False)
 
         assert any(
-            e.code == ErrorCode.TASK_INVALID_OPTIONS
+            e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
             and 'invalid task_options_json' in e.message
             for e in errors
         )
@@ -259,7 +259,7 @@ class TestCheckRuntimePolicyValidation:
         errors = app.check(live=False)
 
         assert any(
-            e.code == ErrorCode.TASK_INVALID_OPTIONS
+            e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
             and 'task_options_json must be an object' in e.message
             for e in errors
         )
@@ -283,7 +283,7 @@ class TestCheckRuntimePolicyValidation:
         errors = app.check(live=False)
 
         assert any(
-            e.code == ErrorCode.TASK_INVALID_OPTIONS
+            e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
             and 'retry_policy must be an object' in e.message
             for e in errors
         )
@@ -313,7 +313,7 @@ class TestCheckRuntimePolicyValidation:
         errors = app.check(live=False)
 
         assert any(
-            e.code == ErrorCode.TASK_INVALID_OPTIONS
+            e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
             and 'retry_policy.auto_retry_for is required' in e.message
             for e in errors
         )
@@ -335,7 +335,7 @@ class TestCheckRuntimePolicyValidation:
         errors = app.check(live=False)
 
         assert any(
-            e.code == ErrorCode.TASK_INVALID_OPTIONS
+            e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
             and 'auto_retry_for must be a list' in e.message
             for e in errors
         )
@@ -357,7 +357,7 @@ class TestCheckRuntimePolicyValidation:
         errors = app.check(live=False)
 
         assert any(
-            e.code == ErrorCode.TASK_INVALID_OPTIONS
+            e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
             and 'auto_retry_for must not be empty' in e.message
             for e in errors
         )
@@ -381,7 +381,7 @@ class TestCheckRuntimePolicyValidation:
         errors = app.check(live=False)
 
         assert any(
-            e.code == ErrorCode.TASK_INVALID_OPTIONS
+            e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
             and 'auto_retry_for entries must be strings' in e.message
             for e in errors
         )
@@ -403,7 +403,7 @@ class TestCheckRuntimePolicyValidation:
         errors = app.check(live=False)
 
         assert any(
-            e.code == ErrorCode.TASK_INVALID_OPTIONS
+            e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
             and 'looks like an exception class name' in e.message
             for e in errors
         )
@@ -425,7 +425,7 @@ class TestCheckRuntimePolicyValidation:
         errors = app.check(live=False)
 
         assert any(
-            e.code == ErrorCode.TASK_INVALID_OPTIONS
+            e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
             and 'is invalid' in e.message
             for e in errors
         )
@@ -457,7 +457,7 @@ class TestCheckRuntimePolicyValidation:
         errors = app.check(live=False)
 
         assert any(
-            e.code == ErrorCode.TASK_INVALID_OPTIONS
+            e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
             and 'invalid retry_policy metadata' in e.message
             for e in errors
         )
@@ -473,7 +473,7 @@ class TestCheckRuntimePolicyValidation:
         errors = app.check(live=False)
 
         assert any(
-            e.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
+            e.code == HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
             and 'exception_mapper must be a mapping' in e.message
             for e in errors
         )
@@ -489,7 +489,7 @@ class TestCheckRuntimePolicyValidation:
         errors = app.check(live=False)
 
         assert any(
-            e.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
+            e.code == HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
             and 'looks like an exception class name' in e.message
             for e in errors
         )
@@ -513,7 +513,7 @@ class TestCheckRuntimePolicyValidation:
         errors = app.check(live=False)
 
         assert any(
-            e.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
+            e.code == HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
             and 'looks like an exception class name' in e.message
             for e in errors
         )

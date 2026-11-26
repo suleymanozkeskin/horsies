@@ -11,7 +11,7 @@ use crate::core::config::worker_profile::{
     MAX_SEATS_PER_SHARED_ASYNC_CHILD, MAX_SEATS_PER_SHARED_THREAD_CHILD, MAX_SHARED_ASYNC_CHILDREN,
     MAX_SHARED_THREAD_CHILDREN, MAX_TASK_LIMIT,
 };
-use crate::core::error::ErrorCode;
+use crate::core::error::HorsiesErrorCode;
 
 fn bounded<const MIN: u32, const MAX: u32>(value: u32) -> BoundedU32<MIN, MAX> {
     BoundedU32::try_from(value).expect("a test value is inside its bounds")
@@ -519,7 +519,7 @@ fn a_refusal_is_a_profile_refusal_with_its_bound() {
     );
     assert_eq!(
         out_of_bounds.code,
-        Some(ErrorCode::ConfigInvalidWorkerProfile)
+        Some(HorsiesErrorCode::ConfigInvalidWorkerProfile)
     );
     assert_eq!(
         out_of_bounds.help_text.as_deref(),
@@ -537,7 +537,7 @@ fn a_refusal_is_a_profile_refusal_with_its_bound() {
         "worker_profiles['p'].drain_timeout: a drain timeout of 0 is refused; a stopping \
          worker needs a deadline",
     );
-    assert_eq!(zero.code, Some(ErrorCode::ConfigInvalidWorkerProfile));
+    assert_eq!(zero.code, Some(HorsiesErrorCode::ConfigInvalidWorkerProfile));
     assert_eq!(
         zero.help_text.as_deref(),
         Some("set a drain timeout above 0 and at most 86400s")

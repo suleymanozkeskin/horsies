@@ -31,11 +31,11 @@ from horsies._core import (
 from horsies.core.app import Horsies
 from horsies.core.banner import print_banner
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.result_types import BrokerOperationError, broker_error_cause
+from horsies.core.brokers.result_types import DatabaseOperationError, broker_error_cause
 from horsies.core.types.error_detail import NoCause
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     HorsiesError,
     ValidationReport,
 )
@@ -57,7 +57,7 @@ from horsies.core.utils.imports import (
 )
 
 
-def _raise_schema_error(err: BrokerOperationError) -> NoReturn:
+def _raise_schema_error(err: DatabaseOperationError) -> NoReturn:
     """Raise ``RuntimeError(err.message)``, chained from the cause when there is one."""
     match broker_error_cause(err):
         case NoCause():
@@ -130,7 +130,7 @@ def _resolve_module_argument(args: argparse.Namespace) -> str:
     if module_flag and module_pos and module_flag != module_pos:
         raise ConfigurationError(
             message='conflicting module paths provided',
-            code=ErrorCode.CLI_INVALID_ARGS,
+            code=HorsiesErrorCode.CLI_INVALID_ARGS,
             notes=[
                 f'--module={module_flag!r} conflicts with positional {module_pos!r}',
                 'pass the module path exactly once (either as -m/--module or positionally)',
@@ -145,7 +145,7 @@ def _resolve_module_argument(args: argparse.Namespace) -> str:
     if not module_path:
         raise ConfigurationError(
             message='module path is required',
-            code=ErrorCode.CLI_INVALID_ARGS,
+            code=HorsiesErrorCode.CLI_INVALID_ARGS,
             notes=['no --module flag or positional module argument provided'],
             help_text=(
                 'provide module path in one of these formats:\n'
@@ -231,7 +231,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
                     help_lines += '\nwhere <app_name> is the variable name of your Horsies instance'
                 raise ConfigurationError(
                     message=f"ambiguous module locator: '{module_locator}'",
-                    code=ErrorCode.CLI_INVALID_ARGS,
+                    code=HorsiesErrorCode.CLI_INVALID_ARGS,
                     notes=[
                         f"'{module_path}' mixes dotted module notation with a .py file extension",
                     ],
@@ -239,7 +239,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
                 )
             raise ConfigurationError(
                 message=f'module file not found: {file_path}',
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[f"resolved path: '{file_path}'"],
                 help_text='check that the file path is correct and the file exists',
             )
@@ -252,14 +252,14 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
         except ImportError as e:
             raise ConfigurationError(
                 message=f'failed to import module: {file_path}',
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[str(e)],
                 help_text='check that the module and its dependencies are importable',
             )
         except Exception as e:
             raise ConfigurationError(
                 message=f'error while importing module: {file_path}',
-                code=ErrorCode.MODULE_EXEC_ERROR,
+                code=HorsiesErrorCode.MODULE_IMPORT_ERROR,
                 notes=[f'{type(e).__name__}: {e}'],
                 help_text=(
                     'the module was found but raised an error during import;\n'
@@ -277,7 +277,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
         except ModuleNotFoundError as e:
             raise ConfigurationError(
                 message=f'module not found: {module_path}',
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[
                     str(e),
                     f'sys.path: {sys.path[:5]}...',
@@ -290,7 +290,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
         except ImportError as e:
             raise ConfigurationError(
                 message=f'failed to import module: {module_path}',
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[str(e)],
                 help_text=(
                     'ensure the module and its dependencies are importable;\n'
@@ -300,7 +300,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
         except Exception as e:
             raise ConfigurationError(
                 message=f'error while importing module: {module_path}',
-                code=ErrorCode.MODULE_EXEC_ERROR,
+                code=HorsiesErrorCode.MODULE_IMPORT_ERROR,
                 notes=[f'{type(e).__name__}: {e}'],
                 help_text=(
                     'the module was found but raised an error during import;\n'
@@ -316,7 +316,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
         if not hasattr(module, attr_name):
             raise ConfigurationError(
                 message=f"module '{module_name}' has no attribute '{attr_name}'",
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[
                     f"available attributes: {[n for n in dir(module) if not n.startswith('_')]}"
                 ],
@@ -326,7 +326,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
         if not isinstance(obj, Horsies):
             raise ConfigurationError(
                 message=f"'{attr_name}' in module '{module_name}' is not a Horsies instance",
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[f'got {type(obj).__name__} instead of Horsies'],
                 help_text='ensure the variable points to a Horsies() instance',
             )
@@ -344,7 +344,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
         if not app_instances:
             raise ConfigurationError(
                 message=f'no Horsies instance found in {module_name}',
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[f"scanned module '{module_name}' for Horsies instances"],
                 help_text='specify the variable name: module.path:variable',
             )
@@ -353,7 +353,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
             var_names = [name for _, name in app_instances]
             raise ConfigurationError(
                 message=f'multiple Horsies instances found in {module_name}',
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[f'found: {var_names}'],
                 help_text='specify which one: module.path:variable',
             )
@@ -448,7 +448,7 @@ def _profile_selection_error(
         case ProfileNotGiven(defined=defined):
             config_error = ConfigurationError(
                 message='--profile is required',
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[
                     'a worker takes its settings from a named profile in '
                     'AppConfig.worker_profiles; there is no default profile',
@@ -459,7 +459,7 @@ def _profile_selection_error(
         case ProfileUnknown(requested=requested, defined=defined):
             config_error = ConfigurationError(
                 message=f'unknown worker profile {requested!r}',
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[_defined_profiles_note(defined)],
                 help_text=_profile_help(defined),
             )
@@ -560,7 +560,7 @@ def _print_worker_startup_report(errors: Sequence[HorsiesError]) -> None:
     report = ValidationReport('worker-startup')
     for error in errors:
         report.add(error)
-    print(report.format_rust_style(), file=sys.stderr)
+    print(report.format_diagnostic(), file=sys.stderr)
 
 
 def scheduler_command(args: argparse.Namespace) -> None:
@@ -608,7 +608,7 @@ def scheduler_command(args: argparse.Namespace) -> None:
         report = ValidationReport('scheduler-startup')
         for error in startup_errors:
             report.add(error)
-        print(report.format_rust_style(), file=sys.stderr)
+        print(report.format_diagnostic(), file=sys.stderr)
         sys.exit(1)
 
     # Import task modules for validation
@@ -733,7 +733,7 @@ def check_command(args: argparse.Namespace) -> None:
         report = ValidationReport('check')
         for error in errors:
             report.add(error)
-        print(report.format_rust_style(), file=sys.stderr)
+        print(report.format_diagnostic(), file=sys.stderr)
         sys.exit(1)
     else:
         print(
@@ -1025,7 +1025,7 @@ def web_command(args: argparse.Namespace) -> None:
             report = ValidationReport('web-startup')
             for error in startup_errors:
                 report.add(error)
-            print(report.format_rust_style(), file=sys.stderr)
+            print(report.format_diagnostic(), file=sys.stderr)
             sys.exit(1)
 
     policy = resolve_web_auth_policy(args)

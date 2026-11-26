@@ -86,8 +86,8 @@ pub use process_listener::{
     CheckInterruption, ListenError, ListenerPlanError, SessionCheckFailure,
 };
 pub use result_types::{
-    BrokerCheckCause, BrokerErrorCode, BrokerOperationError, BrokerOperationFailedCode,
-    BrokerOperationSource, BrokerRefusalCause, BrokerResult, RawResultRead, RawResultRecord,
+    BrokerCheckCause, DatabaseErrorCode, DatabaseOperationError, DatabaseOperationFailedCode,
+    BrokerOperationSource, BrokerRefusalCause, DatabaseResult, RawResultRead, RawResultRecord,
     StoredEnvelopeRefused, StoredEnvelopeText, TaskInfoRead, WorkerPingStep,
 };
 pub use row::heartbeat::HeartbeatRow;

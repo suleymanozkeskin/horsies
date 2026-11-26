@@ -1012,7 +1012,7 @@ mod tests {
         }
         let full = render_events_module(&EVENT_CONTRACT);
         assert!(full.contains(
-            "import uuid\nfrom dataclasses import dataclass, field\nfrom datetime import datetime, timedelta, timezone\nfrom typing import Final, Literal, cast\n\nfrom horsies._catalog.task_codes import ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode\nfrom horsies.core.types.result import Err, Ok, Result\n"
+            "import uuid\nfrom dataclasses import dataclass, field\nfrom datetime import datetime, timedelta, timezone\nfrom typing import Final, Literal, cast\n\nfrom horsies._catalog.task_codes import ContractCode, OperationalCode, OutcomeCode, RetrievalCode\nfrom horsies.core.types.result import Err, Ok, Result\n"
         ));
     }
 

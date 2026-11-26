@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use horsies_core::events::AttemptNumber;
 use horsies_core::{
-    BodyCarrier, Execution, OperationalErrorCode, TaskErrorCode, UserCode, WorkflowNodeIndex,
+    BodyCarrier, Execution, OperationalCode, TaskErrorCode, UserCode, WorkflowNodeIndex,
     MAX_WORKFLOW_NODE_INDEX,
 };
 use opentelemetry::trace::{SpanId, SpanKind, TraceId, TracerProvider as _};
@@ -289,7 +289,7 @@ fn an_instrumented_function_of_an_async_body_nests_under_the_attempt_span() {
 #[test]
 fn the_end_of_the_body_sets_the_status_of_the_attempt_span() {
     let declined = TaskErrorCode::User(UserCode::parse("DECLINED").expect("a free user code"));
-    let unhandled = TaskErrorCode::BuiltIn(OperationalErrorCode::UnhandledException.into());
+    let unhandled = TaskErrorCode::BuiltIn(OperationalCode::UnhandledException.into());
     let carrier = send_carrier();
     let error_type = LabelName::ErrorCode.attribute_key();
     for (end, expected) in [

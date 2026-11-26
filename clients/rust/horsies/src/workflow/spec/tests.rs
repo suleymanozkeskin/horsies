@@ -70,7 +70,7 @@ fn refusal(builder: WorkflowSpecBuilder) -> HorsiesError {
     builder.build().unwrap_err()
 }
 
-fn code_of(builder: WorkflowSpecBuilder) -> Option<ErrorCode> {
+fn code_of(builder: WorkflowSpecBuilder) -> Option<HorsiesErrorCode> {
     refusal(builder).code
 }
 
@@ -100,14 +100,14 @@ fn a_chain_builds_with_auto_node_ids() {
 fn an_empty_name_is_refused() {
     let mut builder = test_builder(" ");
     add(&mut builder, charge());
-    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowNoName));
+    assert_eq!(code_of(builder), Some(HorsiesErrorCode::WorkflowNoName));
 }
 
 #[test]
 fn a_spec_without_a_node_is_refused() {
     assert_eq!(
         code_of(test_builder("empty")),
-        Some(ErrorCode::WorkflowNoNodes)
+        Some(HorsiesErrorCode::WorkflowNoNodes)
     );
 }
 
@@ -118,8 +118,8 @@ fn more_nodes_than_the_limit_are_refused() {
         add(&mut builder, charge());
     }
     let refused = refusal(builder);
-    assert_eq!(refused.code, Some(ErrorCode::WorkflowTooManyNodes));
-    assert_eq!(ErrorCode::WorkflowTooManyNodes.as_code_str(), "HRS-038");
+    assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowTooManyNodes));
+    assert_eq!(HorsiesErrorCode::WorkflowTooManyNodes.as_code_str(), "HRS-038");
     assert!(refused.message.contains("10001 nodes"), "{refused}");
 }
 
@@ -127,13 +127,13 @@ fn more_nodes_than_the_limit_are_refused() {
 fn an_invalid_node_id_is_refused() {
     let mut builder = test_builder("ids");
     add(&mut builder, charge().node_id("has space"));
-    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidNodeId));
+    assert_eq!(code_of(builder), Some(HorsiesErrorCode::WorkflowInvalidNodeId));
     let mut builder = test_builder("ids");
     add(
         &mut builder,
         charge().node_id("x".repeat(MAX_NODE_ID_LENGTH + 1)),
     );
-    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidNodeId));
+    assert_eq!(code_of(builder), Some(HorsiesErrorCode::WorkflowInvalidNodeId));
     let mut builder = test_builder("ids");
     add(&mut builder, charge().node_id("step-1:sub_task.v2"));
     let spec = builder.build().unwrap();
@@ -150,7 +150,7 @@ fn a_refusal_of_the_first_gate_stops_the_second_gate() {
     let mut builder = test_builder("gates");
     add(&mut builder, charge().node_id("has space").priority(0));
     let refused = refusal(builder);
-    assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidNodeId));
+    assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowInvalidNodeId));
     assert!(refused.notes.is_empty(), "{refused}");
 }
 
@@ -159,7 +159,7 @@ fn a_repeated_node_id_is_refused() {
     let mut builder = test_builder("ids");
     add(&mut builder, charge().node_id("same"));
     add(&mut builder, charge().node_id("same"));
-    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowDuplicateNodeId));
+    assert_eq!(code_of(builder), Some(HorsiesErrorCode::WorkflowDuplicateNodeId));
 }
 
 #[test]
@@ -169,19 +169,19 @@ fn a_reference_of_another_builder_is_refused() {
     let mut builder = test_builder("main");
     add(&mut builder, charge());
     add(&mut builder, report().arg_from(total(), foreign));
-    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidDependency));
+    assert_eq!(code_of(builder), Some(HorsiesErrorCode::WorkflowInvalidDependency));
 
     let mut builder = test_builder("main");
     add(&mut builder, charge());
     builder.output(foreign);
-    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidOutput));
+    assert_eq!(code_of(builder), Some(HorsiesErrorCode::WorkflowInvalidOutput));
 
     let mut builder = test_builder("main");
     add(&mut builder, charge());
     builder.success_policy(SuccessPolicy::new(vec![SuccessCase::new([foreign])]));
     assert_eq!(
         code_of(builder),
-        Some(ErrorCode::WorkflowInvalidSuccessPolicy)
+        Some(HorsiesErrorCode::WorkflowInvalidSuccessPolicy)
     );
 }
 
@@ -191,7 +191,7 @@ fn a_context_source_outside_the_dependencies_is_refused() {
     let charged = add(&mut builder, charge());
     let node = task_node::<u32, ContextInput>("summarize").workflow_ctx_from([charged]);
     builder.add_task(node, context_registration());
-    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidCtxFrom));
+    assert_eq!(code_of(builder), Some(HorsiesErrorCode::WorkflowInvalidContextFrom));
 }
 
 #[test]
@@ -206,11 +206,11 @@ fn a_context_for_a_task_that_takes_none_is_refused() {
     );
     let refused = refusal(builder);
     assert!(
-        refused.code == Some(ErrorCode::WorkflowCtxParamMissing)
+        refused.code == Some(HorsiesErrorCode::WorkflowContextParameterMissing)
             || refused
                 .notes
                 .iter()
-                .any(|note| note.contains(ErrorCode::WorkflowCtxParamMissing.as_code_str())),
+                .any(|note| note.contains(HorsiesErrorCode::WorkflowContextParameterMissing.as_code_str())),
         "{refused}"
     );
 }
@@ -232,16 +232,16 @@ fn a_quorum_outside_its_bounds_is_refused() {
     let mut builder = test_builder("join");
     let charged = add(&mut builder, charge());
     add(&mut builder, charge().waits_for(charged).join_quorum(0));
-    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidJoin));
+    assert_eq!(code_of(builder), Some(HorsiesErrorCode::WorkflowInvalidJoin));
     let mut builder = test_builder("join");
     let charged = add(&mut builder, charge());
     add(&mut builder, charge().waits_for(charged).join_quorum(2));
-    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidJoin));
+    assert_eq!(code_of(builder), Some(HorsiesErrorCode::WorkflowInvalidJoin));
     // A quorum node with no dependency can never meet its quorum.
     let mut builder = test_builder("join");
     add(&mut builder, charge());
     add(&mut builder, charge().join_quorum(1));
-    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidJoin));
+    assert_eq!(code_of(builder), Some(HorsiesErrorCode::WorkflowInvalidJoin));
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn an_any_join_needs_a_default_for_each_result_member() {
     let mut builder = test_builder("join");
     let charged = add(&mut builder, charge());
     add(&mut builder, report().arg_from(total(), charged).join_any());
-    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidJoin));
+    assert_eq!(code_of(builder), Some(HorsiesErrorCode::WorkflowInvalidJoin));
 
     let mut builder = test_builder("join");
     let charged = add(&mut builder, charge());
@@ -271,7 +271,7 @@ fn a_priority_outside_1_to_100_is_refused() {
         add(&mut builder, charge().priority(priority));
         assert_eq!(
             code_of(builder),
-            Some(ErrorCode::WorkflowInvalidPriority),
+            Some(HorsiesErrorCode::WorkflowInvalidPriority),
             "{priority}"
         );
     }
@@ -287,7 +287,7 @@ fn a_success_policy_without_a_case_or_a_required_node_is_refused() {
     builder.success_policy(SuccessPolicy::new(Vec::new()));
     assert_eq!(
         code_of(builder),
-        Some(ErrorCode::WorkflowInvalidSuccessPolicy)
+        Some(HorsiesErrorCode::WorkflowInvalidSuccessPolicy)
     );
     let mut builder = test_builder("policy");
     add(&mut builder, charge());
@@ -295,7 +295,7 @@ fn a_success_policy_without_a_case_or_a_required_node_is_refused() {
         Vec::<NodeRef>::new(),
     )]));
     let refused = refusal(builder);
-    assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidSuccessPolicy));
+    assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowInvalidSuccessPolicy));
     assert!(
         refused
             .message
@@ -333,7 +333,7 @@ fn a_static_member_that_args_from_also_names_is_refused() {
     );
     assert_eq!(
         code_of(builder),
-        Some(ErrorCode::WorkflowKwargsArgsFromOverlap)
+        Some(HorsiesErrorCode::WorkflowKwargsArgsFromOverlap)
     );
 }
 
@@ -347,7 +347,7 @@ fn a_member_that_binds_to_no_field_is_refused() {
             .input_json(r#"{"order_id": 1, "amount": 2.0, "amonut": 3}"#)
             .unwrap(),
     );
-    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidKwargKey));
+    assert_eq!(code_of(builder), Some(HorsiesErrorCode::WorkflowInvalidKwargKey));
 }
 
 /// The input of a task whose types do not refuse an unknown key on read
@@ -388,7 +388,7 @@ fn ship_refusal(input: &str) -> HorsiesError {
 #[test]
 fn a_member_that_a_lenient_input_type_does_not_read_is_refused() {
     let refused = ship_refusal(r#"{"label": "a", "options": {}, "parcels": [], "lable": "b"}"#);
-    assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+    assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowInvalidKwargKey));
     assert!(refused.message.contains("lable"), "{refused}");
 }
 
@@ -398,7 +398,7 @@ fn a_member_that_a_lenient_input_type_does_not_read_is_refused() {
 #[test]
 fn a_nested_member_that_binds_to_no_field_is_refused_with_its_key_path() {
     let refused = ship_refusal(r#"{"label": "a", "options": {"retriess": 3}, "parcels": []}"#);
-    assert_eq!(refused.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
+    assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowKwargsNotSerializable));
     assert!(refused.message.contains("options.retriess"), "{refused}");
 }
 
@@ -408,7 +408,7 @@ fn a_nested_member_that_binds_to_no_field_is_refused_with_its_key_path() {
 fn a_list_element_member_that_binds_to_no_field_is_refused_with_its_key_path() {
     let refused =
         ship_refusal(r#"{"label": "a", "options": {}, "parcels": [{"weight": 1, "wieght": 2}]}"#);
-    assert_eq!(refused.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
+    assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowKwargsNotSerializable));
     assert!(refused.message.contains("parcels[0].wieght"), "{refused}");
 }
 
@@ -442,10 +442,10 @@ fn a_key_that_a_strict_type_refuses_has_the_code_of_its_depth() {
         refusal(builder)
     };
     let nested = strict_refusal(r#"{"label": "a", "options": {"retries": 1, "retriess": 3}}"#);
-    assert_eq!(nested.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
+    assert_eq!(nested.code, Some(HorsiesErrorCode::WorkflowKwargsNotSerializable));
     assert!(nested.message.contains("options.retriess"), "{nested}");
     let top = strict_refusal(r#"{"label": "a", "options": {"retries": 1}, "lable": "b"}"#);
-    assert_eq!(top.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+    assert_eq!(top.code, Some(HorsiesErrorCode::WorkflowInvalidKwargKey));
     assert!(top.message.contains("lable"), "{top}");
 }
 
@@ -460,7 +460,7 @@ fn a_member_of_the_input_of_a_task_with_no_parameters_is_refused() {
             .input_json(r#"{"count": 1}"#)
             .unwrap(),
     );
-    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidKwargKey));
+    assert_eq!(code_of(builder), Some(HorsiesErrorCode::WorkflowInvalidKwargKey));
 }
 
 /// #572: a node whose static input misses a field of its input type.
@@ -470,7 +470,7 @@ fn a_missing_field_is_refused() {
     add(&mut builder, task_node::<f64, ChargeInput>("charge"));
     assert_eq!(
         code_of(builder),
-        Some(ErrorCode::WorkflowMissingRequiredParams)
+        Some(HorsiesErrorCode::WorkflowMissingRequiredParams)
     );
     let mut builder = test_builder("missing");
     let charged = add(&mut builder, charge());
@@ -480,7 +480,7 @@ fn a_missing_field_is_refused() {
     );
     assert_eq!(
         code_of(builder),
-        Some(ErrorCode::WorkflowMissingRequiredParams)
+        Some(HorsiesErrorCode::WorkflowMissingRequiredParams)
     );
 }
 
@@ -502,7 +502,7 @@ where
 #[test]
 fn a_missing_field_of_the_input_is_refused_with_hrs_020() {
     let refused = input_refusal::<StrictShipInput>(r#"{"options": {"retries": 1}}"#);
-    assert_eq!(refused.code, Some(ErrorCode::WorkflowMissingRequiredParams));
+    assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowMissingRequiredParams));
     assert!(
         refused.message.contains(".: missing field `label`"),
         "{refused}"
@@ -514,7 +514,7 @@ fn a_missing_field_of_the_input_is_refused_with_hrs_020() {
 #[test]
 fn a_missing_field_of_a_member_s_value_is_refused_with_hrs_031() {
     let refused = input_refusal::<StrictShipInput>(r#"{"label": "a", "options": {}}"#);
-    assert_eq!(refused.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
+    assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowKwargsNotSerializable));
     assert!(
         refused.message.contains("options: missing field `retries`"),
         "{refused}"
@@ -526,7 +526,7 @@ fn a_missing_field_of_a_member_s_value_is_refused_with_hrs_031() {
 #[test]
 fn a_missing_field_of_a_list_element_is_refused_with_hrs_031() {
     let refused = input_refusal::<ShipInput>(r#"{"label": "a", "options": {}, "parcels": [{}]}"#);
-    assert_eq!(refused.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
+    assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowKwargsNotSerializable));
     assert!(
         refused
             .message
@@ -546,7 +546,7 @@ fn a_member_of_another_type_is_refused() {
     );
     assert_eq!(
         code_of(builder),
-        Some(ErrorCode::WorkflowKwargsNotSerializable)
+        Some(HorsiesErrorCode::WorkflowKwargsNotSerializable)
     );
 }
 
@@ -582,13 +582,13 @@ fn the_output_type_is_checked() {
     spec.check_output_type::<f64>().unwrap();
     assert_eq!(
         spec.check_output_type::<String>().unwrap_err().code,
-        Some(ErrorCode::WorkflowOutputTypeMismatch)
+        Some(HorsiesErrorCode::WorkflowOutputTypeMismatch)
     );
     assert_eq!(
         spec.check_output_type::<OutputlessResults>()
             .unwrap_err()
             .code,
-        Some(ErrorCode::WorkflowOutputTypeMismatch)
+        Some(HorsiesErrorCode::WorkflowOutputTypeMismatch)
     );
 
     let mut builder = test_builder("no output");
@@ -599,7 +599,7 @@ fn the_output_type_is_checked() {
     spec.check_output_type::<OutputlessResults>().unwrap();
     assert_eq!(
         spec.check_output_type::<f64>().unwrap_err().code,
-        Some(ErrorCode::WorkflowOutputTypeMismatch)
+        Some(HorsiesErrorCode::WorkflowOutputTypeMismatch)
     );
 }
 

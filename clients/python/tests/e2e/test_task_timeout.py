@@ -17,7 +17,7 @@ from sqlalchemy import text
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.task_send_types import TaskSendResult
-from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode
+from horsies.core.models.tasks import OperationalCode, OutcomeCode
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import is_err
 
@@ -170,7 +170,7 @@ async def test_timeout_backlog_drains_without_killing_worker(
             assert OutcomeCode.TASK_TIMEOUT.value in codes
             assert codes <= {
                 OutcomeCode.TASK_TIMEOUT.value,
-                OperationalErrorCode.WORKER_CRASHED.value,
+                OperationalCode.WORKER_CRASHED.value,
             }
 
         # The load-bearing assertion: the worker survived the drain.
@@ -229,7 +229,7 @@ async def test_pool_breaker_storm_does_not_kill_worker(
             ).fetchall()
             assert len(rows) == storm_size
             assert {row.error_code for row in rows} == {
-                OperationalErrorCode.WORKER_CRASHED.value
+                OperationalCode.WORKER_CRASHED.value
             }
 
         follow_up = unwrap_send(await basic_tasks.simple_task.send_async(x=21))

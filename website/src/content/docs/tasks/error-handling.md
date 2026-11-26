@@ -21,7 +21,7 @@ Adjust to your needs.
 
 | Category | Source | Examples | Auto-Retry? |
 | -------- | ------ | -------- | ----------- |
-| Read errors | `handle.get()` gave no outcome | `WaitTimeout`, `BrokerError` | No |
+| Read errors | `handle.get()` gave no outcome | `WaitTimeout`, `ReadDatabaseError` | No |
 | Execution errors | Task raised an exception, or its worker process died | `UNHANDLED_EXCEPTION`, `TASK_EXCEPTION`, `WORKER_CRASHED` | If in `auto_retry_for` |
 | Domain errors | User returned error | `"RATE_LIMITED"`, `"VALIDATION_FAILED"` | If in `auto_retry_for` |
 

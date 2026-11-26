@@ -1,8 +1,9 @@
 //! Render the error classes of horsies-core as Python modules under
 //! `_catalog/`: per module of `ERROR_CATALOGS`, the `Literal` subsets of its
 //! code fields, the record classes that its fields hold (`ERROR_RECORDS`),
-//! one frozen dataclass per class, the union of each catalog, and the
-//! per-operation unions of `ERROR_UNIONS`, in that order. Also
+//! one frozen dataclass per class with its `failure_cause()` method, the
+//! union of each catalog, and the per-operation unions of `ERROR_UNIONS`, in
+//! that order. Also
 //! `_catalog/error_detail.py` with `NoCause`, the field type that several
 //! catalogs share, one module per `NewType` of `TEXT_NEW_TYPES`, and one
 //! module per module of `EXCEPTION_CLASSES` with its `Exception`
@@ -208,14 +209,9 @@ fn render_imports(contents: &ErrorModule, classes: &[&ErrorClass]) -> String {
             }
         )
     });
-    let uses_no_cause = slots.iter().any(|slot| {
-        matches!(
-            slot,
-            ErrorSlot::Exception {
-                python_type: ExceptionType::ExceptionOrNoCause
-            }
-        )
-    });
+    // The `failure_cause()` method of every class returns
+    // `BaseException | NoCause`.
+    let uses_no_cause = !classes.is_empty();
     let record_fields: Vec<&RecordField> = contents
         .records
         .iter()
@@ -309,7 +305,11 @@ fn render_subset(subset: &CodeSubset) -> String {
     text
 }
 
-/// One frozen dataclass.
+/// The doc of the `failure_cause()` method of every class.
+const FAILURE_CAUSE_DOC: &str = "The exception of the cause, or ``NoCause()`` when no exception caused it.\n\nUse it before ``raise ... from``, an ``exc_info=`` or an error tracker\ncall. It does not change the error.";
+
+/// One frozen dataclass, with its slots and its `failure_cause()` method:
+/// the `cause` slot of a class that has one, else `NoCause()`.
 fn render_class(class: &ErrorClass, code: &CodeCatalog) -> String {
     let mut text = format!(
         "@dataclass(slots=True, frozen=True)\nclass {}:\n",
@@ -323,6 +323,16 @@ fn render_class(class: &ErrorClass, code: &CodeCatalog) -> String {
         text.push_str("    ");
         text.push_str(&render_slot(slot, code));
         text.push('\n');
+    }
+    let has_cause = class
+        .slots
+        .iter()
+        .any(|slot| matches!(slot, ErrorSlot::Exception { .. }));
+    text.push_str("\n    def failure_cause(self) -> BaseException | NoCause:\n");
+    text.push_str(&docstring(FAILURE_CAUSE_DOC, "        ").unwrap_or_default());
+    match has_cause {
+        true => text.push_str("        return self.cause\n"),
+        false => text.push_str("        return NoCause()\n"),
     }
     text
 }
@@ -346,9 +356,9 @@ fn render_slot(slot: &ErrorSlot, code: &CodeCatalog) -> String {
             SlotRepr::Hidden => format!("{name}: {} = field(repr=False)", annotation(*python_type)),
         },
         ErrorSlot::Exception { python_type } => match python_type {
-            ExceptionType::Exception => "exception: BaseException = field(repr=False)".to_owned(),
+            ExceptionType::Exception => "cause: BaseException = field(repr=False)".to_owned(),
             ExceptionType::ExceptionOrNoCause => {
-                "exception: BaseException | NoCause = field(repr=False)".to_owned()
+                "cause: BaseException | NoCause = field(repr=False)".to_owned()
             }
         },
     }
@@ -474,7 +484,7 @@ mod tests {
 
     const CODES: CodeCatalog = CodeCatalog {
         python_module: "broker",
-        python_class: "BrokerErrorCode",
+        python_class: "DatabaseErrorCode",
         python_base: PythonEnumBase::StrEnum,
         doc: "",
         members: &[CatalogMember {
@@ -487,7 +497,7 @@ mod tests {
     };
 
     const MISMATCH: ErrorClass = ErrorClass {
-        python_class: "BrokerPayloadMismatch",
+        python_class: "DatabasePayloadMismatch",
         doc: "Nothing was written.",
         slots: &[
             ErrorSlot::CodeMember {
@@ -514,7 +524,7 @@ mod tests {
     fn a_class_renders_its_doc_and_its_slots_in_order() {
         assert_eq!(
             render_class(&MISMATCH, &CODES),
-            "@dataclass(slots=True, frozen=True)\nclass BrokerPayloadMismatch:\n    \"\"\"Nothing was written.\"\"\"\n\n    code: ClassVar[BrokerErrorCode] = BrokerErrorCode.PAYLOAD_MISMATCH\n    retryable: ClassVar[bool] = False\n    message: str = field(repr=False)\n    owner_task_id: uuid.UUID\n    exception: BaseException | NoCause = field(repr=False)\n"
+            "@dataclass(slots=True, frozen=True)\nclass DatabasePayloadMismatch:\n    \"\"\"Nothing was written.\"\"\"\n\n    code: ClassVar[DatabaseErrorCode] = DatabaseErrorCode.PAYLOAD_MISMATCH\n    retryable: ClassVar[bool] = False\n    message: str = field(repr=False)\n    owner_task_id: uuid.UUID\n    cause: BaseException | NoCause = field(repr=False)\n\n    def failure_cause(self) -> BaseException | NoCause:\n        \"\"\"The exception of the cause, or ``NoCause()`` when no exception caused it.\n\n        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker\n        call. It does not change the error.\n        \"\"\"\n        return self.cause\n"
         );
     }
 
@@ -532,7 +542,7 @@ mod tests {
         };
         assert_eq!(
             render_class(&class, &CODES),
-            "@dataclass(slots=True, frozen=True)\nclass Sample:\n    \"\"\"The state may clear.\"\"\"\n\n    code: ClassVar[BrokerErrorCode] = BrokerErrorCode.PAYLOAD_MISMATCH\n    retryable: ClassVar[bool] = True\n"
+            "@dataclass(slots=True, frozen=True)\nclass Sample:\n    \"\"\"The state may clear.\"\"\"\n\n    code: ClassVar[DatabaseErrorCode] = DatabaseErrorCode.PAYLOAD_MISMATCH\n    retryable: ClassVar[bool] = True\n\n    def failure_cause(self) -> BaseException | NoCause:\n        \"\"\"The exception of the cause, or ``NoCause()`` when no exception caused it.\n\n        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker\n        call. It does not change the error.\n        \"\"\"\n        return NoCause()\n"
         );
     }
 
@@ -552,14 +562,14 @@ mod tests {
     fn a_subset_lists_its_members_on_the_code_class() {
         let subset = CodeSubset {
             python_module: "broker_errors",
-            name: "BrokerOperationFailedCode",
+            name: "DatabaseOperationFailedCode",
             doc: "The operation codes.",
             code_catalog: CODES,
             members: vec!["SCHEMA_INIT_FAILED", "CLOSE_FAILED"],
         };
         assert_eq!(
             render_subset(&subset),
-            "type BrokerOperationFailedCode = Literal[\n    BrokerErrorCode.SCHEMA_INIT_FAILED,\n    BrokerErrorCode.CLOSE_FAILED,\n]\n\"\"\"The operation codes.\"\"\"\n"
+            "type DatabaseOperationFailedCode = Literal[\n    DatabaseErrorCode.SCHEMA_INIT_FAILED,\n    DatabaseErrorCode.CLOSE_FAILED,\n]\n\"\"\"The operation codes.\"\"\"\n"
         );
     }
 
@@ -582,11 +592,11 @@ mod tests {
         let modules = error_modules();
         let broker = &modules["broker_errors"];
         let text = render_error_module("broker_errors", broker);
-        assert!(text.contains("__all__ = ['BrokerOperationFailedCode', 'BrokerOperationFailed', "));
-        assert!(text.contains("'BrokerCoreError', 'BrokerCoreEnqueueError']\n"));
-        assert!(text.contains("from horsies._catalog.broker import BrokerErrorCode\n"));
+        assert!(text.contains("__all__ = ['DatabaseOperationFailedCode', 'DatabaseOperationFailed', "));
+        assert!(text.contains("'DatabaseCoreError', 'DatabaseCoreEnqueueError']\n"));
+        assert!(text.contains("from horsies._catalog.broker import DatabaseErrorCode\n"));
         assert!(text.contains("from horsies._catalog.error_detail import NoCause\n"));
-        assert!(text.contains("\n    code: BrokerOperationFailedCode\n"));
+        assert!(text.contains("\n    code: DatabaseOperationFailedCode\n"));
     }
 
     #[test]

@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from horsies.monitoring.errors import (
-    MonitoringQueryDbOperationFailed,
+    MonitoringQueryDatabaseOperationFailed,
     MonitoringQueryError,
     MonitoringQueryErrorCode,
     MonitoringQueryHistoryContractViolation,
@@ -29,7 +29,7 @@ def _every_variant(cause: BaseException) -> list[MonitoringQueryError]:
     """One value of each variant; each cause field holds ``cause``."""
     message = f'failed: {MESSAGE_MARKER}'
     return [
-        MonitoringQueryDbOperationFailed(message=message, retryable=True, exception=cause),
+        MonitoringQueryDatabaseOperationFailed(message=message, retryable=True, exception=cause),
         MonitoringQueryHistoryContractViolation(message=message, exception=cause),
     ]
 
@@ -67,7 +67,7 @@ class TestVariantCatalog:
         self, error: MonitoringQueryError,
     ) -> None:
         match error:
-            case MonitoringQueryDbOperationFailed():
+            case MonitoringQueryDatabaseOperationFailed():
                 assert error.retryable is True
             case _:
                 assert error.retryable is False

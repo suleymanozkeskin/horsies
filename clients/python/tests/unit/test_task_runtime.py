@@ -46,7 +46,7 @@ from horsies.core.codec.kwargs import (
 )
 from horsies.core.codec.typed import decode_task_result
 from horsies.core.errors import (
-    ErrorCode,
+    HorsiesErrorCode,
     TaskDefinitionError,
     WorkflowValidationError,
 )
@@ -368,7 +368,7 @@ class TestRegistration:
         with pytest.raises(TaskDefinitionError) as refused:
             app.task('runtime.refused')(fn)
 
-        assert refused.value.code == ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
+        assert refused.value.code == HorsiesErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
         assert subject in str(refused.value)
         assert 'TaskRuntime' in str(refused.value)
         assert 'runtime.refused' not in app.tasks
@@ -414,7 +414,7 @@ class TestProducerPaths:
                 ],
             )
 
-        assert refused.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert refused.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
     def test_a_schedule_binds_without_the_runtime(self) -> None:
         schedule = TaskSchedule(
@@ -437,7 +437,7 @@ class TestProducerPaths:
         error = _signature_error(APP, schedule)
 
         assert error is not None
-        assert error.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
 
 
 # =============================================================================

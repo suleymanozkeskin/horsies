@@ -15,7 +15,7 @@ import os
 from horsies import (
     Err,
     Ok,
-    OperationalErrorCode,
+    OperationalCode,
     Result,
     RetryPolicy,
     TaskError,
@@ -39,7 +39,7 @@ from . import store_failure
     queue_name=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def sales_rollup(*, window: str) -> Result[SalesRollup, TaskError]:
@@ -65,7 +65,7 @@ def sales_rollup(*, window: str) -> Result[SalesRollup, TaskError]:
     queue_name=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def abandoned_cart_sweep(
@@ -90,7 +90,7 @@ def abandoned_cart_sweep(
     queue_name=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def regional_rollup(*, region: str) -> Result[RegionalRollup, TaskError]:
@@ -117,7 +117,7 @@ def regional_rollup(*, region: str) -> Result[RegionalRollup, TaskError]:
     queue_name=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def retention_audit(*, older_than_days: int) -> Result[RetentionAudit, TaskError]:
@@ -149,7 +149,7 @@ def retention_audit(*, older_than_days: int) -> Result[RetentionAudit, TaskError
     queue_name=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def catalog_import_chunk(
@@ -181,7 +181,7 @@ def catalog_import_chunk(
     # to watch. See `tuning.CHAOS_EXPORT_RETRY_INTERVALS_SECONDS`.
     retry_policy=RetryPolicy.fixed(
         tuning.CHAOS_EXPORT_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def flaky_export(*, export_id: str) -> Result[ExportManifest, TaskError]:

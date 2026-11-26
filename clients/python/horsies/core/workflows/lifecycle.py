@@ -18,14 +18,14 @@ from horsies.core.models.workflow import (
 )
 from horsies.core.models.workflow.handle import _OUTPUTLESS_TERMINALS
 from horsies.core.models.workflow.typing_utils import _resolve_source_node_ok_type
-from horsies.core.errors import WorkflowValidationError, ErrorCode
+from horsies.core.errors import WorkflowValidationError, HorsiesErrorCode
 from horsies.core.models.workflow.handle_types import (
-    HandleAsyncContext,
-    HandleDbOperationFailed,
+    WorkflowHandleAsyncContext,
+    WorkflowHandleDatabaseOperationFailed,
     HandleResult,
-    HandleResumeRecoveryFailed,
-    HandleStoredDataInvalid,
-    HandleWorkflowNotFound,
+    WorkflowHandleResumeRecoveryFailed,
+    WorkflowHandleStoredDataInvalid,
+    WorkflowHandleNotFound,
 )
 from horsies.core.workflows.start_types import (
     WorkflowStartAsyncContext,
@@ -280,7 +280,7 @@ def _start_request(
             except ValueError as exc:
                 raise WorkflowValidationError(
                     message='workflow_id is not a UUID',
-                    code=ErrorCode.WORKFLOW_INVALID_ID,
+                    code=HorsiesErrorCode.WORKFLOW_INVALID_ID,
                     notes=[f'received {workflow_id!r}'],
                     help_text=(
                         'workflow identity is a UUID; supply one (for '
@@ -304,14 +304,14 @@ def _start_request(
             if task.queue is None:
                 raise WorkflowValidationError(
                     message='TaskNode has unresolved queue',
-                    code=ErrorCode.WORKFLOW_UNRESOLVED_QUEUE,
+                    code=HorsiesErrorCode.WORKFLOW_UNRESOLVED_QUEUE,
                     notes=[f"TaskNode '{task.name}' has queue=None"],
                     help_text='use app.workflow() to create WorkflowSpec with proper validation',
                 )
             if task.priority is None:
                 raise WorkflowValidationError(
                     message='TaskNode has unresolved priority',
-                    code=ErrorCode.WORKFLOW_UNRESOLVED_PRIORITY,
+                    code=HorsiesErrorCode.WORKFLOW_UNRESOLVED_PRIORITY,
                     notes=[f"TaskNode '{task.name}' has priority=None"],
                     help_text='use app.workflow() to create WorkflowSpec with proper validation',
                 )
@@ -558,11 +558,11 @@ async def pause_workflow(
     Returns:
         ``Ok(True)`` if workflow was paused.
         ``Ok(False)`` if workflow exists but is not RUNNING (no-op).
-        ``Err(HandleWorkflowNotFound)`` if workflow does not exist.
-        ``Err(HandleDbOperationFailed)`` on a database error or a core
+        ``Err(WorkflowHandleNotFound)`` if workflow does not exist.
+        ``Err(WorkflowHandleDatabaseOperationFailed)`` on a database error or a core
         boundary error; the statement wrote nothing, or its commit outcome
         is unknown.
-        ``Err(HandleStoredDataInvalid)`` if a stored value does not parse.
+        ``Err(WorkflowHandleStoredDataInvalid)`` if a stored value does not parse.
 
     Raises:
         ForkedAfterCoreStart, CoreStopped: the core of this process refuses
@@ -594,7 +594,7 @@ def pause_workflow_blocking(
     on the calling thread, with the GIL released, and the same outcomes. A
     raised signal handler (Ctrl+C) leaves the call; the pause runs on to its
     end. A pause that does not end within the core's bound of a blocking
-    call is ``HandleDbOperationFailed`` with the ``CoreCallTimedOut``; its
+    call is ``WorkflowHandleDatabaseOperationFailed`` with the ``CoreCallTimedOut``; its
     outcome is unknown.
 
     The caller returns ``ASYNC_CONTEXT`` first on a thread that runs an
@@ -622,8 +622,8 @@ def _pause_answer(
         WorkflowPaused
         | WorkflowNotRunning
         | WorkflowAbsent
-        | HandleDbOperationFailed
-        | HandleStoredDataInvalid
+        | WorkflowHandleDatabaseOperationFailed
+        | WorkflowHandleStoredDataInvalid
     ),
 ) -> HandleResult[bool]:
     """The answer of a pause for the core's record. A failure is the core's
@@ -643,11 +643,11 @@ def _pause_answer(
         case WorkflowNotRunning():
             return Ok(False)
         case WorkflowAbsent():
-            return Err(HandleWorkflowNotFound(
+            return Err(WorkflowHandleNotFound(
                 message=f'Workflow {workflow_id} not found',
                 workflow_id=str(workflow_id),
             ))
-        case HandleDbOperationFailed() | HandleStoredDataInvalid():
+        case WorkflowHandleDatabaseOperationFailed() | WorkflowHandleStoredDataInvalid():
             return Err(record)
         case _ as unreachable:
             assert_never(unreachable)
@@ -661,7 +661,7 @@ def pause_workflow_sync(
 
     The blocking form of ``pause_workflow()`` (``pause_workflow_blocking``):
     the same outcomes, on the calling thread. On a thread that runs an event
-    loop it returns ``HandleAsyncContext`` and changes nothing.
+    loop it returns ``WorkflowHandleAsyncContext`` and changes nothing.
 
     Args:
         broker: PostgreSQL broker for database operations.
@@ -671,7 +671,7 @@ def pause_workflow_sync(
     Returns:
         ``Ok(True)`` if workflow was paused.
         ``Ok(False)`` if workflow exists but is not RUNNING (no-op).
-        ``Err(...)`` on failure — see ``HandleOperationError``.
+        ``Err(...)`` on failure — see ``WorkflowHandleError``.
     """
     from horsies.core.utils.loop_runner import (
         async_context_message,
@@ -679,7 +679,7 @@ def pause_workflow_sync(
     )
 
     if in_running_event_loop():
-        return Err(HandleAsyncContext(
+        return Err(WorkflowHandleAsyncContext(
             message=async_context_message(
                 f'pause_workflow_sync for workflow {workflow_id}',
                 'pause_workflow(broker, workflow_id)',
@@ -715,13 +715,13 @@ async def resume_workflow(
     Returns:
         ``Ok(True)`` if workflow was resumed.
         ``Ok(False)`` if workflow exists but is not PAUSED (no-op).
-        ``Err(HandleWorkflowNotFound)`` if workflow does not exist.
-        ``Err(HandleDbOperationFailed)`` on a database error before the
+        ``Err(WorkflowHandleNotFound)`` if workflow does not exist.
+        ``Err(WorkflowHandleDatabaseOperationFailed)`` on a database error before the
         resume commits, a child build that the core could not run, or a
         core boundary error; the transaction rolled back, or its commit
         outcome is unknown.
-        ``Err(HandleStoredDataInvalid)`` if a stored value does not parse.
-        ``Err(HandleResumeRecoveryFailed)`` when the resume committed and the
+        ``Err(WorkflowHandleStoredDataInvalid)`` if a stored value does not parse.
+        ``Err(WorkflowHandleResumeRecoveryFailed)`` when the resume committed and the
         parent advance or the recovery pass after it failed; the workflow
         is RUNNING.
 
@@ -762,7 +762,7 @@ def resume_workflow_blocking(
     their ``build_with`` on the core's callback thread while this thread
     waits. A raised signal handler (Ctrl+C) leaves the call; the resume runs
     on to its end. A resume that does not end within the core's bound of a
-    blocking call is ``HandleDbOperationFailed`` with the
+    blocking call is ``WorkflowHandleDatabaseOperationFailed`` with the
     ``CoreCallTimedOut``; its outcome is unknown.
 
     The caller returns ``ASYNC_CONTEXT`` first on a thread that runs an
@@ -790,9 +790,9 @@ def _resume_answer(
         WorkflowResumed
         | WorkflowNotPaused
         | WorkflowAbsent
-        | HandleDbOperationFailed
-        | HandleStoredDataInvalid
-        | HandleResumeRecoveryFailed
+        | WorkflowHandleDatabaseOperationFailed
+        | WorkflowHandleStoredDataInvalid
+        | WorkflowHandleResumeRecoveryFailed
     ),
 ) -> HandleResult[bool]:
     """The answer of a resume for the core's record. A failure is the core's
@@ -809,14 +809,14 @@ def _resume_answer(
         case WorkflowNotPaused():
             return Ok(False)
         case WorkflowAbsent():
-            return Err(HandleWorkflowNotFound(
+            return Err(WorkflowHandleNotFound(
                 message=f'Workflow {workflow_id} not found',
                 workflow_id=str(workflow_id),
             ))
         case (
-            HandleDbOperationFailed()
-            | HandleStoredDataInvalid()
-            | HandleResumeRecoveryFailed()
+            WorkflowHandleDatabaseOperationFailed()
+            | WorkflowHandleStoredDataInvalid()
+            | WorkflowHandleResumeRecoveryFailed()
         ):
             return Err(record)
         case _ as unreachable:
@@ -831,7 +831,7 @@ def resume_workflow_sync(
 
     The blocking form of ``resume_workflow()`` (``resume_workflow_blocking``):
     the same outcomes and raises, on the calling thread. On a thread that
-    runs an event loop it returns ``HandleAsyncContext`` and changes
+    runs an event loop it returns ``WorkflowHandleAsyncContext`` and changes
     nothing.
 
     Args:
@@ -842,7 +842,7 @@ def resume_workflow_sync(
     Returns:
         ``Ok(True)`` if workflow was resumed.
         ``Ok(False)`` if workflow exists but is not PAUSED (no-op).
-        ``Err(...)`` on failure — see ``HandleOperationError``.
+        ``Err(...)`` on failure — see ``WorkflowHandleError``.
     """
     from horsies.core.utils.loop_runner import (
         async_context_message,
@@ -850,7 +850,7 @@ def resume_workflow_sync(
     )
 
     if in_running_event_loop():
-        return Err(HandleAsyncContext(
+        return Err(WorkflowHandleAsyncContext(
             message=async_context_message(
                 f'resume_workflow_sync for workflow {workflow_id}',
                 'resume_workflow(broker, workflow_id)',

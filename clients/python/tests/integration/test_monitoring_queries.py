@@ -12,7 +12,7 @@ applies migrations). Coverage:
 7. duration semantics (spec 5.3) — which spans count up and which stay None
 8. workflow names / runs / run detail / node detail
 9. list_schedules — NULLS LAST ordering
-10. database failure — Err(DB_OPERATION_FAILED) rather than a raised exception
+10. database failure — Err(DATABASE_OPERATION_FAILED) rather than a raised exception
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ from horsies.monitoring import (
     TaskPage,
     WorkflowRunsLimit,
     ErrorCategory,
-    MonitoringQueryDbOperationFailed,
+    MonitoringQueryDatabaseOperationFailed,
     MonitoringQueryHistoryContractViolation,
     TaskAbsenceReason,
     TaskDetail,
@@ -1871,7 +1871,7 @@ class TestErrorCategoryFilter:
             make_task(
                 queue_name='slow',
                 status=TaskStatus.FAILED,
-                error_code='BROKER_ERROR',
+                error_code='DATABASE_ERROR',
             ),
         )
 
@@ -3078,7 +3078,7 @@ class TestDatabaseFailure:
 
         assert is_err(result)
         error = result.err_value
-        assert isinstance(error, MonitoringQueryDbOperationFailed)
+        assert isinstance(error, MonitoringQueryDatabaseOperationFailed)
         assert error.retryable is True
         assert 'task list query failed' in error.message
         # The driver error of Python's read, or the core's class of the cause
@@ -3104,7 +3104,7 @@ class TestDatabaseFailure:
         result = await get_task_detail(unreachable_broker, uuid.uuid4())
 
         assert is_err(result)
-        assert isinstance(result.err_value, MonitoringQueryDbOperationFailed)
+        assert isinstance(result.err_value, MonitoringQueryDatabaseOperationFailed)
 
     async def test_aggregate_failure_is_reported(
         self, unreachable_broker: PostgresBroker

@@ -516,7 +516,7 @@ async fn two_levels_with_the_default_policy_give_subworkflow_failed() {
     assert_eq!(workflow_status(&pool, workflow_id).await, "FAILED");
     assert_eq!(
         get_code(&pool, workflow_id).await.as_deref(),
-        Some("SUBWORKFLOW_FAILED")
+        Some("SUB_WORKFLOW_FAILED")
     );
 }
 

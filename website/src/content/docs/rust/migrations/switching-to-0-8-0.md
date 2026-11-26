@@ -69,7 +69,7 @@ In `Default` queue mode a task that names a queue is refused, and in `Custom` mo
 | Free-text user codes | An enum with `#[derive(horsies::UserErrorCode)]`; `std::convert::Infallible` for a task with no codes of its own |
 | `UNHANDLED_ERROR`, `TASK_ERROR` | `UNHANDLED_EXCEPTION`, `TASK_EXCEPTION` |
 | `ARGUMENT_TYPE_MISMATCH`, `RETURN_TYPE_MISMATCH` | `WORKER_SERIALIZATION_ERROR` |
-| `SubWorkflowError` | `SubWorkflowFailure`, and `ExceptionRecord` for a panic |
+| `SubWorkflowFailure` | `SubWorkflowFailure`, and `ExceptionRecord` for a panic |
 | `with_data` stored a non-finite float as `null` | `with_data` never fails; a value that cannot be stored is replaced with `{"data_refused": "<cause>"}` |
 | A single parameter stored as its value: `fn double(x: i64)` stored `2` | Every parameter stored under its name: `{"x": 2}`; `fn f(order: Order)` stores `{"order": {...}}` |
 | `auto_retry_for` entries stored as user codes; codes without a policy dropped | Checked at compile time: a built-in code or a code of `E`; `retry_policy` and `auto_retry_for` go together |

@@ -2,7 +2,7 @@
 
 Each failure of ``PostgresBroker.enqueue_async`` comes back as the generated
 class of ``horsies._catalog.broker_errors`` that the core built
-(``BrokerOperationError::enqueue_error``), and the task send maps it to its
+(``DatabaseOperationError::enqueue_error``), and the task send maps it to its
 ``TaskSend*`` class with the payload that the send made. The reference is
 the Python send of 0.7.0:
 
@@ -42,13 +42,13 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
-    BrokerEnqueueError,
-    BrokerEnqueueFailed,
-    BrokerErrorCode,
-    BrokerIdempotencyKeyConflict,
-    BrokerInvalidInput,
-    BrokerInvalidTaskOptions,
-    BrokerPayloadMismatch,
+    DatabaseEnqueueError,
+    DatabaseEnqueueFailed,
+    DatabaseErrorCode,
+    DatabaseIdempotencyKeyConflict,
+    DatabaseInvalidInput,
+    DatabaseInvalidTaskOptions,
+    DatabasePayloadMismatch,
 )
 from horsies.core.codec.json_io import SerializationError
 from horsies.core.history.periods import RetentionClassKey
@@ -112,7 +112,7 @@ def _optional_value_task(app: Horsies, name: str) -> Any:
     return optional_value
 
 
-async def _send(broker: PostgresBroker, **keywords: Any) -> Result[Any, BrokerEnqueueError]:
+async def _send(broker: PostgresBroker, **keywords: Any) -> Result[Any, DatabaseEnqueueError]:
     """One send of ``TASK_NAME`` with a new task id, the call time as
     ``sent_at``, and ``keywords`` over those."""
     arguments: dict[str, Any] = {
@@ -124,7 +124,7 @@ async def _send(broker: PostgresBroker, **keywords: Any) -> Result[Any, BrokerEn
     return await broker.enqueue_async(TASK_NAME, **arguments)
 
 
-def _error_of(result: Result[Any, BrokerEnqueueError]) -> BrokerEnqueueError:
+def _error_of(result: Result[Any, DatabaseEnqueueError]) -> DatabaseEnqueueError:
     assert is_err(result), result
     return result.err_value
 
@@ -155,8 +155,8 @@ async def test_a_rule_of_the_command_or_the_key_is_invalid_input_with_its_value_
 ) -> None:
     error = _error_of(await _send(unreachable_broker, **keywords))
 
-    assert type(error) is BrokerInvalidInput
-    assert error.code is BrokerErrorCode.INVALID_INPUT
+    assert type(error) is DatabaseInvalidInput
+    assert error.code is DatabaseErrorCode.INVALID_INPUT
     assert error.retryable is False
     assert error.message == message
     assert type(error.exception) is ValueError
@@ -173,7 +173,7 @@ async def test_a_rule_that_refused_a_value_that_reads_is_invalid_input_with_no_c
         ),
     )
 
-    assert type(error) is BrokerInvalidInput
+    assert type(error) is DatabaseInvalidInput
     assert error.retryable is False
     assert error.message == (
         'enqueue contract violation: sent_at is in the future without enqueued_at or '
@@ -204,8 +204,8 @@ async def test_refused_task_options_are_invalid_task_options_with_python_s_cause
 ) -> None:
     unreadable = _error_of(await _send(unreachable_broker, task_options='{bad'))
 
-    assert type(unreadable) is BrokerInvalidTaskOptions
-    assert unreadable.code is BrokerErrorCode.INVALID_TASK_OPTIONS
+    assert type(unreadable) is DatabaseInvalidTaskOptions
+    assert unreadable.code is DatabaseErrorCode.INVALID_TASK_OPTIONS
     assert unreadable.retryable is False
     assert type(unreadable.exception) is SerializationError
     reader_error = str(unreadable.exception)
@@ -217,7 +217,7 @@ async def test_refused_task_options_are_invalid_task_options_with_python_s_cause
         await _send(unreachable_broker, task_options='{"retry_policy": "not_a_dict"}'),
     )
 
-    assert type(by_rule) is BrokerInvalidTaskOptions
+    assert type(by_rule) is DatabaseInvalidTaskOptions
     assert by_rule.retryable is False
     assert 'retry_policy is not an object: str' in by_rule.message
     assert type(by_rule.exception) is NoCause
@@ -228,8 +228,8 @@ async def test_a_failed_connect_is_enqueue_failed_with_the_core_class_of_its_cau
 ) -> None:
     error = _error_of(await _send(unreachable_broker, input_json='{"value":1}'))
 
-    assert type(error) is BrokerEnqueueFailed
-    assert error.code is BrokerErrorCode.ENQUEUE_FAILED
+    assert type(error) is DatabaseEnqueueFailed
+    assert error.code is DatabaseErrorCode.ENQUEUE_FAILED
     assert error.retryable is True
     assert type(error.exception) is CoreConnectionError
     assert error.exception.subject == 'enqueue'
@@ -252,7 +252,7 @@ async def test_a_retention_key_that_no_class_derives_is_enqueue_failed_not_retri
         ),
     )
 
-    assert type(error) is BrokerEnqueueFailed
+    assert type(error) is DatabaseEnqueueFailed
     assert error.retryable is False
     assert type(error.exception) is CorePreconditionFailed
     assert error.exception.retryable is False
@@ -302,8 +302,8 @@ async def test_a_task_id_with_another_command_is_payload_mismatch(
         await _send(broker, task_id=task_id, sent_at=sent_at, input_json='{"value":2}'),
     )
 
-    assert type(error) is BrokerPayloadMismatch
-    assert error.code is BrokerErrorCode.PAYLOAD_MISMATCH
+    assert type(error) is DatabasePayloadMismatch
+    assert error.code is DatabaseErrorCode.PAYLOAD_MISMATCH
     assert error.retryable is False
     assert not hasattr(error, 'exception')
     assert error.message == (
@@ -353,8 +353,8 @@ async def test_a_key_that_another_task_holds_is_idempotency_key_conflict(
 
     assert is_err(error)
     conflict = error.err_value
-    assert type(conflict) is BrokerIdempotencyKeyConflict
-    assert conflict.code is BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT
+    assert type(conflict) is DatabaseIdempotencyKeyConflict
+    assert conflict.code is DatabaseErrorCode.IDEMPOTENCY_KEY_CONFLICT
     assert conflict.retryable is False
     assert not hasattr(conflict, 'exception')
     assert conflict.owner_task_id == owner

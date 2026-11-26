@@ -8,9 +8,9 @@ tags: [monitoring, health, liveness, worker, api]
 
 # Health Reads
 
-The health methods are on the `Horsies` app. Each method returns `BrokerResult[T]`: `Ok(value)` on success, or `Err(BrokerOperationError)` with a `retryable` flag on failure. What each read means, and what to do with its result, is on [Worker & Database Health](/horsies/monitoring/worker-health/).
+The health methods are on the `Horsies` app. Each method returns `DatabaseResult[T]`: `Ok(value)` on success, or `Err(DatabaseOperationError)` with a `retryable` flag on failure. What each read means, and what to do with its result, is on [Worker & Database Health](/horsies/monitoring/worker-health/).
 
-Each method has a sync variant with the same name without the `_async` suffix. The sync variant runs the read of the core on the calling thread, with the GIL released. On a thread that runs an event loop it returns `Err(BrokerAsyncContext)` (`ASYNC_CONTEXT`) and does no I/O.
+Each method has a sync variant with the same name without the `_async` suffix. The sync variant runs the read of the core on the calling thread, with the GIL released. On a thread that runs an event loop it returns `Err(DatabaseAsyncContext)` (`ASYNC_CONTEXT`) and does no I/O.
 
 ```python
 from pydantic import SecretStr
@@ -32,7 +32,7 @@ result = await app.ping_database_async()
 if is_ok(result):
     print(f"Postgres reachable in {result.ok_value.latency_ms:.1f} ms")
 else:
-    print(f"Unreachable: {result.err_value.code}")  # DB_PING_FAILED
+    print(f"Unreachable: {result.err_value.code}")  # DATABASE_PING_FAILED
 ```
 
 ### Ping the Workers
@@ -169,11 +169,11 @@ if is_ok(states) and is_ok(pongs):
 
 ## API Reference
 
-### `ping_database_async() -> BrokerResult[DatabasePing]`
+### `ping_database_async() -> DatabaseResult[DatabasePing]`
 
-**Returns:** `Ok(DatabasePing)` with `latency_ms: float`; `Err` with code `DB_PING_FAILED` on failure.
+**Returns:** `Ok(DatabasePing)` with `latency_ms: float`; `Err` with code `DATABASE_PING_FAILED` on failure.
 
-### `ping_workers_async(*, target_worker_id: str | None = None, timeout_seconds: float = 2.0, min_responses: int | None = None) -> BrokerResult[list[WorkerPong]]`
+### `ping_workers_async(*, target_worker_id: str | None = None, timeout_seconds: float = 2.0, min_responses: int | None = None) -> DatabaseResult[list[WorkerPong]]`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -183,15 +183,15 @@ if is_ok(states) and is_ok(pongs):
 
 **Returns:** `Ok(list[WorkerPong])`: one entry per distinct worker that replied, possibly empty. Each `WorkerPong` has `worker_id`, `hostname`, `pid`, `round_trip_ms`. `Err` with code `INVALID_INPUT` on a `timeout_seconds` that is not positive or a `min_responses` below 1; `Err` with code `WORKER_PING_FAILED` on a reply-channel failure.
 
-### `list_worker_states_async() -> BrokerResult[list[WorkerStateSnapshot]]`
+### `list_worker_states_async() -> DatabaseResult[list[WorkerStateSnapshot]]`
 
 **Returns:** `Ok(list[WorkerStateSnapshot])`, the latest snapshot of each worker; `Err` with code `MONITORING_QUERY_FAILED` on failure, also when a stored `slots_down` or `class_capacity` value does not have the shape that the worker writes. The message names the worker.
 
-### `get_worker_state_async(worker_id: str) -> BrokerResult[WorkerStateSnapshot | None]`
+### `get_worker_state_async(worker_id: str) -> DatabaseResult[WorkerStateSnapshot | None]`
 
 **Returns:** `Ok(WorkerStateSnapshot)`, `Ok(None)` if the worker is unknown, or `Err(MONITORING_QUERY_FAILED)`.
 
-### `get_worker_state_history_async(worker_id: str, *, limit: int | None = None) -> BrokerResult[list[WorkerStateSnapshot]]`
+### `get_worker_state_history_async(worker_id: str, *, limit: int | None = None) -> DatabaseResult[list[WorkerStateSnapshot]]`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -200,11 +200,11 @@ if is_ok(states) and is_ok(pongs):
 
 **Returns:** `Ok(list[WorkerStateSnapshot])`, newest first; `Err(INVALID_INPUT)` on a `limit` that is not positive; `Err(MONITORING_QUERY_FAILED)` on a query failure.
 
-### `get_class_coverage_async() -> BrokerResult[ClassCoverage]`
+### `get_class_coverage_async() -> DatabaseResult[ClassCoverage]`
 
 **Returns:** `Ok(ClassCoverage)`; `Err(MONITORING_QUERY_FAILED)` for the failures on [Does a live worker serve every pending class?](/horsies/monitoring/worker-health/#does-a-live-worker-serve-every-pending-class).
 
-### `get_class_report_async() -> BrokerResult[ClassReport]`
+### `get_class_report_async() -> DatabaseResult[ClassReport]`
 
 **Returns:** `Ok(ClassReport)`; `Err(MONITORING_QUERY_FAILED)` for the failures on [How long do pending tasks wait?](/horsies/monitoring/worker-health/#how-long-do-pending-tasks-wait-and-what-capacity-is-free).
 

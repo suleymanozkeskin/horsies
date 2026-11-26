@@ -248,7 +248,7 @@ Unhandled exceptions are wrapped automatically:
 def might_crash() -> Result[str, TaskError]:
     raise ValueError("Something went wrong")
     # Becomes Err(TaskError(
-    #     error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+    #     error_code=OperationalCode.UNHANDLED_EXCEPTION,
     #     message="Unhandled exception in task might_crash: ...",
     # ))
 ```
@@ -661,7 +661,7 @@ The stored options of the task hold the value in effect when the task is sent, s
 
 `@app.task` refuses a declaration that breaks a rule with a `TaskDefinitionError`, one code per rule:
 
-<!-- members: ErrorCode subset -->
+<!-- members: HorsiesErrorCode subset -->
 | Code | Name | Rule |
 | ---- | ---- | ---- |
 | HRS-107 | `TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF` | `SHARED_ASYNC` needs an `async def` function |

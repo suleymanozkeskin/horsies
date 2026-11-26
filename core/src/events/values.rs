@@ -21,7 +21,7 @@ use crate::core::config::worker_profile::{
 };
 use crate::core::task::Execution;
 use crate::core::{
-    BuiltInTaskCode, ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode, TaskErrorCode,
+    BuiltInTaskCode, ContractCode, OperationalCode, OutcomeCode, RetrievalCode, TaskErrorCode,
 };
 use crate::telemetry::labels::ReleaseReason;
 use crate::telemetry::trace_carrier::MAX_TRACE_CARRIER_BYTES;
@@ -99,7 +99,7 @@ pub const BUILT_IN_TASK_CODES: CodeUnion = CodeUnion {
     python_name: "BuiltInTaskCode",
     doc: "A built-in task error code: a member of one of the four built-in code catalogs.",
     catalogs: &[
-        <OperationalErrorCode as CodeEnum>::CATALOG,
+        <OperationalCode as CodeEnum>::CATALOG,
         <ContractCode as CodeEnum>::CATALOG,
         <RetrievalCode as CodeEnum>::CATALOG,
         <OutcomeCode as CodeEnum>::CATALOG,
@@ -186,7 +186,7 @@ pub enum ChildResult {
     /// read. The attempt outcome is `FAILED`.
     Failed { error_code: AttemptErrorCode },
     /// The worker code of the child failed, not the task. The attempt
-    /// outcome is `WORKER_FAILURE`, with the code `BROKER_ERROR`.
+    /// outcome is `WORKER_FAILURE`, with the code `DATABASE_ERROR`.
     WorkerFailure,
     /// The deadline of a shared run fired in its child before the task
     /// ended, and the child ended the run at the deadline. The attempt
@@ -242,9 +242,9 @@ impl WorkerDecision {
     pub fn error_code(self) -> BuiltInTaskCode {
         match self {
             Self::TimedOut => OutcomeCode::TaskTimeout.into(),
-            Self::TaskBlockedLoop => OperationalErrorCode::TaskBlockedLoop.into(),
-            Self::NeighbourBlockedLoop => OperationalErrorCode::NeighbourBlockedLoop.into(),
-            Self::ChildLost => OperationalErrorCode::WorkerCrashed.into(),
+            Self::TaskBlockedLoop => OperationalCode::TaskBlockedLoop.into(),
+            Self::NeighbourBlockedLoop => OperationalCode::NeighbourBlockedLoop.into(),
+            Self::ChildLost => OperationalCode::WorkerCrashed.into(),
             Self::KilledAfterCancel | Self::LostAfterCancel => OutcomeCode::TaskCancelled.into(),
         }
     }

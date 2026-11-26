@@ -3,12 +3,12 @@ title: Error Types
 section: python
 summary: The Python types of task errors, read errors, broker errors, send errors, workflow start and handle errors, and startup errors.
 related: [errors, error-handling, retrieving-results, sending-tasks]
-tags: [errors, TaskError, ReadError, ReadResult, TaskOutcome, BrokerOperationError, TaskSendError, HorsiesError]
+tags: [errors, TaskError, ReadError, ReadResult, TaskOutcome, DatabaseOperationError, TaskSendError, HorsiesError]
 ---
 
 # Error Types
 
-The Python types that carry the error codes of the [Errors Reference](/horsies/tasks/errors/). A task returns `Result[T, TaskError]`; a result read returns `ReadResult[T, TaskError]`; a broker call returns `BrokerResult[T]`; a send returns `TaskSendResult`; a workflow start returns `WorkflowStartResult`; a workflow handle call returns `HandleResult`. Startup errors raise `HorsiesError`.
+The Python types that carry the error codes of the [Errors Reference](/horsies/tasks/errors/). A task returns `Result[T, TaskError]`; a result read returns `ReadResult[T, TaskError]`; a broker call returns `DatabaseResult[T]`; a send returns `TaskSendResult`; a workflow start returns `WorkflowStartResult`; a workflow handle call returns `HandleResult`. Startup errors raise `HorsiesError`.
 
 ## TaskError
 
@@ -17,9 +17,9 @@ The Python types that carry the error codes of the [Errors Reference](/horsies/t
 | `error_code` | `BuiltInTaskCode \| str` | Required. Library or domain error code |
 | `message` | `str \| None` | Human-readable description |
 | `data` | `JsonInput` on write, `JsonValue` on read | Additional context (task_id, etc.) |
-| `exception` | `BaseException \| FlattenedException \| None` | Live exception in-process; flattened to a `FlattenedException` TypedDict (`type`, `module`, `message`, `repr`, `traceback`) when serialized to the wire |
+| `exception` | `BaseException \| ExceptionRecord \| None` | Live exception in-process; flattened to a `ExceptionRecord` TypedDict (`type`, `module`, `message`, `repr`, `traceback`) when serialized to the wire |
 
-`error_code` must not be null: `auto_retry_for` and outcome routing read it. `TaskError` refuses a key that it does not declare, at construction and at decode. `SubWorkflowError` adds `sub_workflow_id` and `sub_workflow_summary`, and it refuses any other key. A stored error with an unknown key, or without `error_code`, is stored data that does not parse: see [Decode Errors](/horsies/tasks/task-types/#decode-errors).
+`error_code` must not be null: `auto_retry_for` and outcome routing read it. `TaskError` refuses a key that it does not declare, at construction and at decode. `SubWorkflowFailure` adds `sub_workflow_id` and `sub_workflow_summary`, and it refuses any other key. A stored error with an unknown key, or without `error_code`, is stored data that does not parse: see [Decode Errors](/horsies/tasks/task-types/#decode-errors).
 
 ## Validation Failure Text
 
@@ -41,7 +41,7 @@ The cause object follows the same rule. Where the library catches a pydantic `Va
 - `Ok(Failed(task_error))`: the task returned `task_error`, or the library recorded it (`TASK_CANCELLED`, `TASK_TIMEOUT`, `WORKER_CRASHED`, ...).
 - `Err(read_error)`: the read gave no outcome.
 
-`ReadError` is a closed union of frozen classes, one class per catalog code. Every class has `code` (its catalog member) and `message` (the subject and the cause). `BrokerError` adds `retryable` (whether the cause may clear) and `exception` (the cause, or `NoCause()`). Match on the class; a `match` that omits a class fails pyright's exhaustiveness check.
+`ReadError` is a closed union of frozen classes, one class per catalog code. Every class has `code` (its catalog member) and `message` (the subject and the cause). `ReadDatabaseError` adds `retryable` (whether the cause may clear) and `exception` (the cause, or `NoCause()`). Match on the class; a `match` that omits a class fails pyright's exhaustiveness check.
 
 | Class | `code` | When | Kept by a `TaskHandle` |
 | ----- | ------ | ---- | ---------------------- |
@@ -53,11 +53,11 @@ The cause object follows the same rule. Where the library catches a pydantic `Va
 | `WaitInsideTask` | `RetrievalCode.WAIT_INSIDE_TASK` | A result wait in a process that runs task bodies. Nothing was read | No |
 | `AsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form | No |
 | `InvalidInput` | `RetrievalCode.INVALID_INPUT` | `timeout_ms` is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`. Nothing was read | No |
-| `ResultDeserializationError` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types | Yes |
-| `UnknownCustomCode` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored error has a custom code that the declared `Enum` of the task does not name. `custom_code` holds the stored text | Yes |
-| `BrokerError` | `OperationalErrorCode.BROKER_ERROR` | The database, the connection or the core call failed. A later read may succeed | No |
+| `ResultDeserializationError` | `OperationalCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types | Yes |
+| `UnknownCustomCode` | `OperationalCode.RESULT_DESERIALIZATION_ERROR` | The stored error has a custom code that the declared `Enum` of the task does not name. `custom_code` holds the stored text | Yes |
+| `ReadDatabaseError` | `OperationalCode.DATABASE_ERROR` | The database, the connection or the core call failed. A later read may succeed | No |
 | `NoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The task succeeded, and this process has no declared type to read the value: the handle was built by id, or the task is not registered here | Yes |
-| `WorkflowCtxMissingId` | `ContractCode.WORKFLOW_CTX_MISSING_ID` | `result_for()` got a node with no `node_id`. Nothing was read | – |
+| `WorkflowCtxMissingId` | `ContractCode.WORKFLOW_CONTEXT_MISSING_ID` | `result_for()` got a node with no `node_id`. Nothing was read | – |
 
 A failed task decodes without a declared type, so `NoTypeAvailable` comes only for a task that succeeded. A process that does not import the task code still reads failed tasks.
 
@@ -72,7 +72,7 @@ The Rust and the TypeScript clients use the same order. So a read inside a task 
 
 ```python
 from horsies import (
-    BrokerError,
+    ReadDatabaseError,
     Err,
     Failed,
     Ok,
@@ -90,29 +90,29 @@ def describe_read(read: ReadResult[int, TaskError]) -> str:
             return f'value: {value}'
         case Ok(Failed(task_error)):
             return f'task failed: {task_error.error_code}'
-        case Err(WaitTimeout() | TaskNotFound() | BrokerError()):
+        case Err(WaitTimeout() | TaskNotFound() | ReadDatabaseError()):
             return 'no outcome yet: read again later'
         case Err(read_error):
             return f'no outcome: {read_error.code}: {read_error.message}'
 ```
 
-## Broker Errors (BrokerResult)
+## Broker Errors (DatabaseResult)
 
-Broker methods return `BrokerResult[T]` = `Result[T, BrokerOperationError]`. The `Err` is an infrastructure-level failure, distinct from a `TaskError` in `Failed`.
+Broker methods return `DatabaseResult[T]` = `Result[T, DatabaseOperationError]`. The `Err` is an infrastructure-level failure, distinct from a `TaskError` in `Failed`.
 
-Three broker methods return a subset of `BrokerOperationError`, their only failures:
+Three broker methods return a subset of `DatabaseOperationError`, their only failures:
 
 | Method | Returns |
 | ------ | ------- |
-| `enqueue_async()` | `Result[uuid.UUID, BrokerEnqueueError]` |
-| `enqueue()` | `Result[uuid.UUID, BrokerEnqueueError \| BrokerSyncCallError]` |
-| `ensure_schema_initialized()` | `Result[None, BrokerOperationFailed]` |
+| `enqueue_async()` | `Result[uuid.UUID, DatabaseEnqueueError]` |
+| `enqueue()` | `Result[uuid.UUID, DatabaseEnqueueError \| DatabaseSyncCallError]` |
+| `ensure_schema_initialized()` | `Result[None, DatabaseOperationFailed]` |
 
 `enqueue()` and `enqueue_async()` require `sent_at`, the call time of the send, which the row stores. A send that repeats a task id is the same send when the stored command fingerprint and `sent_at` equal its own, and answers with that task id; otherwise it is `PAYLOAD_MISMATCH`. A resend therefore passes the `sent_at` of the first send.
 
 They also require `send_kind` (`from horsies import SendKind`): `SendKind.FIRST` for the first send of a task id, `SendKind.REPEAT` for a resend. A repeat reads the task history first, so a resend of a task that finished answers with its task id, or `PAYLOAD_MISMATCH`, and the task does not run again. A first send does not read history.
 
-`BrokerEnqueueError` is `BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict | BrokerInvalidTaskOptions | BrokerInvalidInput`. `BrokerSyncCallError` is `BrokerAsyncContext`: the failure that the sync form adds, where nothing ran. Both are exported from `horsies`.
+`DatabaseEnqueueError` is `DatabaseEnqueueFailed | DatabasePayloadMismatch | DatabaseIdempotencyKeyConflict | DatabaseInvalidTaskOptions | DatabaseInvalidInput`. `DatabaseSyncCallError` is `DatabaseAsyncContext`: the failure that the sync form adds, where nothing ran. Both are exported from `horsies`.
 
 ### Calls That Run on the Core
 
@@ -120,7 +120,7 @@ These calls run on the core of the process: `enqueue()`, `enqueue_async()`, `ens
 
 - The sync forms `enqueue()`, `get_task_info()` and `get_raw_result_record()` call the core on the calling thread. They return `ASYNC_CONTEXT` on a thread that runs an event loop.
 
-When the core of the process cannot run the call, the call returns its failure code (for example `ENQUEUE_FAILED`, `TASK_INFO_QUERY_FAILED`, `DB_PING_FAILED`, `WORKER_PING_FAILED` or `SCHEMA_INIT_FAILED`) with the core error as `exception`. Import the core errors from `horsies`:
+When the core of the process cannot run the call, the call returns its failure code (for example `ENQUEUE_FAILED`, `TASK_INFO_QUERY_FAILED`, `DATABASE_PING_FAILED`, `WORKER_PING_FAILED` or `SCHEMA_INIT_FAILED`) with the core error as `exception`. Import the core errors from `horsies`:
 
 | Core error | When | `retryable` | After the failure |
 | ---------- | ---- | ----------- | ----------------- |
@@ -160,7 +160,7 @@ When the core ran the call and the call failed, `exception` is the core's class 
 
 `CoreServerError` and `CoreConnectionError` share the base class `CoreDatabaseError`; the four classes share `CoreFailure`. `subject` names the core operation, for example `release_claims`. A lock that another session holds is `CoreServerError` with `sqlstate` `'55P03'`.
 
-<!-- members: BrokerErrorCode -->
+<!-- members: DatabaseErrorCode -->
 | Code | Description | Retryable |
 | ---- | ----------- | --------- |
 | `SCHEMA_INIT_FAILED` | Schema initialization failed | Varies |
@@ -169,13 +169,13 @@ When the core ran the call and the call failed, `exception` is the core's class 
 | `IDEMPOTENCY_KEY_CONFLICT` | The idempotency key is reserved by another task with a different command; `owner_task_id` names the owner task | No |
 | `TASK_INFO_QUERY_FAILED` | Task-info or raw-result query failed | Varies |
 | `MONITORING_QUERY_FAILED` | Monitoring or worker-state query failed | Varies |
-| `DB_PING_FAILED` | `ping_database` reachability probe failed | Varies |
+| `DATABASE_PING_FAILED` | `ping_database` reachability probe failed | Varies |
 | `WORKER_PING_FAILED` | `ping_workers` failed: the reply subscribe or the NOTIFY round trip failed | Varies |
 | `CLEANUP_FAILED` | Cleanup or retention operation failed | Varies |
 | `CLOSE_FAILED` | Broker close failed | Varies |
 | `LISTENER_START_FAILED` | LISTEN/NOTIFY listener failed to start | Varies |
 | `LISTENER_SUBSCRIBE_FAILED` | LISTEN/NOTIFY subscribe failed | Varies |
-| `NO_BROKER` | Operation needs a broker, but none is configured | No |
+| `NO_DATABASE` | Operation needs a broker, but none is configured | No |
 | `ASYNC_CONTEXT` | A sync method (`app.get_raw_result()`, `app.ping_database()`, `broker.close()`, ...) was called on a thread that runs an event loop; nothing ran. Call the `*_async` form | No |
 | `NO_TYPE_AVAILABLE` | Typed decode at the `app` layer needs an `ok_type`, but `task_name` is not in the local task registry | No |
 | `INVALID_JSON_PAYLOAD` | Stored result JSON is malformed, not a JSON object, has an invalid strict-serde envelope, or fails app-level typed slot decode | No |
@@ -184,30 +184,30 @@ When the core ran the call and the call failed, `exception` is the core's class 
 | `LISTENER_DISABLED` | The broker was built with `assume_initialized=True` and has no listener, so `ping_workers` cannot run. Nothing ran | No |
 | `WAIT_INSIDE_TASK` | A raw result read (`app.get_raw_result()`, `broker.get_raw_result_record()` or an `*_async` form) was called in a worker child, where task bodies run. Nothing ran. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task) | No |
 
-### BrokerOperationError
+### DatabaseOperationError
 
-`BrokerOperationError` is a union of frozen variants. The nine operation codes from `SCHEMA_INIT_FAILED` to `LISTENER_SUBSCRIBE_FAILED` share `BrokerOperationFailed`, which keeps the code in its `code` field. Every other code has a variant of its own. Every variant has `code`, `message` and `retryable`. Match on the variant; a `match` that omits a variant fails pyright's exhaustiveness check.
+`DatabaseOperationError` is a union of frozen variants. The nine operation codes from `SCHEMA_INIT_FAILED` to `LISTENER_SUBSCRIBE_FAILED` share `DatabaseOperationFailed`, which keeps the code in its `code` field. Every other code has a variant of its own. Every variant has `code`, `message` and `retryable`. Match on the variant; a `match` that omits a variant fails pyright's exhaustiveness check.
 
 | Variant | `code` | Fields besides `message` | `retryable` | After the failure |
 | ------- | ------ | ------------------------ | ----------- | ----------------- |
-| `BrokerOperationFailed` | one of the nine operation codes | `exception` | the core's classification | A read changed nothing. A cleanup may have finished part of its rows |
-| `BrokerEnqueueFailed` | `ENQUEUE_FAILED` | `exception` | the core's classification | The row may or may not exist. An enqueue again with the same task id and payload returns the existing task |
-| `BrokerPayloadMismatch` | `PAYLOAD_MISMATCH` | – | `False` | Nothing was written |
-| `BrokerIdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `owner_task_id` | `False` | Nothing was written |
-| `BrokerNotAttached` | `NO_BROKER` | – | `False` | Nothing ran |
-| `BrokerNoTypeAvailable` | `NO_TYPE_AVAILABLE` | – | `False` | The stored result is unchanged |
-| `BrokerInvalidJsonPayload` | `INVALID_JSON_PAYLOAD` | `exception` | `False` | The stored data is unchanged |
-| `BrokerInvalidTaskOptions` | `INVALID_TASK_OPTIONS` | `exception` | `False` | Nothing was written |
-| `BrokerInvalidInput` | `INVALID_INPUT` | `exception` | `False` | Nothing was written |
-| `BrokerAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing ran |
-| `BrokerListenerDisabled` | `LISTENER_DISABLED` | – | `False` | Nothing ran |
-| `BrokerWaitInsideTask` | `WAIT_INSIDE_TASK` | – | `False` | Nothing ran |
+| `DatabaseOperationFailed` | one of the nine operation codes | `exception` | the core's classification | A read changed nothing. A cleanup may have finished part of its rows |
+| `DatabaseEnqueueFailed` | `ENQUEUE_FAILED` | `exception` | the core's classification | The row may or may not exist. An enqueue again with the same task id and payload returns the existing task |
+| `DatabasePayloadMismatch` | `PAYLOAD_MISMATCH` | – | `False` | Nothing was written |
+| `DatabaseIdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `owner_task_id` | `False` | Nothing was written |
+| `DatabaseNotAttached` | `NO_DATABASE` | – | `False` | Nothing ran |
+| `DatabaseNoTypeAvailable` | `NO_TYPE_AVAILABLE` | – | `False` | The stored result is unchanged |
+| `DatabaseInvalidJsonPayload` | `INVALID_JSON_PAYLOAD` | `exception` | `False` | The stored data is unchanged |
+| `DatabaseInvalidTaskOptions` | `INVALID_TASK_OPTIONS` | `exception` | `False` | Nothing was written |
+| `DatabaseInvalidInput` | `INVALID_INPUT` | `exception` | `False` | Nothing was written |
+| `DatabaseAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing ran |
+| `DatabaseListenerDisabled` | `LISTENER_DISABLED` | – | `False` | Nothing ran |
+| `DatabaseWaitInsideTask` | `WAIT_INSIDE_TASK` | – | `False` | Nothing ran |
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `message` | `str` | Human-readable description |
 | `retryable` | `bool` | The classification of the cause where the variant has a cause from the database or the core: `True` when the condition may clear, for example a lost connection or `TooManyPendingCalls`. `False` on every other variant |
-| `exception` | `BaseException` on `BrokerOperationFailed`; `BaseException \| NoCause` on the other variants that have it | The cause. `NoCause()` when a check found the failure without a Python exception |
+| `exception` | `BaseException` on `DatabaseOperationFailed`; `BaseException \| NoCause` on the other variants that have it | The cause. `NoCause()` when a check found the failure without a Python exception |
 | `owner_task_id` | `uuid.UUID` | The task that holds the idempotency key |
 
 The repr of a variant shows its class name and its other fields. `message` and `exception` are not in the repr.
@@ -216,23 +216,23 @@ The repr of a variant shows its class name and its other fields. `message` and `
 
 ```python
 from horsies import (
-    BrokerEnqueueFailed,
-    BrokerOperationError,
-    BrokerOperationFailed,
+    DatabaseEnqueueFailed,
+    DatabaseOperationError,
+    DatabaseOperationFailed,
     NoCause,
     broker_error_cause,
 )
 
 
-def should_retry(err: BrokerOperationError) -> bool:
+def should_retry(err: DatabaseOperationError) -> bool:
     match err:
-        case BrokerOperationFailed(retryable=retryable) | BrokerEnqueueFailed(retryable=retryable):
+        case DatabaseOperationFailed(retryable=retryable) | DatabaseEnqueueFailed(retryable=retryable):
             return retryable
         case _:
             return False
 
 
-def raise_broker_error(err: BrokerOperationError) -> None:
+def raise_broker_error(err: DatabaseOperationError) -> None:
     match broker_error_cause(err):
         case NoCause():
             raise RuntimeError(err.message)
@@ -301,11 +301,11 @@ The retry methods accept `ENQUEUE_FAILED` and `ASYNC_CONTEXT` (`WorkflowStartRet
 
 ## Workflow Handle Errors (HandleResult)
 
-`WorkflowHandle` methods that read or change the workflow row (`status()`, `results()`, `tasks()`, `cancel()`, `pause()`, `resume()` and their `*_async` forms) and `pause_workflow()` / `resume_workflow()` and their sync forms return `HandleResult[T]` = `Result[T, HandleOperationError]`. `get()`, `result_for()` and their `*_async` forms return a `ReadResult` instead: see [Read Errors](#read-errors-readresult).
+`WorkflowHandle` methods that read or change the workflow row (`status()`, `results()`, `tasks()`, `cancel()`, `pause()`, `resume()` and their `*_async` forms) and `pause_workflow()` / `resume_workflow()` and their sync forms return `HandleResult[T]` = `Result[T, WorkflowHandleError]`. `get()`, `result_for()` and their `*_async` forms return a `ReadResult` instead: see [Read Errors](#read-errors-readresult).
 
-`HandleOperationError` is a union with one frozen variant per `HandleErrorCode` member. Every variant has `code`, `message`, `retryable` and `workflow_id`. `message` and the cause do not show in `repr()`. Match on the variant. Any other exception, for example a defect in `pause_workflow()` or `resume_workflow()`, propagates.
+`WorkflowHandleError` is a union with one frozen variant per `WorkflowHandleErrorCode` member. Every variant has `code`, `message`, `retryable` and `workflow_id`. `message` and the cause do not show in `repr()`. Match on the variant. Any other exception, for example a defect in `pause_workflow()` or `resume_workflow()`, propagates.
 
-`WorkflowHandle.for_id(text, broker)` returns `HandleInvalidWorkflowId` for a workflow id text that is not a UUID: `message`, `workflow_id_text` and `exception` (the `ValueError` of `uuid.UUID`). No handle is built. It is not a `HandleOperationError` variant and has no `HandleErrorCode`.
+`WorkflowHandle.for_id(text, broker)` returns `WorkflowHandleInvalidWorkflowId` for a workflow id text that is not a UUID: `message`, `workflow_id_text` and `exception` (the `ValueError` of `uuid.UUID`). No handle is built. It is not a `WorkflowHandleError` variant and has no `WorkflowHandleErrorCode`.
 
 ## User-Defined Error Codes
 
@@ -341,7 +341,7 @@ from horsies import (
     Err,
     Failed,
     Ok,
-    OperationalErrorCode,
+    OperationalCode,
     OutcomeCode,
     ReadResult,
     RetrievalCode,
@@ -362,7 +362,7 @@ def welcome_text(read: ReadResult[str, TaskError[WelcomeCode]]) -> str:
             match task_error.error_code:
                 case WelcomeCode.INVALID_EMAIL:
                     return "the address is not valid"
-                case OperationalErrorCode() | ContractCode() | RetrievalCode() | OutcomeCode():
+                case OperationalCode() | ContractCode() | RetrievalCode() | OutcomeCode():
                     return f"library failure: {task_error.error_code.value}"
         case Err(read_error):
             return f"no outcome: {read_error.code}"
@@ -381,19 +381,19 @@ def call_api(*, url: str) -> Result[dict[str, JsonValue], TaskError]:
 
 ## Reserved Built-In Code Enforcement
 
-All string values used by the built-in error code families (`OperationalErrorCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`) are **reserved**. User-defined error codes must not collide with these values.
+All string values used by the built-in error code families (`OperationalCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`) are **reserved**. User-defined error codes must not collide with these values.
 
-**Runtime enforcement**: `TaskError(error_code="BROKER_ERROR", message="db down")` raises `ValueError` at construction time. Built-in codes must be passed as enum members. User-defined codes must be plain `str`, not `str, Enum` subclasses:
+**Runtime enforcement**: `TaskError(error_code="DATABASE_ERROR", message="db down")` raises `ValueError` at construction time. Built-in codes must be passed as enum members. User-defined codes must be plain `str`, not `str, Enum` subclasses:
 
 ```python
-TaskError(error_code=OperationalErrorCode.BROKER_ERROR, message="db down")  # correct
+TaskError(error_code=OperationalCode.DATABASE_ERROR, message="db down")  # correct
 TaskError(error_code="MY_CUSTOM_CODE", message="card declined")             # correct — user string
-TaskError(error_code="BROKER_ERROR", message="db down")                     # ValueError — reserved
+TaskError(error_code="DATABASE_ERROR", message="db down")                     # ValueError — reserved
 ```
 
 `WORKFLOW_STOPPED` is also reserved, and it is not a task code: it names a workflow task that stopped before its body ran. `TaskError(error_code="WORKFLOW_STOPPED", ...)` raises `ValueError`, and a stored task error with this code does not decode. An `exception_mapper` value, a `default_unhandled_error_code` or an `auto_retry_for` entry with this name is refused like any other invalid code.
 
-**Serialization**: built-in codes are serialized as tagged dicts `{"__builtin_task_code__": "BROKER_ERROR"}` so round-trip identity is preserved through standard `model_validate()` / `model_validate_json()`. User strings are serialized as plain strings. This tagged format eliminates wire-format ambiguity between built-in and user codes, allowing `model_validate()` to work correctly everywhere — including nested models.
+**Serialization**: built-in codes are serialized as tagged dicts `{"__builtin_task_code__": "DATABASE_ERROR"}` so round-trip identity is preserved through standard `model_validate()` / `model_validate_json()`. User strings are serialized as plain strings. This tagged format eliminates wire-format ambiguity between built-in and user codes, allowing `model_validate()` to work correctly everywhere — including nested models.
 
 `horsies check` detects reserved-code collisions in statically visible configuration:
 
@@ -410,8 +410,8 @@ from pydantic import SecretStr
 app = Horsies(
     config=AppConfig(
         broker=PostgresConfig(database_url=SecretStr('postgresql://...')),
-        # HRS-212: 'BROKER_ERROR' collides with OperationalErrorCode.BROKER_ERROR
-        exception_mapper={ValueError: 'BROKER_ERROR'},
+        # HRS-212: 'DATABASE_ERROR' collides with OperationalCode.DATABASE_ERROR
+        exception_mapper={ValueError: 'DATABASE_ERROR'},
     ),
 )
 ```
@@ -474,7 +474,7 @@ try:
         definition_key="myapp.order_flow.v1",
     )
 except HorsiesError as e:
-    e.code       # ErrorCode.WORKFLOW_CYCLE_DETECTED
+    e.code       # HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED
     e.message    # "cycle detected in workflow DAG"
     e.location   # SourceLocation(file="/app/workflows/order.py", line=12)
     e.notes      # ["workflows must be acyclic directed graphs (DAG)"]

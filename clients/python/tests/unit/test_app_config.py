@@ -22,7 +22,7 @@ from horsies._catalog.worker_manifest import (
 )
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     HorsiesError,
     MultipleValidationErrors,
 )
@@ -176,7 +176,7 @@ class TestPostgresConfigPgBouncer:
             )
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_DATABASE_POOL
         assert error.message == f'{field} was removed in 0.7.0'
         assert error.notes[0] == note
         assert error.notes[1] == (
@@ -245,7 +245,7 @@ class TestPostgresConfigPgBouncer:
             )
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_DATABASE_POOL
         assert error.message == f'{field} was removed in 0.7.0'
         assert f'IsolatedChildren(pool=IsolatedPool({pool_argument}))' in (
             error.help_text or ''
@@ -386,7 +386,7 @@ class TestPostgresConfigPgBouncer:
                 database_url=SecretStr(f'{scheme}://user:secret@localhost/db'),
             )
         error = refused.value
-        assert error.code == ErrorCode.BROKER_INVALID_URL
+        assert error.code == HorsiesErrorCode.DATABASE_INVALID_URL
         assert error.message == f'invalid database_url scheme {scheme!r}'
         assert error.help_text == (
             f"replace '{scheme}://' with 'postgresql://' "
@@ -398,13 +398,13 @@ class TestPostgresConfigPgBouncer:
     def test_database_url_with_another_scheme_is_refused(self) -> None:
         with pytest.raises(ConfigurationError) as refused:
             PostgresConfig(database_url=SecretStr('mysql://user:pass@localhost/db'))
-        assert refused.value.code == ErrorCode.BROKER_INVALID_URL
+        assert refused.value.code == HorsiesErrorCode.DATABASE_INVALID_URL
         assert refused.value.message == "invalid database_url scheme 'mysql'"
 
     def test_database_url_without_a_scheme_is_refused(self) -> None:
         with pytest.raises(ConfigurationError) as refused:
             PostgresConfig(database_url=SecretStr('user:pass@localhost/db'))
-        assert refused.value.code == ErrorCode.BROKER_INVALID_URL
+        assert refused.value.code == HorsiesErrorCode.DATABASE_INVALID_URL
         assert refused.value.message == 'invalid database_url: the URL has no scheme'
 
     def test_session_database_url_that_names_a_driver_is_refused(self) -> None:
@@ -415,7 +415,7 @@ class TestPostgresConfigPgBouncer:
                     'postgresql+psycopg://user:pass@localhost/db',
                 ),
             )
-        assert refused.value.code == ErrorCode.BROKER_INVALID_URL
+        assert refused.value.code == HorsiesErrorCode.DATABASE_INVALID_URL
         assert refused.value.message == (
             "invalid session_database_url scheme 'postgresql+psycopg'"
         )
@@ -452,7 +452,7 @@ class TestPostgresConfigTcpUserTimeout:
                 database_url=SecretStr(self._LOCAL_URL), tcp_user_timeout_ms=-1,
             )
 
-        assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
+        assert refused.value.code == HorsiesErrorCode.CONFIG_INVALID_KEEPALIVE
         assert refused.value.message == 'invalid tcp_user_timeout_ms'
 
     def test_the_core_bound_is_accepted(self) -> None:
@@ -470,7 +470,7 @@ class TestPostgresConfigTcpUserTimeout:
                 database_url=SecretStr(self._LOCAL_URL), tcp_user_timeout_ms=above,
             )
 
-        assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
+        assert refused.value.code == HorsiesErrorCode.CONFIG_INVALID_KEEPALIVE
         assert refused.value.message == 'invalid tcp_user_timeout_ms'
         assert refused.value.notes == [
             f'got: tcp_user_timeout_ms={above}',
@@ -566,7 +566,7 @@ class TestPostgresConfigKeepalives:
                 **{field_name: 0},
             )
 
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_KEEPALIVE
 
     def test_non_positive_values_allowed_when_keepalives_disabled(self) -> None:
         # Disabled keepalives ignore the interval/idle/count values entirely.
@@ -613,7 +613,7 @@ class TestPostgresConfigKeepalives:
                 {'database_url': self._LOCAL_URL, field_name: bound + 1},
             )
 
-        assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
+        assert refused.value.code == HorsiesErrorCode.CONFIG_INVALID_KEEPALIVE
         assert refused.value.message == f'invalid {field_name}'
         assert refused.value.notes == [
             f'got: {field_name}={bound + 1}',
@@ -674,7 +674,7 @@ class TestPrefetchBufferValidation:
                 broker=BROKER,
                 prefetch_buffer=-1,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
 
     def test_prefetch_buffer_positive_requires_claim_lease(self) -> None:
         """prefetch_buffer > 0 without claim_lease_ms should raise ConfigurationError."""
@@ -687,7 +687,7 @@ class TestPrefetchBufferValidation:
                 prefetch_buffer=4,
                 claim_lease_ms=None,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
 
     def test_prefetch_buffer_positive_with_claim_lease_is_valid(self) -> None:
         """prefetch_buffer > 0 with valid claim_lease_ms should be valid."""
@@ -738,7 +738,7 @@ class TestClaimLeaseMsValidation:
                 prefetch_buffer=4,
                 claim_lease_ms=0,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
 
     def test_claim_lease_ms_negative_raises(self) -> None:
         """claim_lease_ms < 0 should raise ConfigurationError."""
@@ -751,7 +751,7 @@ class TestClaimLeaseMsValidation:
                 prefetch_buffer=4,
                 claim_lease_ms=-1000,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
 
     def test_claim_lease_ms_positive_is_valid(self) -> None:
         """claim_lease_ms > 0 should be valid."""
@@ -788,7 +788,7 @@ class TestMaxClaimRenewAgeMsValidation:
                 broker=BROKER,
                 max_claim_renew_age_ms=0,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
 
     def test_negative_raises(self) -> None:
         """max_claim_renew_age_ms < 0 should raise ConfigurationError."""
@@ -801,7 +801,7 @@ class TestMaxClaimRenewAgeMsValidation:
                 broker=BROKER,
                 max_claim_renew_age_ms=-1000,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
 
     def test_less_than_effective_lease_raises(self) -> None:
         """max_claim_renew_age_ms < effective lease should raise ConfigurationError."""
@@ -816,7 +816,7 @@ class TestMaxClaimRenewAgeMsValidation:
                 max_claim_renew_age_ms=5_000,
                 recovery=RecoveryConfig(claimer_heartbeat_interval_ms=2_000),
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
 
     def test_equal_to_effective_lease_is_valid(self) -> None:
         """max_claim_renew_age_ms == effective lease is the minimum valid value."""
@@ -885,7 +885,7 @@ class TestClusterWideCapPrefetchConflict:
                 claim_lease_ms=5000,
                 recovery=SHORT_HB_RECOVERY,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_CLUSTER_CAP
 
     def test_no_cluster_cap_with_prefetch_is_valid(self) -> None:
         """No cluster_wide_cap with prefetch_buffer > 0 should be valid (soft cap mode)."""
@@ -915,7 +915,7 @@ class TestClusterWideCapBoundaries:
                 broker=BROKER,
                 cluster_wide_cap=0,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_CLUSTER_CAP
 
     def test_cluster_wide_cap_negative_raises(self) -> None:
         """cluster_wide_cap=-1 should raise ConfigurationError."""
@@ -927,7 +927,7 @@ class TestClusterWideCapBoundaries:
                 broker=BROKER,
                 cluster_wide_cap=-1,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_CLUSTER_CAP
 
     def test_cluster_wide_cap_minimum_valid(self) -> None:
         """cluster_wide_cap=1 should be the minimum valid value."""
@@ -963,25 +963,25 @@ class TestWorkerManifestBounds:
                 {'prefetch_buffer': CLAIM_COUNT_MAX + 1, 'claim_lease_ms': 60_000},
                 'prefetch_buffer',
                 CLAIM_COUNT_MAX,
-                ErrorCode.CONFIG_INVALID_PREFETCH,
+                HorsiesErrorCode.CONFIG_INVALID_PREFETCH,
             ),
             (
                 {'claim_lease_ms': MILLISECONDS_MAX + 1},
                 'claim_lease_ms',
                 MILLISECONDS_MAX,
-                ErrorCode.CONFIG_INVALID_PREFETCH,
+                HorsiesErrorCode.CONFIG_INVALID_PREFETCH,
             ),
             (
                 {'max_claim_renew_age_ms': MILLISECONDS_MAX + 1},
                 'max_claim_renew_age_ms',
                 MILLISECONDS_MAX,
-                ErrorCode.CONFIG_INVALID_PREFETCH,
+                HorsiesErrorCode.CONFIG_INVALID_PREFETCH,
             ),
             (
                 {'cluster_wide_cap': TASK_LIMIT_MAX + 1},
                 'cluster_wide_cap',
                 TASK_LIMIT_MAX,
-                ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
+                HorsiesErrorCode.CONFIG_INVALID_CLUSTER_CAP,
             ),
             (
                 {
@@ -995,7 +995,7 @@ class TestWorkerManifestBounds:
                 },
                 'custom_queues[1].max_concurrency',
                 QUEUE_CONCURRENCY_MAX,
-                ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE,
             ),
         ],
     )
@@ -1004,7 +1004,7 @@ class TestWorkerManifestBounds:
         fields: dict[str, object],
         path: str,
         maximum: int,
-        code: ErrorCode,
+        code: HorsiesErrorCode,
     ) -> None:
         refusals = [
             error
@@ -1058,7 +1058,7 @@ class TestQueueModeValidation:
                 broker=BROKER,
                 custom_queues=[CustomQueueConfig(name='q1')],
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE
 
     def test_custom_mode_with_none_queues_raises(self) -> None:
         """CUSTOM mode with custom_queues=None should raise ConfigurationError."""
@@ -1070,7 +1070,7 @@ class TestQueueModeValidation:
                 broker=BROKER,
                 custom_queues=None,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE
 
     def test_custom_mode_with_empty_queues_raises(self) -> None:
         """CUSTOM mode with empty custom_queues should raise ConfigurationError."""
@@ -1082,7 +1082,7 @@ class TestQueueModeValidation:
                 broker=BROKER,
                 custom_queues=[],
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE
 
     def test_custom_mode_with_duplicate_names_raises(self) -> None:
         """CUSTOM mode with duplicate queue names should raise ConfigurationError."""
@@ -1097,7 +1097,7 @@ class TestQueueModeValidation:
                     CustomQueueConfig(name='q1'),
                 ],
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE
 
     def test_max_concurrency_none_means_uncapped(self) -> None:
         """max_concurrency=None is the explicit uncapped sentinel."""
@@ -1231,7 +1231,7 @@ class TestMultiErrorCollection:
                 broker=BROKER,
                 cluster_wide_cap=-1,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_CLUSTER_CAP
 
     def test_multi_error_is_horsies_error(self) -> None:
         """MultipleValidationErrors is catchable as HorsiesError."""
@@ -1268,9 +1268,9 @@ class TestMultiErrorCollection:
             )
         errors = exc_info.value.report.errors
         codes = {e.code for e in errors}
-        assert ErrorCode.CONFIG_INVALID_CLUSTER_CAP in codes
-        assert ErrorCode.CONFIG_INVALID_PREFETCH in codes
-        assert ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER in codes
+        assert HorsiesErrorCode.CONFIG_INVALID_CLUSTER_CAP in codes
+        assert HorsiesErrorCode.CONFIG_INVALID_PREFETCH in codes
+        assert HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER in codes
 
 
 @pytest.mark.unit
@@ -1288,7 +1288,7 @@ class TestRetryCodeValidation:
                 broker=BROKER,
                 default_unhandled_error_code='TimeoutError',
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
 
     def test_invalid_mapper_value_format_raises(self) -> None:
         """Mapper values that look like exception names are rejected."""
@@ -1301,7 +1301,7 @@ class TestRetryCodeValidation:
                 broker=BROKER,
                 exception_mapper={ValueError: 'TimeoutError'},
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
 
     def test_valid_default_unhandled_error_code(self) -> None:
         """UPPER_SNAKE_CASE error codes should be accepted."""
@@ -1323,7 +1323,7 @@ class TestRetryCodeValidation:
                 broker=BROKER,
                 default_unhandled_error_code='lowercase_code',
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
 
     def test_non_base_exception_mapper_key_raises(self) -> None:
         """Mapper keys that are not BaseException subclasses should be rejected.
@@ -1697,7 +1697,7 @@ class TestGetBrokerErrorHandling:
             app.set_task_send_pool(connections)
 
     def test_non_horsies_error_wrapped_as_broker_init_failed(self) -> None:
-        """Non-HorsiesError exceptions are wrapped with BROKER_INIT_FAILED."""
+        """Non-HorsiesError exceptions are wrapped with DATABASE_INIT_FAILED."""
         from horsies import Horsies
 
         app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER))
@@ -1710,7 +1710,7 @@ class TestGetBrokerErrorHandling:
             with pytest.raises(HorsiesError) as exc_info:
                 app.get_broker()
 
-            assert exc_info.value.code == ErrorCode.BROKER_INIT_FAILED
+            assert exc_info.value.code == HorsiesErrorCode.DATABASE_INIT_FAILED
             assert 'driver missing' in str(exc_info.value.message)
             assert exc_info.value.__cause__ is not None
 
@@ -1723,7 +1723,7 @@ class TestGetBrokerErrorHandling:
 
         original = HorsiesError(
             message='bad config',
-            code=ErrorCode.BROKER_INVALID_URL,
+            code=HorsiesErrorCode.DATABASE_INVALID_URL,
         )
         with patch(
             'horsies.core.app.PostgresBroker',
@@ -1733,7 +1733,7 @@ class TestGetBrokerErrorHandling:
                 app.get_broker()
 
             assert exc_info.value is original
-            assert exc_info.value.code == ErrorCode.BROKER_INVALID_URL
+            assert exc_info.value.code == HorsiesErrorCode.DATABASE_INVALID_URL
 
 
 @pytest.mark.unit
@@ -1799,7 +1799,7 @@ class TestWorkerStateSnapshotInterval:
             RecoveryConfig(worker_state_snapshot_interval_ms=interval_ms)
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_RECOVERY
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_RECOVERY
         assert error.message == (
             'worker_state_snapshot_interval_ms has more than 20 digits, above '
             'the cap of 60000ms'
@@ -1815,7 +1815,7 @@ class TestWorkerStateSnapshotInterval:
 
         error = exc_info.value
         assert type(error) is ConfigurationError
-        assert error.code == ErrorCode.CONFIG_INVALID_RECOVERY
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_RECOVERY
         assert error.message == (
             f'worker_state_snapshot_interval_ms={interval_ms}ms '
             'is above the cap of 60000ms'

@@ -4,7 +4,7 @@
 //! there. The stale threshold is whole minutes from 0 to one year; another
 //! value is `INVALID_INPUT` before any read, with Python's text.
 
-use crate::broker::result_types::BrokerOperationError;
+use crate::broker::result_types::DatabaseOperationError;
 
 /// The most rows a stale or expired task list returns.
 pub const TASK_LIST_BOUND: usize = 10_000;
@@ -55,14 +55,14 @@ impl StaleThresholdRefusal {
     /// The `INVALID_INPUT` error of the refusal, not retryable, with
     /// Python's text: `stale_threshold_minutes <cause>; give whole minutes
     /// from 0 to 525600`. The text holds no value.
-    pub fn error(&self) -> BrokerOperationError {
+    pub fn error(&self) -> DatabaseOperationError {
         let cause = match self {
             Self::Bool => "is a bool, not an int".to_owned(),
             Self::NotAnInteger { type_name } => format!("is a {type_name}, not an int"),
             Self::BelowZero => "is below 0".to_owned(),
             Self::AboveMaximum => format!("is above {MAX_STALE_THRESHOLD_MINUTES} (one year)"),
         };
-        BrokerOperationError::invalid_input(format!(
+        DatabaseOperationError::invalid_input(format!(
             "stale_threshold_minutes {cause}; give whole minutes from 0 to \
              {MAX_STALE_THRESHOLD_MINUTES}"
         ))
@@ -149,7 +149,7 @@ pub(crate) fn bounded_list_from_rows<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::broker::result_types::BrokerErrorCode;
+    use crate::broker::result_types::DatabaseErrorCode;
 
     #[test]
     fn a_threshold_of_zero_to_one_year_is_accepted() {
@@ -182,7 +182,7 @@ mod tests {
                 "{minutes}"
             );
             let error = refusal.error();
-            assert_eq!(error.code(), BrokerErrorCode::InvalidInput, "{minutes}");
+            assert_eq!(error.code(), DatabaseErrorCode::InvalidInput, "{minutes}");
             assert!(!error.retryable(), "{minutes}");
         }
         for (refusal, cause) in [

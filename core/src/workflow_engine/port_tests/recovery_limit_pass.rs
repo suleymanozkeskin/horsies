@@ -819,7 +819,7 @@ async fn a_child_at_the_limit_fails_the_parent_node() {
         .result
         .expect("the parent node stores its child's failure");
     let error = stored_result_error(&stored);
-    assert_eq!(code(&error).as_deref(), Some("SUBWORKFLOW_FAILED"));
+    assert_eq!(code(&error).as_deref(), Some("SUB_WORKFLOW_FAILED"));
     assert!(stored.contains(LIMIT_MESSAGE), "{stored}");
     db.drop().await;
 }

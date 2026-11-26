@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use horsies_core::handle::HandleListener;
 use horsies_core::{
-    ping_listener_disabled, ping_min_responses_refused, ping_timeout_refused, BrokerOperationError,
+    ping_listener_disabled, ping_min_responses_refused, ping_timeout_refused, DatabaseOperationError,
     BrokerOperationSource, WorkerPingStep, WorkerPong,
 };
 use pyo3::prelude::*;
@@ -116,7 +116,7 @@ fn ping_window(value: &Bound<'_, PyAny>) -> PyResult<Result<Duration, BrokerFail
         Err(error) => {
             return Ok(Err(BrokerFailure::of_operation_error(
                 SUBJECT,
-                BrokerOperationError::worker_ping_failed(
+                DatabaseOperationError::worker_ping_failed(
                     WorkerPingStep::Notify,
                     BrokerOperationSource::ArgumentUnreadable(error.to_string()),
                 ),
@@ -173,7 +173,7 @@ fn ping_target(value: &Bound<'_, PyAny>) -> PyResult<Result<Option<String>, Brok
             let type_name = value.get_type().name()?.to_string();
             Ok(Err(BrokerFailure::of_operation_error(
                 SUBJECT,
-                BrokerOperationError::invalid_input(format!(
+                DatabaseOperationError::invalid_input(format!(
                     "ping_workers request refused: target_worker_id must be a str or None, not \
                      {type_name}"
                 )),
@@ -245,7 +245,7 @@ pub async fn ping_workers_operation(
         Err(error) => {
             return PingOutcome::Failed(BrokerFailure::of_operation_error(
                 SUBJECT,
-                BrokerOperationError::worker_ping_failed(
+                DatabaseOperationError::worker_ping_failed(
                     WorkerPingStep::Notify,
                     BrokerOperationSource::Broker(error),
                 ),

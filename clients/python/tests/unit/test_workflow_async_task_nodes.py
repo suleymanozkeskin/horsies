@@ -10,7 +10,7 @@ import pytest
 from pydantic import SecretStr
 
 from horsies.core.app import Horsies
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
@@ -118,7 +118,7 @@ class TestAsyncTaskNodes:
                 definition_key='mismatch.v1',
             )
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
     def test_workflow_ctx_from_needs_the_parameter_on_an_async_task(self) -> None:
         app = _app()
@@ -141,7 +141,7 @@ class TestAsyncTaskNodes:
                 definition_key='ctx_missing.v1',
             )
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_CTX_PARAM_MISSING
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_CONTEXT_PARAMETER_MISSING
 
     def test_workflow_ctx_from_is_accepted_on_an_async_task_that_declares_it(
         self,

@@ -37,7 +37,7 @@ from horsies.core.docs_fetcher import MainBranch, ReleaseTag
 from horsies.core.worker.core_run import EXIT_FAILED, EXIT_STOPPED, WorkerLaunch
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     HorsiesError,
     WorkflowValidationError,
 )
@@ -50,7 +50,7 @@ from horsies.core.models.worker_profile import (
     WorkerProfile,
 )
 from horsies.core.types.result import Err, Ok
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
+from horsies.core.brokers.result_types import DatabaseErrorCode, DatabaseOperationFailed
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +135,7 @@ class TestResolveModuleArgument:
         ns = self._make_ns(module='flag_mod', module_pos='pos_mod')
         with pytest.raises(ConfigurationError) as exc_info:
             _resolve_module_argument(ns)
-        assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+        assert exc_info.value.code == HorsiesErrorCode.CLI_INVALID_ARGS
         assert 'conflict' in exc_info.value.message.lower()
 
     def test_identical_flag_and_positional_accepted(self) -> None:
@@ -145,12 +145,12 @@ class TestResolveModuleArgument:
     def test_both_missing_raises_configuration_error(self) -> None:
         with pytest.raises(ConfigurationError) as exc_info:
             _resolve_module_argument(self._make_ns())
-        assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+        assert exc_info.value.code == HorsiesErrorCode.CLI_INVALID_ARGS
 
     def test_empty_strings_treated_as_missing(self) -> None:
         with pytest.raises(ConfigurationError) as exc_info:
             _resolve_module_argument(self._make_ns(module='', module_pos=''))
-        assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+        assert exc_info.value.code == HorsiesErrorCode.CLI_INVALID_ARGS
 
     def test_error_includes_help_text(self) -> None:
         with pytest.raises(ConfigurationError) as exc_info:
@@ -196,7 +196,7 @@ class TestDiscoverAppErrors:
     def test_module_not_found_raises(self, _mock_sys: MagicMock) -> None:
         with pytest.raises(ConfigurationError) as exc_info:
             discover_app('nonexistent.module.that.does.not.exist:app')
-        assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+        assert exc_info.value.code == HorsiesErrorCode.CLI_INVALID_ARGS
         assert 'module not found' in exc_info.value.message
 
     @patch('horsies.core.cli.setup_sys_path_from_cwd', return_value=None)
@@ -204,7 +204,7 @@ class TestDiscoverAppErrors:
         # Use a real module but request a nonexistent attribute
         with pytest.raises(ConfigurationError) as exc_info:
             discover_app('os:definitely_not_an_attribute_xyz')
-        assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+        assert exc_info.value.code == HorsiesErrorCode.CLI_INVALID_ARGS
         assert 'no attribute' in exc_info.value.message
 
     @patch('horsies.core.cli.setup_sys_path_from_cwd', return_value=None)
@@ -212,7 +212,7 @@ class TestDiscoverAppErrors:
         # os.path is not a Horsies instance
         with pytest.raises(ConfigurationError) as exc_info:
             discover_app('os:path')
-        assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+        assert exc_info.value.code == HorsiesErrorCode.CLI_INVALID_ARGS
         assert 'not a Horsies instance' in exc_info.value.message
 
     @patch('horsies.core.cli.setup_sys_path_from_cwd', return_value=None)
@@ -230,7 +230,7 @@ class TestDiscoverAppErrors:
 
         with pytest.raises(ConfigurationError) as exc_info:
             discover_app('fake_empty')
-        assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+        assert exc_info.value.code == HorsiesErrorCode.CLI_INVALID_ARGS
         assert 'no Horsies instance found' in exc_info.value.message
 
     @patch('horsies.core.cli.setup_sys_path_from_cwd', return_value=None)
@@ -247,7 +247,7 @@ class TestDiscoverAppErrors:
 
         with pytest.raises(ConfigurationError) as exc_info:
             discover_app('fake_multi')
-        assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+        assert exc_info.value.code == HorsiesErrorCode.CLI_INVALID_ARGS
         assert 'multiple Horsies instances' in exc_info.value.message
 
     @patch('horsies.core.cli.setup_sys_path_from_cwd', return_value=None)
@@ -261,7 +261,7 @@ class TestDiscoverAppErrors:
 
         with pytest.raises(ConfigurationError) as exc_info:
             discover_app('broken.module:app')
-        assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+        assert exc_info.value.code == HorsiesErrorCode.CLI_INVALID_ARGS
         assert 'failed to import' in exc_info.value.message
 
     @patch('horsies.core.cli.setup_sys_path_from_cwd', return_value=None)
@@ -275,7 +275,7 @@ class TestDiscoverAppErrors:
 
         with pytest.raises(ConfigurationError) as exc_info:
             discover_app('broken.module:app')
-        assert exc_info.value.code == ErrorCode.MODULE_EXEC_ERROR
+        assert exc_info.value.code == HorsiesErrorCode.MODULE_IMPORT_ERROR
         assert 'error while importing' in exc_info.value.message
 
     @patch('horsies.core.cli.setup_sys_path_from_cwd', return_value=None)
@@ -287,26 +287,26 @@ class TestDiscoverAppErrors:
     ) -> None:
         mock_import.side_effect = WorkflowValidationError(
             message='duplicate definition_key',
-            code=ErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY,
+            code=HorsiesErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY,
         )
 
         with pytest.raises(WorkflowValidationError) as exc_info:
             discover_app('broken.module:app')
-        assert exc_info.value.code == ErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY
 
     @patch('horsies.core.cli.setup_sys_path_from_cwd', return_value=None)
     def test_ambiguous_dotted_py_pattern_raises(self, _mock_sys: MagicMock) -> None:
         # "app.configs.horsies.py" looks like a dotted module with .py extension
         with pytest.raises(ConfigurationError) as exc_info:
             discover_app('app.configs.horsies.py:app')
-        assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+        assert exc_info.value.code == HorsiesErrorCode.CLI_INVALID_ARGS
         assert 'ambiguous' in exc_info.value.message
 
     @patch('horsies.core.cli.setup_sys_path_from_cwd', return_value=None)
     def test_file_not_found_raises(self, _mock_sys: MagicMock) -> None:
         with pytest.raises(ConfigurationError) as exc_info:
             discover_app('/tmp/nonexistent_horsies_file.py:app')
-        assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+        assert exc_info.value.code == HorsiesErrorCode.CLI_INVALID_ARGS
         assert 'module file not found' in exc_info.value.message
 
     @patch('horsies.core.cli.setup_sys_path_from_cwd', return_value=None)
@@ -526,10 +526,10 @@ def _make_schema_err(
     retryable: bool = True,
     message: str = 'db error',
     exception: Exception | None = None,
-) -> BrokerOperationFailed:
+) -> DatabaseOperationFailed:
     """Build a schema init failure; the cause defaults to a connection error."""
-    return BrokerOperationFailed(
-        code=BrokerErrorCode.SCHEMA_INIT_FAILED,
+    return DatabaseOperationFailed(
+        code=DatabaseErrorCode.SCHEMA_INIT_FAILED,
         message=message,
         retryable=retryable,
         exception=exception or ConnectionError(message),
@@ -1405,7 +1405,7 @@ class TestDiscoverAppFilePath:
         # Act / Assert
         with pytest.raises(ConfigurationError) as exc_info:
             discover_app('/path/to/file.py:app')
-        assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+        assert exc_info.value.code == HorsiesErrorCode.CLI_INVALID_ARGS
         assert 'failed to import' in exc_info.value.message
 
     @patch('horsies.core.cli.setup_sys_path_from_cwd', return_value=None)
@@ -1423,7 +1423,7 @@ class TestDiscoverAppFilePath:
         # Act / Assert
         with pytest.raises(ConfigurationError) as exc_info:
             discover_app('/path/to/file.py:app')
-        assert exc_info.value.code == ErrorCode.MODULE_EXEC_ERROR
+        assert exc_info.value.code == HorsiesErrorCode.MODULE_IMPORT_ERROR
         assert 'error while importing' in exc_info.value.message
 
     @patch('horsies.core.cli.setup_sys_path_from_cwd', return_value=None)
@@ -1492,7 +1492,7 @@ class TestDiscoverAppAdditionalBranches:
         # 'app.configs.horsies.py' with no ':attr' → attr_name is None
         with pytest.raises(ConfigurationError) as exc_info:
             discover_app('app.configs.horsies.py')
-        assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+        assert exc_info.value.code == HorsiesErrorCode.CLI_INVALID_ARGS
         assert 'ambiguous' in exc_info.value.message
         assert '<app_name>' in (exc_info.value.help_text or '')
 

@@ -7,7 +7,7 @@ validates the JSON text of the core's model into the response model with
 ``validate_core_model_json`` of the codec. The error side has two states
 that a read gives:
 
-* ``MonitoringQueryDbOperationFailed``: a database failure that the core
+* ``MonitoringQueryDatabaseOperationFailed``: a database failure that the core
   reports, or a core boundary error of the call (``CoreCallRefusal``).
 * ``MonitoringQueryHistoryContractViolation``: stored history data that
   does not decode, in ``task_stats``, ``list_tasks``, ``get_task_detail``
@@ -59,7 +59,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import validate_core_model_json
 from horsies.core.models.tasks import (
     ContractCode,
-    OperationalErrorCode,
+    OperationalCode,
     OutcomeCode,
     RetrievalCode,
 )
@@ -72,7 +72,7 @@ from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
 from horsies.monitoring.history_window import MonitoringWindow
 from horsies.monitoring.errors import (
-    MonitoringQueryDbOperationFailed,
+    MonitoringQueryDatabaseOperationFailed,
     MonitoringQueryHistoryContractViolation,
     MonitoringResult,
 )
@@ -117,7 +117,7 @@ type SortDirection = Literal['asc', 'desc']
 # Built from horsies' own error-code enums so the mapping never drifts from
 # the library. Any non-null code absent here is user-defined -> DOMAIN.
 _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
-    **{member.value: ErrorCategory.OPERATIONAL for member in OperationalErrorCode},
+    **{member.value: ErrorCategory.OPERATIONAL for member in OperationalCode},
     **{member.value: ErrorCategory.CONTRACT for member in ContractCode},
     **{member.value: ErrorCategory.RETRIEVAL for member in RetrievalCode},
     **{member.value: ErrorCategory.OUTCOME for member in OutcomeCode},
@@ -214,12 +214,12 @@ def _workflow_uuid(workflow_id: str) -> uuid.UUID | None:
 
 def _core_call_failed(
     operation: str, exc: CoreCallRefusal,
-) -> Err[MonitoringQueryDbOperationFailed]:
+) -> Err[MonitoringQueryDatabaseOperationFailed]:
     """A core boundary error of a read call (the core did not start, or the
     loop has too many calls in flight): no statement ran, or the read was
     dropped. Nothing changed."""
     return Err(
-        MonitoringQueryDbOperationFailed(
+        MonitoringQueryDatabaseOperationFailed(
             message=f'{operation} failed: {exc}',
             retryable=core_error_retryable(exc),
             exception=exc,
@@ -276,7 +276,7 @@ async def task_stats(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_STATUS_COUNTS, text))
-        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+        case MonitoringQueryDatabaseOperationFailed() | MonitoringQueryHistoryContractViolation():
             return Err(outcome)
 
 
@@ -320,7 +320,7 @@ async def task_facets(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_FACETS, text))
-        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+        case MonitoringQueryDatabaseOperationFailed() | MonitoringQueryHistoryContractViolation():
             return Err(outcome)
 
 
@@ -374,7 +374,7 @@ async def task_breakdown(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_BREAKDOWN, text))
-        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+        case MonitoringQueryDatabaseOperationFailed() | MonitoringQueryHistoryContractViolation():
             return Err(outcome)
 
 
@@ -410,7 +410,7 @@ async def list_tasks(
         - ``Ok(TaskListPage)``: the page rows and the total.
         - ``Err(MonitoringQueryHistoryContractViolation)``: the EXPLAIN text
           of the unfiltered history estimate does not decode.
-        - ``Err(MonitoringQueryDbOperationFailed)``: the statement failed, or
+        - ``Err(MonitoringQueryDatabaseOperationFailed)``: the statement failed, or
           the core could not run it.
 
     One statement (``horsies_monitoring_task_list``) that the core runs on
@@ -441,7 +441,7 @@ async def list_tasks(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_TASK_LIST_PAGE, text))
-        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+        case MonitoringQueryDatabaseOperationFailed() | MonitoringQueryHistoryContractViolation():
             return Err(outcome)
 
 
@@ -465,7 +465,7 @@ async def get_task_detail(
         - ``Err(MonitoringQueryHistoryContractViolation)``: the history row
           or the attempts do not decode, or the history reader reports the
           task live in the snapshot where the live read found no row.
-        - ``Err(MonitoringQueryDbOperationFailed)``: the statement failed, or
+        - ``Err(MonitoringQueryDatabaseOperationFailed)``: the statement failed, or
           the core could not run it.
 
     One statement (``horsies_monitoring_task_detail``) that the core runs on
@@ -481,7 +481,7 @@ async def get_task_detail(
             return Ok(validate_core_model_json(_TASK_DETAIL, text))
         case TaskDetailAbsent(task_id=absent_id, reason=reason):
             return Ok(TaskDetailNotFound(task_id=absent_id, reason=TaskAbsenceReason(reason)))
-        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+        case MonitoringQueryDatabaseOperationFailed() | MonitoringQueryHistoryContractViolation():
             return Err(outcome)
 
 
@@ -509,7 +509,7 @@ async def list_workflow_names(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_WORKFLOW_NAMES, text))
-        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+        case MonitoringQueryDatabaseOperationFailed() | MonitoringQueryHistoryContractViolation():
             return Err(outcome)
 
 
@@ -539,7 +539,7 @@ async def list_workflow_runs(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_WORKFLOW_RUNS, text))
-        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+        case MonitoringQueryDatabaseOperationFailed() | MonitoringQueryHistoryContractViolation():
             return Err(outcome)
 
 
@@ -572,7 +572,7 @@ async def get_workflow_run(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_WORKFLOW_RUN, text))
-        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+        case MonitoringQueryDatabaseOperationFailed() | MonitoringQueryHistoryContractViolation():
             return Err(outcome)
 
 
@@ -618,7 +618,7 @@ async def get_workflow_node(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_WORKFLOW_NODE, text))
-        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+        case MonitoringQueryDatabaseOperationFailed() | MonitoringQueryHistoryContractViolation():
             return Err(outcome)
 
 
@@ -647,5 +647,5 @@ async def list_schedules(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_SCHEDULES, text))
-        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+        case MonitoringQueryDatabaseOperationFailed() | MonitoringQueryHistoryContractViolation():
             return Err(outcome)

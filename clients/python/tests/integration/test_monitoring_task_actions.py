@@ -32,7 +32,7 @@ from horsies.core.types.status import TaskStatus
 from horsies.core.utils.url import to_psycopg_url
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
 from horsies.monitoring import (
-    TaskActionDbOperationFailed,
+    TaskActionDatabaseOperationFailed,
     TaskActionErrorCode,
     TaskActionNotCancellable,
     TaskActionNotFound,
@@ -619,7 +619,7 @@ class TestDatabaseFailure:
 
         assert is_err(result)
         error = result.err_value
-        assert type(error) is TaskActionDbOperationFailed
+        assert type(error) is TaskActionDatabaseOperationFailed
         assert error.retryable is True
         assert error.task_id == task_id
         assert isinstance(error.exception, CoreConnectionError)

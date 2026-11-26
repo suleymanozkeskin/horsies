@@ -16,10 +16,10 @@ from uuid import UUID
 
 from horsies import NoCause, TaskInfo, TaskStatus
 from horsies.monitoring import (
-    MonitoringQueryDbOperationFailed,
+    MonitoringQueryDatabaseOperationFailed,
     MonitoringQueryError,
     MonitoringQueryHistoryContractViolation,
-    TaskActionDbOperationFailed,
+    TaskActionDatabaseOperationFailed,
     TaskActionError,
     TaskActionNotCancellable,
     TaskActionNotFound,
@@ -30,7 +30,7 @@ from horsies.monitoring import (
 TASK_ID = UUID('0b1c2d3e-4f50-4a61-8b72-c3d4e5f60718')
 
 
-def chain_the_query_database_cause(db_failed: MonitoringQueryDbOperationFailed) -> None:
+def chain_the_query_database_cause(db_failed: MonitoringQueryDatabaseOperationFailed) -> None:
     raise RuntimeError('query failed') from db_failed.exception
 
 
@@ -45,7 +45,7 @@ def every_query_variant_has_a_cause(error: MonitoringQueryError) -> None:
 
 
 def query_causes_are_exceptions() -> None:
-    _ = MonitoringQueryDbOperationFailed(
+    _ = MonitoringQueryDatabaseOperationFailed(
         message='failed',
         retryable=True,
         exception=NoCause(),  # pyright: ignore[reportArgumentType]
@@ -56,7 +56,7 @@ def query_causes_are_exceptions() -> None:
     )
 
 
-def chain_the_task_action_database_cause(db_failed: TaskActionDbOperationFailed) -> None:
+def chain_the_task_action_database_cause(db_failed: TaskActionDatabaseOperationFailed) -> None:
     raise RuntimeError('cancel failed') from db_failed.exception
 
 
@@ -97,7 +97,7 @@ def the_status_is_total() -> None:
 
 
 def task_action_causes_are_exceptions() -> None:
-    _ = TaskActionDbOperationFailed(
+    _ = TaskActionDatabaseOperationFailed(
         message='failed',
         retryable=True,
         task_id=TASK_ID,

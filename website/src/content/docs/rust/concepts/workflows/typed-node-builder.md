@@ -67,7 +67,7 @@ fn checkout_spec(app: &Horsies, order: Order) -> Result<WorkflowSpec, HorsiesErr
 | `function.node()` | `TaskNode<T, A>` of a `TaskFunction<A, T, E>`, the same node |
 | `task_name::params::<name>()` | `InputField<task_name::Input, F>`: the token of the parameter `<name>` of type `F` |
 
-A new node has the input `{}`. Add it with `builder.task(node)`, which returns `Result<TypedNodeRef<T>, HorsiesError>`. `builder.task` gives the node the queue (unless the node names one with `.queue(name)`), the priority of that queue, the options and the workflow context flag of the task's registration on the builder's app. It refuses with `HRS-302` (`ErrorCode::WorkflowUnregisteredTask`) when the builder's app does not register the task, or registers it with another input or output type. The node is then not added.
+A new node has the input `{}`. Add it with `builder.task(node)`, which returns `Result<TypedNodeRef<T>, HorsiesError>`. `builder.task` gives the node the queue (unless the node names one with `.queue(name)`), the priority of that queue, the options and the workflow context flag of the task's registration on the builder's app. It refuses with `HRS-302` (`HorsiesErrorCode::WorkflowUnregisteredTask`) when the builder's app does not register the task, or registers it with another input or output type. The node is then not added.
 
 ## Set the Input
 

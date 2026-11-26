@@ -48,7 +48,7 @@ use super::child_sizing::{
     DEFAULT_TASK_SEND_POOL_CONNECTIONS, FINALIZE_BATCH_FLUSHERS, PARENT_POOL_CLAIM_CONNECTIONS,
     PARENT_POOL_MIN_CONNECTIONS, PARENT_POOL_RESERVE,
 };
-use crate::core::error::{ErrorCode, HorsiesError};
+use crate::core::error::{HorsiesErrorCode, HorsiesError};
 
 pub mod input;
 
@@ -1097,7 +1097,7 @@ pub fn quoted_profile_name(name: &str) -> String {
 }
 
 fn profile_error(message: String, notes: &[String], help: String) -> HorsiesError {
-    let refusal = HorsiesError::new(message).with_code(ErrorCode::ConfigInvalidWorkerProfile);
+    let refusal = HorsiesError::new(message).with_code(HorsiesErrorCode::ConfigInvalidWorkerProfile);
     notes
         .iter()
         .fold(refusal, |refusal, note| refusal.with_note(note.as_str()))
@@ -1489,7 +1489,7 @@ impl ProfileSelectionRefused {
         match self {
             Self::InvalidProfiles { errors } => errors.clone(),
             Self::NotGiven { defined } => vec![HorsiesError::new("--profile is required")
-                .with_code(ErrorCode::CliInvalidArgs)
+                .with_code(HorsiesErrorCode::CliInvalidArgs)
                 .with_note(
                     "a worker takes its settings from a named profile in \
                      AppConfig.worker_profiles; there is no default profile",
@@ -1500,7 +1500,7 @@ impl ProfileSelectionRefused {
                 "unknown worker profile {}",
                 quoted_profile_name(requested)
             ))
-            .with_code(ErrorCode::CliInvalidArgs)
+            .with_code(HorsiesErrorCode::CliInvalidArgs)
             .with_note(defined_profiles_note(defined))
             .with_help(profile_help(defined))],
         }
@@ -1633,7 +1633,7 @@ mod tests {
     fn only_refusal(errors: Vec<HorsiesError>) -> HorsiesError {
         assert_eq!(errors.len(), 1, "{:?}", messages(&errors));
         let refusal = errors.into_iter().next().expect("one refusal");
-        assert_eq!(refusal.code, Some(ErrorCode::ConfigInvalidWorkerProfile));
+        assert_eq!(refusal.code, Some(HorsiesErrorCode::ConfigInvalidWorkerProfile));
         refusal
     }
 
@@ -2605,7 +2605,7 @@ mod tests {
         );
         assert!(errors
             .iter()
-            .all(|error| error.code == Some(ErrorCode::ConfigInvalidWorkerProfile)));
+            .all(|error| error.code == Some(HorsiesErrorCode::ConfigInvalidWorkerProfile)));
     }
 
     /// The shape and claim refusals of the config, as AppConfig validation

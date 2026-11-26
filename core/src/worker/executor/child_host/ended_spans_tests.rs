@@ -32,7 +32,7 @@ use super::seats::ServeEnd;
 use crate::broker::claims::{RunWorkflow, WorkflowNodeIndex};
 use crate::core::config::bounded::BoundedU32;
 use crate::core::task::Execution;
-use crate::core::{BuiltInTaskCode, OperationalErrorCode, OutcomeCode};
+use crate::core::{BuiltInTaskCode, OperationalCode, OutcomeCode};
 use crate::events::{
     AttemptEnd, AttemptEnded, AttemptStart, ChildResult, Event, RunTrace, SlotRecovered,
     WorkerDecision, WorkflowPlace,
@@ -519,15 +519,15 @@ async fn each_reason_gives_one_span_with_its_code_and_the_node_that_was_read() {
         ),
         (
             WorkerDecision::TaskBlockedLoop,
-            OperationalErrorCode::TaskBlockedLoop.into(),
+            OperationalCode::TaskBlockedLoop.into(),
         ),
         (
             WorkerDecision::NeighbourBlockedLoop,
-            OperationalErrorCode::NeighbourBlockedLoop.into(),
+            OperationalCode::NeighbourBlockedLoop.into(),
         ),
         (
             WorkerDecision::ChildLost,
-            OperationalErrorCode::WorkerCrashed.into(),
+            OperationalCode::WorkerCrashed.into(),
         ),
     ];
     for (reason, code) in &cases {

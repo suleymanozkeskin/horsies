@@ -88,7 +88,7 @@ impl From<ListenProbeFailure> for SessionCheckFailure {
 ///
 /// Python's live check answers `ListenerNotCapable` with "broker listener
 /// capability check failed" and every other variant with "broker
-/// connectivity check failed", both `HRS-203` (`BROKER_INVALID_URL`).
+/// connectivity check failed", both `HRS-203` (`DATABASE_INVALID_URL`).
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectivityRefusal {
     /// The core pools could not open with the broker's settings (a URL, a

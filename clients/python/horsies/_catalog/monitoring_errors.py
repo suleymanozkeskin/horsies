@@ -7,14 +7,15 @@ import uuid
 from dataclasses import dataclass, field
 from typing import ClassVar
 
+from horsies._catalog.error_detail import NoCause
 from horsies._catalog.monitoring import MonitoringQueryErrorCode, TaskActionErrorCode
 from horsies._catalog.status import TaskStatus
 
-__all__ = ['MonitoringQueryDbOperationFailed', 'MonitoringQueryHistoryContractViolation', 'TaskActionNotFound', 'TaskActionNotCancellable', 'TaskActionWorkflowTask', 'TaskActionDbOperationFailed', 'TaskActionStoredDataInvalid', 'MonitoringQueryCoreError', 'TaskActionCoreError']
+__all__ = ['MonitoringQueryDatabaseOperationFailed', 'MonitoringQueryHistoryContractViolation', 'TaskActionNotFound', 'TaskActionNotCancellable', 'TaskActionWorkflowTask', 'TaskActionDatabaseOperationFailed', 'TaskActionStoredDataInvalid', 'MonitoringQueryCoreError', 'TaskActionCoreError']
 
 
 @dataclass(slots=True, frozen=True)
-class MonitoringQueryDbOperationFailed:
+class MonitoringQueryDatabaseOperationFailed:
     """The query failed with a database or driver error, or the core of this
     process could not run it. Nothing changed.
 
@@ -25,10 +26,18 @@ class MonitoringQueryDbOperationFailed:
     boundary.
     """
 
-    code: ClassVar[MonitoringQueryErrorCode] = MonitoringQueryErrorCode.DB_OPERATION_FAILED
+    code: ClassVar[MonitoringQueryErrorCode] = MonitoringQueryErrorCode.DATABASE_OPERATION_FAILED
     message: str = field(repr=False)
     retryable: bool
-    exception: BaseException = field(repr=False)
+    cause: BaseException = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
@@ -45,7 +54,15 @@ class MonitoringQueryHistoryContractViolation:
     code: ClassVar[MonitoringQueryErrorCode] = MonitoringQueryErrorCode.HISTORY_CONTRACT_VIOLATION
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
-    exception: BaseException = field(repr=False)
+    cause: BaseException = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
@@ -60,6 +77,14 @@ class TaskActionNotFound:
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
     task_id: uuid.UUID
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
 
 
 @dataclass(slots=True, frozen=True)
@@ -77,6 +102,14 @@ class TaskActionNotCancellable:
     task_id: uuid.UUID
     current_status: TaskStatus
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
 class TaskActionWorkflowTask:
@@ -92,9 +125,17 @@ class TaskActionWorkflowTask:
     task_id: uuid.UUID
     current_status: TaskStatus
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
-class TaskActionDbOperationFailed:
+class TaskActionDatabaseOperationFailed:
     """The cancel statement failed with a database or driver error, or the
     core of this process could not run it.
 
@@ -107,11 +148,19 @@ class TaskActionDbOperationFailed:
     ``CANCELLED``.
     """
 
-    code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.DB_OPERATION_FAILED
+    code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.DATABASE_OPERATION_FAILED
     message: str = field(repr=False)
     retryable: bool
     task_id: uuid.UUID
-    exception: BaseException = field(repr=False)
+    cause: BaseException = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
@@ -127,11 +176,19 @@ class TaskActionStoredDataInvalid:
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
     task_id: uuid.UUID
-    exception: BaseException = field(repr=False)
+    cause: BaseException = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 type MonitoringQueryCoreError = (
-    MonitoringQueryDbOperationFailed
+    MonitoringQueryDatabaseOperationFailed
     | MonitoringQueryHistoryContractViolation
 )
 """Every failure of a monitoring query that the core gives: one class per state."""
@@ -141,7 +198,7 @@ type TaskActionCoreError = (
     TaskActionNotFound
     | TaskActionNotCancellable
     | TaskActionWorkflowTask
-    | TaskActionDbOperationFailed
+    | TaskActionDatabaseOperationFailed
     | TaskActionStoredDataInvalid
 )
 """Every failure of a task action that the core gives: one class per state."""

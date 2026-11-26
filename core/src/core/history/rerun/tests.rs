@@ -19,7 +19,7 @@ use crate::core::history::periods::RetentionDays;
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome, WorkerOwned};
-use crate::core::{OperationalErrorCode, TaskError, TaskResult, TaskStatus};
+use crate::core::{OperationalCode, TaskError, TaskResult, TaskStatus};
 use crate::db::{
     CheckoutClass, IsolationLevel, ParameterType, RollbackOutcome, SqlScript, StatementBound,
     StatementFailure, TypedStatement,
@@ -131,7 +131,7 @@ fn terminal_result(kind: TerminalSource) -> String {
         }
         TerminalSource::Failed | TerminalSource::Expired | TerminalSource::Cancelled => {
             serde_json::to_string(&TaskResult::<serde_json::Value>::Err(TaskError::builtin(
-                OperationalErrorCode::TaskException,
+                OperationalCode::TaskException,
                 "p8 terminal source",
             )))
             .unwrap()
@@ -720,7 +720,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         .unwrap_err();
     assert_eq!(
         history_error.code(),
-        crate::BrokerErrorCode::InvalidJsonPayload
+        crate::DatabaseErrorCode::InvalidJsonPayload
     );
     let absent = Uuid::new_v4();
     assert!(matches!(
@@ -1323,7 +1323,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .expect_found();
     assert_eq!(failed_raw.status, TaskStatus::Failed);
     let expected_error =
-        TaskError::builtin(OperationalErrorCode::TaskException, "p8 terminal source");
+        TaskError::builtin(OperationalCode::TaskException, "p8 terminal source");
     let expected_error_envelope =
         serde_json::to_value(TaskResult::<serde_json::Value>::Err(expected_error.clone())).unwrap();
     assert_eq!(
@@ -1368,13 +1368,13 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .unwrap_err();
     assert_eq!(
         history_info_error.code(),
-        crate::BrokerErrorCode::InvalidJsonPayload
+        crate::DatabaseErrorCode::InvalidJsonPayload
     );
     let raw_error = broker
         .get_raw_result_record(completed, None)
         .await
         .unwrap_err();
-    assert_eq!(raw_error.code(), crate::BrokerErrorCode::InvalidJsonPayload);
+    assert_eq!(raw_error.code(), crate::DatabaseErrorCode::InvalidJsonPayload);
 
     let non_object = b"[]".to_vec();
     sql::query(
@@ -1393,7 +1393,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .unwrap_err();
     assert_eq!(
         shape_error.code(),
-        crate::BrokerErrorCode::InvalidJsonPayload
+        crate::DatabaseErrorCode::InvalidJsonPayload
     );
 
     // The baseline stores no result content type: format version 1 implies
@@ -1428,7 +1428,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     // TASK_INFO_QUERY_FAILED, not retryable.
     assert_eq!(
         attempt_error.code(),
-        crate::BrokerErrorCode::TaskInfoQueryFailed
+        crate::DatabaseErrorCode::TaskInfoQueryFailed
     );
     assert!(!attempt_error.retryable());
 
@@ -1445,7 +1445,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_raw_result_record(Uuid::new_v4(), None)
         .await
         .expect_err("a removed detail reader refuses the history read");
-    assert_eq!(refused.code(), crate::BrokerErrorCode::TaskInfoQueryFailed);
+    assert_eq!(refused.code(), crate::DatabaseErrorCode::TaskInfoQueryFailed);
     assert!(!refused.retryable());
     assert!(refused.message().contains("42883"), "{}", refused.message());
     let mut publication = pool.begin().await.unwrap();

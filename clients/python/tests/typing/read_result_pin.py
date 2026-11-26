@@ -15,7 +15,7 @@ from typing import assert_never
 
 from horsies import (
     AsyncContext,
-    BrokerError,
+    ReadDatabaseError,
     Err,
     Failed,
     InvalidInput,
@@ -91,7 +91,7 @@ def no_ok_value_on_every_member(read: ReadResult[str, TaskError]) -> object:
 def every_read_error(error: ReadError) -> bool:
     """Whether a later read may give an outcome: one arm per class."""
     match error:
-        case WaitTimeout() | TaskNotFound() | ResultNotReady() | BrokerError():
+        case WaitTimeout() | TaskNotFound() | ResultNotReady() | ReadDatabaseError():
             return True
         case (
             WorkflowNotFound()
@@ -111,7 +111,7 @@ def every_read_error(error: ReadError) -> bool:
 
 def read_error_left_out(error: ReadError) -> bool:
     match error:  # pyright: ignore[reportMatchNotExhaustive]
-        case WaitTimeout() | TaskNotFound() | ResultNotReady() | BrokerError():
+        case WaitTimeout() | TaskNotFound() | ResultNotReady() | ReadDatabaseError():
             return True
         case (
             WorkflowNotFound()

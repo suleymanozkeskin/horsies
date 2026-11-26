@@ -48,7 +48,7 @@ from horsies._catalog.producer_metrics import (
     TASK_SEND_DURATION_NAME,
     TASK_SENT_NAME,
 )
-from horsies.core.brokers.result_types import BrokerEnqueueFailed
+from horsies.core.brokers.result_types import DatabaseEnqueueFailed
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendEnqueueFailed
 from horsies.core.models.tasks import TaskError
@@ -173,8 +173,8 @@ def _traceparent(span: ReadableSpan) -> str:
     return f'00-{context.trace_id:032x}-{context.span_id:016x}-{context.trace_flags:02x}'
 
 
-def _enqueue_failed(*, retryable: bool) -> Err[BrokerEnqueueFailed]:
-    return Err(BrokerEnqueueFailed(
+def _enqueue_failed(*, retryable: bool) -> Err[DatabaseEnqueueFailed]:
+    return Err(DatabaseEnqueueFailed(
         message='db gone',
         retryable=retryable,
         exception=ConnectionError('db gone'),

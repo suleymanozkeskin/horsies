@@ -107,7 +107,7 @@ fn child_of(node: &NodeRow) -> Uuid {
 }
 
 /// The sub-workflow failure of `outcome` (Python `_assert_subworkflow_error`):
-/// the code `SUBWORKFLOW_FAILED`, the child `child_id`, which FAILED with at
+/// the code `SUB_WORKFLOW_FAILED`, the child `child_id`, which FAILED with at
 /// least one failed task.
 fn subworkflow_failure<T: Debug, E: UserErrorCode + Debug>(
     outcome: &TaskOutcome<T, E>,
@@ -116,7 +116,7 @@ fn subworkflow_failure<T: Debug, E: UserErrorCode + Debug>(
     let TaskOutcome::Failed(error) = outcome else {
         panic!("expected a sub-workflow failure, got {outcome:?}");
     };
-    assert_eq!(error.code().text(), "SUBWORKFLOW_FAILED");
+    assert_eq!(error.code().text(), "SUB_WORKFLOW_FAILED");
     let failure = error
         .sub_workflow()
         .unwrap_or_else(|| panic!("the error {error:?} is not a sub-workflow failure"));
@@ -399,7 +399,7 @@ async fn test_failed_subworkflow_flows_through_args_from_and_workflow_ctx() {
         output(&handle).await,
         json!({
             "args_is_subworkflow_error": true,
-            "args_error_code": "SUBWORKFLOW_FAILED",
+            "args_error_code": "SUB_WORKFLOW_FAILED",
             "ctx_is_subworkflow_error": true,
             "ids_match": true,
             "summary_status": "FAILED",

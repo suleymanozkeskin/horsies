@@ -51,9 +51,9 @@ pub use crate::core::{
     CancelGraceMs, CancelGraceOutOfRange, ContractCode, CronEnumTerm, CronNumericTerm, CronOrdinal,
     CronSchedule, CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector,
     DeclaredCodeRefusal, DeclaredCodesRefused, DeclaredErrorCode, DeclaredErrorCodes,
-    EnqueueRetention, ErrorCategory, ErrorCode, ErrorCodeLabel, Execution, ExecutionClass,
-    HandleErrorCode, HandleOperation, HandleOperationError, HandleResult, HourlySchedule,
-    IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, OnError, OperationalErrorCode,
+    EnqueueRetention, HorsiesErrorCategory, HorsiesErrorCode, ErrorCodeLabel, Execution, ExecutionClass,
+    WorkflowHandleErrorCode, HandleOperation, WorkflowHandleError, HandleResult, HourlySchedule,
+    IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, OnError, OperationalCode,
     OutcomeCode, PausedAgeRefused, PausedWorkflowAge, PayloadPolicy, PostgresConfig,
     PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError, ResilienceConfigError,
     RetentionChoice, RetentionClassKeyRefused, RetentionConfig, RetentionConfigError,
@@ -73,8 +73,8 @@ pub use crate::core::codec::{JsonText, JsonTextRefused};
 
 // broker re-exports
 pub use crate::broker::{
-    expected_schema_version, BrokerCheckCause, BrokerError, BrokerErrorCode, BrokerOperationError,
-    BrokerOperationFailedCode, BrokerOperationSource, BrokerRefusalCause, BrokerResult,
+    expected_schema_version, BrokerCheckCause, BrokerError, DatabaseErrorCode, DatabaseOperationError,
+    DatabaseOperationFailedCode, BrokerOperationSource, BrokerRefusalCause, DatabaseResult,
     CheckInterruption, CheckedSend, ConnectivityRefusal, DatabasePing, ExpiredTaskRow,
     HeartbeatRow, ListenError, ListenProbeFailure, ListenerPlanError, PostgresBroker,
     RawResultRead, RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow,
