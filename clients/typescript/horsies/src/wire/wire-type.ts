@@ -2,7 +2,7 @@
 // and how the value is present when it is an object member.
 
 import { encodeValue } from "../codec/writer.ts";
-import type { AnyWire } from "./infer.ts";
+import type { AnyWire, ValueWire } from "./infer.ts";
 import { type DefaultText, type Kind, type MemberPresence, nullableKind, OPTIONAL, REQUIRED } from "./kinds.ts";
 
 /** Type-only key of the value type. It does not exist at run time. */
@@ -94,6 +94,11 @@ function defaultText<S>(kind: Kind, value: S): DefaultText {
 /** A required wire type of `kind`. */
 export function wireOf<V, S = V, R extends Role = "value">(kind: Kind): Wire<V, S, "required", R> {
   return new WireType<V, S, "required", R>(kind, REQUIRED);
+}
+
+/** A wire type of `kind` with `presence`, as the zod adapter compiles an object member or a parameter. */
+export function memberWireOf(kind: Kind, presence: MemberPresence): ValueWire {
+  return new WireType<unknown, unknown, Presence, "value">(kind, presence);
 }
 
 /** The kind tree of a wire type. A value that `h.*` did not build is a defect: `TypeError`. */
