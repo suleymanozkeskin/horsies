@@ -232,6 +232,10 @@ export const recordShipment = defineTask({
 
 - A body and a reader get zod's output type; a sender may leave out a
   member that zod marks `.optional()`, `.default()` or `.prefault()`.
+- `z.uuid()` is a string with zod's UUID check. It stores the text as given:
+  an upper-case UUID is stored in upper case. `h.uuid()` refuses a text that
+  is not in the lower-case 8-4-4-4-12 form. Use `h.uuid()` (or
+  `hz.wire(h.uuid())`) for the lower-case form.
 - The adapter refuses a zod form that has no stored form, with `HRS-105`:
   `z.any()`, `z.unknown()`; a one-way change (`.transform()`,
   `z.preprocess()`, `z.coerce.*()`, `.trim()`, `.toLowerCase()`);
@@ -240,7 +244,8 @@ export const recordShipment = defineTask({
   `z.map()`, `z.set()`, `z.function()`, `z.promise()`; a union with an
   object member that is not a discriminated union; a union of an integer
   and a float; `z.intersection()`; `.optional()` or `.default()` outside an
-  object member or a parameter; a recursive schema that is `.optional()` or
+  object member or a parameter; `.default()` or `.prefault()` under
+  `.nonoptional()`; a recursive schema that is `.optional()` or
   `.default()` at its top; and a zod definition, field, format or check
   that the installed horsies does not know.
 - A recursive schema (`z.lazy()`, or an object with a getter member that

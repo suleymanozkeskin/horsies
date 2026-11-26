@@ -10,6 +10,7 @@ import { checkKind } from "../../../horsies/src/wire/check.ts";
 import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
 import { MAX_SCHEMA_DEPTH, compileMember, compileValue } from "../../../horsies/src/zod/adapter.ts";
 import type { ZodSchema } from "../../../horsies/src/zod/definition.ts";
+import { zodValueWire } from "../../../horsies/src/zod/kind.ts";
 import { type ZodSchemaRefused, zodRefusalText } from "../../../horsies/src/zod/rules.ts";
 import { acceptedKind, withDefinition } from "./support.ts";
 
@@ -20,6 +21,24 @@ function refusals(schema: ZodSchema): readonly (readonly [string, string, string
   assert.ok(!compiled.ok, "expected a refusal");
 
   return compiled.error.map((refused: ZodSchemaRefused) => [refused.rule, refused.path, refused.zodType] as const);
+}
+
+/** The rule and path of each `checkKind` refusal of a schema as a whole value, through the entry of the contract compile. */
+function kindRefusals(schema: z.ZodType): readonly (readonly [string, string])[] {
+  const outcome = zodValueWire(schema);
+
+  assert.ok(!outcome.ok && outcome.error.kind === "KindRefused", "expected a KindRefused");
+
+  return outcome.error.refusals.map((refused) => [refused.rule, refused.path] as const);
+}
+
+/** The help of the first `checkKind` refusal of a schema. */
+function kindHelp(schema: z.ZodType): readonly string[] {
+  const outcome = zodValueWire(schema);
+
+  assert.ok(!outcome.ok && outcome.error.kind === "KindRefused", "expected a KindRefused");
+
+  return outcome.error.refusals[0]?.help ?? [];
 }
 
 describe("zod adapter: refusal rules", () => {
@@ -74,24 +93,41 @@ describe("zod adapter: refusal rules", () => {
     }
   });
 
-  test("UNDISCRIMINATED_UNION: z.union() with an object member; a discriminated union with unionFallback", () => {
-    assert.deepEqual(refusals(z.union([z.object({ a: z.int() }), z.string()])), [
-      ["UNDISCRIMINATED_UNION", "$", "union"],
-    ]);
-
+  test("UNION_FALLBACK: a discriminated union with unionFallback", () => {
     const fallback = z.discriminatedUnion("kind", [z.object({ kind: z.literal("a") })], { unionFallback: true });
 
-    assert.deepEqual(refusals(fallback), [["UNDISCRIMINATED_UNION", "$", "union"]]);
+    assert.deepEqual(refusals(fallback), [["UNION_FALLBACK", "$", "union"]]);
   });
 
-  test("MIXED_UNION: z.union() with an array or a record member", () => {
-    assert.deepEqual(refusals(z.union([z.array(z.int()), z.int()])), [["MIXED_UNION", "$", "union"]]);
-    assert.deepEqual(refusals(z.union([z.record(z.string(), z.int()), z.json()])), [["MIXED_UNION", "$", "union"]]);
+  test("a union with an object, array or record member compiles; checkKind refuses it with UnionMemberNotPrimitive and the zod fix", () => {
+    for (const schema of [
+      z.union([z.object({ a: z.int() }), z.string()]),
+      z.union([z.array(z.int()), z.int()]),
+      z.union([z.record(z.string(), z.int()), z.json()]),
+    ]) {
+      assert.deepEqual(kindRefusals(schema), [["UnionMemberNotPrimitive", "$"]]);
+      assert.deepEqual(kindHelp(schema), ["use z.discriminatedUnion() of objects for a union with an object, array or record member"]);
+    }
   });
 
-  test("INT_FLOAT_UNION: an integer member with a float member, also through nullable", () => {
-    assert.deepEqual(refusals(z.union([z.int(), z.number()])), [["INT_FLOAT_UNION", "$", "union"]]);
-    assert.deepEqual(refusals(z.union([z.bigint(), z.number().nullable()])), [["INT_FLOAT_UNION", "$", "union"]]);
+  test("a union with two members that store the same JSON type compiles; checkKind refuses it with AmbiguousUnion and the zod fix", () => {
+    for (const schema of [z.union([z.int(), z.number()]), z.union([z.bigint(), z.number().nullable()])]) {
+      assert.deepEqual(kindRefusals(schema), [["AmbiguousUnion", "$"]]);
+      assert.deepEqual(kindHelp(schema), ["use union members that store different JSON types: one number kind (z.int() or z.number()), not two"]);
+    }
+  });
+
+  test("DEFAULT_UNDER_NONOPTIONAL: .default() or .prefault() under .nonoptional(), at the member's path", () => {
+    assert.deepEqual(refusals(z.string().default("ab").nonoptional()), [["DEFAULT_UNDER_NONOPTIONAL", "$", "nonoptional"]]);
+    assert.deepEqual(refusals(z.string().prefault("ab").nonoptional()), [["DEFAULT_UNDER_NONOPTIONAL", "$", "nonoptional"]]);
+    assert.deepEqual(refusals(z.object({ code: z.string().default("ab").nonoptional() })), [
+      ["DEFAULT_UNDER_NONOPTIONAL", "$.code", "nonoptional"],
+    ]);
+  });
+
+  test("DEFAULT_UNDER_NONOPTIONAL: .nonoptional() over .optional() or a required schema still compiles", () => {
+    assert.ok(compileValue(z.string().optional().nonoptional()).ok);
+    assert.ok(compileValue(z.string().nonoptional()).ok);
   });
 
   test("RECORD_KEY: a key schema that is not a string, a string format, a string enum or a string literal", () => {

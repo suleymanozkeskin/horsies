@@ -14,8 +14,8 @@
 //   meets again inside itself is a lazy kind of that schema's compiled kind.
 // - Unknown keys: every object kind refuses them at decode, also for a `z.object()`, which zod would strip.
 // - The kinds that `checkKind` refuses are refused there, at `Horsies.create`, with the rules of `h.*`: an
-//   integer-like member name (`IntegerLikeMember`: JavaScript puts it first, so the declared order cannot hold), an
-//   ambiguous union, a literal that is not a safe integer, a default that does not encode, a kind deeper than a
+//   integer-like member name (`IntegerLikeMember`: JavaScript puts it first, so the declared order cannot hold), a
+//   union rule (`AmbiguousUnion`, `UnionMemberNotPrimitive`; the union rules live in `checkKind` only), a literal that is not a safe integer, a default that does not encode, a kind deeper than a
 //   stored value.
 
 import { MAX_VALUE_JSON_DEPTH } from "../codec/bounds.ts";
@@ -272,7 +272,7 @@ function compileForm(definition: ZodDefinition, schema: ZodSchema, walk: Walk): 
     case "record":
       return requiredOf(compileRecord(definition, walk));
     case "union":
-      return requiredOf(compileUnion(definition.options, walk, definition.zodType));
+      return requiredOf(compileUnion(definition.options, walk));
     case "taggedUnion":
       return requiredOf(compileTagged(definition, walk));
     case "codec":
@@ -335,7 +335,7 @@ function compileWrapper(definition: FormOf<WrapperForm>, schema: ZodSchema, walk
         presence: inner.presence.mode === "defaulted" ? inner.presence : OPTIONAL,
       }));
     case "nonoptional":
-      return mapped(compileNode(definition.inner, walk), (inner) => ({ kind: inner.kind, presence: REQUIRED }));
+      return compileNonOptional(definition, walk);
     case "default":
     case "prefault":
       return compileDefault(definition, schema, walk);
@@ -358,6 +358,28 @@ function compileWrapper(definition: FormOf<WrapperForm>, schema: ZodSchema, walk
       return refusedForm(definition, walk.path);
     default:
       return unreachable(definition, "compileWrapper");
+  }
+}
+
+/**
+ * `.nonoptional()`: the member is required. Over a `.default()` or `.prefault()` it is refused: zod fills the missing
+ * key from the default, and a default of the stored form would then be a second source of the value.
+ */
+function compileNonOptional(definition: FormOf<"nonoptional">, walk: Walk): Compiled<ZodMemberKind> {
+  const inner = compileNode(definition.inner, walk);
+
+  if (!inner.ok) {
+    return inner;
+  }
+
+  switch (inner.value.presence.mode) {
+    case "defaulted":
+      return refused("DEFAULT_UNDER_NONOPTIONAL", walk.path, definition.zodType);
+    case "required":
+    case "optional":
+      return ok({ kind: inner.value.kind, presence: REQUIRED });
+    default:
+      return unreachable(inner.value.presence, "compileNonOptional");
   }
 }
 
@@ -595,76 +617,11 @@ function recordKeyOf(kind: Kind): RecordKey {
   }
 }
 
-/** What a union member stores, for the union rules. */
-type StoredForm = "object" | "container" | "int" | "float" | "primitive";
-
-function storedForms(kind: Kind): readonly StoredForm[] {
-  switch (kind.node) {
-    case "object":
-    case "taggedUnion":
-      return ["object"];
-    case "array":
-    case "tuple":
-    case "record":
-    case "json":
-    case "taskOutcome":
-      return ["container"];
-    case "int":
-    case "bigint":
-      return ["int"];
-    case "float":
-      return ["float"];
-    case "null":
-    case "boolean":
-    case "string":
-    case "uuid":
-    case "decimal":
-    case "instant":
-    case "offsetDateTime":
-    case "plainDateTime":
-    case "plainDate":
-    case "plainTime":
-    case "literal":
-      return ["primitive"];
-    case "nullable":
-    case "checked":
-      return storedForms(kind.inner);
-    case "conversion":
-      return storedForms(kind.stored);
-    case "union":
-      return kind.members.flatMap(storedForms);
-    case "lazy":
-      // A reference to a schema that holds it: an array, a record, an object, or a level-free cycle that `checkKind`
-      // refuses. Its kind is not compiled yet.
-      return ["container"];
-    default:
-      return unreachable(kind, "storedForms");
-  }
-}
-
-/** A union of primitives. An object member needs a discriminated union; a container member, too. */
-function compileUnion(options: readonly ZodSchema[], walk: Walk, zodType: string): Compiled<Kind> {
+/** The union of the options' kinds. The union rules (same stored JSON type, a container member) are `checkKind`'s. */
+function compileUnion(options: readonly ZodSchema[], walk: Walk): Compiled<Kind> {
   const members = allOf(options.map((option, index) => valueAt(option, at(walk, itemPath(walk.path, index)))));
 
-  if (!members.ok) {
-    return members;
-  }
-
-  const forms = new Set(members.value.flatMap(storedForms));
-
-  if (forms.has("object")) {
-    return refused("UNDISCRIMINATED_UNION", walk.path, zodType);
-  }
-
-  if (forms.has("container")) {
-    return refused("MIXED_UNION", walk.path, zodType);
-  }
-
-  if (forms.has("int") && forms.has("float")) {
-    return refused("INT_FLOAT_UNION", walk.path, zodType);
-  }
-
-  return ok(Object.freeze({ node: "union", members: Object.freeze([...members.value]) }));
+  return members.ok ? ok(Object.freeze({ node: "union", members: Object.freeze([...members.value]) })) : members;
 }
 
 /** An object variant of a discriminated union, and the checks of its own node (a refine on the option). */
@@ -675,7 +632,7 @@ function compileTagged(definition: FormOf<"taggedUnion">, walk: Walk): Compiled<
     case "refused":
       return compileVariants(definition, walk);
     case "triesEachOption":
-      return refused("UNDISCRIMINATED_UNION", walk.path, definition.zodType);
+      return refused("UNION_FALLBACK", walk.path, definition.zodType);
     default:
       return unreachable(definition.unmatchedTag, "compileTagged");
   }

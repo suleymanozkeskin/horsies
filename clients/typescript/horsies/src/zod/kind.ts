@@ -14,7 +14,7 @@ import { err, ok, type Result } from "../wire/result.ts";
 import { memberWireOf, wireOf } from "../wire/wire-type.ts";
 import { compileMember, compileValue, type ZodMemberKind } from "./adapter.ts";
 import type { ZodSchema } from "./internals.ts";
-import type { ZodSchemaRefused } from "./rules.ts";
+import { type ZodKindRefused, type ZodSchemaRefused, zodKindRefused } from "./rules.ts";
 import { type StandardSchemaMarked, type ZodReleaseRefused, zodSchemaOf } from "./version.ts";
 
 /** Why the adapter gives no kind for a zod schema. */
@@ -22,8 +22,8 @@ export type ZodAdapterRefused =
   | ZodReleaseRefused
   /** The schema has forms without a stored form: every refusal, in walk order. */
   | { readonly kind: "SchemaRefused"; readonly refusals: readonly ZodSchemaRefused[] }
-  /** The compiled kind breaks a rule of the wire types (`checkKind`), with the rules of `h.*`. */
-  | { readonly kind: "KindRefused"; readonly refusals: readonly KindRefused[] };
+  /** The compiled kind breaks a rule of the wire types (`checkKind`), with the rules of `h.*` and the zod forms to use. */
+  | { readonly kind: "KindRefused"; readonly refusals: readonly ZodKindRefused[] };
 
 /**
  * The wire type of a zod schema as an object member or a task input parameter: its kind and its presence. The caller
@@ -74,5 +74,5 @@ function kindAfterChecks<T>(
 
   const refusals = check(compiled.value);
 
-  return refusals.length === 0 ? ok(compiled.value) : err(Object.freeze({ kind: "KindRefused", refusals }));
+  return refusals.length === 0 ? ok(compiled.value) : err(Object.freeze({ kind: "KindRefused", refusals: Object.freeze(refusals.map(zodKindRefused)) }));
 }

@@ -63,6 +63,20 @@ describe("zod adapter: primitive forms", () => {
     assert.equal(encodeRefusal(acceptedKind(z.uint32()), -1).refusal, "CheckFailed");
   });
 
+  test("z.int() under a fraction and a whole number above the safe range: one text for each, with no builder name", () => {
+    const kind = acceptedKind(z.object({ id: z.int() }));
+
+    assert.equal(encodeRefusal(kind, { id: 7.5 }).detail, "the integer kind takes a whole number");
+    assert.match(encodeRefusal(kind, { id: 2 ** 53 }).detail, /^the integer kind takes a whole number from -\(2\^53 - 1\)/u);
+  });
+
+  test("z.uuid() stores the text as given; h.uuid() refuses a text that is not lower-case", () => {
+    const upper = "0190A3B4-0000-7000-8000-000000000001";
+
+    assert.equal(storedText(acceptedKind(z.uuid()), upper), `"${upper}"`);
+    assert.equal(encodeRefusal(kindOf(h.uuid()), upper).refusal, "NotCanonicalUuid");
+  });
+
   test("z.number(), z.float64(), z.float32() map to float in Python's float text", () => {
     assert.equal(kindTextOf(z.number()), "float");
     assert.equal(storedText(acceptedKind(z.number()), 7), "7.0");

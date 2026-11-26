@@ -54,7 +54,11 @@ export class Horsies {
   readonly #monitoringArea: MonitoringArea;
   readonly #rerunArea: RerunArea;
 
-  /** The monitoring reads, the health reads and the operator cancel. Each read writes nothing but a schema install. */
+  /**
+   * The monitoring reads, the health reads and the operator cancel. A monitoring read installs no schema and writes
+   * nothing. A health read installs the schema once per handle, as a send does; then it reads only. The cancel writes
+   * the cancellation.
+   */
   readonly monitoring: Monitoring;
 
   static {

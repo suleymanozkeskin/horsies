@@ -23,7 +23,7 @@ type TreeNode = { name: string; children: TreeNode[] };
 
 const TREE: Wire<TreeNode> = h.object({ name: h.string(), children: h.array(h.lazy(() => TREE)) });
 
-const TOO_LARGE: CheckFailure = { issues: [{ path: "$.id", code: "too_big" }] };
+const TOO_LARGE: CheckFailure = { issues: [{ kind: "zodIssue", path: "$.id", code: "too_big" }] };
 
 function written<V>(wire: AnyWire, value: V): Result<string, EncodeRefused> {
   return encodeValue(kindOf(wire), value);

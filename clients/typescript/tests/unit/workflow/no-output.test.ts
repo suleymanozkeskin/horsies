@@ -184,6 +184,7 @@ describe("the success value of a sub-workflow node of a child with no output", (
 
     assert(!refused.ok);
     assert.equal(refused.error.refusal, "CheckFailed");
+    assert.equal(refused.error.detail, 'the conversion refused the value: kind expected "noWorkflowOutput"');
   });
 
   test("resultFor of the node, by the started handle and by the handle of the id, gives NoWorkflowOutput", async () => {

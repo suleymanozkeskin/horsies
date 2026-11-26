@@ -28,6 +28,7 @@ expectType<Equal<h.Infer<typeof children>, Category[]>>();
 const row = h.tuple([h.int(), h.string()], h.boolean());
 
 expectType<Equal<h.Infer<typeof row>, [number, string, ...boolean[]]>>();
+
 expectType<Equal<SentOf<typeof row>, [number, string, ...boolean[]]>>();
 
 const flags = h.tuple([], h.boolean());
@@ -38,6 +39,7 @@ expectType<Equal<h.Infer<typeof flags>, boolean[]>>();
 const item = h.object({ id: h.uuid().default(() => crypto.randomUUID()), name: h.string() });
 
 expectType<Equal<h.Infer<typeof item>, { id: string; name: string }>>();
+
 expectType<Equal<SentOf<typeof item>, { name: string; id?: string }>>();
 
 const rows: h.Infer<typeof row>[] = [[1, "a"], [2, "b", true, false]];

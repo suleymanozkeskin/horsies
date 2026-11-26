@@ -20,11 +20,13 @@ expectType<Equal<ZodValueOf<typeof tree>, Tree>>();
 const row = z.tuple([z.int(), z.string()], z.boolean());
 
 expectType<Equal<ZodValueOf<typeof row>, [number, string, ...boolean[]]>>();
+
 expectType<Equal<ZodSentOf<typeof row>, [number, string, ...boolean[]]>>();
 
 const item = z.object({ id: z.uuid().default(() => crypto.randomUUID()), name: z.string() });
 
 expectType<Equal<ZodValueOf<typeof item>, { id: string; name: string }>>();
+
 expectType<Equal<ZodSentOf<typeof item>, { name: string; id?: string }>>();
 
 // A getter member that returns a schema of the object itself (zod's recursive object form).
@@ -38,4 +40,5 @@ const category = z.object({
 type CategoryValue = ZodValueOf<typeof category>;
 
 expectType<Equal<CategoryValue["name"], string>>();
+
 expectType<Equal<CategoryValue["children"][number]["children"][number]["name"], string>>();

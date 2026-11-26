@@ -132,10 +132,11 @@ bun test
 # build runs in a task child, and the telemetry (the spans and the context
 # across `await` with the OpenTelemetry SDK). The schedule checks read time
 # zones through the engine's Temporal (V8 on Node, JavaScriptCore on Bun), so
-# the schedule tests run on Node too. The seat isolates of SHARED_THREAD
+# the schedule tests run on Node too. The tests of the `horsies` bin run on Node
+# (`node:test`) and start the bin on Node and on Bun. The seat isolates of SHARED_THREAD
 # children run on Node, so their tests run there too.
-print_step_title "Run the codec, wire type, zod adapter, child, seat, workflow, telemetry, schedule and stored-form tests on Node"
-node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/unit/child/**/*.test.ts' 'tests/unit/seats/**/*.test.ts' 'tests/unit/workflow/**/*.test.ts' 'tests/unit/telemetry/**/*.test.ts' 'tests/unit/schedules/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
+print_step_title "Run the codec, wire type, zod adapter, child, seat, workflow, telemetry, schedule, tool and stored-form tests on Node"
+node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/unit/child/**/*.test.ts' 'tests/unit/seats/**/*.test.ts' 'tests/unit/workflow/**/*.test.ts' 'tests/unit/telemetry/**/*.test.ts' 'tests/unit/schedules/**/*.test.ts' 'tests/unit/tools/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
 
 # The lint rule package (eslint-plugin/) runs in ESLint, on Node: its
 # RuleTester cases, and ESLint and tsc of TypeScript 7 on its fixture project.
@@ -144,7 +145,8 @@ bun run --cwd eslint-plugin test
 
 # The ESLint config of the lint rule package (horsies/no-dropped-result and
 # @typescript-eslint/switch-exhaustiveness-check) on the client's own code:
-# the files of horsies/tsconfig.json and tests/tsconfig.json. A dropped Result
+# the files of horsies/tsconfig.json, tests/tsconfig.json, examples/tsconfig.json
+# and examples/showcase/tsconfig.json. A dropped Result
 # or a switch that misses a member of a union fails the step.
 print_step_title "Lint the client's own code with ESLint: dropped results and switch cases"
 node eslint-plugin/lint-client.ts
@@ -181,6 +183,7 @@ bun tests/types/run.ts
 # (horsies/.agents/skills/horsies/) compiles against the built package in the
 # consumer project, with the same three compilers. A failing block is printed
 # with its page and line. The docs pages are held on the docs branch until
-# the release; on other branches the step reads the skill files only.
+# the release; on other branches the step reads the skill files only. A
+# missing skill folder fails the step.
 print_step_title "Docs check of the TypeScript code blocks in both compiler lanes"
 bun tests/docs-check/run.ts
