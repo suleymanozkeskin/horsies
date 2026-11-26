@@ -148,7 +148,7 @@ describe("TaskHandle.info", () => {
     const first = await handle.info();
 
     assert.equal(first.ok && first.value.status, "FAILED");
-    await handle.info();
+    void (await handle.info());
     assert.equal(fake.calls.taskInfo, 2);
   });
 
