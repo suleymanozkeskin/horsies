@@ -34,6 +34,8 @@ export function readErrorText(error: ReadError): string {
       return `the database failed: ${error.message}`;
     case "invalidWait":
       return `a wait over ${error.maxMs} ms`;
+    case "seatRelayFull":
+      return `the seat relay sent nothing: ${error.error.message}`;
     default: {
       const unreachable: never = error;
 

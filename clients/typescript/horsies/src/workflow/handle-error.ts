@@ -10,11 +10,18 @@ import {
   type NativeHandleCoreError,
 } from "../_catalog/workflow_handle_errors.ts";
 import type { RawCatalogError } from "../native/values/records.ts";
+import type { SeatRelayFull } from "../seats/relay-full.ts";
 import { nativeCatalogValue } from "../send/catalog-value.ts";
 import { MAX_WAIT_LIMIT_MS } from "../send/bounds.ts";
 import type { WaitBound } from "../native/sends/addon.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
+
+/**
+ * The error of a handle call (`status`, `results`, `tasks`, `pause`, `resume`, `cancel`): the handle catalog of the
+ * core, or, in a `SHARED_THREAD` body, the seat relay at its bound (nothing was sent).
+ */
+export type WorkflowHandleError = HandleCoreError | SeatRelayFull;
 
 /** Why a read of a workflow outcome failed. A read error is not the workflow's outcome. */
 export type WorkflowReadError =
@@ -39,7 +46,9 @@ export type WorkflowReadError =
       readonly message: string;
     }
   /** A `timeoutMs` that is not a whole number of milliseconds from 0 to `maxMs`; nothing was read. */
-  | { readonly kind: "invalidWait"; readonly maxMs: number };
+  | { readonly kind: "invalidWait"; readonly maxMs: number }
+  /** In a `SHARED_THREAD` body: the seat relay held its bound of waiting calls; nothing was read; retry. */
+  | { readonly kind: "seatRelayFull"; readonly error: SeatRelayFull };
 
 /** The public error of a raw record of the handle catalog. An unknown class throws (a build defect). */
 export function handleErrorOfRaw(raw: RawCatalogError): HandleCoreError {

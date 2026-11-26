@@ -2,12 +2,13 @@
 // with `createRerunArea(host)` and gives one line per member.
 
 import { appCoreHandle, type CoreAccess } from "../app/core-access.ts";
-import { relayedFacades } from "../monitoring/seat-calls.ts";
+import { type RelayedAddon, relayedFacades } from "../monitoring/seat-calls.ts";
 import { CoreHandle } from "../native/handle/core-handle.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import type { TraceArgument } from "../native/values/records.ts";
 import { nativeValueAsync } from "../native/call/envelope.ts";
 import type { AppRerunAnswer, RerunAddon } from "../native/facades/rerun.ts";
+import type { SeatRelayFullOutcome } from "../seats/relay-full.ts";
 import { addonRerunBridge } from "./bridge.ts";
 import type { RerunRequest } from "./parse.ts";
 import type { RerunBridge } from "./bridge.ts";
@@ -68,9 +69,13 @@ export function rerunAreaOfCore(core: CoreAccess, activeCarrier: () => TraceArgu
 }
 
 /** The rerun bridge of a seat isolate: `rerunTask` on the relayed addon; the caller steps on the loaded addon. */
-function relayedRerunBridge(rerun: Pick<RerunAddon, "rerunTask">): RerunBridge {
+function relayedRerunBridge(rerun: RelayedAddon<Pick<RerunAddon, "rerunTask">>): RerunBridge {
   return {
-    rerunTask: async (handle: CoreHandle, request: RerunRequest, trace: TraceArgument): Promise<AppRerunAnswer> =>
+    rerunTask: async (
+      handle: CoreHandle,
+      request: RerunRequest,
+      trace: TraceArgument,
+    ): Promise<AppRerunAnswer | SeatRelayFullOutcome> =>
       nativeValueAsync("rerunTask", () => rerun.rerunTask(handle.native, request.command, request.policy, trace)),
     readStatement: addonRerunBridge.readStatement,
     prepareWrite: addonRerunBridge.prepareWrite,

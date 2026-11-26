@@ -4,6 +4,7 @@ import type { BrokerErrorCode } from "../_catalog/broker.ts";
 import { brokerCoreErrorFromNative, type NativeBrokerCoreError } from "../_catalog/broker_errors.ts";
 import type { AbsenceReason } from "../native/sends/addon.ts";
 import type { RawCatalogError } from "../native/values/records.ts";
+import type { SeatRelayCode, SeatRelayFull } from "../seats/relay-full.ts";
 import { nativeCatalogValue } from "../send/catalog-value.ts";
 import type { LibraryTaskCode } from "../wire/task-error.ts";
 
@@ -46,10 +47,15 @@ export type ReadError =
       readonly message: string;
     }
   /** A `timeoutMs` that is not a whole number of milliseconds from 0 to `maxMs`; nothing was read. */
-  | { readonly kind: "invalidWait"; readonly maxMs: number };
+  | { readonly kind: "invalidWait"; readonly maxMs: number }
+  /** In a `SHARED_THREAD` body: the seat relay held its bound of waiting calls; nothing was read; retry. */
+  | { readonly kind: "seatRelayFull"; readonly error: SeatRelayFull };
 
-/** The library code of a read error, as the Python and Rust clients name it. Pure. */
-export function readErrorCode(error: ReadError): LibraryTaskCode {
+/**
+ * The library code of a read error, as the Python and Rust clients name it; `SEAT_RELAY_FULL` for the seat relay at its
+ * bound, which those clients do not have. Pure.
+ */
+export function readErrorCode(error: ReadError): LibraryTaskCode | SeatRelayCode {
   switch (error.kind) {
     case "waitTimedOut":
       return "WAIT_TIMEOUT";
@@ -66,6 +72,8 @@ export function readErrorCode(error: ReadError): LibraryTaskCode {
       return "BROKER_ERROR";
     case "invalidWait":
       return "INVALID_INPUT";
+    case "seatRelayFull":
+      return error.error.code;
     default: {
       const unexpected: never = error;
 

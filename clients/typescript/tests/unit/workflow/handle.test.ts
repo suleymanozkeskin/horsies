@@ -440,7 +440,9 @@ describe("the seat operations", () => {
         asked.push(`${area} ${workflowsOperation.kind}`);
 
         // SAFETY: the reply of a workflows operation is the workflows area's reply.
-        return (await serveWorkflowsSeatOperation(mainThread, workflowsOperation)) as SeatOperationMap[A]["reply"];
+        const reply = (await serveWorkflowsSeatOperation(mainThread, workflowsOperation)) as SeatOperationMap[A]["reply"];
+
+        return { kind: "reply", reply };
       },
     };
 

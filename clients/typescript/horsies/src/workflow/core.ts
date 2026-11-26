@@ -8,6 +8,7 @@ import { threadId } from "node:worker_threads";
 
 import { DEFAULT_QUEUE_ROUTE } from "../app/contract-list.ts";
 import type { CoreAccess, SeatRelay } from "../app/core-access.ts";
+import type { SeatRelayFullOutcome } from "../seats/relay-full.ts";
 import type { QueueSetup } from "../config/queues.ts";
 import { addonSettlement, addonTake, settlingCallback, takingCallback } from "../native/call/callback.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
@@ -64,21 +65,31 @@ export type StartCall =
   | { readonly kind: "textRefused"; readonly refused: SpecTextRefused }
   | { readonly kind: "specRefused"; readonly fieldPath: string; readonly cause: string };
 
-/** The core operations of workflow starts and handles. Each is async, so every form has one shape. */
-export interface WorkflowCore {
-  start(request: StartRequest): Promise<StartCall>;
-  restart(request: RestartRequest): Promise<StartCall>;
-  status(workflowId: string): Promise<WorkflowStatusRead>;
-  nodeResults(workflowId: string): Promise<NodeResultsRead>;
-  nodes(workflowId: string): Promise<NodesRead>;
-  cancel(workflowId: string): Promise<HandleDone>;
-  pause(workflowId: string): Promise<HandleChange>;
-  resume(workflowId: string): Promise<HandleChange>;
+/**
+ * The core operations of workflow starts and handles. Each is async, so every form has one shape. `Relay` is what a
+ * relayed operation adds to its answer: nothing on a main thread (`never`), and `seatRelayFull` in a seat isolate,
+ * whose relay sends nothing past its bound. `waitEnd` and `processRole` are never relayed.
+ */
+export interface WorkflowCoreOf<Relay> {
+  start(request: StartRequest): Promise<StartCall | Relay>;
+  restart(request: RestartRequest): Promise<StartCall | Relay>;
+  status(workflowId: string): Promise<WorkflowStatusRead | Relay>;
+  nodeResults(workflowId: string): Promise<NodeResultsRead | Relay>;
+  nodes(workflowId: string): Promise<NodesRead | Relay>;
+  cancel(workflowId: string): Promise<HandleDone | Relay>;
+  pause(workflowId: string): Promise<HandleChange | Relay>;
+  resume(workflowId: string): Promise<HandleChange | Relay>;
   waitEnd(workflowId: string, wait: WaitBound): Promise<WorkflowWaitRead>;
-  nodeResult(workflowId: string, nodeId: string): Promise<NodeResultRead>;
+  nodeResult(workflowId: string, nodeId: string): Promise<NodeResultRead | Relay>;
   /** Whether this process runs task bodies: a wait for a result is refused there. */
   processRole(): Promise<ProcessRoleName>;
 }
+
+/** The workflow core of a main thread: the addon's answers. */
+export type AddonWorkflowCore = WorkflowCoreOf<never>;
+
+/** The workflow core of a thread: in a seat isolate, a relayed operation can answer `seatRelayFull`. */
+export type WorkflowCore = WorkflowCoreOf<SeatRelayFullOutcome>;
 
 /** The facts of the app that the main-thread core reads. */
 export type MainThreadFacts = {
@@ -132,7 +143,7 @@ export function addonConversionFacts(facts: MainThreadFacts): ConversionFacts {
 }
 
 /** The core operations on a main thread: the addon on `facts.handle`. */
-export function addonWorkflowCore(facts: MainThreadFacts, conversion: ConversionFacts): WorkflowCore {
+export function addonWorkflowCore(facts: MainThreadFacts, conversion: ConversionFacts): AddonWorkflowCore {
   const handle = facts.handle;
 
   const startText = async (specData: string, request: Omit<RestartRequest, "specData">): Promise<StartCall> => {
@@ -159,7 +170,7 @@ export function addonWorkflowCore(facts: MainThreadFacts, conversion: Conversion
     }
   };
 
-  const core: WorkflowCore = {
+  const core: AddonWorkflowCore = {
     start: async (request) => {
       const text = specDataTextOf(request.spec, conversion);
 
@@ -182,7 +193,7 @@ export function addonWorkflowCore(facts: MainThreadFacts, conversion: Conversion
 
 /** The main-thread side of one seat operation: the same calls as a main-thread call. */
 export async function serveWorkflowsSeatOperation(
-  core: WorkflowCore,
+  core: AddonWorkflowCore,
   operation: WorkflowsSeatOperation,
 ): Promise<WorkflowsSeatReply> {
   switch (operation.kind) {
@@ -214,70 +225,58 @@ export async function serveWorkflowsSeatOperation(
  * a result is refused there before any message (`processRole`), and `waitEnd` is never relayed.
  */
 export function relayedWorkflowCore(relay: SeatRelay): WorkflowCore {
-  const ask = async (operation: WorkflowsSeatOperation): Promise<WorkflowsSeatReply> =>
-    relay.request("workflows", operation);
+  const ask = async (operation: WorkflowsSeatOperation): Promise<WorkflowsSeatReply | SeatRelayFullOutcome> => {
+    const answer = await relay.request("workflows", operation);
+
+    return answer.kind === "reply" ? answer.reply : answer;
+  };
 
   const wrong = (asked: WorkflowsSeatOperation["kind"], reply: WorkflowsSeatReply): never => {
     throw new ClientDefect({ subject: "seat relay", rule: `the reply to ${asked} is ${reply.kind}` });
   };
 
   const core: WorkflowCore = {
-    start: async (request) => {
-      const reply = await ask({ kind: "start", request });
-
-      return reply.kind === "start" ? reply.call : wrong("start", reply);
-    },
-    restart: async (request) => {
-      const reply = await ask({ kind: "restart", request });
-
-      return reply.kind === "restart" ? reply.call : wrong("restart", reply);
-    },
-    status: async (workflowId) => {
-      const reply = await ask({ kind: "status", workflowId });
-
-      return reply.kind === "status" ? reply.read : wrong("status", reply);
-    },
-    nodeResults: async (workflowId) => {
-      const reply = await ask({ kind: "nodeResults", workflowId });
-
-      return reply.kind === "nodeResults" ? reply.read : wrong("nodeResults", reply);
-    },
-    nodes: async (workflowId) => {
-      const reply = await ask({ kind: "nodes", workflowId });
-
-      return reply.kind === "nodes" ? reply.read : wrong("nodes", reply);
-    },
-    cancel: async (workflowId) => {
-      const reply = await ask({ kind: "cancel", workflowId });
-
-      return reply.kind === "cancel" ? reply.done : wrong("cancel", reply);
-    },
-    pause: async (workflowId) => {
-      const reply = await ask({ kind: "pause", workflowId });
-
-      return reply.kind === "pause" ? reply.change : wrong("pause", reply);
-    },
-    resume: async (workflowId) => {
-      const reply = await ask({ kind: "resume", workflowId });
-
-      return reply.kind === "resume" ? reply.change : wrong("resume", reply);
-    },
+    start: async (request) =>
+      fullOr(await ask({ kind: "start", request }), (reply) => (reply.kind === "start" ? reply.call : wrong("start", reply))),
+    restart: async (request) =>
+      fullOr(await ask({ kind: "restart", request }), (reply) => (reply.kind === "restart" ? reply.call : wrong("restart", reply))),
+    status: async (workflowId) =>
+      fullOr(await ask({ kind: "status", workflowId }), (reply) => (reply.kind === "status" ? reply.read : wrong("status", reply))),
+    nodeResults: async (workflowId) =>
+      fullOr(await ask({ kind: "nodeResults", workflowId }), (reply) =>
+        reply.kind === "nodeResults" ? reply.read : wrong("nodeResults", reply),
+      ),
+    nodes: async (workflowId) =>
+      fullOr(await ask({ kind: "nodes", workflowId }), (reply) => (reply.kind === "nodes" ? reply.read : wrong("nodes", reply))),
+    cancel: async (workflowId) =>
+      fullOr(await ask({ kind: "cancel", workflowId }), (reply) => (reply.kind === "cancel" ? reply.done : wrong("cancel", reply))),
+    pause: async (workflowId) =>
+      fullOr(await ask({ kind: "pause", workflowId }), (reply) => (reply.kind === "pause" ? reply.change : wrong("pause", reply))),
+    resume: async (workflowId) =>
+      fullOr(await ask({ kind: "resume", workflowId }), (reply) => (reply.kind === "resume" ? reply.change : wrong("resume", reply))),
     waitEnd: async () => {
       throw new ClientDefect({ subject: "seat relay", rule: "a seat isolate refuses a wait before it asks the core" });
     },
-    nodeResult: async (workflowId, nodeId) => {
-      const reply = await ask({ kind: "nodeResult", workflowId, nodeId });
-
-      return reply.kind === "nodeResult" ? reply.read : wrong("nodeResult", reply);
-    },
+    nodeResult: async (workflowId, nodeId) =>
+      fullOr(await ask({ kind: "nodeResult", workflowId, nodeId }), (reply) =>
+        reply.kind === "nodeResult" ? reply.read : wrong("nodeResult", reply),
+      ),
     processRole: async () => "RUNS_TASK_BODIES",
   };
 
   return Object.freeze(core);
 }
 
+/** `answer` when the relay sent nothing (`seatRelayFull`), else the reply that `read` reads. */
+function fullOr<T>(
+  answer: WorkflowsSeatReply | SeatRelayFullOutcome,
+  read: (reply: WorkflowsSeatReply) => T,
+): T | SeatRelayFullOutcome {
+  return answer.kind === "seatRelayFull" ? answer : read(answer);
+}
+
 /** The core operations in a worker thread with no core: each throws `AddonOutsideMainThread`. */
-export function noWorkflowCore(): WorkflowCore {
+export function noWorkflowCore(): AddonWorkflowCore {
   const refuse = async (): Promise<never> => {
     throw new AddonOutsideMainThread({ threadId });
   };
@@ -302,7 +301,7 @@ export function noWorkflowCore(): WorkflowCore {
  * spec source registered on `facts.handle`, so the core's workflow steps in this process build sub-workflow children
  * with the app's builds. Effects: reads the queue classes; registers the source.
  */
-export function mainThreadWorkflowCore(facts: MainThreadFacts, registry: WorkflowRegistry): WorkflowCore {
+export function mainThreadWorkflowCore(facts: MainThreadFacts, registry: WorkflowRegistry): AddonWorkflowCore {
   const conversion = addonConversionFacts(facts);
 
   const source = takingCallback(

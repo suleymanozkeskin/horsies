@@ -613,7 +613,7 @@ export type CancelState = {
 };
 
 // @public
-export type CancelTaskError = TaskActionCoreError;
+export type CancelTaskError = TaskActionCoreError | SeatRelayFull;
 
 // @public
 export interface CancelTaskOptions {
@@ -1713,10 +1713,10 @@ export type HasRequiredUpstreamOutcome<P extends ParameterSchemas> = true extend
 }[keyof P] ? true : false;
 
 // @public
-export type HealthInputError = BrokerInvalidInput | BrokerOperationFailedWith<"MONITORING_QUERY_FAILED">;
+export type HealthInputError = BrokerInvalidInput | BrokerOperationFailedWith<"MONITORING_QUERY_FAILED"> | SeatRelayFull;
 
 // @public
-export type HealthReadError = BrokerOperationFailedWith<"MONITORING_QUERY_FAILED">;
+export type HealthReadError = BrokerOperationFailedWith<"MONITORING_QUERY_FAILED"> | SeatRelayFull;
 
 // @public (undocumented)
 export interface HistoryContractError {
@@ -2068,13 +2068,13 @@ export interface Monitoring {
     // (undocumented)
     listTasks(query?: TaskListQuery): Promise<Result<TaskListPage, MonitoringReadError>>;
     // (undocumented)
-    schedules(): Promise<Result<readonly ScheduleStateInfo[], MonitoringQueryCoreError>>;
+    schedules(): Promise<Result<readonly ScheduleStateInfo[], MonitoringCoreReadError>>;
     // (undocumented)
     staleTasks(query: StaleTasksQuery): Promise<Result<BoundedTaskList<StaleTaskRow>, HealthInputError>>;
     // (undocumented)
     taskBreakdown(query: TaskBreakdownQuery): Promise<Result<Breakdown, MonitoringReadError>>;
     // (undocumented)
-    taskDetail(taskId: TaskId): Promise<Result<TaskDetailRead, MonitoringQueryCoreError>>;
+    taskDetail(taskId: TaskId): Promise<Result<TaskDetailRead, MonitoringCoreReadError>>;
     // (undocumented)
     taskFacets(query?: TaskFacetsQuery): Promise<Result<Facets, MonitoringReadError>>;
     // (undocumented)
@@ -2086,11 +2086,11 @@ export interface Monitoring {
     // (undocumented)
     workers(): Promise<Result<readonly WorkerStateSnapshot[], HealthReadError>>;
     // (undocumented)
-    workflowNames(): Promise<Result<readonly string[], MonitoringQueryCoreError>>;
+    workflowNames(): Promise<Result<readonly string[], MonitoringCoreReadError>>;
     // (undocumented)
     workflowNode(workflowId: WorkflowId, taskIndex: number): Promise<Result<WorkflowNodeRead, MonitoringReadError>>;
     // (undocumented)
-    workflowRun(workflowId: WorkflowId): Promise<Result<WorkflowRunRead, MonitoringQueryCoreError>>;
+    workflowRun(workflowId: WorkflowId): Promise<Result<WorkflowRunRead, MonitoringCoreReadError>>;
     // (undocumented)
     workflowRuns(query?: WorkflowRunsQuery): Promise<Result<readonly WorkflowRunSummary[], MonitoringReadError>>;
 }
@@ -2103,6 +2103,9 @@ export interface MonitoringAuthPolicy {
     canAct(request: Request): boolean | Promise<boolean>;
     canView(request: Request): boolean | Promise<boolean>;
 }
+
+// @public
+export type MonitoringCoreReadError = MonitoringQueryCoreError | SeatRelayFull;
 
 // @public
 export interface MonitoringHandler {
@@ -2155,7 +2158,7 @@ export const MonitoringQueryRefusalCode: {
 export type MonitoringQueryRefusalCode = (typeof MonitoringQueryRefusalCode)[keyof typeof MonitoringQueryRefusalCode];
 
 // @public
-export type MonitoringReadError = MonitoringQueryCoreError | QueryRefused;
+export type MonitoringReadError = MonitoringCoreReadError | QueryRefused;
 
 // @public
 export interface MonitoringUiOptions {
@@ -2586,7 +2589,7 @@ export interface PhaseUnknownInfo {
 }
 
 // @public
-export type PingDatabaseError = BrokerOperationFailedWith<"DB_PING_FAILED">;
+export type PingDatabaseError = BrokerOperationFailedWith<"DB_PING_FAILED"> | SeatRelayFull;
 
 // @public
 export type PingTarget = {
@@ -2597,7 +2600,7 @@ export type PingTarget = {
 };
 
 // @public
-export type PingWorkersError = BrokerInvalidInput | BrokerListenerDisabled | BrokerOperationFailedWith<"WORKER_PING_FAILED"> | QueryRefused;
+export type PingWorkersError = BrokerInvalidInput | BrokerListenerDisabled | BrokerOperationFailedWith<"WORKER_PING_FAILED"> | QueryRefused | SeatRelayFull;
 
 // @public
 export interface PingWorkersOptions {
@@ -2747,6 +2750,11 @@ export type ReadError =
 | {
     readonly kind: "invalidWait";
     readonly maxMs: number;
+}
+/** In a `SHARED_THREAD` body: the seat relay held its bound of waiting calls; nothing was read; retry. */
+| {
+    readonly kind: "seatRelayFull";
+    readonly error: SeatRelayFull;
 };
 
 // @public
@@ -2936,7 +2944,7 @@ export interface RerunEnqueued {
 }
 
 // @public
-export type RerunError = RerunConnectFailed | RerunStatementFailed | RerunFamilyCheckFailed | RerunRequestRefused | RerunStepRefused;
+export type RerunError = RerunConnectFailed | RerunStatementFailed | RerunFamilyCheckFailed | RerunRequestRefused | RerunStepRefused | SeatRelayFull;
 
 // @public (undocumented)
 export const RerunErrorCode: {
@@ -3472,6 +3480,14 @@ export const SeatRelayCode: {
 export type SeatRelayCode = (typeof SeatRelayCode)[keyof typeof SeatRelayCode];
 
 // @public
+export type SeatRelayFull = {
+    readonly code: typeof SeatRelayCode.SEAT_RELAY_FULL;
+    readonly retryable: true;
+    readonly message: string;
+    readonly exception: CoreCause;
+};
+
+// @public
 export type Secret = {
     readonly kind: "fromEnv";
     readonly name: string;
@@ -3513,7 +3529,7 @@ export type SendableInput<P extends ParameterSchemas> = HasRequiredUpstreamOutco
 export type SenderMayLeaveOut<P> = P extends AnyWire ? PresenceOf<P> extends "required" ? false : true : P extends ZodOptionalIn ? true : false;
 
 // @public
-export type SendFailure = TaskSendSuppressed | TaskSendValidationFailed | TaskSendEnqueueFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | TaskSendKeyConflict | TaskSendSeatRelayFull;
+export type SendFailure = TaskSendSuppressed | TaskSendValidationFailed | TaskSendEnqueueFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | TaskSendKeyConflict | SeatRelayFull;
 
 // @public
 export type SendInput<P extends ParameterSchemas> = keyof PlainParameters<P> extends never ? EmptyObject : ParametersSent<PlainParameters<P>>;
@@ -4295,7 +4311,7 @@ export interface TaskSendEnqueueFailed {
 }
 
 // @public
-export type TaskSendError<O, E extends string> = TaskSendSuppressed | TaskSendValidationFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | TaskSendKeyConflict | TaskSendSeatRelayFull | RetryableSendError<O, E>;
+export type TaskSendError<O, E extends string> = TaskSendSuppressed | TaskSendValidationFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | TaskSendKeyConflict | SeatRelayFull | RetryableSendError<O, E>;
 
 // @public (undocumented)
 export interface TaskSendIdempotencyKeyConflict {
@@ -4363,14 +4379,6 @@ export interface TaskSendPayloadTooLarge {
     // (undocumented)
     readonly sizeBytes: bigint;
 }
-
-// @public
-export type TaskSendSeatRelayFull = {
-    readonly code: typeof SeatRelayCode.SEAT_RELAY_FULL;
-    readonly retryable: true;
-    readonly message: string;
-    readonly exception: CoreCause;
-};
 
 // @public (undocumented)
 export interface TaskSendSuppressed {
@@ -4791,7 +4799,7 @@ export interface WorkerProfileInput {
 }
 
 // @public
-export type WorkerReadError = BrokerOperationFailedWith<"MONITORING_QUERY_FAILED"> | QueryRefused;
+export type WorkerReadError = HealthReadError | QueryRefused;
 
 // @public
 export type WorkerStateRead = {
@@ -4913,14 +4921,14 @@ export interface WorkflowHandle<R extends BuildReturn> extends WorkflowHandleBas
 
 // @public
 export interface WorkflowHandleBase<R extends BuildReturn> {
-    cancel(): Promise<Result<void, HandleCoreError>>;
+    cancel(): Promise<Result<void, WorkflowHandleError>>;
     get(options?: GetOptions): Promise<Result<TaskOutcome<WorkflowOutput<R>, string>, WorkflowReadError>>;
-    pause(): Promise<Result<boolean, HandleCoreError>>;
-    results(): Promise<Result<ReadonlyMap<string, NodeResult>, HandleCoreError>>;
-    resume(): Promise<Result<boolean, HandleCoreError>>;
+    pause(): Promise<Result<boolean, WorkflowHandleError>>;
+    results(): Promise<Result<ReadonlyMap<string, NodeResult>, WorkflowHandleError>>;
+    resume(): Promise<Result<boolean, WorkflowHandleError>>;
     // (undocumented)
-    status(): Promise<Result<WorkflowStatus, HandleCoreError>>;
-    tasks(): Promise<Result<readonly WorkflowTaskInfo[], HandleCoreError>>;
+    status(): Promise<Result<WorkflowStatus, WorkflowHandleError>>;
+    tasks(): Promise<Result<readonly WorkflowTaskInfo[], WorkflowHandleError>>;
     // (undocumented)
     readonly workflowId: WorkflowId;
 }
@@ -4930,6 +4938,9 @@ export interface WorkflowHandleById<R extends BuildReturn> extends WorkflowHandl
     resultFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse>(id: string, contract: TaskContract<P, O, E, X, C>): Promise<Result<TaskOutcome<SchemaValue<O>, E>, WorkflowReadError>>;
     resultFor<P extends ParameterSchemas, C extends BuildReturn>(id: string, workflow: WorkflowContract<P, C>): Promise<Result<TaskOutcome<WorkflowOutput<C>, string>, WorkflowReadError>>;
 }
+
+// @public
+export type WorkflowHandleError = HandleCoreError | SeatRelayFull;
 
 // @public
 export type WorkflowId = string & {
@@ -5032,6 +5043,11 @@ export type WorkflowReadError =
 | {
     readonly kind: "invalidWait";
     readonly maxMs: number;
+}
+/** In a `SHARED_THREAD` body: the seat relay held its bound of waiting calls; nothing was read; retry. */
+| {
+    readonly kind: "seatRelayFull";
+    readonly error: SeatRelayFull;
 };
 
 // @public (undocumented)
@@ -5120,7 +5136,7 @@ export interface WorkflowStartEnqueueFailed {
 }
 
 // @public
-export type WorkflowStartError<R extends BuildReturn> = WorkflowStartValidationFailed | WorkflowStartIdConflict | WorkflowStartCommandConflict | StartEnqueueFailed<R>;
+export type WorkflowStartError<R extends BuildReturn> = WorkflowStartValidationFailed | WorkflowStartIdConflict | WorkflowStartCommandConflict | StartEnqueueFailed<R> | SeatRelayFull;
 
 // @public (undocumented)
 export interface WorkflowStartIdConflict {

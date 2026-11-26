@@ -280,9 +280,9 @@ describe("the pings", () => {
       pingDatabase: async () => failed(brokerOperationFailed("DB_PING_FAILED", "ping_database")),
     };
 
-    assert.deepEqual(await pingDatabase(answered), { ok: true, value: { latencyMs: 1.5 } });
+    assert.deepEqual(await pingDatabase(async () => answered.pingDatabase()), { ok: true, value: { latencyMs: 1.5 } });
 
-    const failure = await pingDatabase(refused);
+    const failure = await pingDatabase(async () => refused.pingDatabase());
 
     assert.ok(!failure.ok && failure.error.code === "DB_PING_FAILED");
   });

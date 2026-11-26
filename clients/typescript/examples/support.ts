@@ -120,6 +120,8 @@ export function readErrorText(error: ReadError): string {
       return `the database read failed (${error.code}): ${error.message}`;
     case "invalidWait":
       return `the wait is not a whole number of milliseconds from 0 to ${String(error.maxMs)}`;
+    case "seatRelayFull":
+      return `the seat relay sent nothing: ${error.error.message}`;
     default: {
       const unexpected: never = error;
 
@@ -149,6 +151,8 @@ export function workflowReadErrorText(error: WorkflowReadError): string {
       return `the database read failed (${error.code}): ${error.message}`;
     case "invalidWait":
       return `the wait is not a whole number of milliseconds from 0 to ${String(error.maxMs)}`;
+    case "seatRelayFull":
+      return `the seat relay sent nothing: ${error.error.message}`;
     default: {
       const unexpected: never = error;
 

@@ -1,19 +1,44 @@
-// The workflow calls of a seat body past the bound of the relay: each handle call gets `DB_OPERATION_FAILED` of the
-// handle catalog, retryable, with the workflow id and a cause that names the bound; a start and a restart get the
-// relay's refusal, `TooManyPendingCalls`. Nothing goes to the main thread.
+// The workflow calls of a seat body past the bound of the relay: a start, a restart (`retryStart`) and each handle call
+// give `SEAT_RELAY_FULL`, retryable, through the error union of the call, with the bound in the text and in the cause.
+// Nothing goes to the main thread.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { isObjectLike } from "../../../horsies/src/codec/values.ts";
-import type { RawCatalogError } from "../../../horsies/src/native/values/records.ts";
+import { checkContractList, contractLookup } from "../../../horsies/src/app/contract-list.ts";
+import { WorkflowId } from "../../../horsies/src/contract/ids.ts";
+import { defineTask } from "../../../horsies/src/contract/public.ts";
 import { IsolateRelay } from "../../../horsies/src/seats/relay.ts";
-import { TooManyPendingCalls } from "../../../horsies/src/thrown-errors.ts";
-import { relayedWorkflowCore, type StartRequest, type WorkflowCore } from "../../../horsies/src/workflow/core.ts";
-import { handleErrorOfRaw } from "../../../horsies/src/workflow/handle-error.ts";
+import { SeatRelayCode, type SeatRelayFull } from "../../../horsies/src/seats/relay-full.ts";
+import { h } from "../../../horsies/src/wire/public.ts";
+import type { Result } from "../../../horsies/src/wire/result.ts";
+import { createWorkflowArea, type WorkflowArea } from "../../../horsies/src/workflow/app-area.ts";
+import { relayedWorkflowCore, type WorkflowCore } from "../../../horsies/src/workflow/core.ts";
+import { type WorkflowHandle, workflowHandleOf } from "../../../horsies/src/workflow/handle.ts";
+import type { BuildReturn } from "../../../horsies/src/workflow/node.ts";
+import { defineWorkflow } from "../../../horsies/src/workflow/public.ts";
+import { listedWorkflowOf, type WorkflowRegistry, workflowRegistry } from "../../../horsies/src/workflow/registry.ts";
+import { NO_OP_START_OBSERVER } from "../../../horsies/src/workflow/start.ts";
 import { TASK_ID } from "../app/support.ts";
-import { SPEC_DATA, WORKFLOW_ID } from "../workflow/core-support.ts";
+import { fakeCore, rawStartEnqueueFailed, WORKFLOW_ID } from "../workflow/core-support.ts";
 import { TEST_RELAY_BOUNDS } from "./support.ts";
+
+const greet = defineTask({ name: "greet", input: { who: h.string() }, output: h.string() });
+
+const hello = defineWorkflow(
+  { name: "hello", definitionKey: "tests.hello.v1", output: h.string(), params: { who: h.string() }, checkCases: [{ who: "a" }] },
+  (w, { who }) => ({ output: w.task(greet, { who }, { id: "greet" }) }),
+);
+
+function registry(): WorkflowRegistry {
+  const entry = listedWorkflowOf(hello);
+
+  assert(entry.ok);
+
+  return workflowRegistry([entry.value], contractLookup(checkContractList([greet], { kind: "default" }).entries), {
+    kind: "default",
+  });
+}
 
 /** The text that names the relay bound and its value. */
 const BOUND_TEXT = `its bound (MAX_RUN_WORK = ${String(TEST_RELAY_BOUNDS.opsWaiting)})`;
@@ -23,8 +48,8 @@ function fullCore(): { readonly core: WorkflowCore; readonly sent: string[] } {
   const sent: string[] = [];
 
   const relay = new IsolateRelay((message) => {
-    if (message.kind === "op") {
-      sent.push(message.request.area);
+    if (message.kind === "op" && message.request.area === "workflows") {
+      sent.push(message.request.operation.kind);
     }
   }, TEST_RELAY_BOUNDS);
 
@@ -32,110 +57,136 @@ function fullCore(): { readonly core: WorkflowCore; readonly sent: string[] } {
     void relay.request("sends", { kind: "taskInfo", taskId: TASK_ID });
   }
 
-  sent.length = 0;
-
   return { core: relayedWorkflowCore(relay), sent };
 }
 
-/** The facts of a handle failure that the tests compare. */
-function handleFailure(raw: RawCatalogError): { readonly code: string; readonly retryable: boolean; readonly workflowId: string; readonly bound: boolean } {
-  const error = handleErrorOfRaw(raw);
-
-  return { code: error.code, retryable: error.retryable, workflowId: error.workflowId, bound: error.message.includes(BOUND_TEXT) };
+function areaOn(core: WorkflowCore): WorkflowArea {
+  return createWorkflowArea({
+    core,
+    registry: registry(),
+    observer: NO_OP_START_OBSERVER,
+    now: () => Temporal.Instant.from("2026-11-26T10:00:00Z"),
+    newWorkflowId: () => WORKFLOW_ID,
+  });
 }
 
-const BOUND_FAILURE = { code: "DB_OPERATION_FAILED", retryable: true, workflowId: WORKFLOW_ID, bound: true };
+function handleOn(core: WorkflowCore): WorkflowHandle<BuildReturn> {
+  const workflowId = WorkflowId.parse(WORKFLOW_ID);
 
-/** The error of a `failed` read, or the fail of the test. */
-function failedError(read: { readonly kind: string }): RawCatalogError {
-  const error: unknown = Reflect.get(read, "error");
+  assert(workflowId.ok);
 
-  if (read.kind !== "failed" || !isObjectLike(error)) {
-    return assert.fail(`the call past the bound gave ${read.kind}`);
-  }
-
-  // SAFETY: a `failed` variant of a workflow read holds the raw record of its catalog.
-  return error as RawCatalogError;
+  return workflowHandleOf<BuildReturn>({
+    core,
+    registry: registry(),
+    workflow: hello,
+    workflowId: workflowId.value,
+    targets: new Map([["greet", { kind: "task", contract: greet } as const]]),
+  });
 }
 
-const START_REQUEST: StartRequest = {
-  spec: {
-    name: "nightly",
-    definitionKey: "nightly",
-    onError: "FAIL",
-    nodes: [],
-    output: 0,
-    successPolicy: { kind: "noPolicy" },
-  },
-  workflowId: WORKFLOW_ID,
-  sentAtMicros: 1n,
-  trace: { kind: "noCarrier" },
-};
+/** `SEAT_RELAY_FULL` with the bound in its text and in its cause, a retryable precondition of the seat relay. */
+function assertRelayFull(error: SeatRelayFull): void {
+  assert.equal(error.code, SeatRelayCode.SEAT_RELAY_FULL);
+  assert.equal(error.retryable, true);
+  assert.ok(error.message.includes(BOUND_TEXT) && error.message.includes("nothing was sent; retry"), error.message);
+  assert.deepEqual(error.exception, {
+    kind: "coreFailure",
+    failure: "preconditionFailed",
+    subject: "seat relay",
+    message: error.message,
+    retryable: true,
+  });
+}
 
-describe("each workflow call kind past the bound of the relay", () => {
-  test("a status read: DB_OPERATION_FAILED, retryable, with the workflow id", async () => {
+/** The error of a failed call, or the fail of the test. */
+function errorOf<T, E>(result: Result<T, E>): E {
+  return result.ok ? assert.fail("the call past the bound was answered") : result.error;
+}
+
+describe("each workflow call kind past the bound of the relay gives SEAT_RELAY_FULL", () => {
+  test("a start", async () => {
     const { core, sent } = fullCore();
+    const error = errorOf(await areaOn(core).start(hello, { who: "a" }));
 
-    assert.deepEqual(handleFailure(failedError(await core.status(WORKFLOW_ID))), BOUND_FAILURE);
+    assert.ok(error.code === SeatRelayCode.SEAT_RELAY_FULL, error.code);
+    assertRelayFull(error);
     assert.deepEqual(sent, []);
   });
 
-  test("a node results read: DB_OPERATION_FAILED", async () => {
-    const { core, sent } = fullCore();
+  test("a restart (retryStart of an ENQUEUE_FAILED)", async () => {
+    const failing = fakeCore({ started: [{ kind: "failed", error: rawStartEnqueueFailed("hello", true) }] });
+    const first = errorOf(await areaOn(failing).start(hello, { who: "a" }));
 
-    assert.deepEqual(handleFailure(failedError(await core.nodeResults(WORKFLOW_ID))), BOUND_FAILURE);
+    assert.ok(first.code === "ENQUEUE_FAILED", first.code);
+
+    const { core, sent } = fullCore();
+    const error = errorOf(await areaOn(core).retryStart(first));
+
+    assert.ok(error.code === SeatRelayCode.SEAT_RELAY_FULL, error.code);
+    assertRelayFull(error);
     assert.deepEqual(sent, []);
   });
 
-  test("a nodes read: DB_OPERATION_FAILED", async () => {
+  test("a status read", async () => {
     const { core, sent } = fullCore();
+    const error = errorOf(await handleOn(core).status());
 
-    assert.deepEqual(handleFailure(failedError(await core.nodes(WORKFLOW_ID))), BOUND_FAILURE);
+    assert.ok(error.code === SeatRelayCode.SEAT_RELAY_FULL, error.code);
+    assertRelayFull(error);
     assert.deepEqual(sent, []);
   });
 
-  test("a node result read: DB_OPERATION_FAILED", async () => {
+  test("a node results read", async () => {
     const { core, sent } = fullCore();
+    const error = errorOf(await handleOn(core).results());
 
-    assert.deepEqual(handleFailure(failedError(await core.nodeResult(WORKFLOW_ID, "count"))), BOUND_FAILURE);
+    assert.ok(error.code === SeatRelayCode.SEAT_RELAY_FULL, error.code);
+    assertRelayFull(error);
     assert.deepEqual(sent, []);
   });
 
-  test("a cancel: DB_OPERATION_FAILED", async () => {
+  test("a nodes read", async () => {
     const { core, sent } = fullCore();
+    const error = errorOf(await handleOn(core).tasks());
 
-    assert.deepEqual(handleFailure(failedError(await core.cancel(WORKFLOW_ID))), BOUND_FAILURE);
+    assert.ok(error.code === SeatRelayCode.SEAT_RELAY_FULL, error.code);
+    assertRelayFull(error);
     assert.deepEqual(sent, []);
   });
 
-  test("a pause: DB_OPERATION_FAILED", async () => {
+  test("a node result read: the read error seatRelayFull", async () => {
     const { core, sent } = fullCore();
+    const error = errorOf(await handleOn(core).resultFor("greet"));
 
-    assert.deepEqual(handleFailure(failedError(await core.pause(WORKFLOW_ID))), BOUND_FAILURE);
+    assert.ok(error.kind === "seatRelayFull", error.kind);
+    assertRelayFull(error.error);
     assert.deepEqual(sent, []);
   });
 
-  test("a resume: DB_OPERATION_FAILED", async () => {
+  test("a cancel", async () => {
     const { core, sent } = fullCore();
+    const error = errorOf(await handleOn(core).cancel());
 
-    assert.deepEqual(handleFailure(failedError(await core.resume(WORKFLOW_ID))), BOUND_FAILURE);
+    assert.ok(error.code === SeatRelayCode.SEAT_RELAY_FULL, error.code);
+    assertRelayFull(error);
     assert.deepEqual(sent, []);
   });
 
-  test("a start: the relay's refusal, TooManyPendingCalls with the bound", async () => {
+  test("a pause", async () => {
     const { core, sent } = fullCore();
+    const error = errorOf(await handleOn(core).pause());
 
-    await assert.rejects(core.start(START_REQUEST), (cause: unknown) => cause instanceof TooManyPendingCalls && cause.bound === TEST_RELAY_BOUNDS.opsWaiting);
+    assert.ok(error.code === SeatRelayCode.SEAT_RELAY_FULL, error.code);
+    assertRelayFull(error);
     assert.deepEqual(sent, []);
   });
 
-  test("a restart: the relay's refusal, TooManyPendingCalls with the bound", async () => {
+  test("a resume", async () => {
     const { core, sent } = fullCore();
+    const error = errorOf(await handleOn(core).resume());
 
-    await assert.rejects(
-      core.restart({ specData: SPEC_DATA, workflowId: WORKFLOW_ID, sentAtMicros: 1n, trace: { kind: "noCarrier" } }),
-      (cause: unknown) => cause instanceof TooManyPendingCalls && cause.bound === TEST_RELAY_BOUNDS.opsWaiting,
-    );
+    assert.ok(error.code === SeatRelayCode.SEAT_RELAY_FULL, error.code);
+    assertRelayFull(error);
     assert.deepEqual(sent, []);
   });
 });

@@ -3,23 +3,24 @@
 // loads the addon. The bounds come from the core's constants, which the main thread gives in the seat marker
 // (`RelayBounds`); they hold per isolate, across its runs.
 //
-// - An operation that waits for I/O of the main thread (an enqueue, a task read, a facade call): at most `opsInFlight`
-//   of them wait for the main thread at once. Later ones wait in the isolate, in order, at most `opsWaiting`. One past
-//   that bound is not sent: it gets the retryable failure of its own type at once (`bound-answers.ts`).
+// - An operation that waits for I/O of the main thread (an enqueue, a task read, a workflow call, a facade call): at
+//   most `opsInFlight` of them wait for the main thread at once. Later ones wait in the isolate, in order, at most
+//   `opsWaiting`.
 // - An operation that the main thread answers at once with no I/O (the prepare of a send) goes at once and takes no
-//   place of the in-flight bound. At most `opsWaiting` prepares wait for their answer; one past that is not sent and
-//   gets its refusal at once.
+//   place of the in-flight bound. At most `opsWaiting` prepares wait for their answer.
+// - One past a bound is not sent: its answer is `seatRelayFull` at once (`lanes.ts`), and the caller gives
+//   `SEAT_RELAY_FULL` through the error union of its call.
 // - A refused answer (the core call threw a `CoreError` on the main thread) rejects with that class and its facts.
 // - The counts change only after the post of an operation: a post that throws takes no place.
 // - A reply of another area than the request's, and an answer to an operation that does not wait, are defects of the
 //   package: the defect rule (the main thread of the child aborts), then the throw.
 
-import type { SeatOperationMap, SeatRelay } from "../app/core-access.ts";
+import type { RelayAnswer, SeatOperationMap, SeatRelay } from "../app/core-access.ts";
 import { thrownError } from "../native/call/envelope.ts";
 import { raiseDefect } from "../native/call/defect.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import { type OperationLane, operationLane } from "./bound-answers.ts";
+import { type OperationLane, operationLane, relayFullAnswer } from "./lanes.ts";
 import {
   type RelayBounds,
   SEAT_PROTOCOL_VERSION,
@@ -28,15 +29,19 @@ import {
   type SeatRequest,
   type SeatToMain,
 } from "./protocol.ts";
+import type { SeatRelayFullOutcome } from "./relay-full.ts";
 
 /** The largest request id: ids are whole numbers, and a JavaScript number holds them exactly up to this bound. */
 const MAX_REQUEST_ID: number = Number.MAX_SAFE_INTEGER;
 
+/** The answer of one operation: the main thread's answer, or the relay's own past a bound (nothing was sent). */
+type OperationAnswer = SeatAnswer | SeatRelayFullOutcome;
+
 /** One operation that waits for its answer. */
-type PendingOperation = { readonly request: SeatRequest; readonly answer: (answer: SeatAnswer) => void };
+type PendingOperation = { readonly request: SeatRequest; readonly answer: (answer: OperationAnswer) => void };
 
 /** One sent operation and its lane. */
-type SentOperation = { readonly operation: PendingOperation; readonly lane: OperationLane["kind"] };
+type SentOperation = { readonly operation: PendingOperation; readonly lane: OperationLane };
 
 /** How a queue took an operation. */
 type QueuePut = "queued" | "full";
@@ -106,16 +111,19 @@ export class IsolateRelay implements SeatRelay {
     this.#waiting = new OperationQueue(bounds.opsWaiting);
   }
 
-  /** Run `operation` of `area` on the main thread of the child, and give its reply. */
-  async request<A extends SeatArea>(area: A, operation: SeatOperationMap[A]["operation"]): Promise<SeatOperationMap[A]["reply"]> {
+  /** Run `operation` of `area` on the main thread of the child, and give its reply, or `seatRelayFull` past a bound. */
+  async request<A extends SeatArea>(
+    area: A,
+    operation: SeatOperationMap[A]["operation"],
+  ): Promise<RelayAnswer<SeatOperationMap[A]["reply"]>> {
     // SAFETY: `operation` is an operation of `area`, so the pair is a member of the request union.
     const request = { area, operation } as SeatRequest;
 
-    const answer = await new Promise<SeatAnswer>((resolve) => {
+    const answer = await new Promise<OperationAnswer>((resolve) => {
       this.#take({ request, answer: resolve });
     });
 
-    return replyOf(area, answer);
+    return relayAnswerOf(area, answer);
   }
 
   /** The main thread answered the operation `requestId`. The next waiting operation goes. */
@@ -167,19 +175,19 @@ export class IsolateRelay implements SeatRelay {
   #take(operation: PendingOperation): void {
     const lane = operationLane(operation.request);
 
-    switch (lane.kind) {
+    switch (lane) {
       case "answeredAtOnce":
         if (this.#prepares >= this.#bounds.opsWaiting) {
-          operation.answer(lane.boundAnswer(this.#bounds.opsWaiting));
+          operation.answer(relayFullAnswer(lane, this.#bounds.opsWaiting));
 
           return;
         }
 
-        this.#send(operation, lane.kind);
+        this.#send(operation, lane);
 
         return;
       case "waitsForIo":
-        this.#takeBounded(operation, lane);
+        this.#takeBounded(operation);
 
         return;
       default:
@@ -187,10 +195,10 @@ export class IsolateRelay implements SeatRelay {
     }
   }
 
-  /** Send an operation that waits for I/O, or queue it, or answer it with its failure past the bound. */
-  #takeBounded(operation: PendingOperation, lane: Extract<OperationLane, { readonly kind: "waitsForIo" }>): void {
+  /** Send an operation that waits for I/O, or queue it, or answer it with `seatRelayFull` past the bound. */
+  #takeBounded(operation: PendingOperation): void {
     if (this.#inFlight < this.#bounds.opsInFlight) {
-      this.#send(operation, lane.kind);
+      this.#send(operation, "waitsForIo");
 
       return;
     }
@@ -201,7 +209,7 @@ export class IsolateRelay implements SeatRelay {
       case "queued":
         return;
       case "full":
-        operation.answer(lane.boundAnswer(this.#bounds.opsWaiting));
+        operation.answer(relayFullAnswer("waitsForIo", this.#bounds.opsWaiting));
 
         return;
       default:
@@ -210,7 +218,7 @@ export class IsolateRelay implements SeatRelay {
   }
 
   /** Post `operation`, then count it: a post that throws takes no place. */
-  #send(operation: PendingOperation, lane: OperationLane["kind"]): void {
+  #send(operation: PendingOperation, lane: OperationLane): void {
     if (this.#lastRequestId >= MAX_REQUEST_ID) {
       raiseDefect(new ClientDefect({ subject: "seat relay", rule: "the request ids of the isolate are used up" }));
     }
@@ -236,8 +244,11 @@ export class IsolateRelay implements SeatRelay {
   }
 }
 
-/** The reply of `area` in `answer`, or the throw of a refused call. A reply of another area is a defect. */
-function replyOf<A extends SeatArea>(area: A, answer: SeatAnswer): SeatOperationMap[A]["reply"] {
+/**
+ * The reply of `area` in `answer`, the relay's `seatRelayFull`, or the throw of a refused call. A reply of another area
+ * is a defect.
+ */
+function relayAnswerOf<A extends SeatArea>(area: A, answer: OperationAnswer): RelayAnswer<SeatOperationMap[A]["reply"]> {
   switch (answer.kind) {
     case "reply":
       if (answer.reply.area !== area) {
@@ -245,9 +256,11 @@ function replyOf<A extends SeatArea>(area: A, answer: SeatAnswer): SeatOperation
       }
 
       // SAFETY: the reply is of `area`, the area of the request.
-      return answer.reply.reply as SeatOperationMap[A]["reply"];
+      return { kind: "reply", reply: answer.reply.reply as SeatOperationMap[A]["reply"] };
     case "refused":
       throw thrownError(answer.refusal);
+    case "seatRelayFull":
+      return answer;
     default:
       return unreachable(answer, "seat relay");
   }

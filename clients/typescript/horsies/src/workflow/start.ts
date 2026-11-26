@@ -17,6 +17,7 @@ import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { runBuild } from "./builder.ts";
 import { type CheckedBuild, checkBuild } from "./checks.ts";
+import type { SeatRelayFullOutcome } from "../seats/relay-full.ts";
 import type { StartCall, WorkflowCore } from "./core.ts";
 import { workflowRecord } from "./define.ts";
 import { type WorkflowHandle, workflowHandleOf } from "./handle.ts";
@@ -166,7 +167,7 @@ type StartFacts = {
 /** The handle or the start error of a start call. Pure apart from the kept retry. */
 function startOutcome<R extends BuildReturn>(
   context: StartContext,
-  call: StartCall,
+  call: StartCall | SeatRelayFullOutcome,
   facts: StartFacts,
 ): StartOutcome<R> {
   const refuse = (message: string): StartOutcome<R> =>
@@ -177,6 +178,8 @@ function startOutcome<R extends BuildReturn>(
       return refuse(`the spec has a string with no stored text at ${call.refused.path}: ${call.refused.detail}`);
     case "specRefused":
       return refuse(`the core refuses the spec data at ${call.fieldPath}: ${call.cause}`);
+    case "seatRelayFull":
+      return err(call.error);
     case "outcome":
       switch (call.outcome.kind) {
         case "started":

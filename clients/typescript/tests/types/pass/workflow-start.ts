@@ -58,6 +58,7 @@ export async function startAndRead(workflowId: WorkflowId): Promise<void> {
       case "WORKFLOW_COMMAND_CONFLICT":
       case "WORKFLOW_ID_CONFLICT":
       case "VALIDATION_FAILED":
+      case "SEAT_RELAY_FULL":
         break;
       case "ENQUEUE_FAILED":
         if (started.error.retryable) {

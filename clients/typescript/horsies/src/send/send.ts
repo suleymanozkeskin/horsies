@@ -25,7 +25,6 @@ import {
   preconditionFailed,
   type RetryableSendError,
   ruleRefused,
-  seatRelayFull,
   type SendFailure,
   sendErrorOfRaw,
   suppressedError,
@@ -185,7 +184,7 @@ async function preparedRequest(
     case "refused":
       return err(sendErrorOfRaw(prepared.error));
     case "seatRelayFull":
-      return err(seatRelayFull(prepared.message));
+      return err(prepared.error);
     case "prepared":
       break;
     default: {
@@ -309,6 +308,8 @@ async function enqueueOnce(
       return ok(taskIdFromCore(outcome.taskId, "enqueue"));
     case "failed":
       return err(sendErrorOfRaw(outcome.error));
+    case "seatRelayFull":
+      return err(outcome.error);
     default: {
       const unexpected: never = outcome;
 

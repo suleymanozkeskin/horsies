@@ -34,10 +34,17 @@ import { unreachable } from "../native/call/never.ts";
 import type { MonitoringReadOutcome, MonitoringReadsAddon } from "../native/facades/monitoring-reads.ts";
 import type { NativeCoreHandle } from "../native/handle/addon.ts";
 import { err, ok, type Result } from "../wire/result.ts";
-import type { MonitoringQueryCoreError } from "../_catalog/monitoring_errors.ts";
 import { raiseDefect } from "../native/call/defect.ts";
 import { ClientDefect } from "../thrown-errors.ts";
-import { type MonitoringReadError, monitoringQueryError, queryRefused, type QueryRefused } from "./errors.ts";
+import {
+  type MonitoringCoreReadError,
+  type MonitoringReadError,
+  monitoringQueryError,
+  queryRefused,
+  type QueryRefused,
+} from "./errors.ts";
+import type { RelayedAddon } from "./seat-calls.ts";
+import type { SeatRelayFullOutcome } from "../seats/relay-full.ts";
 import {
   decodeCoreModel,
   decodedOrDefect,
@@ -83,7 +90,7 @@ export type WorkflowNodeRead =
 
 /** The addon and the handle that the reads call. */
 export interface ReadTarget {
-  readonly addon: MonitoringReadsAddon;
+  readonly addon: RelayedAddon<MonitoringReadsAddon>;
   readonly handle: NativeCoreHandle;
 }
 
@@ -148,7 +155,7 @@ export async function listTasks(
 }
 
 /** The names of the workflows that have runs, at most 10,000. */
-export async function workflowNames(target: ReadTarget): Promise<Result<readonly string[], MonitoringQueryCoreError>> {
+export async function workflowNames(target: ReadTarget): Promise<Result<readonly string[], MonitoringCoreReadError>> {
   return readCoreModel("workflowNames", () => target.addon.readWorkflowNames(target.handle), (text) => {
     const items = listItems("workflowNames", wireJsonOfCoreText("workflowNames", text));
 
@@ -175,7 +182,7 @@ export async function workflowRuns(
 /** The state of every schedule, at most 10,000. */
 export async function schedules(
   target: ReadTarget,
-): Promise<Result<readonly ScheduleStateInfo[], MonitoringQueryCoreError>> {
+): Promise<Result<readonly ScheduleStateInfo[], MonitoringCoreReadError>> {
   return readCoreModel("schedules", () => target.addon.readSchedules(target.handle), (text) =>
     modelList("schedules", text, decodeScheduleStateInfo),
   );
@@ -185,7 +192,7 @@ export async function schedules(
 export async function workflowRun(
   target: ReadTarget,
   workflowId: WorkflowId,
-): Promise<Result<WorkflowRunRead, MonitoringQueryCoreError>> {
+): Promise<Result<WorkflowRunRead, MonitoringCoreReadError>> {
   return readCoreModel("workflowRun", () => target.addon.readWorkflowRun(target.handle, workflowId), (text) => {
     const value = wireJsonOfCoreText("workflowRun", text);
 
@@ -222,7 +229,7 @@ export async function workflowNode(
 export async function taskDetail(
   target: ReadTarget,
   taskId: TaskId,
-): Promise<Result<TaskDetailRead, MonitoringQueryCoreError>> {
+): Promise<Result<TaskDetailRead, MonitoringCoreReadError>> {
   const outcome = await nativeValueAsync("readTaskDetail", () => target.addon.readTaskDetail(target.handle, taskId));
 
   switch (outcome.kind) {
@@ -234,6 +241,8 @@ export async function taskDetail(
       return ok(Object.freeze({ kind: "notFound", taskId, reason: outcome.reason }));
     case "failed":
       return err(monitoringQueryError(outcome.error));
+    case "seatRelayFull":
+      return err(outcome.error);
     default:
       return unreachable(outcome);
   }
@@ -255,7 +264,7 @@ function taskIndexOf(taskIndex: number): Result<number, QueryRefused> {
 /** Call the addon once and give the decoded model, the refusal of the query, or the core's error. */
 async function readModel<T>(
   read: string,
-  answer: () => Promise<NativeEnvelope<MonitoringReadOutcome>>,
+  answer: () => Promise<NativeEnvelope<MonitoringReadOutcome | SeatRelayFullOutcome>>,
   decode: (text: string) => T,
 ): Promise<Result<T, MonitoringReadError>> {
   const outcome = await nativeValueAsync(read, answer);
@@ -267,6 +276,8 @@ async function readModel<T>(
       return err(queryRefused(outcome.field, outcome.reason));
     case "failed":
       return err(monitoringQueryError(outcome.error));
+    case "seatRelayFull":
+      return err(outcome.error);
     default:
       return unreachable(outcome);
   }
@@ -278,9 +289,9 @@ async function readModel<T>(
  */
 async function readCoreModel<T>(
   read: string,
-  answer: () => Promise<NativeEnvelope<MonitoringReadOutcome>>,
+  answer: () => Promise<NativeEnvelope<MonitoringReadOutcome | SeatRelayFullOutcome>>,
   decode: (text: string) => T,
-): Promise<Result<T, MonitoringQueryCoreError>> {
+): Promise<Result<T, MonitoringCoreReadError>> {
   const outcome = await nativeValueAsync(read, answer);
 
   switch (outcome.kind) {
@@ -292,6 +303,8 @@ async function readCoreModel<T>(
       );
     case "failed":
       return err(monitoringQueryError(outcome.error));
+    case "seatRelayFull":
+      return err(outcome.error);
     default:
       return unreachable(outcome);
   }

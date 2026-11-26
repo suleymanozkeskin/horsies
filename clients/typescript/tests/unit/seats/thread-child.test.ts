@@ -18,7 +18,7 @@ import { type MainToSeat, SEAT_PROTOCOL_VERSION, type SeatMarker } from "../../.
 import { ClientDefect, type CoreDefect, CoreStopped, ForkedAfterCoreStart, TooManyPendingCalls } from "../../../horsies/src/thrown-errors.ts";
 import type { CoreAccess, ProducerCore } from "../../../horsies/src/app/core-access.ts";
 import { ENQUEUED, fakeCoreHandle, fakeProducer, PREPARED, TASK_ID } from "../app/support.ts";
-import { noWorkflowCore, type WorkflowCore } from "../../../horsies/src/workflow/core.ts";
+import { type AddonWorkflowCore, noWorkflowCore } from "../../../horsies/src/workflow/core.ts";
 import { FakeChildNative, settled } from "../child/child-native.ts";
 import { contextOf, crunch, ENDED_AT, seatApp, TEST_SEAT_BOUNDS } from "./support.ts";
 
@@ -281,7 +281,7 @@ describe("the operations of the isolates on the main thread", () => {
   test("a workflows operation runs on the workflow core of the main thread's producer", async () => {
     const asked: string[] = [];
 
-    const workflows: WorkflowCore = {
+    const workflows: AddonWorkflowCore = {
       ...noWorkflowCore(),
       status: async (workflowId) => {
         asked.push(workflowId);

@@ -5,22 +5,22 @@
 // - The operation is plain data: the part of the addon, the function, and its arguments after the core handle. The
 //   reply is the envelope that the function resolved with. The facade code of the isolate reads it as it reads the
 //   addon's envelope on a main thread, so each call keeps its own `Result`.
-// - The relayed addons ignore the handle that the facade code passes: the main thread uses its own. The relayed core
-//   handle relays `pingDatabase`; its other members are calls that a facade of a seat body never makes, and each answers
-//   with a thrown `CLIENT_DEFECT` envelope.
-// - Past the bound of the relay, each call gets the retryable database failure of its own type, with a cause that names
-//   the bound (`facadeBoundAnswer`).
+// - The relayed addons ignore the handle that the facade code passes: the main thread uses its own. The database ping
+//   goes through `ping`. The members of the relayed core handle are calls that a facade of a seat body never makes, and
+//   each answers with a thrown `CLIENT_DEFECT` envelope.
+// - Past the bound of the relay nothing is sent: the envelope holds the relay's `seatRelayFull`, and the facade code
+//   gives `SEAT_RELAY_FULL` through the error union of the call (`RelayedAddon`).
 // - `rerunIn` takes the caller's transaction object, which cannot cross a thread: it is not relayed.
 
 import type { SeatRelay } from "../app/core-access.ts";
-import { RerunErrorCode } from "../_catalog/history.ts";
 import type { NativeEnvelope } from "../native/call/envelope.ts";
 import type { CancelAddon } from "../native/facades/cancel.ts";
 import type { HealthAddon } from "../native/facades/health.ts";
 import type { MonitoringReadsAddon } from "../native/facades/monitoring-reads.ts";
 import type { RerunAddon } from "../native/facades/rerun.ts";
-import type { NativeCoreHandle } from "../native/handle/addon.ts";
-import type { ExceptionRecord, RawCatalogError } from "../native/values/records.ts";
+import type { DatabasePingRecord, NativeCoreHandle } from "../native/handle/addon.ts";
+import type { NativeOutcome } from "../native/values/records.ts";
+import type { SeatRelayFullOutcome } from "../seats/relay-full.ts";
 import { unreachable } from "../wire/unreachable.ts";
 
 /** The functions of an addon part that take the core handle first and give a Promise, with their arguments after it. */
@@ -56,21 +56,43 @@ export type FacadesSeatReply = {
     | DatabasePingAnswer;
 };
 
+/**
+ * The functions of an addon part in the form that a thread of any kind gives them: the value of each envelope may be
+ * the seat relay's `seatRelayFull` (in a seat isolate, past the bound of the relay). The addon of a main thread has
+ * this form too, with no `seatRelayFull`.
+ */
+export type RelayedAddon<A> = {
+  readonly [M in keyof A]: A[M] extends (...args: infer P) => Promise<NativeEnvelope<infer V>>
+    ? (...args: P) => Promise<NativeEnvelope<V | SeatRelayFullOutcome>>
+    : never;
+};
+
+/** The database ping of the app's core handle, in the form of `RelayedAddon`. */
+export type RelayedPing = () => Promise<NativeEnvelope<NativeOutcome<DatabasePingRecord> | SeatRelayFullOutcome>>;
+
 /** The facade addons of a seat isolate, on its relay. */
 export interface RelayedFacades {
-  readonly reads: MonitoringReadsAddon;
-  readonly health: HealthAddon;
-  readonly cancel: CancelAddon;
-  readonly rerun: Pick<RerunAddon, "rerunTask">;
+  readonly reads: RelayedAddon<MonitoringReadsAddon>;
+  readonly health: RelayedAddon<HealthAddon>;
+  readonly cancel: RelayedAddon<CancelAddon>;
+  readonly rerun: RelayedAddon<Pick<RerunAddon, "rerunTask">>;
+  readonly ping: RelayedPing;
   readonly handle: NativeCoreHandle;
 }
 
-/** Send `operation` through `relay`, and give the envelope of the reply. */
-async function relayed<T>(relay: SeatRelay, operation: FacadesSeatOperation): Promise<T> {
-  const reply = await relay.request("facades", operation);
+/** Send `operation` through `relay`, and give the envelope of the reply, or the relay's `seatRelayFull` in one. */
+async function relayed<V>(relay: SeatRelay, operation: FacadesSeatOperation): Promise<NativeEnvelope<V | SeatRelayFullOutcome>> {
+  const answer = await relay.request("facades", operation);
 
-  // SAFETY: the main thread ran the addon function that `operation` names, so the envelope has that function's type.
-  return reply.envelope as T;
+  switch (answer.kind) {
+    case "reply":
+      // SAFETY: the main thread ran the addon function that `operation` names, so the envelope has that function's type.
+      return answer.reply.envelope as NativeEnvelope<V>;
+    case "seatRelayFull":
+      return { kind: "value", value: answer };
+    default:
+      return unreachable(answer, "relayed");
+  }
 }
 
 /** The facade addons of a seat isolate whose relay is `relay`. Starts nothing. */
@@ -80,17 +102,19 @@ export function relayedFacades(relay: SeatRelay): RelayedFacades {
     health: relayedHealth(relay),
     cancel: Object.freeze({
       cancelTask: async (_handle, taskId, policy) => relayed(relay, { part: "cancel", call: { method: "cancelTask", args: [taskId, policy] } }),
-    } satisfies CancelAddon),
+    } satisfies RelayedAddon<CancelAddon>),
     rerun: Object.freeze({
       rerunTask: async (_handle, command, policy, trace) =>
         relayed(relay, { part: "rerun", call: { method: "rerunTask", args: [command, policy, trace] } }),
-    } satisfies Pick<RerunAddon, "rerunTask">),
-    handle: relayedHandle(relay),
+    } satisfies RelayedAddon<Pick<RerunAddon, "rerunTask">>),
+    ping: async () => relayed<NativeOutcome<DatabasePingRecord>>(relay, { part: "database", call: { method: "pingDatabase", args: [] } }),
+    handle: relayedHandle(),
   });
 }
 
-function relayedReads(relay: SeatRelay): MonitoringReadsAddon {
-  const read = async <T>(call: HandleCall<MonitoringReadsAddon>): Promise<T> => relayed(relay, { part: "reads", call });
+function relayedReads(relay: SeatRelay): RelayedAddon<MonitoringReadsAddon> {
+  const read = async <V>(call: HandleCall<MonitoringReadsAddon>): Promise<NativeEnvelope<V | SeatRelayFullOutcome>> =>
+    relayed<V>(relay, { part: "reads", call });
 
   return Object.freeze({
     readTaskStats: async (_handle, query) => read({ method: "readTaskStats", args: [query] }),
@@ -103,11 +127,12 @@ function relayedReads(relay: SeatRelay): MonitoringReadsAddon {
     readWorkflowNode: async (_handle, workflowId, taskIndex) => read({ method: "readWorkflowNode", args: [workflowId, taskIndex] }),
     readSchedules: async () => read({ method: "readSchedules", args: [] }),
     readTaskDetail: async (_handle, taskId) => read({ method: "readTaskDetail", args: [taskId] }),
-  } satisfies MonitoringReadsAddon);
+  } satisfies RelayedAddon<MonitoringReadsAddon>);
 }
 
-function relayedHealth(relay: SeatRelay): HealthAddon {
-  const health = async <T>(call: HandleCall<HealthAddon>): Promise<T> => relayed(relay, { part: "health", call });
+function relayedHealth(relay: SeatRelay): RelayedAddon<HealthAddon> {
+  const health = async <V>(call: HandleCall<HealthAddon>): Promise<NativeEnvelope<V | SeatRelayFullOutcome>> =>
+    relayed<V>(relay, { part: "health", call });
 
   return Object.freeze({
     pingWorkers: async (_handle, target, timeoutMs, minResponses) =>
@@ -119,7 +144,7 @@ function relayedHealth(relay: SeatRelay): HealthAddon {
     getExpiredTasks: async () => health({ method: "getExpiredTasks", args: [] }),
     getClassCoverage: async () => health({ method: "getClassCoverage", args: [] }),
     getClassReport: async () => health({ method: "getClassReport", args: [] }),
-  } satisfies HealthAddon);
+  } satisfies RelayedAddon<HealthAddon>);
 }
 
 /** The thrown envelope of a core handle member that does not cross to the main thread. */
@@ -129,121 +154,21 @@ function notRelayed(member: string): NativeEnvelope<never> {
     thrown: {
       code: "CLIENT_DEFECT",
       subject: `seat core handle: ${member}`,
-      rule: "the main thread of the child holds the core handle; a seat isolate relays its database ping only",
+      rule: "the main thread of the child holds the core handle; a seat isolate relays its database ping through `ping`",
     },
   };
 }
 
-/** The core handle of the facade code of a seat isolate: the database ping goes through the relay. */
-function relayedHandle(relay: SeatRelay): NativeCoreHandle {
+/** The core handle of the facade code of a seat isolate: the facade code passes it, and the relayed addons ignore it. */
+function relayedHandle(): NativeCoreHandle {
   const handle: NativeCoreHandle = Object.freeze({
     manifestVersion: () => notRelayed("manifestVersion"),
     withInstallCoverage: () => notRelayed("withInstallCoverage"),
     close: async () => notRelayed("close"),
     installSchema: async () => notRelayed("installSchema"),
     schemaStatus: async () => notRelayed("schemaStatus"),
-    pingDatabase: async () => relayed<DatabasePingAnswer>(relay, { part: "database", call: { method: "pingDatabase", args: [] } }),
+    pingDatabase: async () => notRelayed("pingDatabase"),
   });
 
   return handle;
-}
-
-/** The subject of the failures that the relay of a seat isolate gives. */
-const RELAY_SUBJECT = "seat relay";
-
-/** The cause of a failure at the bound of the relay: a precondition of the call that can clear. Pure. */
-function boundException(message: string): ExceptionRecord {
-  return { kind: "coreFailure", cause: { kind: "preconditionFailed", subject: RELAY_SUBJECT, message, retryable: true } };
-}
-
-/** `MonitoringQueryDbOperationFailed`, retryable: the failure of a monitoring read. Pure. */
-function monitoringReadFailed(message: string): RawCatalogError {
-  return {
-    class: "MonitoringQueryDbOperationFailed",
-    slots: [
-      { name: "message", value: { kind: "text", text: message } },
-      { name: "retryable", value: { kind: "flag", value: true } },
-      { name: "exception", value: { kind: "exception", exception: boundException(message) } },
-    ],
-  };
-}
-
-/** `BrokerOperationFailed` with `code`, retryable: the failure of a health read or a ping. Pure. */
-function brokerOperationFailed(code: string, message: string): RawCatalogError {
-  return {
-    class: "BrokerOperationFailed",
-    slots: [
-      { name: "code", value: { kind: "codeMember", catalog: "BrokerOperationFailedCode", value: code } },
-      { name: "message", value: { kind: "text", text: message } },
-      { name: "retryable", value: { kind: "flag", value: true } },
-      { name: "exception", value: { kind: "exception", exception: boundException(message) } },
-    ],
-  };
-}
-
-/** `TaskActionDbOperationFailed` of `taskId`, retryable: the failure of a cancel. Pure. */
-function cancelFailed(taskId: string, message: string): RawCatalogError {
-  return {
-    class: "TaskActionDbOperationFailed",
-    slots: [
-      { name: "message", value: { kind: "text", text: message } },
-      { name: "retryable", value: { kind: "flag", value: true } },
-      { name: "task_id", value: { kind: "uuid", text: taskId } },
-      { name: "exception", value: { kind: "exception", exception: boundException(message) } },
-    ],
-  };
-}
-
-/** The broker code of the failure of a health call: a worker ping fails as a ping, every other read as a query. Pure. */
-function healthFailureCode(call: HandleCall<HealthAddon>): "WORKER_PING_FAILED" | "MONITORING_QUERY_FAILED" {
-  switch (call.method) {
-    case "pingWorkers":
-      return "WORKER_PING_FAILED";
-    case "listWorkerStates":
-    case "getWorkerState":
-    case "getWorkerStateHistory":
-    case "getStaleTasks":
-    case "getExpiredTasks":
-    case "getClassCoverage":
-    case "getClassReport":
-      return "MONITORING_QUERY_FAILED";
-    default:
-      return unreachable(call, "healthFailureCode");
-  }
-}
-
-/**
- * The envelope that a facade call gets past the bound of the relay: the retryable failure of its own type, with the
- * cause `message`. Nothing reached the main thread, so nothing was read or written. Pure.
- */
-export function facadeBoundAnswer(operation: FacadesSeatOperation, message: string): FacadesSeatReply {
-  switch (operation.part) {
-    case "reads":
-      return { envelope: { kind: "value", value: { kind: "failed", error: monitoringReadFailed(message) } } };
-    case "health":
-      return {
-        envelope: { kind: "value", value: { kind: "failed", error: brokerOperationFailed(healthFailureCode(operation.call), message) } },
-      };
-
-    case "cancel":
-      return { envelope: { kind: "value", value: { kind: "failed", error: cancelFailed(operation.call.args[0], message) } } };
-    case "rerun":
-      return {
-        envelope: {
-          kind: "value",
-          value: {
-            kind: "failed",
-            error: {
-              code: RerunErrorCode.CONNECT_FAILED,
-              message,
-              cause: { kind: "preconditionFailed", subject: RELAY_SUBJECT, message, retryable: true },
-            },
-          },
-        },
-      };
-    case "database":
-      return { envelope: { kind: "value", value: { kind: "failed", error: brokerOperationFailed("DB_PING_FAILED", message) } } };
-    default:
-      return unreachable(operation, "facadeBoundAnswer");
-  }
 }

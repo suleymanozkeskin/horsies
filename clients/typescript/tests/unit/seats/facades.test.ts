@@ -1,7 +1,7 @@
 // The facade calls of a seat body go through the seat relay to the main thread of the child: each kind (a monitoring
 // read, a health read, a worker ping, the database ping, the cancel, the rerun) runs the main thread's addon function
 // with the main thread's core handle, and the seat call gives that answer as its own `Result`; none throws
-// `AddonOutsideMainThread`. Past the bound of the relay, each kind gets its own retryable failure.
+// `AddonOutsideMainThread`. Past the bound of the relay, each kind gives `SEAT_RELAY_FULL` through its own error union.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
@@ -15,6 +15,7 @@ import { IsolateRelay } from "../../../horsies/src/seats/relay.ts";
 import { fakeHandle, mainThreadAccess, taskIdOf, valueEnvelope } from "../monitoring/support/fakes.ts";
 import { COMMAND, POLICY } from "../rerun/support.ts";
 import type { Result } from "../../../horsies/src/wire/result.ts";
+import { SeatRelayCode } from "../../../horsies/src/seats/relay-full.ts";
 import { TEST_RELAY_BOUNDS } from "./support.ts";
 
 const TASK_ID = taskIdOf("01890a5d-ac96-774b-bcce-b302099a8057");
@@ -172,8 +173,10 @@ function fullSeatArea(): { readonly area: MonitoringArea; readonly relay: Isolat
 /** The text that names the relay bound and its value. */
 const BOUND_TEXT = `its bound (MAX_RUN_WORK = ${String(TEST_RELAY_BOUNDS.opsWaiting)})`;
 
-/** The retryable flag of a failed facade `Result`, and whether its message names the bound. */
-function failure<T, E extends object>(result: Result<T, E>): { readonly retryable: boolean; readonly bound: boolean } {
+/** The code and the retryable flag of a failed facade `Result`, and whether its message names the bound. */
+function failure<T, E extends { readonly code: string }>(
+  result: Result<T, E>,
+): { readonly code: string; readonly retryable: boolean; readonly bound: boolean } {
   if (result.ok) {
     return assert.fail("the call past the bound was answered");
   }
@@ -181,43 +184,41 @@ function failure<T, E extends object>(result: Result<T, E>): { readonly retryabl
   const retryable: unknown = Reflect.get(result.error, "retryable");
   const message: unknown = Reflect.get(result.error, "message");
 
-  return { retryable: retryable === true, bound: String(message).includes(BOUND_TEXT) };
+  return { code: result.error.code, retryable: retryable === true, bound: String(message).includes(BOUND_TEXT) };
 }
 
-describe("each facade call kind past the bound of the relay gets its retryable failure", () => {
-  test("a monitoring read: MONITORING_QUERY_FAILED of the read", async () => {
-    assert.deepEqual(failure(await fullSeatArea().area.monitoring.taskStats()), { retryable: true, bound: true });
+/** The failure of every call kind past the bound: the one code of a full seat relay. */
+const RELAY_FULL = { code: SeatRelayCode.SEAT_RELAY_FULL, retryable: true, bound: true };
+
+describe("each facade call kind past the bound of the relay gives SEAT_RELAY_FULL", () => {
+  test("a monitoring read", async () => {
+    assert.deepEqual(failure(await fullSeatArea().area.monitoring.taskStats()), RELAY_FULL);
   });
 
-  test("a health read: MONITORING_QUERY_FAILED of the broker", async () => {
-    assert.deepEqual(failure(await fullSeatArea().area.monitoring.workers()), { retryable: true, bound: true });
+  test("a monitoring read with no query", async () => {
+    assert.deepEqual(failure(await fullSeatArea().area.monitoring.schedules()), RELAY_FULL);
   });
 
-  test("a worker ping: WORKER_PING_FAILED", async () => {
-    const pinged = await fullSeatArea().area.pingWorkers();
-
-    assert.deepEqual(failure(pinged), { retryable: true, bound: true });
-    assert.equal(pinged.ok ? "" : pinged.error.code, "WORKER_PING_FAILED");
+  test("a health read", async () => {
+    assert.deepEqual(failure(await fullSeatArea().area.monitoring.workers()), RELAY_FULL);
   });
 
-  test("the database ping: DB_PING_FAILED", async () => {
-    const pinged = await fullSeatArea().area.pingDatabase();
-
-    assert.deepEqual(failure(pinged), { retryable: true, bound: true });
-    assert.equal(pinged.ok ? "" : pinged.error.code, "DB_PING_FAILED");
+  test("a worker ping", async () => {
+    assert.deepEqual(failure(await fullSeatArea().area.pingWorkers()), RELAY_FULL);
   });
 
-  test("the cancel: the database failure of the cancel, with its task id", async () => {
-    const cancelled = await fullSeatArea().area.monitoring.cancelTask(TASK_ID, { policy: "includeRunning" });
-
-    assert.deepEqual(failure(cancelled), { retryable: true, bound: true });
+  test("the database ping", async () => {
+    assert.deepEqual(failure(await fullSeatArea().area.pingDatabase()), RELAY_FULL);
   });
 
-  test("the rerun: CONNECT_FAILED", async () => {
+  test("the cancel", async () => {
+    assert.deepEqual(failure(await fullSeatArea().area.monitoring.cancelTask(TASK_ID, { policy: "includeRunning" })), RELAY_FULL);
+  });
+
+  test("the rerun in the app's transaction", async () => {
     const { relay } = fullSeatArea();
     const rerun = await rerunAreaOfCore({ kind: "seatRelay", relay }, () => ({ kind: "noCarrier" })).rerun(COMMAND, POLICY);
 
-    assert.deepEqual(failure(rerun), { retryable: true, bound: true });
-    assert.equal(rerun.ok ? "" : rerun.error.code, "CONNECT_FAILED");
+    assert.deepEqual(failure(rerun), RELAY_FULL);
   });
 });

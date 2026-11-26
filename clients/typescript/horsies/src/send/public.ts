@@ -32,10 +32,11 @@ export type {
   SentTypes,
   TaskSendError,
   TaskSendKeyConflict,
-  TaskSendSeatRelayFull,
   WithSentTypes,
 } from "./errors.ts";
 
-export { SeatRelayCode } from "./errors.ts";
+export type { SeatRelayFull } from "../seats/relay-full.ts";
+
+export { SeatRelayCode } from "../seats/relay-full.ts";
 
 export type { Retention, SendOptions } from "./options.ts";

@@ -425,6 +425,6 @@ describe("the defects of a seat isolate go to the main thread, then the isolate 
     });
 
     port.deliver(replyMessage(1, { kind: "reply", reply: { area: "sends", reply: { kind: "prepareSend", prepared: PREPARED } } }));
-    assert.deepEqual(await replied, { kind: "prepareSend", prepared: PREPARED });
+    assert.deepEqual(await replied, { kind: "reply", reply: { kind: "prepareSend", prepared: PREPARED } });
   });
 });

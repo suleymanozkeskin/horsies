@@ -645,6 +645,7 @@ task child are suppressed: the child lifts the suppression when it serves.
 | `PAYLOAD_MISMATCH` | `taskId`, `payload`, `message` | The task id exists with another command or key. Nothing was written |
 | `IDEMPOTENCY_KEY_CONFLICT` | `taskId`, `payload`, `message`, `ownerTaskId`, `retryable: false` | Another task holds the key with another command. Nothing was written |
 | `ENQUEUE_FAILED` | `taskId`, `payload`, `message`, `retryable`, `exception` | The enqueue failed. The row may or may not exist. `retryable` is the classification of the cause |
+| `SEAT_RELAY_FULL` | `message`, `retryable: true`, `exception` | A `SHARED_THREAD` body only: the seat relay holds its bound of waiting calls. Nothing was sent; send again |
 
 - `exception` is the cause that the send met: the server's error, no answer,
   a broken read contract, a failed precondition, or a rule of the client.
@@ -684,6 +685,8 @@ function readErrorText(error: ReadError): string {
       return `${error.code}, retryable: ${String(error.retryable)}`;
     case "invalidWait":
       return `timeoutMs is a whole number from 0 to ${error.maxMs}`;
+    case "seatRelayFull":
+      return error.error.message;
   }
 }
 

@@ -25,6 +25,7 @@ import {
 } from "../../../horsies/src/monitoring/reads.ts";
 import type { WireJson } from "../../../horsies/src/_catalog/wire_json.ts";
 import type { RawCatalogError } from "../../../horsies/src/native/values/records.ts";
+import type { RelayedAddon } from "../../../horsies/src/monitoring/seat-calls.ts";
 import {
   coreText,
   fakeHandle,
@@ -238,7 +239,7 @@ describe("thrown and defect ends", () => {
   test("a thrown envelope throws its class", async () => {
     const { target } = fakeTarget(jsonOutcome(null));
 
-    const thrown: MonitoringReadsAddon = {
+    const thrown: RelayedAddon<MonitoringReadsAddon> = {
       ...target.addon,
       readSchedules: async () => ({
         kind: "thrown",

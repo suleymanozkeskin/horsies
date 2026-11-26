@@ -114,7 +114,7 @@ export function countingRelay(read: TaskInfoRead): { readonly access: CoreAccess
           ? { kind: "taskInfo", read }
           : { kind: "taskInfo", read: { kind: "absent", reason: "NOT_CLASSIFIED" } };
 
-      return reply;
+      return { kind: "reply", reply };
     },
   };
 
