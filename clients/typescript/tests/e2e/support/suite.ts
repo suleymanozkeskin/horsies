@@ -13,13 +13,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { type AnyTaskContract, Horsies, type TaskHandle } from "../../../horsies/src/index.ts";
+import { type AnyTaskContract, type AnyWorkflowContract, Horsies, type TaskHandle } from "../../../horsies/src/index.ts";
 import { appInternals } from "../../../horsies/src/app/internals.ts";
 import { buildApp } from "../src/app.ts";
 import { connectionEnv } from "../src/connection.ts";
 import { type Instance, INSTANCE_ENV, instanceConfig, type Profile, readyClass, type ThreadProfile } from "../src/instances.ts";
 import { MARKER_DIR_ENV, MarkerDir } from "../src/markers.ts";
 import { customHealthcheck } from "../src/tasks/custom.ts";
+import { recoveryHealthcheck } from "../src/tasks/recovery-queues.ts";
 import { healthcheck } from "../src/tasks/basic.ts";
 import { sharedHealthcheck } from "../src/tasks/shared.ts";
 import {
@@ -186,8 +187,7 @@ export class Suite {
   }
 
   async #sendReadiness(profile: Profile): Promise<TaskHandle<string, string>> {
-    const contract = this.instance === "custom_queues" ? customHealthcheck : readyClass(profile) === "SHARED_ASYNC" ? sharedHealthcheck : healthcheck;
-    const sent = await this.app.send(contract, {});
+    const sent = await this.app.send(readinessTask(this.instance, profile), {});
 
     if (!sent.ok) {
       assert.fail(`send the readiness task: ${sent.error.code}: ${sent.error.message}`);
@@ -196,9 +196,9 @@ export class Suite {
     return sent.value;
   }
 
-  /** A second app of the suite's instance on the same database, with `tasks` as its contract list. */
-  otherApp(tasks: readonly AnyTaskContract[]): Horsies {
-    const created = Horsies.create({ ...instanceConfig(this.instance, this.db.connection), tasks });
+  /** A second app of the suite's instance on the same database, with `tasks` and `workflows` as its contract lists. */
+  otherApp(tasks: readonly AnyTaskContract[], workflows: readonly AnyWorkflowContract[] = []): Horsies {
+    const created = Horsies.create({ ...instanceConfig(this.instance, this.db.connection), tasks, workflows });
 
     if (!created.ok) {
       assert.fail(`create a second app: ${created.error.refusals.map((refused) => refused.message).join("; ")}`);
@@ -247,6 +247,27 @@ type SuiteParts = {
   readonly logDir: string;
   readonly closeRows: () => Promise<void>;
 };
+
+/** The readiness task of a worker of `profile` of `instance`: a task of the instance that a child of the profile runs. Pure. */
+function readinessTask(instance: Instance, profile: Profile): typeof healthcheck | typeof customHealthcheck | typeof sharedHealthcheck | typeof recoveryHealthcheck {
+  switch (instance) {
+    case "custom_queues":
+      return customHealthcheck;
+    case "recovery_queues":
+      return recoveryHealthcheck;
+    case "default":
+    case "cluster_cap":
+    case "recovery":
+    case "soft_cap":
+    case "queue_retention":
+    case "declared_retention":
+    case "hook_throws":
+    case "provider_throws":
+    case "hook_past_bound":
+    case "thread_profiles":
+      return readyClass(profile) === "SHARED_ASYNC" ? sharedHealthcheck : healthcheck;
+  }
+}
 
 function appOf(instance: Instance, db: TestDatabase): Horsies {
   const built = buildApp(instance, db.connection);

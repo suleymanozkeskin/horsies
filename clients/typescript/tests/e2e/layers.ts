@@ -9,6 +9,10 @@ export type LayerFile = { readonly name: string; readonly boundSeconds: number }
 export const LAYER_FILES: readonly LayerFile[] = [
   { name: "layer1-tasks", boundSeconds: 1_800 },
   { name: "layer2-cluster", boundSeconds: 1_500 },
+  { name: "layer4-workflow-structure", boundSeconds: 600 },
+  { name: "layer5-workflow-dataflow", boundSeconds: 600 },
+  { name: "layer6-workflow-advanced", boundSeconds: 900 },
+  { name: "layer7-subworkflows", boundSeconds: 1_200 },
   { name: "child-model", boundSeconds: 1_200 },
   { name: "typescript-child", boundSeconds: 1_200 },
   { name: "stored-timeout-refusal", boundSeconds: 600 },
@@ -27,14 +31,10 @@ export const PENDING_SCENARIOS: readonly PendingScenarios[] = [
     mirrors: ["layer 3: Rust layer3_scheduler.rs (10), Python test_layer3_scheduler.py (12)"],
   },
   {
-    issue: 2331,
-    needs: "workflows",
+    issue: 2459,
+    needs: "workflows with no output node",
     mirrors: [
-      "layer 4: Rust layer4_workflow_structure.rs (11), Python test_layer4_workflow_structure.py (20)",
-      "layer 5: Rust layer5_workflow_dataflow.rs (14), Python test_layer5_workflow_dataflow.py (12)",
-      "layer 6: Rust layer6_workflow_advanced.rs (22), Python test_layer6_workflow_advanced.py (19)",
-      "layer 7: Rust layer7_subworkflows.rs (12), Python test_layer7_subworkflows.py (47), test_layer7_subworkflow_priority.py (1)",
-      "Rust stored_timeout_refusal.rs::a_refused_timeout_fails_its_workflow_node",
+      "the result of the terminal nodes of a workflow with no output: Python test_layer4_workflow_structure.py::test_default_terminal_results, the outputless reads of test_layer7_subworkflows.py (test_outputless_success_policy_keeps_failed_subworkflow_result, test_subworkflow_recovery_outputless_recovery, test_subworkflow_deep_outputless_nested_failed_optional, test_subworkflow_deep_outputless_all_failed_required, test_subworkflow_deep_mixed_paths); layers 4 and 7 run each of these cases with an output node",
     ],
   },
   {
