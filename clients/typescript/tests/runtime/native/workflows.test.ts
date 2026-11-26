@@ -10,11 +10,11 @@ import { randomUUID } from "node:crypto";
 import { describe, test } from "node:test";
 
 import { defineTask, defineWorkflow, h, Horsies, WorkflowId } from "../../../horsies/src/index.ts";
+import { appCoreHandle } from "../../../horsies/src/app/core-access.ts";
 import { appInternals } from "../../../horsies/src/app/internals.ts";
 import { envelopeValue } from "../../../horsies/src/native/call/envelope.ts";
 import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { workflowsAddon } from "../../../horsies/src/native/workflows/addon.ts";
-import { appHandle } from "../../../horsies/src/worker/run.ts";
 import { testDatabaseUrl } from "./manifest.ts";
 
 // The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
@@ -65,7 +65,7 @@ function newWorkflowId(): WorkflowId {
 
 describe("the child spec source of the app", () => {
   test("it is registered on the app's one core handle, the handle that the worker runs on", () => {
-    const handle = appHandle(appInternals(testApp()));
+    const handle = appCoreHandle(appInternals(testApp()).core);
     const again = workflowsAddon().registerChildSpecSource(handle.native, () => undefined, []);
 
     assert.equal(envelopeValue(again), "alreadySet");

@@ -25,6 +25,23 @@ pub enum MonitoringQueryErrorCode {
     HistoryContractViolation,
 }
 
+/// The code of a monitoring query that a client refuses before any connect:
+/// a window, a page or a limit that the core refuses, or a value that the
+/// client's types let through and the core cannot take (a count that is not
+/// a whole number, a task index outside 32 bits, text that is not
+/// well-formed). The Python client has no code for these inputs: its parse
+/// functions answer `WindowRefused` and `PageRefused`, and its types cannot
+/// hold the other values.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
+)]
+#[code_catalog(module = "monitoring", base = "str_enum")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum MonitoringQueryRefusalCode {
+    /// A value of the query is refused; no connect and no statement ran.
+    QueryRefused,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MonitoringQueryErrorSource {
     #[error(transparent)]

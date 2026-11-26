@@ -8,7 +8,7 @@
 //   `number` (a priority, a delay), an absent field and "retain forever" as `null`;
 // - the `exception` slot in its public form (`CoreCause | NoCause`, `src/_catalog/error_detail.ts`).
 
-import type { CoreCause, NoCause } from "../_catalog/error_detail.ts";
+import type { CoreCause, CoreFailure, NoCause } from "../_catalog/error_detail.ts";
 import type {
   CauseRecord,
   ClientClassName,
@@ -139,7 +139,8 @@ function generatedCause(exceptionClass: string, message: string): CoreCause {
   }
 }
 
-function coreFailureOf(cause: CauseRecord): CoreCause {
+/** The public core failure of a cause record. Pure. */
+export function coreFailureOf(cause: CauseRecord): CoreFailure {
   switch (cause.kind) {
     case "server":
       return Object.freeze({

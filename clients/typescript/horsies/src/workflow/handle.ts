@@ -45,7 +45,7 @@ export type NodeResult =
   | { readonly kind: "unreadable"; readonly cause: string };
 
 /** One node of a workflow. */
-export interface WorkflowNodeInfo {
+export interface WorkflowTaskInfo {
   /** The node id; a node stored without one has none. */
   readonly nodeId: Recorded<string>;
   readonly index: number;
@@ -70,7 +70,7 @@ export interface WorkflowHandleBase<R extends BuildReturn> {
   /** The stored result of each node that has one, by node id. */
   results(): Promise<Result<ReadonlyMap<string, NodeResult>, HandleCoreError>>;
   /** Every node, in index order. */
-  tasks(): Promise<Result<readonly WorkflowNodeInfo[], HandleCoreError>>;
+  tasks(): Promise<Result<readonly WorkflowTaskInfo[], HandleCoreError>>;
   /** Pause a RUNNING workflow: `true` when it paused. */
   pause(): Promise<Result<boolean, HandleCoreError>>;
   /** Resume a PAUSED workflow: `true` when it resumed. */
@@ -419,12 +419,12 @@ async function nodeResults(facts: HandleFacts): Promise<Result<ReadonlyMap<strin
   }
 }
 
-async function nodeInfos(facts: HandleFacts): Promise<Result<readonly WorkflowNodeInfo[], HandleCoreError>> {
+async function nodeInfos(facts: HandleFacts): Promise<Result<readonly WorkflowTaskInfo[], HandleCoreError>> {
   const read = await facts.core.nodes(facts.workflowId);
 
   switch (read.kind) {
     case "nodes": {
-      const infos: WorkflowNodeInfo[] = [];
+      const infos: WorkflowTaskInfo[] = [];
 
       for (const node of read.nodes) {
         const info = nodeInfoOf(facts.workflowId, node);
@@ -461,7 +461,7 @@ function isNodeStatus(status: string): status is WorkflowTaskStatus {
 }
 
 /** One node, or `STORED_DATA_INVALID` for a stored status or summary that does not read. Pure. */
-function nodeInfoOf(workflowId: string, node: StoredNodeRecord): Result<WorkflowNodeInfo, HandleCoreError> {
+function nodeInfoOf(workflowId: string, node: StoredNodeRecord): Result<WorkflowTaskInfo, HandleCoreError> {
   if (!isNodeStatus(node.status)) {
     return err(
       storedDataInvalid(

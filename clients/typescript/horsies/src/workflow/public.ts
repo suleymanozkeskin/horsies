@@ -40,7 +40,7 @@ export {
 
 export type { ContextReadError, WorkflowContext } from "./context.ts";
 
-export type { NodeResult, WorkflowHandle, WorkflowHandleBase, WorkflowHandleById, WorkflowNodeInfo } from "./handle.ts";
+export type { NodeResult, WorkflowHandle, WorkflowHandleBase, WorkflowHandleById, WorkflowTaskInfo } from "./handle.ts";
 
 export type { WorkflowReadError } from "./handle-error.ts";
 

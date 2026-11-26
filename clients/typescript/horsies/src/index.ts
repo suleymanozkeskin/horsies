@@ -16,6 +16,10 @@ export * from "./read/public.ts";
 
 export * from "./workflow/public.ts";
 
+export * from "./monitoring/public.ts";
+
+export * from "./rerun/public.ts";
+
 export * from "./thrown-errors.ts";
 
 export * from "./cli/public.ts";

@@ -68,7 +68,8 @@ print_step_title "Type check with tsc of TypeScript 6.0"
 "$floor_compiler" --build --clean
 
 # The public API gate of the published entry points (`horsies`,
-# `horsies/zod`): the API report of each one against
+# `horsies/zod`, `horsies/rerun/pg`, `horsies/rerun/postgres`): the API
+# report of each one against
 # tests/public-api/report/, each type that a public declaration names is
 # exported by its entry point, and the no-`any` check with the `unknown`
 # allow list (tests/public-api/unknown-allowed.json). A difference prints the
