@@ -88,9 +88,6 @@ export type SourceRegistration = "registered" | "alreadySet";
 /** The status of a workflow, as the core names it. */
 export type WorkflowStatusName = "PENDING" | "RUNNING" | "PAUSED" | "COMPLETED" | "FAILED" | "CANCELLED" | "EXPIRED";
 
-/** The status of one node of a workflow, as the core names it. */
-export type NodeStatusName = "PENDING" | "READY" | "ENQUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "SKIPPED";
-
 /** The status of a workflow that ended with an error. */
 export type ErrorEndStatusName = "FAILED" | "CANCELLED" | "EXPIRED";
 
@@ -119,7 +116,7 @@ export type NodeResultsRead =
   | { readonly kind: "workflowAbsent" }
   | { readonly kind: "failed"; readonly error: RawCatalogError };
 
-/** One stored node of a workflow. `status` is the stored text: the package maps it to `NodeStatusName`. */
+/** One stored node of a workflow. `status` is the stored text: the package maps it to `WorkflowTaskStatus`. */
 export interface StoredNodeRecord {
   readonly nodeId: RecordedText;
   readonly index: number;

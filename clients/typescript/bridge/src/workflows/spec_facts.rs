@@ -73,14 +73,23 @@ pub fn queue_priorities(
     })
 }
 
-/// The priority of each queue, in the order of `queue_names`. Pure.
+/// The priority of each queue, in the order of `queue_names`; the refusal
+/// of a queue names it as `queueNames[i]`. Pure.
 fn priorities_of(
     rules: &SendRules,
     queue_names: &[String],
 ) -> Result<Vec<SendPriority>, BoundaryRefusal> {
     queue_names
         .iter()
-        .map(|queue| rules.queue_priority(queue))
+        .enumerate()
+        .map(|(index, queue)| {
+            rules
+                .queue_priority(queue)
+                .map_err(|refused| BoundaryRefusal {
+                    subject: format!("queueNames[{index}]"),
+                    rule: refused.rule,
+                })
+        })
         .collect()
 }
 
@@ -177,7 +186,9 @@ mod tests {
             priorities_of(&custom, &["urgent".to_owned()]),
             Ok(vec![SendPriority::Configured { priority: 3 }])
         );
-        assert!(priorities_of(&custom, &["other".to_owned()]).is_err());
+        let refused = priorities_of(&custom, &["urgent".to_owned(), "other".to_owned()])
+            .expect_err("a queue that the custom mode does not hold is refused");
+        assert_eq!(refused.subject, "queueNames[1]");
     }
 
     #[test]

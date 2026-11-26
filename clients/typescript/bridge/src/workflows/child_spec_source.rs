@@ -56,8 +56,10 @@ use crate::handle::core_handle::{ChildSpecSourceSet, CoreHandle};
 /// Python bridge's callback thread.
 pub const CHILD_SPEC_QUEUE_BOUND: usize = 1_024;
 
-/// The longest wait for the answer of one build. A JavaScript loop that does
-/// not take the call within it is blocked by the core's rule.
+/// The longest wait for the answer of one build, from the call to the
+/// answer: it covers the wait for the JavaScript thread to take the call and
+/// the run of the build itself. A JavaScript loop that does not take the call
+/// within it is blocked by the core's rule.
 pub const CHILD_SPEC_WAIT_BOUND: Duration = LOOP_BLOCK_LIMIT;
 
 /// The name of the build function of a TypeScript workflow, as the node
