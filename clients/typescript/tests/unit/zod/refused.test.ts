@@ -11,11 +11,13 @@ import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
 import { MAX_SCHEMA_DEPTH, compileMember, compileValue } from "../../../horsies/src/zod/adapter.ts";
 import type { ZodSchema } from "../../../horsies/src/zod/definition.ts";
 import { type ZodSchemaRefused, zodRefusalText } from "../../../horsies/src/zod/rules.ts";
-import { acceptedKind, withDefinition } from "./support.ts";
+import { acceptedKind, passedSelfCheck, withDefinition } from "./support.ts";
+
+const passed = passedSelfCheck();
 
 /** The rule, path and zod type of each refusal of a schema as a whole value. */
 function refusals(schema: ZodSchema): readonly (readonly [string, string, string])[] {
-  const compiled = compileValue(schema);
+  const compiled = compileValue(passed, schema);
 
   assert.ok(!compiled.ok, "expected a refusal");
 
@@ -127,14 +129,14 @@ describe("zod adapter: refusal rules", () => {
       ["OPTIONAL_NOT_A_MEMBER", "$[0]", "optional"],
     ]);
     assert.deepEqual(refusals(z.string().optional()), [["OPTIONAL_NOT_A_MEMBER", "$", "optional"]]);
-    assert.equal(compileMember(z.string().optional()).ok, true);
+    assert.equal(compileMember(passed, z.string().optional()).ok, true);
   });
 
   test("CHANGING_DEFAULT: a function default whose value changes at each read", () => {
     assert.deepEqual(refusals(z.object({ id: z.uuid().default(() => crypto.randomUUID()) })), [
       ["CHANGING_DEFAULT", "$.id", "default"],
     ]);
-    assert.equal(compileValue(z.object({ tags: z.array(z.string()).default(() => []) })).ok, true);
+    assert.equal(compileValue(passed, z.object({ tags: z.array(z.string()).default(() => []) })).ok, true);
   });
 
   test("RECURSIVE: a schema that contains itself, through z.lazy() and through a getter", () => {
@@ -182,7 +184,7 @@ describe("zod adapter: refusal rules", () => {
   });
 
   test("every refusal of a schema is reported, in walk order, with its fix", () => {
-    const compiled = compileValue(z.looseObject({ at: z.date(), any: z.any() }));
+    const compiled = compileValue(passed, z.looseObject({ at: z.date(), any: z.any() }));
 
     assert.ok(!compiled.ok);
     assert.deepEqual(compiled.error.map(zodRefusalText), [
