@@ -85,3 +85,12 @@ bun tests/public-api/run.ts check
 # tsc of TypeScript 6.0 (the floor compiler installed above).
 print_step_title "Type tests and the consumer project in both compiler lanes"
 bun tests/types/run.ts
+
+# The docs check (tests/docs-check/): each TypeScript code block of the docs
+# pages (website/src/content/docs/typescript/) and of the skill files
+# (horsies/.agents/skills/horsies/) compiles against the built package in the
+# consumer project, with the same three compilers. A failing block is printed
+# with its page and line. The docs pages are held on the docs branch until
+# the release; on other branches the step reads the skill files only.
+print_step_title "Docs check of the TypeScript code blocks in both compiler lanes"
+bun tests/docs-check/run.ts

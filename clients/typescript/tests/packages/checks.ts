@@ -10,7 +10,14 @@ import type { ParsedJson } from "../public-api/package.ts";
 import { apiReport, compareReport, REPORT_DIR, reportFailedText, reportFileName } from "../public-api/report.ts";
 import { TESTS_DIR, toolFailedText } from "../public-api/tools.ts";
 import { testOnlyNamesInBytes } from "./addon-exports.ts";
-import { exportTargets, horsiesFileProblems, horsiesManifestProblems, platformFileProblems, platformManifestProblems } from "./content.ts";
+import {
+  binFileProblems,
+  exportTargets,
+  horsiesFileProblems,
+  horsiesManifestProblems,
+  platformFileProblems,
+  platformManifestProblems,
+} from "./content.ts";
 import type { PlatformExpectation, SkillFolder } from "./content.ts";
 import { glibcFloorProblems, glibcNeedsOf, readelfVersionInfo } from "./glibc-floor.ts";
 import type { JsonObject } from "./manifest.ts";
@@ -45,6 +52,7 @@ export function horsiesProblems(
 
   return [
     ...horsiesFileProblems(tarball.files, exportTargets(manifest["exports"]), expected.skills),
+    ...binFileProblems(tarball.files, manifest["bin"]),
     ...horsiesManifestProblems(manifest, expected.version, expected.optionalDependencies),
     ...filesNamingDevVariable(packageDir, tarball.files).map((file) => `${file} names ${DEV_ADDON_PATH_VARIABLE}`),
     ...apiReportProblems(packageDir, manifest, workDir),
