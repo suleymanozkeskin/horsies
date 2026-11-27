@@ -4,7 +4,7 @@
 // `SHARED_THREAD` tasks run in the seat isolates of a thread child: one that holds its isolate for the time it gets,
 // and one that holds its isolate past its deadline, then returns, and one that ends its isolate with `process.exit`.
 
-import { defineTask, defineWorkflow, h, type Horsies } from "../../../../horsies/src/index.ts";
+import { defineTask, defineWorkflow, h, type Horsies } from "#horsies";
 import { createOnce, markerErrorText } from "../markers.ts";
 import { holdThread, sleepFor } from "./waits.ts";
 

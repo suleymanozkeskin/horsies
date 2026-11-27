@@ -2,7 +2,7 @@
 // `clients/python/tests/e2e/tasks/workflows.py`, the `spec_*` of layer 4): chains, fan-out, fan-in, a diamond, a DAG of
 // seven nodes, an output node, a workflow with no output node, deadlines, failures and a cancel.
 
-import { defineWorkflow, h } from "../../../../horsies/src/index.ts";
+import { defineWorkflow, h } from "#horsies";
 import { fail, FinalResult, finalResult, slowStep, step } from "../tasks/workflow-nodes.ts";
 import { named } from "./naming.ts";
 import { node } from "./node-options.ts";

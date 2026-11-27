@@ -1,7 +1,7 @@
 // Retry tasks (Rust `clients/rust/tests/worker/src/tasks/retry.rs`, Python `clients/python/tests/e2e/tasks/retry.py`).
 // The attempts are counted with marker files, which every child of the worker sees.
 
-import { defineTask, h, type Horsies } from "../../../../horsies/src/index.ts";
+import { defineTask, h, type Horsies } from "#horsies";
 import { markerErrorText, nextAttempt } from "../markers.ts";
 
 /** The retry codes of this module. */

@@ -7,7 +7,7 @@
 
 import { isMainThread, threadId } from "node:worker_threads";
 
-import { type AnyTaskContract, defineTask, h, Horsies } from "../../../horsies/src/index.ts";
+import { type AnyTaskContract, defineTask, h, Horsies } from "#horsies";
 import { err, ok, type Result } from "../../../horsies/src/wire/result.ts";
 import type { Connection } from "./connection.ts";
 import { entryThread, type StartMember, startMarkerName } from "./entry-thread.ts";
@@ -106,6 +106,8 @@ export function buildApp(instance: Instance, connection: Connection): Result<Hor
     case "scheduler_invalid_rules":
     case "scheduler_invalid_task":
     case "handlers":
+    case "handler_hook_throws":
+    case "handler_hook_past_bound":
     case "worker_ended_spans":
       implementDefault(app, instance);
   }
@@ -134,6 +136,8 @@ function instanceTasks(instance: Instance): readonly AnyTaskContract[] {
     case "scheduler_invalid_rules":
     case "scheduler_invalid_task":
     case "handlers":
+    case "handler_hook_throws":
+    case "handler_hook_past_bound":
     case "worker_ended_spans":
       return DEFAULT_CONTRACTS;
   }
@@ -205,6 +209,8 @@ function addFailingStartMember(app: Horsies, instance: DefaultTaskInstance): voi
     case "scheduler_invalid_rules":
     case "scheduler_invalid_task":
     case "handlers":
+    case "handler_hook_throws":
+    case "handler_hook_past_bound":
     case "worker_ended_spans":
       return;
   }

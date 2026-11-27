@@ -6,15 +6,16 @@
 import assert from "node:assert/strict";
 import { describe } from "node:test";
 
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import { loadAddon } from "#horsies";
 import { attemptEndedLine, HANDLER_LINES_MARKER, STARTED_PREFIX } from "../src/handlers.ts";
 import * as basic from "../src/tasks/basic.ts";
 import { sentHandle, succeeded } from "../support/outcome.ts";
 import { found, NOT_YET, pollFor } from "../support/poll.ts";
-import { e2eTest } from "../support/suite.ts";
+import type { Instance } from "../src/instances.ts";
+import { e2eTest, type Suite } from "../support/suite.ts";
 
-// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
-void requireDevAddon();
+// The addon of these tests is the one that the entry of the lane loads (`entry/`).
+void loadAddon();
 
 /** The longest wait for the outcome of a task that a running worker runs. */
 const RESULT_WAIT_MS = 15_000;
@@ -50,4 +51,35 @@ describe("event handlers", () => {
 
     assert.ok(hookPid !== process.pid && hookPid !== worker.pid, `the hook ran in the handler child, not in ${String(hookPid)}`);
   });
+
+  e2eTest("a throwing onHandlerChildStart hook ends the handler child; the worker runs its tasks on", "handler_hook_throws", async (suite) => {
+    await handlerChildStaysDown(suite, "handler_hook_throws");
+  });
+
+  e2eTest("an onHandlerChildStart hook past 10 s ends the handler child; the worker runs its tasks on", "handler_hook_past_bound", async (suite) => {
+    await handlerChildStaysDown(suite, "handler_hook_past_bound");
+  });
 });
+
+/** The text of the worker log line that says the handler child ended after a failed start hook and the worker runs on. */
+const STAYS_DOWN_TEXT = "the handler child exits and stays down";
+
+/** The longest wait for the log line of a hook that holds the handler child past its 10 s bound. */
+const HOOK_FAILURE_WAIT_MS = 45_000;
+
+/**
+ * A worker of `instance` logs that its handler child stays down after the failed start hook (exit code 173), runs a task
+ * to its result, and no event reaches a handler.
+ */
+async function handlerChildStaysDown(suite: Suite, instance: Instance): Promise<void> {
+  const worker = await suite.worker("isolated-1");
+  const handle = await sentHandle("e2e_simple", suite.app.send(basic.simple, { x: 4 }));
+
+  assert.equal(await succeeded(handle, RESULT_WAIT_MS), 8, `${instance}: the worker runs its tasks`);
+
+  await pollFor(HOOK_FAILURE_WAIT_MS, `${instance}: the log line of the failed handler child start`, async () =>
+    worker.logCount(STAYS_DOWN_TEXT) > 0 ? found(true) : NOT_YET,
+  );
+
+  assert.equal(suite.markers.read(HANDLER_LINES_MARKER).kind, "absent", `${instance}: no handler ran`);
+}

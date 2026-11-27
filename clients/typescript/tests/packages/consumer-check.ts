@@ -49,6 +49,7 @@ type Inputs = {
   readonly platformPackage: string;
   readonly release: "publish" | "hold";
   readonly webPage: WebPage;
+  readonly allPlatformPackages: readonly string[];
 };
 
 /** The inputs from the arguments, or the text of the refusal. Pure. */
@@ -60,6 +61,7 @@ function inputsOf(args: readonly string[]): Inputs | { readonly refused: string 
     "platform-package": { type: "string" },
     release: { type: "string" },
     "web-page": { type: "string" },
+    "all-platform-packages": { type: "string" },
   } as const;
 
   let values: { readonly [K in keyof typeof options]?: string | undefined };
@@ -86,7 +88,13 @@ function inputsOf(args: readonly string[]): Inputs | { readonly refused: string 
     return { refused: "give --web-page run|skip" };
   }
 
-  return { installer, registry, version, platformPackage, release, webPage };
+  const all = values["all-platform-packages"];
+
+  if (all === undefined || all === "") {
+    return { refused: "give --all-platform-packages <name,name,...>" };
+  }
+
+  return { installer, registry, version, platformPackage, release, webPage, allPlatformPackages: all.split(",") };
 }
 
 /** Write the project in `folder` and install the packages; the failure text, or `installed`. Effects: writes and installs. */
@@ -115,6 +123,40 @@ function install(inputs: Inputs, folder: string): "installed" | { readonly faile
   console.log(`installed ${packages.join(" ")} with ${inputs.installer} in ${folder}`);
 
   return "installed";
+}
+
+/**
+ * The selection check: a project that lists every platform package as an optional dependency (as the `horsies`
+ * manifest of a release does) installs, and the installer keeps exactly the package of this host (`os`, `cpu` and
+ * `libc` of each manifest). Effects: writes and installs in `folder`; prints the installed packages.
+ */
+function selectionProblems(inputs: Inputs, folder: string): readonly string[] {
+  const optional = Object.fromEntries(inputs.allPlatformPackages.map((name) => [name, inputs.version]));
+
+  writeFileSync(join(folder, "package.json"), `${JSON.stringify({ name: "horsies-selection-check", private: true, type: "module", optionalDependencies: optional })}\n`);
+
+  let run: ReturnType<typeof runCommand>;
+
+  switch (inputs.installer) {
+    case "npm":
+      writeFileSync(join(folder, ".npmrc"), `registry=${inputs.registry}\n`);
+      run = runCommand("npm", ["install", "--no-audit", "--no-fund", "--no-update-notifier"], folder);
+      break;
+    case "bun":
+      writeFileSync(join(folder, "bunfig.toml"), `[install]\nregistry = "${inputs.registry}"\n`);
+      run = runCommand(process.execPath, ["install"], folder);
+      break;
+  }
+
+  if (!run.ok || run.value.code !== 0) {
+    return [commandFailedText(`${inputs.installer} install of the optional platform packages`, run)];
+  }
+
+  const installed = inputs.allPlatformPackages.filter((name) => existsSync(join(folder, "node_modules", name, "package.json")));
+
+  console.log(`selection: ${inputs.installer} installed [${installed.join(", ")}] of [${inputs.allPlatformPackages.join(", ")}]`);
+
+  return installed.join(" ") === inputs.platformPackage ? [] : [`the selection installed [${installed.join(", ")}], not [${inputs.platformPackage}]`];
 }
 
 /** The script that imports `horsies` as a user's module does, and tries one deep import. */
@@ -324,6 +366,13 @@ async function main(args: readonly string[]): Promise<number> {
     }
 
     const problems = [...importProblems(folder), ...(await packageProblems(installedPackageDir(folder), inputs.platformPackage, inputs.webPage))];
+    const selectionFolder = mkdtempSync(join(tmpdir(), "horsies-selection-check-"));
+
+    try {
+      problems.push(...selectionProblems(inputs, selectionFolder));
+    } finally {
+      rmSync(selectionFolder, { recursive: true, force: true });
+    }
 
     for (const problem of problems) {
       console.error(`FAIL (${inputs.installer}): ${problem}`);

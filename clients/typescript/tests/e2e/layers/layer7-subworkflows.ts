@@ -15,8 +15,8 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { describe } from "node:test";
 
-import { type JsonValue, type NodeResult, TaskId, type TaskOutcome, type WorkflowTerminalResults } from "../../../horsies/src/index.ts";
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import { type JsonValue, type NodeResult, TaskId, type TaskOutcome, type WorkflowTerminalResults } from "#horsies";
+import { loadAddon } from "#horsies";
 import { FAST_RECOVERY, SERIAL_QUEUE } from "../src/instances.ts";
 import { serialBlocker, serialChildTask, serialDirectTask, serialParent } from "../src/tasks/recovery-queues.ts";
 import { CHILD_NODE, SUB_OK_VALUE, subFail, subNestedFailMiddle, tenantReport } from "../src/workflows/children.ts";
@@ -51,8 +51,8 @@ import {
   workflowTree,
 } from "../support/workflow-rows.ts";
 
-// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
-void requireDevAddon();
+// The addon of these tests is the one that the entry of the lane loads (`entry/`).
+void loadAddon();
 
 /** The longest wait for the reaper of a worker to finalize a workflow again: one recovery pass each second. */
 const RECOVERY_WAIT_MS = 30_000;

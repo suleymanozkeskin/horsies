@@ -31,7 +31,7 @@ import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-ho
 import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import { InMemorySpanExporter, type ReadableSpan, SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
 
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import { loadAddon, type RerunEnqueuePolicy } from "#horsies";
 import { parseSpanLine, type SpanLine, SPAN_LINES_MARKER } from "../src/span-lines.ts";
 import * as basic from "../src/tasks/basic.ts";
 import * as endedSpans from "../src/tasks/ended-spans.ts";
@@ -41,8 +41,8 @@ import { found, NOT_YET, pollFor } from "../support/poll.ts";
 import { pause } from "../support/process.ts";
 import { e2eTest, READY_LIMIT_MS, type Suite, WORKER_READY_LINE } from "../support/suite.ts";
 
-// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
-void requireDevAddon();
+// The addon of these tests is the one that the entry of the lane loads (`entry/`).
+void loadAddon();
 
 /** The longest wait for the outcome of a task that a running worker runs. */
 const RESULT_WAIT_MS = 30_000;
@@ -372,6 +372,42 @@ describe("attempt spans and the spans of the attempts that the worker ended", ()
       assert.equal(span.traceId, tracing.parent.spanContext().traceId);
       assert.deepEqual(span.parent, { kind: "parent", spanId: sendSpanOf(tracing, handle.taskId).spanContext().spanId });
       assert.ok(BigInt(span.startNanos) <= BigInt(span.endNanos), `start ${span.startNanos}, end ${span.endNanos}`);
+    });
+  });
+});
+
+/** The enqueue policy of the rerun in the case below. */
+const RERUN_POLICY: RerunEnqueuePolicy = {
+  retention: { kind: "forever" },
+  retainRerunInput: "keep",
+  reservationWindow: Temporal.Duration.from({ days: 1 }),
+};
+
+describe("the carrier of a rerun", () => {
+  e2eTest("a rerun in a span stores the carrier of the active context, not the carrier of the source task", "worker_ended_spans", async (suite) => {
+    await suite.worker("isolated-1");
+
+    await withTestTracing(async (tracing) => {
+      const source = await inParentSpan(tracing, async () => sentHandle("e2e_error", suite.app.send(basic.deliberateError, {})));
+
+      await failedCode(source, RESULT_WAIT_MS);
+
+      const caller = otel.trace.getTracer("e2e").startSpan("rerun caller");
+
+      const rerun = await otel.context.with(otel.trace.setSpan(otel.context.active(), caller), async () =>
+        suite.app.rerunTask({ sourceTaskId: source.taskId, goodUntil: { kind: "none" } }, RERUN_POLICY),
+      );
+
+      caller.end();
+      assert.ok(rerun.ok && rerun.value.kind === "enqueued", `the rerun: ${JSON.stringify(rerun)}`);
+
+      const sourceTrace = await suite.app.monitoring.getTaskDetail(source.taskId);
+      const rerunTrace = await suite.app.monitoring.getTaskDetail(rerun.value.newTaskId);
+
+      assert.ok(sourceTrace.ok && sourceTrace.value.kind === "found" && rerunTrace.ok && rerunTrace.value.kind === "found");
+      assert.equal(rerunTrace.value.taskDetail.leaf.traceId, caller.spanContext().traceId);
+      assert.equal(sourceTrace.value.taskDetail.leaf.traceId, tracing.parent.spanContext().traceId);
+      assert.notEqual(rerunTrace.value.taskDetail.leaf.traceId, sourceTrace.value.taskDetail.leaf.traceId);
     });
   });
 });

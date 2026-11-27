@@ -2,7 +2,7 @@
 // `clients/python/tests/e2e/tasks/workflows.py`, the `spec_*` of layer 5): results as parameters (`h.taskOutcome`),
 // results through the workflow context (the context sources of a node), and how a failure or a skip reaches the nodes after it.
 
-import { defineWorkflow, h } from "../../../../horsies/src/index.ts";
+import { defineWorkflow, h } from "#horsies";
 import {
   checkUpstream,
   ContextReport,

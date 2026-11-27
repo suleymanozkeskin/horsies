@@ -15,5 +15,11 @@
     "postgres": "3.4.9",
     "typescript": "7.0.2",
     "zod": "4.1.13"
+  },
+  "imports": {
+    "#horsies": {
+      "horsies-package": "./e2e/entry/package.ts",
+      "default": "./e2e/entry/source.ts"
+    }
   }
 }

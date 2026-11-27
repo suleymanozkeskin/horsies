@@ -9,15 +9,15 @@
 import assert from "node:assert/strict";
 import { describe } from "node:test";
 
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import { loadAddon } from "#horsies";
 import { DECLARED_CLASS_KEY, DECLARED_PERIOD_DAYS, MAPPED_CLASS_KEY } from "../src/instances.ts";
 import * as basic from "../src/tasks/basic.ts";
 import { sentHandle } from "../support/outcome.ts";
 import { pollUntil, sqlText } from "../support/rows.ts";
 import { e2eTest, type Suite } from "../support/suite.ts";
 
-// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
-void requireDevAddon();
+// The addon of these tests is the one that the entry of the lane loads (`entry/`).
+void loadAddon();
 
 /** The longest wait for the end of a task and for the registration of a class. */
 const WAIT_MS = 60_000;

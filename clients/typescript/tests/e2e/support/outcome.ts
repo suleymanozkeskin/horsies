@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 
-import type { JsonValue, ReadError, TaskError, TaskHandle, TaskInfo, TaskOutcome, TaskSendError } from "../../../horsies/src/index.ts";
+import type { JsonValue, ReadError, TaskError, TaskHandle, TaskInfo, TaskOutcome, TaskSendError } from "#horsies";
 import type { Result } from "../../../horsies/src/wire/result.ts";
 import { pause } from "./process.ts";
 

@@ -884,6 +884,11 @@ jobs:
       - name: Build the dev addon
         run: bun run --cwd clients/typescript/bridge build:dev
 
+      # The generated index.d.ts that the build writes, type-checked against
+      # the declarations of tests/native-declarations.
+      - name: Check the declarations of the dev addon
+        run: bun run --cwd clients/typescript/bridge check:declarations
+
       - name: Upload the dev addon
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -944,9 +949,14 @@ jobs:
       - name: Test the codegen crate
         run: cargo test -p horsies-typescript-codegen
 
-  # The end-to-end layers of the TypeScript client on Node and on Bun, with
-  # the dev addon of typescript-addon and PostgreSQL 18. The runner
-  # (tests/e2e/run.ts) runs each layer file under its watchdog.
+  # The end-to-end layers of the TypeScript client on Node and on Bun, through
+  # the built package: the job builds `horsies` (tsconfig.build.json) and the
+  # platform package, installs both into the workspace's node_modules
+  # (tests/e2e/install-built-package.ts), and the layers import `horsies`
+  # through its `exports` map (HORSIES_E2E_ENTRY=package; the published loader
+  # reads no addon path variable). The addon file is the dev addon of
+  # typescript-addon, because the layers use its test exports. PostgreSQL 18.
+  # The runner (tests/e2e/run.ts) runs each layer file under its watchdog.
   typescript-e2e:
     name: typescript-e2e (${{ matrix.runtime }})
     needs: [scope, typescript-addon]
@@ -961,7 +971,7 @@ jobs:
         runtime: [node, bun]
     env:
       HORSIES_TEST_DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
-      HORSIES_NATIVE_ADDON_PATH: ${{ github.workspace }}/clients/typescript/bridge/horsies.linux-x64-gnu.node
+      HORSIES_E2E_ENTRY: package
     services:
       postgres:
         image: postgres:18
@@ -1000,6 +1010,10 @@ jobs:
         working-directory: clients/typescript
         run: bun install --frozen-lockfile
 
+      - name: Build and install the horsies package and the platform package
+        working-directory: clients/typescript
+        run: bun tests/e2e/install-built-package.ts --platform linux-x64-gnu --addon "$GITHUB_WORKSPACE/clients/typescript/bridge/horsies.linux-x64-gnu.node"
+
       - name: Run the end-to-end layers
         working-directory: clients/typescript
         env:
@@ -1008,6 +1022,149 @@ jobs:
         run: |
           ulimit -c 0
           bun tests/e2e/run.ts "$RUNTIME"
+
+  # The end-to-end layers through the PgBouncer fixture of the Python client
+  # (clients/python/tests/fixtures/pgbouncer/: PostgreSQL 18 on 15432, pools
+  # in transaction, session and statement mode), on Node and on Bun, with the
+  # built package as in typescript-e2e. The test server is the direct URL; the
+  # apps connect through the transaction pool
+  # (HORSIES_TEST_DATABASE_URL_TRANSACTION, tests/e2e/support/database.ts).
+  typescript-pgbouncer:
+    name: typescript-pgbouncer (${{ matrix.runtime }})
+    needs: [scope, typescript-addon]
+    if: needs.scope.outputs.run_typescript == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [node, bun]
+    env:
+      HORSIES_TEST_DATABASE_URL: postgresql://postgres:testpassword@localhost:15432/horsies
+      HORSIES_TEST_DATABASE_URL_TRANSACTION: postgresql://postgres:testpassword@localhost:16432/horsies
+      HORSIES_E2E_ENTRY: package
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.TYPESCRIPT_NODE_VERSION }}
+          package-manager-cache: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.TYPESCRIPT_BUN_VERSION }}
+
+      - name: Start PgBouncer fixture stack
+        run: docker compose -f clients/python/tests/fixtures/pgbouncer/compose.yaml up -d --wait
+
+      - name: Download the dev addon
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: typescript-dev-addon
+          path: clients/typescript/bridge
+
+      - name: Install the workspace from bun.lock
+        working-directory: clients/typescript
+        run: bun install --frozen-lockfile
+
+      - name: Build and install the horsies package and the platform package
+        working-directory: clients/typescript
+        run: bun tests/e2e/install-built-package.ts --platform linux-x64-gnu --addon "$GITHUB_WORKSPACE/clients/typescript/bridge/horsies.linux-x64-gnu.node"
+
+      - name: Run the end-to-end layers through the transaction pool
+        working-directory: clients/typescript
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        # No core file: on the Linux runner the kernel core handler holds each aborting child about 20 s.
+        run: |
+          ulimit -c 0
+          bun tests/e2e/run.ts "$RUNTIME"
+
+      - name: Stop PgBouncer fixture stack
+        if: always()
+        run: docker compose -f clients/python/tests/fixtures/pgbouncer/compose.yaml down -v
+
+  # The examples and the showcase on Node and on Bun, each run against a
+  # throwaway database of PostgreSQL 18: the demo of each example with a
+  # worker of its profile (ci/examples.sh), and the schedule test of the
+  # showcase (tests/scheduler.test.ts). Each process runs with the dev start
+  # module (examples/dev/source-package.ts) and the dev addon of
+  # typescript-addon.
+  typescript-examples:
+    name: typescript-examples (${{ matrix.runtime }})
+    needs: [scope, typescript-addon]
+    if: needs.scope.outputs.run_typescript == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [node, bun]
+    env:
+      HORSIES_NATIVE_ADDON_PATH: ${{ github.workspace }}/clients/typescript/bridge/horsies.linux-x64-gnu.node
+      EXAMPLES_DATABASE_SERVER: postgresql://postgres:testpassword@localhost:5432
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: horsies
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.TYPESCRIPT_NODE_VERSION }}
+          package-manager-cache: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.TYPESCRIPT_BUN_VERSION }}
+
+      - name: Download the dev addon
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: typescript-dev-addon
+          path: clients/typescript/bridge
+
+      - name: Install the workspace from bun.lock
+        working-directory: clients/typescript
+        run: bun install --frozen-lockfile
+
+      - name: Run the demo of each example
+        working-directory: clients/typescript
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: ci/examples.sh "$RUNTIME"
+
+      - name: Create the database of the showcase schedule test
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: docker exec "${{ job.services.postgres.id }}" psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE showcase_schedule_$RUNTIME"
+
+      - name: Run the schedule test of the showcase
+        working-directory: clients/typescript/examples/showcase
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+          ACME_DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/showcase_schedule_${{ matrix.runtime }}
+        run: scripts/test.sh "$RUNTIME" tests/scheduler.test.ts
 
   # The parity of the TypeScript client with the Python client
   # (crossclient/parity): the compare tests, then each scenario on the Python

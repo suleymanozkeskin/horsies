@@ -13,6 +13,7 @@ import { testOnlyNamesInBytes } from "./addon-exports.ts";
 import {
   binFileProblems,
   exportTargets,
+  SKILL_FOLDER,
   horsiesFileProblems,
   horsiesManifestProblems,
   lintFileProblems,
@@ -21,7 +22,7 @@ import {
   platformManifestProblems,
 } from "./content.ts";
 import type { PlatformExpectation, SkillFolder } from "./content.ts";
-import { glibcFloorProblems, glibcNeedsOf, readelfVersionInfo } from "./glibc-floor.ts";
+import { compareVersions, glibcFloorProblems, glibcNeedsOf, readelfVersionInfo } from "./glibc-floor.ts";
 import type { JsonObject } from "./manifest.ts";
 import type { PackedTarball } from "./npm-pack.ts";
 
@@ -160,4 +161,48 @@ export function lintProblems(tarball: PackedTarball, packageDir: string, version
   const manifest = unpackedManifest(packageDir);
 
   return [...lintFileProblems(tarball.files, exportTargets(manifest["exports"])), ...lintManifestProblems(manifest, version)];
+}
+
+/** The `horsies` tarball facts that the checks above verified, one log line. Pure. */
+export function horsiesFacts(tarball: PackedTarball): string {
+  const nodeFiles = tarball.files.filter((file) => file.endsWith(".node"));
+  const skillFiles = tarball.files.filter((file) => file.startsWith(`${SKILL_FOLDER}/`));
+  const present = (file: string): string => `${file} ${tarball.files.includes(file) ? "present" : "ABSENT"}`;
+
+  return `verified ${tarball.filename}: ${present("dist/index.d.ts")}; ${present("dist/zod.d.ts")}; ${String(nodeFiles.length)} .node files; ${String(skillFiles.length)} skill files`;
+}
+
+/** The highest `GLIBC_` version that `binaryFile` needs, as text, or why it is unknown. Effects: runs readelf. */
+function highestGlibcText(binaryFile: string): string {
+  const output = readelfVersionInfo(binaryFile);
+
+  if (!output.ok) {
+    return "unknown (readelf failed)";
+  }
+
+  const { numbered } = glibcNeedsOf(output.value);
+
+  if (numbered.length === 0) {
+    return "none";
+  }
+
+  return `GLIBC_${numbered.reduce((high, version) => (compareVersions(version, high) > 0 ? version : high)).join(".")}`;
+}
+
+/**
+ * The platform tarball facts that the checks above verified, one log line: the `.node` files, the `os`, `cpu` and
+ * `libc` fields, and for a glibc addon the highest `GLIBC_` version against its floor. Effects: reads the manifest;
+ * runs readelf for a glibc addon.
+ */
+export function platformFacts(tarball: PackedTarball, packageDir: string, expected: PlatformExpectation): string {
+  const manifest = unpackedManifest(packageDir);
+  const nodeFiles = tarball.files.filter((file) => file.endsWith(".node"));
+  const glibc = expected.libc.kind === "field" && expected.libc.value === "glibc";
+  const floor = expected.glibcFloor.kind === "floor" ? expected.glibcFloor.version.join(".") : "none";
+  const glibcText = glibc ? `; highest ${highestGlibcText(join(packageDir, expected.binary))}, floor ${floor}` : "";
+
+  return (
+    `verified ${tarball.filename}: .node files [${nodeFiles.join(", ")}]; os ${JSON.stringify(manifest["os"])}, ` +
+    `cpu ${JSON.stringify(manifest["cpu"])}, libc ${JSON.stringify(manifest["libc"] ?? null)}${glibcText}`
+  );
 }

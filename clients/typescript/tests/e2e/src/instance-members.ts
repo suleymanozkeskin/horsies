@@ -5,9 +5,9 @@
 
 import { isMainThread } from "node:worker_threads";
 
-import type { AnyWorkflowContract, Horsies, HorsiesConfig } from "../../../horsies/src/index.ts";
+import type { AnyWorkflowContract, Horsies, HorsiesConfig } from "#horsies";
 import { entryThread } from "./entry-thread.ts";
-import { registerHandlers } from "./handlers.ts";
+import { registerFailingHandlerChildStart, registerHandlers } from "./handlers.ts";
 import type { DefaultTaskInstance, Instance } from "./instances.ts";
 import { INVALID_RULE_SECTION, SCHEDULER_SECTION, UNLISTED_TASK_SECTION } from "./tasks/scheduled.ts";
 import { endedSpansFlow } from "./tasks/ended-spans.ts";
@@ -55,6 +55,12 @@ async function installSeatSpanLinesSdk(): Promise<void> {
 export function addInstanceMembers(app: Horsies, instance: DefaultTaskInstance): void {
   switch (instance) {
     case "handlers":
+      registerHandlers(app);
+
+      return;
+    case "handler_hook_throws":
+    case "handler_hook_past_bound":
+      registerFailingHandlerChildStart(app, instance);
       registerHandlers(app);
 
       return;
@@ -107,6 +113,8 @@ export function instanceSchedule(instance: Instance): Pick<HorsiesConfig, "sched
     case "hook_past_bound":
     case "thread_profiles":
     case "handlers":
+    case "handler_hook_throws":
+    case "handler_hook_past_bound":
     case "worker_ended_spans":
       return {};
   }
@@ -135,6 +143,8 @@ export function instanceWorkflows(instance: Instance): readonly AnyWorkflowContr
     case "scheduler_invalid_rules":
     case "scheduler_invalid_task":
     case "handlers":
+    case "handler_hook_throws":
+    case "handler_hook_past_bound":
       return [];
   }
 }

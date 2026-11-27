@@ -6,7 +6,7 @@
 
 import assert from "node:assert/strict";
 
-import { TaskId, WorkflowId } from "../../../horsies/src/index.ts";
+import { TaskId, WorkflowId } from "#horsies";
 import { POLL_INTERVAL_MS, pause } from "./process.ts";
 import { MICROS, pollUntil, type RowTime, rowTime, setTime, sqlText, type TaskRows } from "./rows.ts";
 
