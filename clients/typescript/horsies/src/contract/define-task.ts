@@ -46,13 +46,13 @@ export type RetryPolicy<E extends string> =
       readonly maxRetries: number;
       readonly jitter?: boolean;
       readonly maxDelaySeconds?: number;
-      readonly autoRetryFor: RetryCodes<E>;
+      readonly retryFor: RetryCodes<E>;
     }
   | {
       readonly kind: "fixed";
       readonly intervalsSeconds: NonEmpty<number>;
       readonly jitter?: boolean;
-      readonly autoRetryFor: RetryCodes<E>;
+      readonly retryFor: RetryCodes<E>;
     };
 
 /**

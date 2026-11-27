@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, test } from "node:test";
 
+import * as otel from "@opentelemetry/api";
 import { type DataPoint, DataPointType, type Histogram, type MetricData, type ResourceMetrics } from "@opentelemetry/sdk-metrics";
 
 import { TASK_SEND_DURATION_BUCKET_BOUNDS_SECONDS } from "../../../../horsies/src/_catalog/producer_metrics.ts";
@@ -85,6 +86,11 @@ describe("the producer metrics", () => {
       durations.map((point) => [point.attributes, point.value.count]),
       [[{ "horsies.queue": "default" }, 1]],
     );
+  });
+
+  test("horsies.task.sent counts in whole numbers: the value type INT, as the Rust and Python clients", async () => {
+    assert.equal((await sendTask(contextOf({}, false), report, { n: 1 }, {})).ok, true);
+    assert.equal(metricOf(await sdk.metrics(), "horsies.task.sent")?.descriptor.valueType, otel.ValueType.INT);
   });
 
   test("a failed send has its code as the result, and the resends of one call are one point", async () => {

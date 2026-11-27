@@ -219,7 +219,7 @@ describe("child mode", () => {
 
 describe("the body facts of a child", () => {
   test("OpenTelemetry tracing records the facts of each run; no tracing records none", () => {
-    assert.equal(bodyFactsMode({ kind: "otel", parentage: "linkedToSend", workerEndedSpans: "noSpans" }), "SPANS");
-    assert.equal(bodyFactsMode({ kind: "none" }), "NO_SCOPE");
+    assert.equal(bodyFactsMode({ kind: "otelTracing", parentage: "linkedToSend", workerEndedSpans: "noSpans" }), "SPANS");
+    assert.equal(bodyFactsMode({ kind: "noTracing" }), "NO_SCOPE");
   });
 });

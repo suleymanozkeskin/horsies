@@ -34,9 +34,12 @@ pub struct StopSignal {
 impl StopSignal {
     /// A signal that calls `request` at each stop request. `request` must be
     /// idempotent and must return at once: it runs on the JavaScript thread.
-    #[allow(
-        dead_code,
-        reason = "the worker and scheduler areas build the signal of their runs"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the worker and scheduler areas build the signal of their runs"
+        )
     )]
     pub fn new<F>(request: F) -> Self
     where
@@ -48,9 +51,12 @@ impl StopSignal {
     }
 
     /// Ask the run to stop.
-    #[allow(
-        dead_code,
-        reason = "the requestStop exports of the worker and scheduler areas call it"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the requestStop exports of the worker and scheduler areas call it"
+        )
     )]
     pub fn request(&self) {
         (self.request)();
@@ -63,10 +69,6 @@ impl StopSignal {
 ///
 /// Failure exits: the `napi::Error` of a deferred that Node-API cannot
 /// create. Every other end is an envelope.
-#[allow(
-    dead_code,
-    reason = "the run exports of the scheduler and facades areas call it"
-)]
 pub fn spawn_service_run<'env, T, Build, Run>(
     env: &'env Env,
     subject: &'static str,

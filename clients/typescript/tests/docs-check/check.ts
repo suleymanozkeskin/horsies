@@ -19,14 +19,15 @@ import { type BlockProblem, fileProblems, type ProgramFile, programFiles } from 
 const CONSUMER_PROJECT = `${TESTS_DIR}types/consumer/tsconfig.json`;
 
 /**
- * The types that the blocks see besides the package's own: Node's. A block is the code of a user's project on Node 26
- * or Bun 1.4, and the package itself uses the Node API only (`horsies/tsconfig.json`).
+ * The types that the blocks see besides the package's own: Node's and Bun's. A block is the code of a user's project on
+ * Node 26 or Bun 1.4 (a block can call `Bun.serve`), and the package itself uses the Node API only
+ * (`horsies/tsconfig.json`).
  */
-const BLOCK_TYPES: readonly string[] = ["node"];
+const BLOCK_TYPES: readonly string[] = ["node", "bun"];
 
 /**
  * The packages that a block can import besides `horsies`: the optional peers of the package (the versions of the
- * tests workspace) and the types of `pg` and of Node. Each one is its folder name in `node_modules` and its folder.
+ * tests workspace) and the types of `pg`, of Node and of Bun. Each one is its folder name in `node_modules` and its folder.
  */
 const BLOCK_PACKAGES: readonly (readonly [string, string])[] = [
   ["zod", `${TESTS_DIR}node_modules/zod`],
@@ -34,6 +35,7 @@ const BLOCK_PACKAGES: readonly (readonly [string, string])[] = [
   ["postgres", `${TESTS_DIR}node_modules/postgres`],
   ["@types/pg", `${TESTS_DIR}node_modules/@types/pg`],
   ["@types/node", `${WORKSPACE_DIR}node_modules/@types/node`],
+  ["@types/bun", `${WORKSPACE_DIR}node_modules/@types/bun`],
 ];
 
 /** A block that does not compile: its page, its fence line, its kind and its reason. */

@@ -82,6 +82,7 @@ describe("the seat pool with worker threads", () => {
       settle: (runKey, _taskName, outcome) => {
         settles.outcomes.set(runKey, outcome);
       },
+      isolateEnded: () => undefined,
       serve: async () => assert.fail("the fixture runs no operation here"),
       endChild: (code) => settles.ends.push(code),
       writeLine: (line) => settles.lines.push(line),

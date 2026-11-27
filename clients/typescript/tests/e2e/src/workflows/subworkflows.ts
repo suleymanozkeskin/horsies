@@ -55,19 +55,19 @@ function layer7(name: string): ReturnType<typeof named> {
 }
 
 /** One child that completes. */
-export const successSurface = defineWorkflow({ ...layer7("success_surface"), params: {}, output: h.int() }, (w) => ({
+export const successSurface = defineWorkflow({ ...layer7("success_surface"), parameters: {}, outputType: h.int() }, (w) => ({
   output: w.subWorkflow(subOk, {}, node("e2e_sub_success_child")),
 }));
 
 /** One child that fails; a failure fails the workflow. */
 export const failureFailPolicy = defineWorkflow(
-  { ...layer7("failure_fail_policy"), params: {}, output: h.int(), onError: "fail" },
+  { ...layer7("failure_fail_policy"), parameters: {}, outputType: h.int(), onError: "fail" },
   (w) => ({ output: w.subWorkflow(subFail, {}, node("e2e_sub_failure_child")) }),
 );
 
 /** One child that fails; a failure pauses the workflow. */
 export const failurePausePolicy = defineWorkflow(
-  { ...layer7("failure_pause_policy"), params: {}, output: h.int(), onError: "pause" },
+  { ...layer7("failure_pause_policy"), parameters: {}, outputType: h.int(), onError: "pause" },
   (w) => ({ output: w.subWorkflow(subFail, {}, node("e2e_sub_pause_child")) }),
 );
 
@@ -75,7 +75,7 @@ export const failurePausePolicy = defineWorkflow(
 export const SUCCESS_CTX_CHILD = "e2e_sub_success_ctx_child";
 
 /** A child that completes, then a probe that reads it from its context. */
-export const successContextProbe = defineWorkflow({ ...layer7("success_context_probe"), params: {}, output: CompletedChildProbe }, (w) => {
+export const successContextProbe = defineWorkflow({ ...layer7("success_context_probe"), parameters: {}, outputType: CompletedChildProbe }, (w) => {
   const child = w.subWorkflow(subOk, {}, node(SUCCESS_CTX_CHILD));
 
   return {
@@ -88,7 +88,7 @@ export const FAILURE_PROBE_CHILD = "e2e_sub_failure_probe_child";
 
 /** A child that fails, then a probe that gets it as a parameter and from its context; the policy requires the probe. */
 export const failureArgsContextProbe = defineWorkflow(
-  { ...layer7("failure_args_context_probe"), params: {}, output: FailedChildProbe },
+  { ...layer7("failure_args_context_probe"), parameters: {}, outputType: FailedChildProbe },
   (w) => {
     const child = w.subWorkflow(subFail, {}, node(FAILURE_PROBE_CHILD));
 
@@ -103,7 +103,7 @@ export const failureArgsContextProbe = defineWorkflow(
 );
 
 /** A required task and an optional child that fails. */
-export const optionalFailedChild = defineWorkflow({ ...layer7("optional_failed_child"), params: {}, output: h.string() }, (w) => {
+export const optionalFailedChild = defineWorkflow({ ...layer7("optional_failed_child"), parameters: {}, outputType: h.string() }, (w) => {
   const required = w.task(mark, { value: "required_ok" }, node("e2e_sub_outputless_ok"));
   const optional = w.subWorkflow(subFail, {}, node("e2e_sub_outputless_fail_child"));
 
@@ -111,7 +111,7 @@ export const optionalFailedChild = defineWorkflow({ ...layer7("optional_failed_c
 });
 
 /** Two children side by side: one completes and is required, one fails and is optional. */
-export const parallelChildren = defineWorkflow({ ...layer7("parallel_children"), params: {}, output: h.int() }, (w) => {
+export const parallelChildren = defineWorkflow({ ...layer7("parallel_children"), parameters: {}, outputType: h.int() }, (w) => {
   const ok = w.subWorkflow(subOk, {}, node("e2e_sub_parallel_ok_child"));
   const failing = w.subWorkflow(subFail, {}, node("e2e_sub_parallel_fail_child"));
 
@@ -119,17 +119,17 @@ export const parallelChildren = defineWorkflow({ ...layer7("parallel_children"),
 });
 
 /** A child whose own child completes. */
-export const nestedSuccess = defineWorkflow({ ...layer7("nested_success"), params: {}, output: h.int() }, (w) => ({
+export const nestedSuccess = defineWorkflow({ ...layer7("nested_success"), parameters: {}, outputType: h.int() }, (w) => ({
   output: w.subWorkflow(subNestedOkMiddle, {}, node("e2e_sub_nested_success_child")),
 }));
 
 /** A child whose own child fails. */
-export const nestedFailure = defineWorkflow({ ...layer7("nested_failure"), params: {}, output: h.int() }, (w) => ({
+export const nestedFailure = defineWorkflow({ ...layer7("nested_failure"), parameters: {}, outputType: h.int() }, (w) => ({
   output: w.subWorkflow(subNestedFailMiddle, {}, node("e2e_sub_nested_failure_child")),
 }));
 
 /** A task that gives `UPSTREAM_VALUE`, then a child whose build gets that result. */
-export const childFromUpstream = defineWorkflow({ ...layer7("child_from_upstream"), params: {}, output: h.int() }, (w) => {
+export const childFromUpstream = defineWorkflow({ ...layer7("child_from_upstream"), parameters: {}, outputType: h.int() }, (w) => {
   const source = w.task(produceInt, { value: UPSTREAM_VALUE }, node("e2e_sub_param_source"));
 
   return { output: w.subWorkflow(subParam, { value: source }, node("e2e_sub_param_child")) };
@@ -137,7 +137,7 @@ export const childFromUpstream = defineWorkflow({ ...layer7("child_from_upstream
 
 /** A task that fails, then a child that allows failed dependencies and whose build gets the failure. */
 export const childFromFailedUpstream = defineWorkflow(
-  { ...layer7("child_from_failed_upstream"), params: {}, output: UpstreamSeen },
+  { ...layer7("child_from_failed_upstream"), parameters: {}, outputType: UpstreamSeen },
   (w) => {
     const source = w.task(failWith, { errorCode: "E2E_UPSTREAM_FAIL" }, node("e2e_sub_failed_input_source"));
     const child = w.subWorkflow(subFailedInput, { value: source }, node("e2e_sub_failed_input_child", { runsAfterFailure: true }));
@@ -147,12 +147,12 @@ export const childFromFailedUpstream = defineWorkflow(
 );
 
 /** A child whose static param is a tagged union value: the dog Ada. */
-export const childWithTypedParam = defineWorkflow({ ...layer7("child_with_typed_param"), params: {}, output: PetSeen }, (w) => ({
+export const childWithTypedParam = defineWorkflow({ ...layer7("child_with_typed_param"), parameters: {}, outputType: PetSeen }, (w) => ({
   output: w.subWorkflow(subTypedKwarg, { pet: { kind: "dog", name: "Ada", barkVolume: 7 } }, node("e2e_sub_typed_kwarg_child")),
 }));
 
 /** A fast and a slow task; the child joins on any of them. */
-export const anyJoinFirstSuccess = defineWorkflow({ ...layer7("any_join_first_success"), params: {}, output: h.int() }, (w) => {
+export const anyJoinFirstSuccess = defineWorkflow({ ...layer7("any_join_first_success"), parameters: {}, outputType: h.int() }, (w) => {
   const fast = w.task(mark, { value: "fast" }, node("l7_any_fast_success"));
   const slow = w.task(slowMark, { value: "slow", delayMs: SLOW_NODE_MS }, node("l7_any_slow_success"));
 
@@ -160,7 +160,7 @@ export const anyJoinFirstSuccess = defineWorkflow({ ...layer7("any_join_first_su
 });
 
 /** Two tasks that fail; the child joins on any of them. */
-export const anyJoinAllFailChild = defineWorkflow({ ...layer7("any_join_all_fail_child"), params: {}, output: h.int() }, (w) => {
+export const anyJoinAllFailChild = defineWorkflow({ ...layer7("any_join_all_fail_child"), parameters: {}, outputType: h.int() }, (w) => {
   const a = w.task(fail, {}, node("l7_any_fail_a"));
   const b = w.task(fail, {}, node("l7_any_fail_b"));
 
@@ -168,7 +168,7 @@ export const anyJoinAllFailChild = defineWorkflow({ ...layer7("any_join_all_fail
 });
 
 /** Two tasks that complete and one that fails; the child needs two to succeed; the failure is optional. */
-export const quorumMetChild = defineWorkflow({ ...layer7("quorum_met_child"), params: {}, output: h.int() }, (w) => {
+export const quorumMetChild = defineWorkflow({ ...layer7("quorum_met_child"), parameters: {}, outputType: h.int() }, (w) => {
   const a = w.task(mark, { value: "A" }, node("l7_quorum_met_a"));
   const b = w.task(mark, { value: "B" }, node("l7_quorum_met_b"));
   const c = w.task(failWith, { errorCode: "OPTIONAL_FAIL" }, node("l7_quorum_met_c_fail"));
@@ -178,7 +178,7 @@ export const quorumMetChild = defineWorkflow({ ...layer7("quorum_met_child"), pa
 });
 
 /** One task that completes and two that fail; the child needs two to succeed. */
-export const quorumUnmetChild = defineWorkflow({ ...layer7("quorum_unmet_child"), params: {}, output: h.int() }, (w) => {
+export const quorumUnmetChild = defineWorkflow({ ...layer7("quorum_unmet_child"), parameters: {}, outputType: h.int() }, (w) => {
   const a = w.task(mark, { value: "A" }, node("l7_quorum_unmet_a"));
   const b = w.task(fail, {}, node("l7_quorum_unmet_b"));
   const c = w.task(fail, {}, node("l7_quorum_unmet_c"));
@@ -189,7 +189,7 @@ export const quorumUnmetChild = defineWorkflow({ ...layer7("quorum_unmet_child")
 });
 
 /** Two tasks that fail and a slow one; the child needs two to succeed, which the failures make impossible. */
-export const quorumImpossibleChild = defineWorkflow({ ...layer7("quorum_impossible_child"), params: {}, output: h.int() }, (w) => {
+export const quorumImpossibleChild = defineWorkflow({ ...layer7("quorum_impossible_child"), parameters: {}, outputType: h.int() }, (w) => {
   const a = w.task(fail, {}, node("l7_quorum_impossible_a"));
   const b = w.task(fail, {}, node("l7_quorum_impossible_b"));
   const c = w.task(slowMark, { value: "slow_c", delayMs: SLOW_NODE_MS }, node("l7_quorum_impossible_slow_c"));
@@ -199,21 +199,21 @@ export const quorumImpossibleChild = defineWorkflow({ ...layer7("quorum_impossib
 });
 
 /** A task that fails, then a child after it. */
-export const taskFailSkipsChild = defineWorkflow({ ...layer7("task_fail_skips_child"), params: {}, output: h.int() }, (w) => {
+export const taskFailSkipsChild = defineWorkflow({ ...layer7("task_fail_skips_child"), parameters: {}, outputType: h.int() }, (w) => {
   const source = w.task(fail, {}, node("l7_skip_source_task"));
 
   return { output: w.subWorkflow(subOk, {}, node("l7_skip_sub_after_task_fail", { after: [source] })) };
 });
 
 /** A child that fails, then a task after it. */
-export const childFailSkipsTask = defineWorkflow({ ...layer7("child_fail_skips_task"), params: {}, output: h.string() }, (w) => {
+export const childFailSkipsTask = defineWorkflow({ ...layer7("child_fail_skips_task"), parameters: {}, outputType: h.string() }, (w) => {
   const child = w.subWorkflow(subFail, {}, node("l7_skip_failed_sub"));
 
   return { output: w.task(mark, { value: "should_skip" }, node("l7_skip_task_after_failed_sub", { after: [child] })) };
 });
 
 /** A task that fails, then a child, a task and a child, each after the one before. */
-export const skipChain = defineWorkflow({ ...layer7("skip_chain"), params: {}, output: h.int() }, (w) => {
+export const skipChain = defineWorkflow({ ...layer7("skip_chain"), parameters: {}, outputType: h.int() }, (w) => {
   const source = w.task(fail, {}, node("l7_chain_source_fail"));
   const first = w.subWorkflow(subOk, {}, node("l7_chain_first_sub_skipped", { after: [source] }));
   const middle = w.task(mark, { value: "middle" }, node("l7_chain_middle_task_skipped", { after: [first] }));
@@ -222,39 +222,39 @@ export const skipChain = defineWorkflow({ ...layer7("skip_chain"), params: {}, o
 });
 
 /** One slow child, for the cancel of a running child. */
-export const cancelRunningChild = defineWorkflow({ ...layer7("cancel_running_child"), params: {}, output: h.string() }, (w) => ({
+export const cancelRunningChild = defineWorkflow({ ...layer7("cancel_running_child"), parameters: {}, outputType: h.string() }, (w) => ({
   output: w.subWorkflow(subSlow, SLOW_CHILDREN.cancel, node("l7_cancel_running_child")),
 }));
 
 /** A slow gate, then a child after it. */
-export const cancelBeforeChildStart = defineWorkflow({ ...layer7("cancel_before_child_start"), params: {}, output: h.int() }, (w) => {
+export const cancelBeforeChildStart = defineWorkflow({ ...layer7("cancel_before_child_start"), parameters: {}, outputType: h.int() }, (w) => {
   const gate = w.task(slowMark, { value: "gate", delayMs: CANCEL_GATE_MS }, node("l7_cancel_before_start_gate"));
 
   return { output: w.subWorkflow(subOk, {}, node("l7_cancel_before_start_child", { after: [gate] })) };
 });
 
 /** A child whose own child is slow. */
-export const cancelNestedChild = defineWorkflow({ ...layer7("cancel_nested_child"), params: {}, output: h.string() }, (w) => ({
+export const cancelNestedChild = defineWorkflow({ ...layer7("cancel_nested_child"), parameters: {}, outputType: h.string() }, (w) => ({
   output: w.subWorkflow(subNestedSlowMiddle, {}, node("l7_cancel_nested_middle")),
 }));
 
 /** One slow child, for the pause of a running child. */
-export const pauseRunningChild = defineWorkflow({ ...layer7("pause_running_child"), params: {}, output: h.string() }, (w) => ({
+export const pauseRunningChild = defineWorkflow({ ...layer7("pause_running_child"), parameters: {}, outputType: h.string() }, (w) => ({
   output: w.subWorkflow(subSlow, SLOW_CHILDREN.pause, node("l7_pause_running_child")),
 }));
 
 /** One slow child, for a pause and a resume. */
-export const pauseResumeChild = defineWorkflow({ ...layer7("pause_resume_child"), params: {}, output: h.string() }, (w) => ({
+export const pauseResumeChild = defineWorkflow({ ...layer7("pause_resume_child"), parameters: {}, outputType: h.string() }, (w) => ({
   output: w.subWorkflow(subSlow, SLOW_CHILDREN.resume, node("l7_pause_resume_child")),
 }));
 
 /** One slow child, for a pause and a cancel. */
-export const pauseCancelChild = defineWorkflow({ ...layer7("pause_cancel_child"), params: {}, output: h.string() }, (w) => ({
+export const pauseCancelChild = defineWorkflow({ ...layer7("pause_cancel_child"), parameters: {}, outputType: h.string() }, (w) => ({
   output: w.subWorkflow(subSlow, SLOW_CHILDREN.pauseThenCancel, node("l7_pause_then_cancel_child")),
 }));
 
 /** A gate of `RECOVERY_GATE_MS`, then a child after it. */
-export const readyChildRecovery = defineWorkflow({ ...layer7("ready_child_recovery"), params: {}, output: h.int() }, (w) => {
+export const readyChildRecovery = defineWorkflow({ ...layer7("ready_child_recovery"), parameters: {}, outputType: h.int() }, (w) => {
   const gate = w.task(slowMark, { value: "gate", delayMs: RECOVERY_GATE_MS }, node("l7_recovery_ready_gate"));
 
   return { output: w.subWorkflow(subOk, {}, node("l7_recovery_ready_child", { after: [gate] })) };
@@ -264,8 +264,8 @@ export const readyChildRecovery = defineWorkflow({ ...layer7("ready_child_recove
 export const childRetries = defineWorkflow(
   {
     ...layer7("child_retries"),
-    params: { token: h.string(), succeedOnAttempt: h.int() },
-    output: h.string(),
+    parameters: { token: h.string(), succeedOnAttempt: h.int() },
+    outputType: h.string(),
     checkCases: [{ token: "check", succeedOnAttempt: 1 }],
   },
   (w, params) => ({ output: w.subWorkflow(subRetry, params, node("l7_retry_child")) }),
@@ -273,19 +273,19 @@ export const childRetries = defineWorkflow(
 
 /** One child whose node's task expires at `goodUntil`. */
 export const expiringChild = defineWorkflow(
-  { ...layer7("expiring_child"), params: { goodUntil: h.instant() }, output: h.string(), checkCases: [{ goodUntil: CHECK_DEADLINE }] },
+  { ...layer7("expiring_child"), parameters: { goodUntil: h.instant() }, outputType: h.string(), checkCases: [{ goodUntil: CHECK_DEADLINE }] },
   (w, params) => ({ output: w.subWorkflow(subExpiring, params, node("l7_good_until_expired_child")) }),
 );
 
 /** One child that fails, which the policy requires. */
-export const requiredFailedChild = defineWorkflow({ ...layer7("required_failed_child"), params: {}, output: h.int() }, (w) => {
+export const requiredFailedChild = defineWorkflow({ ...layer7("required_failed_child"), parameters: {}, outputType: h.int() }, (w) => {
   const child = w.subWorkflow(subFail, {}, node("l7_policy_required_fail_child"));
 
   return { output: child, successPolicy: { cases: [{ required: [child] }] } };
 });
 
 /** The first case requires a child that fails; the second a child that completes. */
-export const policyCaseChildren = defineWorkflow({ ...layer7("policy_case_children"), params: {}, output: h.int() }, (w) => {
+export const policyCaseChildren = defineWorkflow({ ...layer7("policy_case_children"), parameters: {}, outputType: h.int() }, (w) => {
   const failing = w.subWorkflow(subFail, {}, node("l7_policy_case_fail_sub"));
   const ok = w.subWorkflow(subOk, {}, node("l7_policy_case_ok_sub"));
 
@@ -293,7 +293,7 @@ export const policyCaseChildren = defineWorkflow({ ...layer7("policy_case_childr
 });
 
 /** A required child and a required task; an optional child that fails. */
-export const mixedRequiredOptional = defineWorkflow({ ...layer7("mixed_required_optional"), params: {}, output: h.string() }, (w) => {
+export const mixedRequiredOptional = defineWorkflow({ ...layer7("mixed_required_optional"), parameters: {}, outputType: h.string() }, (w) => {
   const requiredChild = w.subWorkflow(subOk, {}, node("l7_policy_mixed_required_sub"));
   const requiredTask = w.task(mark, { value: "task_ok" }, node("l7_policy_mixed_required_task"));
   const optionalChild = w.subWorkflow(subFail, {}, node("l7_policy_mixed_optional_sub"));
@@ -305,7 +305,7 @@ export const mixedRequiredOptional = defineWorkflow({ ...layer7("mixed_required_
 });
 
 /** A required task, and an optional child whose own child fails. */
-export const deepOptionalFailure = defineWorkflow({ ...layer7("deep_optional_failure"), params: {}, output: h.string() }, (w) => {
+export const deepOptionalFailure = defineWorkflow({ ...layer7("deep_optional_failure"), parameters: {}, outputType: h.string() }, (w) => {
   const required = w.task(mark, { value: "required_ok" }, node("l7_deep_outputless_required"));
   const nested = w.subWorkflow(subNestedFailMiddle, {}, node("l7_deep_outputless_nested_fail"));
 
@@ -313,7 +313,7 @@ export const deepOptionalFailure = defineWorkflow({ ...layer7("deep_optional_fai
 });
 
 /** Two required children that fail: one directly, one through its own child. */
-export const deepRequiredFailures = defineWorkflow({ ...layer7("deep_required_failures"), params: {}, output: h.int() }, (w) => {
+export const deepRequiredFailures = defineWorkflow({ ...layer7("deep_required_failures"), parameters: {}, outputType: h.int() }, (w) => {
   const direct = w.subWorkflow(subFail, {}, node("l7_deep_all_failed_a"));
   const nested = w.subWorkflow(subNestedFailMiddle, {}, node("l7_deep_all_failed_b"));
 
@@ -324,7 +324,7 @@ export const deepRequiredFailures = defineWorkflow({ ...layer7("deep_required_fa
  * A child that completes; a task that fails and a child after it that allows failed dependencies; an optional child
  * whose own child fails. The policy requires the completed child and the child after the failed task.
  */
-export const deepMixedPaths = defineWorkflow({ ...layer7("deep_mixed_paths"), params: {}, output: h.int() }, (w) => {
+export const deepMixedPaths = defineWorkflow({ ...layer7("deep_mixed_paths"), parameters: {}, outputType: h.int() }, (w) => {
   const ok = w.subWorkflow(subOk, {}, node("l7_deep_mixed_ok_sub"));
   const source = w.task(failWith, { errorCode: "E2E_UPSTREAM_FAIL" }, node("l7_deep_mixed_failed_source"));
   const afterFailure = w.subWorkflow(subFailedInput, { value: source }, node("l7_deep_mixed_allow_failed_sub", { runsAfterFailure: true }));
@@ -334,6 +334,40 @@ export const deepMixedPaths = defineWorkflow({ ...layer7("deep_mixed_paths"), pa
     output: ok,
     successPolicy: { cases: [{ required: [ok, afterFailure] }], optional: [source, nested] },
   };
+});
+
+/** A required task and an optional child that fails; no output node, so `get` reads the outcome of each terminal node. */
+export const outputlessOptionalFailedChild = defineWorkflow({ ...layer7("outputless_optional_failed_child"), parameters: {} }, (w) => {
+  const required = w.task(mark, { value: "required_ok" }, node("e2e_sub_outputless_ok"));
+  const optional = w.subWorkflow(subFail, {}, node("e2e_sub_outputless_fail_child"));
+
+  return { successPolicy: { cases: [{ required: [required] }], optional: [optional] } };
+});
+
+/** A required task, and an optional child whose own child fails; no output node. */
+export const outputlessDeepOptionalFailure = defineWorkflow({ ...layer7("outputless_deep_optional_failure"), parameters: {} }, (w) => {
+  const required = w.task(mark, { value: "required_ok" }, node("l7_deep_outputless_required"));
+  const nested = w.subWorkflow(subNestedFailMiddle, {}, node("l7_deep_outputless_nested_fail"));
+
+  return { successPolicy: { cases: [{ required: [required] }], optional: [nested] } };
+});
+
+/** Two required children that fail: one directly, one through its own child; no output node. */
+export const outputlessDeepRequiredFailures = defineWorkflow({ ...layer7("outputless_deep_required_failures"), parameters: {} }, (w) => {
+  const direct = w.subWorkflow(subFail, {}, node("l7_deep_all_failed_a"));
+  const nested = w.subWorkflow(subNestedFailMiddle, {}, node("l7_deep_all_failed_b"));
+
+  return { successPolicy: { cases: [{ required: [direct, nested] }] } };
+});
+
+/** The paths of `deepMixedPaths`, with no output node: the terminal nodes are the two required children and the optional nested child. */
+export const outputlessDeepMixedPaths = defineWorkflow({ ...layer7("outputless_deep_mixed_paths"), parameters: {} }, (w) => {
+  const ok = w.subWorkflow(subOk, {}, node("l7_deep_mixed_ok_sub"));
+  const source = w.task(failWith, { errorCode: "E2E_UPSTREAM_FAIL" }, node("l7_deep_mixed_failed_source"));
+  const afterFailure = w.subWorkflow(subFailedInput, { value: source }, node("l7_deep_mixed_allow_failed_sub", { runsAfterFailure: true }));
+  const nested = w.subWorkflow(subNestedFailMiddle, {}, node("l7_deep_mixed_nested_optional_fail"));
+
+  return { successPolicy: { cases: [{ required: [ok, afterFailure] }], optional: [source, nested] } };
 });
 
 /** The workflows of this module. */
@@ -373,4 +407,8 @@ export const SUBWORKFLOW_PARENTS = [
   deepOptionalFailure,
   deepRequiredFailures,
   deepMixedPaths,
+  outputlessOptionalFailedChild,
+  outputlessDeepOptionalFailure,
+  outputlessDeepRequiredFailures,
+  outputlessDeepMixedPaths,
 ] as const;

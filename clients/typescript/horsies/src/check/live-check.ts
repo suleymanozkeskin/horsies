@@ -6,7 +6,7 @@ import { ErrorCode } from "../_catalog/error_codes.ts";
 import { raiseDefect } from "../native/call/defect.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import { refusalOfCore } from "../app/core-checks.ts";
-import { refusal, type Refusal } from "../app/refusal.ts";
+import { refusal, type HorsiesError } from "../app/refusal.ts";
 import type { LiveCheckOutcome } from "../native/worker/addon.ts";
 import { unreachable } from "../native/call/never.ts";
 import { type CheckOutcome, type CheckPassed, checkReport } from "./report.ts";
@@ -36,19 +36,19 @@ export function liveCheckOutcome(passed: CheckPassed, live: LiveCheckOutcome): C
   }
 }
 
-function refusedWith(first: Refusal, ...rest: readonly Refusal[]): CheckOutcome {
+function refusedWith(first: HorsiesError, ...rest: readonly HorsiesError[]): CheckOutcome {
   return { kind: "refused", report: checkReport("check", first, rest) };
 }
 
 /** A connect or a `SELECT 1` that failed (Python `_check_broker_connectivity`). Pure. */
-function connectivityRefusal(cause: string): Refusal {
+function connectivityRefusal(cause: string): HorsiesError {
   return refusal(ErrorCode.BROKER_INVALID_URL, BROKER_PATH, `broker connectivity check failed; ${cause}`, [
     "check broker.databaseUrl in Horsies.create",
   ]);
 }
 
 /** A session URL that delivers no NOTIFY to a LISTEN in PgBouncer transaction mode (Python `_run_listener_probe`). Pure. */
-function listenerRefusal(cause: string): Refusal {
+function listenerRefusal(cause: string): HorsiesError {
   return refusal(
     ErrorCode.BROKER_INVALID_URL,
     BROKER_PATH,

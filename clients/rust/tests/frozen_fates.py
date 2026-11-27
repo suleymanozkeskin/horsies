@@ -88,7 +88,6 @@ RENAMED: Final[dict[str, str]] = {
     'precedence_and_registrable_classes_are_exact': 'core::config::retention::tests::precedence_sendable_and_registrable_periods_are_exact',
     'command_union_carries_exactly_the_seven_variants': 'core::history::commands::tests::command_union_carries_exactly_the_six_variants',
     'partition_commands_reject_empty_health_class_and_invalid_timeouts': 'core::history::tests::partition_commands_reject_invalid_timeouts',
-    'open_ended_start_and_predicate_render_one_pinned_text': 'core::history::partitions::catalog::open_ended_leaf_sql_tests::open_ended_predicate_renders_one_pinned_text',
     'manifest_excludes_absent_probes_but_birth_floor_keeps_the_complete_attached_set': 'core::history::partitions::tests::manifest_excludes_absent_probes_and_keeps_the_complete_attached_set',
     'guard_probe_set_is_standard_horizon_plus_the_open_ended_leaf': 'core::history::partitions::tests::guard_probe_set_is_standard_horizon_plus_the_static_forever_leaf',
     'busy_coverage_gate_refuses_startup_when_current_heartbeat_is_absent': 'core::history::partitions::tests::busy_coverage_gate_makes_startup_wait_when_current_heartbeat_is_absent',

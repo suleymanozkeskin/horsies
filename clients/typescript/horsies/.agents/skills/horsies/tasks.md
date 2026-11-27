@@ -23,7 +23,7 @@ export const validateOrder = defineTask({
     kind: "exponential",
     baseSeconds: 30,
     maxRetries: 5,
-    autoRetryFor: ["STOCK_SERVICE_DOWN", "WORKER_CRASHED"],
+    retryFor: ["STOCK_SERVICE_DOWN", "WORKER_CRASHED"],
   },
 });
 ```
@@ -110,6 +110,8 @@ value reads back to the same value.
 | `h.object({ ... })` | an object of the members | A JSON object in declaration order. An undeclared key is refused |
 | `h.array(item)` | `T[]` | A JSON array |
 | `h.tuple([a, b])` | `[A, B]` | A JSON array with one value per item type |
+| `h.tuple([a], rest)` | `[A, ...R[]]` | The items, then zero or more `rest` values; Python's `tuple[R, ...]` when `[]` |
+| `h.lazy(() => w)` | the value type of `w` | The stored form of `w`, for a recursive type (see below) |
 | `h.record(value)` | `Readonly<Record<string, T>>` | A JSON object in the value's own key order |
 | `h.union([a, b])` | `A \| B` | Primitive members, at most one per stored JSON type |
 | `h.union(tag, [objects])` | the member objects | Object members told apart by the string literal member `tag` |
@@ -120,6 +122,7 @@ value reads back to the same value.
 | `.optional()` | An object member or a parameter that a value may leave out. The key is left out of the stored text; it is never `null` |
 | `.nullable()` | `null` or the value |
 | `.default(value)` | A sender may leave the member out; a reader fills `value`. The sender never stores the default |
+| `.default(() => value)` | As `.default(value)`, but the reader calls the function at each read, so each read gets a new value (Python's `default_factory`). `Horsies.create` calls it once to check its value |
 
 ```ts
 import { Decimal } from "horsies";
@@ -174,6 +177,22 @@ export function totalText(text: string): string {
   order (integer-like keys first).
 - `Horsies.create` refuses `h.union` with `h.int()` and `h.float()`: one
   `number` cannot say which it is.
+- A recursive type refers to itself through `h.lazy`; give the constant its
+  type. Each cycle must pass an array or an object: `Horsies.create`
+  refuses a nullable or a union of itself. A value deeper than 200 levels
+  of arrays and objects is refused (`TooDeep`).
+
+```ts
+import type { Wire } from "horsies";
+
+type Category = { name: string; children: Category[] };
+
+export const CategoryTree: Wire<Category> = h.object({
+  name: h.string(),
+  children: h.array(h.lazy(() => CategoryTree)),
+});
+```
+
 - The published declarations carry the Temporal lib reference. A project
   with the default `lib` needs no lib setting for the `Temporal` types.
 
@@ -213,6 +232,10 @@ export const recordShipment = defineTask({
 
 - A body and a reader get zod's output type; a sender may leave out a
   member that zod marks `.optional()`, `.default()` or `.prefault()`.
+- `z.uuid()` is a string with zod's UUID check. It stores the text as given:
+  an upper-case UUID is stored in upper case. `h.uuid()` refuses a text that
+  is not in the lower-case 8-4-4-4-12 form. Use `h.uuid()` (or
+  `hz.wire(h.uuid())`) for the lower-case form.
 - The adapter refuses a zod form that has no stored form, with `HRS-105`:
   `z.any()`, `z.unknown()`; a one-way change (`.transform()`,
   `z.preprocess()`, `z.coerce.*()`, `.trim()`, `.toLowerCase()`);
@@ -221,9 +244,14 @@ export const recordShipment = defineTask({
   `z.map()`, `z.set()`, `z.function()`, `z.promise()`; a union with an
   object member that is not a discriminated union; a union of an integer
   and a float; `z.intersection()`; `.optional()` or `.default()` outside an
-  object member or a parameter; a function default; `z.lazy()`; and a zod
-  definition, field, format or check that the installed horsies does not
-  know.
+  object member or a parameter; `.default()` or `.prefault()` under
+  `.nonoptional()`; a recursive schema that is `.optional()` or
+  `.default()` at its top; and a zod definition, field, format or check
+  that the installed horsies does not know.
+- A recursive schema (`z.lazy()`, or an object with a getter member that
+  returns a schema of itself) and `z.tuple([...], rest)` map to `h.lazy`
+  and `h.tuple(items, rest)`. A zod default is read at each read, as zod
+  reads it: a function default gives a new value each time.
 - The supported zod range is the peer range of the package
   (`>=4.1.13 <4.7.0`). A zod 3 schema is refused with `Zod3Schema`, which
   names zod 4 as the fix. A Standard Schema of another vendor is refused.
@@ -561,17 +589,17 @@ export const fetchPrices = defineTask({
   retryPolicy: {
     kind: "fixed",
     intervalsSeconds: [30, 60, 120],
-    autoRetryFor: ["RATE_LIMITED", "TASK_TIMEOUT", "WORKER_CRASHED"],
+    retryFor: ["RATE_LIMITED", "TASK_TIMEOUT", "WORKER_CRASHED"],
   },
 });
 ```
 
 | `kind` | Fields | Delay of retry n |
 |---|---|---|
-| `"fixed"` | `intervalsSeconds` (one delay per retry), `jitter?`, `autoRetryFor` | `intervalsSeconds[n - 1]` |
-| `"exponential"` | `baseSeconds`, `maxRetries`, `jitter?`, `maxDelaySeconds?`, `autoRetryFor` | `baseSeconds * 2^(n - 1)` |
+| `"fixed"` | `intervalsSeconds` (one delay per retry), `jitter?`, `retryFor` | `intervalsSeconds[n - 1]` |
+| `"exponential"` | `baseSeconds`, `maxRetries`, `jitter?`, `maxDelaySeconds?`, `retryFor` | `baseSeconds * 2^(n - 1)` |
 
-- `autoRetryFor` has at least one code: a declared code of the task or a
+- `retryFor` has at least one code: a declared code of the task or a
   built-in code. Another code fails typecheck.
 - `jitter` is `true` when left out, as in the Python client.
   `maxDelaySeconds` caps the delay after the backoff and the jitter.
@@ -590,7 +618,7 @@ export async function sendValidation(orderId: string): Promise<void> {
       idempotencyKey: `validate:${orderId}`,
       goodUntil: Temporal.Now.instant().add({ minutes: 10 }),
       delaySeconds: 5,
-      retention: { kind: "days", days: 30 },
+      retention: { kind: "period", days: 30 },
     },
   );
 
@@ -603,14 +631,14 @@ export async function sendValidation(orderId: string): Promise<void> {
   switch (sent.error.code) {
     case "ENQUEUE_FAILED":
       if (sent.error.retryable) {
-        const again = await app.retrySend(sent.error);
+        const again = await app.resend(sent.error);
 
         console.log(again.ok ? `sent ${again.value.taskId}` : again.error.message);
       }
 
       break;
     case "IDEMPOTENCY_KEY_CONFLICT": {
-      // Not retryable, and `retrySend` does not take it: send the owner's command, or use another key.
+      // Not retryable, and `resend` does not take it: send the owner's command, or use another key.
       console.warn(`task ${sent.error.ownerTaskId} holds the key`);
       break;
     }
@@ -640,12 +668,12 @@ the first refusal. Every refusal before the enqueue writes nothing.
 A task body may send. The sends that the entry makes at module level in a
 task child are suppressed: the child lifts the suppression when it serves.
 
-| `SendOptions` | Does |
+| `TaskSendOptions` | Does |
 |---|---|
 | `idempotencyKey` | 1 to 255 UTF-8 bytes. Stores the task once per key within the reservation window (24 hours). A second send of the same command gives the task that holds the key |
 | `goodUntil` | A `Temporal.Instant`: the task expires (`TASK_EXPIRED`) when no worker started it by then. Cut to the microsecond, toward the past |
 | `delaySeconds` | Whole seconds, 0 to 4,294,967,295, before a worker may start the task |
-| `retention` | `{ kind: "days", days }`: a period that the app registers; `{ kind: "forever" }`. Left out: the queue's retention, else 30 days |
+| `retention` | `{ kind: "period", days }`: a period that the app registers; `{ kind: "forever" }`. Left out: the queue's retention, else 30 days |
 
 `TaskSendError<O, E>`, told apart by `code`:
 
@@ -655,7 +683,7 @@ task child are suppressed: the child lifts the suppression when it serves.
 | `VALIDATION_FAILED` | `message`, `exception` | A rule refused the send. Nothing was written |
 | `PAYLOAD_TOO_LARGE` | `message`, `sizeBytes`, `limitBytes` (`bigint`) | The input is over the reject bound. Nothing was written |
 | `PAYLOAD_MISMATCH` | `taskId`, `payload`, `message` | The task id exists with another command or key. Nothing was written |
-| `IDEMPOTENCY_KEY_CONFLICT` | `taskId`, `payload`, `message`, `ownerTaskId`, `retryable: false` | Another task holds the key with another command. Nothing was written. Not retryable, and `retrySend` refuses it: send the owner's command, or use another key |
+| `IDEMPOTENCY_KEY_CONFLICT` | `taskId`, `payload`, `message`, `ownerTaskId`, `retryable: false` | Another task holds the key with another command. Nothing was written. Not retryable, and `resend` refuses it: send the owner's command, or use another key |
 | `ENQUEUE_FAILED` | `taskId`, `payload`, `message`, `retryable`, `exception` | The enqueue failed. The row may or may not exist. `retryable` is the classification of the cause |
 | `SEAT_RELAY_FULL` | `message`, `retryable: true`, `exception` | A `SHARED_THREAD` body only: the seat relay holds its bound of waiting calls. Nothing was sent; send again |
 
@@ -664,7 +692,7 @@ task child are suppressed: the child lifts the suppression when it serves.
 - `payload` is not enumerable, so `JSON.stringify` of an error never holds
   the input.
 
-`app.retrySend(error)` takes `ENQUEUE_FAILED` only
+`app.resend(error)` takes `ENQUEUE_FAILED` only
 (typecheck; another code from untyped code is `VALIDATION_FAILED`). It sends
 the same task id and payload again, as a repeat: a task that an earlier call
 wrote answers with its id, also after it finished, and does not run again.
@@ -687,9 +715,9 @@ function readErrorText(error: ReadError): string {
       return `no record holds the task (${error.reason})`;
     case "resultNotAvailable":
       return `the task is ${error.status} and stores no result`;
-    case "storedResultUnreadable":
+    case "resultDeserializationError":
       return error.cause;
-    case "unknownUserCode":
+    case "unknownCustomCode":
       return `the stored code ${error.code} is not declared`;
     case "waitInsideTask":
       return "a result wait inside a task body";
@@ -778,8 +806,8 @@ or `"builtIn"` with `code: BuiltInTaskCode` (a code of horsies).
 | `waitTimeout` | `WAIT_TIMEOUT` | `status` | The task had not ended when the wait ended; it may still run | No |
 | `taskNotFound` | `TASK_NOT_FOUND` | `reason` | Neither the live table nor the history holds the task | No |
 | `resultNotAvailable` | `RESULT_NOT_AVAILABLE` | `status` | The task ended and stores no result | Yes |
-| `storedResultUnreadable` | - | `cause` | The stored result does not read with the contract's types | Yes |
-| `unknownUserCode` | - | `code` (the stored code) | The stored custom code is not in the contract's `errorCodes` | Yes |
+| `resultDeserializationError` | - | `cause` | The stored result does not read with the contract's types | Yes |
+| `unknownCustomCode` | - | `code` (the stored code) | The stored custom code is not in the contract's `errorCodes` | Yes |
 | `waitInsideTask` | `WAIT_INSIDE_TASK` | - | A result wait in a worker child. Nothing was read | No |
 | `database` | the broker code | `retryable`, `message` | The database or the connection failed | No |
 | `invalidInput` | `INVALID_INPUT` | `maxMs` | `waitMs` outside its range. Nothing was read | No |
@@ -898,7 +926,7 @@ import {
   TaskRuntime, AttemptNumber, type CancelState, type CancelCause, type FencingToken,
   type SpawnRefused, type StateKey, type WorkflowTaskRuntime, type StoredWorkflowContext,
   // Sends
-  type SendOptions, type Retention, type TaskSendError, type RetryableSendError,
+  type TaskSendOptions, type SendRetention, type TaskSendError, type RetryableSendError,
   // Reads
   TaskId, type TaskHandle, type ReadError, type TaskInfo, type TaskAttempt, type Recorded,
 } from "horsies";

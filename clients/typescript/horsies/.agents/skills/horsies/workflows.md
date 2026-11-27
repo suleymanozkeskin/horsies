@@ -35,8 +35,8 @@ export const checkout = defineWorkflow(
   {
     name: "checkout",
     definitionKey: "shop.checkout.v1",
-    params: { order: Order },
-    output: Receipt,
+    parameters: { order: Order },
+    outputType: Receipt,
     onError: "fail",
     checkCases: [{ order: { orderId: "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b", totalCents: 900 } }],
   },
@@ -57,22 +57,23 @@ the definition breaks.
 |---|---|
 | `name` | The workflow name. Each start stores it. Not empty (`HRS-001`) |
 | `definitionKey` | The stable identity. A sub-workflow node and the engine find the workflow by it. Not empty (`HRS-016`), unique in the app (`HRS-017`) |
-| `params` | One schema per parameter of the build, with the rules of a task input (`h.*` or zod). `{}` for none |
-| `output` | The schema of the workflow's result, with the rules of a task output. Required. The output node of every build has this type (typecheck; `HRS-025`), and every read of the result decodes with it |
+| `parameters` | One schema per parameter of the build, with the rules of a task input (`h.*` or zod). `{}` for none |
+| `outputType` | The schema of the workflow's result, with the rules of a task output. The output node of every build has this type (typecheck; `HRS-025`), and every read of the result decodes with it. Optional: left out, the workflow has no output node (see "A Workflow With No Output") |
 | `onError` | `"fail"` (default) or `"pause"`. Another value is `HRS-033` |
-| `checkCases` | One params value per case. Required when `params` has a key (typecheck; `HRS-027`); a workflow with `params: {}` takes none. A case that is not params of the workflow is `HRS-028` |
+| `checkCases` | One parameters value per case. Required when `parameters` has a key (typecheck; `HRS-027`); a workflow with `parameters: {}` takes none. A case that is not parameters of the workflow is `HRS-028` |
 
-The build function `(w, params) => ({ output, successPolicy })`:
+The build function `(w, parameters) => ({ output, successPolicy })`, or
+`(w, parameters) => ({ successPolicy })` for a workflow with no `outputType`:
 
 - It is sync. It does no I/O and reads no clock and no random source. It may
   run more than once: at each start, for each check case, and for each
   sub-workflow node of the workflow.
-- `params` is the value that the stored params text reads back to: defaults
+- `parameters` is the value that the stored parameters text reads back to: defaults
   are filled.
 - A build that throws or returns a thenable is refused: at `check` with
   `HRS-029`, at a start with `VALIDATION_FAILED`.
 - List the workflow in `Horsies.create({ tasks, workflows })`, with every
-  task that its nodes run. `Horsies.create` builds a workflow with no params
+  task that its nodes run. `Horsies.create` builds a workflow with no parameters
   once and runs every spec check on it.
 
 ## The Builder `w`
@@ -80,7 +81,7 @@ The build function `(w, params) => ({ output, successPolicy })`:
 | Method | Gives |
 |---|---|
 | `w.task(contract, input, options)` | A task node: `NodeRef<O, E, Id>`, with the contract's output type and codes |
-| `w.subWorkflow(workflow, params, options)` | A sub-workflow node: `NodeRef<O, string, Id>`, with the child's output type |
+| `w.subWorkflow(workflow, parameters, options)` | A sub-workflow node: `NodeRef<O, string, Id>`, with the child's output type (`NoWorkflowOutput` for a child with no `outputType`) |
 
 The input of a node has one member per parameter:
 
@@ -113,8 +114,9 @@ The input of a node has one member per parameter:
   `HRS-012`).
 - A build has at least one node (`HRS-002`) and at most 10,000 (`HRS-038`).
 - The return object holds `output`, a node of this build whose type is the
-  declared `output` (`HRS-011`, `HRS-025`), and an optional
-  `successPolicy`.
+  declared `outputType` (`HRS-011`, `HRS-025`), and an optional
+  `successPolicy`. A workflow with no `outputType` returns no `output`; an
+  output node there fails typecheck (untyped code: `HRS-025`).
 - `workflowContextFrom` on a task without `workflowContext: true` fails
   typecheck (untyped code: `HRS-010`). Each `workflowContextFrom` node is a
   dependency of the node (`HRS-009`): name it in `waitsFor` or as a
@@ -137,7 +139,7 @@ without it has no such member (typecheck).
   `outputFor(nodeId, workflow)` and `hasSummary(nodeId)`.
 - A read gives `notInContext` for a node that is not in
   `workflowContextFrom` or that did not end, `unreadable` for a value that
-  does not read with the contract, and `unknownUserCode` for a code that the
+  does not read with the contract, and `unknownCustomCode` for a code that the
   contract does not list.
 
 <!-- ts-check: alone -->
@@ -148,7 +150,7 @@ const charge = defineTask({ name: "charge", input: { amount: h.int() }, output: 
 const audit = defineTask({ name: "audit", input: {}, output: h.boolean(), workflowContext: true });
 
 export const checkout = defineWorkflow(
-  { name: "checkout", definitionKey: "shop.checkout.v1", params: {}, output: h.boolean() },
+  { name: "checkout", definitionKey: "shop.checkout.v1", parameters: {}, outputType: h.boolean() },
   (w) => {
     const charged = w.task(charge, { amount: 10 }, { nodeId: "charge" });
 
@@ -199,7 +201,7 @@ const pickCarrier = defineTask({
 });
 
 export const shipping = defineWorkflow(
-  { name: "shipping", definitionKey: "shop.shipping.v1", params: {}, output: h.string() },
+  { name: "shipping", definitionKey: "shop.shipping.v1", parameters: {}, outputType: h.string() },
   (w) => {
     const quotes = ["dhl", "ups", "fedex"].map((carrier) =>
       w.task(quoteShipping, { carrier }, { nodeId: `quote-${carrier}` }),
@@ -240,8 +242,8 @@ export const regionReport = defineWorkflow(
   {
     name: "region_report",
     definitionKey: "reports.region_report.v1",
-    params: { region: h.string() },
-    output: h.int(),
+    parameters: { region: h.string() },
+    outputType: h.int(),
     checkCases: [{ region: "eu" }],
   },
   (w, { region }) => ({ output: w.task(fetchRegion, { region }, { nodeId: "fetch" }) }),
@@ -254,7 +256,7 @@ const addTotals = defineTask({
 });
 
 export const allRegions = defineWorkflow(
-  { name: "all_regions", definitionKey: "reports.all_regions.v1", params: {}, output: h.int() },
+  { name: "all_regions", definitionKey: "reports.all_regions.v1", parameters: {}, outputType: h.int() },
   (w) => {
     const eu = w.subWorkflow(regionReport, { region: "eu" }, { nodeId: "eu" });
     const us = w.subWorkflow(regionReport, { region: "us" }, { nodeId: "us" });
@@ -264,13 +266,16 @@ export const allRegions = defineWorkflow(
 );
 ```
 
-- `w.subWorkflow(workflow, params, options)` runs the workflow as a child.
-  Its params follow the input rules of a node; a child with `params: {}`
+- `w.subWorkflow(workflow, parameters, options)` runs the workflow as a child.
+  Its parameters follow the input rules of a node; a child with `parameters: {}`
   takes `{}` (`HRS-022`). Its options are `nodeId`, `waitsFor`, `join` and
   `allowFailedDependencies`.
-- The node's output type is the child's declared `output` and its code type
+- The node's output type is the child's declared `outputType` and its code type
   is `string` (a workflow holds the codes of many tasks), so the node feeds
-  an `h.taskOutcome(workflow)` parameter of that child.
+  an `h.taskOutcome(workflow)` parameter of that child. For a child with no
+  `outputType` the success value is `NoWorkflowOutput`
+  (`{ kind: "noWorkflowOutput" }`): the core stores `null` for the node, as
+  Python reads `None`.
 - List the child in `Horsies.create({ workflows })`. A start of a parent
   whose child is not listed is `VALIDATION_FAILED` (`HRS-020`). A child
   whose definition key the app of the worker does not list fails its node
@@ -284,10 +289,60 @@ export const allRegions = defineWorkflow(
 - The depth limit of nested children is 32: a deeper node fails with
   `SUBWORKFLOW_DEPTH_LIMIT_REACHED`. `check` reports a nesting that reaches
   it for certain (`HRS-036`) and a child that includes itself with the same
-  params and no wait between (`HRS-037`).
+  parameters and no wait between (`HRS-037`).
 - A failed child fails its node with `SUBWORKFLOW_FAILED`. The node's
   `error.subWorkflow` holds the child's `workflowId` and its `summary`
   (status, output, task counts, error summary).
+
+## A Workflow With No Output
+
+```ts
+import { defineTask, defineWorkflow, h, type Horsies } from "horsies";
+
+const refreshRegion = defineTask({ name: "refresh_region", input: { region: h.string() }, output: h.int() });
+
+export const refreshAll = defineWorkflow(
+  { name: "refresh_all", definitionKey: "reports.refresh_all.v1", parameters: {} },
+  (w) => {
+    for (const region of ["eu", "us"]) {
+      w.task(refreshRegion, { region }, { nodeId: `refresh-${region}` });
+    }
+
+    return {};
+  },
+);
+
+export async function refreshed(app: Horsies): Promise<void> {
+  const started = await app.start(refreshAll, {});
+
+  if (!started.ok) {
+    return;
+  }
+
+  const result = await started.value.get({ waitMs: 60_000 });
+
+  if (result.ok && result.value.kind === "succeeded") {
+    for (const [nodeId, outcome] of result.value.value.byNodeId) {
+      console.log(nodeId, outcome.kind);
+    }
+  }
+}
+```
+
+- `outputType` left out: the build returns no `output`, and the core keeps no
+  output node (`NO_OUTPUT`), as Python's `output=None` and Rust's
+  `OutputlessResults`.
+- `get` of a COMPLETED workflow gives `WorkflowTerminalResults`:
+  `{ kind: "terminalResults", byNodeId }`, the outcome of each terminal node by
+  node id. Each value is a `JsonValue` and each custom code is open. A node
+  entry that does not read is a failed outcome with
+  `RESULT_DESERIALIZATION_ERROR` and the node id in `data.node_id`; the other
+  entries stay readable.
+- A stored result whose form does not match the definition (the definition
+  gained or lost `outputType` between the start and the read) is
+  `resultDeserializationError`.
+- A sub-workflow node of such a child, `resultFor` of that node and an
+  `h.taskOutcome(workflow)` parameter give `NoWorkflowOutput`.
 
 ## Starts
 
@@ -301,7 +356,7 @@ export async function runCheckout(app: Horsies, orderId: string): Promise<void> 
     switch (started.error.code) {
       case "ENQUEUE_FAILED":
         if (started.error.retryable) {
-          const again = await app.retryStart(started.error);
+          const again = await app.resendStart(started.error);
 
           console.log(again.ok ? `started ${again.value.workflowId}` : again.error.message);
         }
@@ -347,13 +402,13 @@ export async function runCheckout(app: Horsies, orderId: string): Promise<void> 
 }
 ```
 
-`app.start(workflow, params, { workflowId })` runs these steps and stops at
+`app.start(workflow, parameters, { workflowId })` runs these steps and stops at
 the first refusal. Every refusal before the core's write writes nothing.
 
 1. The app lists the workflow. Else `VALIDATION_FAILED`.
 2. `workflowId` is a `WorkflowId`; left out, a new UUID. A text that is not
    the lower-case 8-4-4-4-12 form is `VALIDATION_FAILED`.
-3. The params encode and read back; the build runs once with the read-back
+3. The parameters encode and read back; the build runs once with the read-back
    value and passes every spec check. Else `VALIDATION_FAILED`.
 4. One start through the core.
 
@@ -378,12 +433,12 @@ minted for it) and `retryable`.
 
 | `code` | Fields | When |
 |---|---|---|
-| `VALIDATION_FAILED` | `exception` | Before any write: not listed, a bad id, params that do not read back, a build that threw, a spec check, a child that is not listed. Not retryable |
+| `VALIDATION_FAILED` | `exception` | Before any write: not listed, a bad id, parameters that do not read back, a build that threw, a spec check, a child that is not listed. Not retryable |
 | `WORKFLOW_ID_CONFLICT` | `existingWorkflowName` | The id belongs to another workflow name. Nothing was written. Not retryable |
 | `WORKFLOW_COMMAND_CONFLICT` | - | The id holds a workflow of the same name with another start command, or a sub-workflow. Nothing was written. Not retryable |
 | `ENQUEUE_FAILED` | `exception` | The connect, the schema install or the start failed. `retryable` is the classification of the cause. A start again with the same id finds the workflow when the commit reply was lost |
 
-`app.retryStart(error)` sends the same spec text, workflow id and sent
+`app.resendStart(error)` sends the same spec text, workflow id and sent
 instant again. It takes an `ENQUEUE_FAILED` error that a start of this
 process gave; another error is `VALIDATION_FAILED`.
 
@@ -392,11 +447,11 @@ process gave; another error is `VALIDATION_FAILED`.
 | Member | Gives |
 |---|---|
 | `workflowId` | The `WorkflowId` |
-| `get({ waitMs })` | `Result<TaskOutcome<O, string>, WorkflowReadError>`: waits while the workflow runs, at most `waitMs` (0 to 4,294,967,295; left out: no bound) |
+| `get({ waitMs })` | `Result<TaskOutcome<O, string>, WorkflowReadError>`: waits while the workflow runs, at most `waitMs` (0 to 4,294,967,295; left out: no bound). `O` is `WorkflowTerminalResults` for a workflow with no `outputType` |
 | `resultFor(nodeId)` | `Result<TaskOutcome<O, E>, WorkflowReadError>`: one node of the returned object (the output and the success policy nodes), typed by its contract. Not a wait |
 | `status()` | `Result<WorkflowStatus, HandleCoreError>` |
 | `results()` | `Result<ReadonlyMap<string, NodeResult>, HandleCoreError>`: the stored result of each node that has one, by node id |
-| `tasks()` | `Result<readonly WorkflowTaskInfo[], HandleCoreError>`: every node in index order |
+| `nodes()` | `Result<readonly WorkflowTaskInfo[], HandleCoreError>`: every node in index order |
 | `pause()` | `Result<boolean, HandleCoreError>`: `true` when a RUNNING workflow paused |
 | `resume()` | `Result<boolean, HandleCoreError>`: `true` when a PAUSED workflow resumed |
 | `cancel()` | `Result<void, HandleCoreError>`: cancels the workflow and its descendants |
@@ -451,7 +506,8 @@ export async function checkoutState(app: Horsies, text: string): Promise<void> {
 - `app.workflowHandle(workflow, workflowId)` does no I/O. It has no build,
   so `resultFor(nodeId, contract)` takes what the node runs: the task contract
   of a task node, or the workflow contract of a sub-workflow node (read
-  with the child's declared output and open custom codes).
+  with the child's declared output, or as `NoWorkflowOutput` for a child
+  with no `outputType`, and open custom codes).
 - A read of a workflow that the app does not list is `noTypeAvailable`,
   before any statement.
 
@@ -460,15 +516,15 @@ export async function checkoutState(app: Horsies, text: string): Promise<void> {
 | `waitTimeout` | `WAIT_TIMEOUT` | - | The workflow had not ended when the wait ended |
 | `workflowNotFound` | `WORKFLOW_NOT_FOUND` | - | No workflow has the id |
 | `resultNotReady` | `RESULT_NOT_READY` | - | `resultFor`: the node stores no result yet, or the workflow has no node of the id |
-| `storedResultUnreadable` | - | `cause` | The stored value does not read with the handle's types |
-| `unknownUserCode` | - | `code` (the stored code) | The stored custom code is not in the node contract's `errorCodes` |
+| `resultDeserializationError` | - | `cause` | The stored value does not read with the handle's types |
+| `unknownCustomCode` | - | `code` (the stored code) | The stored custom code is not in the node contract's `errorCodes` |
 | `waitInsideTask` | `WAIT_INSIDE_TASK` | - | A wait in a worker child. Nothing was read |
 | `noTypeAvailable` | `NO_TYPE_AVAILABLE` | `workflowName` | The app does not list the workflow, so its output has no type to read with. Nothing was read |
 | `database` | the handle code | `retryable`, `message` | The database or the connection failed |
 | `invalidInput` | `INVALID_INPUT` | `maxMs` | `waitMs` outside its range. Nothing was read |
 | `seatRelayFull` | `SEAT_RELAY_FULL` | `retryable: true`, `message` | A `SHARED_THREAD` body only: the seat relay holds its bound of waiting calls. Nothing was read |
 
-`HandleCoreError` (from `status`, `results`, `tasks`, `pause`, `resume`,
+`HandleCoreError` (from `status`, `results`, `nodes`, `pause`, `resume`,
 `cancel`), told apart by `code`; every variant has `message`, `workflowId`
 and `retryable`:
 
@@ -487,8 +543,8 @@ and `retryable`:
 
 ## Check Cases
 
-`check` builds each workflow with no params once and each workflow with
-params once per check case, runs every spec check on each spec, and walks
+`check` builds each workflow with no parameters once and each workflow with
+parameters once per check case, runs every spec check on each spec, and walks
 the sub-workflow nodes down to the depth limit. A finding is a refusal with
 its `HRS-nnn` code; the check fails.
 
@@ -503,7 +559,7 @@ its `HRS-nnn` code; the check fails.
 
 ## Validation Codes
 
-| Code | Refusal |
+| Code | HorsiesError |
 |---|---|
 | `HRS-001` | An empty workflow name |
 | `HRS-002` | A build with no node |
@@ -515,14 +571,14 @@ its `HRS-nnn` code; the check fails.
 | `HRS-016`, `HRS-017` | An empty definition key; a key that another listed workflow has |
 | `HRS-019` | An input key that binds to no parameter, or an input that is not a plain object |
 | `HRS-020` | A missing parameter; a child workflow that the app does not list |
-| `HRS-022` | Params given to a child with `params: {}` |
+| `HRS-022` | Parameters given to a child with `parameters: {}` |
 | `HRS-024` | A node for a plain parameter |
-| `HRS-025` | An output node whose type is not the declared `output` |
-| `HRS-027`, `HRS-028` | A workflow with params and no check cases; a case that is not params of the workflow |
+| `HRS-025` | An output node whose type is not the declared `outputType`; an output node with no `outputType`, or none with an `outputType` |
+| `HRS-027`, `HRS-028` | A workflow with parameters and no check cases; a case that is not parameters of the workflow |
 | `HRS-029` | A build that throws or returns a thenable |
 | `HRS-031` | A value that does not encode or read back, or has another type |
 | `HRS-033` | An `onError` that is not `"fail"` or `"pause"` |
-| `HRS-036`, `HRS-037` | A sub-workflow nesting that reaches the depth limit, or includes itself with the same params |
+| `HRS-036`, `HRS-037` | A sub-workflow nesting that reaches the depth limit, or includes itself with the same parameters |
 | `HRS-038` | More than 10,000 nodes |
 | `HRS-302` | A node of a task that the app does not list |
 
@@ -546,7 +602,7 @@ join.** Its source may not have ended.
 **List every task and child workflow.** A node of an unlisted task is
 `HRS-302`; an unlisted child is `HRS-020`.
 
-**Give every workflow with params its check cases.** `check` builds only
+**Give every workflow with parameters its check cases.** `check` builds only
 what the cases reach.
 
 ## All Key Imports
@@ -558,9 +614,10 @@ import {
   defineWorkflow, type WorkflowContract, type WorkflowDefinition, type WorkflowBuilder,
   type WorkflowBuild, type OnError, type CheckCase, type CheckCases, type BuildReturn,
   // Nodes
-  type NodeRef, type AnyNode, type Join, type TaskNodeOptions, type SubWorkflowNodeOptions,
+  type NodeRef, type AnyNode, type JoinType, type TaskNodeOptions, type SubWorkflowNodeOptions,
   type TaskOutcomeWire, type UpstreamValue, type UpstreamCode,
-  type SuccessPolicy, type SuccessCase, type WorkflowOutput,
+  type SuccessPolicy, type SuccessCase, type WorkflowOutput, type SubWorkflowOutput,
+  type BuildReturnWithoutOutput, type WorkflowTerminalResults, type NoWorkflowOutput,
   // Starts
   WorkflowId, type StartOptions, type WorkflowStartError, type StartEnqueueFailed,
   // Handles

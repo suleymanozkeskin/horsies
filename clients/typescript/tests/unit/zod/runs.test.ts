@@ -34,7 +34,7 @@ describe("checksRun", () => {
 
     assert.deepEqual(checksRun(refined._zod.def.checks ?? [])({}), {
       ok: false,
-      error: { issues: [{ path: "$.<input>[2]", code: "custom" }] },
+      error: { issues: [{ kind: "zodIssue", path: "$.<input>[2]", code: "custom" }] },
     });
   });
 
@@ -43,7 +43,7 @@ describe("checksRun", () => {
 
     assert.deepEqual(checksRun(later._zod.def.checks ?? [])("x"), {
       ok: false,
-      error: { issues: [{ path: "$", code: ASYNC_ISSUE_CODE }] },
+      error: { issues: [{ kind: "horsiesIssue", path: "$", code: ASYNC_ISSUE_CODE }] },
     });
   });
 
@@ -60,8 +60,8 @@ describe("checksRun", () => {
       ok: false,
       error: {
         issues: [
-          { path: "$", code: "custom" },
-          { path: "$", code: "too_big" },
+          { kind: "zodIssue", path: "$", code: "custom" },
+          { kind: "zodIssue", path: "$", code: "too_big" },
         ],
       },
     });
@@ -76,7 +76,7 @@ describe("checksRun", () => {
 
     assert.deepEqual(checksRun(schema._zod.def.checks ?? [])("ab"), {
       ok: false,
-      error: { issues: [{ path: "$", code: "custom" }] },
+      error: { issues: [{ kind: "zodIssue", path: "$", code: "custom" }] },
     });
   });
 });
@@ -93,7 +93,7 @@ describe("parseRun", () => {
     const run = parseRun(z.templateLiteral(["v", z.int()]));
 
     assert.deepEqual(run("v2"), { ok: true, value: true });
-    assert.deepEqual(run("w2"), { ok: false, error: { issues: [{ path: "$", code: "invalid_format" }] } });
+    assert.deepEqual(run("w2"), { ok: false, error: { issues: [{ kind: "zodIssue", path: "$", code: "invalid_format" }] } });
   });
 });
 
@@ -116,12 +116,12 @@ describe("codecRuns", () => {
   });
 
   test("decode gives the issues that the codec's decode adds", () => {
-    assert.deepEqual(runs.decode(150), { ok: false, error: { issues: [{ path: "$", code: "custom" }] } });
+    assert.deepEqual(runs.decode(150), { ok: false, error: { issues: [{ kind: "zodIssue", path: "$", code: "custom" }] } });
   });
 
   test("encode runs the output schema backward, then the codec's encode", () => {
     assert.deepEqual(runs.encode(0.5), { ok: true, value: 50 });
-    assert.deepEqual(runs.encode(2), { ok: false, error: { issues: [{ path: "$", code: "too_big" }] } });
+    assert.deepEqual(runs.encode(2), { ok: false, error: { issues: [{ kind: "zodIssue", path: "$", code: "too_big" }] } });
   });
 
   test("encode gives the issues that the codec's encode adds", () => {
@@ -136,7 +136,7 @@ describe("codecRuns", () => {
       },
     });
 
-    assert.deepEqual(runsOfCodec(signed).encode(-1), { ok: false, error: { issues: [{ path: "$", code: "custom" }] } });
+    assert.deepEqual(runsOfCodec(signed).encode(-1), { ok: false, error: { issues: [{ kind: "zodIssue", path: "$", code: "custom" }] } });
   });
 
   test("a codec decode or encode that returns a promise is the issue async_check", () => {
@@ -144,7 +144,7 @@ describe("codecRuns", () => {
       z.codec(z.string(), z.string(), { decode: async (text) => text, encode: async (text) => text }),
     );
 
-    const asyncIssue = { ok: false, error: { issues: [{ path: "$", code: ASYNC_ISSUE_CODE }] } };
+    const asyncIssue = { ok: false, error: { issues: [{ kind: "horsiesIssue", path: "$", code: ASYNC_ISSUE_CODE }] } };
 
     assert.deepEqual([later.decode("x"), later.encode("x")], [asyncIssue, asyncIssue]);
   });
@@ -157,7 +157,7 @@ describe("codecRuns", () => {
 
     assert.deepEqual(runsOfCodec(lossy).encode("x"), {
       ok: false,
-      error: { issues: [{ path: "$", code: ONE_WAY_ISSUE_CODE }] },
+      error: { issues: [{ kind: "horsiesIssue", path: "$", code: ONE_WAY_ISSUE_CODE }] },
     });
   });
 
@@ -174,7 +174,7 @@ describe("decodeRun", () => {
     const run = decodeRun(z.codec(z.string(), z.number(), { decode: Number, encode: String }));
 
     assert.deepEqual(run("7"), { ok: true, value: 7 });
-    assert.deepEqual(run(7), { ok: false, error: { issues: [{ path: "$", code: "invalid_type" }] } });
+    assert.deepEqual(run(7), { ok: false, error: { issues: [{ kind: "zodIssue", path: "$", code: "invalid_type" }] } });
   });
 });
 
@@ -186,13 +186,13 @@ describe("recordKeysRun", () => {
   });
 
   test("a missing key is the issue missing_key at its declared name", () => {
-    assert.deepEqual(run({ a: 1 }), { ok: false, error: { issues: [{ path: "$.b", code: MISSING_KEY_ISSUE_CODE }] } });
+    assert.deepEqual(run({ a: 1 }), { ok: false, error: { issues: [{ kind: "horsiesIssue", path: "$.b", code: MISSING_KEY_ISSUE_CODE }] } });
   });
 
   test("a key that the key schema refuses is written <input>: the key is part of the value", () => {
     assert.deepEqual(run({ a: 1, b: 2, secret: 3 }), {
       ok: false,
-      error: { issues: [{ path: "$.<input>", code: "invalid_value" }] },
+      error: { issues: [{ kind: "zodIssue", path: "$.<input>", code: "invalid_value" }] },
     });
   });
 

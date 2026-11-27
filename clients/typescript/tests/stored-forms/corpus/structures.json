@@ -1,0 +1,46 @@
+{
+ "texts": [
+  {
+   "case": "recursive_model",
+   "text": "{\"name\":\"root\",\"children\":[{\"name\":\"a\",\"children\":[]},{\"name\":\"b\",\"children\":[{\"name\":\"c\",\"children\":[]}]}]}"
+  },
+  {
+   "case": "variadic_tuple",
+   "text": "[]"
+  },
+  {
+   "case": "variadic_tuple",
+   "text": "[true]"
+  },
+  {
+   "case": "variadic_tuple",
+   "text": "[true,false,true]"
+  },
+  {
+   "case": "tuple_with_rest",
+   "text": "[1,\"a\"]"
+  },
+  {
+   "case": "tuple_with_rest",
+   "text": "[1,\"a\",true]"
+  },
+  {
+   "case": "tuple_with_rest",
+   "text": "[1,\"a\",true,false,true]"
+  },
+  {
+   "case": "default_factory",
+   "text": "{\"id\":\"1b4e28ba-2fa1-11d2-883f-b9a761bde3fb\",\"name\":\"a\"}"
+  }
+ ],
+ "refused": [
+  {
+   "case": "tuple_with_rest",
+   "text": "[1,\"a\",true,0]",
+   "loc": [
+    3
+   ]
+  }
+ ],
+ "default_factory_left_out": "{\"name\":\"a\"}"
+}

@@ -4,7 +4,8 @@
 //   bun tests/packages/pack.ts --addons <folder of the built horsies.<platform>.node files> --out <folder>
 //
 // `--out` receives every tarball and `index.json` (the name, version, file, digests and manifest of each tarball; the
-// install check serves them from a local registry). Needs `npm` (Node 26), `tar` and, for the glibc rows, `readelf`.
+// install check serves them from a local registry). The lint package (`@horsies/eslint-plugin`) is packed and checked
+// when `eslint-plugin/package.json` exists. Needs `npm` (Node 26), `tar` and, for the glibc rows, `readelf`.
 // Exit status: 0 when every check passes; 1 when a check fails; 2 when a step fails or an input does not read.
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -13,7 +14,7 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import type { Result } from "../../horsies/src/wire/result.ts";
-import { horsiesProblems, platformProblems, unpackedManifest } from "./checks.ts";
+import { horsiesProblems, lintProblems, platformProblems, unpackedManifest } from "./checks.ts";
 import { commandFailedText, runCommand } from "./command.ts";
 import { platformExpectationOf } from "./content.ts";
 import { manifestRefusedText, optionalDependenciesOf, readHorsiesManifest } from "./manifest.ts";
@@ -22,7 +23,7 @@ import { npmPack, packFailedText } from "./npm-pack.ts";
 import type { PackedTarball, PackFailed } from "./npm-pack.ts";
 import { platformListRefusedText, readPlatformList } from "./platforms.ts";
 import type { ReleasePlatform } from "./platforms.ts";
-import { sourceSkillFolder, stageFailedText, stageHorsies, stagePlatforms } from "./stage.ts";
+import { sourceSkillFolder, stageFailedText, stageHorsies, stageLint, stagePlatforms } from "./stage.ts";
 import type { StageFailed } from "./stage.ts";
 
 /** One entry of `index.json`: a packed tarball and the manifest it carries. */
@@ -99,8 +100,15 @@ function inputsOf(args: readonly string[]): Inputs | { readonly refused: string 
   return { addonsDir: resolve(values.addons), outDir: resolve(values.out), manifest: manifest.value, rows: rows.value };
 }
 
+/** The lint package of a run: not in the repository, or packed and unpacked. */
+type PackedLint = { readonly kind: "absent" } | { readonly kind: "packed"; readonly unpacked: Unpacked };
+
 /** Every package of a run, packed and unpacked. */
-type PackedPackages = { readonly horsies: Unpacked; readonly platforms: readonly (readonly [ReleasePlatform, Unpacked])[] };
+type PackedPackages = {
+  readonly horsies: Unpacked;
+  readonly platforms: readonly (readonly [ReleasePlatform, Unpacked])[];
+  readonly lint: PackedLint;
+};
 
 /** Stage, pack and unpack every package. Effects: writes the stage folder and the tarballs. */
 function packEvery(inputs: Inputs, stageDir: string): Result<PackedPackages, StepFailed> {
@@ -134,7 +142,38 @@ function packEvery(inputs: Inputs, stageDir: string): Result<PackedPackages, Ste
     platforms.push([row, unpacked.value]);
   }
 
-  return { ok: true, value: { horsies: horsies.value, platforms } };
+  const lint = packLint(inputs, stageDir);
+
+  return lint.ok ? { ok: true, value: { horsies: horsies.value, platforms, lint: lint.value } } : lint;
+}
+
+/** Stage, pack and unpack the lint package when the repository has it. Effects: writes the stage folder and the tarball. */
+function packLint(inputs: Inputs, stageDir: string): Result<PackedLint, StepFailed> {
+  const staged = stageLint(stageDir);
+
+  if (!staged.ok) {
+    return { ok: false, error: { kind: "StageFailed", failure: staged.error } };
+  }
+
+  switch (staged.value.kind) {
+    case "absent":
+      return { ok: true, value: { kind: "absent" } };
+    case "staged": {
+      const unpacked = packAndUnpack(staged.value.folder, inputs.outDir, join(stageDir, "unpacked", "eslint-plugin"));
+
+      return unpacked.ok ? { ok: true, value: { kind: "packed", unpacked: unpacked.value } } : unpacked;
+    }
+  }
+}
+
+/** The lint package as a list of at most one unpacked package. */
+function lintUnpacked(lint: PackedLint): readonly Unpacked[] {
+  switch (lint.kind) {
+    case "absent":
+      return [];
+    case "packed":
+      return [lint.unpacked];
+  }
 }
 
 /** Check every tarball and write `index.json`; the problems. Effects: reads the unpacked files; writes the index. */
@@ -147,9 +186,12 @@ function checkAndIndex(inputs: Inputs, packed: PackedPackages, stageDir: string)
     ...packed.platforms.flatMap(([row, unpacked]) =>
       platformProblems(unpacked.tarball, unpacked.packageDir, platformExpectationOf(row, version)),
     ),
+    ...lintUnpacked(packed.lint).flatMap((unpacked) => lintProblems(unpacked.tarball, unpacked.packageDir, version)),
   ];
 
-  const entries: IndexEntry[] = [packed.horsies, ...packed.platforms.map(([, unpacked]) => unpacked)].map((unpacked) => ({
+  const everyUnpacked = [packed.horsies, ...packed.platforms.map(([, unpacked]) => unpacked), ...lintUnpacked(packed.lint)];
+
+  const entries: IndexEntry[] = everyUnpacked.map((unpacked) => ({
     ...unpacked.tarball,
     manifest: unpackedManifest(unpacked.packageDir),
   }));

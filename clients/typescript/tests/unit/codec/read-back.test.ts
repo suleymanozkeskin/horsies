@@ -16,8 +16,8 @@ import { checkedKind, conversionKind, INT_KIND, type Kind } from "../../../horsi
 import { err, ok, type Result } from "../../../horsies/src/wire/result.ts";
 import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
 
-const TOO_LARGE: CheckFailure = { issues: [{ path: "$", code: "too_big" }] };
-const NOT_A_NUMBER: CheckFailure = { issues: [{ path: "$", code: "invalid_type" }] };
+const TOO_LARGE: CheckFailure = { issues: [{ kind: "zodIssue", path: "$", code: "too_big" }] };
+const NOT_A_NUMBER: CheckFailure = { issues: [{ kind: "zodIssue", path: "$", code: "invalid_type" }] };
 
 function atMost<V>(limit: number): (value: V) => Result<true, CheckFailure> {
   return (value) => (isNumber(value) && value <= limit ? ok<true>(true) : err(TOO_LARGE));

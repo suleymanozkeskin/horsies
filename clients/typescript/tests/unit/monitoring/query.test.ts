@@ -43,7 +43,7 @@ describe("taskListArg", () => {
       statuses: ["FAILED"],
       taskNames: ["resize"],
       errorCategories: ["OPERATIONAL"],
-      retried: "retriedOnly",
+      retriedOnly: true,
       sort: { field: "queueSeconds", direction: "ascending" },
       offset: 10,
       limit: 20,
@@ -112,7 +112,7 @@ describe("the other queries", () => {
       ok: true,
       value: { name: { kind: "anyName" }, status: { kind: "anyStatus" }, limit: { kind: "coreDefault" } },
     });
-    assert.deepEqual(workflowRunsArg({ name: "nightly", status: "FAILED", limit: 5 }), {
+    assert.deepEqual(workflowRunsArg({ workflowName: "nightly", status: "FAILED", limit: 5 }), {
       ok: true,
       value: {
         name: { kind: "named", name: "nightly" },
@@ -123,7 +123,7 @@ describe("the other queries", () => {
   });
 
   test("a workflow name that is not well-formed text is QUERY_REFUSED", () => {
-    const arg = workflowRunsArg({ name: LONE_SURROGATE });
+    const arg = workflowRunsArg({ workflowName: LONE_SURROGATE });
 
     assert.ok(!arg.ok);
     assert.equal(arg.error.field, "workflowName");

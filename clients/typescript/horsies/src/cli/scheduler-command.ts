@@ -1,8 +1,8 @@
 // The `scheduler` command: run the scheduler of the app's schedules until `SIGTERM` or `SIGINT`.
 //
-//   <entry> scheduler [--loglevel LEVEL]
+//   <entry> scheduler [--log-level LEVEL]
 //
-// - `--loglevel`: the lowest level of the core records of this process; default `INFO`.
+// - `--log-level`: the lowest level of the core records of this process; default `INFO`.
 //
 // Exit codes: 0 after an operator stop; 1 for each scheduler run error; 2 for arguments that do not parse. Sends at
 // module level stay suppressed in this process until the scheduler starts to serve.
@@ -34,14 +34,14 @@ import {
 } from "./usage.ts";
 
 /** The usage line of `scheduler`. */
-export const SCHEDULER_USAGE = "<entry> scheduler [--loglevel LEVEL]";
+export const SCHEDULER_USAGE = "<entry> scheduler [--log-level LEVEL]";
 
-/** The default `--loglevel` of `scheduler`. */
+/** The default `--log-level` of `scheduler`. */
 export const SCHEDULER_DEFAULT_LOG_LEVEL: WorkerLogLevel = "INFO";
 
 /** The flags of `scheduler`. */
 const SCHEDULER_FLAGS = {
-  loglevel: { type: "string" },
+  "log-level": { type: "string" },
 } as const;
 
 /** What `scheduler` calls that has effects. */
@@ -98,7 +98,7 @@ export function parseSchedulerStart(args: readonly string[]): Result<SchedulerSt
     return flags;
   }
 
-  const levelText = textFlag(flags.value, "loglevel");
+  const levelText = textFlag(flags.value, "log-level");
   const logLevel = levelText === undefined ? ok(SCHEDULER_DEFAULT_LOG_LEVEL) : parseLogLevel(levelText);
 
   return logLevel.ok ? ok({ logLevel: logLevel.value }) : logLevel;

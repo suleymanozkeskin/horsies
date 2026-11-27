@@ -99,6 +99,42 @@ async fn the_three_policies_answer_their_postures() {
     assert!(!viewing.can_act(facts).await);
 }
 
+/// A blank comma-separated member, or a blank copy of a repeated header,
+/// makes the identity ambiguous: `TrustedHeader` refuses it. Members that
+/// are all present are allowed.
+#[tokio::test]
+async fn a_trusted_header_with_a_blank_member_is_refused() {
+    let policy = TrustedHeader::new("X-Forwarded-User", true).unwrap();
+    for value in ["alice, ", ", alice", "alice,,bob", ","] {
+        let (head, _body) = Request::builder()
+            .uri("/api/meta")
+            .header("x-forwarded-user", value)
+            .body(Body::empty())
+            .unwrap()
+            .into_parts();
+        let facts = MonitoringRequest::of(&head);
+        assert!(!policy.can_view(facts).await, "{value:?}");
+        assert!(!policy.can_act(facts).await, "{value:?}");
+    }
+
+    let (repeated, _body) = Request::builder()
+        .uri("/api/meta")
+        .header("x-forwarded-user", "alice")
+        .header("x-forwarded-user", "")
+        .body(Body::empty())
+        .unwrap()
+        .into_parts();
+    assert!(!policy.can_view(MonitoringRequest::of(&repeated)).await);
+
+    let (members, _body) = Request::builder()
+        .uri("/api/meta")
+        .header("x-forwarded-user", "alice, bob")
+        .body(Body::empty())
+        .unwrap()
+        .into_parts();
+    assert!(policy.can_view(MonitoringRequest::of(&members)).await);
+}
+
 /// The page and its assets are public: a policy that refuses every view
 /// does not stop them.
 #[tokio::test]

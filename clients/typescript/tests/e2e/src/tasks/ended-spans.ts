@@ -2,7 +2,7 @@
 // `clients/python/tests/e2e/tasks/instance_worker_ended_spans.py`): an isolated sleeper that the worker kills at its
 // deadline, a one-node workflow of that sleeper, and a shared async sleeper that its child ends at its deadline. The
 // `SHARED_THREAD` tasks run in the seat isolates of a thread child: one that holds its isolate for the time it gets,
-// and one that holds its isolate past its deadline, then returns.
+// and one that holds its isolate past its deadline, then returns, and one that ends its isolate with `process.exit`.
 
 import { defineTask, defineWorkflow, h, type Horsies } from "../../../../horsies/src/index.ts";
 import { createOnce, markerErrorText } from "../markers.ts";
@@ -55,9 +55,18 @@ export const endedSpansThreadOverrun = defineTask({
   timeoutMs: SLEEPER_TIMEOUT_MS,
 });
 
+/** Ends its seat isolate with `process.exit`: the run ends `WORKER_CRASHED`, and the main thread makes the span. */
+export const endedSpansThreadExit = defineTask({
+  name: "e2e_worker_ended_spans_thread_exit",
+  input: {},
+  output: h.string(),
+  execution: "SHARED_THREAD",
+  timeoutMs: THREAD_HOLD_TIMEOUT_MS,
+});
+
 /** One node of the isolated sleeper. */
 export const endedSpansFlow = defineWorkflow(
-  { name: "e2e_worker_ended_spans_flow", definitionKey: "tests.e2e.worker_ended_spans.flow.v1", params: {}, output: h.string() },
+  { name: "e2e_worker_ended_spans_flow", definitionKey: "tests.e2e.worker_ended_spans.flow.v1", parameters: {}, outputType: h.string() },
   (w) => {
     const sleeper = w.task(endedSpansSleeper, {}, { nodeId: "sleeper" });
 
@@ -71,6 +80,7 @@ export const ENDED_SPANS_CONTRACTS = [
   endedSpansSharedSleeper,
   endedSpansThreadHold,
   endedSpansThreadOverrun,
+  endedSpansThreadExit,
 ] as const;
 
 /** The implementations of this module on `app`. */
@@ -95,6 +105,9 @@ export function implementEndedSpans(app: Horsies): void {
     holdThread(holdMs);
 
     return ok("held");
+  });
+  app.implement(endedSpansThreadExit, () => {
+    process.exit(3);
   });
   app.implement(endedSpansThreadOverrun, (_input, { ok }) => {
     holdThread(THREAD_OVERRUN_HOLD_MS);

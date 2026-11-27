@@ -14,12 +14,12 @@ import type {
   AnyNode,
   BuildReturn,
   DefaultJoin,
-  Join,
+  JoinType,
   NodeInput,
   NodeRef,
   SubWorkflowNodeOptions,
+  SubWorkflowOutput,
   TaskNodeOptions,
-  WorkflowOutput,
 } from "./node.ts";
 
 /** The builder of a workflow build. */
@@ -32,30 +32,33 @@ export interface WorkflowBuilder {
     X extends Execution,
     C extends ContextUse,
     const Id extends string,
-    const J extends Join = DefaultJoin,
+    const J extends JoinType = DefaultJoin,
   >(
     contract: TaskContract<P, O, E, X, C>,
     input: NoInfer<NodeInput<P, J>>,
     options: TaskNodeOptions<Id, J, C>,
   ): NodeRef<SchemaValue<O>, E, Id>;
-  /** A node that runs the workflow of `workflow` as a child. A child with `params: {}` takes `{}`. */
+  /**
+   * A node that runs the workflow of `workflow` as a child. A child with `parameters: {}` takes `{}`. Its success
+   * value is the child's output, or `NoWorkflowOutput` for a child with no `outputType`.
+   */
   subWorkflow<
     P extends ParameterSchemas,
     R extends BuildReturn,
     const Id extends string,
-    const J extends Join = DefaultJoin,
+    const J extends JoinType = DefaultJoin,
   >(
     workflow: WorkflowContract<P, R>,
-    params: NoInfer<NodeInput<P, J>>,
+    parameters: NoInfer<NodeInput<P, J>>,
     options: SubWorkflowNodeOptions<Id, J>,
-  ): NodeRef<WorkflowOutput<R>, string, Id>;
+  ): NodeRef<SubWorkflowOutput<R>, string, Id>;
 }
 
 /** The options of a node as the build gave them, before the checks. Every node option type is one of these. */
 export type RecordedOptions = {
   readonly nodeId: string;
   readonly waitsFor?: readonly AnyNode[];
-  readonly join?: Join;
+  readonly join?: JoinType;
   readonly allowFailedDependencies?: boolean;
   readonly queue?: string;
   readonly priority?: number;

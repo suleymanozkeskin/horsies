@@ -4,8 +4,9 @@
 //
 //   bun tests/docs-check/run.ts
 //
-// A docs root that has no folder is printed and passes: the docs pages are held on the docs branch until the release,
-// so on the other branches the check reads the skill files only. Exit status: 0 when every block passes; 1 when a root
+// The docs pages root that has no folder is printed and passes: the docs pages are held on the docs branch until the
+// release, so on the other branches the check reads the skill files only. The skill files root must have a folder: a
+// missing one stops the run with its path. Exit status: 0 when every block passes; 1 when a root
 // or a page does not read or a block fails; 2 when a tool fails. Needs `bun`, and the floor compiler installed in
 // `ci/typescript-floor/`.
 
@@ -14,14 +15,20 @@ import { fileURLToPath } from "node:url";
 import { compileFailedText } from "../types/lanes.ts";
 import { type CheckReport, checkPages, type CompilerRun, compileSetupFailedText, type ExtractedPages } from "./check.ts";
 import { extractErrorText, SKIP_KINDS } from "./extract.ts";
-import { type Page, readRoot, walkFailedText } from "./pages.ts";
+import { type DocRoot, type Page, readDocRoot, walkFailedText } from "./pages.ts";
 import { blockProblemText } from "./program.ts";
 
 /** The repository folder. */
 const REPOSITORY_DIR: string = fileURLToPath(new URL("../../../../", import.meta.url));
 
-/** The folders whose pages hold the checked blocks, from the repository folder. */
-const DOC_ROOTS: readonly string[] = ["website/src/content/docs/typescript", "clients/typescript/horsies/.agents/skills/horsies"];
+/**
+ * The folders whose pages hold the checked blocks, from the repository folder. The docs pages are held on the docs
+ * branch until the release, so that root may be absent. The skill files are in the package, so that root is required.
+ */
+const DOC_ROOTS: readonly DocRoot[] = [
+  { path: "website/src/content/docs/typescript", presence: "mayBeAbsent" },
+  { path: "clients/typescript/horsies/.agents/skills/horsies", presence: "required" },
+];
 
 /** The exit status of a run. */
 type Verdict = "passed" | "refused" | "toolFailed";
@@ -42,7 +49,7 @@ function rootPages(): readonly Page[] | "refused" {
   const pages: Page[] = [];
 
   for (const root of DOC_ROOTS) {
-    const read = readRoot(REPOSITORY_DIR, root);
+    const read = readDocRoot(REPOSITORY_DIR, root);
 
     if (!read.ok) {
       console.error(walkFailedText(read.error));
@@ -52,10 +59,10 @@ function rootPages(): readonly Page[] | "refused" {
 
     switch (read.value.state) {
       case "absent":
-        console.log(`${root}: no folder`);
+        console.log(`${root.path}: no folder`);
         break;
       case "read":
-        console.log(`${root}: ${counted(read.value.pages.length, "page")}`);
+        console.log(`${root.path}: ${counted(read.value.pages.length, "page")}`);
         pages.push(...read.value.pages);
         break;
     }

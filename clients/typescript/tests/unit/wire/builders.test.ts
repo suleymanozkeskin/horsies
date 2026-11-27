@@ -4,6 +4,7 @@ import { describe, test } from "node:test";
 import { defineTask } from "../../../horsies/src/contract/define-task.ts";
 import { h, type ObjectWire, parametersKind } from "../../../horsies/src/wire/builders.ts";
 import type { AnyWire, RequiredWire } from "../../../horsies/src/wire/infer.ts";
+import { ok } from "../../../horsies/src/wire/result.ts";
 import { kindOf, presenceOf } from "../../../horsies/src/wire/wire-type.ts";
 
 describe("h.* builders", () => {
@@ -44,8 +45,59 @@ describe("h.* builders", () => {
     assert.deepEqual(kindOf(h.tuple([h.int(), h.string()])), {
       node: "tuple",
       items: [{ node: "int" }, { node: "string" }],
+      rest: { state: "none" },
     });
     assert.deepEqual(kindOf(h.record(h.float())), { node: "record", value: { node: "float" } });
+  });
+
+  test("a tuple with a rest item holds the rest item kind", () => {
+    assert.deepEqual(kindOf(h.tuple([h.int()], h.boolean())), {
+      node: "tuple",
+      items: [{ node: "int" }],
+      rest: { state: "items", item: { node: "boolean" } },
+    });
+    assert.deepEqual(kindOf(h.tuple([], h.string())), {
+      node: "tuple",
+      items: [],
+      rest: { state: "items", item: { node: "string" } },
+    });
+  });
+
+  test("h.lazy calls its getter at the first use only, and gives the kind of the wire type that it returns", () => {
+    let calls = 0;
+
+    const lazy = kindOf(
+      h.lazy(() => {
+        calls += 1;
+
+        return h.int();
+      }),
+    );
+
+    assert(lazy.node === "lazy");
+    assert.equal(calls, 0);
+    assert.deepEqual([lazy.target(), lazy.target(), calls], [{ node: "int" }, { node: "int" }, 1]);
+    assert.deepEqual(lazy.level(), { state: "passesLevel" });
+  });
+
+  test("h.lazy of a wire type that may be absent is a defect that the static types refuse: TypeError at the first use", () => {
+    // SAFETY: the static types refuse this call; the test checks the run-time guard behind them.
+    const optional = h.int().optional() as AnyWire as RequiredWire;
+    const lazy = kindOf(h.lazy(() => optional));
+
+    assert(lazy.node === "lazy");
+    assert.throws(() => lazy.target(), TypeError);
+  });
+
+  test("a function default is computed: the function runs at each call of compute, not at the build", () => {
+    let calls = 0;
+    const factory = (): number => (calls += 1);
+    const presence = presenceOf(h.int().default(factory));
+
+    assert(presence.mode === "defaulted" && presence.fallback.state === "computed");
+    assert.equal(calls, 0);
+    assert.equal(presence.fallback.source, factory);
+    assert.deepEqual([presence.fallback.compute(), presence.fallback.compute()], [ok("1"), ok("2")]);
   });
 
   test("literal, enum and the two union forms", () => {

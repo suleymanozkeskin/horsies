@@ -27,6 +27,7 @@ from typing import (
     Literal,
     TypeVar,
     Union,
+    Unpack,
     assert_never,
     cast,
     get_args,
@@ -844,6 +845,20 @@ def _classify(
         for arg in args:
             if arg is Ellipsis:
                 continue
+            if _is_unpacked_tuple_item(arg):
+                raise _RejectedError(_Rejection(
+                    banned=f'unpacked item {arg!r} inside a tuple',
+                    reason=(
+                        'pydantic stores an unpacked `*tuple[...]` item as a '
+                        'nested array (`[1, [true, false]]`), not as the flat '
+                        'array of a tuple with a rest item'
+                    ),
+                    fix=(
+                        'use tuple[T, ...] or tuple[T1, T2, ...]; '
+                        'for a fixed head and a variable tail, use a '
+                        'dataclass or BaseModel with a tuple[T, ...] field'
+                    ),
+                ))
             _classify(
                 arg,
                 json_value_allowed_position=json_value_allowed_position,
@@ -1041,6 +1056,13 @@ def _walk_dataclass_fields(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _is_unpacked_tuple_item(arg: object) -> bool:
+    """True when `arg` is `*tuple[...]` or `Unpack[...]` inside a tuple."""
+    if get_origin(arg) is Unpack:
+        return True
+    return getattr(arg, '__unpacked__', False) is True
 
 
 def _find_discriminator(metadata: tuple[object, ...]) -> str | None:

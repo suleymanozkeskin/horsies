@@ -1,4 +1,4 @@
-// Compile-pass cases of a send and a read through the app: the send error switch with a full match (`retrySend` of
+// Compile-pass cases of a send and a read through the app: the send error switch with a full match (`resend` of
 // `ENQUEUE_FAILED`; `IDEMPOTENCY_KEY_CONFLICT` has `retryable: false`), the send
 // options, and the read switch over the tag and the code of the task error.
 
@@ -26,12 +26,12 @@ export async function sendAndRead(): Promise<void> {
   if (!sent.ok) {
     switch (sent.error.code) {
       case "IDEMPOTENCY_KEY_CONFLICT":
-        // Not retryable: `retrySend` does not take it. Send the owner's command, or use another key.
+        // Not retryable: `resend` does not take it. Send the owner's command, or use another key.
         console.warn(sent.error.ownerTaskId);
         break;
       case "ENQUEUE_FAILED":
         if (sent.error.retryable) {
-          void (await app.retrySend(sent.error));
+          void (await app.resend(sent.error));
         }
 
         break;
@@ -116,7 +116,7 @@ export async function sendWithOptions(): Promise<void> {
       idempotencyKey: "validate:1",
       goodUntil: Temporal.Now.instant().add({ minutes: 10 }),
       delaySeconds: 30,
-      retention: { kind: "days", days: 30 },
+      retention: { kind: "period", days: 30 },
     },
   ));
   void (await app.send(validateOrder, { orderId: crypto.randomUUID(), lines: [] }, { retention: { kind: "forever" } }));

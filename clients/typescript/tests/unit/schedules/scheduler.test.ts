@@ -206,15 +206,15 @@ describe("the scheduler command", () => {
     );
   });
 
-  test("no flag: INFO; --loglevel in any case", () => {
+  test("no flag: INFO; --log-level in any case", () => {
     assert.deepEqual(parseSchedulerStart([]), ok({ logLevel: "INFO" }));
-    assert.deepEqual(parseSchedulerStart(["--loglevel=warning"]), ok({ logLevel: "WARNING" }));
+    assert.deepEqual(parseSchedulerStart(["--log-level=warning"]), ok({ logLevel: "WARNING" }));
   });
 
   test("a stop gives 0 and writes nothing", async () => {
     const deps = commandDeps(ok({ kind: "stopped" }));
 
-    assert.equal(await runSchedulerCommand(["--loglevel", "DEBUG"], deps), 0);
+    assert.equal(await runSchedulerCommand(["--log-level", "DEBUG"], deps), 0);
     assert.deepEqual(deps.starts, [{ logLevel: "DEBUG" }]);
     assert.deepEqual(deps.output.errors, []);
   });
@@ -229,11 +229,11 @@ describe("the scheduler command", () => {
   }
 
   test("an unknown flag and a level that does not parse give 2 with the usage, and nothing runs", async () => {
-    for (const args of [["--profile", "io"], ["--loglevel", "LOUD"], ["extra"]]) {
+    for (const args of [["--profile", "io"], ["--log-level", "LOUD"], ["extra"]]) {
       const deps = commandDeps(ok({ kind: "stopped" }));
 
       assert.equal(await runSchedulerCommand(args, deps), 2);
-      assert.equal(deps.output.errors[0], "usage: <entry> scheduler [--loglevel LEVEL]");
+      assert.equal(deps.output.errors[0], "usage: <entry> scheduler [--log-level LEVEL]");
       assert.match(deps.output.errors[1] ?? "", /^horsies scheduler: error: /);
       assert.deepEqual(deps.starts, []);
     }

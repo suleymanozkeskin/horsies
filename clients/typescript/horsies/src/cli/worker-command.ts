@@ -1,9 +1,9 @@
 // The `worker` command: run a worker of a profile of the app until `SIGTERM` or `SIGINT`.
 //
-//   <entry> worker --profile NAME [--loglevel LEVEL] [--metrics-listen HOST:PORT]
+//   <entry> worker --profile NAME [--log-level LEVEL] [--metrics-listen HOST:PORT]
 //
 // - `--profile`: no default; the core refuses a start with no profile and names the profiles of the app.
-// - `--loglevel`: the lowest level of the core records of this process and of its children; default `INFO`.
+// - `--log-level`: the lowest level of the core records of this process and of its children; default `INFO`.
 // - `--metrics-listen`: serve `/metrics`, `/livez` and `/readyz` on `HOST:PORT`; the core's rule checks the value.
 //
 // Exit codes: 0 after an operator stop and the drain; 1 for each worker run error; 2 for arguments that do not parse.
@@ -40,15 +40,15 @@ import {
 } from "./usage.ts";
 
 /** The usage line of `worker`. */
-export const WORKER_USAGE = "<entry> worker --profile NAME [--loglevel LEVEL] [--metrics-listen HOST:PORT]";
+export const WORKER_USAGE = "<entry> worker --profile NAME [--log-level LEVEL] [--metrics-listen HOST:PORT]";
 
-/** The default `--loglevel` of `worker`. */
+/** The default `--log-level` of `worker`. */
 export const WORKER_DEFAULT_LOG_LEVEL: WorkerLogLevel = "INFO";
 
 /** The flags of `worker`. */
 const WORKER_FLAGS = {
   profile: { type: "string" },
-  loglevel: { type: "string" },
+  "log-level": { type: "string" },
   "metrics-listen": { type: "string" },
 } as const;
 
@@ -115,7 +115,7 @@ export function parseWorkerStart(
   }
 
   const profileName = textFlag(flags.value, "profile");
-  const levelText = textFlag(flags.value, "loglevel");
+  const levelText = textFlag(flags.value, "log-level");
   const logLevel = levelText === undefined ? ok(WORKER_DEFAULT_LOG_LEVEL) : parseLogLevel(levelText);
 
   if (!logLevel.ok) {

@@ -1,4 +1,4 @@
-// The parts that every command of `cli.run` shares: the exit codes, the output lines, the `--loglevel` values, the
+// The parts that every command of `cli.run` shares: the exit codes, the output lines, the `--log-level` values, the
 // flag parse with `node:util` `parseArgs`, and the usage error.
 
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
@@ -53,7 +53,7 @@ export function usageErrorLines(command: string, usage: string, error: UsageErro
   return [`usage: ${usage}`, `horsies ${command}: error: ${error.message}`];
 }
 
-/** Each `--loglevel` value, by itself: the record names each level of the core's `WorkerLogLevel` once. */
+/** Each `--log-level` value, by itself: the record names each level of the core's `WorkerLogLevel` once. */
 const LOG_LEVEL_NAMES: { readonly [Level in WorkerLogLevel]: Level } = {
   DEBUG: "DEBUG",
   INFO: "INFO",
@@ -62,16 +62,16 @@ const LOG_LEVEL_NAMES: { readonly [Level in WorkerLogLevel]: Level } = {
   CRITICAL: "CRITICAL",
 };
 
-/** The `--loglevel` values, lowest first. */
+/** The `--log-level` values, lowest first. */
 export const LOG_LEVELS: readonly WorkerLogLevel[] = Object.values(LOG_LEVEL_NAMES);
 
-/** The level of a `--loglevel` text, in any case. Pure. */
+/** The level of a `--log-level` text, in any case. Pure. */
 export function parseLogLevel(text: string): Result<WorkerLogLevel, UsageError> {
   const upper = text.toUpperCase();
   const level = LOG_LEVELS.find((known) => known === upper);
 
   return level === undefined
-    ? err(usageError(`--loglevel must be one of ${LOG_LEVELS.join(", ")}, not ${JSON.stringify(text)}`))
+    ? err(usageError(`--log-level must be one of ${LOG_LEVELS.join(", ")}, not ${JSON.stringify(text)}`))
     : ok(level);
 }
 

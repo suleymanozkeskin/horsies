@@ -388,6 +388,15 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **Python: the signature check refuses a tuple with an unpacked item.**
+  A parameter or return annotation such as `tuple[int, *tuple[bool, ...]]`
+  is refused at registration with `SignatureValidationError`. The error names
+  the task, the position and the supported forms. pydantic stores the unpacked
+  item as a nested array (`[1, [true, false]]`). It has no flat form for it.
+  The TypeScript client stores a tuple with a rest item as one flat array.
+  Use `tuple[T, ...]`, `tuple[T1, T2]`, or a dataclass or `BaseModel` with a
+  `tuple[T, ...]` field.
+
 - **A schema install of the `TYPESCRIPT` client family into an empty
   database records its family row.** The install writes the family row in
   the transaction of the first migration whose `CHECK`
@@ -420,6 +429,24 @@ there is no migration contract between pre-1.0 versions.
   10000). Before, its stored error had no `data`. A reader that reads
   `data.field` now reads it for the rows of each client. The Python child
   writes the same `data` as before.
+- **The Rust scheduler run ends at a stop request during its connect.**
+  `PreparedScheduler::run` waited for the connect and the schema install
+  before it read the stop request, so `SIGTERM` during them ended the run
+  only after the connect, the start and its first state write. A stop
+  request before or during them now returns `Ok(SchedulerStopped)`, drops
+  the connect and writes no schedule state, as the TypeScript and Python
+  schedulers do. A stop request after the connect is unchanged.
+- **The Rust client leaves the status of a successful attempt span unset.**
+  The span of a task attempt that returned a value had the status OK. It
+  now has no status, as the Python and TypeScript clients write it and as
+  the OpenTelemetry specification asks of instrumentation libraries. The
+  status ERROR with `error.type` for a failure is unchanged.
+- **The Python and Rust web handlers refuse a trusted identity header with a
+  blank comma-separated member.** A request with two copies of the header,
+  one blank, reaches the handler as `alice, `. `TrustedHeader` now refuses
+  it for reads and for actions, as the TypeScript client does. Every value
+  of a repeated header is checked. A value with all members present, such as
+  `alice, bob`, is still allowed.
 
 ## 0.8.1 — 2026-11-25
 

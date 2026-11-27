@@ -14,7 +14,7 @@ export const MARKDOWN_CAMPAIGN_ID = "MARKDOWN-CHECK";
 export const MARKDOWN_SKU_COUNT = 6;
 
 export const seasonalMarkdown = defineWorkflow(
-  { name: "seasonal_markdown", definitionKey: "acme.seasonal_markdown.v1", params: {}, output: SalesRollup },
+  { name: "seasonal_markdown", definitionKey: "acme.seasonal_markdown.v1", parameters: {}, outputType: SalesRollup },
   (w) => {
     const markdowns = Array.from({ length: MARKDOWN_SKU_COUNT }, (_unused, index) =>
       w.task(

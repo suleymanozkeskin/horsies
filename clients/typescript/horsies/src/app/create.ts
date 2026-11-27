@@ -1,6 +1,6 @@
 // `Horsies.create`: the checks of the config and of each listed contract, in order, and the app context.
 //
-// Order of the refusals: the config (the TypeScript parse and the tracing step, then the core's check), then the
+// Order of the refusals: the config (the TypeScript parse, the tracing step, then the core's check), then the
 // contracts in list order (the list, the queue, the wire types, then the core's checks of the codes and the options).
 //
 // The thread rule: the addon loads only on the main thread of a process. On a main thread every check runs; the core's
@@ -54,7 +54,7 @@ import {
 } from "./contract-list.ts";
 import { type AcceptedConfig, checkConfigWithCore, checkTaskWithCore, type CoreChecks } from "./core-checks.ts";
 import type { AddonCore, CoreAccess, ProducerCore } from "./core-access.ts";
-import type { Refusal } from "./refusal.ts";
+import type { HorsiesError } from "./refusal.ts";
 import { RefusalSink } from "./refusals.ts";
 import { initialSuppression, type ProcessStart, processStart, SuppressionState } from "./suppression.ts";
 
@@ -67,7 +67,7 @@ export type HorsiesConfig = AppConfigInput & {
 };
 
 /** Why `Horsies.create` gives no app: every refusal, in order. */
-export type CreateRefused = { readonly refusals: NonEmpty<Refusal> };
+export type ValidationReport = { readonly refusals: NonEmpty<HorsiesError> };
 
 /** The facts of the process that `Horsies.create` reads. A test gives its own. */
 export interface CreateEnvironment {
@@ -85,7 +85,7 @@ export interface CreateEnvironment {
     options: ReadonlyMap<string, NativeTaskOptions>,
     workflows: WorkflowsOnMainThread,
   ) => AddonCore;
-  /** The load of the OpenTelemetry API; called only for `tracing: { kind: "otel" }`, on every thread. */
+  /** The load of the OpenTelemetry API; called only for `tracing: { kind: "otelTracing" }`, on every thread. */
   readonly otelApi: OtelApiLoader;
 }
 
@@ -102,7 +102,7 @@ export function processEnvironment(): CreateEnvironment {
 }
 
 /** The app context of `config`, or every refusal in order. */
-export function createApp(config: HorsiesConfig, environment: CreateEnvironment): Result<AppContext, CreateRefused> {
+export function createApp(config: HorsiesConfig, environment: CreateEnvironment): Result<AppContext, ValidationReport> {
   const parsed = parseAppConfig(config, environment.environment);
   const tracing = tracingPartsOf(tracingSettingOf(config.tracing), processTracingEnvironment(environment.otelApi));
   // The queue check reads only the queue fields of the input, so a refused config adds no false queue refusal.
@@ -115,18 +115,16 @@ export function createApp(config: HorsiesConfig, environment: CreateEnvironment)
     queues,
   });
 
-  if (!parsed.ok || !tracing.ok) {
-    return refused([
-      ...(parsed.ok ? [] : parsed.error),
-      ...(tracing.ok ? [] : [tracing.error]),
-      ...inListOrder(list.refusals),
-      ...workflows.refusals,
-    ]);
+  const tracingRefusals = tracing.ok ? [] : [tracing.error];
+
+  // The core's checks need the parsed config: a refused parse leaves them out.
+  if (!parsed.ok) {
+    return refused([...parsed.error, ...tracingRefusals, ...inListOrder(list.refusals), ...workflows.refusals]);
   }
 
   if (!environment.mainThread) {
-    return list.refusals.length > 0 || workflows.refusals.length > 0
-      ? refused([...inListOrder(list.refusals), ...workflows.refusals])
+    return !tracing.ok || list.refusals.length > 0 || workflows.refusals.length > 0
+      ? refused([...tracingRefusals, ...inListOrder(list.refusals), ...workflows.refusals])
       : ok(contextOf(parsed.value, list.entries, workerThreadCore(), environment, tracing.value, workflows.registry));
   }
 
@@ -135,12 +133,13 @@ export function createApp(config: HorsiesConfig, environment: CreateEnvironment)
   const options = coreCheckedOptions(checks, list.entries);
 
   const refusals = [
+    ...tracingRefusals,
     ...(accepted.kind === "refused" ? accepted.refusals : []),
     ...inListOrder([...list.refusals, ...options.refusals]),
     ...workflows.refusals,
   ];
 
-  if (accepted.kind === "refused" || refusals.length > 0) {
+  if (!tracing.ok || accepted.kind === "refused" || refusals.length > 0) {
     return refused(refusals);
   }
 
@@ -176,14 +175,14 @@ function coreCheckedOptions(
   return { options, refusals };
 }
 
-function refused(refusals: readonly Refusal[]): Result<AppContext, CreateRefused> {
+function refused(refusals: readonly HorsiesError[]): Result<AppContext, ValidationReport> {
   const [first, ...rest] = refusals;
 
   if (first === undefined) {
     throw new TypeError("createApp: a refused create with no refusal");
   }
 
-  const all: NonEmpty<Refusal> = Object.freeze([first, ...rest]);
+  const all: NonEmpty<HorsiesError> = Object.freeze([first, ...rest]);
 
   return err(Object.freeze({ refusals: all }));
 }

@@ -1,4 +1,4 @@
-// The workflow handle: each method's outcomes and errors, waitInsideTask before any call, unknownUserCode in
+// The workflow handle: each method's outcomes and errors, waitInsideTask before any call, unknownCustomCode in
 // resultFor, open codes in get, stored texts that the strict check refused; the seat operations through a stub relay;
 // the child spec source answers; and the workflow context.
 
@@ -34,14 +34,14 @@ import { passedSpec } from "./support.ts";
 const count = defineTask({ name: "count", input: {}, output: h.int(), errorCodes: ["TOO_MANY"] });
 const name = defineTask({ name: "name", input: { n: h.taskOutcome(count) }, output: h.string() });
 
-const flow = defineWorkflow({ name: "flow", definitionKey: "tests.flow.v1", output: h.string(), params: {} }, (w) => {
+const flow = defineWorkflow({ name: "flow", definitionKey: "tests.flow.v1", outputType: h.string(), parameters: {} }, (w) => {
   const counted = w.task(count, {}, { nodeId: "count" });
 
   return { output: w.task(name, { n: counted }, { nodeId: "name" }), successPolicy: { cases: [{ required: [counted] }] } };
 });
 
 const child = defineWorkflow(
-  { name: "child", definitionKey: "tests.child.v1", output: h.int(), params: { n: h.int() }, checkCases: [{ n: 1 }] },
+  { name: "child", definitionKey: "tests.child.v1", outputType: h.int(), parameters: { n: h.int() }, checkCases: [{ n: 1 }] },
   (w, { n }) => {
     if (n < 0) {
       throw new RangeError("negative");
@@ -128,9 +128,9 @@ describe("WorkflowHandle.get", () => {
     [
       "a text that the strict check refused",
       { wait: { kind: "completed", result: { kind: "refused", cause: "x" } } },
-      "storedResultUnreadable",
+      "resultDeserializationError",
     ],
-    ["a NULL result", { wait: { kind: "completed", result: { kind: "none" } } }, "storedResultUnreadable"],
+    ["a NULL result", { wait: { kind: "completed", result: { kind: "none" } } }, "resultDeserializationError"],
     ["a failed read", { wait: { kind: "failed", error: rawDbFailed() } }, "database"],
   ];
 
@@ -169,8 +169,8 @@ describe("the read form of a sub-workflow output", () => {
       {
         name: "counted",
         definitionKey: "tests.counted.v1",
-        output: h.int(),
-        params: { n: h.int() },
+        outputType: h.int(),
+        parameters: { n: h.int() },
         checkCases: [{ n: 1 }],
       },
       (w) => {
@@ -181,7 +181,7 @@ describe("the read form of a sub-workflow output", () => {
     );
 
     const parent = defineWorkflow(
-      { name: "parent", definitionKey: "tests.parent.v1", output: h.int(), params: {} },
+      { name: "parent", definitionKey: "tests.parent.v1", outputType: h.int(), parameters: {} },
       (w) => ({
         output: w.subWorkflow(counted, { n: 2 }, { nodeId: "child" }),
       }),
@@ -226,7 +226,7 @@ describe("the read form of a sub-workflow output", () => {
 
 describe("a workflow that the app does not list", () => {
   const other = defineWorkflow(
-    { name: "other", definitionKey: "tests.other.v1", output: h.int(), params: {} },
+    { name: "other", definitionKey: "tests.other.v1", outputType: h.int(), parameters: {} },
     (w) => ({ output: w.task(count, {}, { nodeId: "count" }) }),
   );
 
@@ -276,12 +276,12 @@ describe("WorkflowHandle.resultFor", () => {
     assert.deepEqual(read, { ok: true, value: { kind: "succeeded", value: 7 } });
   });
 
-  test("a custom code that the contract does not list: unknownUserCode", async () => {
+  test("a custom code that the contract does not list: unknownCustomCode", async () => {
     const read = await handle({
       nodeResult: { kind: "stored", result: { kind: "checked", text: customErrorEnvelope("OTHER") } },
     }).handle.resultFor("count");
 
-    assert.deepEqual(read, { ok: false, error: { kind: "unknownUserCode", code: "OTHER" } });
+    assert.deepEqual(read, { ok: false, error: { kind: "unknownCustomCode", code: "OTHER" } });
   });
 
   test("no stored result: resultNotReady; a failed read: database", async () => {
@@ -292,13 +292,13 @@ describe("WorkflowHandle.resultFor", () => {
     assert(!failed.ok && failed.error.kind === "database");
   });
 
-  test("a stored text that the core's strict check refuses ends as storedResultUnreadable and never reaches the reader", async () => {
+  test("a stored text that the core's strict check refuses ends as resultDeserializationError and never reaches the reader", async () => {
     // The addon ran the strict check (`nodeResult`); a refused text crosses as its cause only, so no text is decoded.
     const refused = await handle({
       nodeResult: { kind: "stored", result: { kind: "refused", cause: "a repeated key" } },
     }).handle.resultFor("count");
 
-    assert.deepEqual(refused, { ok: false, error: { kind: "storedResultUnreadable", cause: "a repeated key" } });
+    assert.deepEqual(refused, { ok: false, error: { kind: "resultDeserializationError", code: "RESULT_DESERIALIZATION_ERROR", cause: "a repeated key" } });
   });
 
   test("a handle by id reads with the contract that the caller gives", async () => {
@@ -337,17 +337,17 @@ describe("WorkflowHandle.resultFor", () => {
     assert.deepEqual(await byId.resultFor("child", child), { ok: true, value: { kind: "succeeded", value: 8 } });
   });
 
-  test("a sub-workflow node by id whose stored value is not the child's declared output: storedResultUnreadable", async () => {
+  test("a sub-workflow node by id whose stored value is not the child's declared output: resultDeserializationError", async () => {
     const { byId } = byIdReading(okEnvelope('"eight"'));
     const read = await byId.resultFor("child", child);
 
     assert(!read.ok);
-    assert.equal(read.error.kind, "storedResultUnreadable");
+    assert.equal(read.error.kind, "resultDeserializationError");
   });
 
   test("a sub-workflow node by id of a child that the app does not list: noTypeAvailable, no read", async () => {
     const other = defineWorkflow(
-      { name: "other", definitionKey: "tests.other_child.v1", output: h.int(), params: {} },
+      { name: "other", definitionKey: "tests.other_child.v1", outputType: h.int(), parameters: {} },
       (w) => ({ output: w.task(count, {}, { nodeId: "count" }) }),
     );
 
@@ -416,8 +416,8 @@ describe("the other handle methods", () => {
       subWorkflowSummary: { kind: "none" },
     } as const;
 
-    const tasks = await handle({ nodes: { kind: "nodes", nodes: [node] } }).handle.tasks();
-    const invalid = await handle({ nodes: { kind: "nodes", nodes: [{ ...node, status: "LOST" }] } }).handle.tasks();
+    const tasks = await handle({ nodes: { kind: "nodes", nodes: [node] } }).handle.nodes();
+    const invalid = await handle({ nodes: { kind: "nodes", nodes: [{ ...node, status: "LOST" }] } }).handle.nodes();
 
     assert(tasks.ok);
     assert.equal(tasks.value[0]?.status, "COMPLETED");
@@ -632,7 +632,7 @@ describe("the workflow context", () => {
     assert.deepEqual(context.value.resultFor("count", count), { ok: true, value: { kind: "succeeded", value: 7 } });
     assert.deepEqual(context.value.resultFor("other", count), {
       ok: false,
-      error: { kind: "unknownUserCode", nodeId: "other", code: "OTHER" },
+      error: { kind: "unknownCustomCode", nodeId: "other", code: "OTHER" },
     });
     assert.deepEqual(context.value.resultFor("none", count), {
       ok: false,

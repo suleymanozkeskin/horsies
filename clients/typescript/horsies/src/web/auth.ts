@@ -18,7 +18,7 @@ import type { Result } from "../wire/result.ts";
  * The `request` of a verdict has the method, the URL, the headers and the signal of the incoming
  * request, and no body: the core reads the body.
  */
-export interface MonitoringAuthPolicy {
+export interface MonitoringAuthorizationPolicy {
   /** Whether this request may read monitoring data. */
   canView(request: Request): boolean | Promise<boolean>;
   /** Whether this request may cancel, pause or resume. Asked only after `canView` allowed. */
@@ -53,12 +53,12 @@ const HEADER_VALUE_SEPARATOR = ",";
  * authentication: choosing it states that something in front of the handler authenticated the
  * caller.
  */
-export function allowAll(): MonitoringAuthPolicy {
+export function allowAll(): MonitoringAuthorizationPolicy {
   return { canView: () => true, canAct: () => true };
 }
 
 /** Allow every request to read, and refuse every action. */
-export function viewOnly(): MonitoringAuthPolicy {
+export function viewOnly(): MonitoringAuthorizationPolicy {
   return { canView: () => true, canAct: () => false };
 }
 
@@ -77,7 +77,7 @@ export function viewOnly(): MonitoringAuthPolicy {
 export function trustedHeader(
   headerName: string,
   options: TrustedHeaderOptions,
-): Result<MonitoringAuthPolicy, TrustedHeaderRefused> {
+): Result<MonitoringAuthorizationPolicy, TrustedHeaderRefused> {
   if (headerName.trim() === "") {
     return err({ kind: "blankHeaderName" });
   }

@@ -42,9 +42,10 @@ export function extractorConfig(built: BuiltPackage, entryPoint: EntryPoint, rep
           strict: true,
           module: "nodenext",
           moduleResolution: "nodenext",
-          // The published declarations name global types of the runtime (`AbortSignal`), which a consumer has from the
-          // Node types (Node and Bun both give them); with none, API Extractor cannot follow them. Not the DOM lib: a
-          // DOM-only name must not pass the gate.
+          // The published declarations name global types of the runtime (`AbortSignal`, and the Fetch types `Request`
+          // and `Response` of the web handler), which a consumer has from the Node types (Node and Bun both give
+          // them); with none, API Extractor cannot follow them. Not the DOM lib: a DOM-only name must not pass the
+          // gate.
           lib: ["es2025", "esnext.temporal"],
           types: ["node"],
           typeRoots: [`${WORKSPACE_DIR}node_modules/@types`],

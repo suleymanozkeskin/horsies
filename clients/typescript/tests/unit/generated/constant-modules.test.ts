@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { TASK_LIST_ROW_BOUND } from "../../../horsies/src/_catalog/broker_bounds.ts";
+import { TASK_LIST_BOUND } from "../../../horsies/src/_catalog/broker_bounds.ts";
 import {
   MAX_ATTEMPT,
   MAX_EVENT_QUEUE_NAME_CHARS,
@@ -65,7 +65,7 @@ const bounds = [
   MAX_EVENT_USER_CODE_CHARS,
   MAX_EVENT_TRACE_CARRIER_CHARS,
   MAX_EVENT_WORKER_ID_CHARS,
-  TASK_LIST_ROW_BOUND,
+  TASK_LIST_BOUND,
 ];
 
 describe("generated constant modules", () => {

@@ -178,6 +178,7 @@ describe("a run in a seat isolate", () => {
         };
       },
       flush: async () => undefined,
+      isolateEnded: () => undefined,
     };
 
     setSeatBodyObserver(contextOf(app), observer);
@@ -208,6 +209,7 @@ describe("the flush of a seat isolate", () => {
     setSeatBodyObserver(contextOf(app), {
       enter: () => ({ run: (call) => call(), thrown: () => undefined, end: () => undefined, cancelled: () => undefined }),
       flush: async () => flush.promise,
+      isolateEnded: () => undefined,
     });
 
     const { port } = await served(app);
@@ -226,6 +228,7 @@ describe("the flush of a seat isolate", () => {
     setSeatBodyObserver(contextOf(app), {
       enter: () => ({ run: (call) => call(), thrown: () => undefined, end: () => undefined, cancelled: () => undefined }),
       flush: async () => Promise.reject(new TypeError("the observer broke")),
+      isolateEnded: () => undefined,
     });
 
     const { port } = await served(app);
@@ -294,6 +297,7 @@ describe("cancel in a seat", () => {
         },
       }),
       flush: async () => undefined,
+      isolateEnded: () => undefined,
     };
 
     setSeatBodyObserver(contextOf(app), observer);
@@ -419,6 +423,7 @@ describe("the defects of a seat isolate go to the main thread, then the isolate 
         cancelled: () => undefined,
       }),
       flush: async () => undefined,
+      isolateEnded: () => undefined,
     });
     app.implement(crunch, () => {
       throw new RangeError("body");
