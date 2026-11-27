@@ -63,14 +63,14 @@ export async function checkHealth(app: Horsies): Promise<boolean> {
 | `app.pingWorkers(options?)` | `readonly WorkerPong[]` (`workerId`, `hostname`, `pid`, `roundTripMs`), the distinct replies by worker id |
 | `app.monitoring.listWorkerStates()` | `readonly WorkerStateSnapshot[]`: the latest snapshot of each worker that wrote one |
 | `app.monitoring.getWorkerState(workerId)` | `WorkerStateRead`: `{ kind: "found", snapshot }` or `{ kind: "notFound", workerId }` |
-| `app.monitoring.getWorkerStateHistory(workerId, limit?)` | `readonly WorkerStateSnapshot[]`, newest first. `WorkerHistoryLimit`: `{ kind: "allRetained" }` (default) or `{ kind: "newest", count }` |
+| `app.monitoring.getWorkerStateHistory(workerId, limit?)` | `readonly WorkerStateSnapshot[]`, newest first. `WorkerHistoryLimit`: `{ kind: "allRetained" }` (default) or `{ kind: "newest", count }`. A `count` above 10,000 is refused with `INVALID_INPUT`; so is `allRetained` for a worker that holds more than 10,000 snapshots (no row is returned in part) |
 | `app.monitoring.getStaleTasks({ thresholdMinutes })` | `BoundedTaskList<StaleTaskRow>`: `RUNNING` tasks with no beat for `thresholdMinutes` (whole minutes, 0 to 525,600) |
 | `app.monitoring.getExpiredTasks()` | `BoundedTaskList<ExpiredTaskRow>`: `PENDING` tasks past their `goodUntil`, oldest deadline first |
 | `app.monitoring.getExecutionClassCoverage()` | `ExecutionClassCoverage`: whether a live worker can run each pending stream (a queue and an execution class) |
 | `app.monitoring.getExecutionClassReport()` | `ExecutionClassReport`: the pending streams, the budget load of each live worker, and `liveWindow` (how recent a snapshot of a live worker is) |
 
 - `PingWorkersOptions`: `target` (`{ kind: "everyWorker" }`, the default, or
-  `{ kind: "worker", workerId }`), `waitMs` (a whole number above 0,
+  `{ kind: "worker", workerId }`), `waitMs` (a whole number above 0, at most 60,000;
   default `DEFAULT_PING_WAIT_MS`, 2,000), `minResponses`
   (`{ kind: "fullWindow" }`, the default, or `{ kind: "atLeast", count }`).
   The ping returns at the first of: the target worker replied, `count`
@@ -244,6 +244,7 @@ export async function cancelPending(app: Horsies, storedId: string): Promise<boo
       return false;
     case "isWorkflowTask":
     case "databaseOperationFailed":
+    case "outcomeUnknown":
     case "storedDataInvalid":
     case "seatRelayFull":
       console.error(cancelled.error.message);
@@ -282,7 +283,8 @@ export async function cancelPending(app: Horsies, storedId: string): Promise<boo
 | `TASK_NOT_FOUND` | No live or history row has the id. Nothing changed |
 | `TASK_NOT_CANCELLABLE` | Terminal, or `RUNNING` with `pendingOrClaimedOnly`; `currentStatus` is the status found. Nothing changed |
 | `TASK_IS_WORKFLOW_TASK` | The task belongs to a workflow; `currentStatus` is the status found. Nothing changed |
-| `DATABASE_OPERATION_FAILED` | The statement or the connect failed; `retryable` follows the cause. The outcome is unknown: nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
+| `DATABASE_OPERATION_FAILED` | The connect failed, the statement was not sent, or the server refused it. Nothing changed; `retryable` follows the cause |
+| `OUTCOME_UNKNOWN` | The statement was sent and its reply was lost; `retryable` follows the cause. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED`, and a cancel that did not commit cancels the task |
 | `STORED_DATA_INVALID` | Stored data does not parse. Nothing changed |
 
 There is no manual retry action. Re-execution is a rerun (Rerun, below).

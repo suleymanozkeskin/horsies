@@ -29,7 +29,7 @@ use crate::workflow_engine::child_spec::ChildSpecSource;
 use super::app::{build_router, MountPath, WebState};
 use super::auth::{MonitoringAuthorizationPolicy, MonitoringRequest, INTENT_HEADER};
 use super::common::ApiError;
-use super::events::{EventBroadcaster, EventFrames};
+use super::events::{EventBroadcaster, EventFrames, EventStreamsRefused};
 use super::fleet_metrics::WebFleetMetrics;
 use super::schema::SchemaProbe;
 use super::spa::{EmbeddedAssets, MonitoringUiConfig};
@@ -267,8 +267,33 @@ impl MonitoringHandler {
     /// answer. The first subscriber starts the broadcaster's subscriptions
     /// on the broker's listener; a broker without a listener, or a listener
     /// that stopped, answers the degraded frame and the end.
+    ///
+    /// A handler with [`MAX_OPEN_EVENT_STREAMS`] open streams answers the
+    /// same: the degraded frame and the end, with a warning in the log. A
+    /// host that tells the refusal apart calls
+    /// [`try_subscribe_events`](Self::try_subscribe_events).
+    ///
+    /// [`MAX_OPEN_EVENT_STREAMS`]: super::events::MAX_OPEN_EVENT_STREAMS
     pub async fn subscribe_events(&self) -> EventFrames {
-        EventFrames::new(self.events.subscribe().await, self.heartbeat)
+        match self.try_subscribe_events().await {
+            Ok(frames) => frames,
+            Err(refused) => {
+                tracing::warn!("the monitoring handler refused an event stream: {refused}");
+                EventFrames::degraded(self.heartbeat)
+            }
+        }
+    }
+
+    /// [`subscribe_events`](Self::subscribe_events), with the refusal of a
+    /// handler at its bound of open streams.
+    ///
+    /// Errors: [`EventStreamsRefused`] when [`MAX_OPEN_EVENT_STREAMS`]
+    /// streams are open. Nothing is subscribed.
+    ///
+    /// [`MAX_OPEN_EVENT_STREAMS`]: super::events::MAX_OPEN_EVENT_STREAMS
+    pub async fn try_subscribe_events(&self) -> Result<EventFrames, EventStreamsRefused> {
+        let subscription = self.events.subscribe().await?;
+        Ok(EventFrames::new(subscription, self.heartbeat))
     }
 
     /// The access that a request needs: [`route_access`] with the actions

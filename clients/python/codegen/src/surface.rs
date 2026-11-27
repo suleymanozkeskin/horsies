@@ -2669,7 +2669,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "EventStreamRefused",
-        doc: "No stream: the handler has no broker. The host writes frame, the degraded frame, and ends\nthe response.",
+        doc: "No stream: the handler has no broker, or it serves its bound of open streams. The host\nwrites frame, the degraded frame, and ends the response.",
         constructor: Constructor::NoConstructor,
         properties: &[
             property("message", "str"),
@@ -2721,7 +2721,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
                 name: "subscribe_events_async",
                 parameters: &[],
                 returns: TypeText::FutureOf("EventStream | EventStreamRefused"),
-                doc: "Subscribe one event stream, after an allowed view. A broker without a listener, or a\nstopped listener, gives a stream whose first frame is the degraded frame. Reads only.",
+                doc: "Subscribe one event stream, after an allowed view. A broker without a listener, or a\nstopped listener, gives a stream whose first frame is the degraded frame. A handler with\n256 open streams gives EventStreamRefused. Reads only.",
             },
             StubFunction {
                 name: "close_events_async",

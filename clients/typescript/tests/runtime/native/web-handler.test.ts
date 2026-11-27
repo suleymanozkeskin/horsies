@@ -7,6 +7,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 
+import { MAX_OPEN_EVENT_STREAMS } from "../../../horsies/src/_catalog/monitoring_bounds.ts";
 import { Horsies } from "../../../horsies/src/index.ts";
 import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
@@ -227,6 +228,30 @@ describe("the event stream with a built addon and a database", () => {
     }
 
     assert.equal(read?.done, true);
+    await handler.close();
+  });
+
+  test("a stream past the bound of open streams is the degraded frame, and a closed stream frees its place", async () => {
+    const handler = shortHeartbeatHandler(manifestJson(testDatabaseUrl(), false), { authorizationPolicy: allowAll() });
+    const open: Response[] = [];
+
+    for (let count = 0; count < MAX_OPEN_EVENT_STREAMS; count += 1) {
+      open.push(await handler(request("/api/events")));
+    }
+
+    const refused = await handler(request("/api/events"));
+
+    assert.equal(await refused.text(), 'data: {"topic": "degraded"}\n\n');
+
+    const [first, ...rest] = open;
+
+    await first?.body?.cancel();
+
+    const freed = await handler(request("/api/events"));
+
+    assert.ok((await framesUntil(freed, ": heartbeat\n\n")).length >= 1);
+    await freed.body?.cancel();
+    await Promise.all(rest.map(async (response) => response.body?.cancel()));
     await handler.close();
   });
 

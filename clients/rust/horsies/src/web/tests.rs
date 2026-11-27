@@ -252,6 +252,23 @@ async fn the_event_stream_without_a_listener_is_the_degraded_frame() {
     assert_eq!(&body[..], b"data: {\"topic\": \"degraded\"}\n\n");
 }
 
+/// A subscription that the handler refused (its bound of open streams) is
+/// the degraded frame, then the end, with the headers of a stream.
+#[tokio::test]
+async fn a_refused_event_stream_is_the_degraded_frame_with_the_stream_headers() {
+    let response = degraded_event_stream();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[CONTENT_TYPE],
+        "text/event-stream; charset=utf-8"
+    );
+    assert_eq!(response.headers()[CACHE_CONTROL], "no-cache");
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&body[..], b"data: {\"topic\": \"degraded\"}\n\n");
+}
+
 /// A refused view of the event stream is the handler's 403; no stream
 /// starts.
 #[tokio::test]

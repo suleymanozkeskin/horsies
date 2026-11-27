@@ -325,6 +325,7 @@ mod tests {
             "TASK_NOT_CANCELLABLE",
             "TASK_IS_WORKFLOW_TASK",
             "DATABASE_OPERATION_FAILED",
+            "OUTCOME_UNKNOWN",
             "STORED_DATA_INVALID",
         ]);
     }

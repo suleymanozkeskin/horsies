@@ -267,8 +267,9 @@ pub struct EventFrame {
 #[derive(Clone, Debug)]
 pub struct EventStreamEnded {}
 
-/// No stream: the handler has no broker. The host writes `frame`, the
-/// degraded frame, and ends the response.
+/// No stream: the handler has no broker, or it serves its bound of open
+/// streams (`MAX_OPEN_EVENT_STREAMS`). The host writes `frame`, the degraded
+/// frame, and ends the response.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct EventStreamRefused {
@@ -458,9 +459,13 @@ async fn handle_operation(
 
 async fn subscribe_operation(state: Arc<HandlerState>, core: &'static Core) -> SubscribeOutcome {
     match state.built(core).await {
-        Ok(built) => {
-            SubscribeOutcome::Stream(EventStream::new(built.handler.subscribe_events().await))
-        }
+        Ok(built) => match built.handler.try_subscribe_events().await {
+            Ok(frames) => SubscribeOutcome::Stream(EventStream::new(frames)),
+            Err(refused) => SubscribeOutcome::Refused(EventStreamRefused {
+                message: format!("The monitoring handler refused an event stream: {refused}"),
+                frame: DEGRADED_FRAME.to_owned(),
+            }),
+        },
         Err(error) => SubscribeOutcome::Refused(EventStreamRefused {
             message: format!("The monitoring handler has no broker: {error}"),
             frame: DEGRADED_FRAME.to_owned(),

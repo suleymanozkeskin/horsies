@@ -169,6 +169,9 @@ fn task_action_failed(error: TaskActionError) -> ActionOutcome {
         ),
         TaskActionError::DatabaseOperationFailed {
             message, retryable, ..
+        }
+        | TaskActionError::OutcomeUnknown {
+            message, retryable, ..
         } => database_failed(Transience::of_retryable(retryable), message),
         // The request was valid, and a repeat gives the same answer until the
         // stored row changes.

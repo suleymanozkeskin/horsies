@@ -1226,6 +1226,17 @@ mod tests {
                 TASK,
                 BrokerError::ConnectionFailed("refused".to_owned()),
             ),
+            TaskActionError::cancel_outcome_unknown(
+                TASK,
+                crate::db::StatementFailure::OutcomeUnknown {
+                    statement: "cancel_task",
+                    cause: crate::db::UnknownOutcomeCause::NoReplyWithinBound {
+                        bound: std::time::Duration::from_secs(1),
+                        grace: std::time::Duration::from_secs(1),
+                        cancel: crate::db::CancelRequestOutcome::Sent,
+                    },
+                },
+            ),
             TaskActionError::StoredDataInvalid {
                 message: "Task cancel failed: stored data does not parse: \
                           terminalization outcome decode failed: observed_status NOT_KNOWN"

@@ -32,10 +32,10 @@ use crate::broker::enqueue_task::{
 };
 use crate::broker::error::{BrokerError, EnqueueRefusal};
 use crate::broker::health::{
-    checked_history_limit, ping_min_responses_refused, ping_wait_refused,
-    read_listed_worker_states, read_worker_snapshot, read_worker_snapshots, DatabasePing,
-    ListedWorkerState, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
-    WORKER_PING_CHANNEL,
+    checked_history_limit, checked_history_rows, checked_ping_wait, history_fetch_limit,
+    ping_min_responses_refused, read_listed_worker_states, read_worker_snapshot,
+    read_worker_snapshots, DatabasePing, ListedWorkerState, WorkerPingRequest, WorkerPong,
+    WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
 };
 use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
 use crate::broker::result_types::{
@@ -2219,9 +2219,7 @@ impl PostgresBroker {
         wait: std::time::Duration,
         min_responses: Option<usize>,
     ) -> DatabaseResult<Vec<WorkerPong>> {
-        if wait.is_zero() {
-            return Err(ping_wait_refused(&0));
-        }
+        let wait = checked_ping_wait(wait)?;
         if min_responses == Some(0) {
             return Err(ping_min_responses_refused(&0));
         }
@@ -2447,9 +2445,12 @@ impl PostgresBroker {
 
     /// State-snapshot history for one worker, newest first.
     ///
-    /// `limit` of `None` returns all retained rows; pass `Some(n)` to bound the
-    /// fetch. A limit of 0 or less is `INVALID_INPUT`, with no database call.
-    /// An unreadable stored row fails the read as in
+    /// `limit` of `None` returns all retained rows, at most
+    /// [`WORKER_HISTORY_ROW_BOUND`](crate::broker::WORKER_HISTORY_ROW_BOUND);
+    /// pass `Some(n)` to bound the fetch. A limit of 0 or less, or above the
+    /// bound, is `INVALID_INPUT`, with no database call. A worker that holds
+    /// more retained rows than the bound refuses the read of `None` with
+    /// `INVALID_INPUT`: no rows are returned in part. An unreadable stored row fails the read as in
     /// [`list_worker_states`](Self::list_worker_states). Mirrors Python's
     /// `get_worker_state_history_async`.
     pub async fn get_worker_state_history(
@@ -2458,17 +2459,19 @@ impl PostgresBroker {
         limit: Option<i64>,
     ) -> DatabaseResult<Vec<WorkerStateSnapshot>> {
         let limit = checked_history_limit(limit)?;
+        let fetch_limit = history_fetch_limit(limit);
         let rows = self
             .read_main(
                 &GET_WORKER_STATE_HISTORY
                     .bind()
                     .value(&worker_id)
-                    .value(&limit)
+                    .value(&fetch_limit)
                     .finish(),
                 stored_worker_state,
             )
             .await
             .map_err(|error| monitoring_query_error("get_worker_state_history", error))?;
+        let rows = checked_history_rows(limit, rows)?;
         read_worker_snapshots("get_worker_state_history", rows)
     }
 
@@ -4450,6 +4453,19 @@ mod broker_operation_error_tests {
     }
 
     #[tokio::test]
+    async fn ping_workers_refuses_a_wait_above_the_bound_as_invalid_input() {
+        let broker = unreachable_broker();
+
+        let over = crate::broker::WORKER_PING_WAIT_BOUND + Duration::from_millis(1);
+        let Err(refused) = broker.ping_workers(None, over, None).await else {
+            panic!("a wait above the bound must be refused");
+        };
+
+        assert_eq!(refused.code(), DatabaseErrorCode::InvalidInput);
+        assert!(!refused.retryable());
+    }
+
+    #[tokio::test]
     async fn ping_workers_refuses_zero_min_responses_as_invalid_input() {
         let broker = unreachable_broker();
 
@@ -4496,6 +4512,18 @@ mod broker_operation_error_tests {
             assert_eq!(refused.code(), DatabaseErrorCode::InvalidInput, "{limit}");
             assert!(!refused.retryable(), "{limit}");
         }
+    }
+
+    #[tokio::test]
+    async fn worker_state_history_refuses_a_limit_above_the_bound() {
+        let broker = unreachable_broker();
+
+        let over = crate::broker::WORKER_HISTORY_ROW_BOUND + 1;
+        let Err(refused) = broker.get_worker_state_history("w1", Some(over)).await else {
+            panic!("limit {over} must be refused");
+        };
+        assert_eq!(refused.code(), DatabaseErrorCode::InvalidInput);
+        assert!(!refused.retryable());
     }
 
     /// `close` returns the core pools to `Idle`, and the next operation opens

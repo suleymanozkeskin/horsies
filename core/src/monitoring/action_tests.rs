@@ -311,6 +311,18 @@ fn action_models_and_task_mapping_serialize_exactly() {
             r#"{"detail":"refused"}"#,
         ),
         (
+            TaskActionError::OutcomeUnknown {
+                message: "unknown".to_owned(),
+                retryable: true,
+                task_id,
+                cause: Box::new(crate::broker::BrokerError::ConnectionFailed(
+                    "reply lost".to_owned(),
+                )),
+            },
+            503,
+            r#"{"detail":"unknown"}"#,
+        ),
+        (
             TaskActionError::StoredDataInvalid {
                 message: "stored".to_owned(),
                 task_id,
