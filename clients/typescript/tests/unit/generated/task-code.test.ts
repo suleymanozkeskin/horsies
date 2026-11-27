@@ -21,8 +21,8 @@ describe("task codes", () => {
       ...Object.values(RetrievalCode),
       ...Object.values(OutcomeCode),
     ]);
-    expect(BUILT_IN_TASK_CODES).toHaveLength(37);
-    expect(new Set(BUILT_IN_TASK_CODES).size).toBe(37);
+    expect(BUILT_IN_TASK_CODES).toHaveLength(38);
+    expect(new Set(BUILT_IN_TASK_CODES).size).toBe(38);
     expect(Object.isFrozen(BUILT_IN_TASK_CODES)).toBe(true);
   });
 
@@ -30,6 +30,15 @@ describe("task codes", () => {
     const asyncContext: BuiltInTaskCode = RetrievalCode.ASYNC_CONTEXT;
 
     expect(BUILT_IN_TASK_CODES).toContain(asyncContext);
+  });
+
+  test("the contract codes name a node with no id and a node that is not in the context apart", () => {
+    expect(Object.values(ContractCode)).toEqual([
+      "RETURN_TYPE_MISMATCH",
+      "WORKFLOW_CONTEXT_MISSING_ID",
+      "NODE_NOT_IN_CONTEXT",
+      "NO_TYPE_AVAILABLE",
+    ]);
   });
 
   test("the reserved names are not built-in codes", () => {

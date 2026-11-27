@@ -26,7 +26,7 @@ use horsies_core::core::task::result::TASK_RESULT_ENVELOPE_KEY;
 use horsies_core::events::{
     MAX_ATTEMPT, MAX_EVENT_CUSTOM_CODE_CHARS, MAX_EVENT_QUEUE_NAME_CHARS,
     MAX_EVENT_TASK_NAME_CHARS, MAX_EVENT_TRACE_CARRIER_CHARS, MAX_EVENT_WORKER_ID_CHARS,
-    MAX_RETRY_COUNT,
+    MAX_RETRY_COUNT, MAX_TASK_RETRIES,
 };
 use horsies_core::frame_protocol::{
     BAD_ARGUMENTS_EXIT_CODE, BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE,
@@ -180,7 +180,7 @@ const EXIT_CODE_CONSTANTS: [PublishedConstant; 11] = [
 /// The stem of the module of the exit codes.
 const EXIT_CODES_MODULE: &str = "exit_codes";
 
-const EVENT_CONSTANTS: [PublishedConstant; 7] = [
+const EVENT_CONSTANTS: [PublishedConstant; 8] = [
     PublishedConstant::Integer {
         name: "MAX_ATTEMPT",
         value: MAX_ATTEMPT as i128,
@@ -188,6 +188,10 @@ const EVENT_CONSTANTS: [PublishedConstant; 7] = [
     PublishedConstant::Integer {
         name: "MAX_RETRY_COUNT",
         value: MAX_RETRY_COUNT as i128,
+    },
+    PublishedConstant::Integer {
+        name: "MAX_TASK_RETRIES",
+        value: MAX_TASK_RETRIES as i128,
     },
     PublishedConstant::Integer {
         name: "MAX_EVENT_TASK_NAME_CHARS",
@@ -669,6 +673,7 @@ mod tests {
         for (name, value) in [
             ("MAX_ATTEMPT", i128::from(MAX_ATTEMPT)),
             ("MAX_RETRY_COUNT", i128::from(MAX_RETRY_COUNT)),
+            ("MAX_TASK_RETRIES", i128::from(MAX_TASK_RETRIES)),
             (
                 "MAX_EVENT_TASK_NAME_CHARS",
                 MAX_EVENT_TASK_NAME_CHARS as i128,
@@ -692,7 +697,7 @@ mod tests {
         ] {
             assert!(text.contains(&integer_statement(name, value)), "{name}");
         }
-        assert_eq!(text.matches("export const ").count(), 10);
+        assert_eq!(text.matches("export const ").count(), 11);
     }
 
     #[test]

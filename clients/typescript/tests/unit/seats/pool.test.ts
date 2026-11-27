@@ -145,7 +145,7 @@ const RECORDED_FACTS: BodyFactsRecord = {
 };
 
 function runPost(runKey: bigint, taskName = "crunch"): SeatRunPost {
-  return { kind: "runBody", runKey, taskName, inputJson: '{"n":1}', taskId: TASK_ID, attempt: 2, facts: { kind: "notRecorded" } };
+  return { kind: "runBody", runKey, taskName, inputJson: '{"n":1}', taskId: TASK_ID, attempt: 2, maxRetries: 3, facts: { kind: "notRecorded" } };
 }
 
 function result(runKey: bigint, json: string): SeatToMain {

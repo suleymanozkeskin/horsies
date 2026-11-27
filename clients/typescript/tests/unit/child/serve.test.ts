@@ -48,8 +48,8 @@ function served(
   return { post, native, defects, table };
 }
 
-function runBody(runKey: bigint, taskName: string, inputJson: string): ChildPost {
-  return { kind: "runBody", runKey, taskName, inputJson, taskId: RUN_TASK_ID, attempt: 1, facts: { kind: "notRecorded" } };
+function runBody(runKey: bigint, taskName: string, inputJson: string, attempt = 1, maxRetries = 0): ChildPost {
+  return { kind: "runBody", runKey, taskName, inputJson, taskId: RUN_TASK_ID, attempt, maxRetries, facts: { kind: "notRecorded" } };
 }
 
 describe("the cancel post and the body observation", () => {
@@ -101,6 +101,34 @@ describe("the post dispatcher", () => {
     await settled();
     assert.deepEqual(child.native.values, [[5n, "42"]]);
     assert.deepEqual(child.table.size(), { runs: 0, works: 0 });
+  });
+
+  test("the runtime of a body gets the attempt and the retry budget of its post: the retry facts of a first run and of a retry", async () => {
+    const seen: number[][] = [];
+
+    const child = served([
+      implementationParts(
+        implementationOf(
+          double,
+          ({ n }, runtime) => {
+            seen.push([runtime.attempt, runtime.maxRetries, runtime.retriesLeft]);
+
+            return runtime.ok(n);
+          },
+          [],
+        ),
+      ),
+    ]);
+
+    child.post(runBody(1n, "double", '{"n":1}', 1, 2));
+    child.post(runBody(2n, "double", '{"n":1}', 2, 2));
+    child.post(runBody(3n, "double", '{"n":1}', 3, 2));
+    await settled();
+    assert.deepEqual(seen, [
+      [1, 2, 2],
+      [2, 2, 1],
+      [3, 2, 0],
+    ]);
   });
 
   test("the reader of a child gets only the input text that the core posts after its strict check", async () => {

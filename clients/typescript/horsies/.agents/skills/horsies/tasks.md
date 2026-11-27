@@ -376,6 +376,9 @@ runtime to a test, and `implementation.run` adds `ok` and `err`.
 | `ok(value)` | The success of the body: a value of the contract's `output` type |
 | `err({ code, message, data })` | The error of the body: a code of the contract's `errorCodes` |
 | `taskId` | The `TaskId` of the task |
+| `attempt` | The `AttemptNumber`: 1 on the first run, 1 more on each retry |
+| `maxRetries` | The `MaxRetries` of the task: the retries that follow its first attempt, 0 to 20 |
+| `retriesLeft` | The `RetriesLeft` after this attempt: `maxRetries - (attempt - 1)`, and 0 past the budget. It is not a last-attempt flag: a code that the retry policy does not retry, or `goodUntil`, can end the retries before it reaches 0 |
 | `fencingToken` | `{ taskId, value }`: `value` is the attempt number (Fencing Token) |
 | `signal` | An `AbortSignal` that fires at an operator cancel, and at the deadline of a `SHARED_ASYNC` run |
 | `cancelState()` | `{ kind: "notRequested" }` or `{ kind: "requested", cause: "DEADLINE" \| "OPERATOR" }`, with no turn of the event loop |
@@ -861,6 +864,9 @@ export async function testEmptyOrder(): Promise<boolean> {
   that `app.provide` returned with a value of the key's type
   (`[[Reports, fakePool]]`); a key with no entry throws `ClientDefect`.
   `spawn` runs its work at once and is never refused.
+- `TaskRuntime.forTest({ ..., maxRetries })`: the retry budget from
+  `MaxRetries.parse(3)`. Left out, the budget is `MaxRetries.NONE` (0).
+  `attempt: 2` with a budget of 3 gives `retriesLeft` 2.
 - `TaskRuntime.forTest({ ..., workflowContext })`: the stored form of a
   workflow context: `workflow_id`, `task_index`, `task_name`, and
   `results_by_id`, the stored result of each node by node id

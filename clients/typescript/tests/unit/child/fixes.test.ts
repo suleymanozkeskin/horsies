@@ -69,7 +69,7 @@ async function endedCode(run: Promise<never>): Promise<number> {
 }
 
 function runBodyPost(runKey: bigint): ChildPost {
-  return { kind: "runBody", runKey, taskName: "ping", inputJson: '{"n":1}', taskId: RUN_TASK_ID, attempt: 1, facts: { kind: "notRecorded" } };
+  return { kind: "runBody", runKey, taskName: "ping", inputJson: '{"n":1}', taskId: RUN_TASK_ID, attempt: 1, maxRetries: 0, facts: { kind: "notRecorded" } };
 }
 
 describe("a served child", () => {
