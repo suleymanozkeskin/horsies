@@ -15,12 +15,16 @@ import {
   mintTaskId,
   setPanicRule,
 } from "../../../horsies/src/native/process-core/process-core.ts";
+import { runAbortingChildCase } from "./child-process.ts";
 
 // The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
 void requireDevAddon();
 
 /** The longest time a child case may take. */
 const CHILD_CASE_BOUND_MS = 30_000;
+
+/** The longest time a test that runs one child case may take: the child bound, and the time to read its end. */
+const CHILD_TEST_BOUND_MS = CHILD_CASE_BOUND_MS + 5_000;
 
 /** The abort signal of the process. */
 const ABORT_SIGNAL = "SIGABRT";
@@ -87,8 +91,8 @@ describe("the process-wide rules, each in a child process", () => {
     assert.equal(runChild("defect-under-stop-core").stdout, "ClientDefect");
   });
 
-  test("a defect under ABORT_PROCESS writes its line and aborts the process", () => {
-    const child = runChild("defect-under-abort-process");
+  test("a defect under ABORT_PROCESS writes its line and aborts the process", { timeout: CHILD_TEST_BOUND_MS }, () => {
+    const child = runAbortingChildCase("process-core-child.ts", "defect-under-abort-process", CHILD_CASE_BOUND_MS);
 
     assert.equal(child.signal, ABORT_SIGNAL, child.stderr);
     assert.match(child.stderr, /aborts: defect CLIENT_DEFECT of the horsies package: a defect of the horsies package: taskId: a UUID/u);

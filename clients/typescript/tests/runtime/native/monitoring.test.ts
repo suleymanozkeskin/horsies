@@ -126,7 +126,7 @@ describe("the reads of an installed database", () => {
     });
     assert.deepEqual(await monitoring.getWorkflowNode(WORKFLOW_V4, 0), {
       ok: true,
-      value: { kind: "notFound", workflowId: WORKFLOW_V4, taskIndex: 0 },
+      value: { kind: "notFound", workflowId: WORKFLOW_V4, nodeIndex: 0 },
     });
   });
 
@@ -195,7 +195,7 @@ describe("an unreachable database", () => {
       ["limit", await monitoring.taskBreakdown({ groupBy: "worker", limit: 501 })],
       ["limit", await monitoring.listWorkflowRuns({ limit: 0 })],
       ["limit", await monitoring.listWorkflowRuns({ limit: 201 })],
-      ["taskIndex", await monitoring.getWorkflowNode(WORKFLOW_V4, 2 ** 31)],
+      ["nodeIndex", await monitoring.getWorkflowNode(WORKFLOW_V4, 2 ** 31)],
     ] as const;
 
     for (const [field, read] of refusals) {
