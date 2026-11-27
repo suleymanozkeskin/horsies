@@ -104,7 +104,7 @@ rand = "0.10"
 gethostname = "0.4"
 owo-colors = "4"
 toml = "1"
-sysinfo = "0.38"
+sysinfo = "0.40"
 libc = "0.2"
 
 [lints]

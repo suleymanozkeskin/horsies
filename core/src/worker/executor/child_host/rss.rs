@@ -12,7 +12,9 @@ pub(super) fn read_rss() -> RssReading {
     let Ok(pid) = sysinfo::get_current_pid() else {
         return RssReading::Unreadable;
     };
-    let mut system = System::new();
+    let Ok(mut system) = System::new() else {
+        return RssReading::Unreadable;
+    };
     system.refresh_processes_specifics(
         ProcessesToUpdate::Some(&[pid]),
         true,

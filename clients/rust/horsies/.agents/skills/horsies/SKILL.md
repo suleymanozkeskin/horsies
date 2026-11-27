@@ -57,7 +57,7 @@ read `https://suleymanozkeskin.github.io/horsies/rust/llms.txt`.
 | `sqlx` | off | `horsies::rerun::SqlxCaller` |
 | `otel` | off | `horsies::otel`: OpenTelemetry spans of the sends, the workflow starts and the task bodies, and the producer metrics, with the global providers of `opentelemetry` 0.33 |
 
-Minimum Rust version: 1.91.
+Minimum Rust version: 1.95.
 
 ## Define a Task
 

@@ -153,7 +153,7 @@ pub async fn ensure_database(settings: &DatabaseSettings) -> StoreResult<bool> {
         "CREATE DATABASE \"{}\"",
         settings.database_name.replace('"', "\"\"")
     );
-    sqlx::query(&statement)
+    sqlx::query(sqlx::AssertSqlSafe(statement))
         .execute(&pool)
         .await
         .map_err(|error| store_error("ensure_database", error))?;
@@ -668,7 +668,7 @@ impl Store {
         let value = value.to_owned();
         self.transaction(&operation, |tx| {
             Box::pin(async move {
-                Ok(sqlx::query(&statement)
+                Ok(sqlx::query(sqlx::AssertSqlSafe(statement))
                     .bind(value)
                     .bind(order_id)
                     .fetch_optional(&mut **tx)

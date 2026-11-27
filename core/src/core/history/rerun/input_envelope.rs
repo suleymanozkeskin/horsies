@@ -73,7 +73,7 @@ fn write_canonical_json(value: &Value, output: &mut Vec<u8>) -> Result<(), serde
             // so the keys are sorted here, as `sort_keys=True` sorts them: by
             // code point, which is the byte order of UTF-8.
             let mut members: Vec<(&String, &Value)> = values.iter().collect();
-            members.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            members.sort_unstable_by_key(|(left, _)| *left);
             output.push(b'{');
             for (index, (key, value)) in members.into_iter().enumerate() {
                 if index != 0 {

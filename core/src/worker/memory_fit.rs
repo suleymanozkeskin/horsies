@@ -72,7 +72,9 @@ pub struct MachineMemoryUnreadable {
 /// Read the total RAM of the host. Inside a container this is the RAM of the
 /// host, not a cgroup limit ([`read_cgroup_memory_limit`]).
 pub fn read_machine_memory() -> Result<MachineMemory, MachineMemoryUnreadable> {
-    let mut system = sysinfo::System::new();
+    let mut system = sysinfo::System::new().map_err(|cause| MachineMemoryUnreadable {
+        reason: format!("the host refused the system reader: {cause}"),
+    })?;
     system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
     machine_memory_of(system.total_memory())
 }
