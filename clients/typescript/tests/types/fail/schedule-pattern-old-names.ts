@@ -1,4 +1,4 @@
-// expect: TS2724 at 7, TS2353 at 9, TS2353 at 11, TS2353 at 13
+// expect: TS2305 at 7, TS2353 at 9, TS2353 at 11, TS2353 at 13
 // The patterns name their fields as the Python and Rust clients do: `time` (not `at`), `weekdays` (not `days`) and
 // `dayOfMonth` (not `day`). One schedule is a `TaskSchedule`; `ScheduleEntry` is no public name.
 

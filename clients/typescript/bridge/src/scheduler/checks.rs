@@ -1,4 +1,4 @@
-//! The core's checks of a schedule declaration, which `app.schedules` calls
+//! The core's checks of a schedule declaration, which `Horsies.create` calls
 //! on a main thread. Each starts no core, opens no connection and reads no
 //! clock, so a task child that runs the entry before `cli.run` still lets
 //! the child host shape its process runtime.
@@ -18,7 +18,7 @@
 //!   chooses no retention.
 //!
 //! No check applies the fork and stop rule of a core call: each reads only
-//! its arguments and the core's tables, so `app.schedules` never throws.
+//! its arguments and the core's tables, so the declaration of the `schedule` section never throws.
 
 use chrono_tz::Tz;
 use horsies_core::scheduler_manifest::PatternJson;

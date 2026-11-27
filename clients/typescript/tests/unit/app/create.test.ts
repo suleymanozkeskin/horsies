@@ -56,6 +56,20 @@ describe("Horsies.create: the config", () => {
     assert.equal(createHorsies(input, environment).ok, true);
   });
 
+  test("the core's config check gets the app's schema mode; the default is MIGRATE_AND_VALIDATE", () => {
+    for (const [schemaMode, expected] of [
+      [undefined, "MIGRATE_AND_VALIDATE"],
+      ["OBSERVE_ONLY", "OBSERVE_ONLY"],
+      ["ASSUME_INITIALIZED", "ASSUME_INITIALIZED"],
+    ] as const) {
+      const environment = fakeEnvironment();
+      const input: HorsiesConfig = schemaMode === undefined ? config([ping]) : { ...config([ping]), schemaMode };
+
+      assert.equal(createHorsies(input, environment).ok, true);
+      assert.deepEqual(environment.checks.schemaModes, [expected]);
+    }
+  });
+
   test("a core config refusal keeps its catalog code, at the path config", () => {
     const environment = fakeEnvironment({ checks: fakeChecks({ config: [catalogRefusal("HRS-201", "cluster_wide_cap must be >= 1")] }) });
 

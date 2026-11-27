@@ -3,6 +3,8 @@
 //
 // - A field that the config leaves out is left out of the text, so the core's default applies: each default has one
 //   source.
+// - `schemaMode`, `logFormat` and `tracing` are not fields of the core's `AppConfig`: the parsed config keeps the first
+//   two with their defaults filled (`process-settings.ts`), and `Horsies.create` reads `tracing`.
 // - The parse checks only what the core's config reader needs before it can read the text (`checked.ts`); the core
 //   checks every rule of the config (the bridge's `checkAppConfig`).
 // - A refusal of the cluster cap has the code `HRS-201`; a refusal of a claim field has the code of the prefetch
@@ -31,6 +33,7 @@ import {
   u32Field,
 } from "./checked.ts";
 import { type PayloadPolicyInput, payloadJson } from "./payload.ts";
+import { type LogFormat, logFormatOf, type SchemaMode, schemaModeOf } from "./process-settings.ts";
 import { type QueueConfigInput, queueEntries, type QueueSetup, queueSetupOf } from "./queues.ts";
 import { type RecoveryConfigInput, recoveryJson } from "./recovery.ts";
 import { type ResilienceConfigInput, resilienceJson } from "./resilience.ts";
@@ -78,12 +81,24 @@ export type AppConfigInput = QueueConfigInput & {
   readonly resendOnTransientError?: boolean;
   /** The spans and producer metrics of the app. Left out: `{ kind: "noTracing" }`. `Horsies.create` reads it; the core does not. */
   readonly tracing?: TracingConfigInput;
+  /**
+   * What the app's core handle does with the database schema. Left out: `"MIGRATE_AND_VALIDATE"` (the first operation
+   * that needs the schema applies the migrations and checks the schema version). `"OBSERVE_ONLY"` runs no schema
+   * statement; `"ASSUME_INITIALIZED"` runs no schema statement and uses no listener. The producer, the scheduler, `web`
+   * and the task sends of each worker child use this mode. The worker's own connection always migrates and validates,
+   * and the live step of `check` reads through a connection of its own with `"OBSERVE_ONLY"`.
+   */
+  readonly schemaMode?: SchemaMode;
+  /** The format of the core log records on stderr in the worker, the scheduler, `check` and each worker child. Left out: `{ kind: "textLogs" }`. */
+  readonly logFormat?: LogFormat;
 };
 
 /** A parsed config. The core's config text is not enumerable, so a log of the value never shows a secret. */
 export type AppConfig = {
   readonly queues: QueueSetup;
   readonly resendOnTransientError: boolean;
+  readonly schemaMode: SchemaMode;
+  readonly logFormat: LogFormat;
   /** The JSON text of the core's `AppConfig`. It holds the database URLs. */
   readonly coreConfigJson: string;
 };
@@ -210,6 +225,8 @@ function appConfigOf(input: AppConfigInput, core: ConfigObject): AppConfig {
   const config = {
     queues: queueSetupOf(input),
     resendOnTransientError: input.resendOnTransientError === true,
+    schemaMode: schemaModeOf(input.schemaMode),
+    logFormat: logFormatOf(input.logFormat),
     coreConfigJson: JSON.stringify(core),
   };
 

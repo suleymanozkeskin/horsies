@@ -25,6 +25,9 @@ const CHILD_TEST_BOUND_MS = CHILD_CASE_BOUND_MS + 5_000;
 /** The longest time a process with an empty loop may take to exit. */
 const IDLE_EXIT_BOUND_MS = 10_000;
 
+/** The keys of a JSON log line, in order: the keys of Python's `JsonLogsFormatter`. */
+const JSON_LOG_KEYS = ["ts", "level", "logger", "message", "process", "task_id", "task_name", "attempt", "trace_id", "span_id", "exc"];
+
 /** The levels that the default threshold WARNING lets through. */
 const WARNING_AND_ABOVE: ReadonlySet<string> = new Set(["WARNING", "ERROR"]);
 
@@ -85,6 +88,25 @@ describe("the JavaScript log sink", () => {
     assert.match(child.stderr, /horsies: the log sink threw: planned sink failure/u);
     assert.match(child.stderr, /horsies: \d+ log records go to stderr: the JavaScript sink threw/u);
     assert.match(child.stderr, / INFO horsies\.sql /u);
+  });
+
+  test("a command of an app with jsonLogs writes each stderr record as one JSON line with the same keys", () => {
+    const child = runChildCase("logging-child.ts", "command-json-lines", CHILD_CASE_BOUND_MS);
+
+    assert.equal(child.stdout, "pinged done", child.stderr);
+
+    const objects = child.stderr
+      .split("\n")
+      .filter((line) => line.startsWith("{"))
+      .map((line): Record<string, unknown> => JSON.parse(line));
+
+    const statement = objects.find((object) => object["logger"] === "horsies.sql");
+
+    assert.ok(statement !== undefined, child.stderr);
+    assert.equal(statement["level"], "INFO");
+    assert.ok(Number.isSafeInteger(statement["process"]), child.stderr);
+    assert.ok(objects.every((object) => Object.keys(object).join(",") === JSON_LOG_KEYS.join(",")), child.stderr);
+    assert.doesNotMatch(child.stderr, / INFO horsies\.sql /u);
   });
 
   test("a process with a sink set and a started core exits when its loop is empty", () => {
