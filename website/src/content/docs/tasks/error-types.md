@@ -389,6 +389,8 @@ def call_api(*, url: str) -> Result[dict[str, JsonValue], TaskError[ApiCode]]:
 
 ## Reserved Built-In Code Enforcement
 
+The built-in code enums are `StrEnum` classes. `str(code)` and `f"{code}"` give the code text, for example `DATABASE_ERROR`, as a custom code of type `str` does.
+
 All string values used by the built-in error code families (`OperationalCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`) are **reserved**. Custom error codes must not collide with these values.
 
 **Runtime enforcement**: `TaskError(code="DATABASE_ERROR", message="db down")` raises `ValueError` at construction time. Built-in codes must be passed as enum members. Custom codes must be plain `str`, not `str, Enum` subclasses:

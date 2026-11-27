@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 __all__ = ['DatabaseErrorCode']
 
 
-class DatabaseErrorCode(str, Enum):
+class DatabaseErrorCode(StrEnum):
     """Categorized broker operation failure codes.
 
     The members are Python's, in Python's order

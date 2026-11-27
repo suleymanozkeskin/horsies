@@ -17,7 +17,7 @@ use crate::core::codec::{task_result_from_json_str, task_result_to_json_string};
 use crate::core::task::result::{read_task_result_text, TaskResultText};
 use crate::core::workflow::node::SubWorkflowParameters;
 use crate::core::TaskResult;
-use crate::worker::execution::build_task_input;
+use crate::worker::execution::{build_task_input, UpstreamCodes};
 use crate::workflow_engine::child_spec::ChildSpecRequest;
 use crate::workflow_engine::start_statement::{merged_child_input, NodeInput};
 use crate::workflow_engine::steps::ChildStartSource;
@@ -153,7 +153,7 @@ fn the_child_host_passes_each_envelope_as_stored() {
             args_from_entry(envelope),
         );
 
-        let built = build_task_input(&input, true)
+        let built = build_task_input(&input, true, UpstreamCodes::NotChecked)
             .unwrap_or_else(|refused| panic!("{}: the child host refused: {refused}", vector.name));
 
         assert_eq!(

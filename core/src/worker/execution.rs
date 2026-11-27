@@ -44,14 +44,16 @@ use crate::core::lifecycle::{
     PhaseTwoStep, TerminalizationCommand, TerminalizationOutcome, UnreportedAttemptOutcome,
     WorkflowSuccessOutcome,
 };
-use crate::core::task::error::{OperationalCode, TaskError};
-use crate::core::task::result::TaskResult;
+use crate::core::task::error::{OperationalCode, TaskError, TaskErrorCode};
+use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
 use crate::core::workflow::context::{WORKFLOW_CTX_KWARG, WORKFLOW_META_KWARG};
+use crate::core::TaskRegistry;
 use crate::db::{
     CheckoutClass, CorePool, ParameterType, StatementBound, StatementFailure, TypedStatement,
 };
 use crate::workflow_engine::args_merge::{
-    args_from_inner_text, object_members, object_text, ARGS_FROM_ENVELOPE_KEY,
+    args_from_inner_text, args_from_source, object_members, object_text, ArgsFromSource,
+    ARGS_FROM_ENVELOPE_KEY,
 };
 use crate::workflow_engine::child_spec::ChildSpecSource;
 use crate::workflow_engine::phase2_recovery::Phase2Wake;
@@ -176,6 +178,19 @@ const PHASE_RETRY_MAX_DELAY_S: f64 = 15.0;
 // Phase 1a: Build the task input from the one stored input value
 // ---------------------------------------------------------------------------
 
+/// Where the input build reads the custom codes that an upstream task declares.
+#[derive(Clone, Copy)]
+pub(crate) enum UpstreamCodes<'a> {
+    /// The build checks no upstream code: a check-time read of an input and a
+    /// vector read have no registry of the process that ran the upstream task.
+    NotChecked,
+    /// The build refuses an `args_from` result whose stored error holds a custom code that
+    /// the upstream task, found in this registry by its name, does not declare. An upstream
+    /// task that declares no code, a task that the registry does not hold, and a
+    /// sub-workflow node are not checked.
+    Registry(&'a TaskRegistry),
+}
+
 /// Build the task input bytes from one encoded input value.
 ///
 /// Shared by the child's run (`worker::executor::child_host`) and
@@ -204,9 +219,14 @@ const PHASE_RETRY_MAX_DELAY_S: f64 = 15.0;
 /// ([`workflow_ctx_text`]). No value is parsed and written again, so an
 /// integer outside the `i64` and `u64` range reaches the task as stored, as
 /// Python's `loads_json` reads any integer (`core/codec/json_io.py:97`).
+///
+/// With [`UpstreamCodes::Registry`], an `args_from` result whose stored error holds a custom code
+/// that its upstream task does not declare is `WORKER_SERIALIZATION_ERROR`
+/// ([`refuse_undeclared_upstream_code`]).
 pub(crate) fn build_task_input(
     input: &str,
     accepts_workflow_context: bool,
+    upstream: UpstreamCodes<'_>,
 ) -> Result<Vec<u8>, TaskError> {
     check_json_text(input)
         .map_err(|e| serialization_error(format!("stored input refused: {e}")))?;
@@ -226,7 +246,7 @@ pub(crate) fn build_task_input(
         return Ok(input.as_bytes().to_vec());
     }
 
-    let members = task_members(input)?;
+    let members = task_members(input, upstream)?;
     let args_from_names: HashSet<String> = members
         .task_members
         .iter()
@@ -305,7 +325,10 @@ struct TaskMembers<'a> {
 /// Errors: `WORKER_SERIALIZATION_ERROR` for a malformed `args_from` entry
 /// ([`args_from_inner_text`]), and when serde_json does not read the members
 /// of a text that the strict read took. Pure.
-fn task_members(input: &str) -> Result<TaskMembers<'_>, TaskError> {
+fn task_members<'a>(
+    input: &'a str,
+    upstream: UpstreamCodes<'_>,
+) -> Result<TaskMembers<'a>, TaskError> {
     let members = object_members(input)
         .map_err(|e| serialization_error(format!("stored input refused: {e}")))?;
     let mut read = TaskMembers {
@@ -320,7 +343,10 @@ fn task_members(input: &str) -> Result<TaskMembers<'_>, TaskError> {
                 let member = match args_from_inner_text(&name, value)
                     .map_err(|refusal| serialization_error(refusal.to_string()))?
                 {
-                    Some(inner) => TaskMember::ArgsFrom(inner),
+                    Some(inner) => {
+                        refuse_undeclared_upstream_code(&name, value, inner, upstream)?;
+                        TaskMember::ArgsFrom(inner)
+                    }
                     None => TaskMember::Stored(value),
                 };
                 read.task_members.push((name, member));
@@ -350,6 +376,49 @@ fn task_input_text(members: &[(String, TaskMember<'_>)], workflow_context: Optio
         },
     }
     object_text(&written)
+}
+
+/// Refuse an `args_from` result whose stored error holds a custom code that the upstream task
+/// does not declare. `entry` is the `args_from` entry of the kwarg `name`; `inner` is its result
+/// envelope. A result that does not read as an envelope is left to the decode of the receiving
+/// type. Pure.
+///
+/// Errors: `WORKER_SERIALIZATION_ERROR` naming the kwarg, the task and the code.
+fn refuse_undeclared_upstream_code(
+    name: &str,
+    entry: &RawValue,
+    inner: &RawValue,
+    upstream: UpstreamCodes<'_>,
+) -> Result<(), TaskError> {
+    let registry = match upstream {
+        UpstreamCodes::NotChecked => return Ok(()),
+        UpstreamCodes::Registry(registry) => registry,
+    };
+    let source_name = match args_from_source(entry) {
+        Some(ArgsFromSource::Task(source_name)) => source_name,
+        Some(ArgsFromSource::SubWorkflow) | None => return Ok(()),
+    };
+    let declared = match registry.get(&source_name) {
+        Ok(task) => task.error_codes(),
+        Err(_not_registered) => return Ok(()),
+    };
+    if declared.is_empty() {
+        return Ok(());
+    }
+    let error = match read_task_result_text(inner.get()) {
+        Ok(TaskResultText::Err(error)) => error,
+        Ok(TaskResultText::Ok(_value)) | Err(_unreadable) => return Ok(()),
+    };
+    match error.error_code {
+        TaskErrorCode::Custom(code) if !declared.contains(&code.as_str()) => {
+            Err(serialization_error(format!(
+                "kwarg '{name}': the upstream outcome of task '{source_name}' holds the custom code \
+                 '{}', which the task does not declare",
+                code.as_str()
+            )))
+        }
+        TaskErrorCode::Custom(_declared_code) | TaskErrorCode::BuiltIn(_) => Ok(()),
+    }
 }
 
 fn serialization_error(message: String) -> TaskError {
@@ -1625,11 +1694,19 @@ mod result_wrap_tests {
 
 #[cfg(test)]
 mod task_input_tests {
-    use super::build_task_input;
+    use std::sync::Arc;
+
+    use super::{build_task_input, UpstreamCodes};
+    use crate::core::task::fn_trait::{
+        BlockingTaskFn, RawTaskResult, RegisteredTask, TaskMetadata,
+    };
+    use crate::core::task::result::TaskResult;
     use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
+    use crate::core::TaskRegistry;
 
     fn task_input(input: &str) -> String {
-        let bytes = build_task_input(input, false).expect("task input built");
+        let bytes =
+            build_task_input(input, false, UpstreamCodes::NotChecked).expect("task input built");
         String::from_utf8(bytes).expect("task input is UTF-8")
     }
 
@@ -1655,7 +1732,7 @@ mod task_input_tests {
     #[test]
     fn input_text_that_breaks_the_strict_read_rule_is_refused() {
         for input in ["{", "NaN", r#"{"a":1,"a":2}"#] {
-            let err = build_task_input(input, false).unwrap_err();
+            let err = build_task_input(input, false, UpstreamCodes::NotChecked).unwrap_err();
             assert!(
                 err.message
                     .unwrap_or_default()
@@ -1672,7 +1749,7 @@ mod task_input_tests {
     }
 
     fn refusal(input: &str) -> String {
-        let err = build_task_input(input, false).unwrap_err();
+        let err = build_task_input(input, false, UpstreamCodes::NotChecked).unwrap_err();
         assert_eq!(err.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
         err.message.unwrap_or_default()
     }
@@ -1763,7 +1840,8 @@ mod task_input_tests {
 
     /// The task input of a task that takes the workflow context.
     fn task_input_with_context(input: &str) -> String {
-        let bytes = build_task_input(input, true).expect("task input built");
+        let bytes =
+            build_task_input(input, true, UpstreamCodes::NotChecked).expect("task input built");
         String::from_utf8(bytes).expect("task input is UTF-8")
     }
 
@@ -1831,13 +1909,80 @@ mod task_input_tests {
             format!(r#"{{"long":{long},"x":{{"__h_x":1}},"__h_workflow_meta__":{{}}}}"#),
             r#"{"__h_other__":1}"#.to_owned(),
         ] {
-            let error = build_task_input(&refused, false).unwrap_err();
+            let error = build_task_input(&refused, false, UpstreamCodes::NotChecked).unwrap_err();
             assert_eq!(
                 error.error_code.to_string(),
                 "WORKER_SERIALIZATION_ERROR",
                 "{refused}"
             );
         }
+    }
+
+    struct EchoTask;
+
+    impl BlockingTaskFn for EchoTask {
+        fn execute(&self, input: &[u8]) -> RawTaskResult {
+            TaskResult::Ok(input.to_vec())
+        }
+    }
+
+    /// A registry with the task `upstream`, which declares `codes`.
+    fn registry_with(codes: &'static [&'static str]) -> TaskRegistry {
+        let mut registry = TaskRegistry::new();
+        registry
+            .register(
+                "upstream",
+                RegisteredTask::Blocking {
+                    task: Arc::new(EchoTask),
+                    metadata: TaskMetadata::default().with_error_codes(codes),
+                },
+            )
+            .expect("the task registers");
+        registry
+    }
+
+    /// The input of a task whose member `dep` is the result of `upstream`, a failure with `code`.
+    fn input_with_upstream_code(code: &str) -> String {
+        format!(
+            r#"{{"dep":{{"__h_taskresult_envelope__":true,"source_task_name":"upstream","source_definition_key":null,"inner":{{"__h_task_result__":true,"ok":null,"err":{{"error_code":"{code}","message":"no","data":null,"exception":null}}}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn an_upstream_code_that_the_upstream_task_declares_reads() {
+        let registry = registry_with(&["RATE_LIMITED"]);
+        let built = build_task_input(
+            &input_with_upstream_code("RATE_LIMITED"),
+            false,
+            UpstreamCodes::Registry(&registry),
+        );
+        assert!(built.is_ok(), "{built:?}");
+    }
+
+    #[test]
+    fn an_upstream_code_that_the_upstream_task_does_not_declare_is_worker_serialization_error() {
+        let registry = registry_with(&["RATE_LIMITED"]);
+        let error = build_task_input(
+            &input_with_upstream_code("CARD_DECLINED"),
+            false,
+            UpstreamCodes::Registry(&registry),
+        )
+        .unwrap_err();
+        assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
+        let message = error.message.unwrap_or_default();
+        assert!(message.contains("CARD_DECLINED"), "{message}");
+        assert!(message.contains("'dep'"), "{message}");
+    }
+
+    #[test]
+    fn an_upstream_task_without_declared_codes_reads_any_code() {
+        let registry = registry_with(&[]);
+        let built = build_task_input(
+            &input_with_upstream_code("CARD_DECLINED"),
+            false,
+            UpstreamCodes::Registry(&registry),
+        );
+        assert!(built.is_ok(), "{built:?}");
     }
 
     /// The context takes the place of a member named `workflow_context`, as Python's

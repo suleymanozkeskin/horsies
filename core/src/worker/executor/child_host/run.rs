@@ -32,7 +32,7 @@ use crate::core::task::fn_trait::{RawTaskResult, RegisteredTask, TaskModule};
 use crate::core::task::result::TaskResult;
 use crate::events::{AttemptNumber, QueueName};
 use crate::worker::execution::{
-    build_task_input, mark_task_finalizing, phase_retry_delay, FinalizingMark,
+    build_task_input, mark_task_finalizing, phase_retry_delay, FinalizingMark, UpstreamCodes,
 };
 use crate::worker::executor::protocol::{
     FailureDetail, ResultEnvelopeText, RunEnd, StopReason, StoredOptionsRefusal, TaskInputText,
@@ -483,7 +483,11 @@ pub(super) fn prepare(app: &ChildApp, task_name: &str, input: &TaskInputText) ->
             )))
         }
     };
-    match build_task_input(input.as_str(), task.accepts_workflow_context()) {
+    match build_task_input(
+        input.as_str(),
+        task.accepts_workflow_context(),
+        UpstreamCodes::Registry(&app.registry),
+    ) {
         Ok(input) => Prepared::Body {
             task: Box::new(task),
             input,

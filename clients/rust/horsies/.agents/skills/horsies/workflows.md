@@ -170,7 +170,9 @@ the task's registration on the builder's app.
   `task_name::fields::<name>()`. A token of another task, or a source of
   another output type, is a compile error.
 - `E` in `TaskOutcome<S, E>` reads the source's custom codes. `CustomCode`
-  reads any custom code as checked text.
+  reads any custom code as checked text. A source task that declares codes
+  and stores a custom code that it does not declare fails the run with
+  `WORKER_SERIALIZATION_ERROR`, whatever `E` is.
 - The field `S` of `arg_from` must be the source's output type.
 
 Data flow rules:

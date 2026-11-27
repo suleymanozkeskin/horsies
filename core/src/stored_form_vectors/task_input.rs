@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use super::{refusal_name, vector_file};
 use crate::core::history::enqueue::{prepare_enqueue_facts, EnqueuePreparationError, SendPart};
-use crate::worker::execution::build_task_input;
+use crate::worker::execution::{build_task_input, UpstreamCodes};
 
 #[derive(Deserialize)]
 struct TaskInputForm {
@@ -67,7 +67,7 @@ fn the_send_accepts_each_python_text() {
 #[test]
 fn the_child_host_passes_each_python_text_byte_for_byte() {
     for vector in form().vectors {
-        let passed = build_task_input(&vector.text, false)
+        let passed = build_task_input(&vector.text, false, UpstreamCodes::NotChecked)
             .unwrap_or_else(|refused| panic!("{}: the child host refused: {refused}", vector.name));
         assert_eq!(passed, vector.text.as_bytes(), "{}", vector.name);
     }
@@ -103,7 +103,7 @@ fn the_send_refuses_each_refused_text_with_its_refusal() {
 fn the_child_host_refuses_each_refused_text() {
     for refused in form().refused_texts {
         assert!(
-            build_task_input(&refused.text, false).is_err(),
+            build_task_input(&refused.text, false, UpstreamCodes::NotChecked).is_err(),
             "{}",
             refused.name
         );
