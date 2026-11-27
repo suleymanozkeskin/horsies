@@ -6008,7 +6008,7 @@ mod tests {
         // claims on the wakes of its listener: a broker of a worker.
         let worker_url = database_url_for(&database.config_url, database.database.name());
         let broker = PostgresBroker::connect_worker_with(
-            &test_app_config(worker_url.clone()).broker,
+            &test_app_config(worker_url.clone()).database,
             crate::ClientFamily::Rust,
         )
         .await
@@ -6116,7 +6116,7 @@ mod tests {
         .expect("install the claim refusal");
         let worker_url = database_url_for(&database.config_url, database.database.name());
         let broker = PostgresBroker::connect_worker_with(
-            &test_app_config(worker_url.clone()).broker,
+            &test_app_config(worker_url.clone()).database,
             crate::ClientFamily::Rust,
         )
         .await

@@ -462,7 +462,7 @@ fn retention_period_cases() -> Vec<BoundCase> {
         ),
         retention_case(
             Box::new(|config: &mut AppConfig| {
-                config.retention.retention_sweep_interval_seconds = 0
+                config.retention.retention_sweep_interval_seconds = 0;
             }),
             RetentionField::RetentionSweepIntervalSeconds,
             "retention.retention_sweep_interval_seconds",
@@ -495,7 +495,7 @@ fn resilience_and_payload_cases() -> Vec<BoundCase> {
         ),
         (
             Box::new(|config: &mut AppConfig| {
-                config.resilience.database_retry_max_attempts = u64::MAX
+                config.resilience.database_retry_max_attempts = u64::MAX;
             }),
             ConfigField::Resilience(ResilienceField::DatabaseRetryMaxAttempts),
             "resilience.database_retry_max_attempts",

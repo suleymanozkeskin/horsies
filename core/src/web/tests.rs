@@ -1985,7 +1985,7 @@ async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
     let database = crate::test_support::TestDatabase::create_empty().await;
     let broker = Arc::new(
         PostgresBroker::connect_observe_only(
-            &AppConfig::from_database_url(database.url()).broker,
+            &AppConfig::from_database_url(database.url()).database,
             crate::ClientFamily::Rust,
         )
         .await
@@ -2889,7 +2889,7 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
     let url = database.url().to_owned();
     let broker = Arc::new(
         PostgresBroker::connect_observe_only(
-            &AppConfig::from_database_url(&url).broker,
+            &AppConfig::from_database_url(&url).database,
             crate::ClientFamily::Rust,
         )
         .await

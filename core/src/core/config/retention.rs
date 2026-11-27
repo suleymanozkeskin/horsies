@@ -824,7 +824,7 @@ mod tests {
             "history_leaf_horizon_days" => config.history_leaf_horizon_days = value as u32,
             "heartbeat_leaf_horizon_hours" => config.heartbeat_leaf_horizon_hours = value as u32,
             "partition_maintenance_interval_seconds" => {
-                config.partition_maintenance_interval_seconds = value
+                config.partition_maintenance_interval_seconds = value;
             }
             "retention_sweep_interval_seconds" => config.retention_sweep_interval_seconds = value,
             "retention_delete_batch_size" => config.retention_delete_batch_size = value as u32,

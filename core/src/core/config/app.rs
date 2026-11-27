@@ -547,7 +547,7 @@ impl AppConfig {
             Err(PostgresConfigError::SocketValueOutOfBounds(refused)) => {
                 errors.push(AppConfigError::Keepalive(refused.to_string()));
             }
-            Err(error) => errors.push(AppConfigError::Broker(error.to_string())),
+            Err(error) => errors.push(AppConfigError::DatabaseInvalidUrl(error.to_string())),
         }
 
         // Recovery validation
@@ -1364,7 +1364,7 @@ mod tests {
                 Some(HorsiesErrorCode::ConfigInvalidPrefetch),
             ),
             (
-                AppConfigError::Broker(String::new()),
+                AppConfigError::DatabaseInvalidUrl(String::new()),
                 Some(HorsiesErrorCode::DatabaseInvalidUrl),
             ),
             (
