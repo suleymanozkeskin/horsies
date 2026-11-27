@@ -799,3 +799,322 @@ jobs:
       - name: Measure the typecheck speed of this runner (report only)
         working-directory: clients/typescript
         run: bun run typecheck-speed:record
+
+  # The dev addon of the TypeScript client for linux-x64-gnu, built once per
+  # run, and its native tests on Node and on Bun against PostgreSQL 18. The
+  # jobs typescript-e2e and typescript-parity download the file that this job
+  # uploads: no job builds the addon twice in one run.
+  typescript-addon:
+    needs: scope
+    if: needs.scope.outputs.run_typescript == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      HORSIES_TEST_DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
+      HORSIES_NATIVE_ADDON_PATH: ${{ github.workspace }}/clients/typescript/bridge/horsies.linux-x64-gnu.node
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: horsies
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.TYPESCRIPT_NODE_VERSION }}
+          package-manager-cache: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.TYPESCRIPT_BUN_VERSION }}
+
+      # rustup is preinstalled on the runner. With no argument it installs the
+      # toolchain and components that rust-toolchain.toml names.
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - name: Cache Cargo builds
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      # The napi CLI of clients/typescript/bridge/package.json.
+      - name: Install the workspace from bun.lock
+        working-directory: clients/typescript
+        run: bun install --frozen-lockfile
+
+      - name: Build the dev addon
+        run: bun run --cwd clients/typescript/bridge build:dev
+
+      - name: Upload the dev addon
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: typescript-dev-addon
+          path: clients/typescript/bridge/horsies.linux-x64-gnu.node
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Run the native tests on Bun
+        run: bun run --cwd clients/typescript/bridge test:native
+
+      - name: Run the native tests on Node
+        run: bun run --cwd clients/typescript/bridge test:native:node
+
+  # The generated files of the TypeScript client: the renderer check reports
+  # drift between the committed files and the core, and the crate tests run
+  # the renderer's own tests.
+  typescript-codegen:
+    needs: scope
+    if: needs.scope.outputs.run_typescript == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - name: Cache Cargo builds
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Check the generated TypeScript files
+        run: |
+          if ! cargo run -p horsies-typescript-codegen -- check clients/typescript/horsies; then
+            echo '::error::The generated TypeScript files differ from the core. To write them, run: cargo run -p horsies-typescript-codegen -- write clients/typescript/horsies' >&2
+            exit 1
+          fi
+
+      - name: Test the codegen crate
+        run: cargo test -p horsies-typescript-codegen
+
+  # The end-to-end layers of the TypeScript client on Node and on Bun, with
+  # the dev addon of typescript-addon and PostgreSQL 18. The runner
+  # (tests/e2e/run.ts) runs each layer file under its watchdog.
+  typescript-e2e:
+    name: typescript-e2e (${{ matrix.runtime }})
+    needs: [scope, typescript-addon]
+    if: needs.scope.outputs.run_typescript == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [node, bun]
+    env:
+      HORSIES_TEST_DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
+      HORSIES_NATIVE_ADDON_PATH: ${{ github.workspace }}/clients/typescript/bridge/horsies.linux-x64-gnu.node
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: horsies
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.TYPESCRIPT_NODE_VERSION }}
+          package-manager-cache: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.TYPESCRIPT_BUN_VERSION }}
+
+      - name: Download the dev addon
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: typescript-dev-addon
+          path: clients/typescript/bridge
+
+      - name: Install the workspace from bun.lock
+        working-directory: clients/typescript
+        run: bun install --frozen-lockfile
+
+      - name: Run the end-to-end layers
+        working-directory: clients/typescript
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: bun tests/e2e/run.ts "$RUNTIME"
+
+  # The parity of the TypeScript client with the Python client
+  # (crossclient/parity): the compare tests, then each scenario on the Python
+  # side and on the TypeScript side (Node and Bun), each on its own new
+  # database. The Python side needs horsies._core, so the job installs the
+  # dev wheel of python-wheel. The Rust side is not built: rust-e2e of
+  # tests-full.yml runs the Rust pairs.
+  typescript-parity:
+    needs: [scope, python-wheel, typescript-addon]
+    if: needs.scope.outputs.run_typescript == 'true' && needs.scope.outputs.run_python == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      HORSIES_TEST_DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
+      HORSIES_NATIVE_ADDON_PATH: ${{ github.workspace }}/clients/typescript/bridge/horsies.linux-x64-gnu.node
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: horsies
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.TYPESCRIPT_NODE_VERSION }}
+          package-manager-cache: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.TYPESCRIPT_BUN_VERSION }}
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Download the dev addon
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: typescript-dev-addon
+          path: clients/typescript/bridge
+
+      - name: Download the dev wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: horsies-dev-wheel
+          path: dist
+
+      - name: Install the workspace from bun.lock
+        working-directory: clients/typescript
+        run: bun install --frozen-lockfile
+
+      # The project itself comes from the wheel; every later `uv run` has
+      # --no-sync, so uv does not replace it with a build of the source.
+      - name: Install the Python dependencies and the dev wheel
+        run: |
+          uv sync --dev --no-install-project
+          uv pip install --python clients/python/.venv --no-deps dist/horsies-*.whl
+          # pytest puts clients/python/ first on sys.path, so `import horsies`
+          # loads the source folder; give it the compiled module of the wheel.
+          unzip -o -j dist/horsies-*.whl 'horsies/_core*.so' -d clients/python/horsies
+
+      - name: Run the compare tests
+        run: uv run --no-sync pytest -c clients/python/pyproject.toml --rootdir . crossclient/parity/test_compare_sides.py -v --tb=short
+
+      - name: Run the TypeScript parity scenarios
+        run: uv run --no-sync pytest -c clients/python/pyproject.toml --rootdir . crossclient/parity/test_parity.py -k typescript -v --tb=short
+
+  # The zod adapter of the TypeScript client on the newest patch of each zod
+  # minor of the supported range (the peer range of horsies/package.json,
+  # SUPPORTED_ZOD in horsies/src/zod/version.ts: >=4.1.13 <4.7.0). A row is
+  # added when the range gains a minor. The runner of the type tests
+  # (tests/types/run.ts) has no case filter, so the step runs every case,
+  # the zod-* compile-fail cases among them.
+  typescript-zod-minors:
+    name: typescript-zod-minors (zod ${{ matrix.zod }})
+    needs: scope
+    if: needs.scope.outputs.run_typescript == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        zod: ['4.1.13', '4.2.1', '4.3.6', '4.4.3', '4.5.4', '4.6.7']
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.TYPESCRIPT_NODE_VERSION }}
+          package-manager-cache: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.TYPESCRIPT_BUN_VERSION }}
+
+      # The packages that pin zod (tests, horsies, examples, examples/showcase)
+      # pin it in the `zod` entry of their dev dependencies; the peer range is
+      # not an exact pin and stays. The install is not frozen: bun.lock
+      # changes in this job only.
+      - name: Install the workspace and the floor compiler
+        working-directory: clients/typescript
+        env:
+          ZOD_VERSION: ${{ matrix.zod }}
+        run: |
+          set -euo pipefail
+          for package_file in tests/package.json horsies/package.json examples/package.json examples/showcase/package.json; do
+            grep -q '"zod": "4.1.13"' "$package_file"
+            sed -i "s/\"zod\": \"4.1.13\"/\"zod\": \"$ZOD_VERSION\"/" "$package_file"
+          done
+          bun install
+          (cd ci/typescript-floor && bun install --frozen-lockfile)
+          for package_folder in tests horsies; do
+            installed="$(cd "$package_folder" && node -p "require(require.resolve('zod/package.json')).version")"
+            test "$installed" = "$ZOD_VERSION"
+          done
+
+      - name: Type check with bun check
+        working-directory: clients/typescript
+        run: bun check
+
+      - name: Run the zod tests on Bun
+        working-directory: clients/typescript
+        run: bun test tests/unit/zod
+
+      - name: Run the zod tests on Node
+        working-directory: clients/typescript
+        run: node --test 'tests/unit/zod/**/*.test.ts'
+
+      - name: Run the type tests
+        working-directory: clients/typescript
+        run: bun tests/types/run.ts
