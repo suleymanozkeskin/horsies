@@ -292,6 +292,15 @@ jobs:
         working-directory: clients/typescript
         run: bun tests/packages/pack.ts --addons "$GITHUB_WORKSPACE/addons" --out "$GITHUB_WORKSPACE/npm-packages"
 
+      # The packed horsies tarball is the input of the public API gate: the API
+      # report, the exported-type check and the no-any check read its
+      # unpacked declarations.
+      - name: Run the public API gate on the packed horsies tarball
+        working-directory: clients/typescript
+        env:
+          VERSION: ${{ needs.platforms.outputs.version }}
+        run: bun tests/public-api/run.ts check --tarball "$GITHUB_WORKSPACE/npm-packages/horsies-$VERSION.tgz"
+
       - name: Upload the tarballs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -325,6 +334,7 @@ jobs:
       PLATFORM_PACKAGE: ${{ matrix.package }}
       RELEASE: ${{ matrix.release }}
       WEB_PAGE: ${{ matrix.web_page }}
+      ALL_PLATFORM_PACKAGES: ${{ matrix.all_packages }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -413,7 +423,8 @@ jobs:
               --version "$VERSION" \
               --platform-package "$PLATFORM_PACKAGE" \
               --release "$RELEASE" \
-              --web-page "$WEB_PAGE"
+              --web-page "$WEB_PAGE" \
+              --all-platform-packages "$ALL_PLATFORM_PACKAGES"
 
       - name: Install and check on the runner
         if: matrix.place == 'runner'
@@ -426,7 +437,8 @@ jobs:
               --version "$VERSION" \
               --platform-package "$PLATFORM_PACKAGE" \
               --release "$RELEASE" \
-              --web-page "$WEB_PAGE"
+              --web-page "$WEB_PAGE" \
+              --all-platform-packages "$ALL_PLATFORM_PACKAGES"
 
       - name: Show the requests of the registry
         if: always()

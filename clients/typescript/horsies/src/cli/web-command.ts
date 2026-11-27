@@ -67,7 +67,7 @@ export const WEB_DEFAULT_TRUSTED_HEADER = "X-Forwarded-User";
 const MAX_PORT = 65_535;
 
 /** The flags of `web`, as `node:util` `parseArgs` reads them. */
-const WEB_FLAG_OPTIONS = {
+export const WEB_FLAG_OPTIONS = {
   host: { type: "string" },
   port: { type: "string" },
   authorization: { type: "string" },

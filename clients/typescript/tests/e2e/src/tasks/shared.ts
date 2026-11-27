@@ -3,7 +3,7 @@
 // the signal or ignores it, a blocked event loop before and after an `await`, a throw in a callback that a body
 // scheduled, and a Promise that no body awaits.
 
-import { defineTask, h, type Horsies } from "../../../../horsies/src/index.ts";
+import { defineTask, h, type Horsies } from "#horsies";
 import { appendLine, createOnce, markerErrorText, unixMillis } from "../markers.ts";
 import { simple } from "./basic.ts";
 import { holdThread, PAST_THE_DEADLINE_MS, sleepFor } from "./waits.ts";

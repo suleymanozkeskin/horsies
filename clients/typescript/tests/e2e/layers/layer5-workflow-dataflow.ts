@@ -8,8 +8,8 @@
 import assert from "node:assert/strict";
 import { describe } from "node:test";
 
-import { defineWorkflow, h } from "../../../horsies/src/index.ts";
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import { defineWorkflow, h } from "#horsies";
+import { loadAddon } from "#horsies";
 import { contextReport, produceInt } from "../src/tasks/workflow-nodes.ts";
 import * as dataflow from "../src/workflows/dataflow.ts";
 import { errorCode, sentHandle, succeeded } from "../support/outcome.ts";
@@ -18,8 +18,8 @@ import { nodeError, nodeValue, startedHandle, WORKFLOW_WAIT_MS, workflowCode, wo
 import { endedNodes, nodeById, startedAfterEnd, statusesOf } from "../support/workflow-rows.ts";
 import { node } from "../src/workflows/node-options.ts";
 
-// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
-void requireDevAddon();
+// The addon of these tests is the one that the entry of the lane loads (`entry/`).
+void loadAddon();
 
 /**
  * A workflow whose node input has the key `extra`, which `e2e_wf_produce_int` does not take. The value comes from a

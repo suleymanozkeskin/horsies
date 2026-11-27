@@ -4,7 +4,8 @@
 // Both append one line to the marker `handler-lines`, which a test reads: the hook `started <pid>` once per handler
 // child, the handler `<task id> <attempt> <end kind>` for each attempt that ended.
 
-import type { Horsies } from "../../../horsies/src/index.ts";
+import type { Horsies } from "#horsies";
+import { holdThread } from "./tasks/waits.ts";
 import { appendLine, markerErrorText } from "./markers.ts";
 
 /** The marker of the handler lines. */
@@ -38,4 +39,25 @@ export function registerHandlers(app: Horsies): void {
   app.onEvent("AttemptEnded", { name: ATTEMPT_ENDED_HANDLER }, (event) => {
     writeLine(attemptEndedLine(event.taskId, event.attempt, event.end.kind));
   });
+}
+
+/** How long the hook of `handler_hook_past_bound` holds the handler child: past the 10 s bound of a start hook. */
+export const HANDLER_HOOK_HOLD_MS = 15_000;
+
+/** The handler child start hook that fails: it throws, or it holds the child past the bound. Registered before the recording hook. */
+export function registerFailingHandlerChildStart(app: Horsies, instance: "handler_hook_throws" | "handler_hook_past_bound"): void {
+  switch (instance) {
+    case "handler_hook_throws":
+      app.onHandlerChildStart(() => {
+        throw new Error("e2e handler child start hook failure");
+      });
+
+      return;
+    case "handler_hook_past_bound":
+      app.onHandlerChildStart(() => {
+        holdThread(HANDLER_HOOK_HOLD_MS);
+      });
+
+      return;
+  }
 }

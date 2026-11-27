@@ -48,7 +48,7 @@ export const METRICS_USAGE = "<entry> metrics --metrics-listen HOST:PORT [--log-
 export const METRICS_DEFAULT_LOG_LEVEL: WorkerLogLevel = "INFO";
 
 /** The flags of `metrics`, as `node:util` `parseArgs` reads them. */
-const METRICS_FLAG_OPTIONS = {
+export const METRICS_FLAG_OPTIONS = {
   "metrics-listen": { type: "string" },
   "log-level": { type: "string" },
 } as const;

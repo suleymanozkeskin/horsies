@@ -16,8 +16,8 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { describe, test } from "node:test";
 
-import { type TaskHandle, TaskId } from "../../../horsies/src/index.ts";
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import { type TaskHandle, TaskId } from "#horsies";
+import { loadAddon } from "#horsies";
 import { threadProvidedState } from "../src/app.ts";
 import type { Instance, ThreadProfile } from "../src/instances.ts";
 import * as basic from "../src/tasks/basic.ts";
@@ -29,8 +29,8 @@ import { exitText } from "../support/process.ts";
 import { pollUntil } from "../support/rows.ts";
 import { e2eTest, type Suite, TEST_LIMIT_MS, WORKER_READY_LINE } from "../support/suite.ts";
 
-// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
-void requireDevAddon();
+// The addon of these tests is the one that the entry of the lane loads (`entry/`).
+void loadAddon();
 
 /** Why Bun skips the tests of this file but the first. */
 const BUN_SKIP_REASON = "SHARED_THREAD children run on Node only: on Bun the worker refuses a profile with them (the first test of this file)";

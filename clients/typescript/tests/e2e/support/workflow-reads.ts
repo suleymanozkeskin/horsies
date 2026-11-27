@@ -15,7 +15,7 @@ import type {
   WorkflowId,
   WorkflowReadError,
   WorkflowStartError,
-} from "../../../horsies/src/index.ts";
+} from "#horsies";
 import type { Result } from "../../../horsies/src/wire/result.ts";
 import { errorCode, errorText } from "./outcome.ts";
 

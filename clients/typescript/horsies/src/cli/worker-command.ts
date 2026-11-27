@@ -46,7 +46,7 @@ export const WORKER_USAGE = "<entry> worker --profile NAME [--log-level LEVEL] [
 export const WORKER_DEFAULT_LOG_LEVEL: WorkerLogLevel = "INFO";
 
 /** The flags of `worker`. */
-const WORKER_FLAGS = {
+export const WORKER_FLAGS = {
   profile: { type: "string" },
   "log-level": { type: "string" },
   "metrics-listen": { type: "string" },

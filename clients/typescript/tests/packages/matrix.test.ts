@@ -131,3 +131,11 @@ describe("runtimeVersionsOf", () => {
     assert.ok("refused" in runtimeVersionsOf(["--node", "26.13.1"]));
   });
 });
+
+describe("the selection list of the install entries", () => {
+  test("each entry of a row carries the packages that the caller passes", () => {
+    const entries = installEntriesOf(MUSL_ROW, VERSIONS, "@horsies/native-a,@horsies/native-b");
+
+    assert.deepEqual(entries.map((entry) => entry.all_packages), ["@horsies/native-a,@horsies/native-b", "@horsies/native-a,@horsies/native-b"]);
+  });
+});

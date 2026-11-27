@@ -8,7 +8,7 @@
 //   refuses them.
 // - `scheduler_invalid_task`: a schedule of a contract that the app does not list. The scheduler start refuses it.
 
-import { defineTask, h, type Horsies, type SchedulePattern } from "../../../../horsies/src/index.ts";
+import { defineTask, h, type Horsies, type SchedulePattern } from "#horsies";
 
 /** The interval of the interval schedules of the `scheduler` instance that do not catch up, in seconds. */
 export const SCHEDULE_INTERVAL_SECONDS = 2;

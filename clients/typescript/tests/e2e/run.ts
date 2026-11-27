@@ -3,9 +3,12 @@
 //   cd clients/typescript && bun tests/e2e/run.ts <node|bun> [<layer file name> ...]
 //
 // - Needs `HORSIES_TEST_DATABASE_URL` (a throwaway PostgreSQL server; there is no default) and
-//   `HORSIES_NATIVE_ADDON_PATH` (the absolute path of a dev build of the addon), `python3` for the watchdog, and the
-//   runtime of the lane on `PATH` (`node` 26 or `bun` 1.4). The PgBouncer lane also sets
-//   `HORSIES_TEST_DATABASE_URL_TRANSACTION`.
+//   `python3` for the watchdog, and the runtime of the lane on `PATH` (`node` 26 or `bun` 1.4). The PgBouncer lane also
+//   sets `HORSIES_TEST_DATABASE_URL_TRANSACTION`.
+// - The entry of the run is `HORSIES_E2E_ENTRY`: `source` (the default; needs `HORSIES_NATIVE_ADDON_PATH`, the absolute
+//   path of a dev build of the addon) or `package` (the built `horsies` package and its platform package, installed by
+//   `install-built-package.ts`; the files import `#horsies`, which `tests/package.json` maps to `entry/package.ts`
+//   under the condition `horsies-package`). The runner sets that condition for each process of the run.
 // - Runs each layer file (`layers.ts`) in its own process, one file at a time: `node --test <file>` or
 //   `bun test ./<file>`, under the watchdog (`watchdog.py`: 2 GiB of the process tree and the file's wall bound). The
 //   watchdog kills each process of the tree that is left after the file, also after a failure.
@@ -29,6 +32,15 @@ const MEMORY_BOUND_MB = 2_048;
 
 /** The variable of the dev addon path. */
 const ADDON_PATH_VARIABLE = "HORSIES_NATIVE_ADDON_PATH";
+
+/** The variable that selects the entry of the run. */
+const ENTRY_VARIABLE = "HORSIES_E2E_ENTRY";
+
+/** The entries of a run: the source of the package with the dev addon, or the built package. */
+export type EntryKind = "source" | "package";
+
+/** The condition of `imports` in `tests/package.json` that selects the built package. */
+const PACKAGE_CONDITION = "horsies-package";
 
 /** The workspace folder: every command runs there. */
 const WORKSPACE: string = fileURLToPath(new URL("../..", import.meta.url));
@@ -75,31 +87,60 @@ export function fileCommand(runtime: Runtime, file: LayerFile): Command {
   return { program: "python3", args: [WATCHDOG, "--max-mb", String(MEMORY_BOUND_MB), "--max-seconds", String(file.boundSeconds), "--", ...test] };
 }
 
+/** The entry that `value` (the variable) names, or the text of the refusal. Pure. */
+export function entryOf(value: string | undefined): { readonly ok: true; readonly entry: EntryKind } | { readonly ok: false; readonly error: string } {
+  switch (value) {
+    case undefined:
+    case "source":
+      return { ok: true, entry: "source" };
+    case "package":
+      return { ok: true, entry: "package" };
+    default:
+      return { ok: false, error: `${ENTRY_VARIABLE} is ${JSON.stringify(value)}; it is source or package` };
+  }
+}
+
+/** The environment that selects `entry` in every process of the run: the condition for the runtime's own option variable. Pure. */
+export function entryEnvironment(runtime: Runtime, entry: EntryKind): Readonly<Record<string, string>> {
+  switch (entry) {
+    case "source":
+      return {};
+    case "package":
+      return runtime === "node" ? { NODE_OPTIONS: `--conditions=${PACKAGE_CONDITION}` } : { BUN_OPTIONS: `--conditions=${PACKAGE_CONDITION}` };
+  }
+}
+
 /** The settings of the run, or why the suite cannot run. Effects: reads the environment. */
-function runSettings(runId: string): { readonly ok: true; readonly settings: ServerSettings } | { readonly ok: false; readonly error: string } {
+function runSettings(runId: string): { readonly ok: true; readonly settings: ServerSettings; readonly entry: EntryKind } | { readonly ok: false; readonly error: string } {
   const settings = serverSettings((name) => (name === RUN_ID_VARIABLE ? runId : process.env[name]));
 
   if (!settings.ok) {
     return { ok: false, error: settingsRefusedText(settings.error) };
   }
 
+  const entry = entryOf(process.env[ENTRY_VARIABLE]);
+
+  if (!entry.ok) {
+    return { ok: false, error: entry.error };
+  }
+
   const addon = process.env[ADDON_PATH_VARIABLE] ?? "";
 
-  if (!isAbsolute(addon)) {
+  if (entry.entry === "source" && !isAbsolute(addon)) {
     return { ok: false, error: `${ADDON_PATH_VARIABLE}: set it to the absolute path of a dev build of the addon (bun run --cwd bridge build:dev)` };
   }
 
-  return { ok: true, settings: settings.value };
+  return { ok: true, settings: settings.value, entry: entry.entry };
 }
 
 /** Run one file and drop the databases that it left. Effects: a process, and statements on the test server. */
-async function runFile(runtime: Runtime, file: LayerFile, settings: ServerSettings): Promise<FileEnd> {
+async function runFile(runtime: Runtime, file: LayerFile, settings: ServerSettings, entry: EntryKind): Promise<FileEnd> {
   const command = fileCommand(runtime, file);
   const startedAt = performance.now();
 
   process.stdout.write(`\n==> ${file.name} on ${runtime}\n`);
 
-  const ran = spawnSync(command.program, command.args, { cwd: WORKSPACE, stdio: "inherit", env: { ...process.env, [RUN_ID_VARIABLE]: settings.runId } });
+  const ran = spawnSync(command.program, command.args, { cwd: WORKSPACE, stdio: "inherit", env: { ...process.env, ...entryEnvironment(runtime, entry), [RUN_ID_VARIABLE]: settings.runId } });
   const exit = ran.status ?? EXIT_FAILED;
   const seconds = Math.round((performance.now() - startedAt) / 1_000);
 
@@ -173,7 +214,7 @@ async function main(args: readonly string[]): Promise<number> {
   const ends: FileEnd[] = [];
 
   for (const file of plan.plan.files) {
-    ends.push(await runFile(plan.plan.runtime, file, run.settings));
+    ends.push(await runFile(plan.plan.runtime, file, run.settings, run.entry));
   }
 
   printPending();

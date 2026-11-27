@@ -44,7 +44,7 @@ export const CHECK_USAGE = "<entry> check [--live] [--log-level LEVEL]";
 export const CHECK_DEFAULT_LOG_LEVEL: WorkerLogLevel = "WARNING";
 
 /** The flags of `check`. */
-const CHECK_FLAGS = {
+export const CHECK_FLAGS = {
   live: { type: "boolean" },
   "log-level": { type: "string" },
 } as const;

@@ -5,9 +5,9 @@
 
 import { isMainThread } from "node:worker_threads";
 
-import type { AnyWorkflowContract, Horsies } from "../../../horsies/src/index.ts";
+import type { AnyWorkflowContract, Horsies } from "#horsies";
 import { entryThread } from "./entry-thread.ts";
-import { registerHandlers } from "./handlers.ts";
+import { registerFailingHandlerChildStart, registerHandlers } from "./handlers.ts";
 import type { DefaultTaskInstance, Instance } from "./instances.ts";
 import { declareInvalidRuleSchedules, declareSchedules, declareUnlistedTaskSchedule } from "./tasks/scheduled.ts";
 import { endedSpansFlow } from "./tasks/ended-spans.ts";
@@ -70,6 +70,12 @@ export function addInstanceMembers(app: Horsies, instance: DefaultTaskInstance):
       registerHandlers(app);
 
       return;
+    case "handler_hook_throws":
+    case "handler_hook_past_bound":
+      registerFailingHandlerChildStart(app, instance);
+      registerHandlers(app);
+
+      return;
     case "worker_ended_spans":
       app.onChildStart(installSpanLinesSdk);
       app.onHandlerChildStart(installSpanLinesSdk);
@@ -117,6 +123,8 @@ export function instanceWorkflows(instance: Instance): readonly AnyWorkflowContr
     case "scheduler_invalid_rules":
     case "scheduler_invalid_task":
     case "handlers":
+    case "handler_hook_throws":
+    case "handler_hook_past_bound":
       return [];
   }
 }

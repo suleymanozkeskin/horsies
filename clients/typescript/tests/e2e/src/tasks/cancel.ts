@@ -9,7 +9,7 @@
 //   thread. A sync body that reads no cancel within its wait writes `notRequested`.
 // - `<token>-ended`: the process id of the child, when a body that ignores the cancel ends.
 
-import { type CancelState, defineTask, h, type Horsies } from "../../../../horsies/src/index.ts";
+import { type CancelState, defineTask, h, type Horsies } from "#horsies";
 import { err, ok, type Result } from "../../../../horsies/src/wire/result.ts";
 import { createOnce, markerErrorText, unixMillis } from "../markers.ts";
 import { holdThread, sleepFor } from "./waits.ts";

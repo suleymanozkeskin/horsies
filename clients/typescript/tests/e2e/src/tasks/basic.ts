@@ -2,7 +2,7 @@
 // Each task is `ISOLATED`, the default class, on the default queue. A body that holds its thread mirrors a Rust
 // blocking body; an async body mirrors a Rust async body.
 
-import { defineTask, h, type Horsies } from "../../../../horsies/src/index.ts";
+import { defineTask, h, type Horsies } from "#horsies";
 import { createOnce, markerErrorText, unixMillis } from "../markers.ts";
 import { holdThread, runtimeName, sleepFor } from "./waits.ts";
 

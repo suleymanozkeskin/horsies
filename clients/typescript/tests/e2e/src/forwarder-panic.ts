@@ -9,7 +9,7 @@
 // (`entry-thread.ts`).
 
 import type { NativeEnvelope, NativeThrown } from "../../../horsies/src/native/call/envelope.ts";
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import { loadAddon } from "#horsies";
 import { err, ok, type Result } from "../../../horsies/src/wire/result.ts";
 
 /** The thread of the forwarder, as the abort line names it (`FORWARDER_THREAD_NAME` of the bridge). */
@@ -35,7 +35,7 @@ export function probeRefusedText(refused: ProbeRefused): string {
 
 /** The probe of the dev addon of this process, or `notInBuild`. Effects: loads the dev addon at the first call. */
 export function forwarderPanicAddon(): Result<ForwarderPanicAddon, ProbeRefused> {
-  const exports = requireDevAddon();
+  const exports = loadAddon();
 
   if (!("probePanicLogForwarder" in exports)) {
     return err({ kind: "notInBuild" });
