@@ -3071,6 +3071,8 @@ export const RerunErrorCode: {
     readonly DRIVER_FAILED: "DRIVER_FAILED";
     readonly NO_OPEN_TRANSACTION: "NO_OPEN_TRANSACTION";
     readonly RESULT_NOT_TEXT: "RESULT_NOT_TEXT";
+    readonly RETRY_CODE_NOT_DECLARED: "RETRY_CODE_NOT_DECLARED";
+    readonly TASK_NOT_REGISTERED: "TASK_NOT_REGISTERED";
 };
 
 // @public (undocumented)
@@ -3215,6 +3217,20 @@ export type RerunRetention = {
 };
 
 // @public
+export interface RerunRetryCodeNotDeclared {
+    // (undocumented)
+    readonly code: typeof RerunErrorCode.RETRY_CODE_NOT_DECLARED;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    // (undocumented)
+    readonly retryCode: string;
+    // (undocumented)
+    readonly taskName: string;
+}
+
+// @public
 export interface RerunSourceAbsent {
     // (undocumented)
     readonly kind: "sourceAbsent";
@@ -3260,7 +3276,7 @@ export interface RerunStatementFailed {
 export type RerunStatementOutcome = "notCommitted" | "unknown";
 
 // @public
-export type RerunStepRefused = RerunClassNotRegistered | RerunCallerKeyRefused | RerunIdMintRefused | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunContractViolation;
+export type RerunStepRefused = RerunClassNotRegistered | RerunCallerKeyRefused | RerunIdMintRefused | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunRetryCodeNotDeclared | RerunTaskNotRegistered | RerunContractViolation;
 
 // @public
 export type RerunStoredFamily = {
@@ -3269,6 +3285,18 @@ export type RerunStoredFamily = {
 } | {
     readonly kind: "notRecorded";
 };
+
+// @public
+export interface RerunTaskNotRegistered {
+    // (undocumented)
+    readonly code: typeof RerunErrorCode.TASK_NOT_REGISTERED;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    // (undocumented)
+    readonly taskName: string;
+}
 
 // @public
 export interface RerunUnknownStoredFamily {

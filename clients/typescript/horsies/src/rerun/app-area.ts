@@ -7,7 +7,7 @@ import { CoreHandle } from "../native/handle/core-handle.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import type { TraceArgument } from "../native/values/records.ts";
 import { nativeValueAsync } from "../native/call/envelope.ts";
-import type { AppRerunAnswer, RerunAddon } from "../native/facades/rerun.ts";
+import type { AppRerunAnswer, RegisteredTaskCodesArg, RerunAddon } from "../native/facades/rerun.ts";
 import type { SeatRelayFullOutcome } from "../seats/relay-full.ts";
 import { addonRerunBridge } from "./bridge.ts";
 import type { RerunRequest } from "./parse.ts";
@@ -26,6 +26,11 @@ export interface RerunHost {
    * no tracing, `NO_ACTIVE_CARRIER`.
    */
   activeCarrier(): TraceArgument;
+  /**
+   * The declared custom codes of the tasks that the app lists, each task once: the core checks the stored retry
+   * list of a rerun's source against them.
+   */
+  registeredCodes(): RegisteredTaskCodesArg;
 }
 
 /** The rerun members of the app. */
@@ -51,18 +56,22 @@ export const NO_ACTIVE_CARRIER: TraceArgument = { kind: "noCarrier" };
  * seat relay to the main thread of its child; `rerunTaskIn` does not cross a thread (the caller's transaction object stays
  * in the isolate), so there it throws `AddonOutsideMainThread`. Starts nothing.
  */
-export function rerunAreaOfCore(core: CoreAccess, activeCarrier: () => TraceArgument): RerunArea {
+export function rerunAreaOfCore(
+  core: CoreAccess,
+  activeCarrier: () => TraceArgument,
+  registeredCodes: () => RegisteredTaskCodesArg,
+): RerunArea {
   switch (core.kind) {
     case "seatRelay": {
       const relayed = relayedFacades(core.relay);
       const handle = new CoreHandle(relayed.handle);
 
-      return rerunAreaOn({ coreHandle: () => handle, activeCarrier }, relayedRerunBridge(relayed.rerun));
+      return rerunAreaOn({ coreHandle: () => handle, activeCarrier, registeredCodes }, relayedRerunBridge(relayed.rerun));
     }
 
     case "addon":
     case "noCore":
-      return createRerunArea({ coreHandle: () => appCoreHandle(core), activeCarrier });
+      return createRerunArea({ coreHandle: () => appCoreHandle(core), activeCarrier, registeredCodes });
     default:
       return unreachable(core, "rerunAreaOfCore");
   }
@@ -75,8 +84,9 @@ function relayedRerunBridge(rerun: RelayedAddon<Pick<RerunAddon, "rerunTask">>):
       handle: CoreHandle,
       request: RerunRequest,
       trace: TraceArgument,
+      codes: RegisteredTaskCodesArg,
     ): Promise<AppRerunAnswer | SeatRelayFullOutcome> =>
-      nativeValueAsync("rerunTask", () => rerun.rerunTask(handle.native, request.command, request.policy, trace)),
+      nativeValueAsync("rerunTask", () => rerun.rerunTask(handle.native, request.command, request.policy, trace, codes)),
     readStatement: addonRerunBridge.readStatement,
     prepareWrite: addonRerunBridge.prepareWrite,
   };
@@ -91,11 +101,12 @@ export function createRerunArea(host: RerunHost): RerunArea {
 export function rerunAreaOn(host: RerunHost, bridge: RerunBridge): RerunArea {
   return {
     rerunTask: async (command: RerunCommand, policy: RerunEnqueuePolicy): Promise<AppRerunResult> =>
-      rerunInApp(bridge, host.coreHandle(), host.activeCarrier(), command, policy),
+      rerunInApp(bridge, host.coreHandle(), host.activeCarrier(), host.registeredCodes(), command, policy),
     rerunTaskIn: async (
       transaction: CallerTransaction,
       command: RerunCommand,
       policy: RerunEnqueuePolicy,
-    ): Promise<CallerRerunResult> => rerunInCaller(bridge, host.activeCarrier(), transaction, command, policy),
+    ): Promise<CallerRerunResult> =>
+      rerunInCaller(bridge, host.activeCarrier(), host.registeredCodes(), transaction, command, policy),
   };
 }

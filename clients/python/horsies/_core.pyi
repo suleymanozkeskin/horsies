@@ -2683,6 +2683,37 @@ class RerunCallerKeyRefused:
 
 
 @final
+class RerunRetryCodeNotDeclared:
+    """The stored retry list of the source names the custom code retry_code, and the task task_name
+    of the calling app does not declare it (RETRY_CODE_NOT_DECLARED). Nothing written.
+    message names both; exception is a CorePreconditionFailed with the subject rerun_task,
+    not retryable.
+    """
+    @property
+    def task_name(self) -> str: ...
+    @property
+    def retry_code(self) -> str: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
+
+
+@final
+class RerunTaskNotRegistered:
+    """The stored retry list of the source names a custom code, and the calling app does not
+    register the task task_name (TASK_NOT_REGISTERED). Nothing written. message names the
+    task; exception is a CorePreconditionFailed with the subject rerun_task, not retryable.
+    """
+    @property
+    def task_name(self) -> str: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
+
+
+@final
 class RerunEnqueuedRecord:
     """The new task exists: this write, or this write already run in the caller's transaction."""
     @property
@@ -3379,10 +3410,12 @@ def prepare_fleet_metrics(handle: CoreHandle, *, listen: ListenAddress, queue_na
     """
 
 
-def prepare_rerun_write(read: PreparedStatement, row: tuple[object, ...], command: RerunCommandRecord, policy: RerunPolicyRecord, *, sent_at: datetime.datetime) -> RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunCallerKeyRefused | IdMintRefused:
+def prepare_rerun_write(read: PreparedStatement, row: tuple[object, ...], command: RerunCommandRecord, policy: RerunPolicyRecord, *, registered_task_codes: dict[str, tuple[str, ...]], sent_at: datetime.datetime) -> RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunCallerKeyRefused | RerunRetryCodeNotDeclared | RerunTaskNotRegistered | IdMintRefused:
     """Decide the rerun from the row of its read (a tuple in column order): the write, or the
-    answer that ends it with nothing written. Pure apart from the id mint. A row that does not
-    fit the columns raises CoreDefect.
+    answer that ends it with nothing written. registered_task_codes maps the name of each task
+    that the calling app registers to the custom codes that it declares; the stored retry
+    list of the source is checked against it. Pure apart from the id mint. A row that does not
+    fit the columns raises CoreDefect; a code set that the core refuses raises ValueError.
     """
 
 

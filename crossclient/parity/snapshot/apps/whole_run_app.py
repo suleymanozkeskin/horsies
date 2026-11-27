@@ -27,6 +27,7 @@ import asyncio
 import os
 import time
 from datetime import timedelta
+from enum import Enum
 from typing import Final
 
 from pydantic import SecretStr
@@ -37,7 +38,12 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.outcome import Succeeded, TaskOutcome
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.models.tasks import Execution, RetryPolicy, TaskError
+from horsies.core.models.tasks import (
+    Execution,
+    OperationalErrorCode,
+    RetryPolicy,
+    TaskError,
+)
 from horsies.core.models.workflow import (
     OnError,
     SubWorkflowNode,
@@ -105,8 +111,16 @@ PAST_THE_DEADLINE_S: Final = 30.0
 SHARED_TIMEOUT_MS: Final = 30_000
 """The deadline of a shared task that ends in time."""
 
-RETRY_POLICY: Final = RetryPolicy.fixed([1, 1], auto_retry_for=['TRANSIENT'])
-"""Two retries one second apart for the code `TRANSIENT`."""
+
+class WholeRunCode(str, Enum):
+    """The code that `RETRY_POLICY` retries on."""
+
+    TRANSIENT = 'TRANSIENT'
+
+
+RETRY_POLICY: Final = RetryPolicy.fixed([1, 1], auto_retry_for=[WholeRunCode.TRANSIENT])
+"""Two retries one second apart for the code `TRANSIENT`. A task with this
+policy declares `error_codes=WholeRunCode`."""
 
 
 def _marker(name: str) -> str:
@@ -213,7 +227,7 @@ def refuse(*, value: int) -> Result[int, TaskError]:
     return Err(TaskError(error_code='REFUSED', message=f'refused {value}'))
 
 
-@app.task(task_name='whole_run.transient', retry_policy=RETRY_POLICY)
+@app.task(task_name='whole_run.transient', error_codes=WholeRunCode, retry_policy=RETRY_POLICY)
 def transient(*, value: int) -> Result[int, TaskError]:
     """A task error that the policy retries until the retries run out."""
     return Err(
@@ -283,7 +297,7 @@ async def async_neighbour() -> Result[str, TaskError]:
     task_name='whole_run.blocks_loop_once',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=['TASK_BLOCKED_LOOP']),
+    retry_policy=RetryPolicy.fixed([1], auto_retry_for=[OperationalErrorCode.TASK_BLOCKED_LOOP]),
 )
 async def blocks_loop_once() -> Result[str, TaskError]:
     """The first attempt waits until its neighbour runs, then blocks the

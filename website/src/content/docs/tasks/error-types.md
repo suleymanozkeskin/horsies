@@ -368,14 +368,23 @@ def welcome_text(read: ReadResult[str, TaskError[WelcomeCode]]) -> str:
             return f"no outcome: {read_error.code}"
 ```
 
-User-defined codes are auto-retried when listed in `auto_retry_for`:
+User-defined codes are auto-retried when `auto_retry_for` lists their members. `auto_retry_for` takes code members only: built-in members, and members of the `Enum` class of `error_codes=`. `@app.task` refuses a plain `str` with `TASK_INVALID_OPTIONS`:
 
 ```python
+class ApiCode(str, Enum):
+    RATE_LIMITED = "RATE_LIMITED"
+    SERVICE_UNAVAILABLE = "SERVICE_UNAVAILABLE"
+
+
 @app.task(
     "call_api",
-    retry_policy=RetryPolicy.fixed([30, 60, 120], auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"]),
+    error_codes=ApiCode,
+    retry_policy=RetryPolicy.fixed(
+        [30, 60, 120],
+        auto_retry_for=[ApiCode.RATE_LIMITED, ApiCode.SERVICE_UNAVAILABLE],
+    ),
 )
-def call_api(*, url: str) -> Result[dict[str, JsonValue], TaskError]:
+def call_api(*, url: str) -> Result[dict[str, JsonValue], TaskError[ApiCode]]:
     ...
 ```
 

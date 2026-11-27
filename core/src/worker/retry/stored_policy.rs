@@ -734,6 +734,16 @@ fn not_a_code_entries(position: usize) -> Vec<Entry> {
     entries
 }
 
+impl RetryRule {
+    /// The codes that start a retry, as the stored policy holds them, in the
+    /// stored order: the values of built-in codes and the texts of custom
+    /// codes. A rerun checks them against the codes of the calling app
+    /// (`core::history::rerun::steps`).
+    pub fn auto_retry_for(&self) -> &[String] {
+        &self.auto_retry_for
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Model validators
 // ---------------------------------------------------------------------------

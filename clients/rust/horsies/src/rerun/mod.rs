@@ -22,6 +22,12 @@
 //! opens no span of its own. Without the feature, or with no valid span in
 //! the current context, the new task stores no carrier. The carrier of the
 //! source task is never copied.
+//!
+//! Both check the stored retry list of the source against the declared
+//! custom codes of the app's tasks ([`Horsies::registered_task_codes`]): a
+//! built-in code passes; a custom code passes when the app registers the
+//! task and the task declares the code. Otherwise the rerun is refused and
+//! writes nothing.
 
 #[cfg(feature = "sqlx")]
 mod sqlx_adapter;
@@ -34,14 +40,16 @@ use horsies_core::{
     RerunPreparation,
 };
 
+use crate::config::declared_codes;
 use crate::process_state::refuse_in_a_fork;
 use crate::telemetry::rerun_trace;
 use crate::Horsies;
 
 pub use horsies_core::{
     CallerColumn, CallerRow, CallerStatement, CallerTransaction, CallerType, IdempotencyKeyError,
-    NotEligibleReason, RecordedFamily, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunRowError,
-    RerunTask, StatementValue, TaskAbsenceReason, UnknownStoredFamily, Uuid7Error,
+    NotEligibleReason, RecordedFamily, RegisteredTaskCodes, RerunEnqueuePolicy, RerunError,
+    RerunOutcome, RerunRowError, RerunTask, StatementValue, TaskAbsenceReason, UnknownStoredFamily,
+    Uuid7Error,
 };
 #[cfg(feature = "sqlx")]
 pub use sqlx_adapter::SqlxCaller;
@@ -78,6 +86,27 @@ pub enum CallerRerunError<E> {
     /// Nothing is written.
     #[error("the caller key of the rerun is refused: {0}")]
     CallerKeyRefused(IdempotencyKeyError),
+    /// The stored retry list of the source names the custom code `code`,
+    /// and the task `task_name` of the app does not declare it. Nothing is
+    /// written. Not retryable: the same call meets it again until the app
+    /// declares the code.
+    #[error(
+        "rerun refused: the stored retry list of task '{task_name}' names the code '{retry_code}', \
+         which the task does not declare"
+    )]
+    RetryCodeNotDeclared {
+        task_name: String,
+        retry_code: String,
+    },
+    /// The stored retry list of the source names a custom code, and the app
+    /// does not register the task `task_name`, so the code cannot be
+    /// checked. Nothing is written. Not retryable: the same call meets it
+    /// again until the app registers the task.
+    #[error(
+        "rerun refused: the app does not register task '{task_name}', so the custom codes of \
+         its stored retry list cannot be checked"
+    )]
+    TaskNotRegistered { task_name: String },
     /// The task id source refused to mint the new task's id. Nothing is
     /// written.
     #[error("the task id of the rerun could not be minted: {0}")]
@@ -89,8 +118,11 @@ pub enum CallerRerunError<E> {
 }
 
 /// Rerun `command` in `transaction`, a transaction that the caller owns
-/// (Python `rerun_task(connection, command, policy)`), with the new task
-/// sent at `sent_at`.
+/// (Python `rerun_task(connection, command, policy,
+/// registered_task_codes=...)`), with the new task sent at `sent_at`.
+/// `codes` are the declared custom codes of the app's tasks
+/// ([`Horsies::registered_task_codes`]); the stored retry list of the
+/// source is checked against them before the write.
 ///
 /// Statements, on `transaction`: the source read
 /// (`horsies_rerun_source_read`); for an eligible source with a retained
@@ -112,13 +144,14 @@ pub async fn rerun_task_in<T>(
     transaction: &mut T,
     command: &RerunTask,
     policy: &RerunEnqueuePolicy,
+    codes: &RegisteredTaskCodes,
     sent_at: DateTime<Utc>,
 ) -> Result<RerunOutcome, CallerRerunError<T::Error>>
 where
     T: CallerTransaction,
 {
     let command = traced(command.clone());
-    rerun_command_in(transaction, &command, policy, sent_at).await
+    rerun_command_in(transaction, &command, policy, codes, sent_at).await
 }
 
 /// `command` with the trace carrier of the caller's current context
@@ -135,6 +168,7 @@ async fn rerun_command_in<T>(
     transaction: &mut T,
     command: &RerunTask,
     policy: &RerunEnqueuePolicy,
+    codes: &RegisteredTaskCodes,
     sent_at: DateTime<Utc>,
 ) -> Result<RerunOutcome, CallerRerunError<T::Error>>
 where
@@ -145,8 +179,16 @@ where
         .query_one(&read)
         .await
         .map_err(CallerRerunError::Driver)?;
-    let prepared = prepare_rerun_write(&read, &row, command, policy, ClientFamily::Rust, sent_at)
-        .map_err(CallerRerunError::Row)?;
+    let prepared = prepare_rerun_write(
+        &read,
+        &row,
+        command,
+        policy,
+        codes,
+        ClientFamily::Rust,
+        sent_at,
+    )
+    .map_err(CallerRerunError::Row)?;
     let write = match prepared {
         RerunPreparation::Write(write) => write,
         RerunPreparation::Refused(refusal) => return Ok(refusal.into()),
@@ -161,6 +203,18 @@ where
         }
         RerunPreparation::CallerKeyRefused(refused) => {
             return Err(CallerRerunError::CallerKeyRefused(refused))
+        }
+        RerunPreparation::RetryCodeNotDeclared {
+            task_name,
+            retry_code,
+        } => {
+            return Err(CallerRerunError::RetryCodeNotDeclared {
+                task_name,
+                retry_code,
+            })
+        }
+        RerunPreparation::TaskNotRegistered { task_name } => {
+            return Err(CallerRerunError::TaskNotRegistered { task_name })
         }
         RerunPreparation::IdMintRefused(refused) => {
             return Err(CallerRerunError::IdMintRefused(refused))
@@ -188,12 +242,30 @@ pub enum AppRerunError {
 }
 
 impl Horsies {
+    /// The declared custom codes of every task that the app registers, by
+    /// task name: the input of [`rerun_task_in`]. [`Horsies::rerun_task`]
+    /// takes them itself. Pure.
+    ///
+    /// # Panics
+    ///
+    /// When a registered task holds a code set that the registration
+    /// refuses: a defect, because the registration checked every set.
+    pub fn registered_task_codes(&self) -> RegisteredTaskCodes {
+        RegisteredTaskCodes::new(
+            self.tasks()
+                .iter()
+                .map(|(name, task)| (name.to_owned(), declared_codes(name, task)))
+                .collect(),
+        )
+    }
+
     /// Rerun `command` in a transaction of the app's handle, and commit it
     /// (in a worker child, the child's producer handle). The handle checks
     /// the client family of the database before the transaction, and
     /// installs the schema once per handle, as a send does. The new task
     /// stores the trace carrier of the caller's current context (feature
-    /// `otel`), as with [`rerun_task_in`].
+    /// `otel`), as with [`rerun_task_in`]. The stored retry list of the
+    /// source is checked against [`Horsies::registered_task_codes`].
     ///
     /// Outcomes: as [`rerun_task_in`].
     ///
@@ -216,7 +288,7 @@ impl Horsies {
             .await
             .map_err(AppRerunError::Connect)?;
         broker
-            .rerun_task(command, policy)
+            .rerun_task(command, policy, &self.registered_task_codes())
             .await
             .map_err(AppRerunError::Rerun)
     }
@@ -300,9 +372,15 @@ mod tests {
             rows: vec![row],
             ran: Vec::new(),
         };
-        let outcome = rerun_task_in(&mut transaction, &command, &policy, Utc::now())
-            .await
-            .unwrap();
+        let outcome = rerun_task_in(
+            &mut transaction,
+            &command,
+            &policy,
+            &RegisteredTaskCodes::NONE,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
         assert!(
             matches!(outcome, RerunOutcome::SourceAbsent { task_id, .. } if task_id == command.source_task_id()),
             "{outcome:?}"
@@ -326,9 +404,15 @@ mod tests {
             rows: vec![row],
             ran: Vec::new(),
         };
-        let refused = rerun_task_in(&mut transaction, &command, &policy, Utc::now())
-            .await
-            .unwrap_err();
+        let refused = rerun_task_in(
+            &mut transaction,
+            &command,
+            &policy,
+            &RegisteredTaskCodes::NONE,
+            Utc::now(),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(
                 refused,
@@ -359,9 +443,15 @@ mod tests {
             rows: vec![row],
             ran: Vec::new(),
         };
-        let refused = rerun_task_in(&mut transaction, &command, &policy, Utc::now())
-            .await
-            .unwrap_err();
+        let refused = rerun_task_in(
+            &mut transaction,
+            &command,
+            &policy,
+            &RegisteredTaskCodes::NONE,
+            Utc::now(),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(
                 &refused,
@@ -390,9 +480,15 @@ mod tests {
             rows: vec![row],
             ran: Vec::new(),
         };
-        let refused = rerun_task_in(&mut transaction, &command, &policy, Utc::now())
-            .await
-            .unwrap_err();
+        let refused = rerun_task_in(
+            &mut transaction,
+            &command,
+            &policy,
+            &RegisteredTaskCodes::NONE,
+            Utc::now(),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&refused, CallerRerunError::ClassNotRegistered { key } if key == "missing_class"),
             "{refused:?}"
@@ -409,6 +505,7 @@ mod tests {
             &mut transaction,
             &command(),
             &RerunEnqueuePolicy::standard(true),
+            &RegisteredTaskCodes::NONE,
             Utc::now(),
         )
         .await
@@ -429,6 +526,7 @@ mod tests {
             &mut transaction,
             &command(),
             &RerunEnqueuePolicy::standard(true),
+            &RegisteredTaskCodes::NONE,
             Utc::now(),
         )
         .await

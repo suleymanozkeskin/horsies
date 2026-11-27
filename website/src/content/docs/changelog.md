@@ -134,6 +134,66 @@ there is no migration contract between pre-1.0 versions.
   - The error of a workflow that `WorkflowHandle.get` gives, and the outcome
     of a `SubWorkflowNode`, keep custom codes as text: the error of a failed
     workflow is the error of its failed node, which can be any task.
+- **Breaking (all clients): a rerun checks the stored retry list of its
+  source.** Before the write, the rerun checks the `auto_retry_for` codes of
+  the stored options against the declared custom codes of the calling app's
+  tasks. A built-in code passes for every task. A custom code passes when
+  the app registers the task and the task declares the code. Otherwise the
+  rerun is refused and writes nothing; neither refusal is retryable:
+  - `RerunErrorCode::RetryCodeNotDeclared` (`RETRY_CODE_NOT_DECLARED`): the
+    stored list names a custom code that the task does not declare, so the
+    new task would not retry on it.
+  - `RerunErrorCode::TaskNotRegistered` (`TASK_NOT_REGISTERED`): the stored
+    list names a custom code, and the app does not register the task, so the
+    code cannot be checked.
+  - A stored list of built-in codes only, or no retry policy, needs no
+    registered task. A stored policy that does not fit its rule is not
+    checked here: the worker refuses it when it runs the task.
+  - Core: the input is `RegisteredTaskCodes` (each registered task by name,
+    with its `DeclaredErrorCodes`; `RegisteredTaskCodes::NONE` for an app
+    with no task); `RegisteredTaskCodes::of` gives `DeclaredCodes::Registered
+    { custom }` or `DeclaredCodes::TaskNotRegistered`. `prepare_rerun_write`
+    takes `codes` after `policy`, and `PostgresBroker::rerun_task` takes
+    `codes` last. `RerunPreparation` and `RerunError` have the variants
+    `RetryCodeNotDeclared { task_name, retry_code }` and
+    `TaskNotRegistered { task_name }`. `RetryRule::auto_retry_for` gives the
+    stored codes.
+  - Python: `rerun_task` takes the keyword `registered_task_codes`
+    (`Mapping[str, tuple[str, ...]]`), and `Horsies.registered_task_codes()`
+    gives it: every registered task with its `task_error_codes`.
+    `app.rerun_task_async` and `app.rerun_task` pass the app's codes. A
+    refusal raises `CorePreconditionFailed` (subject `rerun_task`); a code
+    set that is not a declared code set raises `ValueError`. The bridge
+    records are `RerunRetryCodeNotDeclared` and `RerunTaskNotRegistered`.
+  - Rust: `rerun::rerun_task_in(transaction, &command, &policy, &codes,
+    sent_at)` takes `&app.registered_task_codes()`; `Horsies::rerun_task`
+    passes the app's codes. `CallerRerunError` has the variants
+    `RetryCodeNotDeclared { task_name, retry_code }` and
+    `TaskNotRegistered { task_name }`. `horsies::rerun` exports
+    `RegisteredTaskCodes`.
+- **Breaking (Python): `auto_retry_for` takes code members.** An entry of
+  `RetryPolicy.auto_retry_for` is a member of a built-in code enum
+  (`OperationalErrorCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`)
+  or a member of the `Enum` class that the task declares with
+  `error_codes=`. The type is `list[BuiltInTaskCode | Enum]` in the field,
+  `RetryPolicy.fixed` and `RetryPolicy.exponential`, so pyright refuses a
+  plain `str`.
+  - `@app.task` refuses a plain `str` (also a misspelled code such as
+    `"BROKR_ERROR"`), a member of another `Enum` class, and a custom member
+    of a task that declares a tuple or no `error_codes`, with
+    `TaskDefinitionError` `TASK_INVALID_OPTIONS` (`HRS-102`). The notes name
+    the task and the entry, and the task is not registered. One error per
+    refused entry; several come in one `MultipleValidationErrors`.
+  - A task that retries on a code of its own declares the code in an `Enum`
+    class, as a Rust task declares it in its code type. Its body can return
+    the member or its text.
+  - The `RetryPolicy` constructor no longer checks the entries; `@app.task`
+    checks them against the codes of the task.
+  - The stored retry policy holds the text of each code, as before.
+  - New in `horsies.core.declared_error_codes` (not exported by
+    `horsies`): `check_retry_codes`, `RetryEntryNotAMember`,
+    `RetryMemberNotDeclared`, `RetryEntryRefusal` and
+    `RetryEntriesRefused`.
 - **Breaking (Python): `Result` for task bodies, `ReadResult` for reads,
   `TaskOutcome` for node inputs.** `TaskResult` is removed, with no alias.
   - A task body returns `Result[T, TaskError]`: `Ok(value)` or

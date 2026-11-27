@@ -13,6 +13,7 @@ import type { RerunOutcome } from "../../../horsies/src/rerun/types.ts";
 import type { Result } from "../../../horsies/src/wire/result.ts";
 import {
   CARRIER,
+  CODES,
   COMMAND,
   ENQUEUED_ANSWERS,
   NEW_TASK_ID,
@@ -26,7 +27,7 @@ import {
 import type { BridgeAnswers, TransactionAnswer } from "./support.ts";
 
 /** A host with an active span. */
-const HOST: RerunHost = { coreHandle: unusedCoreHandle, activeCarrier: () => CARRIER };
+const HOST: RerunHost = { coreHandle: unusedCoreHandle, activeCarrier: () => CARRIER, registeredCodes: () => CODES };
 
 /** The answer of `app.rerunTaskIn` and the names of the statements that ran, with these answers. */
 async function rerunIn(
@@ -76,6 +77,7 @@ describe("app.rerunTaskIn", () => {
         call: "prepareWrite",
         trace: CARRIER,
         readRow: { cells: [{ kind: "text", text: "t" }, { kind: "null" }] },
+        codes: CODES,
       },
       { call: "decodeRow", row: { cells: [{ kind: "text", text: "INSERTED" }, { kind: "text", text: NEW_TASK_ID }] } },
     ]);
@@ -86,7 +88,7 @@ describe("app.rerunTaskIn", () => {
     const { transaction } = fakeTransaction([rowOf("t"), rowOf("INSERTED", NEW_TASK_ID)]);
 
     const answer = await rerunAreaOn(
-      { coreHandle: unusedCoreHandle, activeCarrier: () => NO_ACTIVE_CARRIER },
+      { coreHandle: unusedCoreHandle, activeCarrier: () => NO_ACTIVE_CARRIER, registeredCodes: () => CODES },
       bridge,
     ).rerunTaskIn(transaction, COMMAND, POLICY);
 
@@ -142,6 +144,28 @@ describe("app.rerunTaskIn errors", () => {
       assert.deepEqual(answer, { ok: false, error: { ...refusal, retryable: false } }, refusal.code);
       assert.deepEqual(ran, ["rerun_source_read"], refusal.code);
     }
+  });
+
+  test("RETRY_CODE_NOT_DECLARED names the task and the code, and writes nothing", async () => {
+    const refusal: CallerStepRefusal = {
+      code: "RETRY_CODE_NOT_DECLARED",
+      message: "rerun refused: undeclared",
+      taskName: "charge",
+      retryCode: "CARD_DECLINED",
+    };
+
+    const { answer, ran } = await rerunIn({ ...ENQUEUED_ANSWERS, preparation: { kind: "refused", error: refusal } }, [rowOf("t")]);
+
+    assert.deepEqual(answer, { ok: false, error: { ...refusal, retryable: false } });
+    assert.deepEqual(ran, ["rerun_source_read"]);
+  });
+
+  test("TASK_NOT_REGISTERED names the task, and writes nothing", async () => {
+    const refusal: CallerStepRefusal = { code: "TASK_NOT_REGISTERED", message: "rerun refused: unlisted", taskName: "charge" };
+    const { answer, ran } = await rerunIn({ ...ENQUEUED_ANSWERS, preparation: { kind: "refused", error: refusal } }, [rowOf("t")]);
+
+    assert.deepEqual(answer, { ok: false, error: { ...refusal, retryable: false } });
+    assert.deepEqual(ran, ["rerun_source_read"]);
   });
 
   test("DRIVER_FAILED carries the driver's error and the statement", async () => {
