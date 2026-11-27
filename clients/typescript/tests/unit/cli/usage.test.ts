@@ -56,7 +56,9 @@ describe("the flag parse", () => {
   });
 
   test("a valid parse gives the values of the flags", () => {
-    assert.deepEqual(parseFlags(["--profile", "a", "--live"], FLAGS), { ok: true, value: { profile: "a", live: true } });
+    const parsed = parseFlags(["--profile", "a", "--live"], FLAGS);
+
+    assert.deepEqual(parsed.ok && { ...parsed.value }, { profile: "a", live: true });
   });
 
   test("each refusal is a usage error with the message of the rule", () => {
