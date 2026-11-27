@@ -18,7 +18,7 @@ from horsies.core.errors import (
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
-    OperationalErrorCode,
+    OperationalCode,
     OutcomeCode,
     RetryPolicy,
     TaskError,
@@ -248,7 +248,7 @@ class TestRetryCodeMembers:
             error_codes=_TaskCode,
             retry_policy=RetryPolicy.fixed(
                 [1, 2],
-                auto_retry_for=[OperationalErrorCode.WORKER_CRASHED, _TaskCode.RATE_LIMITED],
+                auto_retry_for=[OperationalCode.WORKER_CRASHED, _TaskCode.RATE_LIMITED],
             ),
         )
         def retries_on_members() -> Result[str, TaskError]:
@@ -275,7 +275,7 @@ class TestRetryCodeMembers:
                 return Ok('ok')
 
         error = exc_info.value
-        assert error.code == ErrorCode.TASK_INVALID_OPTIONS
+        assert error.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
         assert error.message == 'auto_retry_for[0] is not a code member'
         assert error.notes == [
             "task 'plain_text_retry'",
@@ -299,7 +299,7 @@ class TestRetryCodeMembers:
                 return Ok('ok')
 
         error = exc_info.value
-        assert error.code == ErrorCode.TASK_INVALID_OPTIONS
+        assert error.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
         assert error.message == 'auto_retry_for[0] is not a code of the task'
         assert error.notes == [
             "task 'other_enum_retry'",
@@ -324,7 +324,7 @@ class TestRetryCodeMembers:
                 return Ok('ok')
 
         error = exc_info.value
-        assert error.code == ErrorCode.TASK_INVALID_OPTIONS
+        assert error.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
         assert error.notes[2] == 'the task declares no Enum class with error_codes='
 
     def test_every_refused_entry_is_reported(self) -> None:

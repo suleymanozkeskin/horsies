@@ -399,7 +399,7 @@ def _declared_code_error(
 
 _RETRY_CODES_HELP: Final = (
     'pass code members: a built-in code, for example '
-    'OperationalErrorCode.WORKER_CRASHED, or a member of the Enum class that '
+    'OperationalCode.WORKER_CRASHED, or a member of the Enum class that '
     'the task declares with error_codes='
 )
 """The help of a refused `auto_retry_for` entry."""
@@ -471,7 +471,7 @@ def _retry_entry_error(
             declared_note = f'the task declares error_codes={declared.__name__}'
     return TaskDefinitionError(
         message=message,
-        code=ErrorCode.TASK_INVALID_OPTIONS,
+        code=HorsiesErrorCode.TASK_INVALID_OPTIONS,
         location=location,
         notes=[f"task '{task_name}'", entry_note, declared_note],
         help_text=_RETRY_CODES_HELP,

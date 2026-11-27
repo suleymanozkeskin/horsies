@@ -44,7 +44,7 @@ The library handles retries automatically when `auto_retry_for` matches the erro
 ```python
 from enum import Enum
 
-from horsies import OperationalErrorCode, RetryPolicy, Result, TaskError, JsonValue
+from horsies import OperationalCode, RetryPolicy, Result, TaskError, JsonValue
 
 
 class FetchCode(str, Enum):
@@ -58,7 +58,7 @@ class FetchCode(str, Enum):
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=3,
-        auto_retry_for=[OperationalErrorCode.UNHANDLED_EXCEPTION, FetchCode.RATE_LIMITED],
+        auto_retry_for=[OperationalCode.UNHANDLED_EXCEPTION, FetchCode.RATE_LIMITED],
     ),
 )
 def fetch_api_data(*, url: str) -> Result[dict[str, JsonValue], TaskError]:

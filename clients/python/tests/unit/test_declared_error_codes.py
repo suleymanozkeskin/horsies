@@ -38,7 +38,7 @@ from horsies.core.errors import (
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode, TaskError
+from horsies.core.models.tasks import OperationalCode, OutcomeCode, TaskError
 from horsies.core.types.result import Err, Ok, Result
 
 pytestmark = [pytest.mark.unit]
@@ -223,7 +223,7 @@ class TestCheckRetryCodes:
         self,
     ) -> None:
         entries = [
-            OperationalErrorCode.WORKER_CRASHED,
+            OperationalCode.WORKER_CRASHED,
             OutcomeCode.TASK_TIMEOUT,
             ChargeCode.RATE_LIMITED,
         ]
@@ -260,7 +260,7 @@ class TestCheckRetryCodes:
     def test_every_refused_entry_is_named_in_list_order(self) -> None:
         entries: list[object] = [
             7,
-            OperationalErrorCode.BROKER_ERROR,
+            OperationalCode.DATABASE_ERROR,
             OtherCode.RATE_LIMITED,
         ]
         assert check_retry_codes(entries, ChargeCode) == Err(

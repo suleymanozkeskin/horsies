@@ -50,7 +50,7 @@ from horsies.core.models.schedule import (
     ScheduleConfig,
     TaskSchedule,
 )
-from horsies.core.models.tasks import OperationalErrorCode, RetryPolicy, TaskError
+from horsies.core.models.tasks import OperationalCode, RetryPolicy, TaskError
 from horsies.core.scheduler.manifest import to_scheduler_manifest
 from horsies.core.scheduler.service import Scheduler
 from horsies.core.scheduler.validation import PreparedSchedule, prepare_schedules
@@ -82,7 +82,7 @@ def _app(
     @app.task(
         _REPORT_TASK,
         timeout_ms=30_000,
-        retry_policy=RetryPolicy.fixed([1, 2], auto_retry_for=[OperationalErrorCode.TASK_EXCEPTION]),
+        retry_policy=RetryPolicy.fixed([1, 2], auto_retry_for=[OperationalCode.TASK_EXCEPTION]),
     )
     def nightly(*, day: str, limit: int) -> Result[int, TaskError]:
         return Ok(limit)

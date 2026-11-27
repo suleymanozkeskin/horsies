@@ -13,7 +13,7 @@ import time
 
 from horsies.core.models.tasks import (
     Execution,
-    OperationalErrorCode,
+    OperationalCode,
     OutcomeCode,
     RetryPolicy,
     TaskError,
@@ -140,7 +140,7 @@ async def shared_stuck_once(*, marker: str) -> Result[str, TaskError]:
     task_name='e2e_shared_blocks_once',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=30_000,
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=[OperationalErrorCode.TASK_BLOCKED_LOOP]),
+    retry_policy=RetryPolicy.fixed([1], auto_retry_for=[OperationalCode.TASK_BLOCKED_LOOP]),
 )
 async def shared_blocks_once(*, marker: str) -> Result[str, TaskError]:
     """The first attempt blocks the event loop past the block limit; the

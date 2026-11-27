@@ -27,7 +27,7 @@ A checkout in one task body:
         auto_retry_for=[
             CheckoutCode.PAYMENTS_UNAVAILABLE,
             CheckoutCode.MAIL_UNAVAILABLE,
-            OperationalErrorCode.WORKER_CRASHED,
+            OperationalCode.WORKER_CRASHED,
         ],
     ),
 )
@@ -62,7 +62,7 @@ from horsies import (
     Failed,
     JsonValue,
     Ok,
-    OperationalErrorCode,
+    OperationalCode,
     Result,
     RetryPolicy,
     Succeeded,
@@ -141,7 +141,7 @@ def post_with_key(
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=5,
-        auto_retry_for=[CheckoutCode.PAYMENTS_UNAVAILABLE, OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[CheckoutCode.PAYMENTS_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
     ),
 )
 def charge_card(
@@ -169,7 +169,7 @@ def charge_card(
     retry_policy=RetryPolicy.exponential(
         base_seconds=10,
         max_retries=5,
-        auto_retry_for=[CheckoutCode.BILLING_UNAVAILABLE, OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[CheckoutCode.BILLING_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
     ),
 )
 def write_invoice(
@@ -203,7 +203,7 @@ def write_invoice(
     error_codes=CheckoutCode,
     retry_policy=RetryPolicy.fixed(
         [60, 300, 900],
-        auto_retry_for=[CheckoutCode.MAIL_UNAVAILABLE, OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[CheckoutCode.MAIL_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
     ),
 )
 def send_receipt(

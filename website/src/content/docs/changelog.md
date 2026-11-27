@@ -260,7 +260,7 @@ there is no migration contract between pre-1.0 versions.
     `RegisteredTaskCodes`.
 - **Breaking (Python): `auto_retry_for` takes code members.** An entry of
   `RetryPolicy.auto_retry_for` is a member of a built-in code enum
-  (`OperationalErrorCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`)
+  (`OperationalCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`)
   or a member of the `Enum` class that the task declares with
   `error_codes=`. The type is `list[BuiltInTaskCode | Enum]` in the field,
   `RetryPolicy.fixed` and `RetryPolicy.exponential`, so pyright refuses a

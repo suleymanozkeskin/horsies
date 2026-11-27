@@ -126,7 +126,7 @@ def retry_codes() -> None:
     of the declared `Enum` class. A plain `str` is refused."""
     _ = RetryPolicy.fixed(
         [1, 2],
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED, WelcomeCode.MAILBOX_FULL],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED, WelcomeCode.MAILBOX_FULL],
     )
     _ = RetryPolicy.exponential(1, max_retries=2, auto_retry_for=[OutcomeCode.TASK_TIMEOUT])
     _ = RetryPolicy.fixed([1], auto_retry_for=['MAILBOX_FULL'])  # pyright: ignore[reportArgumentType]

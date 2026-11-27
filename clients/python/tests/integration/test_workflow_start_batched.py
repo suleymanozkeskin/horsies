@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import OperationalErrorCode, RetryPolicy, TaskError
+from horsies.core.models.tasks import OperationalCode, RetryPolicy, TaskError
 from horsies.core.models.workflow import TaskNode
 from horsies.core.types.result import Ok, Result, is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
@@ -212,7 +212,7 @@ class TestBatchedStartShape:
             task_name=f'batched_retry_{uuid.uuid4().hex[:8]}',
             retry_policy=RetryPolicy.fixed(
                 [1000, 1000, 1000, 1000, 1000],
-                auto_retry_for=[OperationalErrorCode.TASK_EXCEPTION],
+                auto_retry_for=[OperationalCode.TASK_EXCEPTION],
             ),
         )
         def retry_task(*, value: int) -> Result[int, TaskError]:

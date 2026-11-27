@@ -2956,7 +2956,7 @@ class TestIdempotencyKeyConflictClassification:
         app = _make_app()
         app.config.resend_on_transient_err = True
         broker = MagicMock()
-        broker.enqueue.return_value = Err(BrokerIdempotencyKeyConflict(
+        broker.enqueue.return_value = Err(DatabaseIdempotencyKeyConflict(
             message='idempotency key is reserved by task owner-task-1',
             owner_task_id='owner-task-1',
         ))

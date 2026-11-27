@@ -531,7 +531,7 @@ class RetryPolicy(BaseModel):
         jitter: whether to add ±25% randomization to delays
         max_delay_seconds: optional maximum delay after backoff and jitter
         auto_retry_for: the code members that start a retry: members of the
-            built-in code enums (`OperationalErrorCode`, `ContractCode`,
+            built-in code enums (`OperationalCode`, `ContractCode`,
             `RetrievalCode`, `OutcomeCode`), or members of the `Enum` class
             that the task declares with `error_codes=`. At least one.
 

@@ -695,7 +695,7 @@ RetryPolicy.fixed([1, 2, 5], auto_retry_for=[ApiCode.DEADLOCK], jitter=False)
     error_codes=ApiCode,
     retry_policy=RetryPolicy.fixed(
         [60, 300],
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED, ApiCode.RATE_LIMITED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED, ApiCode.RATE_LIMITED],
     ),
 )
 def sync_orders() -> Result[int, TaskError[ApiCode]]:
