@@ -42,6 +42,8 @@ export type InstallEntry = {
   readonly installer: Installer;
   readonly runtime: "node" | "bun";
   readonly place: NpmInstall["kind"];
+  /** `run`: the install check serves the monitoring page and its script; `skip`: it does not. */
+  readonly web_page: "run" | "skip";
   readonly image?: string;
 };
 
@@ -81,6 +83,11 @@ export function buildEntryOf(row: ReleasePlatform, versions: RuntimeVersions): B
   return { ...entry, build: row.build.kind, check: row.install.kind, ...buildImage, ...checkImages };
 }
 
+/** Whether the install check of a row serves the monitoring page: the Linux x86_64 glibc row, as the wheel check does. Pure. */
+export function webPageOf(row: ReleasePlatform): InstallEntry["web_page"] {
+  return row.platform === "linux-x64-gnu" ? "run" : "skip";
+}
+
 /** The two install entries of a row: npm on Node, and Bun. Pure. */
 export function installEntriesOf(row: ReleasePlatform, versions: RuntimeVersions): readonly InstallEntry[] {
   const common = {
@@ -90,6 +97,7 @@ export function installEntriesOf(row: ReleasePlatform, versions: RuntimeVersions
     package: platformPackageOf(row),
     release: row.release,
     place: row.install.kind,
+    web_page: webPageOf(row),
   };
 
   switch (row.install.kind) {

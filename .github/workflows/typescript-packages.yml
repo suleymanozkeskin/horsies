@@ -302,7 +302,10 @@ jobs:
   # Per platform and installer: a new project installs horsies from a local
   # registry of the tarballs (npm on Node 26, or Bun 1.4), in a container of
   # the platform's image or on the runner, then loads the addon through the
-  # package loader and pings PostgreSQL (tests/packages/consumer-check.ts).
+  # package loader, resolves each entry point, requires the skill files and
+  # the bin file, pings PostgreSQL through app.pingDatabase(), and, on the
+  # Linux x86_64 glibc row, serves the monitoring page and its script from an
+  # app on a refused database URL (tests/packages/consumer-check.ts).
   # For a held row, horsies does not list the platform package, so the check
   # installs it by name beside horsies.
   check-npm:
@@ -321,6 +324,7 @@ jobs:
       INSTALLER: ${{ matrix.installer }}
       PLATFORM_PACKAGE: ${{ matrix.package }}
       RELEASE: ${{ matrix.release }}
+      WEB_PAGE: ${{ matrix.web_page }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -408,7 +412,8 @@ jobs:
               --registry "http://127.0.0.1:$PACKAGE_REGISTRY_PORT/" \
               --version "$VERSION" \
               --platform-package "$PLATFORM_PACKAGE" \
-              --release "$RELEASE"
+              --release "$RELEASE" \
+              --web-page "$WEB_PAGE"
 
       - name: Install and check on the runner
         if: matrix.place == 'runner'
@@ -420,7 +425,8 @@ jobs:
               --registry "http://127.0.0.1:$PACKAGE_REGISTRY_PORT/" \
               --version "$VERSION" \
               --platform-package "$PLATFORM_PACKAGE" \
-              --release "$RELEASE"
+              --release "$RELEASE" \
+              --web-page "$WEB_PAGE"
 
       - name: Show the requests of the registry
         if: always()
