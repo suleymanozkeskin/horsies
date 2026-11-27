@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+/// The name of the one queue of [`QueueMode::Default`].
+pub const DEFAULT_QUEUE_NAME: &str = "default";
+
+/// The priority of the queue of [`QueueMode::Default`], and of a task that
+/// resolves no queue priority: 100, the last priority. It is not the
+/// default of [`CustomQueueConfig::priority`].
+pub const DEFAULT_QUEUE_PRIORITY: u32 = 100;
+
 /// Queue routing mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -126,6 +134,12 @@ fn default_max_concurrency() -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_route_is_the_default_queue_at_the_last_priority() {
+        assert_eq!(DEFAULT_QUEUE_NAME, "default");
+        assert_eq!(DEFAULT_QUEUE_PRIORITY, 100);
+    }
 
     #[test]
     fn queue_mode_serde() {

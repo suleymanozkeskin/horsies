@@ -33,7 +33,7 @@ use crate::telemetry::registry::{
     Counter, Gauge, HandleRefused, Histogram, ProcessFacts, Recorded, Registry, RegistryLabels,
     Replaced,
 };
-use crate::{AppConfig, ExecutionClassCoverage, PostgresBroker, QueueMode};
+use crate::{AppConfig, ExecutionClassCoverage, PostgresBroker, QueueMode, DEFAULT_QUEUE_NAME};
 
 use super::gauges::{
     oldest_pending_series, queue_task_series, schedule_series, schema_version_series,
@@ -65,9 +65,6 @@ pub const FLEET_COLLECTOR_METRICS: [MetricId; 14] = [
     MetricId::CollectErrors,
     MetricId::CollectFailed,
 ];
-
-/// The queue of an app in `QueueMode::Default`.
-const DEFAULT_QUEUE_NAME: &str = "default";
 
 /// The names that the fleet metrics take as label values. A queue or a
 /// schedule name outside them is `(unknown)`.

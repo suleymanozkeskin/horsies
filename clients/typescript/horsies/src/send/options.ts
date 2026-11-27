@@ -4,7 +4,7 @@ import { WHOLE_SECONDS_MAX, WHOLE_SECONDS_MIN } from "../_catalog/manifest.ts";
 import type { DeadlineFact, DelayFact, OptionalText, RetentionChoice } from "../native/sends/addon.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { instantText } from "../codec/temporal-text.ts";
-import { IDEMPOTENCY_KEY_MAX_BYTES } from "./bounds.ts";
+import { IDEMPOTENCY_KEY_MAX_BYTES } from "../_catalog/send_bounds.ts";
 
 /** The retention of the task's history record: a period of whole days that the app registers, or forever. */
 export type SendRetention = { readonly kind: "period"; readonly days: number } | { readonly kind: "forever" };

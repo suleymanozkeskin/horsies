@@ -77,10 +77,23 @@ export type UpstreamOutput =
   | { readonly state: "refused"; readonly detail: string };
 
 /**
- * The outcome of an upstream task or sub-workflow, which a workflow node gives to a whole input parameter: the stored
- * result envelope, whose `ok` value has the upstream output kind.
+ * The custom codes that an upstream contract allows in a stored error: `declared` holds the `errorCodes` of a task
+ * contract (`upstream` names it, for a refusal); `open` is a task with no `errorCodes` and a workflow contract, where
+ * every custom code is allowed. A built-in code is allowed in both.
  */
-export type TaskOutcomeKind = { readonly node: "taskOutcome"; readonly output: UpstreamOutput };
+export type UpstreamCodes =
+  | { readonly state: "open" }
+  | { readonly state: "declared"; readonly upstream: string; readonly codes: readonly string[] };
+
+/**
+ * The outcome of an upstream task or sub-workflow, which a workflow node gives to a whole input parameter: the stored
+ * result envelope, whose `ok` value has the upstream output kind and whose custom error code is one of `codes`.
+ */
+export type TaskOutcomeKind = {
+  readonly node: "taskOutcome";
+  readonly output: UpstreamOutput;
+  readonly codes: UpstreamCodes;
+};
 
 /**
  * A value that a user-side conversion turns into the stored value of `stored` and back (a zod codec). The stored text

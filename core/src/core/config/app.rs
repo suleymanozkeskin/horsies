@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::broker::{PostgresConfig, PostgresConfigError};
 use super::no_member_after_the_tag;
 use super::payload::PayloadPolicy;
-use super::queue::{CustomQueueConfig, QueueMode};
+use super::queue::{CustomQueueConfig, QueueMode, DEFAULT_QUEUE_NAME};
 use super::recovery::RecoveryConfig;
 use super::resilience::WorkerResilienceConfig;
 use super::retention::RetentionConfig;
@@ -460,7 +460,7 @@ impl AppConfig {
         }
 
         let declared_queues: Vec<&str> = match self.queue_mode {
-            QueueMode::Default => vec!["default"],
+            QueueMode::Default => vec![DEFAULT_QUEUE_NAME],
             QueueMode::Custom => self
                 .custom_queues
                 .iter()
