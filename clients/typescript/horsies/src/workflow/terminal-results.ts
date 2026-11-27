@@ -7,7 +7,7 @@
 // error. Each entry of `results_by_id` is the stored result envelope of one terminal node.
 
 import { OperationalCode } from "../_catalog/task_codes.ts";
-import { TASK_RESULT_ENVELOPE_KEY } from "../codec/bounds.ts";
+import { TASK_RESULT_ENVELOPE_KEY } from "../_catalog/codec_bounds.ts";
 import { readErrorNode } from "../codec/envelope.ts";
 import type { JsonValue } from "../codec/json-value.ts";
 import { isTreeObject, type TreeObject, type TreeValue } from "../codec/number-text.ts";

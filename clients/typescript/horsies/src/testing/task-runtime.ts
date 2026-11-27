@@ -13,7 +13,7 @@
 //   the context reader reads; `noContext` when the test gives none. A form that the writer or the reader refuses is a
 //   mistake of the test: `TypeError`, with the member and the rule.
 
-import { MAX_JSON_DEPTH } from "../codec/bounds.ts";
+import { MAX_JSON_DEPTH } from "../_catalog/codec_bounds.ts";
 import { writtenJsonText } from "../codec/json-text.ts";
 import { engineKeysKeptText, type JsonValue } from "../codec/json-value.ts";
 import { refusalText, ROOT_PATH } from "../codec/refusal.ts";

@@ -2,9 +2,14 @@
 // `SubWorkflowFailure` and `SubWorkflowSummary`, `core/src/core/workflow/summary.rs`). A summary key that the core
 // does not name is ignored, as the core ignores it.
 
+import { SUMMARY_OUTPUT_DEPTH_LIMIT } from "../_catalog/codec_bounds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
-import type { SubWorkflowFailure, SubWorkflowSummary, WorkflowStatus } from "../wire/task-error.ts";
-import { SUMMARY_COUNT_MAX, SUMMARY_COUNT_MIN, SUMMARY_OUTPUT_DEPTH_LIMIT, WORKFLOW_STATUSES } from "./bounds.ts";
+import {
+  type SubWorkflowFailure,
+  type SubWorkflowSummary,
+  WORKFLOW_STATUSES,
+  type WorkflowStatus,
+} from "../wire/task-error.ts";
 import { decodeJsonNode } from "./json-value.ts";
 import { isTreeObject, type TreeObject, type TreeValue } from "./number-text.ts";
 import {
@@ -22,6 +27,12 @@ const SUB_WORKFLOW_SUMMARY_KEY = "sub_workflow_summary";
 const COUNT_KEYS = ["total_tasks", "completed_tasks", "failed_tasks", "skipped_tasks"] as const;
 
 const STATUSES: ReadonlySet<string> = new Set(WORKFLOW_STATUSES);
+
+/** The largest count of a sub-workflow summary: the core stores each count as an `i32`. */
+const SUMMARY_COUNT_MAX = 2_147_483_647;
+
+/** The smallest count of a sub-workflow summary (the `i32` range). */
+const SUMMARY_COUNT_MIN = -2_147_483_648;
 
 /**
  * The forms of a UUID that the core reads (the `uuid` crate's `Uuid::parse_str`): 32 hex digits, the hyphenated

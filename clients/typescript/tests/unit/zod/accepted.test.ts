@@ -5,7 +5,7 @@ import { describe, test } from "node:test";
 
 import { z } from "zod";
 
-import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/_catalog/codec_bounds.ts";
 import { encodeWithReadBack } from "../../../horsies/src/codec/read-back.ts";
 import { h } from "../../../horsies/src/wire/builders.ts";
 import { checkKind, checkMemberKind } from "../../../horsies/src/wire/check.ts";

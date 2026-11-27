@@ -18,7 +18,7 @@ import { AddonOutsideMainThread } from "../thrown-errors.ts";
 import type { Kind } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import type { TaskError, TaskOutcome } from "../wire/task-error.ts";
-import { MAX_WAIT_LIMIT_MS } from "../send/bounds.ts";
+import { MAX_WAIT_LIMIT_MS } from "../_catalog/send_bounds.ts";
 import { databaseReadError, type ReadError, seatRelayFullRead } from "./errors.ts";
 import { type TaskInfo, taskInfoOf } from "./info.ts";
 

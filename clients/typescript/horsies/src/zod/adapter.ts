@@ -18,7 +18,7 @@
 //   union rule (`AmbiguousUnion`, `UnionMemberNotPrimitive`; the union rules live in `checkKind` only), a literal that is not a safe integer, a default that does not encode, a kind deeper than a
 //   stored value.
 
-import { MAX_VALUE_JSON_DEPTH } from "../codec/bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../_catalog/codec_bounds.ts";
 import { issuesText, type ValueCheck } from "../codec/conversion.ts";
 import { isEngineKey } from "../codec/engine-keys.ts";
 import { encodeRefused, itemPath, memberPath, ROOT_PATH } from "../codec/refusal.ts";

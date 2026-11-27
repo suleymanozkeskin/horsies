@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 
 import * as otel from "@opentelemetry/api";
 
+import { PACKAGE_VERSION } from "../../../../horsies/src/_catalog/package_version.ts";
 import type { SendCallResult, SendObserver } from "../../../../horsies/src/app/observers.ts";
 import { taskIdFromCore } from "../../../../horsies/src/contract/ids.ts";
 import type { TraceArgument } from "../../../../horsies/src/native/values/records.ts";
@@ -60,6 +61,7 @@ describe("the send span", () => {
 
     assert.equal(span.kind, otel.SpanKind.PRODUCER);
     assert.equal(span.instrumentationScope.name, "horsies");
+    assert.equal(span.instrumentationScope.version, PACKAGE_VERSION);
     assert.deepEqual(span.attributes, {
       "messaging.system": "horsies",
       "messaging.operation.type": "send",

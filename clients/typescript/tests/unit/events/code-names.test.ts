@@ -9,7 +9,7 @@ import {
   BUILT_IN_TASK_CODES as GENERATED_BUILT_IN_TASK_CODES,
   type BuiltInTaskCode as GeneratedBuiltInTaskCode,
 } from "../../../horsies/src/_catalog/task_code.ts";
-import { BUILT_IN_TASK_CODES } from "../../../horsies/src/codec/bounds.ts";
+import { BUILT_IN_TASK_CODES } from "../../../horsies/src/_catalog/task_code.ts";
 import type { BuiltInTaskCode } from "../../../horsies/src/wire/task-error.ts";
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;

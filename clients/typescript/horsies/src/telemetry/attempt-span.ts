@@ -54,6 +54,7 @@ import { flushTracerProvider } from "./flush.ts";
 import type { NoSpanIds, SpanIds } from "./log-context.ts";
 import {
   INSTRUMENTATION_SCOPE,
+  INSTRUMENTATION_SCOPE_VERSION,
   type OtelApi,
   type OtelAttributes,
   type OtelContext,
@@ -173,7 +174,7 @@ export function openedAttemptSpan(
     const options = { kind: api.SpanKind.CONSUMER, attributes, links: place.links };
 
     const span = api.trace
-      .getTracer(INSTRUMENTATION_SCOPE)
+      .getTracer(INSTRUMENTATION_SCOPE, INSTRUMENTATION_SCOPE_VERSION)
       .startSpan(`${RUN_OPERATION} ${facts.taskName}`, withTime(options, start), place.parent);
 
     const active = api.trace.setSpan(place.parent, span);
