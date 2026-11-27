@@ -3,17 +3,20 @@
 //!
 //! - The outcome is the cancelled record, or the raw record of the core's
 //!   `TaskActionError` (`TaskActionNotFound`, `TaskActionNotCancellable`,
-//!   `TaskActionWorkflowTask`, `TaskActionDbOperationFailed` or
+//!   `TaskActionIsWorkflowTask`, `TaskActionDatabaseOperationFailed` or
 //!   `TaskActionStoredDataInvalid`), with `cancel_task` as the subject of its
 //!   exception. The core gives each class its message.
-//! - A failed connect is `TaskActionDbOperationFailed`: nothing was sent.
+//! - A failed connect is `TaskActionDatabaseOperationFailed`: nothing was
+//!   sent.
 //! - The cancel writes in one statement. A stop of the core during the
 //!   statement leaves its outcome unknown (`CallKind::Write`); a repeat tells
 //!   which: a committed cancel answers `TaskActionNotCancellable` with
 //!   `CANCELLED`.
 
 use horsies_core::catalog::CodeEnum;
-use horsies_core::monitoring::{cancel_task, TaskActionError, TaskActionResult, TaskCancelled};
+use horsies_core::monitoring::{
+    cancel_task, CancelPolicy as CoreCancelPolicy, TaskActionError, TaskActionResult, TaskCancelled,
+};
 use napi::bindgen_prelude::Object;
 use napi::Env;
 use napi_derive::napi;
@@ -42,11 +45,11 @@ pub enum CancelPolicy {
 }
 
 impl CancelPolicy {
-    /// The core's `include_running` flag. Pure.
-    const fn include_running(self) -> bool {
+    /// The core's cancel policy of the same name. Pure.
+    const fn core_policy(self) -> CoreCancelPolicy {
         match self {
-            Self::IncludeRunning => true,
-            Self::PendingOrClaimedOnly => false,
+            Self::IncludeRunning => CoreCancelPolicy::IncludeRunning,
+            Self::PendingOrClaimedOnly => CoreCancelPolicy::PendingOrClaimedOnly,
         }
     }
 }
@@ -105,7 +108,7 @@ async fn cancel_operation(
             return Outcome::failed(SUBJECT, &TaskActionError::cancel_failed(task_id, error))
         }
     };
-    cancel_outcome(cancel_task(&broker, task_id, policy.include_running()).await)
+    cancel_outcome(cancel_task(&broker, task_id, policy.core_policy()).await)
 }
 
 /// The outcome of the core's answer to a cancel. Pure.
@@ -158,8 +161,14 @@ mod tests {
     }
 
     #[test]
-    fn each_policy_sets_the_flag_of_the_core() {
-        assert!(CancelPolicy::IncludeRunning.include_running());
-        assert!(!CancelPolicy::PendingOrClaimedOnly.include_running());
+    fn each_policy_is_the_core_policy_of_the_same_name() {
+        assert_eq!(
+            CancelPolicy::IncludeRunning.core_policy(),
+            CoreCancelPolicy::IncludeRunning
+        );
+        assert_eq!(
+            CancelPolicy::PendingOrClaimedOnly.core_policy(),
+            CoreCancelPolicy::PendingOrClaimedOnly
+        );
     }
 }

@@ -168,7 +168,7 @@ export function subWorkflowFailure(error: TaskError, childId: string): SubWorkfl
   assert.ok(failure !== null, `the error is not a sub-workflow failure: ${errorText(error)}`);
   assert.equal(failure.workflowId, childId);
   assert.equal(failure.summary.status, "FAILED");
-  assert.ok(failure.summary.failedTasks >= 1, `the child has a failed task: ${JSON.stringify(failure.summary)}`);
+  assert.ok(failure.summary.failedNodes >= 1, `the child has a failed task: ${JSON.stringify(failure.summary)}`);
 
   return failure;
 }

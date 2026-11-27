@@ -238,12 +238,12 @@ fn event_handler_constants() -> [PublishedConstant; 3] {
 }
 
 const BROKER_CONSTANTS: [PublishedConstant; 1] = [PublishedConstant::Integer {
-    name: "TASK_LIST_BOUND",
+    name: "TASK_LIST_ROW_BOUND",
     value: TASK_LIST_BOUND as i128,
 }];
 
 /// The stem of the module of the broker bound. The constant name is the
-/// name of the core's constant.
+/// name that the Python client publishes for the core's `TASK_LIST_BOUND`.
 const BROKER_BOUNDS_MODULE: &str = "broker_bounds";
 
 /// The stem of the module of the bounds and spellings of the stored forms.
@@ -792,7 +792,7 @@ mod tests {
             module_of("broker_bounds"),
             format!(
                 "{GENERATED_HEADER}\n{}",
-                integer_statement("TASK_LIST_BOUND", TASK_LIST_BOUND as i128)
+                integer_statement("TASK_LIST_ROW_BOUND", TASK_LIST_BOUND as i128)
             )
         );
     }

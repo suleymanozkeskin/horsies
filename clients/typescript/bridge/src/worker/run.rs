@@ -847,7 +847,7 @@ mod tests {
             task_index: 2,
             child_depth: 1,
             definition_key: Some("region_sync".to_owned()),
-            params: horsies_core::SubWorkflowParams::NotGiven,
+            params: horsies_core::SubWorkflowParameters::NotGiven,
             node_input: "{}".to_owned(),
             args_from: None,
             sources: Vec::new(),

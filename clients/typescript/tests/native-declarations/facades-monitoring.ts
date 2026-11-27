@@ -46,7 +46,7 @@ import type {
   MonitoringReadsAddon,
   QueryField,
   RetriedArg,
-  RunNameArg,
+  WorkflowNameArg,
   RunStatusArg,
   SortArg,
   SortDirectionArg,
@@ -56,7 +56,7 @@ import type {
   TaskDetailOutcome,
   TaskFacetsArg,
   TaskListArg,
-  TaskStatsArg,
+  TaskStatusCountsArg,
   WindowArg,
   WindowBoundArg,
   WorkflowRunsArg,
@@ -65,7 +65,7 @@ import type { Mutual, SameFunction } from "./mutual.ts";
 
 type Reads = MonitoringReadsAddon;
 
-export const readTaskStatsMatches: SameFunction<typeof Generated.readTaskStats, Reads["readTaskStats"]> = true;
+export const readTaskStatusCountsMatches: SameFunction<typeof Generated.readTaskStatusCounts, Reads["readTaskStatusCounts"]> = true;
 export const readTaskFacetsMatches: SameFunction<typeof Generated.readTaskFacets, Reads["readTaskFacets"]> = true;
 
 export const readTaskBreakdownMatches: SameFunction<typeof Generated.readTaskBreakdown, Reads["readTaskBreakdown"]> =
@@ -119,11 +119,11 @@ export const sortFieldMatches: Mutual<Generated.SortFieldArg, SortFieldArg> = tr
 export const sortDirectionMatches: Mutual<Generated.SortDirectionArg, SortDirectionArg> = true;
 export const groupByMatches: Mutual<Generated.GroupByArg, GroupByArg> = true;
 export const filtersMatches: Mutual<Generated.FiltersArg, FiltersArg> = true;
-export const taskStatsMatches: Mutual<Generated.TaskStatsArg, TaskStatsArg> = true;
+export const taskStatusCountsMatches: Mutual<Generated.TaskStatusCountsArg, TaskStatusCountsArg> = true;
 export const taskFacetsMatches: Mutual<Generated.TaskFacetsArg, TaskFacetsArg> = true;
 export const taskBreakdownMatches: Mutual<Generated.TaskBreakdownArg, TaskBreakdownArg> = true;
 export const taskListMatches: Mutual<Generated.TaskListArg, TaskListArg> = true;
-export const runNameMatches: Mutual<Generated.RunNameArg, RunNameArg> = true;
+export const workflowNameMatches: Mutual<Generated.WorkflowNameArg, WorkflowNameArg> = true;
 export const runStatusMatches: Mutual<Generated.RunStatusArg, RunStatusArg> = true;
 export const workflowRunsMatches: Mutual<Generated.WorkflowRunsArg, WorkflowRunsArg> = true;
 export const readOutcomeMatches: Mutual<Generated.MonitoringReadOutcome, MonitoringReadOutcome> = true;

@@ -86,15 +86,15 @@ describe("taskActionCoreErrorFromNative", () => {
     });
   });
 
-  test("TaskActionWorkflowTask", () => {
+  test("TaskActionIsWorkflowTask", () => {
     const value = taskActionCoreErrorFromNative({
-      class: "TaskActionWorkflowTask",
+      class: "TaskActionIsWorkflowTask",
       slots: { message: MESSAGE, task_id: TASK_ID, current_status: TaskStatus.RUNNING },
     });
 
     expectConverted(value, {
       shown: {
-        kind: "workflowTask",
+        kind: "isWorkflowTask",
         code: "TASK_IS_WORKFLOW_TASK",
         retryable: false,
         taskId: TASK_ID,

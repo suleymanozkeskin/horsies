@@ -190,7 +190,7 @@ describe("layer 5: workflow data flow", () => {
     assert.deepEqual(await workflowValue(handle), {
       kind: "context",
       workflowId: handle.workflowId,
-      taskIndex: 1,
+      nodeIndex: 1,
       taskName: "e2e_wf_context_report",
       sourceValue: dataflow.REPORTED_SOURCE_VALUE,
     });

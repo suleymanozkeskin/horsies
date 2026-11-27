@@ -60,7 +60,7 @@ describe("cancelTask", () => {
       ],
       [
         {
-          class: "TaskActionWorkflowTask",
+          class: "TaskActionIsWorkflowTask",
           slots: [textSlot("message", "m"), uuidSlot("task_id", TASK_ID), codeSlot("current_status", "TaskStatus", "PENDING")],
         },
         "TASK_IS_WORKFLOW_TASK",

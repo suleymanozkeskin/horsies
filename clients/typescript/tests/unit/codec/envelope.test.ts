@@ -90,9 +90,9 @@ describe("stored task error rules", () => {
     const id = "0192f3b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b";
 
     const summary =
-      '{"status":"FAILED","total_tasks":1,"completed_tasks":0,"failed_tasks":1,"skipped_tasks":0,"note":1}';
+      '{"status":"FAILED","total_nodes":1,"completed_nodes":0,"failed_nodes":1,"skipped_nodes":0,"note":1}';
 
-    const floatCount = summary.replace('"total_tasks":1', '"total_tasks":1.0');
+    const floatCount = summary.replace('"total_nodes":1', '"total_nodes":1.0');
     const engineKeyOutput = summary.replace("{", '{"output":{"__h_x":1},');
     const head = `{"error_code":{"__builtin_task_code__":"SUB_WORKFLOW_FAILED"},"sub_workflow_id":"${id}"`;
     const outcome = outcomeOf(JSON_KIND, `${ERROR_HEAD}${head},"sub_workflow_summary":${summary}}}`);
@@ -108,7 +108,7 @@ describe("stored task error rules", () => {
   });
 
   test("the sub-workflow id: each form that the core reads gives the lower-case hyphenated form", () => {
-    const summary = '{"status":"FAILED","total_tasks":1,"completed_tasks":0,"failed_tasks":1,"skipped_tasks":0}';
+    const summary = '{"status":"FAILED","total_nodes":1,"completed_nodes":0,"failed_nodes":1,"skipped_nodes":0}';
     const canonical = "0192f3b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b";
 
     for (const id of [

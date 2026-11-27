@@ -48,7 +48,7 @@ export {
 
 export type { ContextReadError, RuntimeWorkflowContext, WorkflowContext } from "./context.ts";
 
-export type { NodeResult, WorkflowHandle, WorkflowHandleBase, WorkflowHandleById, WorkflowTaskInfo } from "./handle.ts";
+export type { NodeResult, WorkflowHandle, WorkflowHandleBase, WorkflowHandleById, WorkflowNodeInfo } from "./handle.ts";
 
 export type { WorkflowHandleError, WorkflowReadError } from "./handle-error.ts";
 
@@ -73,4 +73,4 @@ export type {
 
 export { WorkflowHandleErrorCode } from "../_catalog/workflow_handle.ts";
 
-export { WorkflowTaskStatus } from "../_catalog/status.ts";
+export { WorkflowNodeStatus } from "../_catalog/status.ts";

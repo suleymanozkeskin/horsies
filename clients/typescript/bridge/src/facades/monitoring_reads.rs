@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use horsies_core::monitoring::{
     get_task_detail, get_workflow_node, get_workflow_run, list_schedules, list_tasks,
-    list_workflow_names, list_workflow_runs, task_breakdown, task_facets, task_stats,
+    list_workflow_names, list_workflow_runs, task_breakdown, task_facets, task_status_counts,
     MonitoringQueryError, TaskAbsenceReason, TaskDetailRead,
 };
 use horsies_core::PostgresBroker;
@@ -34,16 +34,16 @@ use crate::call::operation::{guarded_start, spawn_operation};
 use crate::call::thrown::Envelope;
 use crate::facades::answer::answered_at_once;
 use crate::facades::monitoring_query::{
-    task_breakdown_query, task_facets_query, task_list_query, task_stats_query, whole_number,
-    workflow_runs_query, QueryField, QueryStop, TaskBreakdownArg, TaskFacetsArg, TaskListArg,
-    TaskStatsArg, WorkflowRunsArg,
+    task_breakdown_query, task_facets_query, task_list_query, task_status_counts_query,
+    whole_number, workflow_runs_query, QueryField, QueryStop, TaskBreakdownArg, TaskFacetsArg,
+    TaskListArg, TaskStatusCountsArg, WorkflowRunsArg,
 };
 use crate::handle::core_handle::{BrokerConnection, CoreHandle};
 use crate::values::boundary::{text_of_uuid, uuid_of_text, BoundaryRefusal};
 use crate::values::catalog_values::RawCatalogError;
 
 /// The rule of a workflow task index.
-const TASK_INDEX_RULE: &str = "a whole number from -2147483648 to 2147483647";
+const NODE_INDEX_RULE: &str = "a whole number from -2147483648 to 2147483647";
 
 /// The outcome of one list, aggregate or workflow read.
 #[napi(
@@ -110,19 +110,19 @@ type EncodedRead = Result<Result<String, serde_json::Error>, MonitoringQueryErro
 /// The task status counts of the window: all seven statuses, in a fixed
 /// order. Reads.
 #[napi(ts_return_type = "Promise<NativeEnvelope<MonitoringReadOutcome>>")]
-pub fn read_task_stats<'env>(
+pub fn read_task_status_counts<'env>(
     env: &'env Env,
     handle: &CoreHandle,
-    query: TaskStatsArg,
+    query: TaskStatusCountsArg,
 ) -> napi::Result<Object<'env>> {
-    let subject = "task stats query";
+    let subject = "task status counts query";
     query_read(
         env,
         handle,
         subject,
-        || task_stats_query(query),
+        || task_status_counts_query(query),
         move |broker, query| async move {
-            task_stats(&broker, &query)
+            task_status_counts(&broker, &query)
                 .await
                 .map(|counts| serde_json::to_string(&counts))
         },
@@ -276,17 +276,17 @@ pub fn read_workflow_node<'env>(
     env: &'env Env,
     handle: &CoreHandle,
     workflow_id: String,
-    task_index: f64,
+    node_index: f64,
 ) -> napi::Result<Object<'env>> {
     let subject = "workflow node detail query";
-    let build = || node_address(&workflow_id, task_index).map_err(QueryStop::Defect);
+    let build = || node_address(&workflow_id, node_index).map_err(QueryStop::Defect);
     query_read(
         env,
         handle,
         subject,
         build,
-        move |broker, (workflow_id, task_index)| async move {
-            get_workflow_node(&broker, workflow_id, task_index)
+        move |broker, (workflow_id, node_index)| async move {
+            get_workflow_node(&broker, workflow_id, node_index)
                 .await
                 .map(|node| serde_json::to_string(&node))
         },
@@ -449,12 +449,12 @@ fn detail_outcome(read: Result<TaskDetailRead, MonitoringQueryError>) -> TaskDet
     }
 }
 
-/// The workflow id and the task index of a node. Pure.
-fn node_address(workflow_id: &str, task_index: f64) -> Result<(Uuid, i32), BoundaryRefusal> {
+/// The workflow id and the node index of a node. Pure.
+fn node_address(workflow_id: &str, node_index: f64) -> Result<(Uuid, i32), BoundaryRefusal> {
     let workflow_id = uuid_of_text("workflowId", workflow_id)?;
-    let index = whole_number("taskIndex", task_index)?;
+    let index = whole_number("nodeIndex", node_index)?;
     let index =
-        i32::try_from(index).map_err(|_| BoundaryRefusal::new("taskIndex", TASK_INDEX_RULE))?;
+        i32::try_from(index).map_err(|_| BoundaryRefusal::new("nodeIndex", NODE_INDEX_RULE))?;
     Ok((workflow_id, index))
 }
 
@@ -557,11 +557,11 @@ mod tests {
     }
 
     #[test]
-    fn a_task_index_outside_i32_is_a_defect() {
+    fn a_node_index_outside_i32_is_a_defect() {
         let text = "01890a5d-ac96-774b-bcce-b302099a8057";
         assert_eq!(
             node_address(text, 2_147_483_648.0),
-            Err(BoundaryRefusal::new("taskIndex", TASK_INDEX_RULE))
+            Err(BoundaryRefusal::new("nodeIndex", NODE_INDEX_RULE))
         );
     }
 

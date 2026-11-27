@@ -39,7 +39,7 @@ export type SortFieldArg =
   | "failedAt"
   | "status"
   | "taskName"
-  | "queueName"
+  | "queue"
   | "priority"
   | "retryCount"
   | "queueSeconds"
@@ -62,8 +62,8 @@ export interface FiltersArg {
   readonly retried: RetriedArg;
 }
 
-/** The task stats read: every filter but the statuses. */
-export interface TaskStatsArg {
+/** The task status counts read: every filter but the statuses. */
+export interface TaskStatusCountsArg {
   readonly window: WindowArg;
   readonly taskNames: string[];
   readonly queues: string[];
@@ -99,14 +99,16 @@ export interface TaskListArg {
 }
 
 /** The workflow name filter of the workflow runs read. */
-export type RunNameArg = { readonly kind: "anyName" } | { readonly kind: "named"; readonly name: string };
+export type WorkflowNameArg =
+  | { readonly kind: "anyName" }
+  | { readonly kind: "named"; readonly workflowName: string };
 
 /** The status filter of the workflow runs read: the stored text of a workflow status. */
 export type RunStatusArg = { readonly kind: "anyStatus" } | { readonly kind: "status"; readonly status: string };
 
 /** The workflow runs read. */
 export interface WorkflowRunsArg {
-  readonly name: RunNameArg;
+  readonly workflowName: WorkflowNameArg;
   readonly status: RunStatusArg;
   readonly limit: CountArg;
 }
@@ -131,14 +133,14 @@ type ReadAnswer = Promise<NativeEnvelope<MonitoringReadOutcome>>;
 
 /** The monitoring read functions of the addon. Each takes the handle first. */
 export interface MonitoringReadsAddon {
-  readTaskStats(handle: NativeCoreHandle, query: TaskStatsArg): ReadAnswer;
+  readTaskStatusCounts(handle: NativeCoreHandle, query: TaskStatusCountsArg): ReadAnswer;
   readTaskFacets(handle: NativeCoreHandle, query: TaskFacetsArg): ReadAnswer;
   readTaskBreakdown(handle: NativeCoreHandle, query: TaskBreakdownArg): ReadAnswer;
   readTaskList(handle: NativeCoreHandle, query: TaskListArg): ReadAnswer;
   readWorkflowNames(handle: NativeCoreHandle): ReadAnswer;
   readWorkflowRuns(handle: NativeCoreHandle, query: WorkflowRunsArg): ReadAnswer;
   readWorkflowRun(handle: NativeCoreHandle, workflowId: string): ReadAnswer;
-  readWorkflowNode(handle: NativeCoreHandle, workflowId: string, taskIndex: number): ReadAnswer;
+  readWorkflowNode(handle: NativeCoreHandle, workflowId: string, nodeIndex: number): ReadAnswer;
   readSchedules(handle: NativeCoreHandle): ReadAnswer;
   readTaskDetail(handle: NativeCoreHandle, taskId: string): Promise<NativeEnvelope<TaskDetailOutcome>>;
 }

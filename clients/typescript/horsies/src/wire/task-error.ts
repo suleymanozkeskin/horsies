@@ -30,10 +30,10 @@ export type SubWorkflowSummary = {
   readonly status: WorkflowStatus;
   /** The child's output, `null` when it has none. */
   readonly output: JsonValue;
-  readonly totalTasks: number;
-  readonly completedTasks: number;
-  readonly failedTasks: number;
-  readonly skippedTasks: number;
+  readonly totalNodes: number;
+  readonly completedNodes: number;
+  readonly failedNodes: number;
+  readonly skippedNodes: number;
   /** The message of the child's stored error, `null` when it has none. */
   readonly errorSummary: string | null;
 };

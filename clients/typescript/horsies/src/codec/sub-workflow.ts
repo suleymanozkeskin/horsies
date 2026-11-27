@@ -24,7 +24,7 @@ import { isNumber, isString } from "./values.ts";
 
 const SUB_WORKFLOW_ID_KEY = "sub_workflow_id";
 const SUB_WORKFLOW_SUMMARY_KEY = "sub_workflow_summary";
-const COUNT_KEYS = ["total_tasks", "completed_tasks", "failed_tasks", "skipped_tasks"] as const;
+const COUNT_KEYS = ["total_nodes", "completed_nodes", "failed_nodes", "skipped_nodes"] as const;
 
 const STATUSES: ReadonlySet<string> = new Set(WORKFLOW_STATUSES);
 
@@ -125,7 +125,7 @@ export function readSubWorkflowSummary(node: TreeValue, path: string): Result<Su
   return counts.ok ? ok(Object.freeze({ status, output: output.value, errorSummary, ...counts.value })) : counts;
 }
 
-type Counts = Pick<SubWorkflowSummary, "totalTasks" | "completedTasks" | "failedTasks" | "skippedTasks">;
+type Counts = Pick<SubWorkflowSummary, "totalNodes" | "completedNodes" | "failedNodes" | "skippedNodes">;
 
 /** The four counts: each an integer in the range that the core stores (`i32`). */
 function readCounts(node: TreeObject, path: string): Result<Counts, EnvelopeRefused> {
@@ -141,7 +141,7 @@ function readCounts(node: TreeObject, path: string): Result<Counts, EnvelopeRefu
     values.push(count);
   }
 
-  const [totalTasks = 0, completedTasks = 0, failedTasks = 0, skippedTasks = 0] = values;
+  const [totalNodes = 0, completedNodes = 0, failedNodes = 0, skippedNodes = 0] = values;
 
-  return ok({ totalTasks, completedTasks, failedTasks, skippedTasks });
+  return ok({ totalNodes, completedNodes, failedNodes, skippedNodes });
 }

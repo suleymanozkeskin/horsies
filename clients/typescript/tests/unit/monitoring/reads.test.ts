@@ -17,7 +17,7 @@ import {
   taskBreakdown,
   taskDetail,
   taskFacets,
-  taskStats,
+  taskStatusCounts,
   workflowNames,
   workflowNode,
   workflowRun,
@@ -62,7 +62,7 @@ function fakeTarget(
   };
 
   const addon: MonitoringReadsAddon = {
-    readTaskStats: read("readTaskStats"),
+    readTaskStatusCounts: read("readTaskStatusCounts"),
     readTaskFacets: read("readTaskFacets"),
     readTaskBreakdown: read("readTaskBreakdown"),
     readTaskList: read("readTaskList"),
@@ -88,9 +88,9 @@ function jsonOutcome(value: WireJson): MonitoringReadOutcome {
 }
 
 describe("each read decodes the core's text", () => {
-  test("taskStats gives the status counts", async () => {
+  test("taskStatusCounts gives the status counts", async () => {
     const { target } = fakeTarget(jsonOutcome([sample("StatusCount"), sample("StatusCount")]));
-    const read = await taskStats(target, {});
+    const read = await taskStatusCounts(target, {});
 
     assert.ok(read.ok);
     assert.equal(read.value.length, 2);
@@ -155,7 +155,7 @@ describe("found and not found", () => {
   });
 
   test("workflowNode found and not found", async () => {
-    const found = await workflowNode(fakeTarget(jsonOutcome(sample("WorkflowTaskDetail"))).target, WORKFLOW_ID, 2);
+    const found = await workflowNode(fakeTarget(jsonOutcome(sample("WorkflowNodeDetail"))).target, WORKFLOW_ID, 2);
     const missing = await workflowNode(fakeTarget(jsonOutcome(null)).target, WORKFLOW_ID, 2);
 
     assert.ok(found.ok && found.value.kind === "found");
@@ -170,7 +170,14 @@ describe("expected failures are values", () => {
 
     assert.deepEqual(read, {
       ok: false,
-      error: { kind: "invalidInput", code: "INVALID_INPUT", retryable: false, field: "window", reason: "the window exceeds the 30-day maximum" },
+      error: {
+        kind: "invalidInput",
+        code: "INVALID_INPUT",
+        retryable: false,
+        message: "window: the window exceeds the 30-day maximum",
+        field: "window",
+        reason: "the window exceeds the 30-day maximum",
+      },
     });
   });
 
@@ -251,17 +258,17 @@ describe("thrown and defect ends", () => {
   });
 
   test("a text that does not decode is a defect", async () => {
-    await assert.rejects(taskStats(fakeTarget(jsonOutcome([new Map([["status", "PENDING"]])])).target, {}), { name: "ClientDefect" });
+    await assert.rejects(taskStatusCounts(fakeTarget(jsonOutcome([new Map([["status", "PENDING"]])])).target, {}), { name: "ClientDefect" });
   });
 });
 
 describe("the timing variants of the core decode through the reads", () => {
   test("every attempt phases variant of a task detail", async () => {
     const detail = sample("TaskDetail");
-    const attempts = withMember(detail, "attempts", [sample("TaskAttemptInfo")]);
+    const attempts = withMember(detail, "attempts", [sample("TaskAttemptDetail")]);
 
     for (const phases of timingExamples("attempt_phases")) {
-      const text = coreText(withMember(attempts, "attempts", [withMember(sample("TaskAttemptInfo"), "phases", phases)]));
+      const text = coreText(withMember(attempts, "attempts", [withMember(sample("TaskAttemptDetail"), "phases", phases)]));
       const read = await taskDetail(fakeTarget(jsonOutcome(null), { kind: "json", text }).target, TASK_ID);
 
       assert.ok(read.ok && read.value.kind === "found");
@@ -279,7 +286,7 @@ describe("the timing variants of the core decode through the reads", () => {
     }
 
     for (const timing of timingExamples("node_timings")) {
-      const node = withMember(sample("WorkflowNodeInfo"), "timing", timing);
+      const node = withMember(sample("WorkflowNodeSummary"), "timing", timing);
       const read = await workflowRun(fakeTarget(jsonOutcome(withMember(run, "nodes", [node]))).target, WORKFLOW_ID);
 
       assert.ok(read.ok && read.value.kind === "found" && read.value.run.nodes.length === 1);

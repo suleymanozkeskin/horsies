@@ -16,7 +16,7 @@ import type {
   TaskBreakdownArg,
   TaskFacetsArg,
   TaskListArg,
-  TaskStatsArg,
+  TaskStatusCountsArg,
   WindowArg,
   WindowBoundArg,
   WorkflowRunsArg,
@@ -48,7 +48,7 @@ export type TaskSortField =
   | "failedAt"
   | "status"
   | "taskName"
-  | "queueName"
+  | "queue"
   | "priority"
   | "retryCount"
   | "queueSeconds"
@@ -79,8 +79,8 @@ export interface TaskFilters {
   readonly retriedOnly?: boolean;
 }
 
-/** The task stats read: every filter but the statuses (the stats count each status). */
-export type TaskStatsQuery = Omit<TaskFilters, "statuses">;
+/** The task status counts read: every filter but the statuses (the read counts each status). */
+export type TaskStatusCountsQuery = Omit<TaskFilters, "statuses">;
 
 /** The task facets read: only the coarse filters, so one selection never empties the option lists of the others. */
 export type TaskFacetsQuery = Pick<TaskFilters, "window" | "statuses" | "errorCategories" | "retriedOnly">;
@@ -108,8 +108,8 @@ export interface WorkflowRunsQuery {
   readonly limit?: number;
 }
 
-/** The addon argument of a task stats query. Pure. */
-export function taskStatsArg(query: TaskStatsQuery): Result<TaskStatsArg, QueryRefused> {
+/** The addon argument of a task status counts query. Pure. */
+export function taskStatusCountsArg(query: TaskStatusCountsQuery): Result<TaskStatusCountsArg, QueryRefused> {
   const filters = filtersArg(query);
 
   if (!filters.ok) {
@@ -189,7 +189,8 @@ export function workflowRunsArg(query: WorkflowRunsQuery): Result<WorkflowRunsAr
   }
 
   return ok({
-    name: query.workflowName === undefined ? { kind: "anyName" } : { kind: "named", name: query.workflowName },
+    workflowName:
+      query.workflowName === undefined ? { kind: "anyName" } : { kind: "named", workflowName: query.workflowName },
     status: query.status === undefined ? { kind: "anyStatus" } : { kind: "status", status: query.status },
     limit: limit.value,
   });

@@ -36,8 +36,8 @@ export interface TaskActionNotCancellable {
   readonly currentStatus: TaskStatus;
 }
 
-export interface TaskActionWorkflowTask {
-  readonly kind: "workflowTask";
+export interface TaskActionIsWorkflowTask {
+  readonly kind: "isWorkflowTask";
   readonly code: "TASK_IS_WORKFLOW_TASK";
   readonly retryable: false;
   readonly message: string;
@@ -70,7 +70,7 @@ export type MonitoringQueryCoreError =
 export type TaskActionCoreError =
   | TaskActionNotFound
   | TaskActionNotCancellable
-  | TaskActionWorkflowTask
+  | TaskActionIsWorkflowTask
   | TaskActionDatabaseOperationFailed
   | TaskActionStoredDataInvalid;
 
@@ -108,8 +108,8 @@ export interface NativeTaskActionNotCancellable {
   };
 }
 
-export interface NativeTaskActionWorkflowTask {
-  readonly class: "TaskActionWorkflowTask";
+export interface NativeTaskActionIsWorkflowTask {
+  readonly class: "TaskActionIsWorkflowTask";
   readonly slots: {
     readonly message: string;
     readonly task_id: string;
@@ -145,7 +145,7 @@ export type NativeMonitoringQueryCoreError =
 export type NativeTaskActionCoreError =
   | NativeTaskActionNotFound
   | NativeTaskActionNotCancellable
-  | NativeTaskActionWorkflowTask
+  | NativeTaskActionIsWorkflowTask
   | NativeTaskActionDatabaseOperationFailed
   | NativeTaskActionStoredDataInvalid;
 
@@ -234,9 +234,9 @@ export function taskActionCoreErrorFromNative(raw: NativeTaskActionCoreError): T
       );
     }
 
-    case "TaskActionWorkflowTask": {
-      const value: TaskActionWorkflowTask = {
-        kind: "workflowTask",
+    case "TaskActionIsWorkflowTask": {
+      const value: TaskActionIsWorkflowTask = {
+        kind: "isWorkflowTask",
         code: "TASK_IS_WORKFLOW_TASK",
         retryable: false,
         message: raw.slots.message,

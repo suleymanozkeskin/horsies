@@ -49,10 +49,10 @@ async function step(args: readonly string[], env: Readonly<Record<string, string
 
 /** The count of the live tasks of `app`, or the read failure. */
 async function liveTasks(app: Horsies): Promise<Result<number, string>> {
-  const stats = await app.monitoring.taskStats();
+  const stats = await app.monitoring.taskStatusCounts();
 
   if (!stats.ok) {
-    return err(`the task stats read failed: ${stats.error.code}`);
+    return err(`the task status counts read failed: ${stats.error.code}`);
   }
 
   return ok(stats.value.filter((count) => LIVE_STATUSES.includes(count.status)).reduce((sum, count) => sum + count.count, 0));

@@ -547,8 +547,8 @@ describe("the child spec source", () => {
 describe("the workflow context", () => {
   /** The stored summary of a child that ended with `status`, its output text `output` and `errorSummary`. */
   const summary = (status: string, output: string, errorSummary: string) =>
-    `{"status":"${status}","output":${output},"total_tasks":1,"completed_tasks":1,"failed_tasks":0,` +
-    `"skipped_tasks":0,"error_summary":${errorSummary}}`;
+    `{"status":"${status}","output":${output},"total_nodes":1,"completed_nodes":1,"failed_nodes":0,` +
+    `"skipped_nodes":0,"error_summary":${errorSummary}}`;
 
   const text = writtenJsonText(
     `{"workflow_id":"${WORKFLOW_ID}","task_index":2,"task_name":"audit","results_by_id":` +
@@ -582,10 +582,10 @@ describe("the workflow context", () => {
         status: "FAILED",
         output: null,
         errorSummary: "boom",
-        totalTasks: 1,
-        completedTasks: 1,
-        failedTasks: 0,
-        skippedTasks: 0,
+        totalNodes: 1,
+        completedNodes: 1,
+        failedNodes: 0,
+        skippedNodes: 0,
       },
     });
     assert.deepEqual(context().summaryFor("count"), { ok: false, error: { kind: "notInContext", nodeId: "count" } });
@@ -631,7 +631,7 @@ describe("the workflow context", () => {
     const context = workflowContextOf(text);
 
     assert(context.ok);
-    assert.equal(context.value.taskIndex, 2);
+    assert.equal(context.value.nodeIndex, 2);
     assert.deepEqual(context.value.resultFor("count", count), { ok: true, value: { kind: "succeeded", value: 7 } });
     assert.deepEqual(context.value.resultFor("other", count), {
       ok: false,

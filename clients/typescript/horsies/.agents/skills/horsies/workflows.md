@@ -132,7 +132,7 @@ without it has no such member (typecheck).
 | `{ kind: "context", context }` | The run is a workflow node that names `workflowContextFrom` |
 | `{ kind: "noContext" }` | A direct send, or a node with no `workflowContextFrom` |
 
-- `context` holds `workflowId`, `taskIndex` and `taskName`, and reads the
+- `context` holds `workflowId`, `nodeIndex` and `taskName`, and reads the
   nodes of `workflowContextFrom`: `resultFor(nodeId, contract)` (the node's
   `TaskOutcome`, read with the contract's output type and codes),
   `hasResult(nodeId)`, and for a sub-workflow node `summaryFor(nodeId)`,
@@ -451,7 +451,7 @@ process gave; another error is `VALIDATION_FAILED`.
 | `resultFor(nodeId)` | `Result<TaskOutcome<O, E>, WorkflowReadError>`: one node of the returned object (the output and the success policy nodes), typed by its contract. Not a wait |
 | `status()` | `Result<WorkflowStatus, HandleCoreError>` |
 | `results()` | `Result<ReadonlyMap<string, NodeResult>, HandleCoreError>`: the stored result of each node that has one, by node id |
-| `nodes()` | `Result<readonly WorkflowTaskInfo[], HandleCoreError>`: every node in index order |
+| `nodes()` | `Result<readonly WorkflowNodeInfo[], HandleCoreError>`: every node in index order |
 | `pause()` | `Result<boolean, HandleCoreError>`: `true` when a RUNNING workflow paused |
 | `resume()` | `Result<boolean, HandleCoreError>`: `true` when a PAUSED workflow resumed |
 | `cancel()` | `Result<void, HandleCoreError>`: cancels the workflow and its descendants |
@@ -463,8 +463,8 @@ process gave; another error is `VALIDATION_FAILED`.
   workflow is `failed` with `WORKFLOW_PAUSED`; a resume can continue it.
 - `NodeResult` is `{ kind: "outcome", outcome }` (a
   `TaskOutcome<JsonValue, string>`) or `{ kind: "unreadable", cause }`.
-- `WorkflowTaskInfo` has `nodeId`, `index`, `name`, `status`
-  (`WorkflowTaskStatus`), `result`, `startedAt`, `completedAt`,
+- `WorkflowNodeInfo` has `nodeId`, `index`, `name`, `status`
+  (`WorkflowNodeStatus`), `result`, `startedAt`, `completedAt`,
   `subWorkflowId` and `subWorkflowSummary`; a fact that the row may not hold
   is a `Recorded<T>`.
 
@@ -537,7 +537,7 @@ export async function checkoutState(app: Horsies, text: string): Promise<void> {
 
 ## Statuses
 
-| `WorkflowStatus` (`WORKFLOW_STATUSES`) | `WorkflowTaskStatus` |
+| `WorkflowStatus` (`WORKFLOW_STATUSES`) | `WorkflowNodeStatus` |
 |---|---|
 | `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `PAUSED`, `CANCELLED`, `EXPIRED` | `PENDING`, `READY`, `ENQUEUED`, `RUNNING`, `COMPLETED`, `FAILED`, `SKIPPED` |
 
@@ -622,7 +622,7 @@ import {
   WorkflowId, type StartOptions, type WorkflowStartError, type StartEnqueueFailed,
   // Handles
   type WorkflowHandle, type WorkflowHandleById, type WorkflowReadError, type HandleCoreError,
-  type NodeResult, type WorkflowTaskInfo, type WorkflowStatus, WorkflowTaskStatus,
+  type NodeResult, type WorkflowNodeInfo, type WorkflowStatus, WorkflowNodeStatus,
   WORKFLOW_STATUSES, type SubWorkflowSummary, type SubWorkflowFailure, type TaskOutcome,
   // The workflow context of a task
   type RuntimeWorkflowContext, type WorkflowContext, type ContextReadError,

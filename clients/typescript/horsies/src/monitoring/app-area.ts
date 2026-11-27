@@ -59,7 +59,7 @@ import type {
   WorkerStateRead,
   WorkerStateSnapshot,
 } from "./health-types.ts";
-import type { TaskBreakdownQuery, TaskFacetsQuery, TaskListQuery, TaskStatsQuery, WorkflowRunsQuery } from "./query.ts";
+import type { TaskBreakdownQuery, TaskFacetsQuery, TaskListQuery, TaskStatusCountsQuery, WorkflowRunsQuery } from "./query.ts";
 import {
   listTasks,
   schedules,
@@ -67,7 +67,7 @@ import {
   taskDetail,
   type TaskDetailRead,
   taskFacets,
-  taskStats,
+  taskStatusCounts,
   workflowNames,
   workflowNode,
   type WorkflowNodeRead,
@@ -97,7 +97,7 @@ export interface StaleTasksQuery {
 
 /** The reads and the cancel of `app.monitoring`. */
 export interface Monitoring {
-  taskStats(query?: TaskStatsQuery): Promise<Result<readonly StatusCount[], MonitoringReadError>>;
+  taskStatusCounts(query?: TaskStatusCountsQuery): Promise<Result<readonly StatusCount[], MonitoringReadError>>;
   taskFacets(query?: TaskFacetsQuery): Promise<Result<Facets, MonitoringReadError>>;
   taskBreakdown(query: TaskBreakdownQuery): Promise<Result<Breakdown, MonitoringReadError>>;
   listTasks(query?: TaskListQuery): Promise<Result<TaskListPage, MonitoringReadError>>;
@@ -173,7 +173,7 @@ export function createMonitoringArea(core: CoreAccess, native: MonitoringAddons 
   const health = () => ({ addon: addons.health(), handle: handle() });
 
   const monitoring: Monitoring = Object.freeze({
-    taskStats: async (query: TaskStatsQuery = {}) => taskStats(reads(), query),
+    taskStatusCounts: async (query: TaskStatusCountsQuery = {}) => taskStatusCounts(reads(), query),
     taskFacets: async (query: TaskFacetsQuery = {}) => taskFacets(reads(), query),
     taskBreakdown: async (query: TaskBreakdownQuery) => taskBreakdown(reads(), query),
     listTasks: async (query: TaskListQuery = {}) => listTasks(reads(), query),
