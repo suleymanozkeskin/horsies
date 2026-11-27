@@ -712,7 +712,7 @@ def runner_of(handler: EventHandler) -> Result[HandlerRunner, BootFailedFrame]:
     an errno of a resource limit, else ``TaskLoopCreateFailed``, which
     repeats.
     """
-    match handler.kind:
+    match handler.handler_kind:
         case HandlerKind.DEF:
             return Ok(OnThread())
         case HandlerKind.ASYNC_DEF:

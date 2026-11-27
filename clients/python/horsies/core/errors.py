@@ -69,13 +69,13 @@ class SourceLocation:
         )
 
     @classmethod
-    def from_function(cls, fn: Callable[..., Any]) -> SourceLocation | None:
+    def from_function(cls, function: Callable[..., Any]) -> SourceLocation | None:
         """Create SourceLocation from a function object.
 
         Returns None if the callable doesn't have source location info
         (e.g., built-in functions, C extensions, or mock objects).
         """
-        code = getattr(fn, '__code__', None)
+        code = getattr(function, '__code__', None)
         if code is None:
             return None
         return cls(

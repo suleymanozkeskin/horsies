@@ -26,7 +26,7 @@ from horsies.core.workflows.start_types import (
     WorkflowStartError,
     WorkflowStartErrorCode,
     WorkflowStartIdConflict,
-    WorkflowStartRetryable,
+    WorkflowStartResendable,
     WorkflowStartValidationFailed,
 )
 from tests.union_members import union_members
@@ -73,7 +73,7 @@ class TestVariantCatalog:
         assert built == set(union_members(WorkflowStartError))
 
     def test_the_retryable_variants_carry_a_start_id(self) -> None:
-        assert set(get_args(WorkflowStartRetryable.__value__)) == {
+        assert set(get_args(WorkflowStartResendable.__value__)) == {
             WorkflowStartEnqueueFailed,
             WorkflowStartAsyncContext,
         }

@@ -1,4 +1,4 @@
-"""``rerun_task`` through the core's rerun steps: the read it sends on the
+"""``rerun_task_in_async`` through the core's rerun steps: the read it sends on the
 caller's connection, and the preconditions it raises for.
 
 The connection is a mock whose source read returns a row in the core's
@@ -20,10 +20,10 @@ import pytest
 
 from horsies.core.app import Horsies
 from horsies.core.history.rerun.operations import (
+    RerunCommand,
     RerunEnqueuePolicy,
     RerunSourceLive,
-    RerunTask,
-    rerun_task,
+    rerun_task_in_async,
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
@@ -64,9 +64,9 @@ def _policy() -> RerunEnqueuePolicy:
 
 
 async def _rerun(connection: AsyncMock) -> object:
-    return await rerun_task(
+    return await rerun_task_in_async(
         connection,
-        RerunTask(source_task_id=SOURCE_ID, deadline=None),
+        RerunCommand(source_task_id=SOURCE_ID, good_until=None),
         _policy(),
         registered_task_codes={},
     )
@@ -103,7 +103,7 @@ async def test_a_database_of_another_family_raises_before_any_write(stored: str 
     with pytest.raises(CorePreconditionFailed) as raised:
         _ = await _rerun(connection)
 
-    assert raised.value.subject == 'rerun_task'
+    assert raised.value.subject == 'rerun_task_in'
     assert raised.value.retryable is False
     assert 'PYTHON' in raised.value.message
     assert connection.execute.await_count == 1
@@ -118,16 +118,16 @@ class WriteSent(Exception):
     check before the write."""
 
 
-def _history_row(auto_retry_for: list[str]) -> tuple[object, ...]:
+def _history_row(retry_for: list[str]) -> tuple[object, ...]:
     """The source read row of a FAILED history source of ``TASK_NAME`` whose
-    stored options retry on the code texts ``auto_retry_for``."""
+    stored options retry on the code texts ``retry_for``."""
     options = {
         'retry_policy': {
             'max_retries': 1,
-            'intervals': [1],
+            'intervals_seconds': [1],
             'backoff_strategy': 'fixed',
             'jitter': True,
-            'auto_retry_for': auto_retry_for,
+            'retry_for': retry_for,
         },
     }
     options_text = json.dumps(options, separators=(',', ':'))
@@ -155,11 +155,11 @@ def _history_row(auto_retry_for: list[str]) -> tuple[object, ...]:
     return tuple(named.get(column) for column in _READ_COLUMNS)
 
 
-def _history_connection(auto_retry_for: list[str]) -> AsyncMock:
+def _history_connection(retry_for: list[str]) -> AsyncMock:
     """A connection whose source read returns ``_history_row`` and whose
     write raises ``WriteSent``."""
     result = MagicMock()
-    result.one.return_value = _history_row(auto_retry_for)
+    result.one.return_value = _history_row(retry_for)
     connection = AsyncMock()
     connection.execute = AsyncMock(side_effect=[result, WriteSent()])
     return connection
@@ -169,9 +169,9 @@ async def _rerun_with(
     connection: AsyncMock,
     registered_task_codes: Mapping[str, tuple[str, ...]],
 ) -> object:
-    return await rerun_task(
+    return await rerun_task_in_async(
         connection,
-        RerunTask(source_task_id=SOURCE_ID, deadline=None),
+        RerunCommand(source_task_id=SOURCE_ID, good_until=None),
         _policy(),
         registered_task_codes=registered_task_codes,
     )
@@ -194,7 +194,7 @@ async def test_a_stored_custom_retry_code_that_the_task_does_not_declare_raises(
     with pytest.raises(CorePreconditionFailed) as raised:
         _ = await _rerun_with(connection, {TASK_NAME: ('RATE_LIMITED',)})
 
-    assert raised.value.subject == 'rerun_task'
+    assert raised.value.subject == 'rerun_task_in'
     assert raised.value.retryable is False
     assert "'charge'" in raised.value.message
     assert "'TRANSIENT'" in raised.value.message
@@ -250,7 +250,7 @@ def _app_with_charge(*, declares_transient: bool) -> Horsies:
     @app.task(
         TASK_NAME,
         error_codes=error_codes,
-        retry_policy=RetryPolicy.fixed([1], auto_retry_for=[_ChargeCode.TRANSIENT])
+        retry_policy=RetryPolicy.fixed([1], retry_for=[_ChargeCode.TRANSIENT])
         if declares_transient
         else None,
     )
@@ -275,17 +275,17 @@ def test_the_app_gives_the_declared_codes_of_every_registered_task() -> None:
 async def test_the_app_rerun_checks_the_stored_retry_list_against_its_registry() -> None:
     declaring = _history_connection(['TRANSIENT'])
     with pytest.raises(WriteSent):
-        _ = await _app_with_charge(declares_transient=True).rerun_task_async(
+        _ = await _app_with_charge(declares_transient=True).rerun_task_in_async(
             declaring,
-            RerunTask(source_task_id=SOURCE_ID, deadline=None),
+            RerunCommand(source_task_id=SOURCE_ID, good_until=None),
             _policy(),
         )
 
     not_declaring = _history_connection(['TRANSIENT'])
     with pytest.raises(CorePreconditionFailed, match="names the code 'TRANSIENT'"):
-        _ = await _app_with_charge(declares_transient=False).rerun_task_async(
+        _ = await _app_with_charge(declares_transient=False).rerun_task_in_async(
             not_declaring,
-            RerunTask(source_task_id=SOURCE_ID, deadline=None),
+            RerunCommand(source_task_id=SOURCE_ID, good_until=None),
             _policy(),
         )
     assert not_declaring.execute.await_count == 1

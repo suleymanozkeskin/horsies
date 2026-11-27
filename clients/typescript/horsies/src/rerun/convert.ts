@@ -43,7 +43,7 @@ export function rerunOutcome(record: RerunOutcomeRecord): RerunOutcome {
     case "inputCorrupt":
       return { kind: "inputCorrupt", taskId: id(record.taskId), detail: record.detail };
     case "keyConflict":
-      return { kind: "keyConflict", taskId: id(record.taskId), ownerTaskId: id(record.reservedByTaskId) };
+      return { kind: "keyConflict", taskId: id(record.taskId), ownerTaskId: id(record.ownerTaskId) };
     case "keyReplay":
       return { kind: "keyReplay", existingTaskId: id(record.existingTaskId) };
     default:
@@ -88,7 +88,7 @@ export function appRerunError(failure: AppRerunFailure): RerunError {
     case RerunErrorCode.INVALID_POLICY:
       return invalidPolicy(failure.message);
     case RerunErrorCode.CLASS_NOT_REGISTERED:
-    case RerunErrorCode.CALLER_KEY_REFUSED:
+    case RerunErrorCode.IDEMPOTENCY_KEY_REFUSED:
     case RerunErrorCode.ID_MINT_REFUSED:
     case RerunErrorCode.CLIENT_FAMILY_MISMATCH:
     case RerunErrorCode.UNKNOWN_STORED_FAMILY:
@@ -145,8 +145,8 @@ export function stepRefused(refusal: CallerStepRefusal): RerunStepRefused {
         message: refusal.message,
         taskName: refusal.taskName,
       };
-    case RerunErrorCode.CALLER_KEY_REFUSED:
-      return { kind: "callerKeyRefused", code: refusal.code, retryable: false, message: refusal.message };
+    case RerunErrorCode.IDEMPOTENCY_KEY_REFUSED:
+      return { kind: "idempotencyKeyRefused", code: refusal.code, retryable: false, message: refusal.message };
     case RerunErrorCode.ID_MINT_REFUSED:
       return { kind: "idMintRefused", code: refusal.code, retryable: false, message: refusal.message };
     case RerunErrorCode.CONTRACT_VIOLATION:

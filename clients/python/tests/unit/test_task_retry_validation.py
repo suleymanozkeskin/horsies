@@ -54,10 +54,18 @@ class _OtherCode(str, Enum):
 class TestRetryPolicyValidation:
     """Tests for RetryPolicy model-level validation."""
 
-    def test_empty_auto_retry_for_rejected(self) -> None:
-        """RetryPolicy rejects empty auto_retry_for list."""
+    def test_empty_retry_for_rejected(self) -> None:
+        """RetryPolicy rejects empty retry_for list."""
         with pytest.raises(ValueError, match='at least 1 item'):
-            RetryPolicy.fixed([5], auto_retry_for=[])
+            RetryPolicy.fixed([5], retry_for=[])
+
+    def test_the_keys_of_an_older_release_are_refused(self) -> None:
+        """`intervals` and `auto_retry_for` are not fields: no alias reads them."""
+        with pytest.raises(ValidationError) as exc_info:
+            RetryPolicy.model_validate({'intervals': [60], 'auto_retry_for': ['X']})
+
+        locations = {error['loc'] for error in exc_info.value.errors()}
+        assert locations == {('retry_for',), ('intervals',), ('auto_retry_for',)}
 
     def test_exponential_accepts_max_delay_seconds(self) -> None:
         """RetryPolicy supports an opt-in maximum delay for exponential backoff."""
@@ -65,7 +73,7 @@ class TestRetryPolicyValidation:
             base_seconds=60,
             max_retries=5,
             max_delay_seconds=600,
-            auto_retry_for=[_TaskCode.TRANSIENT],
+            retry_for=[_TaskCode.TRANSIENT],
             jitter=False,
         )
 
@@ -79,7 +87,7 @@ class TestRetryPolicyValidation:
                 base_seconds=60,
                 max_retries=5,
                 max_delay_seconds=0,
-                auto_retry_for=[_TaskCode.TRANSIENT],
+                retry_for=[_TaskCode.TRANSIENT],
             )
 
     def test_max_delay_seconds_serializes_only_when_set(self) -> None:
@@ -87,13 +95,13 @@ class TestRetryPolicyValidation:
         uncapped = RetryPolicy.exponential(
             base_seconds=60,
             max_retries=5,
-            auto_retry_for=[_TaskCode.TRANSIENT],
+            retry_for=[_TaskCode.TRANSIENT],
         )
         capped = RetryPolicy.exponential(
             base_seconds=60,
             max_retries=5,
             max_delay_seconds=600,
-            auto_retry_for=[_TaskCode.TRANSIENT],
+            retry_for=[_TaskCode.TRANSIENT],
         )
 
         uncapped_json = serialize_task_options(
@@ -121,16 +129,16 @@ class TestRetryPolicyValidation:
 class TestTaskDecoratorValidation:
     """Tests for @app.task() definition-time validation."""
 
-    def test_top_level_auto_retry_for_rejected(self) -> None:
-        """Top-level auto_retry_for is rejected with TASK_INVALID_OPTIONS."""
+    def test_top_level_retry_for_rejected(self) -> None:
+        """Top-level retry_for is rejected with TASK_INVALID_OPTIONS."""
         app = _make_app()
-        with pytest.raises(TaskDefinitionError, match='auto_retry_for') as exc_info:
+        with pytest.raises(TaskDefinitionError, match='retry_for') as exc_info:
 
             @app.task(
-                'deprecated_auto_retry_for',
-                auto_retry_for=['RATE_LIMITED'],  # type: ignore[call-arg]
+                'top_level_retry_for',
+                retry_for=['RATE_LIMITED'],  # type: ignore[call-arg]
             )
-            def deprecated_auto_retry_for() -> Result[str, TaskError]:
+            def top_level_retry_for() -> Result[str, TaskError]:
                 return Ok('ok')
 
         assert exc_info.value.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
@@ -234,7 +242,7 @@ class TestTaskDecoratorValidation:
 
 @pytest.mark.unit
 class TestRetryCodeMembers:
-    """`@app.task()` takes code members in `auto_retry_for`: members of the
+    """`@app.task()` takes code members in `retry_for`: members of the
     built-in code enums and of the `Enum` class of `error_codes=`."""
 
     def test_built_in_and_declared_members_register(self) -> None:
@@ -248,7 +256,7 @@ class TestRetryCodeMembers:
             error_codes=_TaskCode,
             retry_policy=RetryPolicy.fixed(
                 [1, 2],
-                auto_retry_for=[OperationalCode.WORKER_CRASHED, _TaskCode.RATE_LIMITED],
+                retry_for=[OperationalCode.WORKER_CRASHED, _TaskCode.RATE_LIMITED],
             ),
         )
         def retries_on_members() -> Result[str, TaskError]:
@@ -256,10 +264,10 @@ class TestRetryCodeMembers:
 
         options_json = retries_on_members.task_options_json
         assert options_json is not None
-        stored = json.loads(options_json)['retry_policy']['auto_retry_for']
+        stored = json.loads(options_json)['retry_policy']['retry_for']
         assert stored == ['WORKER_CRASHED', 'RATE_LIMITED']
-        failure = TaskError(error_code=_TaskCode.RATE_LIMITED).model_dump(mode='json')
-        assert failure['error_code'] == stored[1]
+        failure = TaskError(code=_TaskCode.RATE_LIMITED).model_dump(mode='json')
+        assert failure['code'] == stored[1]
 
     def test_plain_text_entry_refused(self) -> None:
         """A plain `str` entry is TASK_INVALID_OPTIONS; the notes name the
@@ -269,17 +277,17 @@ class TestRetryCodeMembers:
 
             @app.task(
                 'plain_text_retry',
-                retry_policy=RetryPolicy.fixed([1], auto_retry_for=['BROKR_ERROR']),  # pyright: ignore[reportArgumentType]
+                retry_policy=RetryPolicy.fixed([1], retry_for=['BROKR_ERROR']),  # pyright: ignore[reportArgumentType]
             )
             def plain_text_retry() -> Result[str, TaskError]:
                 return Ok('ok')
 
         error = exc_info.value
         assert error.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
-        assert error.message == 'auto_retry_for[0] is not a code member'
+        assert error.message == 'retry_for[0] is not a code member'
         assert error.notes == [
             "task 'plain_text_retry'",
-            "auto_retry_for[0]='BROKR_ERROR' is a str, not a code member",
+            "retry_for[0]='BROKR_ERROR' is a str, not a code member",
             'the task declares no Enum class with error_codes=',
         ]
         assert 'plain_text_retry' not in app.registered_task_names()
@@ -293,17 +301,17 @@ class TestRetryCodeMembers:
             @app.task(
                 'other_enum_retry',
                 error_codes=_TaskCode,
-                retry_policy=RetryPolicy.fixed([1], auto_retry_for=[_OtherCode.RATE_LIMITED]),
+                retry_policy=RetryPolicy.fixed([1], retry_for=[_OtherCode.RATE_LIMITED]),
             )
             def other_enum_retry() -> Result[str, TaskError]:
                 return Ok('ok')
 
         error = exc_info.value
         assert error.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
-        assert error.message == 'auto_retry_for[0] is not a code of the task'
+        assert error.message == 'retry_for[0] is not a code of the task'
         assert error.notes == [
             "task 'other_enum_retry'",
-            'auto_retry_for[0]=_OtherCode.RATE_LIMITED is neither a built-in '
+            'retry_for[0]=_OtherCode.RATE_LIMITED is neither a built-in '
             'code nor a member of the declared Enum class',
             'the task declares error_codes=_TaskCode',
         ]
@@ -318,7 +326,7 @@ class TestRetryCodeMembers:
             @app.task(
                 'tuple_declared_retry',
                 error_codes=('RATE_LIMITED',),
-                retry_policy=RetryPolicy.fixed([1], auto_retry_for=[_TaskCode.RATE_LIMITED]),
+                retry_policy=RetryPolicy.fixed([1], retry_for=[_TaskCode.RATE_LIMITED]),
             )
             def tuple_declared_retry() -> Result[str, TaskError]:
                 return Ok('ok')
@@ -337,7 +345,7 @@ class TestRetryCodeMembers:
                 'two_refused_entries',
                 retry_policy=RetryPolicy.fixed(
                     [1],
-                    auto_retry_for=['TRANSIENT', OutcomeCode.TASK_TIMEOUT, _OtherCode.RATE_LIMITED],  # pyright: ignore[reportArgumentType]
+                    retry_for=['TRANSIENT', OutcomeCode.TASK_TIMEOUT, _OtherCode.RATE_LIMITED],  # pyright: ignore[reportArgumentType]
                 ),
             )
             def two_refused_entries() -> Result[str, TaskError]:
@@ -345,8 +353,8 @@ class TestRetryCodeMembers:
 
         messages = [error.message for error in exc_info.value.report.refusals]
         assert messages == [
-            'auto_retry_for[0] is not a code member',
-            'auto_retry_for[2] is not a code of the task',
+            'retry_for[0] is not a code member',
+            'retry_for[2] is not a code of the task',
         ]
         assert 'two_refused_entries' not in app.registered_task_names()
 
@@ -421,23 +429,23 @@ class TestCheckRuntimePolicyValidation:
             for e in errors
         )
 
-    # --- auto_retry_for field validation ---
+    # --- retry_for field validation ---
 
-    def test_rejects_missing_auto_retry_for(self) -> None:
-        """Missing auto_retry_for in retry_policy is rejected."""
+    def test_rejects_missing_retry_for(self) -> None:
+        """Missing retry_for in retry_policy is rejected."""
         app = _make_app()
 
-        @app.task('missing_auto_retry_for')
-        def missing_auto_retry_for() -> Result[str, TaskError]:
+        @app.task('missing_retry_for')
+        def missing_retry_for() -> Result[str, TaskError]:
             return Ok('ok')
 
         setattr(
-            app.tasks['missing_auto_retry_for'],
+            app.tasks['missing_retry_for'],
             'task_options_json',
             json.dumps({
                 'retry_policy': {
                     'max_retries': 1,
-                    'intervals': [1],
+                    'intervals_seconds': [1],
                     'backoff_strategy': 'fixed',
                 },
             }),
@@ -447,80 +455,80 @@ class TestCheckRuntimePolicyValidation:
 
         assert any(
             e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
-            and 'retry_policy.auto_retry_for is required' in e.message
+            and 'retry_policy.retry_for is required' in e.message
             for e in errors
         )
 
-    def test_rejects_non_list_auto_retry_for(self) -> None:
-        """Non-list auto_retry_for is rejected."""
+    def test_rejects_non_list_retry_for(self) -> None:
+        """Non-list retry_for is rejected."""
         app = _make_app()
 
-        @app.task('bad_auto_retry_for_shape')
-        def bad_auto_retry_for_shape() -> Result[str, TaskError]:
+        @app.task('bad_retry_for_shape')
+        def bad_retry_for_shape() -> Result[str, TaskError]:
             return Ok('ok')
 
         setattr(
-            app.tasks['bad_auto_retry_for_shape'],
+            app.tasks['bad_retry_for_shape'],
             'task_options_json',
-            json.dumps({'retry_policy': {'auto_retry_for': 'NOT_A_LIST'}}),
+            json.dumps({'retry_policy': {'retry_for': 'NOT_A_LIST'}}),
         )
 
         errors = app.check(live=False).refusals
 
         assert any(
             e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
-            and 'auto_retry_for must be a list' in e.message
+            and 'retry_for must be a list' in e.message
             for e in errors
         )
 
-    def test_rejects_empty_auto_retry_for(self) -> None:
-        """Empty auto_retry_for is rejected."""
+    def test_rejects_empty_retry_for(self) -> None:
+        """Empty retry_for is rejected."""
         app = _make_app()
 
-        @app.task('empty_auto_retry_for')
-        def empty_auto_retry_for() -> Result[str, TaskError]:
+        @app.task('empty_retry_for')
+        def empty_retry_for() -> Result[str, TaskError]:
             return Ok('ok')
 
         setattr(
-            app.tasks['empty_auto_retry_for'],
+            app.tasks['empty_retry_for'],
             'task_options_json',
-            json.dumps({'retry_policy': {'auto_retry_for': []}}),
+            json.dumps({'retry_policy': {'retry_for': []}}),
         )
 
         errors = app.check(live=False).refusals
 
         assert any(
             e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
-            and 'auto_retry_for must not be empty' in e.message
+            and 'retry_for must not be empty' in e.message
             for e in errors
         )
 
-    # --- auto_retry_for entry validation ---
+    # --- retry_for entry validation ---
 
-    def test_rejects_non_string_auto_retry_entries(self) -> None:
-        """Non-string entries in auto_retry_for are rejected."""
+    def test_rejects_non_string_retry_for_entries(self) -> None:
+        """Non-string entries in retry_for are rejected."""
         app = _make_app()
 
-        @app.task('non_string_auto_retry')
-        def non_string_auto_retry() -> Result[str, TaskError]:
+        @app.task('non_string_retry_for')
+        def non_string_retry_for() -> Result[str, TaskError]:
             return Ok('ok')
 
         setattr(
-            app.tasks['non_string_auto_retry'],
+            app.tasks['non_string_retry_for'],
             'task_options_json',
-            json.dumps({'retry_policy': {'auto_retry_for': ['RETRY_ME', 123]}}),
+            json.dumps({'retry_policy': {'retry_for': ['RETRY_ME', 123]}}),
         )
 
         errors = app.check(live=False).refusals
 
         assert any(
             e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
-            and 'auto_retry_for entries must be strings' in e.message
+            and 'retry_for entries must be strings' in e.message
             for e in errors
         )
 
-    def test_rejects_exception_name_in_auto_retry_for(self) -> None:
-        """Exception class names in auto_retry_for are rejected at check time."""
+    def test_rejects_exception_name_in_retry_for(self) -> None:
+        """Exception class names in retry_for are rejected at check time."""
         app = _make_app()
 
         @app.task('exc_name_retry')
@@ -530,7 +538,7 @@ class TestCheckRuntimePolicyValidation:
         setattr(
             app.tasks['exc_name_retry'],
             'task_options_json',
-            json.dumps({'retry_policy': {'auto_retry_for': ['TimeoutError']}}),
+            json.dumps({'retry_policy': {'retry_for': ['TimeoutError']}}),
         )
 
         errors = app.check(live=False).refusals
@@ -541,8 +549,8 @@ class TestCheckRuntimePolicyValidation:
             for e in errors
         )
 
-    def test_rejects_invalid_format_in_auto_retry_for(self) -> None:
-        """Non-UPPER_SNAKE_CASE entries in auto_retry_for are rejected at check time."""
+    def test_rejects_invalid_format_in_retry_for(self) -> None:
+        """Non-UPPER_SNAKE_CASE entries in retry_for are rejected at check time."""
         app = _make_app()
 
         @app.task('bad_format_retry')
@@ -552,7 +560,7 @@ class TestCheckRuntimePolicyValidation:
         setattr(
             app.tasks['bad_format_retry'],
             'task_options_json',
-            json.dumps({'retry_policy': {'auto_retry_for': ['lower_case']}}),
+            json.dumps({'retry_policy': {'retry_for': ['lower_case']}}),
         )
 
         errors = app.check(live=False).refusals
@@ -580,9 +588,9 @@ class TestCheckRuntimePolicyValidation:
             json.dumps({
                 'retry_policy': {
                     'max_retries': 3,
-                    'intervals': [5],
+                    'intervals_seconds': [5],
                     'backoff_strategy': 'fixed',
-                    'auto_retry_for': ['SOME_CODE'],
+                    'retry_for': ['SOME_CODE'],
                 },
             }),
         )

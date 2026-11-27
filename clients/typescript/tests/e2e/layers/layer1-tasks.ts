@@ -313,7 +313,7 @@ describe("layer 1: tasks", () => {
 
     assert.equal(info.taskId, handle.taskId);
     assert.equal(info.taskName, "e2e_simple");
-    assert.equal(info.queueName, "default");
+    assert.equal(info.queue, "default");
     assert.equal(info.status, "COMPLETED");
     assert.equal(info.attempts.length, 1);
   });
@@ -330,21 +330,21 @@ describe("layer 1: tasks", () => {
   e2eTest("exponential retries wait longer each time; sentAt does not change", "default", async (suite) => {
     const handle = await sentHandle("e2e_exponential", suite.app.send(retry.exponential, {}));
     const first = await infoOf(handle);
-    const enqueued = [first.enqueuedAt];
+    const due = [first.dueAt];
 
     await suite.worker("isolated-1");
     await pollUntilInfo(handle, 20_000, "the third retry", (info) => {
-      if (info.retryCount === enqueued.length) {
-        enqueued.push(info.enqueuedAt);
+      if (info.retryCount === due.length) {
+        due.push(info.dueAt);
       }
 
       assert.deepEqual(info.sentAt, first.sentAt, "sentAt changed on a retry");
 
-      return enqueued.length > retry.EXPONENTIAL_MAX_RETRIES;
+      return due.length > retry.EXPONENTIAL_MAX_RETRIES;
     });
 
     // The interval from the send to the first retry holds the start of the worker, so it is not measured.
-    const [, firstRetry, secondRetry, thirdRetry] = enqueued.map((instant) => instant.epochMilliseconds);
+    const [, firstRetry, secondRetry, thirdRetry] = due.map((instant) => instant.epochMilliseconds);
 
     assert.ok(firstRetry !== undefined && secondRetry !== undefined && thirdRetry !== undefined);
     const secondDelay = secondRetry - firstRetry;

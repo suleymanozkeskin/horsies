@@ -55,7 +55,7 @@ def _make_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(healthcheck.send())
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
@@ -457,7 +457,7 @@ async def test_success_policy_not_met_error_content(broker: PostgresBroker) -> N
         )
         assert status == 'FAILED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
         assert_failed(result, expected_code='REQUIRED_FAIL')
 
 
@@ -521,7 +521,7 @@ async def test_recovery_preserves_results(broker: PostgresBroker) -> None:
         assert status == 'COMPLETED'
 
         # Get the original result to ensure it completed properly
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
         _ = succeeded_value(result)  # Verify result is accessible
 
         # Now simulate a "stuck" workflow by artificially setting status back to RUNNING
@@ -615,7 +615,7 @@ async def test_workflow_task_retries(broker: PostgresBroker, tmp_path: Path) -> 
 
     # Create dynamic spec with counter file
     node_retry = TaskNode(
-        fn=retry_then_ok_task,
+        function=retry_then_ok_task,
         kwargs={'counter_file': str(counter_file), 'succeed_on_attempt': 2},
     )
 
@@ -643,7 +643,7 @@ async def test_workflow_task_retries(broker: PostgresBroker, tmp_path: Path) -> 
         ), f'Workflow should complete after retries, got {status}'
 
         # Verify the task completed with success
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
         assert_succeeded(result)
 
         # Verify attempts were made
@@ -669,7 +669,7 @@ async def test_workflow_task_retries_exhausted(
 
     # succeed_on_attempt=10 but max_retries=3 → 4 attempts total, never succeeds
     node_retry = TaskNode(
-        fn=retry_then_ok_task,
+        function=retry_then_ok_task,
         kwargs={'counter_file': str(counter_file), 'succeed_on_attempt': 10},
     )
 
@@ -736,7 +736,7 @@ async def test_on_error_pause_stops_workflow(broker: PostgresBroker) -> None:
         assert db_tasks[2]['status'] == 'PENDING', f"C should still be PENDING (paused before enqueue), got {db_tasks[2]['status']}"
 
         # handle.get() should return WORKFLOW_PAUSED error
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
         assert_failed(result, expected_code='WORKFLOW_PAUSED')
 
 
@@ -798,7 +798,7 @@ def _make_recovery_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(instance_recovery.healthcheck.send())
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 

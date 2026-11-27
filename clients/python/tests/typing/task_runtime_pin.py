@@ -67,14 +67,17 @@ def sync_forms(app: Horsies, runtime: TaskRuntime) -> None:
 
     assert_type(with_parameters.send(order_id='o-1'), TaskSendResult[TaskHandle[int]])
     assert_type(runtime_only.send(), TaskSendResult[TaskHandle[FencingToken]])
-    assert_type(with_parameters.schedule(5, order_id='o-1'), TaskSendResult[TaskHandle[int]])
+    assert_type(
+        with_parameters.with_options(delay_seconds=5).send(order_id='o-1'),
+        TaskSendResult[TaskHandle[int]],
+    )
     assert_type(with_parameters.node()(order_id='o-1'), TaskNode[int])
     assert_type(runtime_only.node()(), TaskNode[FencingToken])
     with_parameters.send(runtime, order_id='o-1')  # pyright: ignore[reportCallIssue]
     with_parameters.send(runtime=runtime, order_id='o-1')  # pyright: ignore[reportCallIssue]
     with_parameters.send()  # pyright: ignore[reportCallIssue]
     runtime_only.send(runtime)  # pyright: ignore[reportCallIssue]
-    with_parameters.schedule(5, runtime, order_id='o-1')  # pyright: ignore[reportCallIssue]
+    with_parameters.with_options(delay_seconds=5).send(runtime, order_id='o-1')  # pyright: ignore[reportCallIssue]
     with_parameters.node()(runtime=runtime, order_id='o-1')  # pyright: ignore[reportCallIssue]
 
 

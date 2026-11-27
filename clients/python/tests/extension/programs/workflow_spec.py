@@ -44,7 +44,7 @@ APP: Final = Horsies(
 )
 
 
-@APP.task(task_name='tests.extension.value')
+@APP.task(name='tests.extension.value')
 def value_task(*, value: int) -> Result[int, TaskError]:
     return Ok(value)
 
@@ -58,7 +58,7 @@ class ExtensionChild(WorkflowDefinition[int]):
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
         _ = (args, params)
-        node = TaskNode(fn=value_task, kwargs={'value': 1})
+        node = TaskNode(function=value_task, kwargs={'value': 1})
         return app.workflow(cls.name, [node], output=node, definition_key=cls.definition_key)
 
 

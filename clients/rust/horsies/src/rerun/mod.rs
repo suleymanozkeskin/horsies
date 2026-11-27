@@ -1,11 +1,11 @@
 //! Rerun of a retained terminal task: in the app's own transaction, or in
 //! the caller's transaction through `CallerTransaction` (Python
-//! `rerun_task(connection, command, policy)`).
+//! `rerun_task_in_async(connection, command, policy)`).
 //!
 //! A rerun reads the source task in one statement and, for an eligible
 //! source with a retained input, writes one new task with the lineage
-//! `RERUN` (`horsies_enqueue_task`), which claims the caller key of a keyed
-//! rerun first. Every outcome but [`RerunOutcome::Enqueued`] writes nothing.
+//! `RERUN` (`horsies_enqueue_task`), which claims the idempotency key of a
+//! keyed rerun first. Every outcome but [`RerunOutcome::Enqueued`] writes nothing.
 //!
 //! - [`Horsies::rerun_task`] runs both statements in a transaction of the
 //!   app's handle and commits it.
@@ -46,10 +46,10 @@ use crate::telemetry::rerun_trace;
 use crate::Horsies;
 
 pub use horsies_core::{
-    CallerColumn, CallerRow, CallerStatement, CallerTransaction, CallerType, IdempotencyKeyError,
-    NotEligibleReason, RecordedFamily, RegisteredTaskCodes, RerunEnqueuePolicy, RerunError,
-    RerunOutcome, RerunRowError, RerunTask, StatementValue, TaskAbsenceReason, UnknownStoredFamily,
-    Uuid7Error,
+    CallerColumn, CallerRow, CallerStatement, CallerTransaction, CallerType, EnqueueRetention,
+    IdempotencyKeyError, NotEligibleReason, RecordedFamily, RegisteredTaskCodes, RerunCommand,
+    RerunEnqueuePolicy, RerunError, RerunOutcome, RerunRowError, StatementValue, TaskAbsenceReason,
+    UnknownStoredFamily, Uuid7Error,
 };
 #[cfg(feature = "sqlx")]
 pub use sqlx_adapter::SqlxCaller;
@@ -64,7 +64,7 @@ pub enum CallerRerunError<E> {
     /// A statement of the rerun failed in the caller's driver. Its retry
     /// rule is the driver's.
     #[error("a rerun statement failed in the caller's transaction: {0}")]
-    Driver(#[source] E),
+    DriverFailed(#[source] E),
     /// The retention class of the new task has no class row: the new task
     /// would have no history partition. Nothing is written. A precondition
     /// of the call (Python `ValueError`).
@@ -82,10 +82,9 @@ pub enum CallerRerunError<E> {
     /// same row is refused again until it is repaired.
     #[error("rerun refused: {0}")]
     UnknownStoredFamily(UnknownStoredFamily),
-    /// The caller key of the command is not a valid idempotency key.
-    /// Nothing is written.
-    #[error("the caller key of the rerun is refused: {0}")]
-    CallerKeyRefused(IdempotencyKeyError),
+    /// The idempotency key of the command is not valid. Nothing is written.
+    #[error("the idempotency key of the rerun is refused: {0}")]
+    IdempotencyKeyRefused(IdempotencyKeyError),
     /// The stored retry list of the source names the custom code `code`,
     /// and the task `task_name` of the app does not declare it. Nothing is
     /// written. Not retryable: the same call meets it again until the app
@@ -118,7 +117,7 @@ pub enum CallerRerunError<E> {
 }
 
 /// Rerun `command` in `transaction`, a transaction that the caller owns
-/// (Python `rerun_task(connection, command, policy,
+/// (Python `rerun_task_in_async(connection, command, policy,
 /// registered_task_codes=...)`), with the new task sent at `sent_at`.
 /// `codes` are the declared custom codes of the app's tasks
 /// ([`Horsies::registered_task_codes`]); the stored retry list of the
@@ -142,7 +141,7 @@ pub enum CallerRerunError<E> {
 /// the key claim or the new row; the caller does not commit it.
 pub async fn rerun_task_in<T>(
     transaction: &mut T,
-    command: &RerunTask,
+    command: &RerunCommand,
     policy: &RerunEnqueuePolicy,
     codes: &RegisteredTaskCodes,
     sent_at: DateTime<Utc>,
@@ -156,7 +155,7 @@ where
 
 /// `command` with the trace carrier of the caller's current context
 /// ([`rerun_trace`]): none without the feature `otel`.
-fn traced(command: RerunTask) -> RerunTask {
+fn traced(command: RerunCommand) -> RerunCommand {
     command.with_trace(rerun_trace())
 }
 
@@ -166,7 +165,7 @@ fn traced(command: RerunTask) -> RerunTask {
 /// Errors: [`CallerRerunError`], as [`rerun_task_in`].
 async fn rerun_command_in<T>(
     transaction: &mut T,
-    command: &RerunTask,
+    command: &RerunCommand,
     policy: &RerunEnqueuePolicy,
     codes: &RegisteredTaskCodes,
     sent_at: DateTime<Utc>,
@@ -178,7 +177,7 @@ where
     let row = transaction
         .query_one(&read)
         .await
-        .map_err(CallerRerunError::Driver)?;
+        .map_err(CallerRerunError::DriverFailed)?;
     let prepared = prepare_rerun_write(
         &read,
         &row,
@@ -201,8 +200,8 @@ where
         RerunPreparation::UnknownStoredFamily(unknown) => {
             return Err(CallerRerunError::UnknownStoredFamily(unknown))
         }
-        RerunPreparation::CallerKeyRefused(refused) => {
-            return Err(CallerRerunError::CallerKeyRefused(refused))
+        RerunPreparation::IdempotencyKeyRefused(refused) => {
+            return Err(CallerRerunError::IdempotencyKeyRefused(refused))
         }
         RerunPreparation::RetryCodeNotDeclared {
             task_name,
@@ -223,7 +222,7 @@ where
     let row = transaction
         .query_one(write.statement())
         .await
-        .map_err(CallerRerunError::Driver)?;
+        .map_err(CallerRerunError::DriverFailed)?;
     let written = decode_rerun_write(&write, &row).map_err(CallerRerunError::Row)?;
     Ok(written.into())
 }
@@ -234,7 +233,7 @@ pub enum AppRerunError {
     /// The app's handle could not connect, or could not install the
     /// schema. Nothing ran. The retry rule is the cause's.
     #[error("the rerun could not connect: {0}")]
-    Connect(BrokerError),
+    ConnectFailed(BrokerError),
     /// The rerun failed ([`RerunError`]). Nothing committed, except after
     /// an outcome-unknown failure at `COMMIT`.
     #[error("{0}")]
@@ -277,7 +276,7 @@ impl Horsies {
     /// process runtime started. Nothing ran.
     pub async fn rerun_task(
         &self,
-        command: RerunTask,
+        command: RerunCommand,
         policy: RerunEnqueuePolicy,
     ) -> Result<RerunOutcome, AppRerunError> {
         refuse_in_a_fork(format_args!("Horsies::rerun_task"));
@@ -286,7 +285,7 @@ impl Horsies {
             .reads_handle()
             .initialized_broker()
             .await
-            .map_err(AppRerunError::Connect)?;
+            .map_err(AppRerunError::ConnectFailed)?;
         broker
             .rerun_task(command, policy, &self.registered_task_codes())
             .await
@@ -347,8 +346,8 @@ mod tests {
         )
     }
 
-    fn command() -> RerunTask {
-        RerunTask::new(Uuid::new_v4(), None, None)
+    fn command() -> RerunCommand {
+        RerunCommand::new(Uuid::new_v4(), None, None)
     }
 
     #[tokio::test]
@@ -466,8 +465,10 @@ mod tests {
     #[tokio::test]
     async fn an_unregistered_class_is_refused_before_the_write() {
         let command = command();
-        let policy =
-            RerunEnqueuePolicy::new("missing_class", true, chrono::Duration::hours(24)).unwrap();
+        let retention = EnqueueRetention::Period(
+            horsies_core::RetentionDays::parse_period(chrono::Duration::days(9)).unwrap(),
+        );
+        let policy = RerunEnqueuePolicy::new(retention, true, chrono::Duration::hours(24)).unwrap();
         let read = rerun_read(&command, &policy);
         let row = source_read_row(
             &read,
@@ -490,7 +491,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            matches!(&refused, CallerRerunError::ClassNotRegistered { key } if key == "missing_class"),
+            matches!(&refused, CallerRerunError::ClassNotRegistered { key } if key == "standard_9d"),
             "{refused:?}"
         );
     }
@@ -511,7 +512,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            matches!(refused, CallerRerunError::Driver(ScriptedFailure)),
+            matches!(refused, CallerRerunError::DriverFailed(ScriptedFailure)),
             "{refused:?}"
         );
     }

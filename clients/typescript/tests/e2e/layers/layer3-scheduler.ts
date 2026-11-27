@@ -231,10 +231,10 @@ describe("layer 3: the scheduler", () => {
     assert.ok(strictlyIncreasing(sent), `each send follows the one before: ${sent.join(", ")}`);
   });
 
-  e2eTest("a schedule config that breaks a rule is refused at the scheduler start: an interval of no time unit, a repeated name", "scheduler_invalid_rules", async (suite) => {
+  e2eTest("a schedule config that breaks a rule is refused at the scheduler start: an interval of zero seconds, a repeated name", "scheduler_invalid_rules", async (suite) => {
     const output = await refusedSchedulerOutput(suite);
 
-    assert.ok(output.includes("IntervalSchedule requires at least one time unit"), output);
+    assert.ok(output.includes("IntervalSchedule every must be between 1 and 31536000 seconds (1 second to 365 days), got 0 seconds"), output);
     assert.ok(output.includes(`has the name "${scheduled.DUPLICATE_SCHEDULE}"`), output);
   });
 

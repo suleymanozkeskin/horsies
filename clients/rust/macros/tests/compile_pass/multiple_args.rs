@@ -7,6 +7,6 @@ async fn sum_two(a: i32, b: i32) -> Result<i32, TaskError<std::convert::Infallib
 }
 
 fn main() {
-    let _ = sum_two::params::a();
-    let _ = sum_two::params::b();
+    let _ = sum_two::fields::a();
+    let _ = sum_two::fields::b();
 }

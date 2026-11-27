@@ -42,7 +42,7 @@ def _always_fails() -> None:
     raise RuntimeError('deliberate hook failure for the fail-closed e2e test')
 
 
-@app.task(task_name='e2e_hook_fail_healthcheck')
+@app.task(name='e2e_hook_fail_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 

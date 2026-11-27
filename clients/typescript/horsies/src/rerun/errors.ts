@@ -67,10 +67,10 @@ export interface RerunClassNotRegistered {
   readonly classKey: string;
 }
 
-/** The caller key is not a valid idempotency key: empty, or more than 255 UTF-8 bytes. Nothing is written. */
-export interface RerunCallerKeyRefused {
-  readonly kind: "callerKeyRefused";
-  readonly code: typeof RerunErrorCode.CALLER_KEY_REFUSED;
+/** The idempotency key is not valid: empty, or more than 255 UTF-8 bytes. Nothing is written. */
+export interface RerunIdempotencyKeyRefused {
+  readonly kind: "idempotencyKeyRefused";
+  readonly code: typeof RerunErrorCode.IDEMPOTENCY_KEY_REFUSED;
   readonly retryable: false;
   readonly message: string;
 }
@@ -195,7 +195,7 @@ export type RerunRequestRefused = RerunInvalidCommand | RerunInvalidPolicy;
 /** A refusal of the rerun steps: nothing is written. */
 export type RerunStepRefused =
   | RerunClassNotRegistered
-  | RerunCallerKeyRefused
+  | RerunIdempotencyKeyRefused
   | RerunIdMintRefused
   | RerunClientFamilyMismatch
   | RerunUnknownStoredFamily

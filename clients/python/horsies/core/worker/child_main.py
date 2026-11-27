@@ -487,7 +487,7 @@ def bounded_envelope(task_name: str, result: ResultEnvelope) -> ResultEnvelope:
     )
     logger.error(message)
     failure = TaskError(
-        error_code=OperationalCode.WORKER_SERIALIZATION_ERROR,
+        code=OperationalCode.WORKER_SERIALIZATION_ERROR,
         message=message,
         data={'task_name': task_name, 'result_bytes': size},
     )

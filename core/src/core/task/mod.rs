@@ -10,18 +10,19 @@ pub mod seat_relay;
 pub mod send_types;
 
 pub use error::{
-    error_code_label, BuiltInTaskCode, ContractCode, DeclaredCodeRefusal, DeclaredCodesRefused,
-    DeclaredErrorCode, DeclaredErrorCodes, ErrorCodeLabel, ExceptionRecord, OperationalCode,
-    OutcomeCode, RetrievalCode, StoredErrorRefused, SubWorkflowFailure, TaskError, TaskErrorCode,
-    TaskErrorKind, UserCode, UserCodeRefused, UNDECLARED_LABEL,
+    error_code_label, BuiltInTaskCode, ContractCode, CustomCode, CustomCodeRefused,
+    DeclaredCodeRefusal, DeclaredCodesRefused, DeclaredErrorCode, DeclaredErrorCodes,
+    ErrorCodeLabel, ExceptionRecord, OperationalCode, OutcomeCode, RetrievalCode,
+    StoredErrorRefused, SubWorkflowFailure, TaskError, TaskErrorCode, TaskErrorKind,
+    UNDECLARED_LABEL,
 };
 pub use execution::{Execution, ExecutionClass, GraceUse, InvalidExecution, TimeoutUse};
 pub use fencing::{FencingToken, FencingTokenRefused};
 pub use fn_trait::{AsyncTaskFn, BlockingTaskFn, RawTaskResult, RegisteredTask};
 pub use info::{TaskAttemptInfo, TaskInfo};
 pub use options::{
-    BackoffStrategy, CancelGraceMs, CancelGraceOutOfRange, RetryPolicy, RetryPolicyError,
-    TaskOptions,
+    check_cancel_grace_ms, BackoffStrategy, CancelGraceOutOfRange, RetryPolicy, RetryPolicyError,
+    TaskOptions, DEFAULT_CANCEL_GRACE_MS,
 };
 pub use result::TaskResult;
 pub use seat_relay::SeatRelayCode;

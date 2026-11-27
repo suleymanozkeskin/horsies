@@ -32,7 +32,7 @@ Every task id parameter and field of these methods is a `uuid.UUID`.
 
 ## Methods
 
-### `get_raw_result_record_async(task_id: UUID, wait_ms: int | None = None) -> DatabaseResult[RawResultRecord | None]`
+### `get_raw_result_record_async(task_id: UUID, wait_ms: int | None = None) -> DatabaseResult[StoredResult | None]`
 
 Fetch the raw stored result envelope for a task by ID, waiting if necessary. This is the broker's infrastructure-level result-fetch surface: it does no typed decoding and imports no user code. Callers that want a typed `ReadResult[T, TaskError]` should use [`app.get_result_async`](#app-level-typed-result-apis) instead — it composes a typed decode on top of this call.
 
@@ -45,7 +45,7 @@ Waits on PostgreSQL `LISTEN/NOTIFY`, and reads the row again at least every 5 se
 
 In a worker child, where task bodies run, it returns `Err(DatabaseWaitInsideTask)` (`WAIT_INSIDE_TASK`) at once, as its first check, and waits for nothing. See [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task).
 
-**Returns:** `DatabaseResult[RawResultRecord | None]` — `Ok(None)` if no task row exists for that ID; `Err(DatabaseOperationError)` on infrastructure failure. The `RawResultRecord` carries `task_id`, `task_name`, `status`, and `raw_result` (the decoded JSON envelope, or `None` for cancelled tasks, non-terminal timeout snapshots, or terminal rows with no payload).
+**Returns:** `DatabaseResult[StoredResult | None]` — `Ok(None)` if no task row exists for that ID; `Err(DatabaseOperationError)` on infrastructure failure. The `StoredResult` carries `task_id`, `task_name`, `status`, and `raw_result` (the decoded JSON envelope, or `None` for cancelled tasks, non-terminal timeout snapshots, or terminal rows with no payload).
 
 Sync variant: `get_raw_result_record(task_id, wait_ms)`. It runs on the calling thread, with the GIL released. On a thread that runs an event loop it returns `Err(DatabaseAsyncContext)` (`ASYNC_CONTEXT`) and does no I/O.
 
@@ -67,22 +67,22 @@ elif is_err(result):
 
 ### App-level typed result APIs
 
-For most callers, prefer `app.get_result_async(task_id, timeout_ms)` over the raw record. It returns `ReadResult[Any, TaskError]`. The outcome is decoded with the `task_ok_type` of the local task catalog. A read failure is `Err(read_error)`: for example `ResultDeserializationError` for a stored value that does not decode, `NoTypeAvailable` for a task that is not registered in this process, or `ReadDatabaseError` for a database failure. See [Read Errors](/horsies/tasks/error-types/#read-errors-readresult).
+For most callers, prefer `app.get_result_async(task_id, wait_ms)` over the raw record. It returns `ReadResult[Any, TaskError]`. The outcome is decoded with the `task_ok_type` of the local task catalog. A read failure is `Err(read_error)`: for example `ReadResultDeserializationError` for a stored value that does not decode, `ReadNoTypeAvailable` for a task that is not registered in this process, or `ReadDatabaseError` for a database failure. See [Read Errors](/horsies/tasks/error-types/#read-errors-readresult).
 
 ```python
 from horsies import Err, Failed, Ok, Succeeded
 
 # Async — typed decode at the app layer
-match await app.get_result_async(task_id, timeout_ms=5000):
+match await app.get_result_async(task_id, wait_ms=5000):
     case Ok(Succeeded(value)):
         print(f"Result: {value}")
     case Ok(Failed(task_error)):
-        print(f"Task error: {task_error.error_code}")
+        print(f"Task error: {task_error.code}")
     case Err(read_error):
         print(f"Read error: {read_error.code} - {read_error.message}")
 
 # Sync
-read = app.get_result(task_id, timeout_ms=5000)
+read = app.get_result(task_id, wait_ms=5000)
 ```
 
 ### `get_stale_tasks(threshold_minutes: int = 2) -> DatabaseResult[BoundedTaskList[StaleTaskRow]]`
@@ -149,7 +149,7 @@ elif result.ok_value is not None:
 
 Run the stale RUNNING recovery pass once. The reaper of each worker runs the same pass every `check_interval_ms` when `RecoveryConfig.fail_stale_running` is on. Use this method to run the pass when that setting is off, or between two reaper passes.
 
-The pass recovers each RUNNING task with no runner heartbeat within the threshold, as [Stale RUNNING Recovery](/horsies/workers/heartbeats-recovery/#stale-running-recovery) states. A task with a retry policy that lists `WORKER_CRASHED` in `auto_retry_for`, and with retries left, is scheduled for retry. Each other task goes to FAILED with the `WORKER_CRASHED` error code.
+The pass recovers each RUNNING task with no runner heartbeat within the threshold, as [Stale RUNNING Recovery](/horsies/workers/heartbeats-recovery/#stale-running-recovery) states. A task with a retry policy that lists `WORKER_CRASHED` in `retry_for`, and with retries left, is scheduled for retry. Each other task goes to FAILED with the `WORKER_CRASHED` error code.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

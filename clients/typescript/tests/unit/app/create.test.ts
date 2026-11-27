@@ -234,11 +234,11 @@ describe("Horsies.create: the core's checks of a contract", () => {
     assert.deepEqual(checks.optionsFacts, [
       {
         taskName: "charge",
-        queueName: "default",
+        queue: "default",
         execution: "SHARED_ASYNC",
         timeout: { kind: "set", milliseconds: 30_000 },
         cancelGrace: { kind: "notSet" },
-        retry: { kind: "fixed", intervalsSeconds: [60, 300], jitter: false, autoRetryFor: ["PROVIDER_DOWN"] },
+        retry: { kind: "fixed", intervalsSeconds: [60, 300], jitter: false, retryFor: ["PROVIDER_DOWN"] },
         declaredCodes: { kind: "declared", codes: ["PROVIDER_DOWN"] },
       },
     ]);

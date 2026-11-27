@@ -12,7 +12,7 @@ Two error strategies by return type:
 
 2. **Read strategy**: ``get``, ``result_for`` and their ``*_async`` forms
    return ``ReadResult``. A read failure is ``Err(ReadError)``, one class
-   per code (``WaitTimeout``, ``WorkflowNotFound``, ``ReadDatabaseError``, ...),
+   per code (``ReadWaitTimeout``, ``ReadWorkflowNotFound``, ``ReadDatabaseError``, ...),
    apart from the outcome of the workflow or the node.
 
 ``WorkflowHandle.for_id`` returns ``WorkflowHandleInvalidWorkflowId``

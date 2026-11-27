@@ -1630,22 +1630,30 @@ class TestFormatSchedulePattern:
     """Tests for AppConfig._format_schedule_pattern covering all match cases."""
 
     def test_interval_all_components(self) -> None:
-        """Interval with days, hours, minutes, seconds should format all parts."""
-        pattern = IntervalSchedule(days=1, hours=2, minutes=30, seconds=15)
+        """An interval of days, hours, minutes and seconds formats all parts."""
+        pattern = IntervalSchedule(
+            every=timedelta(days=1, hours=2, minutes=30, seconds=15),
+        )
         result = AppConfig._format_schedule_pattern(pattern)
         assert result == 'every 1d 2h 30m 15s'
 
     def test_interval_hours_only(self) -> None:
-        """Interval with only hours should format just hours."""
-        pattern = IntervalSchedule(hours=4)
+        """An interval of whole hours formats the hours only."""
+        pattern = IntervalSchedule(every=timedelta(hours=4))
         result = AppConfig._format_schedule_pattern(pattern)
         assert result == 'every 4h'
 
     def test_interval_minutes_and_seconds(self) -> None:
-        """Interval with minutes and seconds only."""
-        pattern = IntervalSchedule(minutes=10, seconds=30)
+        """An interval of minutes and seconds formats no zero part."""
+        pattern = IntervalSchedule(every=timedelta(minutes=10, seconds=30))
         result = AppConfig._format_schedule_pattern(pattern)
         assert result == 'every 10m 30s'
+
+    def test_interval_in_seconds_formats_the_largest_unit_first(self) -> None:
+        """An interval given in seconds only formats in its largest units."""
+        pattern = IntervalSchedule(every=timedelta(seconds=90))
+        result = AppConfig._format_schedule_pattern(pattern)
+        assert result == 'every 1m 30s'
 
     def test_hourly(self) -> None:
         """Hourly pattern should format with zero-padded minute:second."""
@@ -1668,15 +1676,15 @@ class TestFormatSchedulePattern:
     def test_weekly(self) -> None:
         """Weekly pattern should list day names and time."""
         pattern = WeeklySchedule(
-            days=[Weekday.MONDAY, Weekday.FRIDAY],
+            weekdays=[Weekday.MONDAY, Weekday.FRIDAY],
             time=datetime_time(9, 0, 0),
         )
         result = AppConfig._format_schedule_pattern(pattern)
         assert result == 'weekly on monday, friday at 09:00:00'
 
     def test_monthly(self) -> None:
-        """Monthly pattern should show day number and time."""
-        pattern = MonthlySchedule(day=15, time=datetime_time(3, 0, 0))
+        """Monthly pattern should show the day of the month and time."""
+        pattern = MonthlySchedule(day_of_month=15, time=datetime_time(3, 0, 0))
         result = AppConfig._format_schedule_pattern(pattern)
         assert result == 'monthly on day 15 at 03:00:00'
 

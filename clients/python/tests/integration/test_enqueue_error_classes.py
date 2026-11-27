@@ -106,7 +106,7 @@ def _optional_value_task(app: Horsies, name: str) -> Any:
     """A task whose one keyword argument has a default: a send can pass it
     or pass nothing."""
 
-    @app.task(task_name=name)
+    @app.task(name=name)
     def optional_value(*, value: int = 0) -> Result[int, TaskError]:
         return Ok(value)
 
@@ -313,18 +313,18 @@ async def test_a_task_id_with_another_command_is_payload_mismatch(
     )
 
     # The task send keeps the payload that it sent: a sync send inside the
-    # running loop returns its prepared payload, and the async retry sends it.
+    # running loop returns its prepared payload, and the async resend sends it.
     task = _optional_value_task(app, f'enqueue_classes_{uuid4().hex}')
     prepared = task.send(value=1)
     assert is_err(prepared)
     assert isinstance(prepared.err_value, TaskSendAsyncContext)
-    assert is_ok(await task.retry_send_async(prepared.err_value))
+    assert is_ok(await task.resend_async(prepared.err_value))
     changed = dataclasses.replace(
         prepared.err_value,
         payload=dataclasses.replace(prepared.err_value.payload, input_json=None),
     )
 
-    mismatch = await task.retry_send_async(changed)
+    mismatch = await task.resend_async(changed)
 
     assert is_err(mismatch)
     assert type(mismatch.err_value) is TaskSendPayloadMismatch

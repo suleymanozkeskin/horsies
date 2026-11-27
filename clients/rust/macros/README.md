@@ -1,1 +1,1 @@
-Internal crate of [horsies](https://crates.io/crates/horsies): the task and workflow macros of the Rust client (`task`, `blocking_task`, `WorkflowInput`, `UserErrorCode`). Depend on `horsies` directly, not this crate.
+Internal crate of [horsies](https://crates.io/crates/horsies): the task and workflow macros of the Rust client (`task`, `blocking_task`, `WorkflowInput`, `CustomErrorCode`). Depend on `horsies` directly, not this crate.

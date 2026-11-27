@@ -201,7 +201,7 @@ describe("the schedule section: each check lands in the schedules refusal list",
       calls: core,
     });
 
-    assert.deepEqual(core.patterns, ['{"type":"hourly","minute":60,"second":0}']);
+    assert.deepEqual(core.patterns, ['{"kind":"hourly","minute":60,"second":0}']);
     assert.deepEqual(scheduleRefusals(context), [
       ["HRS-205", "schedules[0] a", "schedules[0] a: pattern: the pattern breaks its rules: minute 60"],
     ]);
@@ -328,7 +328,7 @@ describe("the schedule section: the order, the disabled schedules and the thread
     );
 
     assert.deepEqual(scheduleRefusals(context), []);
-    assert.deepEqual(core.patterns, ['{"type":"hourly","minute":0,"second":0}']);
+    assert.deepEqual(core.patterns, ['{"kind":"hourly","minute":0,"second":0}']);
     assert.deepEqual(scheduleDeclaration(context), {
       kind: "declared",
       section: { enabled: true, checkIntervalSeconds: 1 },
@@ -412,7 +412,7 @@ describe("Horsies.create declares the schedule section of the config", () => {
       scheduler: { kind: "refused" },
       names: ["nightly", "ghost"],
     });
-    assert.deepEqual(core.patterns, ['{"type":"hourly","minute":0,"second":0}', '{"type":"hourly","minute":0,"second":0}']);
+    assert.deepEqual(core.patterns, ['{"kind":"hourly","minute":0,"second":0}', '{"kind":"hourly","minute":0,"second":0}']);
   });
 
   test("in a worker thread with no core call", () => {

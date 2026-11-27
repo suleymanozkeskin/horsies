@@ -591,7 +591,7 @@ Errors (each with `kind`, the code in camelCase, `code` and `message`;
 |---|---|---|
 | `INVALID_COMMAND`, `INVALID_POLICY` | both | A field breaks its rule. Nothing ran |
 | `CLASS_NOT_REGISTERED` | both | The retention class of the new task has no class row (`classKey`). Nothing is written |
-| `CALLER_KEY_REFUSED` | both | The idempotency key is empty or more than 255 UTF-8 bytes |
+| `IDEMPOTENCY_KEY_REFUSED` | both | The idempotency key is empty or more than 255 UTF-8 bytes |
 | `ID_MINT_REFUSED` | both | The task id source refused to mint the new id |
 | `CLIENT_FAMILY_MISMATCH`, `UNKNOWN_STORED_FAMILY` | both | Another client family installed the database, or its family row is not a family |
 | `CONTRACT_VIOLATION` | both | A row or stored data broke the rerun's contract. Nothing committed |

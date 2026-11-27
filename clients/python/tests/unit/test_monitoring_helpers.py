@@ -171,15 +171,15 @@ class TestCategorizeErrorCode:
         for member in family:
             assert categorize_error_code(member.value) is expected
 
-    def test_unknown_code_is_domain(self) -> None:
-        assert categorize_error_code('MY_BUSINESS_ERROR') is ErrorCategory.DOMAIN
+    def test_unknown_code_is_custom(self) -> None:
+        assert categorize_error_code('MY_BUSINESS_ERROR') is ErrorCategory.CUSTOM
 
-    def test_former_hydration_code_is_domain(self) -> None:
+    def test_former_hydration_code_is_custom(self) -> None:
         """``PYDANTIC_HYDRATION_ERROR`` is not a built-in code, so a
-        stored row with it is a domain error, not a contract error."""
+        stored row with it has a custom code, not a contract code."""
         assert (
             categorize_error_code('PYDANTIC_HYDRATION_ERROR')
-            is ErrorCategory.DOMAIN
+            is ErrorCategory.CUSTOM
         )
 
     def test_whitespace_is_stripped_before_lookup(self) -> None:

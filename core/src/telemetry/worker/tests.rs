@@ -11,7 +11,7 @@ use chrono::Utc;
 use super::*;
 use crate::broker::claims::ClaimRead;
 use crate::core::task::error::OperationalCode;
-use crate::core::task::{Execution, TaskErrorCode, UserCode};
+use crate::core::task::{CustomCode, Execution, TaskErrorCode};
 use crate::core::{BuiltInTaskCode, OutcomeCode};
 use crate::events::{
     self, AttemptErrorCode, AttemptRecord, AttemptStart, ChildResult, OperatorCancelEnd,
@@ -32,7 +32,7 @@ use crate::worker::executor::slots::{
 fn slot_event(slot: u32) -> SlotRecovered {
     SlotRecovered {
         at: Utc::now(),
-        child_kind: Execution::Isolated,
+        child_execution: Execution::Isolated,
         slot: SlotIndex::try_from(slot).unwrap(),
     }
 }
@@ -73,11 +73,11 @@ async fn an_offer_to_a_full_queue_drops_the_event_and_counts_queue_full() {
 }
 
 /// The slot of each event of `events`, in order.
-fn slots_of(events: &[Event]) -> Vec<u32> {
+fn slots_of(events: &[AnyEvent]) -> Vec<u32> {
     events
         .iter()
         .map(|event| match event {
-            Event::SlotRecovered(recovered) => recovered.slot.get(),
+            AnyEvent::SlotRecovered(recovered) => recovered.slot.get(),
             other => panic!("the queue holds only slot events, not {other:?}"),
         })
         .collect()
@@ -147,7 +147,7 @@ fn an_event_of_a_type_that_the_child_does_not_take_is_not_built() {
         built.set(true);
         events::ChildStarted {
             at: Utc::now(),
-            child_kind: Execution::Isolated,
+            child_execution: Execution::Isolated,
             slot: SlotIndex::try_from(0).unwrap(),
             child_pid: crate::worker::executor::protocol::ProcessId::new(7).unwrap(),
             boot_duration: std::time::Duration::from_millis(5),
@@ -241,7 +241,7 @@ fn placed_after(read: ClaimRead) -> crate::worker::executor::slots::Placed {
     use crate::worker::executor::protocol::ProcessId;
     crate::worker::executor::slots::Placed {
         child_pid: ProcessId::new(4242).unwrap(),
-        child_kind: Execution::Isolated,
+        child_execution: Execution::Isolated,
         at: read.at + std::time::Duration::from_secs(1),
         wall: read.wall + chrono::Duration::seconds(1),
     }
@@ -261,10 +261,10 @@ fn a_placed_task_gives_one_attempt_placed_with_its_child_and_one_slot_wait() {
     let events = watched.events();
     assert_eq!(events.len(), 1, "{events:?}");
     match &events[0] {
-        Event::AttemptPlaced(event) => {
+        AnyEvent::AttemptPlaced(event) => {
             assert_eq!(event.task_id, task.task_id);
             assert_eq!(event.execution, Execution::SharedAsync);
-            assert_eq!(event.child_kind, Execution::Isolated);
+            assert_eq!(event.child_execution, Execution::Isolated);
             assert_eq!(event.child_pid, placed.child_pid);
             assert_eq!(event.attempt.get(), 3);
             assert_eq!(event.at, placed.wall);
@@ -324,8 +324,8 @@ fn declaring_telemetry() -> WatchedTelemetry {
     WatchedTelemetry::with(Arc::new(registry), codes)
 }
 
-fn user_code(code: &str) -> TaskErrorCode {
-    TaskErrorCode::User(UserCode::parse(code).unwrap())
+fn custom_code(code: &str) -> TaskErrorCode {
+    TaskErrorCode::Custom(CustomCode::parse(code).unwrap())
 }
 
 /// How the event of a run end is expected to read.
@@ -337,16 +337,16 @@ enum ExpectedEnd {
 
 /// Each end of a run on a child gives one `AttemptEnded` with its end, and
 /// one count of `horsies.task.attempts` with its outcome and code label: a
-/// declared user code is its own label, another user code is `undeclared`.
+/// declared custom code is its own label, another custom code is `undeclared`.
 #[test]
 fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
     let value = ResultRead::Value;
-    let declared = ResultRead::TaskError(user_code("RATE_LIMITED"));
-    let other = ResultRead::TaskError(user_code("OTHER_CODE"));
+    let declared = ResultRead::TaskError(custom_code("RATE_LIMITED"));
+    let other = ResultRead::TaskError(custom_code("OTHER_CODE"));
     let unreadable = ResultRead::Unreadable;
     let failed_with = |code: &str| {
         ExpectedEnd::Reported(ChildResult::Failed {
-            error_code: AttemptErrorCode::from(&user_code(code)),
+            error_code: AttemptErrorCode::from(&custom_code(code)),
         })
     };
     let cases: Vec<(EndView<'_>, ExpectedEnd, &str, &str)> = vec![
@@ -490,13 +490,13 @@ fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
                 error_code: BuiltInTaskCode::parse(code).expect("the code of a worker decision"),
                 trace: RunTrace::NoCarrier,
                 placed_at: placed.wall,
-                child_kind: Execution::Isolated,
+                child_execution: Execution::Isolated,
                 worker_id: WorkerIdText::cut("worker-1"),
                 workflow: WorkflowPlace::NotInWorkflow,
             },
         };
         match events.as_slice() {
-            [Event::AttemptEnded(ended)] => {
+            [AnyEvent::AttemptEnded(ended)] => {
                 assert_eq!(ended.end, expected_end, "{view:?}");
                 assert_eq!(ended.execution, Execution::Isolated, "{view:?}");
                 assert_eq!(ended.attempt.get(), 3, "{view:?}");
@@ -539,10 +539,11 @@ fn traced_task(kind: crate::worker::executor::slots::TaskKind) -> ClaimedTask {
 
 /// An end that the worker decided carries the facts of the span that the
 /// handler child makes: the code of its reason, the stored carrier, the
-/// placement time, the kind of the child that ran the attempt (an isolated
-/// child here, not the class of the task), the worker id of the registry,
-/// and what the claim read of the workflow node: a plain task is not in a
-/// workflow; the node of a workflow task is not known to the worker.
+/// placement time, the execution class of the child that ran the attempt
+/// (an isolated child here, not the class of the task), the worker id of
+/// the registry, and what the claim read of the workflow node: a plain task
+/// is not in a workflow; the node of a workflow task is not known to the
+/// worker.
 #[test]
 fn an_end_that_the_worker_decided_carries_the_facts_of_its_span() {
     use crate::worker::executor::slots::TaskKind;
@@ -564,7 +565,7 @@ fn an_end_that_the_worker_decided_carries_the_facts_of_its_span() {
         );
 
         match watched.events().as_slice() {
-            [Event::AttemptEnded(ended)] => {
+            [AnyEvent::AttemptEnded(ended)] => {
                 assert_eq!(ended.execution, Execution::SharedThread, "{kind:?}");
                 assert_eq!(
                     ended.end,
@@ -573,7 +574,7 @@ fn an_end_that_the_worker_decided_carries_the_facts_of_its_span() {
                         error_code: OutcomeCode::TaskTimeout.into(),
                         trace: task.trace.clone(),
                         placed_at: placed.wall,
-                        child_kind: Execution::Isolated,
+                        child_execution: Execution::Isolated,
                         worker_id: WorkerIdText::cut("worker-1"),
                         workflow,
                     },
@@ -627,7 +628,7 @@ fn a_reported_end_carries_the_start_that_its_child_reported() {
             .attempt_ended(&task, &ChildPlacement::Placed(placed), view);
 
         match watched.events().as_slice() {
-            [Event::AttemptEnded(ended)] => assert_eq!(
+            [AnyEvent::AttemptEnded(ended)] => assert_eq!(
                 ended.end,
                 events::AttemptEnd::ReportedByChild { result, start },
                 "{view:?}"
@@ -744,12 +745,12 @@ fn only_an_end_with_no_result_frame_asks_for_a_worker_made_span() {
             .attempt_ended(&task, &ChildPlacement::Placed(placed), view);
 
         match (watched.events().as_slice(), expected) {
-            ([Event::AttemptEnded(ended)], Ok((result, start))) => assert_eq!(
+            ([AnyEvent::AttemptEnded(ended)], Ok((result, start))) => assert_eq!(
                 ended.end,
                 events::AttemptEnd::ReportedByChild { result, start },
                 "{view:?}"
             ),
-            ([Event::AttemptEnded(ended)], Err(decision)) => match &ended.end {
+            ([AnyEvent::AttemptEnded(ended)], Err(decision)) => match &ended.end {
                 events::AttemptEnd::DecidedByWorker { reason, .. } => {
                     assert_eq!(*reason, decision, "{view:?}");
                 }
@@ -777,7 +778,7 @@ fn an_end_not_known_counts_apart_from_the_outcomes() {
     );
 
     match watched.events().as_slice() {
-        [Event::AttemptEnded(ended)] => assert_eq!(
+        [AnyEvent::AttemptEnded(ended)] => assert_eq!(
             ended.end,
             events::AttemptEnd::NotKnown {
                 child_pid: placed.child_pid
@@ -818,7 +819,7 @@ fn a_stop_before_running_and_a_task_with_no_child_give_their_own_events() {
     );
 
     match watched.events().as_slice() {
-        [Event::AttemptNotStarted(not_started), Event::ClaimReleased(released)] => {
+        [AnyEvent::AttemptNotStarted(not_started), AnyEvent::ClaimReleased(released)] => {
             assert_eq!(not_started.reason, StopReason::WorkflowStopped);
             assert_eq!(released.reason, ReleaseReason::QueueFull);
         }
@@ -880,7 +881,7 @@ fn each_settlement_gives_one_attempt_recorded_with_its_record() {
     for (settled, record) in cases {
         let mut watched = declaring_telemetry();
         let task = claimed_task(Execution::SharedAsync);
-        let declared = user_code("RATE_LIMITED");
+        let declared = custom_code("RATE_LIMITED");
         let noted = EndNoted::Seen {
             seen: tokio::time::Instant::now(),
             error_code: watched.registry.labels().error_codes.value_of(
@@ -894,7 +895,7 @@ fn each_settlement_gives_one_attempt_recorded_with_its_record() {
         watched.telemetry.attempt_recorded(&task, noted, settled);
 
         match watched.events().as_slice() {
-            [Event::AttemptRecorded(recorded)] => {
+            [AnyEvent::AttemptRecorded(recorded)] => {
                 assert_eq!(recorded.record, record, "{settled:?}");
             }
             other => panic!("{settled:?} gives one AttemptRecorded, not {other:?}"),
@@ -988,7 +989,7 @@ fn each_recovered_row_gives_one_task_recovered_with_its_action_and_one_count() {
         .events()
         .into_iter()
         .map(|event| match event {
-            Event::TaskRecovered(recovered) => (
+            AnyEvent::TaskRecovered(recovered) => (
                 recovered.task_id.as_u128(),
                 recovered.action,
                 recovered.task_name.as_str().to_owned(),

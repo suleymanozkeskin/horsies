@@ -47,9 +47,9 @@ from horsies.core.models.task_send_types import (
 )
 from horsies.core.models.outcome import (
     ReadDatabaseError,
-    NoTypeAvailable,
-    ResultDeserializationError,
-    WaitInsideTask,
+    ReadNoTypeAvailable,
+    ReadResultDeserializationError,
+    ReadWaitInsideTask,
 )
 from horsies.core.models.tasks import TaskError
 from horsies.core.task_decorator import TaskHandle, create_task_wrapper
@@ -311,9 +311,9 @@ def _handle(broker: MagicMock) -> TaskHandle[int]:
 
 
 READ_ERROR_OF: dict[type[Any], tuple[type[Any], bool]] = {
-    DatabaseNoTypeAvailable: (NoTypeAvailable, True),
-    DatabaseInvalidJsonPayload: (ResultDeserializationError, True),
-    DatabaseWaitInsideTask: (WaitInsideTask, False),
+    DatabaseNoTypeAvailable: (ReadNoTypeAvailable, True),
+    DatabaseInvalidJsonPayload: (ReadResultDeserializationError, True),
+    DatabaseWaitInsideTask: (ReadWaitInsideTask, False),
 }
 
 

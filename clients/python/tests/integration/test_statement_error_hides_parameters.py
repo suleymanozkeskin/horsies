@@ -48,7 +48,7 @@ def _with_lock_timeout(url: str) -> str:
 
 
 def _secret_task(app: Horsies) -> Any:
-    @app.task(task_name='hide_parameters_secret_task')
+    @app.task(name='hide_parameters_secret_task')
     def secret_task(*, secret: str) -> Result[str, TaskError]:
         return Ok(secret)
 

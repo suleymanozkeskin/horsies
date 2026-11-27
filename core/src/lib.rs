@@ -47,26 +47,26 @@ pub(crate) mod workflow_engine;
 // core re-exports
 pub use crate::core::RegisteredTask;
 pub use crate::core::{
-    error_code_label, mask_database_url, AnyNode, AppConfigError, BackoffStrategy, BuiltInTaskCode,
-    CancelGraceMs, CancelGraceOutOfRange, ContractCode, CronEnumTerm, CronNumericTerm, CronOrdinal,
-    CronSchedule, CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector,
-    DeclaredCodeRefusal, DeclaredCodesRefused, DeclaredErrorCode, DeclaredErrorCodes,
-    EnqueueRetention, ErrorCodeLabel, Execution, ExecutionClass, HandleOperation, HandleResult,
-    HorsiesErrorCategory, HorsiesErrorCode, HourlySchedule, IntervalSchedule, JoinType, Month,
-    MonthlySchedule, NodeKey, OnError, OperationalCode, OutcomeCode, PausedAgeRefused,
-    PausedWorkflowAge, PayloadPolicy, PostgresConfig, PostgresConfigError, QueueMode,
-    RecoveryConfig, RecoveryConfigError, ResilienceConfigError, RetentionChoice,
-    RetentionClassKeyRefused, RetentionConfig, RetentionConfigError, RetrievalCode, RetryPolicy,
-    RetryPolicyError, ScheduleConfig, SchedulePattern, StartRefusalCause, SubWorkflowFailure,
-    SubWorkflowParams, SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskAttemptInfo,
-    TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind, TaskInfo, TaskOptions,
-    TaskRegistry, TaskResult, TaskSchedule, TaskSendError, TaskSendErrorCode, TaskSendPayload,
-    TaskSendResult, TaskStatus, UserCode, UserCodeRefused, ValidationReport, Weekday,
+    check_cancel_grace_ms, error_code_label, mask_database_url, AnyNode, AppConfigError,
+    BackoffStrategy, BuiltInTaskCode, CancelGraceOutOfRange, ContractCode, CronEnumTerm,
+    CronNumericTerm, CronOrdinal, CronSchedule, CustomCode, CustomCodeRefused, CustomQueueConfig,
+    CustomQueueConfigError, DailySchedule, DaySelector, DeclaredCodeRefusal, DeclaredCodesRefused,
+    DeclaredErrorCode, DeclaredErrorCodes, EnqueueRetention, ErrorCodeLabel, Execution,
+    ExecutionClass, HandleOperation, HandleResult, HorsiesErrorCategory, HorsiesErrorCode,
+    HourlySchedule, IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, OnError,
+    OperationalCode, OutcomeCode, PausedAgeRefused, PausedWorkflowAge, PayloadPolicy,
+    PostgresConfig, PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
+    ResilienceConfigError, RetentionChoice, RetentionClassKeyRefused, RetentionConfig,
+    RetentionConfigError, RetrievalCode, RetryPolicy, RetryPolicyError, ScheduleConfig,
+    SchedulePattern, StartRefusalCause, SubWorkflowFailure, SubWorkflowParams, SubWorkflowSummary,
+    SuccessCase, SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode,
+    TaskErrorKind, TaskInfo, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
+    TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, ValidationReport, Weekday,
     WeeklySchedule, WorkerResilienceConfig, WorkflowContext, WorkflowHandleError,
     WorkflowHandleErrorCode, WorkflowMeta, WorkflowSpec, WorkflowStartError,
     WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus,
-    TASK_TERMINAL_STATES, UNDECLARED_LABEL, WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES,
-    WORKFLOW_TERMINAL_STATES,
+    DEFAULT_CANCEL_GRACE_MS, TASK_TERMINAL_STATES, UNDECLARED_LABEL, WF_TASK_TERMINAL_VALUES,
+    WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };
 pub use crate::core::{AppConfig, HorsiesError};
 // A user value kept as its stored text: a sub-workflow summary output, the `data` of a task error.
@@ -253,8 +253,8 @@ pub use crate::broker::migrations::SchemaRefusal;
 pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
 pub use crate::core::history::rerun::{
-    DeclaredCodes, NotEligibleReason, RegisteredTaskCodes, RerunEnqueuePolicy, RerunError,
-    RerunErrorCode, RerunOutcome, RerunTask,
+    DeclaredCodes, NotEligibleReason, RegisteredTaskCodes, RerunCommand, RerunEnqueuePolicy,
+    RerunError, RerunErrorCode, RerunOutcome,
 };
 // One core statement in a transaction that the caller owns: the Rust
 // client's adapters implement `CallerTransaction`; the core's own

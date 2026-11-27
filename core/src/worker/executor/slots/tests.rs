@@ -57,8 +57,8 @@ mod deadline_tests;
 mod settle_tests;
 
 const RETRY_ON_TIMEOUT: &str = r#"{"timeout_ms": 1000, "retry_policy": {"max_retries": 2,
-    "intervals": [5, 5], "backoff_strategy": "fixed", "jitter": false,
-    "max_delay_seconds": null, "auto_retry_for": ["TASK_TIMEOUT"]}}"#;
+    "intervals_seconds": [5, 5], "backoff_strategy": "fixed", "jitter": false,
+    "max_delay_seconds": null, "retry_for": ["TASK_TIMEOUT"]}}"#;
 
 // ---------------------------------------------------------------------------
 // Claim plan and routes
@@ -532,8 +532,8 @@ fn a_timeout_retries_when_the_policy_names_it() {
 
 /// One retry of `TASK_TIMEOUT` after 30 s.
 const ONE_TIMEOUT_RETRY_AFTER_30_S: &str = r#"{"retry_policy": {"max_retries": 1,
-    "intervals": [30], "backoff_strategy": "fixed", "jitter": false,
-    "max_delay_seconds": null, "auto_retry_for": ["TASK_TIMEOUT"]}}"#;
+    "intervals_seconds": [30], "backoff_strategy": "fixed", "jitter": false,
+    "max_delay_seconds": null, "retry_for": ["TASK_TIMEOUT"]}}"#;
 
 /// The command of a retry after a timeout (the order is
 /// `exit_not_seen_tests::a_deadline_kill_gives_no_end_before_the_exit_is_seen`):
@@ -865,7 +865,7 @@ fn a_worker_failure_is_a_broker_error_that_never_retries() {
 #[test]
 fn a_reported_task_error_keeps_its_envelope_and_retries_by_policy() {
     let claimed = task(ExecutionClass::Isolated, RETRY_ON_TIMEOUT);
-    let error = TaskError::builtin(OperationalCode::TaskException, "boom");
+    let error = TaskError::built_in(OperationalCode::TaskException, "boom");
     let envelope = ResultEnvelopeText::new(
         serde_json::to_string(
             &crate::core::task::result::TaskResult::<serde_json::Value>::Err(error.clone()),

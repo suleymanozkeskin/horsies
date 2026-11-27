@@ -24,8 +24,8 @@ Use this page for the exact method signatures and return types used by workflows
 | `.resend_on_transient_error` | `bool` | Auto-retry transient start errors (default `False`) |
 | `.start(workflow_id=None)` | `(str \| None) -> WorkflowStartResult[WorkflowHandle[T]]` | Start workflow (sync) |
 | `.start_async(workflow_id=None)` | `(str \| None) -> WorkflowStartResult[WorkflowHandle[T]]` | Start workflow (async) |
-| `.retry_start(error)` | `(WorkflowStartRetryable) -> WorkflowStartResult[WorkflowHandle[T]]` | Retry a failed start (sync) |
-| `.retry_start_async(error)` | `(WorkflowStartRetryable) -> WorkflowStartResult[WorkflowHandle[T]]` | Retry a failed start (async) |
+| `.retry_start(error)` | `(WorkflowStartResendable) -> WorkflowStartResult[WorkflowHandle[T]]` | Retry a failed start (sync) |
+| `.retry_start_async(error)` | `(WorkflowStartResendable) -> WorkflowStartResult[WorkflowHandle[T]]` | Retry a failed start (async) |
 
 ### Module-Level Start Functions
 
@@ -88,7 +88,7 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error. Any other exception in the start transaction is a defect and propagates |
 | `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` was called on a thread that runs an event loop; nothing was written. Call `await spec.retry_start_async(err)` to complete the start with the error's id |
 
-`WorkflowStartRetryable` is `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext`. It is the parameter type of `.retry_start()` and `.retry_start_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. The retry methods start the workflow again with the error's `workflow_id`. An error of another workflow returns `WorkflowStartValidationFailed`.
+`WorkflowStartResendable` is `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext`. It is the parameter type of `.retry_start()` and `.retry_start_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. The retry methods start the workflow again with the error's `workflow_id`. An error of another workflow returns `WorkflowStartValidationFailed`.
 
 **Usage:**
 
@@ -97,11 +97,11 @@ from horsies import Err, Failed, Ok, Succeeded, WorkflowStartEnqueueFailed
 
 match spec.start():
     case Ok(handle):
-        match handle.get(timeout_ms=30000):  # Wait for completion
+        match handle.get(wait_ms=30000):  # Wait for completion
             case Ok(Succeeded(value)):
                 print(f"Success: {value}")
             case Ok(Failed(task_error)):
-                print(f"Workflow failed: {task_error.error_code}")
+                print(f"Workflow failed: {task_error.code}")
             case Err(read_error):
                 print(f"Read failed: {read_error.code}")
 
@@ -109,9 +109,9 @@ match spec.start():
         # Transient infra failure — retry with stored workflow_id
         match spec.retry_start(err):
             case Ok(handle):
-                match handle.get(timeout_ms=30000):
+                match handle.get(wait_ms=30000):
                     case Ok(Failed(task_error)):
-                        print(f"Workflow failed: {task_error.error_code}")
+                        print(f"Workflow failed: {task_error.code}")
                     case _:
                         pass
             case Err(retry_err):
@@ -137,9 +137,9 @@ match spec.start():
 | `WorkflowHandle.for_id(text, broker)` | `(str, PostgresBroker) -> Result[WorkflowHandle[Any], WorkflowHandleInvalidWorkflowId]` | The handle of a workflow id text, or `WorkflowHandleInvalidWorkflowId` when the text is not a UUID. Reads nothing |
 | `.workflow_id` | `uuid.UUID` | Workflow id; `str(handle.workflow_id)` is its canonical text |
 | `.status()` / `.status_async()` | `-> HandleResult[WorkflowStatus]` | Current workflow status |
-| `.get()` / `.get_async()` | `(timeout_ms: int \| None) -> ReadResult[OutT, TaskError]` | Block until completion or timeout. The outcome is in `Ok(...)`. A read failure is in `Err(ReadError)`, for example `Err(WaitTimeout(...))`. A COMPLETED workflow whose output node is SKIPPED returns `Ok(Failed(task_error))` with `WORKFLOW_OUTPUT_SKIPPED`: see [Output Node Under a Success Policy](/horsies/concepts/workflows/workflow-semantics/#output-node-under-a-success-policy) |
+| `.get()` / `.get_async()` | `(wait_ms: int \| None) -> ReadResult[OutT, TaskError]` | Block until completion or timeout. The outcome is in `Ok(...)`. A read failure is in `Err(ReadError)`, for example `Err(ReadWaitTimeout(...))`. A COMPLETED workflow whose output node is SKIPPED returns `Ok(Failed(task_error))` with `WORKFLOW_OUTPUT_SKIPPED`: see [Output Node Under a Success Policy](/horsies/concepts/workflows/workflow-semantics/#output-node-under-a-success-policy) |
 | `.results()` / `.results_async()` | `-> HandleResult[dict[str, TaskOutcome[Any, TaskError]]]` | All results keyed by node_id; `Ok({})` before any node has a result, `WorkflowHandleNotFound` when no workflow has the id |
-| `.result_for()` / `.result_for_async()` | `(TaskNode[T] \| NodeKey[T]) -> ReadResult[T, TaskError]` | Single node result (non-blocking). No stored result yet is `Err(ResultNotReady(...))` |
+| `.result_for()` / `.result_for_async()` | `(TaskNode[T] \| NodeKey[T]) -> ReadResult[T, TaskError]` | Single node result (non-blocking). No stored result yet is `Err(ReadResultNotReady(...))` |
 | `.tasks()` / `.tasks_async()` | `-> HandleResult[list[WorkflowTaskInfo]]` | Status of all workflow tasks; `WorkflowHandleNotFound` when no workflow has the id |
 | `.cancel()` / `.cancel_async()` | `-> HandleResult[None]` | Cancel workflow |
 | `.pause()` / `.pause_async()` | `-> HandleResult[bool]` | Pause running workflow |

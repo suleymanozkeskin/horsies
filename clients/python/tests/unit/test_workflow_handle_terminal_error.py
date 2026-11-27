@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import horsies._core as core
-from horsies.core.models.outcome import Failed, ReadResult, ResultDeserializationError
+from horsies.core.models.outcome import Failed, ReadResult, ReadResultDeserializationError
 from horsies.core.models.tasks import (
     OutcomeCode,
     TaskError,
@@ -66,12 +66,12 @@ def _failed_error(result: ReadResult[Any, TaskError]) -> TaskError:
 
 
 def _unreadable_message(result: ReadResult[Any, TaskError]) -> str:
-    """The message of a read that gave ``ResultDeserializationError``."""
+    """The message of a read that gave ``ReadResultDeserializationError``."""
     match result:
-        case Err(ResultDeserializationError(message=message)):
+        case Err(ReadResultDeserializationError(message=message)):
             return message
         case _:
-            pytest.fail(f'expected ResultDeserializationError, got {result!r}')
+            pytest.fail(f'expected ReadResultDeserializationError, got {result!r}')
 
 
 class TestNoStoredError:
@@ -94,10 +94,10 @@ class TestNoStoredError:
         # the status again.
         handle = _handle(status, error_row=SimpleNamespace(error=None))
 
-        result = await handle.get_async(timeout_ms=0)
+        result = await handle.get_async(wait_ms=0)
 
         error = _failed_error(result)
-        assert error.error_code is code
+        assert error.code is code
         assert error.message == f'Workflow {status.value.lower()}'
 
 
@@ -110,7 +110,7 @@ class TestCompletedWithoutStoredResult:
             WorkflowStatus.COMPLETED, error_row=SimpleNamespace(result=None),
         )
 
-        result = await handle.get_async(timeout_ms=0)
+        result = await handle.get_async(wait_ms=0)
 
         assert _unreadable_message(result) == (
             f'Workflow {WORKFLOW_ID} is COMPLETED and its stored result is NULL'
@@ -123,7 +123,7 @@ class TestCompletedWithoutStoredResult:
             WorkflowStatus.COMPLETED, error_row=SimpleNamespace(result=''),
         )
 
-        result = await handle.get_async(timeout_ms=0)
+        result = await handle.get_async(wait_ms=0)
 
         assert _unreadable_message(result) == (
             'Workflow result JSON corrupt: JSON parse failed: the text is empty'
@@ -140,7 +140,7 @@ class TestEmptyStoredError:
         # error" (TestNoStoredError).
         handle = _handle(status, error_row=SimpleNamespace(error=''))
 
-        result = await handle.get_async(timeout_ms=0)
+        result = await handle.get_async(wait_ms=0)
 
         assert _unreadable_message(result) == (
             'Workflow error payload corrupt: JSON parse failed: the text is empty'
@@ -155,10 +155,10 @@ class TestLegacyExpiryText:
             error_row=SimpleNamespace(error=LEGACY_EXPIRY_TEXT),
         )
 
-        result = await handle.get_async(timeout_ms=0)
+        result = await handle.get_async(wait_ms=0)
 
         error = _failed_error(result)
-        assert error.error_code is OutcomeCode.WORKFLOW_EXPIRED
+        assert error.code is OutcomeCode.WORKFLOW_EXPIRED
         assert error.message == LEGACY_EXPIRY_TEXT
 
 
@@ -184,7 +184,7 @@ class TestStoredErrorThatIsNotAnObject:
             WorkflowStatus.FAILED, error_row=SimpleNamespace(error=stored),
         )
 
-        result = await handle.get_async(timeout_ms=0)
+        result = await handle.get_async(wait_ms=0)
 
         assert _unreadable_message(result) == (
             f'Workflow error payload is not a JSON object: got {type_name}'
@@ -212,7 +212,7 @@ class TestStoredErrorObjectThatDoesNotDecode:
             WorkflowStatus.FAILED, error_row=SimpleNamespace(error=stored),
         )
 
-        result = await handle.get_async(timeout_ms=0)
+        result = await handle.get_async(wait_ms=0)
 
         assert _unreadable_message(result).startswith(
             'Workflow error payload validation failed: ',
@@ -231,4 +231,4 @@ class TestStoredErrorObjectThatDoesNotDecode:
             side_effect=RuntimeError('decode defect'),
         ):
             with pytest.raises(RuntimeError, match='decode defect'):
-                await handle.get_async(timeout_ms=0)
+                await handle.get_async(wait_ms=0)

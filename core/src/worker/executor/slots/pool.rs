@@ -96,9 +96,9 @@ pub struct IsolatedPoolConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Placed {
     pub child_pid: ProcessId,
-    /// The kind of the child: the execution class of its slot. A task of a
+    /// The execution class of the child: the class of its slot. A task of a
     /// shared class can run on an isolated child (the route rule).
-    pub child_kind: ExecutionClass,
+    pub child_execution: ExecutionClass,
     /// When the child took the task (monotonic clock of the worker).
     pub at: Instant,
     /// The same time on the wall clock of the worker.
@@ -158,13 +158,13 @@ pub fn watched_placement() -> (PlacementWatch, PlacementReceipt) {
     (PlacementWatch(sender), PlacementReceipt(receiver))
 }
 
-/// Where the placement of one task goes, once its pool knows the kind of
-/// the child.
+/// Where the placement of one task goes, once its pool knows the execution
+/// class of the child.
 enum PlacementNotice {
     Unwatched,
     Watched {
         to: oneshot::Sender<Placed>,
-        child_kind: ExecutionClass,
+        child_execution: ExecutionClass,
     },
 }
 
@@ -184,16 +184,16 @@ impl Answer {
         Self::watched(sender, watch, ExecutionClass::Isolated)
     }
 
-    /// The answer of a task of a pool whose children are of `child_kind`,
-    /// whose placement goes to `watch`.
+    /// The answer of a task of a pool whose children are of the class
+    /// `child_execution`, whose placement goes to `watch`.
     pub(super) fn watched(
         sender: oneshot::Sender<AttemptEnd>,
         watch: PlacementWatch,
-        child_kind: ExecutionClass,
+        child_execution: ExecutionClass,
     ) -> Self {
         let placement = PlacementNotice::Watched {
             to: watch.0,
-            child_kind,
+            child_execution,
         };
         Self {
             sender: Some(sender),
@@ -208,12 +208,15 @@ impl Answer {
         self.fallback = AttemptEnd::EndUnknown { pid };
         match std::mem::replace(&mut self.placement, PlacementNotice::Unwatched) {
             PlacementNotice::Unwatched => {}
-            PlacementNotice::Watched { to, child_kind } => {
+            PlacementNotice::Watched {
+                to,
+                child_execution,
+            } => {
                 // The submitter may have gone away; the placement is then
                 // not needed.
                 let _unread = to.send(Placed {
                     child_pid: pid,
-                    child_kind,
+                    child_execution,
                     at: Instant::now(),
                     wall: Utc::now(),
                 });

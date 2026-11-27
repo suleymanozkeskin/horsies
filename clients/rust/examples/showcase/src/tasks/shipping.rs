@@ -13,7 +13,7 @@ use super::{runtime, task_store};
     "book_courier",
     queue = "fulfillment",
     retry_policy = crate::tasks::courier_retry(),
-    auto_retry_for = ["COURIER_UNAVAILABLE", "WORKER_CRASHED"]
+    retry_for = ["COURIER_UNAVAILABLE", "WORKER_CRASHED"]
 )]
 pub async fn book_courier(
     rt: TaskRuntime,
@@ -30,7 +30,7 @@ pub async fn book_courier(
     "print_label",
     queue = "fulfillment",
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn print_label(
     rt: TaskRuntime,
@@ -50,7 +50,7 @@ pub async fn print_label(
     "tracking_seed",
     queue = "fulfillment",
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn tracking_seed(
     rt: TaskRuntime,

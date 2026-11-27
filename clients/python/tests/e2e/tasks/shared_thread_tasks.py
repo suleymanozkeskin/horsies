@@ -21,7 +21,7 @@ HANG_TIMEOUT_MS = 2_000
 
 
 @app.task(
-    task_name='e2e_thread_sleep',
+    name='e2e_thread_sleep',
     execution=Execution.SHARED_THREAD,
     timeout_ms=30_000,
 )
@@ -35,7 +35,7 @@ def thread_sleep(*, seconds: float) -> Result[str, TaskError]:
 
 
 @app.task(
-    task_name='e2e_thread_task_send_pool',
+    name='e2e_thread_task_send_pool',
     execution=Execution.SHARED_THREAD,
     timeout_ms=30_000,
 )
@@ -47,7 +47,7 @@ def thread_task_send_pool() -> Result[str, TaskError]:
 
 
 @app.task(
-    task_name='e2e_thread_hang',
+    name='e2e_thread_hang',
     execution=Execution.SHARED_THREAD,
     timeout_ms=HANG_TIMEOUT_MS,
 )

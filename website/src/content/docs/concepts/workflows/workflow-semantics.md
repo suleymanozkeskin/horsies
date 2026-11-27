@@ -77,8 +77,8 @@ To run several steps with effects so that a retry or a crash runs only the step 
 
 Workflow tasks use the same retry mechanism as standalone tasks:
 
-- A task retries only when it has a `retry_policy` **and** the failure matches `auto_retry_for` (configured on `RetryPolicy`).
-- `auto_retry_for` is a required field on `RetryPolicy`, so retry triggers are always co-located with retry timing.
+- A task retries only when it has a `retry_policy` **and** the failure matches `retry_for` (configured on `RetryPolicy`).
+- `retry_for` is a required field on `RetryPolicy`, so retry triggers are always co-located with retry timing.
 - While retrying, the workflow task remains `RUNNING` until the final attempt completes.
 
 ### Worker crash / restart
@@ -86,7 +86,7 @@ Workflow tasks use the same retry mechanism as standalone tasks:
 If a worker crashes mid-task, recovery behaves as follows:
 
 - **CLAIMED task** (never started): requeued safely.
-- **RUNNING task** (started): retried if the task has `WORKER_CRASHED` in `auto_retry_for` and retries remaining; otherwise marked `FAILED` with `WORKER_CRASHED`.
+- **RUNNING task** (started): retried if the task has `WORKER_CRASHED` in `retry_for` and retries remaining; otherwise marked `FAILED` with `WORKER_CRASHED`.
 - **Workflow reconciliation**: if `tasks.status` is terminal but the corresponding
   `workflow_tasks.status` is still non-terminal, recovery triggers the normal
   completion path to update `workflow_tasks`, propagate to dependents, and finalize
@@ -316,7 +316,7 @@ A (FAILED) → B (SKIPPED) → C (SKIPPED) → D (SKIPPED)
 Tasks with `allow_failed_dependencies=True` receive the outcome of each dependency:
 
 - **FAILED deps**: Receive `Failed` with the original error
-- **SKIPPED deps**: Receive a sentinel `Failed` with `error_code=UPSTREAM_SKIPPED`
+- **SKIPPED deps**: Receive a sentinel `Failed` with `code=UPSTREAM_SKIPPED`
 
 The Python example is in [Recovery Handlers](/horsies/concepts/workflows/workflow-examples/#recovery-handlers).
 
@@ -435,14 +435,14 @@ To create nodes from runtime data, use a `SubWorkflowNode`. Its `build_with()` r
 
 ## Retry Policies in Workflows
 
-Workflow tasks honor the same retry policies configured on the `@task` decorator. When a task with a `retry_policy` is used in a workflow, those settings (including `auto_retry_for`) are preserved and applied when the workflow engine enqueues the task.
+Workflow tasks honor the same retry policies configured on the `@task` decorator. When a task with a `retry_policy` is used in a workflow, those settings (including `retry_for`) are preserved and applied when the workflow engine enqueues the task.
 
 The Python example is in [Retry Policies in Workflows](/horsies/concepts/workflows/workflow-examples/#retry-policies-in-workflows).
 
 **Behavior:**
 
 - `max_retries` from the retry policy is applied to the underlying task
-- `auto_retry_for` error codes (on `RetryPolicy`) trigger automatic retries on matching failures
+- `retry_for` error codes (on `RetryPolicy`) trigger automatic retries on matching failures
 - Retries happen at the task level (worker handles retry scheduling)
 - A task that fails after exhausting retries propagates failure to the workflow
 
@@ -534,11 +534,11 @@ Tasks can access upstream results via `WorkflowContext` using the type-safe `res
 ### Enabling WorkflowContext
 
 1. Set `workflow_context_from` on the TaskNode to specify which upstream results to include
-2. Declare `workflow_ctx: WorkflowContext | None` parameter in the task function
+2. Declare `workflow_context: WorkflowContext | None` parameter in the task function
 
 **Important:** `workflow_context_from` is **per-task**. The context is built fresh for each task that opts in, and does **not** persist or propagate to downstream tasks.
 
-**Scope:** Inside a task function, only results from nodes listed in `workflow_context_from` are accessible via `workflow_ctx.result_for()`. Accessing a node not in the list raises `KeyError` with `"TaskNode id '{id}' not in workflow context"`.
+**Scope:** Inside a task function, only results from nodes listed in `workflow_context_from` are accessible via `workflow_context.result_for()`. Accessing a node not in the list raises `KeyError` with `"TaskNode id '{id}' not in workflow context"`.
 
 This is distinct from `WorkflowHandle.result_for()`, which queries the database for any node in the workflow and returns the read error `RESULT_NOT_READY` if the task hasn't completed.
 

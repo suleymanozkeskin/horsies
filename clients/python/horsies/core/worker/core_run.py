@@ -170,7 +170,7 @@ def worker_manifest_json(
         (name, task.task_options_json) for name, task in app.tasks.items()
     )
     tasks = {
-        name: TaskFacts(execution=classes[name], error_codes=task.task_error_codes)
+        name: TaskFacts(execution=classes[name], error_codes=task.error_codes)
         for name, task in app.tasks.items()
     }
     handlers = tuple(

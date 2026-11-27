@@ -1,5 +1,5 @@
 //! Blocking forms of the async API, for a program that does not run a
-//! tokio runtime (Python's sync calls: `send` and `schedule`, the retries,
+//! tokio runtime (Python's sync calls: `send`, `resend`,
 //! `TaskHandle.get` and `info`, the app's reads by task id and health
 //! reads, `check(live=True)`, the workflow starts and the sync methods of
 //! `WorkflowHandle`).
@@ -23,7 +23,7 @@
 //!   runtime, so it runs nothing and answers the `ASYNC_CONTEXT` member of
 //!   its catalog, as a Python sync call inside a running event loop does:
 //!   `TaskSendError::AsyncContext` (with the prepared task id and payload,
-//!   so `retry_send(&error).await` completes the same send),
+//!   so `resend(&error).await` completes the same send),
 //!   `ReadError::AsyncContext`, `DatabaseOperationError::AsyncContext`, a
 //!   `ValidationReport` with `HRS-217`,
 //!   `WorkflowStartErrorCode::AsyncContext` with the workflow id of the
@@ -67,9 +67,9 @@ use crate::check::{connectivity_report, CHECK};
 use crate::handle::checked_task_wait;
 use crate::process_state::{runtime_for, RuntimeStartFailed};
 use crate::{
-    CheckPassed, Horsies, HorsiesError, HorsiesErrorCode, MinResponses, PingTarget, ReadError,
-    StoredResult, TaskFunction, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome, TaskSendOptions,
-    UserErrorCode, ValidationReport, WaitLimit, WorkerHistoryLimit,
+    CheckPassed, CustomErrorCode, Horsies, HorsiesError, HorsiesErrorCode, MinResponses,
+    PingTarget, ReadError, StoredResult, TaskFunction, TaskHandle, TaskInfo, TaskInfoParts,
+    TaskOutcome, TaskSendOptions, ValidationReport, WaitLimit, WorkerHistoryLimit,
 };
 
 /// Where a blocking call can run.
@@ -126,7 +126,7 @@ impl<'a, A, T, E> TaskFunctionView<'a, A, T, E>
 where
     A: Serialize + DeserializeOwned + 'static,
     T: Serialize + DeserializeOwned + 'static,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     /// `TaskFunction::send`, blocking.
     pub fn send(&self, input: A) -> Result<TaskHandle<T, E>, TaskSendError> {
@@ -152,18 +152,18 @@ where
     pub fn with_options(
         &self,
         options: TaskSendOptions,
-    ) -> TaskFunctionSendOptionsView<'a, A, T, E> {
-        TaskFunctionSendOptionsView {
+    ) -> TaskFunctionWithOptionsView<'a, A, T, E> {
+        TaskFunctionWithOptionsView {
             function: self.function,
             options,
         }
     }
 
-    /// `TaskFunction::retry_send`, blocking. On a runtime thread it answers
+    /// `TaskFunction::resend`, blocking. On a runtime thread it answers
     /// `AsyncContext` again, with the same task id and payload.
-    pub fn retry_send(&self, error: &TaskSendError) -> Result<TaskHandle<T, E>, TaskSendError> {
-        let (task_id, payload) = self.function.retry_target(error)?;
-        self.enqueue(task_id, payload, SendKind::Repeat, "retry_send")
+    pub fn resend(&self, error: &TaskSendError) -> Result<TaskHandle<T, E>, TaskSendError> {
+        let (task_id, payload) = self.function.checked_resend_target(error)?;
+        self.enqueue(task_id, payload, SendKind::Repeat, "resend")
     }
 
     /// The checks of a first send, then the enqueue. A refused input is
@@ -203,7 +203,7 @@ where
                 message: format!(
                     "blocking {call} of task '{}' was called on a thread that runs a tokio \
                      runtime; its wait would stall the runtime, so nothing was written. Use \
-                     `{call}(...).await`; an async retry with this error sends the same task \
+                     `{call}(...).await`; an async resend with this error sends the same task \
                      id and payload.",
                     self.function.task_name()
                 ),
@@ -231,16 +231,16 @@ fn start_failed_send(
 }
 
 /// The blocking sends of one task with per-send options.
-pub struct TaskFunctionSendOptionsView<'a, A, T, E> {
+pub struct TaskFunctionWithOptionsView<'a, A, T, E> {
     function: &'a TaskFunction<A, T, E>,
     options: TaskSendOptions,
 }
 
-impl<A, T, E> TaskFunctionSendOptionsView<'_, A, T, E>
+impl<A, T, E> TaskFunctionWithOptionsView<'_, A, T, E>
 where
     A: Serialize + DeserializeOwned + 'static,
     T: Serialize + DeserializeOwned + 'static,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     /// Send the task with these options, now or after their delay,
     /// blocking.
@@ -266,15 +266,15 @@ impl<T, E> TaskHandle<T, E> {
 impl<T, E> TaskHandleView<'_, T, E>
 where
     T: DeserializeOwned + Clone,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     /// `TaskHandle::get`, blocking. The limit is the first check, as in
     /// the async form: a `Within` limit above `MAX_WAIT_LIMIT_MS` is
     /// `InvalidInput`. Then, in Python's order: a process that runs task
     /// bodies refuses the wait; a kept read is returned; a runtime thread
     /// answers `AsyncContext`, which is not kept.
-    pub fn get(&self, limit: WaitLimit) -> Result<TaskOutcome<T, E>, ReadError> {
-        let _wait = checked_task_wait(self.handle.task_id(), limit)?;
+    pub fn get(&self, wait: WaitLimit) -> Result<TaskOutcome<T, E>, ReadError> {
+        let _checked = checked_task_wait(self.handle.task_id(), wait)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(ReadError::wait_inside_task(&format!(
                 "TaskHandle.get() for task {}",
@@ -285,9 +285,9 @@ where
             return kept;
         }
         block_read(
-            self.handle.get(limit),
+            self.handle.get(wait),
             &format!("TaskHandle::get() for task {}", self.handle.task_id()),
-            "handle.get(limit)",
+            "handle.get(wait)",
         )
     }
 
@@ -316,8 +316,8 @@ fn block_read<V>(
         Place::AsyncContext => Err(ReadError::AsyncContext {
             message: async_context_message(blocking_call, async_call),
         }),
-        Place::RuntimeStartFailed(failed) => Err(ReadError::Database {
-            code: DatabaseErrorCode::TaskInfoQueryFailed,
+        Place::RuntimeStartFailed(failed) => Err(ReadError::DatabaseError {
+            database_code: DatabaseErrorCode::TaskInfoQueryFailed,
             message: format!("the read did not start: {failed}"),
             retryable: true,
         }),
@@ -372,16 +372,13 @@ impl HorsiesView<'_> {
     pub fn get_result<T, E>(
         &self,
         task_id: Uuid,
-        limit: WaitLimit,
+        wait: WaitLimit,
     ) -> Result<TaskOutcome<T, E>, ReadError>
     where
         T: DeserializeOwned + Clone,
-        E: UserErrorCode,
+        E: CustomErrorCode,
     {
-        self.app
-            .task_handle_of::<T, E>(task_id)
-            .blocking()
-            .get(limit)
+        self.app.task_handle::<T, E>(task_id).blocking().get(wait)
     }
 
     /// `Horsies::get_raw_result`, blocking. The limit is the first check,
@@ -389,18 +386,18 @@ impl HorsiesView<'_> {
     pub fn get_raw_result(
         &self,
         task_id: Uuid,
-        limit: WaitLimit,
+        wait: WaitLimit,
     ) -> Result<StoredResult, ReadError> {
-        let _wait = checked_task_wait(task_id, limit)?;
+        let _checked = checked_task_wait(task_id, wait)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(ReadError::wait_inside_task(&format!(
                 "Horsies.get_raw_result() for task {task_id}"
             )));
         }
         block_read(
-            self.app.get_raw_result(task_id, limit),
+            self.app.get_raw_result(task_id, wait),
             &format!("Horsies::get_raw_result() for task {task_id}"),
-            "app.get_raw_result(task_id, limit)",
+            "app.get_raw_result(task_id, wait)",
         )
     }
 
@@ -573,7 +570,7 @@ mod tests {
 
     /// Python `TaskSendAsyncContext`: a blocking send on a runtime thread
     /// writes nothing and keeps the prepared task id and payload, which an
-    /// async retry accepts.
+    /// async resend accepts.
     #[tokio::test]
     async fn a_blocking_send_on_a_runtime_thread_keeps_its_prepared_send() {
         let app = app();
@@ -587,9 +584,9 @@ mod tests {
         };
         assert_eq!(payload.input_json, r#"{"id":7}"#);
         assert!(refused.message().contains("blocking send of task 'bill'"));
-        let (retried_id, _payload) = function.retry_target(&refused).unwrap();
-        assert_eq!(retried_id, *task_id);
-        let again = function.blocking().retry_send(&refused).unwrap_err();
+        let (resent_id, _payload) = function.checked_resend_target(&refused).unwrap();
+        assert_eq!(resent_id, *task_id);
+        let again = function.blocking().resend(&refused).unwrap_err();
         assert_eq!(again.task_id(), Some(*task_id));
         assert_eq!(again.code(), horsies_core::TaskSendErrorCode::AsyncContext);
     }
@@ -614,10 +611,10 @@ mod tests {
     #[tokio::test]
     async fn a_blocking_read_on_a_runtime_thread_is_async_context_and_not_kept() {
         let app = app();
-        let handle = app.task_handle_of::<u32, Infallible>(Uuid::from_u128(5));
+        let handle = app.task_handle::<u32, Infallible>(Uuid::from_u128(5));
         let refused = handle.blocking().get(WaitLimit::NoLimit).unwrap_err();
         assert!(matches!(refused, ReadError::AsyncContext { .. }));
-        assert_eq!(refused.code().value(), "ASYNC_CONTEXT");
+        assert_eq!(refused.code().as_str(), "ASYNC_CONTEXT");
         assert!(handle.kept().is_none());
         let info = app
             .blocking()
@@ -636,7 +633,7 @@ mod tests {
         let app = app();
         let task_id = Uuid::from_u128(6);
         let above = WaitLimit::Within(Duration::from_millis(crate::MAX_WAIT_LIMIT_MS + 1));
-        let handle = app.task_handle_of::<u32, Infallible>(task_id);
+        let handle = app.task_handle::<u32, Infallible>(task_id);
         let refused = handle.blocking().get(above).unwrap_err();
         assert_eq!(
             refused,
@@ -710,9 +707,9 @@ mod tests {
     #[test]
     fn the_message_names_the_call_and_the_async_form() {
         assert_eq!(
-            async_context_message("TaskHandle::get()", "handle.get(limit)"),
+            async_context_message("TaskHandle::get()", "handle.get(wait)"),
             "blocking TaskHandle::get() was called on a thread that runs a tokio runtime; its \
-             wait would stall the runtime, so nothing ran. Use `handle.get(limit).await` \
+             wait would stall the runtime, so nothing ran. Use `handle.get(wait).await` \
              instead."
         );
     }

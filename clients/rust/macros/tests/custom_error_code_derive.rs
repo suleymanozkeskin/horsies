@@ -1,9 +1,9 @@
-//! `#[derive(UserErrorCode)]`: each unit variant has one code, its name in
+//! `#[derive(CustomErrorCode)]`: each unit variant has one code, its name in
 //! UPPER_SNAKE_CASE, and the code reads back to its variant.
 
-use horsies::UserErrorCode;
+use horsies::CustomErrorCode;
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum ChargeCode {
     CardDeclined,
     RateLimited,
@@ -11,7 +11,7 @@ enum ChargeCode {
     r#Type,
 }
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum NoCodes {}
 
 #[test]
@@ -20,15 +20,15 @@ fn each_variant_has_its_upper_snake_case_code() {
         ChargeCode::CODES,
         &["CARD_DECLINED", "RATE_LIMITED", "HTTP_ERROR", "TYPE"]
     );
-    assert_eq!(ChargeCode::RateLimited.code(), "RATE_LIMITED");
-    assert_eq!(ChargeCode::r#Type.code(), "TYPE");
+    assert_eq!(ChargeCode::RateLimited.as_str(), "RATE_LIMITED");
+    assert_eq!(ChargeCode::r#Type.as_str(), "TYPE");
 }
 
 #[test]
 fn each_code_reads_back_to_its_variant() {
     for code in ChargeCode::CODES {
         let variant = ChargeCode::from_code(code).expect("a code of the type");
-        assert_eq!(variant.code(), *code);
+        assert_eq!(variant.as_str(), *code);
     }
 }
 

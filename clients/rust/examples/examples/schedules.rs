@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use horsies::{
     task, AppConfig, Horsies, HorsiesError, HourlySchedule, IntervalSchedule, JsonText,
@@ -39,8 +40,7 @@ fn schedules() -> Result<ScheduleConfig, JsonTextRefused> {
             "heartbeat-every-10s",
             "record_heartbeat",
             SchedulePattern::Interval(IntervalSchedule {
-                seconds: Some(10),
-                ..IntervalSchedule::default()
+                every: Duration::from_secs(10),
             }),
         )
         .input(&record_heartbeat::Input {

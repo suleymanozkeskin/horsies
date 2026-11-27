@@ -47,10 +47,10 @@ from . import store_failure
 
 @app.task(
     'reserve_stock',
-    queue_name=QUEUE_FULFILLMENT,
+    queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def reserve_stock(
@@ -70,7 +70,7 @@ def reserve_stock(
             if not outcome.known_sku:
                 return Err(
                     TaskError(
-                        error_code=UNKNOWN_SKU,
+                        code=UNKNOWN_SKU,
                         message=f'{sku} is not in the catalog',
                         data={'order_id': order_id, 'sku': sku},
                     ),
@@ -78,7 +78,7 @@ def reserve_stock(
             if not outcome.reserved:
                 return Err(
                     TaskError(
-                        error_code=INSUFFICIENT_STOCK,
+                        code=INSUFFICIENT_STOCK,
                         message=(
                             f'{sku} has {outcome.available} available, '
                             f'order {order_id} needs {quantity}'
@@ -104,10 +104,10 @@ def reserve_stock(
 
 @app.task(
     'release_stock',
-    queue_name=QUEUE_FULFILLMENT,
+    queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def release_stock(
@@ -125,7 +125,7 @@ def release_stock(
             if available is None:
                 return Err(
                     TaskError(
-                        error_code=UNKNOWN_SKU,
+                        code=UNKNOWN_SKU,
                         message=f'{sku} is not in the catalog',
                         data={'sku': sku},
                     ),
@@ -137,10 +137,10 @@ def release_stock(
 
 @app.task(
     'replenish_catalog',
-    queue_name=QUEUE_ANALYTICS,
+    queue=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def replenish_catalog(*, target_units: int) -> Result[StocktakeSummary, TaskError]:
@@ -183,11 +183,11 @@ def _feed_window() -> str:
 
 @app.task(
     'sync_supplier_feed',
-    queue_name=QUEUE_ANALYTICS,
+    queue=QUEUE_ANALYTICS,
     error_codes=SupplierRetryCode,
     retry_policy=RetryPolicy.fixed(
         tuning.SUPPLIER_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[SupplierRetryCode.SUPPLIER_TIMEOUT, OperationalCode.WORKER_CRASHED],
+        retry_for=[SupplierRetryCode.SUPPLIER_TIMEOUT, OperationalCode.WORKER_CRASHED],
     ),
     exception_mapper={TimeoutError: SUPPLIER_TIMEOUT},
 )
@@ -224,21 +224,21 @@ def _feed_node(node_id: str) -> TaskNode[SupplierFeed]:
     way to ask whether a result exists without `result_for` raising. A task
     receives node ids as data, not node objects, so it rebuilds the handle.
     """
-    return TaskNode(fn=sync_supplier_feed, node_id=node_id)
+    return TaskNode(function=sync_supplier_feed, node_id=node_id)
 
 
 @app.task(
     'update_stock_levels',
-    queue_name=QUEUE_ANALYTICS,
+    queue=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def update_stock_levels(
     *,
     feed_node_ids: list[str],
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[RestockPlan, TaskError]:
     """Apply whatever supplier feeds reported — the quorum aggregate.
 
@@ -247,10 +247,10 @@ def update_stock_levels(
     feed is missing or failed is simply absent from the context, which is why
     every lookup is guarded rather than assumed.
     """
-    if workflow_ctx is None:
+    if workflow_context is None:
         return Err(
             TaskError(
-                error_code=NO_WORKFLOW_CONTEXT,
+                code=NO_WORKFLOW_CONTEXT,
                 message='update_stock_levels runs only as a workflow node',
                 data={'feed_node_ids': feed_node_ids},
             ),
@@ -268,10 +268,10 @@ def update_stock_levels(
 
     for node_id in feed_node_ids:
         node = _feed_node(node_id)
-        if not workflow_ctx.has_result(node):
+        if not workflow_context.has_result(node):
             missing.append(node_id)
             continue
-        match workflow_ctx.result_for(node):
+        match workflow_context.result_for(node):
             case Failed(_):
                 missing.append(node_id)
                 continue
@@ -290,7 +290,7 @@ def update_stock_levels(
     if not reporting:
         return Err(
             TaskError(
-                error_code=QUORUM_NOT_MET,
+                code=QUORUM_NOT_MET,
                 message='no supplier feed reached the aggregate',
                 data={'missing': missing},
             ),

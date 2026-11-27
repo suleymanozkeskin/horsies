@@ -89,7 +89,7 @@ class TestSpecConstructionRefusesALoneSurrogate:
         with pytest.raises(WorkflowValidationError) as raised:
             _ = app.workflow(
                 name='surrogate-task-node',
-                tasks=[TaskNode(fn=note, kwargs=kwargs)],
+                tasks=[TaskNode(function=note, kwargs=kwargs)],
                 definition_key=_key('task_node'),
             )
 
@@ -196,7 +196,7 @@ class TestValueThatHoldsItself:
         with pytest.raises(WorkflowValidationError) as raised:
             _ = app.workflow(
                 name='circular-task-node',
-                tasks=[TaskNode(fn=linked, kwargs={'x': node})],
+                tasks=[TaskNode(function=linked, kwargs={'x': node})],
                 definition_key=_key('circular_task_node'),
             )
 
@@ -252,7 +252,7 @@ class TestValueThatIsTooDeep:
         with pytest.raises(WorkflowValidationError) as raised:
             _ = app.workflow(
                 name='deep-task-node',
-                tasks=[TaskNode(fn=linked, kwargs={'x': node})],
+                tasks=[TaskNode(function=linked, kwargs={'x': node})],
                 definition_key=_key('deep_task_node'),
             )
 
@@ -277,7 +277,7 @@ class TestValuePastTheDepthBound:
         with pytest.raises(WorkflowValidationError) as raised:
             _ = app.workflow(
                 name='cycle-task-node',
-                tasks=[TaskNode(fn=holds_json, kwargs={'x': value})],
+                tasks=[TaskNode(function=holds_json, kwargs={'x': value})],
                 definition_key=_key('cycle_task_node'),
             )
 

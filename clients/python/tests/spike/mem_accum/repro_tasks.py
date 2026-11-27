@@ -22,17 +22,17 @@ from tests.spike.mem_accum.repro_app import app
 _RETAINED: list[bytearray] = []
 
 
-@app.task(task_name='mem_healthcheck')
+@app.task(name='mem_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='mem_noop')
+@app.task(name='mem_noop')
 def noop_task() -> Result[int, TaskError]:
     return Ok(os.getpid())
 
 
-@app.task(task_name='mem_alloc')
+@app.task(name='mem_alloc')
 def alloc_task(*, mb: int) -> Result[int, TaskError]:
     """Allocate `mb` MB transiently and free it before returning."""
     buf = bytearray(mb * 1024 * 1024)
@@ -42,7 +42,7 @@ def alloc_task(*, mb: int) -> Result[int, TaskError]:
     return Ok(os.getpid())
 
 
-@app.task(task_name='mem_leaky')
+@app.task(name='mem_leaky')
 def leaky_task(*, mb: int) -> Result[int, TaskError]:
     """Retain `mb` MB so child RSS ratchets up across calls."""
     _RETAINED.append(bytearray(mb * 1024 * 1024))

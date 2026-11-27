@@ -10,7 +10,7 @@ tags: [scheduling, patterns, interval, cron]
 
 | Pattern | Use Case |
 | ------- | -------- |
-| `IntervalSchedule` | Every N seconds/minutes/hours/days from scheduler start |
+| `IntervalSchedule` | Every fixed length of time from scheduler start |
 | `HourlySchedule` | Every hour at specific minute |
 | `DailySchedule` | Every day at specific time |
 | `WeeklySchedule` | Specific days at specific time |
@@ -22,25 +22,37 @@ tags: [scheduling, patterns, interval, cron]
 Run repeatedly at a fixed interval.
 
 ```python
+from datetime import timedelta
+
 from horsies.core.models.schedule import IntervalSchedule
 
 # Every 30 seconds
-IntervalSchedule(seconds=30)
+IntervalSchedule(every=timedelta(seconds=30))
 
 # Every 5 minutes
-IntervalSchedule(minutes=5)
+IntervalSchedule(every=timedelta(minutes=5))
 
 # Every 2 hours
-IntervalSchedule(hours=2)
+IntervalSchedule(every=timedelta(hours=2))
 
 # Every day
-IntervalSchedule(days=1)
+IntervalSchedule(every=timedelta(days=1))
 
-# Combined: every 1 hour 30 minutes
-IntervalSchedule(hours=1, minutes=30)
+# Every 1 hour 30 minutes
+IntervalSchedule(every=timedelta(hours=1, minutes=30))
 ```
 
-At least one time unit must be specified. Values are added together.
+| Field | Range | Description |
+| ----- | ----- | ----------- |
+| `every` | 1 second to 365 days | Length of the interval, a `timedelta` in whole seconds |
+
+The pattern refuses three kinds of `every` at construction with `ConfigurationError` (`HRS-205`, `CONFIG_INVALID_SCHEDULE`):
+
+- A length with microseconds, for example `timedelta(seconds=1.5)`. Schedules fire at whole seconds.
+- A length of zero or less.
+- A length above 365 days.
+
+The scheduler manifest holds `every` as ISO 8601 duration text with days, hours, minutes and seconds only, the largest unit first: `PT30S`, `PT1M30S`, `P1DT2H`. `pattern.model_dump(mode='json')` gives `{'kind': 'interval', 'every': 'PT30S'}`.
 
 ## HourlySchedule
 
@@ -96,13 +108,13 @@ from horsies.core.models.schedule import WeeklySchedule, Weekday
 
 # Monday and Friday at 9 AM
 WeeklySchedule(
-    days=[Weekday.MONDAY, Weekday.FRIDAY],
+    weekdays=[Weekday.MONDAY, Weekday.FRIDAY],
     time=time(9, 0, 0),
 )
 
 # Every weekday at 8 AM
 WeeklySchedule(
-    days=[
+    weekdays=[
         Weekday.MONDAY,
         Weekday.TUESDAY,
         Weekday.WEDNESDAY,
@@ -114,10 +126,12 @@ WeeklySchedule(
 
 # Weekends at noon
 WeeklySchedule(
-    days=[Weekday.SATURDAY, Weekday.SUNDAY],
+    weekdays=[Weekday.SATURDAY, Weekday.SUNDAY],
     time=time(12, 0, 0),
 )
 ```
+
+`weekdays` holds at least one day, and each day one time.
 
 Weekday values:
 
@@ -139,19 +153,19 @@ from datetime import time
 from horsies.core.models.schedule import MonthlySchedule
 
 # 1st of month at midnight
-MonthlySchedule(day=1, time=time(0, 0, 0))
+MonthlySchedule(day_of_month=1, time=time(0, 0, 0))
 
 # 15th of month at noon
-MonthlySchedule(day=15, time=time(12, 0, 0))
+MonthlySchedule(day_of_month=15, time=time(12, 0, 0))
 
 # Last valid day handling
-MonthlySchedule(day=31, time=time(23, 59, 0))
+MonthlySchedule(day_of_month=31, time=time(23, 59, 0))
 # Months with fewer than 31 days are skipped (e.g. February, April)
 ```
 
 | Field | Range | Description |
 | ----- | ----- | ----------- |
-| `day` | 1-31 | Day of month |
+| `day_of_month` | 1-31 | Day of month |
 | `time` | time | Time of day |
 
 ## Time of Day
@@ -222,7 +236,7 @@ Enum terms (`month`, day-of-week), parameterized by `Month` or `Weekday`:
 
 ### Wall-clock alignment and staggering
 
-This is what `CronSchedule` provides that `IntervalSchedule` cannot. `IntervalSchedule(hours=4)`
+This is what `CronSchedule` provides that `IntervalSchedule` cannot. `IntervalSchedule(every=timedelta(hours=4))`
 runs every 4 hours measured from scheduler start, so it drifts and cannot stagger.
 `CronSchedule` aligns to the clock and lets a minute offset spread load:
 
@@ -406,7 +420,7 @@ run matters.
 
 <!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
-from datetime import time
+from datetime import time, timedelta
 from horsies.core.models.schedule import (
     ScheduleConfig,
     TaskSchedule,
@@ -424,7 +438,7 @@ config = AppConfig(
             TaskSchedule(
                 name="heartbeat",
                 task_name="send_heartbeat",
-                pattern=IntervalSchedule(seconds=30),
+                pattern=IntervalSchedule(every=timedelta(seconds=30)),
             ),
             # Daily cleanup at 3 AM UTC
             TaskSchedule(
@@ -438,7 +452,7 @@ config = AppConfig(
                 name="weekly-report",
                 task_name="generate_weekly_report",
                 pattern=WeeklySchedule(
-                    days=[Weekday.MONDAY],
+                    weekdays=[Weekday.MONDAY],
                     time=time(9, 0, 0),
                 ),
                 timezone="America/New_York",
@@ -457,7 +471,7 @@ common cases the calendar patterns are shortest; for full cron expressivity use
 | Cron | Horsies |
 | ---- | ------- |
 | `0 3 * * *` | `DailySchedule(time=time(3, 0, 0))` |
-| `0 9 * * 1` | `WeeklySchedule(days=[Weekday.MONDAY], time=time(9, 0))` |
+| `0 9 * * 1` | `WeeklySchedule(weekdays=[Weekday.MONDAY], time=time(9, 0))` |
 | `15 */4 * * *` | `CronSchedule(minute=[CronValues(values=[15])], hour=[CronStep(step=4)], month=[CronEvery()], day=EveryDay())` |
 
 Benefits:

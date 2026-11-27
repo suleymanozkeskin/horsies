@@ -99,7 +99,7 @@ _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 class TaskFacts:
     """The facts of one registered task that the worker manifest carries:
     its execution class and the error codes that it declares, in the order
-    of the declaration (`task_error_codes`, which the decorator checked)."""
+    of the declaration (`error_codes`, which the decorator checked)."""
 
     execution: Execution
     error_codes: tuple[str, ...]

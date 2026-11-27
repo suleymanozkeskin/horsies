@@ -114,7 +114,7 @@ impl TelemetryOn {
         };
         let _emitted = self.emit(|| ChildStarted {
             at: Utc::now(),
-            child_kind: kind,
+            child_execution: kind,
             slot,
             child_pid,
             boot_duration,
@@ -134,7 +134,7 @@ impl TelemetryOn {
         };
         let _emitted = self.emit(|| ChildReplaced {
             at: Utc::now(),
-            child_kind: kind,
+            child_execution: kind,
             slot,
             child_pid,
             reason,
@@ -147,7 +147,7 @@ impl TelemetryOn {
         };
         let _emitted = self.emit(|| SlotDown {
             at: Utc::now(),
-            child_kind: kind,
+            child_execution: kind,
             slot,
             cause,
         });
@@ -159,7 +159,7 @@ impl TelemetryOn {
         };
         let _emitted = self.emit(|| SlotRecovered {
             at: Utc::now(),
-            child_kind: kind,
+            child_execution: kind,
             slot,
         });
     }

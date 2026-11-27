@@ -38,13 +38,13 @@ def _make_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(basic_tasks.healthcheck.send())
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
 
 async def _value(handle: TaskHandle[Any]) -> Any:
-    result = await asyncio.to_thread(handle.get, timeout_ms=RESULT_TIMEOUT_MS)
+    result = await asyncio.to_thread(handle.get, wait_ms=RESULT_TIMEOUT_MS)
     return succeeded_value(result)
 
 

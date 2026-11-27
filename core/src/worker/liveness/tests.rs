@@ -25,7 +25,7 @@ use super::*;
 use crate::broker::core_rows::StatementLog;
 use crate::broker::pools::core_pool_for_test_url;
 use crate::db::{ConnectError, ConnectFailure, CorePool, MaskedUrl, DEFAULT_SOCKET_SETTINGS};
-use crate::events::{Event, RecoveryAction};
+use crate::events::{AnyEvent, RecoveryAction};
 use crate::telemetry::worker::WorkerTelemetry;
 use crate::test_support::migrated_database_url;
 use crate::test_support::migrated_pool;
@@ -603,13 +603,13 @@ async fn told_pass(
 /// The recovery events of `task_ids` in `events`: the task id, the action,
 /// the task name and the queue of each, sorted by task id.
 fn recoveries_of(
-    events: Vec<Event>,
+    events: Vec<AnyEvent>,
     task_ids: &[Uuid],
 ) -> Vec<(Uuid, RecoveryAction, String, String)> {
     let mut told: Vec<(Uuid, RecoveryAction, String, String)> = events
         .into_iter()
         .filter_map(|event| match event {
-            Event::TaskRecovered(recovered) if task_ids.contains(&recovered.task_id) => Some((
+            AnyEvent::TaskRecovered(recovered) if task_ids.contains(&recovered.task_id) => Some((
                 recovered.task_id,
                 recovered.action,
                 recovered.task_name.as_str().to_owned(),

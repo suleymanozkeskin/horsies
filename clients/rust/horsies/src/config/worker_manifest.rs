@@ -237,7 +237,7 @@ mod tests {
 
     use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMeta};
     use horsies_core::worker_manifest::parse_worker_manifest;
-    use horsies_core::{CancelGraceMs, RegisteredTask, TaskOptions, TaskResult};
+    use horsies_core::{RegisteredTask, TaskOptions, TaskResult, DEFAULT_CANCEL_GRACE_MS};
 
     use super::*;
     use crate::{
@@ -262,14 +262,14 @@ mod tests {
             None => plain,
             Some(execution) => plain.with_task_options(TaskOptions {
                 task_name: "task".to_owned(),
-                queue_name: None,
+                queue: None,
                 good_until: None,
-                auto_retry_for: None,
+                retry_for: None,
                 retry_policy: None,
                 timeout_ms: Some(5_000),
                 execution,
                 cancel_grace_ms: match execution {
-                    Execution::SharedAsync => Some(CancelGraceMs::DEFAULT),
+                    Execution::SharedAsync => Some(DEFAULT_CANCEL_GRACE_MS),
                     Execution::Isolated | Execution::SharedThread => None,
                 },
             }),

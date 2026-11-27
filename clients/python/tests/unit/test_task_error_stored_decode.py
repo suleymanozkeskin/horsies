@@ -8,7 +8,7 @@ refusal or drops its cause.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,7 +17,7 @@ from pydantic import SecretStr, ValidationError
 from horsies.core.app import Horsies
 from horsies.core.brokers.result_types import (
     DatabaseInvalidJsonPayload,
-    RawResultRecord,
+    StoredResult,
 )
 from horsies.core.codec.error_payload import FALLBACK_ERROR_JSON
 from horsies.core.codec.json_io import dumps_json, loads_json
@@ -33,6 +33,7 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
     OperationalCode,
+    OutcomeCode,
     SubWorkflowFailure,
     TaskError,
     TaskInfo,
@@ -40,11 +41,10 @@ from horsies.core.models.tasks import (
 from horsies.core.models.outcome import (
     Failed,
     ReadResult,
-    ResultDeserializationError,
+    ReadResultDeserializationError,
     Succeeded,
     TaskOutcome,
 )
-from horsies.core.models.workflow.context import SubWorkflowSummary
 from horsies.core.models.workflow.enums import WorkflowStatus
 from horsies.core.models.workflow.handle import (
     _decode_per_task_envelope,  # pyright: ignore[reportPrivateUsage]
@@ -63,11 +63,17 @@ _DECLARED: dict[str, Json] = {'error_code': 'MY_CODE', 'message': 'm'}
 _NOT_A_TASK_ERROR: list[tuple[dict[str, Json], str]] = [
     ({'nope': 1}, 'nope'),
     ({**_DECLARED, 'nope': 1}, 'nope'),
-    ({}, 'error_code'),
-    ({'message': 'm'}, 'error_code'),
-    ({'error_code': None, 'message': 'm', 'data': None, 'exception': None}, 'error_code'),
+    ({}, 'code: Field required'),
+    ({'message': 'm'}, 'code: Field required'),
+    (
+        {'error_code': None, 'message': 'm', 'data': None, 'exception': None},
+        'code must not be null',
+    ),
 ]
 """An err slot that does not parse, with a word of the cause that it gives."""
+
+_STORED_KEYS = ('exception', 'error_code', 'data', 'message')
+"""The keys of a stored plain task error, in the order of the core's writer."""
 
 _NOT_A_TASK_ERROR_IDS = [
     'only-an-unknown-key',
@@ -126,10 +132,10 @@ def _make_app() -> Horsies:
 
 def _assert_stored_data_error(read: ReadResult[Any, TaskError], cause: str) -> None:
     match read:
-        case Err(err_value=ResultDeserializationError(message=message)):
+        case Err(err_value=ReadResultDeserializationError(message=message)):
             assert cause in message
         case _:
-            pytest.fail(f'expected ResultDeserializationError, got {read!r}')
+            pytest.fail(f'expected ReadResultDeserializationError, got {read!r}')
 
 
 def _failed_task_error(read: Result[TaskOutcome[Any, TaskError], object]) -> TaskError:
@@ -142,23 +148,26 @@ def _failed_task_error(read: Result[TaskOutcome[Any, TaskError], object]) -> Tas
 
 
 def _assert_code_without_message(error: TaskError) -> None:
-    assert error.error_code == 'RATE_LIMITED'
+    assert error.code == 'RATE_LIMITED'
     assert error.message is None
 
 
 class TestRequiredFields:
-    """``error_code`` and ``message`` are required, and the other two are not."""
+    """The code is required, and the other three fields are not.
+
+    The stored key of the code is ``error_code``, and the field is ``code``.
+    """
 
     def test_a_null_code_gives_one_cause(self) -> None:
         with pytest.raises(ValueValidationError) as refusal:
             decode_task_error({'error_code': None, 'message': 'm'})
-        assert 'error_code must not be null' in str(refusal.value)
+        assert 'code must not be null' in str(refusal.value)
         assert 'UNHANDLED_EXCEPTION' not in str(refusal.value)
 
     def test_an_empty_value_names_the_code_only(self) -> None:
         with pytest.raises(ValueValidationError) as refusal:
             decode_task_error({})
-        assert 'error_code: Field required' in str(refusal.value)
+        assert 'code: Field required' in str(refusal.value)
         assert 'message' not in str(refusal.value)
 
     def test_a_bad_code_shape_does_not_offer_null(self) -> None:
@@ -172,22 +181,22 @@ class TestRequiredFields:
         assert decoded.data is None
         assert decoded.exception is None
 
-    def test_a_user_code_stays_a_free_string(self) -> None:
+    def test_a_custom_code_stays_a_free_string(self) -> None:
         decoded = decode_task_error({'error_code': 'any text at all', 'message': 'm'})
-        assert decoded.error_code == 'any text at all'
-        assert type(decoded.error_code) is str
+        assert decoded.code == 'any text at all'
+        assert type(decoded.code) is str
 
     def test_the_constructor_requires_a_code(self) -> None:
-        with pytest.raises(ValidationError, match='error_code'):
+        with pytest.raises(ValidationError, match='code'):
             TaskError(message='m')  # pyright: ignore[reportCallIssue]
 
     def test_a_code_only_error_builds(self) -> None:
-        error = TaskError(error_code='MY_CODE')
-        assert error.error_code == 'MY_CODE'
+        error = TaskError(code='MY_CODE')
+        assert error.code == 'MY_CODE'
         assert error.message is None
 
     def test_a_code_only_error_writes_a_null_message(self) -> None:
-        encoded = encode_task_error(TaskError(error_code='MY_CODE'))
+        encoded = encode_task_error(TaskError(code='MY_CODE'))
         assert isinstance(encoded, dict)
         assert encoded['message'] is None
 
@@ -202,16 +211,16 @@ class TestRequiredFields:
 
         error = builds_no_code().unwrap_err()
 
-        assert error.error_code is OperationalCode.UNHANDLED_EXCEPTION
+        assert error.code is OperationalCode.UNHANDLED_EXCEPTION
         assert error.message is not None
-        assert 'error_code: Field required' in error.message
+        assert 'code: Field required' in error.message
 
     def test_a_task_that_builds_no_message_keeps_its_code(self) -> None:
         app = _make_app()
 
         @app.task('builds_no_message')
         def builds_no_message() -> Result[int, TaskError]:
-            return Err(TaskError(error_code='RATE_LIMITED'))
+            return Err(TaskError(code='RATE_LIMITED'))
 
         _assert_code_without_message(builds_no_message().unwrap_err())
 
@@ -226,7 +235,7 @@ class TestErrorWithNoMessage:
     @_NO_MESSAGE
     def test_the_decode_keeps_the_code(self, err_slot: dict[str, Json]) -> None:
         decoded = decode_task_error(err_slot)
-        assert decoded.error_code == 'RATE_LIMITED'
+        assert decoded.code == 'RATE_LIMITED'
         assert decoded.message is None
 
     @_NO_MESSAGE
@@ -237,7 +246,7 @@ class TestErrorWithNoMessage:
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(
             return_value=Ok(
-                RawResultRecord(
+                StoredResult(
                     task_id='task-1',
                     task_name='t',
                     status=TaskStatus.FAILED,
@@ -262,7 +271,7 @@ class TestErrorWithNoMessage:
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(
             return_value=Ok(
-                RawResultRecord(
+                StoredResult(
                     task_id='task-1',
                     task_name='t',
                     status=TaskStatus.FAILED,
@@ -328,7 +337,7 @@ class TestDecodeTaskError:
             'exception': None,
         })
         assert type(decoded) is TaskError
-        assert decoded.error_code == 'MY_CODE'
+        assert decoded.code == 'MY_CODE'
         assert decoded.message == 'm'
         assert decoded.data == {'k': 1}
 
@@ -337,7 +346,7 @@ class TestDecodeTaskError:
             'error_code': {'__builtin_task_code__': 'DATABASE_ERROR'},
             'message': 'm',
         })
-        assert decoded.error_code is OperationalCode.DATABASE_ERROR
+        assert decoded.code is OperationalCode.DATABASE_ERROR
 
     def test_the_discriminator_key_is_refused_as_a_field_of_the_error(self) -> None:
         with pytest.raises(ValueValidationError, match='extra_forbidden'):
@@ -366,41 +375,37 @@ class TestDecodeTaskError:
         with pytest.raises(ValueValidationError, match='sub_workflow_summary'):
             decode_task_error({**_DECLARED, 'sub_workflow_summary': _SUMMARY})
 
-    def test_the_engine_dump_of_a_subworkflow_error_decodes(self) -> None:
-        """The engine stores this dump in a parent node, not ``encode_task_error``."""
-        error = SubWorkflowFailure(
-            error_code='MY_CODE',
-            message='m',
-            sub_workflow_id='wf-child',
-            sub_workflow_summary=SubWorkflowSummary(
-                status=WorkflowStatus.FAILED,
-                output=None,
-                total_tasks=1,
-                completed_tasks=0,
-                failed_tasks=1,
-                skipped_tasks=0,
-                error_summary=None,
-            ),
-        )
-        decoded = decode_task_error(cast(Json, error.model_dump(mode='json')))
+    def test_the_engine_form_of_a_subworkflow_error_decodes(self) -> None:
+        """The core engine stores a sub-workflow error in a parent node with
+        the key ``error_code`` and the two sub-workflow fields after the four
+        keys of every error."""
+        decoded = decode_task_error({
+            'exception': None,
+            'error_code': 'MY_CODE',
+            'data': None,
+            'message': 'm',
+            'sub_workflow_id': 'wf-child',
+            'sub_workflow_summary': _SUMMARY,
+        })
         assert isinstance(decoded, SubWorkflowFailure)
+        assert decoded.code == 'MY_CODE'
 
     @pytest.mark.parametrize(
         'error',
         [
-            TaskError(error_code='MY_CODE', message='m'),
+            TaskError(code='MY_CODE', message='m'),
             TaskError(
-                error_code=OperationalCode.DATABASE_ERROR,
+                code=OperationalCode.DATABASE_ERROR,
                 message='m',
                 data={'k': 1},
             ),
         ],
-        ids=['user-code', 'built-in-code'],
+        ids=['custom-code', 'built-in-code'],
     )
     def test_each_key_that_the_encoder_writes_decodes(self, error: TaskError) -> None:
         encoded = encode_task_error(error)
         assert isinstance(encoded, dict)
-        assert set(encoded) == set(TaskError.model_fields)
+        assert list(encoded) == list(_STORED_KEYS)
         assert decode_task_error(encoded) == error
 
     def test_a_subclass_with_its_own_field_is_refused(self) -> None:
@@ -408,7 +413,7 @@ class TestDecodeTaskError:
             retry_hint: int
 
         encoded = encode_task_error(
-            WithOwnField(error_code='MY_CODE', message='m', retry_hint=1),
+            WithOwnField(code='MY_CODE', message='m', retry_hint=1),
         )
 
         with pytest.raises(ValueValidationError, match='retry_hint'):
@@ -423,7 +428,7 @@ class TestDecodeTaskError:
 
     def test_the_constructor_refuses_an_unknown_key(self) -> None:
         with pytest.raises(ValidationError, match='extra_forbidden'):
-            TaskError.model_validate({**_DECLARED, 'nope': 1})
+            TaskError.model_validate({'code': 'MY_CODE', 'message': 'm', 'nope': 1})
 
     def test_the_fallback_error_json_decodes(self) -> None:
         decoded = decode_task_result(
@@ -431,10 +436,64 @@ class TestDecodeTaskError:
         )
         match decoded:
             case Failed(error=error):
-                assert error.error_code is OperationalCode.WORKER_SERIALIZATION_ERROR
+                assert error.code is OperationalCode.WORKER_SERIALIZATION_ERROR
                 assert error.message == 'secondary serialization failure'
             case Succeeded():
                 pytest.fail(f'expected a failed outcome, got {decoded!r}')
+
+
+class TestStoredCodeKey:
+    """The field ``code`` is stored under the key ``error_code``, the field
+    name of the core's ``TaskError``."""
+
+    def test_the_encode_writes_error_code_at_the_place_of_the_field(self) -> None:
+        encoded = encode_task_error(
+            TaskError(code=OperationalCode.DATABASE_ERROR, message='m'),
+        )
+        assert isinstance(encoded, dict)
+        assert list(encoded) == list(_STORED_KEYS)
+        assert encoded['error_code'] == {'__builtin_task_code__': 'DATABASE_ERROR'}
+        assert 'code' not in encoded
+
+    def test_the_encode_of_a_subworkflow_error_keeps_the_key_order(self) -> None:
+        stored: dict[str, Json] = {
+            'exception': None,
+            'error_code': 'MY_CODE',
+            'data': None,
+            'message': 'm',
+            'sub_workflow_id': 'wf-child',
+            'sub_workflow_summary': _SUMMARY,
+        }
+        encoded = encode_task_error(decode_task_error(stored))
+        assert isinstance(encoded, dict)
+        assert list(encoded) == list(stored)
+
+    def test_the_decode_reads_error_code_as_the_code(self) -> None:
+        decoded = decode_task_error({
+            'exception': None,
+            'error_code': {'__builtin_task_code__': 'TASK_TIMEOUT'},
+            'data': None,
+            'message': 'm',
+        })
+        assert decoded.code is OutcomeCode.TASK_TIMEOUT
+
+    @pytest.mark.parametrize(
+        'err_slot',
+        [
+            {'code': 'MY_CODE', 'message': 'm'},
+            {'error_code': 'MY_CODE', 'code': 'MY_CODE', 'message': 'm'},
+        ],
+        ids=['only-the-field-name', 'field-name-beside-the-stored-key'],
+    )
+    def test_a_stored_key_code_is_refused(self, err_slot: dict[str, Json]) -> None:
+        with pytest.raises(ValueValidationError) as refusal:
+            decode_task_error(err_slot)
+        assert "unexpected key 'code'" in str(refusal.value)
+        assert "'error_code'" in str(refusal.value)
+
+    def test_the_constructor_refuses_the_stored_key(self) -> None:
+        with pytest.raises(ValidationError, match='extra_forbidden'):
+            TaskError(error_code='MY_CODE')  # pyright: ignore[reportCallIssue]
 
 
 class TestClientReaders:
@@ -448,7 +507,7 @@ class TestClientReaders:
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(
             return_value=Ok(
-                RawResultRecord(
+                StoredResult(
                     task_id='task-1',
                     task_name='t',
                     status=TaskStatus.FAILED,
@@ -473,7 +532,7 @@ class TestClientReaders:
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(
             return_value=Ok(
-                RawResultRecord(
+                StoredResult(
                     task_id='task-1',
                     task_name='t',
                     status=TaskStatus.FAILED,
@@ -537,7 +596,7 @@ class TestClientReaders:
             case Err(err_value=unreadable):
                 assert cause in unreadable.message
                 assert (
-                    unreadable.as_outcome().error.error_code
+                    unreadable.as_outcome().error.code
                     is OperationalCode.RESULT_DESERIALIZATION_ERROR
                 )
             case Ok():

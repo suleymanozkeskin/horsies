@@ -61,7 +61,7 @@ class TestWorkflowBuilderRegistration:
 
         builders = app.get_workflow_builders()
         assert len(builders) == 1
-        assert builders[0].fn is my_builder
+        assert builders[0].function is my_builder
 
     def test_decorator_stamps_builder_attr(self) -> None:
         """Decorated function carries the sentinel attribute."""
@@ -697,7 +697,7 @@ class TestCheckIntegration:
             {
                 '__module__': mod_name,
                 'name': 'missing_definition_key',
-                'step': TaskNode(fn=mock.MagicMock(task_name='task_a')),
+                'step': TaskNode(function=mock.MagicMock(task_name='task_a')),
             },
         )
         setattr(module, 'MissingDefinitionKeyWorkflow', missing_def)
@@ -718,7 +718,7 @@ class TestCheckIntegration:
         def missing_key_builder() -> WorkflowSpec[Any]:
             return WorkflowSpec(
                 name='missing_key_builder',
-                tasks=[TaskNode(fn=mock.MagicMock(task_name='task_a'))],
+                tasks=[TaskNode(function=mock.MagicMock(task_name='task_a'))],
             )
 
         errors = app.check(live=False).refusals
@@ -759,8 +759,8 @@ class TestNodeBindingInCheck:
                 name='valid_builder',
                 tasks=[
                     TaskNode(
-                        fn=mock.MagicMock(
-                            task_name='scrape', task_queue_name='scraping',
+                        function=mock.MagicMock(
+                            task_name='scrape', queue='scraping',
                         ),
                     ),
                 ],
@@ -779,8 +779,8 @@ class TestNodeBindingInCheck:
                 name='invalid_builder',
                 tasks=[
                     TaskNode(
-                        fn=mock.MagicMock(
-                            task_name='scrape', task_queue_name='nonexistent',
+                        function=mock.MagicMock(
+                            task_name='scrape', queue='nonexistent',
                         ),
                     ),
                 ],
@@ -802,7 +802,7 @@ def _broken(value: int) -> int:
 
 def _mock_fn(queue: str) -> Any:
     """A mock task fn carrying a queue name, for TaskNode binding tests."""
-    return mock.MagicMock(task_name=f'task_{queue}', task_queue_name=queue)
+    return mock.MagicMock(task_name=f'task_{queue}', queue=queue)
 
 
 class TestRecursiveSubworkflowBindingInCheck:
@@ -824,7 +824,7 @@ class TestRecursiveSubworkflowBindingInCheck:
 
             @classmethod
             def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
-                bad = TaskNode(fn=_mock_fn('ghost'), node_id='bad')
+                bad = TaskNode(function=_mock_fn('ghost'), node_id='bad')
                 return WorkflowSpec(name=cls.name, tasks=[bad], output=bad)
 
         @app.workflow_builder()
@@ -849,7 +849,7 @@ class TestRecursiveSubworkflowBindingInCheck:
 
             @classmethod
             def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
-                ok = TaskNode(fn=_mock_fn('scraping'), node_id='ok')
+                ok = TaskNode(function=_mock_fn('scraping'), node_id='ok')
                 return WorkflowSpec(name=cls.name, tasks=[ok], output=ok)
 
         @app.workflow_builder()
@@ -872,7 +872,7 @@ class TestRecursiveSubworkflowBindingInCheck:
             _ = values, shape
 
         leaf_fn = _mock_fn('scraping')
-        leaf_fn._original_fn = take
+        leaf_fn._original_function = take
 
         class ChildContainers(WorkflowDefinition[Any]):
             name = 'child_containers'
@@ -888,7 +888,7 @@ class TestRecursiveSubworkflowBindingInCheck:
             ) -> WorkflowSpec[Any]:
                 seen.append((values, shape, label))
                 leaf = TaskNode(
-                    fn=leaf_fn,
+                    function=leaf_fn,
                     node_id='leaf',
                     kwargs={'values': values, 'shape': shape},
                 )
@@ -1016,7 +1016,7 @@ class TestRecursiveSubworkflowBindingInCheck:
             @classmethod
             def build_with(cls, app: Horsies, n: int) -> WorkflowSpec[Any]:
                 seen.append(n)
-                leaf = TaskNode(fn=_mock_fn('scraping'), node_id='leaf')
+                leaf = TaskNode(function=_mock_fn('scraping'), node_id='leaf')
                 return WorkflowSpec(name=cls.name, tasks=[leaf], output=leaf)
 
         @app.workflow_builder()
@@ -1049,14 +1049,14 @@ class TestRecursiveSubworkflowBindingInCheck:
             def build_with(
                 cls, app: Horsies, v: TaskOutcome[int, TaskError],
             ) -> WorkflowSpec[Any]:
-                bad = TaskNode(fn=_mock_fn('ghost'), node_id='bad')
+                bad = TaskNode(function=_mock_fn('ghost'), node_id='bad')
                 return WorkflowSpec(name=cls.name, tasks=[bad], output=bad)
 
         @app.workflow_builder()
         def parent_builder() -> WorkflowSpec[Any]:
             source_fn = _mock_fn('scraping')
             source_fn.task_ok_type = int
-            src = TaskNode(fn=source_fn, node_id='src')
+            src = TaskNode(function=source_fn, node_id='src')
             sub = SubWorkflowNode(
                 workflow_def=ChildRuntime, args_from={'v': src}, waits_for=[src],
             )
@@ -1077,7 +1077,7 @@ class TestRecursiveSubworkflowBindingInCheck:
 
             @classmethod
             def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
-                t = TaskNode(fn=_mock_fn('scraping'), node_id='t')
+                t = TaskNode(function=_mock_fn('scraping'), node_id='t')
                 child = SubWorkflowNode(workflow_def=Recur, node_id='self')
                 return app.workflow(
                     cls.name, [t, child], definition_key=cls.definition_key,
@@ -1116,14 +1116,14 @@ class TestRecursiveSubworkflowBindingInCheck:
                 if depth == 0:
                     # Valid at depth 0; recurse into the SAME definition with
                     # different kwargs that bind an invalid queue at depth 1.
-                    t = TaskNode(fn=_mock_fn('scraping'), node_id='t0')
+                    t = TaskNode(function=_mock_fn('scraping'), node_id='t0')
                     deeper = SubWorkflowNode(
                         workflow_def=Recur, kwargs={'depth': 1}, node_id='deeper',
                     )
                     return app.workflow(
                         cls.name, [t, deeper], definition_key=cls.definition_key,
                     )
-                bad = TaskNode(fn=_mock_fn('ghost'), node_id='bad')
+                bad = TaskNode(function=_mock_fn('ghost'), node_id='bad')
                 return WorkflowSpec(
                     name=f'{cls.name}_d{depth}', tasks=[bad], output=bad,
                 )
@@ -1179,8 +1179,8 @@ class TestRecursiveSubworkflowBindingInCheck:
             @classmethod
             def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
                 # Two distinct invalid-queue nodes → collected together.
-                a = TaskNode(fn=_mock_fn('ghost1'), node_id='a')
-                b = TaskNode(fn=_mock_fn('ghost2'), node_id='b')
+                a = TaskNode(function=_mock_fn('ghost1'), node_id='a')
+                b = TaskNode(function=_mock_fn('ghost2'), node_id='b')
                 return app.workflow(
                     cls.name, [a, b], definition_key=cls.definition_key,
                 )

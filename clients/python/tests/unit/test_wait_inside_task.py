@@ -32,12 +32,12 @@ from horsies.core.brokers.result_types import (
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.outcome import (
-    InvalidInput,
     ReadError,
+    ReadInvalidInput,
     ReadResult,
+    ReadTaskNotFound,
+    ReadWaitInsideTask,
     Succeeded,
-    TaskNotFound,
-    WaitInsideTask,
 )
 from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow.handle import WorkflowHandle
@@ -101,32 +101,32 @@ def _workflow_handle(app: Horsies) -> WorkflowHandle[Any]:
     return WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=app.get_broker())
 
 
-def _task_get(app: Horsies, timeout_ms: int | None) -> ReadResult[Any, TaskError]:
-    return _handle(app).get(timeout_ms=timeout_ms)
+def _task_get(app: Horsies, wait_ms: int | None) -> ReadResult[Any, TaskError]:
+    return _handle(app).get(wait_ms=wait_ms)
 
 
-def _task_get_async(app: Horsies, timeout_ms: int | None) -> ReadResult[Any, TaskError]:
-    return asyncio.run(_handle(app).get_async(timeout_ms=timeout_ms))
+def _task_get_async(app: Horsies, wait_ms: int | None) -> ReadResult[Any, TaskError]:
+    return asyncio.run(_handle(app).get_async(wait_ms=wait_ms))
 
 
-def _app_get_result(app: Horsies, timeout_ms: int | None) -> ReadResult[Any, TaskError]:
-    return app.get_result(uuid.UUID(TASK_ID), timeout_ms)
+def _app_get_result(app: Horsies, wait_ms: int | None) -> ReadResult[Any, TaskError]:
+    return app.get_result(uuid.UUID(TASK_ID), wait_ms)
 
 
 def _app_get_result_async(
-    app: Horsies, timeout_ms: int | None,
+    app: Horsies, wait_ms: int | None,
 ) -> ReadResult[Any, TaskError]:
-    return asyncio.run(app.get_result_async(uuid.UUID(TASK_ID), timeout_ms))
+    return asyncio.run(app.get_result_async(uuid.UUID(TASK_ID), wait_ms))
 
 
-def _workflow_get(app: Horsies, timeout_ms: int | None) -> ReadResult[Any, TaskError]:
-    return _workflow_handle(app).get(timeout_ms=timeout_ms)
+def _workflow_get(app: Horsies, wait_ms: int | None) -> ReadResult[Any, TaskError]:
+    return _workflow_handle(app).get(wait_ms=wait_ms)
 
 
 def _workflow_get_async(
-    app: Horsies, timeout_ms: int | None,
+    app: Horsies, wait_ms: int | None,
 ) -> ReadResult[Any, TaskError]:
-    return asyncio.run(_workflow_handle(app).get_async(timeout_ms=timeout_ms))
+    return asyncio.run(_workflow_handle(app).get_async(wait_ms=wait_ms))
 
 
 WAITS: dict[str, Callable[[Horsies, int | None], ReadResult[Any, TaskError]]] = {
@@ -140,24 +140,24 @@ WAITS: dict[str, Callable[[Horsies, int | None], ReadResult[Any, TaskError]]] = 
 SYNC_WAITS = ('TaskHandle.get', 'app.get_result', 'WorkflowHandle.get')
 
 
-def _app_get_raw_result(app: Horsies, timeout_ms: int | None) -> DatabaseResult[Any]:
-    return app.get_raw_result(TASK_ID, timeout_ms)
+def _app_get_raw_result(app: Horsies, wait_ms: int | None) -> DatabaseResult[Any]:
+    return app.get_raw_result(TASK_ID, wait_ms)
 
 
 def _app_get_raw_result_async(
-    app: Horsies, timeout_ms: int | None,
+    app: Horsies, wait_ms: int | None,
 ) -> DatabaseResult[Any]:
-    return asyncio.run(app.get_raw_result_async(TASK_ID, timeout_ms))
+    return asyncio.run(app.get_raw_result_async(TASK_ID, wait_ms))
 
 
-def _broker_raw_record(app: Horsies, timeout_ms: int | None) -> DatabaseResult[Any]:
-    return app.get_broker().get_raw_result_record(TASK_ID, timeout_ms)
+def _broker_raw_record(app: Horsies, wait_ms: int | None) -> DatabaseResult[Any]:
+    return app.get_broker().get_raw_result_record(TASK_ID, wait_ms)
 
 
 def _broker_raw_record_async(
-    app: Horsies, timeout_ms: int | None,
+    app: Horsies, wait_ms: int | None,
 ) -> DatabaseResult[Any]:
-    return asyncio.run(app.get_broker().get_raw_result_record_async(TASK_ID, timeout_ms))
+    return asyncio.run(app.get_broker().get_raw_result_record_async(TASK_ID, wait_ms))
 
 
 RAW_WAITS: dict[str, Callable[[Horsies, int | None], DatabaseResult[Any]]] = {
@@ -202,7 +202,7 @@ def test_a_wait_in_a_task_process_returns_wait_inside_task_and_reads_nothing(
     result = WAITS[name](app, VALID_TIMEOUT_MS)
 
     error = _read_error(result)
-    assert isinstance(error, WaitInsideTask)
+    assert isinstance(error, ReadWaitInsideTask)
     assert 'workflow' in error.message
     _assert_nothing_ran(app.get_broker())
 
@@ -216,7 +216,7 @@ def test_a_refused_timeout_in_a_task_process_returns_invalid_input_first(
     """The wait limit is checked before the process role."""
     result = WAITS[name](app, REFUSED_TIMEOUT_MS)
 
-    assert isinstance(_read_error(result), InvalidInput)
+    assert isinstance(_read_error(result), ReadInvalidInput)
     _assert_nothing_ran(app.get_broker())
 
 
@@ -258,7 +258,7 @@ def test_a_sync_wait_inside_a_running_loop_of_a_task_process_is_a_wait_inside_ta
 
     result = asyncio.run(inside())
 
-    assert isinstance(_read_error(result), WaitInsideTask)
+    assert isinstance(_read_error(result), ReadWaitInsideTask)
 
 
 @pytest.mark.parametrize('name', SYNC_RAW_WAITS)
@@ -281,16 +281,16 @@ def test_the_refusal_is_not_cached_on_the_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     handle = _handle(app)
-    assert isinstance(_read_error(handle.get(timeout_ms=0)), WaitInsideTask)
+    assert isinstance(_read_error(handle.get(wait_ms=0)), ReadWaitInsideTask)
 
     monkeypatch.setattr(process_role_module, '_role', ProcessRole.RUNS_NO_TASK_BODIES)
     with patch.object(
         app.get_broker(), 'get_raw_result_record', return_value=Ok(None)
     ) as read:
-        outside = handle.get(timeout_ms=0)
+        outside = handle.get(wait_ms=0)
 
     read.assert_called_once()
-    assert isinstance(_read_error(outside), TaskNotFound)
+    assert isinstance(_read_error(outside), ReadTaskNotFound)
 
 
 @pytest.mark.usefixtures('task_process')
@@ -301,7 +301,7 @@ def test_a_handle_without_a_broker_returns_its_result_in_a_task_process(
     handle: TaskHandle[int] = TaskHandle(TASK_ID, app=app, broker_mode=False, ok_type=int)
     handle.set_immediate_result(Ok(7))
 
-    result = handle.get(timeout_ms=0)
+    result = handle.get(wait_ms=0)
 
     assert result == Ok(Succeeded(7))
     _assert_nothing_ran(app.get_broker())

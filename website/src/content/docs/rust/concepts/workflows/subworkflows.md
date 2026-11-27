@@ -52,7 +52,7 @@ impl WorkflowDefinition for RegionReport {
     ) -> Result<WorkflowSpec, HorsiesError> {
         builder.definition_key(Self::definition_key());
         let _fetched = builder.task(
-            fetch_report::node().set(fetch_report::params::region(), params.region)?,
+            fetch_report::node().set(fetch_report::fields::region(), params.region)?,
         )?;
         builder.build()
     }
@@ -130,7 +130,7 @@ Params given to a definition without params are refused with `HRS-022`. Params t
 - A field with `#[serde(skip)]` or `#[serde(skip_deserializing)]` gets no token.
 - A `#[serde(flatten)]` field is a compile error.
 
-The parameters of a task have their tokens in the task's own module: `task_name::params::<name>()`. See [Typed Node Builder](/horsies/rust/concepts/workflows/typed-node-builder/).
+The parameters of a task have their tokens in the task's own module: `task_name::fields::<name>()`. See [Typed Node Builder](/horsies/rust/concepts/workflows/typed-node-builder/).
 
 ## SubWorkflowNode
 
@@ -200,7 +200,7 @@ impl WorkflowDefinition for RegionFanOut {
             let _fetched = builder.task(
                 fetch_report::node()
                     .node_id(format!("fetch_{region}"))
-                    .set(fetch_report::params::region(), region)?,
+                    .set(fetch_report::fields::region(), region)?,
             )?;
         }
         builder.build()
@@ -268,8 +268,8 @@ The result of a sub-workflow node is the result of its child: the child's output
 | Read | Gives |
 |------|-------|
 | `arg_from(field, child_node)` | `TaskOutcome<T, E>` with `T` the child's output type |
-| `workflow_ctx.summary_for(&key)` | The `SubWorkflowSummary` of the ended child |
-| `workflow_ctx.output_for::<T>(&key)` | `Option<T>`: the child's output, `None` when the child stored none |
+| `workflow_context.summary_for(&key)` | The `SubWorkflowSummary` of the ended child |
+| `workflow_context.output_for::<T>(&key)` | `Option<T>`: the child's output, `None` when the child stored none |
 | `handle.tasks()` | `WorkflowNodeInfo` with `sub_workflow_id` and `sub_workflow_summary` |
 
 `SubWorkflowSummary`:

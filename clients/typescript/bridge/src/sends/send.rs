@@ -136,10 +136,7 @@ impl QueuePriorities {
                     priority: configured.priority,
                 })
                 .ok_or_else(|| {
-                    BoundaryRefusal::new(
-                        "options.queueName",
-                        "a custom queue of the accepted config",
-                    )
+                    BoundaryRefusal::new("options.queue", "a custom queue of the accepted config")
                 }),
         }
     }
@@ -322,7 +319,7 @@ impl SendRules {
         let deadline = facts.deadline.instant()?;
         let input_bytes = byte_count("inputBytes", facts.input_bytes)?;
         let task_name = options.task_name.as_str();
-        let queue = options.queue_name.as_deref().ok_or_else(|| {
+        let queue = options.queue.as_deref().ok_or_else(|| {
             BoundaryRefusal::new("options", "checked options that name the queue of the task")
         })?;
         let priority = self.queues.priority_of(queue)?;
@@ -747,9 +744,9 @@ mod tests {
     fn options() -> TaskOptions {
         TaskOptions {
             task_name: "report".to_owned(),
-            queue_name: Some("default".to_owned()),
+            queue: Some("default".to_owned()),
             good_until: None,
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: None,
             timeout_ms: None,
             execution: horsies_core::Execution::Isolated,
@@ -795,7 +792,7 @@ mod tests {
             }
         );
         let audit = TaskOptions {
-            queue_name: Some("audit".to_owned()),
+            queue: Some("audit".to_owned()),
             ..options()
         };
         let prepared = rules()
@@ -955,11 +952,11 @@ mod tests {
     fn a_send_on_a_custom_queue_takes_the_priority_of_the_core_config() {
         let rules = custom_rules();
         let billing = TaskOptions {
-            queue_name: Some("billing".to_owned()),
+            queue: Some("billing".to_owned()),
             ..options()
         };
         let bulk = TaskOptions {
-            queue_name: Some("bulk".to_owned()),
+            queue: Some("bulk".to_owned()),
             ..options()
         };
         assert_eq!(
@@ -976,7 +973,7 @@ mod tests {
     #[test]
     fn a_queue_that_the_custom_config_does_not_hold_is_a_boundary_refusal() {
         let unknown = TaskOptions {
-            queue_name: Some("unknown".to_owned()),
+            queue: Some("unknown".to_owned()),
             ..options()
         };
         let refused = custom_rules().prepared(
@@ -984,9 +981,9 @@ mod tests {
             &facts(RetentionChoice::Forever, 10.0),
             &unknown,
         );
-        assert!(matches!(refused, Err(refusal) if refusal.subject == "options.queueName"));
+        assert!(matches!(refused, Err(refusal) if refusal.subject == "options.queue"));
         let no_queue = TaskOptions {
-            queue_name: None,
+            queue: None,
             ..options()
         };
         let refused = rules().prepared(

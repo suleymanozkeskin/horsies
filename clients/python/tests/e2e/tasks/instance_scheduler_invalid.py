@@ -7,6 +7,7 @@ The scheduler should fail to start because the scheduled task doesn't exist.
 from __future__ import annotations
 
 import os
+from datetime import timedelta
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
@@ -31,7 +32,7 @@ schedule_config = ScheduleConfig(
         TaskSchedule(
             name='invalid_schedule_nonexistent_task',
             task_name='this_task_does_not_exist_anywhere',  # <-- Nonexistent!
-            pattern=IntervalSchedule(seconds=5),
+            pattern=IntervalSchedule(every=timedelta(seconds=5)),
             timezone='UTC',
         ),
     ],

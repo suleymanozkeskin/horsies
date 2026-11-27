@@ -46,7 +46,7 @@ const STEP_REFUSAL_KINDS: Readonly<Record<CallerStepRefusal["code"], CallerRerun
   CLASS_NOT_REGISTERED: "classNotRegistered",
   RETRY_CODE_NOT_DECLARED: "retryCodeNotDeclared",
   TASK_NOT_REGISTERED: "taskNotRegistered",
-  CALLER_KEY_REFUSED: "callerKeyRefused",
+  IDEMPOTENCY_KEY_REFUSED: "idempotencyKeyRefused",
   ID_MINT_REFUSED: "idMintRefused",
   CLIENT_FAMILY_MISMATCH: "clientFamilyMismatch",
   UNKNOWN_STORED_FAMILY: "unknownStoredFamily",
@@ -143,7 +143,7 @@ describe("app.rerunTaskIn errors", () => {
   test("each refusal of the steps writes nothing and keeps its fields", async () => {
     const refusals: CallerStepRefusal[] = [
       { code: "CLASS_NOT_REGISTERED", message: "unknown retention class", classKey: "standard_8d" },
-      { code: "CALLER_KEY_REFUSED", message: "rerun idempotency key failed" },
+      { code: "IDEMPOTENCY_KEY_REFUSED", message: "rerun idempotency key failed" },
       { code: "ID_MINT_REFUSED", message: "rerun identity mint failed" },
       { code: "CLIENT_FAMILY_MISMATCH", message: "rerun refused", stored: { kind: "notRecorded" } },
       { code: "UNKNOWN_STORED_FAMILY", message: "rerun refused: corrupt", stored: "GO" },

@@ -173,7 +173,7 @@ impl<F: Future> Future for CatchPanic<F> {
 /// the task, the panic text as message and repr, and the captured backtrace
 /// or an empty traceback. Pure.
 pub(super) fn panic_error(task_name: &str, module: TaskModule, record: PanicRecord) -> TaskError {
-    let mut error = TaskError::builtin(
+    let mut error = TaskError::built_in(
         OperationalCode::UnhandledException,
         format!(
             "Unhandled exception in task {task_name}: {PANIC_TYPE_NAME}: {}",

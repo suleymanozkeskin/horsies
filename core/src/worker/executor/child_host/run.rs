@@ -456,7 +456,7 @@ pub(super) fn refusal_end(task_name: &str, refusal: &StoredOptionsRefusal) -> Ru
             }),
         ),
     };
-    let mut error = TaskError::builtin(OperationalCode::WorkerSerializationError, reason.as_str());
+    let mut error = TaskError::built_in(OperationalCode::WorkerSerializationError, reason.as_str());
     error.data = Some(JsonText::of_engine_value(&data));
     error_envelope(error)
 }
@@ -477,13 +477,13 @@ pub(super) fn prepare(app: &ChildApp, task_name: &str, input: &TaskInputText) ->
     let task = match app.registry.get(task_name) {
         Ok(task) => task.clone(),
         Err(error) => {
-            return Prepared::Ended(error_envelope(TaskError::builtin(
+            return Prepared::Ended(error_envelope(TaskError::built_in(
                 OperationalCode::WorkerResolutionError,
                 format!("task '{task_name}' is not registered in this binary: {error}"),
             )))
         }
     };
-    match build_task_input(input.as_str(), task.accepts_workflow_ctx()) {
+    match build_task_input(input.as_str(), task.accepts_workflow_context()) {
         Ok(input) => Prepared::Body {
             task: Box::new(task),
             input,
@@ -500,12 +500,12 @@ pub(super) fn result_end(result: TaskResult<Vec<u8>>) -> RunEnd {
         TaskResult::Ok(bytes) => match serde_json::from_slice::<&RawValue>(&bytes) {
             Ok(raw) => match serde_json::to_string(&TaskResult::Ok(raw)) {
                 Ok(text) => RunEnd::Result(ResultEnvelopeText::new(text)),
-                Err(error) => error_envelope(TaskError::builtin(
+                Err(error) => error_envelope(TaskError::built_in(
                     OperationalCode::WorkerSerializationError,
                     format!("failed to encode the result envelope: {error}"),
                 )),
             },
-            Err(error) => error_envelope(TaskError::builtin(
+            Err(error) => error_envelope(TaskError::built_in(
                 OperationalCode::WorkerSerializationError,
                 format!("failed to parse task result JSON: {error}"),
             )),

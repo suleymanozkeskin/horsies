@@ -55,7 +55,7 @@ from horsies.core.brokers.result_types import (
     DatabaseOperationFailed,
     DatabaseOperationFailedCode,
     DatabaseResult,
-    RawResultRecord,
+    StoredResult,
 )
 from horsies.core.codec.json_io import Json
 from horsies.core.models.app import AppConfig
@@ -175,8 +175,8 @@ def _read_failed() -> DatabaseResult[Any]:
 
 def _record(
     status: TaskStatus, raw_result: dict[str, Json] | None, task_name: str,
-) -> RawResultRecord:
-    return RawResultRecord(
+) -> StoredResult:
+    return StoredResult(
         task_id=TASK_ID,
         task_name=task_name,
         status=status,
@@ -188,7 +188,7 @@ def _record(
 # Horsies.get_result: PostgresBroker.get_raw_result_record
 # =============================================================================
 
-RAW_RESULT_ANSWERS: Final[dict[str, Callable[[], DatabaseResult[RawResultRecord | None]]]] = {
+RAW_RESULT_ANSWERS: Final[dict[str, Callable[[], DatabaseResult[StoredResult | None]]]] = {
     'read_failed': _read_failed,
     'task_absent': lambda: Ok(None),
     'cancelled': lambda: Ok(_record(TaskStatus.CANCELLED, None, REGISTERED_TASK)),
@@ -241,13 +241,13 @@ def _task_info(task_name: str, raw_result: dict[str, Json] | None) -> TaskInfo:
         task_id=TASK_ID,
         task_name=task_name,
         status=TaskStatus.FAILED,
-        queue_name='default',
+        queue='default',
         priority=0,
         retry_count=0,
         max_retries=0,
         next_retry_at=None,
         sent_at=_AT,
-        enqueued_at=_AT,
+        due_at=_AT,
         claimed_at=_AT,
         started_at=_AT,
         completed_at=None,

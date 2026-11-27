@@ -152,7 +152,7 @@ fn scenario_4_registration_succeeds_with_valid_queue() {
     let mut app = custom_app();
     let function = fast_compute::register(&mut app).expect("a configured queue");
     assert_eq!(function.task_name(), "fast_compute");
-    assert_eq!(function.queue_name(), "fast");
+    assert_eq!(function.queue(), "fast");
     assert_eq!(function.priority(), 1);
 }
 
@@ -170,7 +170,7 @@ fn scenario_4_worker_config_is_valid() {
     let mut app = custom_app();
     let fast = fast_compute::register(&mut app).expect("fast");
     let slow = slow_compute::register(&mut app).expect("slow");
-    assert_eq!((fast.queue_name(), slow.queue_name()), ("fast", "slow"));
+    assert_eq!((fast.queue(), slow.queue()), ("fast", "slow"));
     assert_eq!((fast.priority(), slow.priority()), (1, 50));
     assert_check_passes(&app, 2);
 }
@@ -183,7 +183,7 @@ fn scenario_5_registration_succeeds_without_queue() {
     let mut app = default_app();
     let function = ping::register(&mut app).expect("no queue in Default mode");
     assert_eq!(function.task_name(), "ping");
-    assert_eq!(function.queue_name(), "default");
+    assert_eq!(function.queue(), "default");
 }
 
 /// Python: `TestDefaultModeAcceptsNoQueue::test_task_without_queue_succeeds`.

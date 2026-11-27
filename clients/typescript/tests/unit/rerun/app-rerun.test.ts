@@ -48,7 +48,7 @@ describe("app.rerunTask", () => {
         call: "rerunTask",
         handle: HANDLE,
         request: {
-          command: { sourceTaskId: SOURCE_TASK_ID, deadline: { kind: "noDeadline" }, callerKey: { kind: "keyed", key: "order-7" } },
+          command: { sourceTaskId: SOURCE_TASK_ID, goodUntil: { kind: "noDeadline" }, idempotencyKey: { kind: "keyed", key: "order-7" } },
           policy: { retention: { kind: "days", days: 7 }, rerunInput: "keep", reservationWindowMicros: 86_400_000_000n },
         },
         trace: CARRIER,
@@ -83,7 +83,7 @@ describe("app.rerunTask", () => {
   });
 
   test("keyConflict names the task that holds the idempotency key in ownerTaskId", async () => {
-    const outcome: RerunOutcomeRecord = { kind: "keyConflict", taskId: SOURCE_TASK_ID, reservedByTaskId: NEW_TASK_ID };
+    const outcome: RerunOutcomeRecord = { kind: "keyConflict", taskId: SOURCE_TASK_ID, ownerTaskId: NEW_TASK_ID };
 
     assert.deepEqual(await rerunAnswering({ kind: "done", outcome }), {
       ok: true,
@@ -176,8 +176,8 @@ describe("app.rerunTask errors", () => {
         { kind: "classNotRegistered", code: "CLASS_NOT_REGISTERED", retryable: false, message: "unknown retention class", classKey: "standard_8d" },
       ],
       [
-        { code: "CALLER_KEY_REFUSED", message: "rerun idempotency key failed" },
-        { kind: "callerKeyRefused", code: "CALLER_KEY_REFUSED", retryable: false, message: "rerun idempotency key failed" },
+        { code: "IDEMPOTENCY_KEY_REFUSED", message: "rerun idempotency key failed" },
+        { kind: "idempotencyKeyRefused", code: "IDEMPOTENCY_KEY_REFUSED", retryable: false, message: "rerun idempotency key failed" },
       ],
       [
         { code: "ID_MINT_REFUSED", message: "rerun identity mint failed" },

@@ -72,6 +72,7 @@ impl WorkerRunOptions {
 
     /// Options that name no profile: the CLI with no `--profile`, which
     /// the core refuses with Python's report.
+    #[cfg(any(test, feature = "cli"))]
     pub(crate) fn without_profile(log_level: WorkerLogLevel) -> Self {
         Self {
             profile: ProfileRequest::NotGiven,

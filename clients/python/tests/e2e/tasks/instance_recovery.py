@@ -64,12 +64,12 @@ def _workflow(*, name: str, tasks: list[TaskNode], **kwargs: object) -> object:
     )
 
 
-@app.task(task_name='e2e_recovery_healthcheck', queue_name='default')
+@app.task(name='e2e_recovery_healthcheck', queue='default')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='e2e_recovery_slow', queue_name='default')
+@app.task(name='e2e_recovery_slow', queue='default')
 def slow_task(*, duration_ms: int) -> Result[str, TaskError]:
     """Long-running task for crash-while-RUNNING tests."""
     import time
@@ -78,7 +78,7 @@ def slow_task(*, duration_ms: int) -> Result[str, TaskError]:
     return Ok(f'slept_{duration_ms}')
 
 
-@app.task(task_name='e2e_recovery_wf_step', queue_name='default')
+@app.task(name='e2e_recovery_wf_step', queue='default')
 def recovery_wf_step(*, step: str, delay_ms: int) -> Result[str, TaskError]:
     """Workflow step with configurable delay for crash-recovery tests."""
     import time
@@ -100,19 +100,19 @@ def recovery_wf_step(*, step: str, delay_ms: int) -> Result[str, TaskError]:
 # F depends on E, also on "recovery" queue — runs sequentially after E.
 # ---------------------------------------------------------------------------
 
-_node_a = TaskNode(fn=recovery_wf_step, kwargs={'step': 'A', 'delay_ms': 50})
-_node_b = TaskNode(fn=recovery_wf_step, kwargs={'step': 'B', 'delay_ms': 50}, waits_for=[_node_a])
-_node_c = TaskNode(fn=recovery_wf_step, kwargs={'step': 'C', 'delay_ms': 60_000}, waits_for=[_node_b])
-_node_d = TaskNode(fn=recovery_wf_step, kwargs={'step': 'D', 'delay_ms': 60_000}, waits_for=[_node_b])
+_node_a = TaskNode(function=recovery_wf_step, kwargs={'step': 'A', 'delay_ms': 50})
+_node_b = TaskNode(function=recovery_wf_step, kwargs={'step': 'B', 'delay_ms': 50}, waits_for=[_node_a])
+_node_c = TaskNode(function=recovery_wf_step, kwargs={'step': 'C', 'delay_ms': 60_000}, waits_for=[_node_b])
+_node_d = TaskNode(function=recovery_wf_step, kwargs={'step': 'D', 'delay_ms': 60_000}, waits_for=[_node_b])
 _node_e = TaskNode(
-    fn=recovery_wf_step,
+    function=recovery_wf_step,
     kwargs={'step': 'E', 'delay_ms': 50},
     waits_for=[_node_c, _node_d],
     allow_failed_dependencies=True,
     queue='recovery',
 )
 _node_f = TaskNode(
-    fn=recovery_wf_step,
+    function=recovery_wf_step,
     kwargs={'step': 'F', 'delay_ms': 50},
     waits_for=[_node_e],
     queue='recovery',

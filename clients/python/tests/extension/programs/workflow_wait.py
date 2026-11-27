@@ -66,11 +66,11 @@ def ctrl_c_ends_a_blocking_get() -> Report:
         ),
     )
 
-    @app.task(task_name=TASK_NAME)
+    @app.task(name=TASK_NAME)
     def value_task(*, value: int) -> Result[int, TaskError]:
         return Ok(value)
 
-    node: TaskNode[int] = TaskNode(fn=value_task, kwargs={'value': 1})
+    node: TaskNode[int] = TaskNode(function=value_task, kwargs={'value': 1})
     spec = app.workflow(
         WORKFLOW_NAME, [node], output=node, definition_key=f'{WORKFLOW_NAME}.v1',
     )

@@ -12,7 +12,7 @@
 //! write that does not fit its statement (`RowDecode`, `CallerRow`), and the
 //! three preparation variants that the core keeps in `RerunError`
 //! (`EnqueuePreparation`, `Fingerprint`, `Serialization`). The rerun steps
-//! turn a preparation refusal into `inputCorrupt` or `CALLER_KEY_REFUSED`
+//! turn a preparation refusal into `inputCorrupt` or `IDEMPOTENCY_KEY_REFUSED`
 //! (`horsies_core::prepare_rerun_write`), so the three reach no rerun of
 //! this core; the map keeps them total.
 
@@ -80,12 +80,12 @@ pub enum RerunOutcomeRecord {
     },
     /// The stored input or its options fail their checks.
     InputCorrupt { task_id: String, detail: String },
-    /// The caller key holds another command (the source's own included).
+    /// The idempotency key holds another command (the source's own included).
     KeyConflict {
         task_id: String,
-        reserved_by_task_id: String,
+        owner_task_id: String,
     },
-    /// The caller key holds this rerun command already.
+    /// The idempotency key holds this rerun command already.
     KeyReplay { existing_task_id: String },
 }
 
@@ -129,10 +129,10 @@ impl From<RerunOutcome> for RerunOutcomeRecord {
             },
             RerunOutcome::KeyConflict {
                 task_id,
-                reserved_by_task_id,
+                owner_task_id,
             } => Self::KeyConflict {
                 task_id: text_of_uuid(task_id),
-                reserved_by_task_id: text_of_uuid(reserved_by_task_id),
+                owner_task_id: text_of_uuid(owner_task_id),
             },
             RerunOutcome::KeyReplay { existing_task_id } => Self::KeyReplay {
                 existing_task_id: text_of_uuid(existing_task_id),
@@ -233,8 +233,8 @@ pub enum AppRerunFailure {
     ClassNotRegistered { message: String, class_key: String },
     /// The core refused the policy. Nothing is written.
     InvalidPolicy { message: String },
-    /// The caller key is not a valid idempotency key. Nothing is written.
-    CallerKeyRefused { message: String },
+    /// The idempotency key is not valid. Nothing is written.
+    IdempotencyKeyRefused { message: String },
     /// The task id source refused to mint the new task's id. Nothing is
     /// written.
     IdMintRefused { message: String },
@@ -278,7 +278,7 @@ pub fn app_failure(error: RerunError) -> AppRerunFailure {
             AppRerunFailure::ClassNotRegistered { message, class_key }
         }
         RerunError::InvalidPolicy(_) => AppRerunFailure::InvalidPolicy { message },
-        RerunError::Idempotency(_) => AppRerunFailure::CallerKeyRefused { message },
+        RerunError::Idempotency(_) => AppRerunFailure::IdempotencyKeyRefused { message },
         RerunError::Identity(_) => AppRerunFailure::IdMintRefused { message },
         RerunError::ClientFamilyMismatch { stored, own: _ } => {
             AppRerunFailure::ClientFamilyMismatch {
@@ -375,7 +375,7 @@ pub enum CallerStepRefusal {
         message: String,
         class_key: String,
     },
-    CallerKeyRefused {
+    IdempotencyKeyRefused {
         message: String,
     },
     IdMintRefused {
@@ -510,11 +510,11 @@ mod tests {
             (
                 RerunOutcome::KeyConflict {
                     task_id: SOURCE,
-                    reserved_by_task_id: OTHER,
+                    owner_task_id: OTHER,
                 },
                 RerunOutcomeRecord::KeyConflict {
                     task_id: SOURCE_TEXT.to_owned(),
-                    reserved_by_task_id: OTHER_TEXT.to_owned(),
+                    owner_task_id: OTHER_TEXT.to_owned(),
                 },
             ),
             (
@@ -645,7 +645,7 @@ mod tests {
                 RerunError::Idempotency(IdempotencyKeyError::Empty {
                     label: "idempotency key",
                 }),
-                AppRerunFailure::CallerKeyRefused {
+                AppRerunFailure::IdempotencyKeyRefused {
                     message: "rerun idempotency key failed: idempotency key must be non-empty"
                         .to_owned(),
                 },

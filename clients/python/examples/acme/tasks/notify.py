@@ -39,10 +39,10 @@ APOLOGY_TEMPLATE = 'order-problem'
 
 @app.task(
     'send_order_email',
-    queue_name=QUEUE_NOTIFICATIONS,
+    queue=QUEUE_NOTIFICATIONS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def send_order_email(
@@ -58,7 +58,7 @@ def send_order_email(
             if order is None:
                 return Err(
                     TaskError(
-                        error_code=ORDER_NOT_FOUND,
+                        code=ORDER_NOT_FOUND,
                         message=f'no order {order_id} to write about',
                         data={'order_id': order_id},
                     ),
@@ -81,10 +81,10 @@ def send_order_email(
 
 @app.task(
     'send_shipping_sms',
-    queue_name=QUEUE_NOTIFICATIONS,
+    queue=QUEUE_NOTIFICATIONS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def send_shipping_sms(
@@ -100,7 +100,7 @@ def send_shipping_sms(
             if order is None:
                 return Err(
                     TaskError(
-                        error_code=ORDER_NOT_FOUND,
+                        code=ORDER_NOT_FOUND,
                         message=f'no order {order_id} to notify',
                         data={'order_id': order_id},
                     ),
@@ -120,10 +120,10 @@ def send_shipping_sms(
 
 @app.task(
     'marketing_blast',
-    queue_name=QUEUE_NOTIFICATIONS,
+    queue=QUEUE_NOTIFICATIONS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def marketing_blast(*, segment: str) -> Result[MarketingBlast, TaskError]:
@@ -146,10 +146,10 @@ def marketing_blast(*, segment: str) -> Result[MarketingBlast, TaskError]:
 
 @app.task(
     'winback_blast',
-    queue_name=QUEUE_NOTIFICATIONS,
+    queue=QUEUE_NOTIFICATIONS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def winback_blast(

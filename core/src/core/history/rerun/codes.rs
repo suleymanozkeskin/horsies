@@ -27,8 +27,9 @@ pub enum RerunErrorCode {
     /// The retention class of the new task has no class row: register its
     /// period first. Nothing was written.
     ClassNotRegistered,
-    /// The caller key is not a valid idempotency key. Nothing was written.
-    CallerKeyRefused,
+    /// The idempotency key of the command is not a valid idempotency key.
+    /// Nothing was written.
+    IdempotencyKeyRefused,
     /// The task id source refused to mint the id of the new task. Nothing
     /// was written.
     IdMintRefused,

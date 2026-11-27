@@ -1,6 +1,6 @@
 // The workflow context of a task that takes it (`defineTask({ ..., workflowContext: true })`): the results and the
 // sub-workflow summaries of the dependencies that its node names in `workflowContextFrom`, by node id. The core writes
-// it into the input member `workflow_ctx` (the core's `WorkflowContext`: `workflow_id`, `task_index`, `task_name`,
+// it into the input member `workflow_context` (the core's `WorkflowContext`: `workflow_id`, `task_index`, `task_name`,
 // `results_by_id`, `summaries_by_id`); the Node child takes that member out of the input, reads it with
 // `workflowContextOfTree` and gives the value as `runtime.workflowContext` (`RuntimeWorkflowContext`). The reads are
 // those of the Rust and Python clients: `resultFor`, `hasResult`, `summaryFor`, `outputFor`, `hasSummary`.
@@ -76,7 +76,7 @@ export interface WorkflowContext {
 /**
  * The `workflowContext` member of the runtime of a task with `workflowContext: true`: the context that the core wrote
  * into the run's input, or `noContext`. The core writes it only for a workflow node that names `workflowContextFrom`;
- * a direct send and a node with no `workflowContextFrom` give `noContext`, as Python gives `workflow_ctx = None`.
+ * a direct send and a node with no `workflowContextFrom` give `noContext`, as Python gives `workflow_context = None`.
  */
 export type RuntimeWorkflowContext =
   | { readonly kind: "context"; readonly context: WorkflowContext }
@@ -88,17 +88,17 @@ export const NO_WORKFLOW_CONTEXT: RuntimeWorkflowContext = Object.freeze({ kind:
 /** One stored sub-workflow summary of the context: the summary, and its stored output for a typed read. */
 type StoredSummary = { readonly summary: SubWorkflowSummary; readonly output: TreeValue };
 
-/** Why a `workflow_ctx` text is not a workflow context: the member and the rule. */
+/** Why a `workflow_context` text is not a workflow context: the member and the rule. */
 export type ContextRefused = { readonly kind: "ContextRefused"; readonly member: string; readonly detail: string };
 
 const INDEX_MIN = 0;
 
-/** The workflow context of a `workflow_ctx` text that passed the core's strict check. Pure. */
+/** The workflow context of a `workflow_context` text that passed the core's strict check. Pure. */
 export function workflowContextOf(text: JsonText): Result<WorkflowContext, ContextRefused> {
   return workflowContextOfTree(readTree(text));
 }
 
-/** The workflow context of the tree of a `workflow_ctx` member, read from a text that passed the strict check. Pure. */
+/** The workflow context of the tree of a `workflow_context` member, read from a text that passed the strict check. Pure. */
 export function workflowContextOfTree(tree: TreeValue): Result<WorkflowContext, ContextRefused> {
   if (!isTreeObject(tree)) {
     return refused("$", "the context is not an object");

@@ -1,4 +1,4 @@
-/// Typed error types for task send/schedule operations.
+/// Typed error types for task send operations.
 ///
 /// Mirrors Python's `clients/python/horsies/core/models/task_send_types.py`: one variant per
 /// code, and the core maps every enqueue error to its variant once
@@ -25,10 +25,10 @@ pub enum TaskSendErrorCode {
     /// Send called while suppression is active (worker/scheduler import phase,
     /// `check()`, or `HORSIES_SUPPRESS_SENDS=1`). Non-retryable.
     SendSuppressed,
-    /// A sync (Python) or blocking (Rust) send, schedule or retry was called
+    /// A sync (Python) or blocking (Rust) send or resend was called
     /// on a thread that runs an event loop (Python) or a tokio runtime
     /// (Rust); the blocking enqueue would stall it, so nothing was written.
-    /// A blocking retry on the same thread returns this code again; the
+    /// A blocking resend on the same thread returns this code again; the
     /// async forms complete the dispatch with the same task id.
     #[code_catalog(blocking_form_only)]
     AsyncContext,
@@ -37,11 +37,11 @@ pub enum TaskSendErrorCode {
     /// Infrastructure error (schema init, DB transaction). Conditionally retryable.
     EnqueueFailed,
     /// The task id exists with a different command or idempotency key.
-    /// Nothing was written. The retry methods refuse it.
+    /// Nothing was written. The resend methods refuse it.
     PayloadMismatch,
     /// The idempotency key is reserved by another task with a different
     /// command. Nothing was written. Non-retryable: send the same command, or
-    /// use another key. The retry methods refuse it.
+    /// use another key. The resend methods refuse it.
     IdempotencyKeyConflict,
     /// Serialized payload exceeded `payload.reject_bytes`; nothing was
     /// written. Non-retryable — shrink the payload (pass a reference to
@@ -63,10 +63,10 @@ impl std::fmt::Display for TaskSendErrorCode {
     }
 }
 
-/// Serialized envelope for idempotent retry.
+/// Serialized envelope for an idempotent resend.
 ///
 /// All value fields are pre-serialized to avoid round-trip issues.
-/// The retry methods extract this payload directly — no user input needed.
+/// The resend methods extract this payload directly — no user input needed.
 /// A replay carries the same command and `sent_at`, so the exact-id resend
 /// check accepts it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,7 +130,7 @@ impl TaskSendPayload {
     }
 }
 
-/// Error from task send/schedule operations: one variant per
+/// Error from task send operations: one variant per
 /// [`TaskSendErrorCode`] that the core or a client's blocking form
 /// produces, each with only the facts of its state (Python
 /// `clients/python/horsies/core/models/task_send_types.py`).
@@ -143,24 +143,24 @@ impl TaskSendPayload {
     module = "task_send_errors",
     code = "TaskSendErrorCode",
     union = "TaskSendCoreError",
-    union_doc = "Every failure of a send or schedule that the core records."
+    union_doc = "Every failure of a send that the core records."
 )]
 pub enum TaskSendError {
     /// Sends are suppressed in this process. Nothing was serialized or written.
     ///
     /// Suppression is active during the worker and scheduler import phase,
-    /// during ``check()``, and under ``HORSIES_SUPPRESS_SENDS=1``. The retry
+    /// during ``check()``, and under ``HORSIES_SUPPRESS_SENDS=1``. The resend
     /// methods refuse this error.
     #[error_class(class = "TaskSendSuppressed", code = "SendSuppressed")]
     Suppressed {
         #[error_slot(python = "Str", hidden)]
         message: String,
     },
-    /// A sync send or schedule ran inside a running event loop. Nothing was written.
+    /// A sync send ran inside a running event loop. Nothing was written.
     ///
-    /// The payload is prepared. ``retry_send_async(err)`` or
-    /// ``retry_schedule_async(err)`` completes the same dispatch with the same
-    /// task id. A sync retry from the same loop returns this error again.
+    /// The payload is prepared. ``resend_async(err)`` completes the same
+    /// dispatch with the same task id. A sync resend from the same loop returns
+    /// this error again.
     // The Rust client's blocking forms give it on a thread that runs a tokio
     // runtime; the core's enqueue never does.
     #[error_class(class = "TaskSendAsyncContext", code = "AsyncContext")]
@@ -175,7 +175,7 @@ pub enum TaskSendError {
     /// The input was refused before anything was written.
     ///
     /// ``cause`` is the exception of the cause, or ``NoCause()`` when a check refused the
-    /// input without a Python exception. The retry methods refuse this error.
+    /// input without a Python exception. The resend methods refuse this error.
     // `cause` is what refused it.
     #[error_class(
         class = "TaskSendValidationFailed",
@@ -190,7 +190,7 @@ pub enum TaskSendError {
     },
     /// The broker or the database failed during enqueue. The row may or may not exist.
     ///
-    /// ``retryable`` is the core's classification of the cause. ``retry_send(err)``
+    /// ``retryable`` is the core's classification of the cause. ``resend(err)``
     /// sends the same task id and payload again; the broker returns the existing
     /// task for a duplicate. ``cause`` is ``NoCause()`` when the broker found
     /// the failure by a data check.
@@ -214,7 +214,7 @@ pub enum TaskSendError {
     },
     /// The task id exists with a different command or idempotency key. Nothing was written.
     ///
-    /// The message names which one differs. The retry methods refuse this error.
+    /// The message names which one differs. The resend methods refuse this error.
     #[error_class(class = "TaskSendPayloadMismatch", code = "PayloadMismatch")]
     PayloadMismatch {
         #[error_slot(python = "Uuid")]
@@ -227,7 +227,7 @@ pub enum TaskSendError {
     /// The serialized kwargs exceed ``payload.reject_bytes``. Nothing was written.
     ///
     /// ``size_bytes`` is the length of the serialized kwargs and ``limit_bytes``
-    /// the configured limit. The retry methods refuse this error.
+    /// the configured limit. The resend methods refuse this error.
     #[error_class(class = "TaskSendPayloadTooLarge", code = "PayloadTooLarge")]
     PayloadTooLarge {
         #[error_slot(python = "Str", hidden)]
@@ -244,7 +244,7 @@ pub enum TaskSendError {
     /// it. While the owner task is live, the repeat meets the same conflict.
     /// After the reservation ends, the repeat starts a second task under the
     /// key. To complete the send, send the same command as the owner task, or
-    /// use another key. The retry methods refuse this error.
+    /// use another key. The resend methods refuse this error.
     #[error_class(
         class = "TaskSendIdempotencyKeyConflict",
         code = "IdempotencyKeyConflict",
@@ -336,8 +336,8 @@ impl TaskSendError {
         }
     }
 
-    /// The task id and payload when the retry methods accept this error,
-    /// else `None`. Python's accepted set (`TaskSendRetryable`,
+    /// The task id and payload when the resend methods accept this error,
+    /// else `None`. Python's accepted set (`TaskSendResendable`,
     /// `clients/python/horsies/core/models/task_send_types.py`): an async context
     /// and an enqueue failure. A refusal is never replayed, because the same
     /// input meets the same refusal. A key conflict is a refusal: a repeat of
@@ -642,7 +642,7 @@ pub fn send_error_from_enqueue(
     }
 }
 
-/// Result type for task send/schedule operations.
+/// Result type for task send operations.
 ///
 /// `Ok(T)` on success (typically a client's task handle),
 /// `Err(TaskSendError)` on failure.
@@ -808,9 +808,9 @@ mod tests {
         }
     }
 
-    /// Python `TaskSendRetryable` holds `TaskSendAsyncContext`: a blocking
+    /// Python `TaskSendResendable` holds `TaskSendAsyncContext`: a blocking
     /// send on a runtime thread keeps its prepared task id and payload, and
-    /// an async retry sends them.
+    /// an async resend sends them.
     #[test]
     fn an_async_context_keeps_its_payload_and_is_accepted_for_a_resend() {
         let task_id = Uuid::from_u128(3);
@@ -855,7 +855,7 @@ mod tests {
         })
     }
 
-    /// Python `test_task_decorator.py::test_retry_send_reuses_task_id_and_payload`:
+    /// Python `test_task_decorator.py::test_resend_reuses_task_id_and_payload`:
     /// a resend carries the first send's task id and payload.
     #[test]
     fn a_database_failure_keeps_its_flag_and_is_accepted_for_a_resend() {

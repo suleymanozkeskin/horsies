@@ -306,7 +306,7 @@ class TestValidateExceptionMapper:
 @pytest.mark.unit
 class TestErrorCodeValidation:
     def test_exception_like_name_rejected(self) -> None:
-        err = validate_error_code_string('TimeoutError', field_name='auto_retry_for')
+        err = validate_error_code_string('TimeoutError', field_name='retry_for')
         assert err is not None
         assert 'looks like an exception class name' in err
 
@@ -333,6 +333,6 @@ class TestErrorCodeValidation:
         assert 'UPPER_SNAKE_CASE' in err
 
     def test_upper_snake_case_accepted(self) -> None:
-        err = validate_error_code_string('RATE_LIMITED', field_name='auto_retry_for')
+        err = validate_error_code_string('RATE_LIMITED', field_name='retry_for')
         assert err is None
 

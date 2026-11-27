@@ -56,10 +56,10 @@ pub struct AttemptPlaced {
     /// The execution class of the task.
     pub execution: Execution,
     pub attempt: AttemptNumber,
-    /// The kind of the child that took the task. A worker that runs no
-    /// child of a shared class serves that class on its isolated children,
-    /// so a task of a shared class can run on an isolated child.
-    pub child_kind: Execution,
+    /// The execution class of the child that took the task. A worker that
+    /// runs no child of a shared class serves that class on its isolated
+    /// children, so a task of a shared class can run on an isolated child.
+    pub child_execution: Execution,
     /// The process id of the child.
     pub child_pid: ProcessId,
     /// From the claim to the time the child took the task (monotonic clock
@@ -128,8 +128,8 @@ pub struct TaskRecovered {
 pub struct ChildStarted {
     /// When the ready frame reached the worker (wall clock of the worker).
     pub at: DateTime<Utc>,
-    /// The kind of the child: the execution class of its slot.
-    pub child_kind: Execution,
+    /// The execution class of the child: the class of its slot.
+    pub child_execution: Execution,
     pub slot: SlotIndex,
     pub child_pid: ProcessId,
     /// From the start of the boot to the ready frame (monotonic clock of the
@@ -142,7 +142,7 @@ pub struct ChildStarted {
 pub struct ChildReplaced {
     /// When the worker ended the old child (wall clock of the worker).
     pub at: DateTime<Utc>,
-    pub child_kind: Execution,
+    pub child_execution: Execution,
     pub slot: SlotIndex,
     /// The process id of the old child.
     pub child_pid: ProcessId,
@@ -154,7 +154,7 @@ pub struct ChildReplaced {
 pub struct SlotDown {
     /// When the boot failed (wall clock of the worker).
     pub at: DateTime<Utc>,
-    pub child_kind: Execution,
+    pub child_execution: Execution,
     pub slot: SlotIndex,
     pub cause: SlotDownCause,
 }
@@ -165,6 +165,6 @@ pub struct SlotRecovered {
     /// When the slot's new child sent its ready frame (wall clock of the
     /// worker).
     pub at: DateTime<Utc>,
-    pub child_kind: Execution,
+    pub child_execution: Execution,
     pub slot: SlotIndex,
 }

@@ -15,14 +15,13 @@ from uuid import UUID
 
 import pytest
 
-from horsies.core.history.errors import HistoryContractError
 from horsies import TaskAbsenceReason
 from horsies.core.history.rerun.operations import (
+    RerunCommand,
     RerunEnqueuePolicy,
     RerunSourceAbsent,
     RerunSourceCorrupt,
-    RerunTask,
-    rerun_task,
+    rerun_task_in_async,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -75,9 +74,9 @@ def _policy() -> RerunEnqueuePolicy:
 async def test_the_reason_is_the_staged_classification(
     reason: TaskAbsenceReason,
 ) -> None:
-    outcome = await rerun_task(
+    outcome = await rerun_task_in_async(
         _connection(reason.value),
-        RerunTask(source_task_id=SOURCE_ID, deadline=None),
+        RerunCommand(source_task_id=SOURCE_ID, good_until=None),
         _policy(),
         registered_task_codes={},
     )
@@ -87,17 +86,17 @@ async def test_the_reason_is_the_staged_classification(
 
 @pytest.mark.asyncio
 async def test_a_reason_outside_the_set_is_a_corrupt_source() -> None:
-    outcome = await rerun_task(
+    outcome = await rerun_task_in_async(
         _connection('PURGED'),
-        RerunTask(source_task_id=SOURCE_ID, deadline=None),
+        RerunCommand(source_task_id=SOURCE_ID, good_until=None),
         _policy(),
         registered_task_codes={},
     )
 
     match outcome:
-        case RerunSourceCorrupt(task_id=task_id, exception=HistoryContractError() as exc):
+        case RerunSourceCorrupt(task_id=task_id, detail=detail):
             assert task_id == SOURCE_ID
-            assert str(exc) == (
+            assert detail == (
                 f"absence reason of {SOURCE_ID} is 'PURGED', which is not a task absence reason"
             )
         case other:

@@ -16,5 +16,5 @@ fn main() {
     let _now = app_parameter::send(&horsies_app, "billing".to_owned());
     let _with_options = app_parameter::with_options(TaskSendOptions::new())
         .send(&horsies_app, "billing".to_owned());
-    let _field = app_parameter::params::app();
+    let _field = app_parameter::fields::app();
 }

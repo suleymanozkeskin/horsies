@@ -27,7 +27,7 @@ from horsies import Err, Ok, Result, TaskError
 def divide(*, a: int, b: int) -> Result[float, TaskError]:
     if b == 0:
         return Err(TaskError(
-            error_code="DIVISION_BY_ZERO",
+            code="DIVISION_BY_ZERO",
             message="Cannot divide by zero",
         ))
     return Ok(a / b)
@@ -59,7 +59,7 @@ def describe_quotient(*, quotient: TaskOutcome[float, TaskError]) -> Result[str,
         case Succeeded(value):
             return Ok(f"quotient={value}")
         case Failed(error):
-            return Err(TaskError(error_code="UPSTREAM_FAILED", message=error.message))
+            return Err(TaskError(code="UPSTREAM_FAILED", message=error.message))
 ```
 
 ## ReadResult
@@ -84,11 +84,11 @@ Read the result with one `match`, with one arm for each form:
 ```python
 match divide.send(a=10, b=2):
     case Ok(handle):
-        match handle.get(timeout_ms=30_000):
+        match handle.get(wait_ms=30_000):
             case Ok(Succeeded(value)):
                 print(f"Result: {value}")
             case Ok(Failed(task_error)):
-                print(f"Task failed: {task_error.error_code} - {task_error.message}")
+                print(f"Task failed: {task_error.code} - {task_error.message}")
             case Err(read_error):
                 print(f"Read failed: {read_error.code} - {read_error.message}")
     case Err(send_err):
@@ -103,43 +103,43 @@ match divide.send(a=10, b=2):
 
 | Class | Code | When | Kept by `TaskHandle` |
 |-------|------|------|----------------------|
-| `WaitTimeout` | `RetrievalCode.WAIT_TIMEOUT` | The wait limit passed before the task or the workflow ended. It can still run, and a later read can find it ended | No |
-| `TaskNotFound` | `RetrievalCode.TASK_NOT_FOUND` | Neither the live table nor the task history holds the task. A handle built by id can race the commit of its send, so a later read can find it | No |
-| `WorkflowNotFound` | `RetrievalCode.WORKFLOW_NOT_FOUND` | No workflow has the id of the handle, or retention removed the workflow after `get()` read its terminal status | No |
-| `ResultNotAvailable` | `RetrievalCode.RESULT_NOT_AVAILABLE` | The task reached a terminal status and stored no result, or a handle with no broker holds no result | Yes |
-| `ResultNotReady` | `RetrievalCode.RESULT_NOT_READY` | `WorkflowHandle.result_for()`: the node stores no result yet. A later read can find one | No |
-| `WaitInsideTask` | `RetrievalCode.WAIT_INSIDE_TASK` | A result wait in a worker child, where task bodies run. Nothing was read. See [Waiting for a Result Inside a Task](#waiting-for-a-result-inside-a-task) | No |
-| `AsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form there | No |
-| `InvalidInput` | `RetrievalCode.INVALID_INPUT` | `timeout_ms` is negative, not an int, or above `MAX_TASK_TIMEOUT_MS`. Nothing was read | No |
-| `ResultDeserializationError` | `OperationalCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types. The same read gives the same error until the stored value changes | Yes |
-| `UnknownCustomCode` | `RetrievalCode.UNKNOWN_CUSTOM_CODE` | The stored error has a custom code that the declared `Enum` of the task does not name: a row of another version of the task. `custom_code` holds the stored text. It shares its code with `ResultDeserializationError` and names the code | Yes |
+| `ReadWaitTimeout` | `RetrievalCode.WAIT_TIMEOUT` | The wait limit passed before the task or the workflow ended. It can still run, and a later read can find it ended | No |
+| `ReadTaskNotFound` | `RetrievalCode.TASK_NOT_FOUND` | Neither the live table nor the task history holds the task. A handle built by id can race the commit of its send, so a later read can find it | No |
+| `ReadWorkflowNotFound` | `RetrievalCode.WORKFLOW_NOT_FOUND` | No workflow has the id of the handle, or retention removed the workflow after `get()` read its terminal status | No |
+| `ReadResultNotAvailable` | `RetrievalCode.RESULT_NOT_AVAILABLE` | The task reached a terminal status and stored no result, or a handle with no broker holds no result | Yes |
+| `ReadResultNotReady` | `RetrievalCode.RESULT_NOT_READY` | `WorkflowHandle.result_for()`: the node stores no result yet. A later read can find one | No |
+| `ReadWaitInsideTask` | `RetrievalCode.WAIT_INSIDE_TASK` | A result wait in a worker child, where task bodies run. Nothing was read. See [Waiting for a Result Inside a Task](#waiting-for-a-result-inside-a-task) | No |
+| `ReadAsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form there | No |
+| `ReadInvalidInput` | `RetrievalCode.INVALID_INPUT` | `wait_ms` is negative, not an int, or above `MAX_TASK_TIMEOUT_MS`. Nothing was read | No |
+| `ReadResultDeserializationError` | `OperationalCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types. The same read gives the same error until the stored value changes | Yes |
+| `ReadUnknownCustomCode` | `RetrievalCode.UNKNOWN_CUSTOM_CODE` | The stored error has a custom code that the declared `Enum` of the task does not name: a row of another version of the task. `custom_code` holds the stored text. The fix is a deploy of the `Enum` with the code | Yes |
 | `ReadDatabaseError` | `OperationalCode.DATABASE_ERROR` | The database, the connection or the core call failed, or a workflow handle read found stored workflow data that is not valid. The condition can clear, so a later read can succeed | No |
-| `NoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The task succeeded, and this process has no declared type to read the value with: the handle was built by id, or the task or the workflow is not registered here | Yes |
-| `WorkflowCtxMissingId` | `ContractCode.WORKFLOW_CONTEXT_MISSING_ID` | `WorkflowHandle.result_for()` got a node with no `node_id`. Nothing was read | No |
+| `ReadNoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The task succeeded, and this process has no declared type to read the value with: the handle was built by id, or the task or the workflow is not registered here | Yes |
+| `ReadWorkflowContextMissingId` | `ContractCode.WORKFLOW_CONTEXT_MISSING_ID` | `WorkflowHandle.result_for()` got a node with no `node_id`. Nothing was read | No |
 
 A `TaskHandle` keeps an outcome and each class with "Yes": a later `get()` returns it with no read. A class with "No" is not kept, so a later `get()` reads again.
 
 A read does its checks before it reads, in this order. Only the first check that fails gives its class:
 
-1. `InvalidInput`: the wait limit (`timeout_ms`) is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`.
-2. `WaitInsideTask`: the read runs in a process that runs task bodies.
+1. `ReadInvalidInput`: the wait limit (`wait_ms`) is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`.
+2. `ReadWaitInsideTask`: the read runs in a process that runs task bodies.
 3. A `TaskHandle` returns the read that it keeps.
-4. `AsyncContext`: a sync read runs on a thread that runs an event loop.
+4. `ReadAsyncContext`: a sync read runs on a thread that runs an event loop.
 
-The Rust and the TypeScript clients use the same order. So a read inside a task with a wait above the limit gives `InvalidInput` in each client.
+The Rust and the TypeScript clients use the same order. So a read inside a task with a wait above the limit gives `INVALID_INPUT` in each client.
 
 Match a class to handle one failure in its own arm:
 
 ```python
-from horsies import ReadDatabaseError, ReadResult, TaskNotFound, WaitTimeout
+from horsies import ReadDatabaseError, ReadResult, ReadTaskNotFound, ReadWaitTimeout
 
 def describe_read(read: ReadResult[float, TaskError]) -> str:
     match read:
         case Ok(Succeeded(value)):
             return f"value {value}"
         case Ok(Failed(task_error)):
-            return f"task failed: {task_error.error_code}"
-        case Err(WaitTimeout() | TaskNotFound() | ReadDatabaseError()):
+            return f"task failed: {task_error.code}"
+        case Err(ReadWaitTimeout() | ReadTaskNotFound() | ReadDatabaseError()):
             return "no outcome yet: read again later"
         case Err(read_error):
             return f"no outcome: {read_error.code} - {read_error.message}"
@@ -147,13 +147,13 @@ def describe_read(read: ReadResult[float, TaskError]) -> str:
 
 ## TaskError Structure
 
-`TaskError` is a Pydantic model. `error_code` is required. The other fields are optional. A key that the model does not declare is refused.
+`TaskError` is a Pydantic model. `code` is required. The other fields are optional. A key that the model does not declare is refused.
 
 `TaskError[C]` is generic in the type `C` of its custom code, with the default `str`. A task that declares an `Enum` `E` with `error_codes=` and returns `TaskError[E]` has members of `E` as its custom codes ([Declare Error Codes](/horsies/tasks/defining-tasks/#declare-error-codes)).
 
 | Field | Type | Purpose |
 |-------|------|---------|
-| `error_code` | `C \| BuiltInTaskCode` (required): a custom code, or a built-in code | Identifies the error type |
+| `code` | `C \| BuiltInTaskCode` (required): a custom code, or a built-in code | Identifies the error type |
 | `message` | `str` | Human-readable description |
 | `data` | `Any` | Additional context (dict, list, etc.) |
 | `exception` | `BaseException` or `ExceptionRecord` | Live exception in-process; flattened on the wire to `type`, `module`, `message`, `repr`, and `traceback` |
@@ -161,7 +161,7 @@ def describe_read(read: ReadResult[float, TaskError]) -> str:
 <!-- check: skip elided -- a return statement shown without its function -->
 ```python
 return Err(TaskError(
-    error_code="VALIDATION_FAILED",
+    code="VALIDATION_FAILED",
     message="Input validation failed",
     data={"field": "email", "reason": "invalid format"},
 ))
@@ -213,7 +213,7 @@ A read gives these codes as `read_error.code`, not inside a `TaskError`. Each co
 | `RESULT_NOT_AVAILABLE` | Result cache is empty for an immediate/sync handle |
 | `RESULT_NOT_READY` | Result not yet available; task is still running |
 | `ASYNC_CONTEXT` | Sync `get()` / `result_for()` was called on a thread that runs an event loop; nothing ran; not cached. Call `await handle.get_async()` / `result_for_async()` |
-| `INVALID_INPUT` | An argument of `get()` / `get_async()` was refused before any read, for example a `timeout_ms` that is negative, not an int, or above `MAX_TASK_TIMEOUT_MS`; not cached |
+| `INVALID_INPUT` | An argument of `get()` / `get_async()` was refused before any read, for example a `wait_ms` that is negative, not an int, or above `MAX_TASK_TIMEOUT_MS`; not cached |
 | `WAIT_INSIDE_TASK` | A result wait was called inside a worker child, where task bodies run; it waited for nothing; not cached. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](#waiting-for-a-result-inside-a-task) |
 | `UNKNOWN_CUSTOM_CODE` | The stored error has a custom code that the declared code type of the task does not name; the same read gives the same error |
 
@@ -236,7 +236,7 @@ A read gives these codes as `read_error.code`, not inside a `TaskError`. Each co
 
 ## Waiting for a Result Inside a Task
 
-A task does not wait for the result of another task. In a worker child, these calls return `Err(WaitInsideTask(...))` (`RetrievalCode.WAIT_INSIDE_TASK`) at once and wait for nothing:
+A task does not wait for the result of another task. In a worker child, these calls return `Err(ReadWaitInsideTask(...))` (`RetrievalCode.WAIT_INSIDE_TASK`) at once and wait for nothing:
 
 - `TaskHandle.get()` and `TaskHandle.get_async()` on a handle from `send()` or `send_async()`
 - `app.get_result()` and `app.get_result_async()`
@@ -244,14 +244,14 @@ A task does not wait for the result of another task. In a worker child, these ca
 
 The raw result reads wait too. In a worker child they return `Err(DatabaseWaitInsideTask)` (`DatabaseErrorCode.WAIT_INSIDE_TASK`) at once: `app.get_raw_result()`, `app.get_raw_result_async()`, `broker.get_raw_result_record()` and `broker.get_raw_result_record_async()`.
 
-The refusal is the first check of each call. It comes before the check of `timeout_ms` (`InvalidInput`) and before the check of the event loop (`AsyncContext`). The rule covers the whole child process: the task body, the threads that it starts, and the `on_child_start` hooks.
+The refusal is the first check of each call. It comes before the check of `wait_ms` (`ReadInvalidInput`) and before the check of the event loop (`ReadAsyncContext`). The rule covers the whole child process: the task body, the threads that it starts, and the `on_child_start` hooks.
 
 These calls do not wait, so they work in a task:
 
 - `send()` and `send_async()`
 - starting a workflow
 - `TaskHandle.info()`
-- `workflow_ctx.result_for()`
+- `workflow_context.result_for()`
 
 A task that waits keeps its child while it waits. When enough tasks wait for other tasks, no child is free for the tasks that they wait for, and nothing moves until timeouts end the waits. A loop in a task that polls `info()` and sleeps holds its child the same way; it is outside this contract.
 
@@ -275,7 +275,7 @@ def transfer_funds(*, amount: float) -> Result[str, TaskError]:
     if amount <= 0:
         # This is a domain error - expected, handled
         return Err(TaskError(
-            error_code="INVALID_AMOUNT",
+            code="INVALID_AMOUNT",
             message="Amount must be positive",
         ))
     return Ok("Transfer complete")
@@ -340,11 +340,11 @@ def assert_succeeded(read: ReadResult[int, TaskError]) -> None:
 def assert_task_timeout(read: ReadResult[int, TaskError]) -> None:
     match read:
         case Ok(Failed(task_error)):
-            assert task_error.error_code == OutcomeCode.TASK_TIMEOUT
+            assert task_error.code == OutcomeCode.TASK_TIMEOUT
         case _:
             pytest.fail(f"expected a failed outcome, got {read!r}")
 
 
 def assert_wait_timeout(read: ReadResult[int, TaskError]) -> None:
-    assert isinstance(read, Err) and isinstance(read.err_value, WaitTimeout)
+    assert isinstance(read, Err) and isinstance(read.err_value, ReadWaitTimeout)
 ```

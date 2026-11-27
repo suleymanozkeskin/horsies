@@ -59,7 +59,7 @@ def _make_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(basic_tasks.healthcheck.send())
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
@@ -72,7 +72,7 @@ def _make_shared_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(shared_async_tasks.shared_sleep.send(seconds=0))
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
@@ -84,7 +84,7 @@ READY_CHECKS: dict[str, Callable[[], Callable[[], bool]]] = {
 
 
 async def _value(handle: TaskHandle[str]) -> str:
-    result = await asyncio.to_thread(handle.get, timeout_ms=RESULT_TIMEOUT_MS)
+    result = await asyncio.to_thread(handle.get, wait_ms=RESULT_TIMEOUT_MS)
     return succeeded_value(result)
 
 
@@ -102,7 +102,7 @@ async def test_shared_tasks_run_at_once_and_a_timeout_leaves_neighbours_finished
         isolated = unwrap_send(await basic_tasks.pid_task.send_async())
         isolated_result = await asyncio.to_thread(
             isolated.get,
-            timeout_ms=RESULT_TIMEOUT_MS,
+            wait_ms=RESULT_TIMEOUT_MS,
         )
         isolated_pid = str(succeeded_value(isolated_result))
         hang = unwrap_send(await shared_async_tasks.shared_hang.send_async())
@@ -193,7 +193,7 @@ async def test_a_shared_task_sends_with_send_async(
             result = await asyncio.to_thread(
                 app.get_result,
                 UUID(sent_id),
-                timeout_ms=RESULT_TIMEOUT_MS,
+                wait_ms=RESULT_TIMEOUT_MS,
             )
             assert succeeded_value(result) == x * 2
 
@@ -267,7 +267,7 @@ async def test_a_shared_row_with_unusable_options_fails_once(
 
 async def _isolated_pid() -> str:
     handle = unwrap_send(await basic_tasks.pid_task.send_async())
-    result = await asyncio.to_thread(handle.get, timeout_ms=RESULT_TIMEOUT_MS)
+    result = await asyncio.to_thread(handle.get, wait_ms=RESULT_TIMEOUT_MS)
     return str(succeeded_value(result))
 
 

@@ -67,10 +67,10 @@ def _options(**fields: Any) -> str:
     """Task options with a valid exponential policy, `fields` replaced."""
     policy: dict[str, Any] = {
         'max_retries': 3,
-        'intervals': [5],
+        'intervals_seconds': [5],
         'backoff_strategy': 'exponential',
         'jitter': True,
-        'auto_retry_for': ['TRANSIENT'],
+        'retry_for': ['TRANSIENT'],
     }
     policy.update(fields)
     return json.dumps({'retry_policy': policy})
@@ -83,8 +83,8 @@ def _options(**fields: Any) -> str:
         _options(max_retries=MAX_RETRY_ATTEMPTS + 1),
         _options(max_retries=True),
         _options(max_retries='3'),
-        _options(intervals=[5, 10]),
-        _options(auto_retry_for=[]),
+        _options(intervals_seconds=[5, 10]),
+        _options(retry_for=[]),
         _options(surprise=1),
         '{"retry_policy": {"max_retries": 3}}',
         '{"retry_policy": [3]}',

@@ -38,24 +38,24 @@ from .core.models.tasks import (
     TaskAttemptInfo,
 )
 from .core.models.outcome import (
-    AsyncContext,
-    ReadDatabaseError,
     Failed,
-    InvalidInput,
-    NoTypeAvailable,
+    ReadAsyncContext,
+    ReadDatabaseError,
     ReadError,
+    ReadInvalidInput,
+    ReadNoTypeAvailable,
     ReadResult,
-    ResultDeserializationError,
-    ResultNotAvailable,
-    ResultNotReady,
+    ReadResultDeserializationError,
+    ReadResultNotAvailable,
+    ReadResultNotReady,
+    ReadTaskNotFound,
+    ReadUnknownCustomCode,
+    ReadWaitInsideTask,
+    ReadWaitTimeout,
+    ReadWorkflowContextMissingId,
+    ReadWorkflowNotFound,
     Succeeded,
-    TaskNotFound,
     TaskOutcome,
-    UnknownCustomCode,
-    WaitInsideTask,
-    WaitTimeout,
-    WorkflowCtxMissingId,
-    WorkflowNotFound,
 )
 from .core.models.queues import QueueMode, CustomQueueConfig
 from .core.models.workflow import (
@@ -108,7 +108,7 @@ from .core.workflows.start_types import (
     WorkflowStartErrorCode,
     WorkflowStartIdConflict,
     WorkflowStartResult,
-    WorkflowStartRetryable,
+    WorkflowStartResendable,
     WorkflowStartValidationFailed,
 )
 from .core.models.schedule import (
@@ -190,16 +190,16 @@ from .core.errors import HorsiesErrorCode, ValidationReport, MultipleValidationE
 from .core.exception_mapper import ExceptionMapper
 from .core.task_decorator import (
     from_node,
-    RetentionChoice,
+    SendRetention,
     TaskHandle,
-    TaskSendOptions,
+    TaskFunctionWithOptions,
 )
 from .core.models.task_send_types import (
     TaskSendErrorCode,
     TaskSendPayload,
     TaskSendError,
     TaskSendResult,
-    TaskSendRetryable,
+    TaskSendResendable,
     TaskSendSuppressed,
     TaskSendAsyncContext,
     TaskSendValidationFailed,
@@ -299,6 +299,7 @@ from .core.models.boot_failure import (
 from ._catalog.history import TaskAbsenceReason
 from .core.history.rerun.operations import (
     NotEligibleReason,
+    RerunCommand,
     RerunEnqueued,
     RerunEnqueuePolicy,
     RerunInputCorrupt,
@@ -310,8 +311,7 @@ from .core.history.rerun.operations import (
     RerunSourceAbsent,
     RerunSourceCorrupt,
     RerunSourceLive,
-    RerunTask,
-    rerun_task,
+    rerun_task_in_async,
 )
 from .core.types.result import Result, Ok, Err, is_ok, is_err
 from .core.codec import JsonValue, StrictJsonError
@@ -353,19 +353,19 @@ __all__ = [
     'Failed',
     'ReadResult',
     'ReadError',
-    'WaitTimeout',
-    'TaskNotFound',
-    'WorkflowNotFound',
-    'ResultNotAvailable',
-    'ResultNotReady',
-    'WaitInsideTask',
-    'AsyncContext',
-    'InvalidInput',
-    'ResultDeserializationError',
-    'UnknownCustomCode',
+    'ReadWaitTimeout',
+    'ReadTaskNotFound',
+    'ReadWorkflowNotFound',
+    'ReadResultNotAvailable',
+    'ReadResultNotReady',
+    'ReadWaitInsideTask',
+    'ReadAsyncContext',
+    'ReadInvalidInput',
+    'ReadResultDeserializationError',
+    'ReadUnknownCustomCode',
     'ReadDatabaseError',
-    'NoTypeAvailable',
-    'WorkflowCtxMissingId',
+    'ReadNoTypeAvailable',
+    'ReadWorkflowContextMissingId',
     'OperationalCode',
     'ContractCode',
     'RetrievalCode',
@@ -438,7 +438,7 @@ __all__ = [
     'WorkflowStartErrorCode',
     'WorkflowStartIdConflict',
     'WorkflowStartResult',
-    'WorkflowStartRetryable',
+    'WorkflowStartResendable',
     'WorkflowStartValidationFailed',
     # Scheduling
     'Weekday',
@@ -469,7 +469,7 @@ __all__ = [
     'PayloadPolicy',
     # Recovery
     'RecoveryConfig',
-    'RetentionChoice',
+    'SendRetention',
     'RetentionConfig',
     'WorkerResilienceConfig',
     # Tracing
@@ -512,7 +512,7 @@ __all__ = [
     'ExceptionMapper',
     # Task handle
     'TaskHandle',
-    'TaskSendOptions',
+    'TaskFunctionWithOptions',
     # Node injection
     'from_node',
     # Task send types
@@ -520,7 +520,7 @@ __all__ = [
     'TaskSendPayload',
     'TaskSendError',
     'TaskSendResult',
-    'TaskSendRetryable',
+    'TaskSendResendable',
     'TaskSendSuppressed',
     'TaskSendAsyncContext',
     'TaskSendValidationFailed',
@@ -610,8 +610,8 @@ __all__ = [
     'TaskLoopCreateFailed',
     'ThreadStartRefused',
     # Rerun
-    'rerun_task',
-    'RerunTask',
+    'rerun_task_in_async',
+    'RerunCommand',
     'RerunEnqueuePolicy',
     'RerunOutcome',
     'RerunEnqueued',

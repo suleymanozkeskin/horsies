@@ -1,5 +1,5 @@
 // The workflow context of a posted run input. For a task with `workflowContext: true`, the core's child host writes the
-// context of the run's node into the input member `workflow_ctx` (`build_task_input`, `core/src/worker/execution.rs`)
+// context of the run's node into the input member `workflow_context` (`build_task_input`, `core/src/worker/execution.rs`)
 // when the node names `workflowContextFrom`; for any other run of the task the input has no such member. The child
 // takes the member out before the decode with the contract's parameters, which refuse an undeclared key, and gives its
 // value as `runtime.workflowContext`. For a task that takes no context the core writes no member, and the input decodes
@@ -16,8 +16,8 @@ import {
   workflowContextOfTree,
 } from "../workflow/context.ts";
 
-/** The input member that holds the workflow context (the core's `WORKFLOW_CTX_FIELD`). */
-export const WORKFLOW_CONTEXT_MEMBER = "workflow_ctx";
+/** The input member that holds the workflow context (the core's `WORKFLOW_CONTEXT_FIELD`). */
+export const WORKFLOW_CONTEXT_MEMBER = "workflow_context";
 
 /** A run input split into the parameters that the contract decodes and the workflow context of the runtime. */
 export type WorkflowInput = { readonly parameters: TreeValue; readonly context: RuntimeWorkflowContext };
@@ -37,7 +37,7 @@ export function workflowInputOf(tree: TreeValue, use: ContextUse): Result<Workfl
   }
 }
 
-/** The split of the input of a task that takes the context: with its `workflow_ctx` member, or without one. Pure. */
+/** The split of the input of a task that takes the context: with its `workflow_context` member, or without one. Pure. */
 function contextInput(tree: TreeValue): Result<WorkflowInput, ContextRefused> {
   // A tree object has no prototype and holds no `undefined`: a member that the text leaves out reads as `undefined`.
   const member = isTreeObject(tree) ? tree[WORKFLOW_CONTEXT_MEMBER] : undefined;

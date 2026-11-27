@@ -48,7 +48,7 @@ def _missing_result_entry(
     node_label = node_id if node_id is not None else '-'
     return Failed(
         TaskError(
-            error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
+            code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
             message=(
                 f'Dependency node {node_label} (index {task_index}, task '
                 f'{task_name}) is {status} with no stored result'
@@ -94,7 +94,7 @@ def _decode_stored_task_result(
     if deser is None:
         return Failed(
             TaskError(
-                error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
+                code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                 message=(
                     f'Stored task result JSON corrupt for task '
                     f'{task_name!r}'
@@ -105,7 +105,7 @@ def _decode_stored_task_result(
     if app is None:
         return Failed(
             TaskError(
-                error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
+                code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                 message=(
                     f'No app context available to decode result for '
                     f'task {task_name!r}'
@@ -123,7 +123,7 @@ def _decode_stored_task_result(
     if ok_type is None:
         return Failed(
             TaskError(
-                error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
+                code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                 message=(
                     f'Source {task_name!r} is not registered in this '
                     f'process (not a known task or workflow definition); '
@@ -137,7 +137,7 @@ def _decode_stored_task_result(
     except (StrictJsonError, ValueValidationError) as exc:
         return Failed(
             TaskError(
-                error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
+                code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                 message=(
                     f'decode_task_result failed for task {task_name!r}: '
                     f'{exc}'
@@ -186,7 +186,7 @@ def terminal_dependency_result(
     if status == WorkflowTaskStatus.SKIPPED.value:
         return Failed(
             TaskError(
-                error_code=OutcomeCode.UPSTREAM_SKIPPED,
+                code=OutcomeCode.UPSTREAM_SKIPPED,
                 message='Upstream dependency was SKIPPED',
                 data={'dependency_index': task_index},
             )

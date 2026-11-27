@@ -121,51 +121,51 @@ class _StartMark:
 STARTED = _StartMark()
 
 
-@APP.task(task_name='seat_double', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
+@APP.task(name='seat_double', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
 async def seat_double(*, x: int) -> Result[int, TaskError]:
     await asyncio.sleep(0)
     return Ok(x * 2)
 
 
-@APP.task(task_name='seat_sync')
+@APP.task(name='seat_sync')
 def seat_sync() -> Result[int, TaskError]:
     RAN.append('seat_sync')
     return Ok(1)
 
 
-@APP.task(task_name='seat_never', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
+@APP.task(name='seat_never', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
 async def seat_never() -> Result[int, TaskError]:
     RAN.append('seat_never')
     return Ok(1)
 
 
 @APP.task(
-    task_name='seat_core_stopped', execution=Execution.SHARED_ASYNC, timeout_ms=1000
+    name='seat_core_stopped', execution=Execution.SHARED_ASYNC, timeout_ms=1000
 )
 async def seat_core_stopped() -> Result[int, TaskError]:
     """A core call of the body met the stopped core of the child."""
     raise core.CoreStopped('log forwarder', 'planned panic')
 
 
-@APP.task(task_name='seat_raises', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
+@APP.task(name='seat_raises', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
 async def seat_raises() -> Result[int, TaskError]:
     raise ValueError('bad input')
 
 
-@APP.task(task_name='seat_waits', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
+@APP.task(name='seat_waits', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
 async def seat_waits() -> Result[int, TaskError]:
     STARTED.set()
     await asyncio.Event().wait()
     return Ok(1)
 
 
-@APP.task(task_name='seat_quick', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
+@APP.task(name='seat_quick', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
 async def seat_quick() -> Result[int, TaskError]:
     return Ok(1)
 
 
 @APP.task(
-    task_name='seat_cancels_itself',
+    name='seat_cancels_itself',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=1000,
     exception_mapper={asyncio.CancelledError: 'CANCELLED_BY_BODY'},
@@ -179,7 +179,7 @@ async def seat_cancels_itself() -> Result[int, TaskError]:
 
 
 @APP.task(
-    task_name='seat_cancels_itself_and_returns',
+    name='seat_cancels_itself_and_returns',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=1000,
     exception_mapper={asyncio.CancelledError: 'CANCELLED_BY_BODY'},
@@ -194,7 +194,7 @@ async def seat_cancels_itself_and_returns() -> Result[int, TaskError]:
 
 
 @APP.task(
-    task_name='seat_raises_generator_exit',
+    name='seat_raises_generator_exit',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=1000,
     exception_mapper={GeneratorExit: 'GENERATOR_EXIT_OF_BODY'},
@@ -221,7 +221,7 @@ async def _ignore_cancels_until_release() -> None:
 
 
 @APP.task(
-    task_name='seat_leaves_work', execution=Execution.SHARED_ASYNC, timeout_ms=10_000
+    name='seat_leaves_work', execution=Execution.SHARED_ASYNC, timeout_ms=10_000
 )
 async def seat_leaves_work() -> Result[int, TaskError]:
     """Returns while an asyncio task that it started still runs."""
@@ -230,7 +230,7 @@ async def seat_leaves_work() -> Result[int, TaskError]:
 
 
 @APP.task(
-    task_name='seat_left_work_ignores_cancel',
+    name='seat_left_work_ignores_cancel',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=10_000,
 )
@@ -250,7 +250,7 @@ STARTS: list[asyncio.Event] = []
 
 
 @APP.task(
-    task_name='seat_reads_cancel_state', execution=Execution.SHARED_ASYNC, timeout_ms=10_000
+    name='seat_reads_cancel_state', execution=Execution.SHARED_ASYNC, timeout_ms=10_000
 )
 async def seat_reads_cancel_state(runtime: TaskRuntime) -> Result[int, TaskError]:
     """Waits until it is cancelled, records its cancel state, and returns a
@@ -264,7 +264,7 @@ async def seat_reads_cancel_state(runtime: TaskRuntime) -> Result[int, TaskError
 
 
 @APP.task(
-    task_name='seat_swallows_then_cancels_itself',
+    name='seat_swallows_then_cancels_itself',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=10_000,
     exception_mapper={asyncio.CancelledError: 'CANCELLED_BY_BODY'},
@@ -415,7 +415,7 @@ def test_a_def_task_is_refused_before_it_runs(steps: _Steps) -> None:
     envelope = _set_running(_run(_frame('seat_sync')))
 
     error = _failed(_result(envelope, int))
-    assert error.error_code == OperationalCode.WORKER_RESOLUTION_ERROR
+    assert error.code == OperationalCode.WORKER_RESOLUTION_ERROR
     assert error.message == (
         'Failed to resolve seat_sync: the task is def, and a shared async '
         'child runs only async def tasks'
@@ -441,7 +441,7 @@ def test_a_refusal_fails_the_task_after_running_and_before_resolve(
         CancelGraceInvalid(reason=reason),
     ).envelope
     error = _failed(_result(envelope, int))
-    assert error.error_code == OperationalCode.WORKER_SERIALIZATION_ERROR
+    assert error.code == OperationalCode.WORKER_SERIALIZATION_ERROR
     assert error.data == {
         'task_name': 'seat_double',
         'field': 'cancel_grace_ms',
@@ -475,7 +475,7 @@ def test_a_task_that_raises_is_mapped(steps: _Steps) -> None:
     envelope = _set_running(_run(_frame('seat_raises')))
 
     error = _failed(_result(envelope, int))
-    assert error.error_code == OperationalCode.UNHANDLED_EXCEPTION
+    assert error.code == OperationalCode.UNHANDLED_EXCEPTION
 
 
 def test_a_body_that_the_stopped_core_ended_ends_the_child_with_no_report(
@@ -522,7 +522,7 @@ def test_a_cancel_of_the_body_ends_the_run(steps: _Steps) -> None:
         envelope = _set_running(asyncio.run(cancel_after_start()))
 
     error = _failed(_result(envelope, int))
-    assert error.error_code == OperationalCode.UNHANDLED_EXCEPTION
+    assert error.code == OperationalCode.UNHANDLED_EXCEPTION
     assert 'CancelledError' in (error.message or '')
 
 
@@ -534,7 +534,7 @@ def test_a_body_that_cancels_its_own_task_goes_through_the_mapper(
     envelope = _set_running(_run(_frame('seat_cancels_itself')))
 
     error = _failed(_result(envelope, int))
-    assert error.error_code == 'CANCELLED_BY_BODY'
+    assert error.code == 'CANCELLED_BY_BODY'
 
 
 def test_a_generator_exit_of_the_body_goes_through_the_mapper(steps: _Steps) -> None:
@@ -543,7 +543,7 @@ def test_a_generator_exit_of_the_body_goes_through_the_mapper(steps: _Steps) -> 
     envelope = _set_running(_run(_frame('seat_raises_generator_exit')))
 
     error = _failed(_result(envelope, int))
-    assert error.error_code == 'GENERATOR_EXIT_OF_BODY'
+    assert error.code == 'GENERATOR_EXIT_OF_BODY'
 
 
 class TestTheMarkerOfASeat:
@@ -587,7 +587,7 @@ def test_a_body_that_returns_after_cancelling_its_own_task_goes_through_the_mapp
     envelope = _set_running(_run(_frame('seat_cancels_itself_and_returns')))
 
     error = _failed(_result(envelope, int))
-    assert error.error_code == 'CANCELLED_BY_BODY'
+    assert error.code == 'CANCELLED_BY_BODY'
 
 
 class _Exited(BaseException):
@@ -689,7 +689,7 @@ def test_a_pending_self_cancel_on_the_seat_loop_ends_only_that_run(
     ends = {frame.dispatch: frame.end for frame in writer.results()}
     assert _result(_envelope_of(ends[1]), int) == Succeeded(8)
     error = _failed(_result(_envelope_of(ends[2]), int))
-    assert error.error_code == 'CANCELLED_BY_BODY'
+    assert error.code == 'CANCELLED_BY_BODY'
 
 
 class TestTheMarkerOnTheSeatLoop:

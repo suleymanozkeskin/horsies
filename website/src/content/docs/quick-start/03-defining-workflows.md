@@ -66,10 +66,10 @@ Each `TaskNode` requires a `node_id` for identification within the workflow.
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Recommended: explicit node_id
-TaskNode(fn=validate_order, node_id="validate_order")
+TaskNode(function=validate_order, node_id="validate_order")
 
 # Avoid: relying on auto-assignment
-TaskNode(fn=validate_order)  # becomes "order_processing:0"
+TaskNode(function=validate_order)  # becomes "order_processing:0"
 ```
 
 For type-safe node construction with static arguments, see [Typed Node Builder](/horsies/concepts/workflows/typed-node-builder/).
@@ -84,13 +84,13 @@ from horsies import TaskNode, WorkflowDefinition, WorkflowDefinitionConfig, OnEr
 
 # Module-level nodes with explicit node_id
 _validate_node: TaskNode[ValidatedOrder] = TaskNode(
-    fn=validate_order,
+    function=validate_order,
     node_id="validate",
 )
 reveal_type(_validate_node)  # TaskNode[ValidatedOrder]
 
 _inventory_node = TaskNode(
-    fn=check_inventory,
+    function=check_inventory,
     waits_for=[_validate_node],
     args_from={"order_result": _validate_node},
     node_id="inventory",
@@ -98,7 +98,7 @@ _inventory_node = TaskNode(
 reveal_type(_inventory_node)  # TaskNode[InventoryStatus]
 
 _cost_node = TaskNode(
-    fn=calculate_shipping_cost,
+    function=calculate_shipping_cost,
     waits_for=[_validate_node],
     args_from={"order_result": _validate_node},
     node_id="shipping_cost",
@@ -106,7 +106,7 @@ _cost_node = TaskNode(
 reveal_type(_cost_node)  # TaskNode[ShippingCost]
 
 _address_node = TaskNode(
-    fn=check_address,
+    function=check_address,
     waits_for=[_validate_node],
     args_from={"order_result": _validate_node},
     node_id="address",
@@ -114,7 +114,7 @@ _address_node = TaskNode(
 reveal_type(_address_node)  # TaskNode[AddressValidation]
 
 _reserve_node: TaskNode[Reservation] = TaskNode(
-    fn=reserve_inventory,
+    function=reserve_inventory,
     waits_for=[_inventory_node, _cost_node, _address_node],
     args_from={
         "inventory_result": _inventory_node,
@@ -126,7 +126,7 @@ _reserve_node: TaskNode[Reservation] = TaskNode(
 reveal_type(_reserve_node)  # TaskNode[Reservation]
 
 _shipment_node: TaskNode[Shipment] = TaskNode(
-    fn=create_shipment,
+    function=create_shipment,
     waits_for=[_reserve_node],
     args_from={"reservation_result": _reserve_node},
     node_id="shipment",
@@ -134,7 +134,7 @@ _shipment_node: TaskNode[Shipment] = TaskNode(
 reveal_type(_shipment_node)  # TaskNode[Shipment]
 
 _notify_node: TaskNode[NotificationResult] = TaskNode(
-    fn=send_notification,
+    function=send_notification,
     waits_for=[_shipment_node],
     args_from={"shipment_result": _shipment_node},
     node_id="notify",
@@ -178,7 +178,7 @@ match spec.start():
     case Ok(handle):
         reveal_type(handle)  # WorkflowHandle[NotificationResult]
 
-        handle.get(timeout_ms=30000)  # Wait for completion
+        handle.get(wait_ms=30000)  # Wait for completion
 
         # Type-safe result: ReadResult[NotificationResult, TaskError]
         result = handle.result_for(OrderProcessingWorkflow.notify)
@@ -190,7 +190,7 @@ match spec.start():
                 print(f"Order {notification.order_id} processed")
             case Ok(Failed(error)):
                 reveal_type(error)  # TaskError
-                print(f"Failed: {error.error_code} - {error.message}")
+                print(f"Failed: {error.code} - {error.message}")
             case Err(read_error):
                 print(f"Read failed: {read_error.code} - {read_error.message}")
 ```
@@ -206,35 +206,35 @@ from horsies import Err, Failed, Ok, Succeeded
 def start_order_processing(order: Order) -> None:
     """Start the order processing workflow."""
     validate_node: TaskNode[ValidatedOrder] = TaskNode(
-        fn=validate_order,
+        function=validate_order,
         kwargs={'order': order},
         node_id="validate_order",
     )
     reveal_type(validate_node)  # TaskNode[ValidatedOrder]
 
     inventory_node = TaskNode(
-        fn=check_inventory,
+        function=check_inventory,
         waits_for=[validate_node],
         args_from={"order_result": validate_node},
         node_id="check_inventory",
     )
 
     cost_node = TaskNode(
-        fn=calculate_shipping_cost,
+        function=calculate_shipping_cost,
         waits_for=[validate_node],
         args_from={"order_result": validate_node},
         node_id="calculate_cost",
     )
 
     address_node = TaskNode(
-        fn=check_address,
+        function=check_address,
         waits_for=[validate_node],
         args_from={"order_result": validate_node},
         node_id="check_address",
     )
 
     reserve_node = TaskNode(
-        fn=reserve_inventory,
+        function=reserve_inventory,
         waits_for=[inventory_node, cost_node, address_node],
         args_from={
             "inventory_result": inventory_node,
@@ -245,14 +245,14 @@ def start_order_processing(order: Order) -> None:
     )
 
     shipment_node = TaskNode(
-        fn=create_shipment,
+        function=create_shipment,
         waits_for=[reserve_node],
         args_from={"reservation_result": reserve_node},
         node_id="create_shipment",
     )
 
     notify_node: TaskNode[NotificationResult] = TaskNode(
-        fn=send_notification,
+        function=send_notification,
         waits_for=[shipment_node],
         args_from={"shipment_result": shipment_node},
         node_id="send_notification",
@@ -283,7 +283,7 @@ def start_order_processing(order: Order) -> None:
             pass
     reveal_type(handle)  # WorkflowHandle[NotificationResult]
 
-    handle.get(timeout_ms=30000)
+    handle.get(wait_ms=30000)
 
     # Type-safe result access
     result = handle.result_for(notify_node)
@@ -295,7 +295,7 @@ def start_order_processing(order: Order) -> None:
             print(f"Order {notification.order_id} processed successfully")
         case Ok(Failed(error)):
             reveal_type(error)  # TaskError
-            print(f"Order processing failed: {error.error_code} - {error.message}")
+            print(f"Order processing failed: {error.code} - {error.message}")
         case Err(read_error):
             print(f"Read failed: {read_error.code} - {read_error.message}")
 ```
@@ -308,7 +308,7 @@ def start_order_processing(order: Order) -> None:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-@app.task("check_inventory", queue_name="standard")
+@app.task("check_inventory", queue="standard")
 def check_inventory(
     *,
     order_result: TaskOutcome[ValidatedOrder, TaskError],
@@ -316,7 +316,7 @@ def check_inventory(
     match order_result:
         case Failed():
             return Err(TaskError(
-                error_code="UPSTREAM_FAILED",
+                code="UPSTREAM_FAILED",
                 message="Cannot check inventory: order validation failed",
             ))
         case Succeeded(order):  # ValidatedOrder
@@ -332,7 +332,7 @@ When multiple nodes converge into a single task (fan-in), each upstream result a
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-@app.task("reserve_inventory", queue_name="urgent")
+@app.task("reserve_inventory", queue="urgent")
 def reserve_inventory(
     *,
     inventory_result: TaskOutcome[InventoryStatus, TaskError],
@@ -342,17 +342,17 @@ def reserve_inventory(
     match (inventory_result, cost_result, address_result):
         case (Failed(), _, _):
             return Err(TaskError(
-                error_code="INVENTORY_CHECK_FAILED",
+                code="INVENTORY_CHECK_FAILED",
                 message="Cannot reserve: inventory check failed",
             ))
         case (_, Failed(), _):
             return Err(TaskError(
-                error_code="COST_CALCULATION_FAILED",
+                code="COST_CALCULATION_FAILED",
                 message="Cannot reserve: shipping cost calculation failed",
             ))
         case (_, _, Failed()):
             return Err(TaskError(
-                error_code="ADDRESS_VALIDATION_FAILED",
+                code="ADDRESS_VALIDATION_FAILED",
                 message="Cannot reserve: address validation failed",
             ))
         case (Succeeded(inventory), Succeeded(cost), Succeeded(_address)):
@@ -377,4 +377,4 @@ The kwarg names must match the keys defined in `args_from`. For example, the `re
 | `args_from` | Inject the upstream `TaskOutcome` as kwargs |
 | `output` | Node whose result becomes the workflow result |
 | `on_error` | `FAIL` continues DAG, `PAUSE` stops immediately |
-| `result_for(node)` | Non-blocking type-safe result access. Returns `Err(ResultNotReady(...))` if task hasn't completed |
+| `result_for(node)` | Non-blocking type-safe result access. Returns `Err(ReadResultNotReady(...))` if task hasn't completed |

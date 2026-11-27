@@ -181,14 +181,14 @@ list_schedules(broker)                                  # next run, then name; a
   `Breakdown.total` is a `BreakdownCounts` over every group.
 - Filter lists: OR within a dimension, AND across dimensions; empty = no filter.
 - `error_categories` (`ErrorCategory`: OPERATIONAL / CONTRACT / RETRIEVAL /
-  OUTCOME / DOMAIN) expands server-side from the library's own code registry —
-  DOMAIN is the complement of every built-in code.
+  OUTCOME / CUSTOM) expands server-side from the library's own code registry —
+  CUSTOM is the complement of every built-in code.
 - Worker/health surfaces reuse the app APIs: `list_worker_states_async`,
   `ping_workers_async`, `ping_database_async`, `get_worker_state_history_async`,
   `get_execution_class_report_async`.
 - A snapshot's `slot_health` is `AllSlotsServing()` or `SlotsDown(slots)` (the
   worker is degraded). Each `DownSlot` has `slot`, `cause`
-  (`ResourceShortage(errno_name)` or `ThreadStartRefused()`), `detail` (at
+  (`ResourceShortage(errno)` or `ThreadStartRefused()`), `detail` (at
   most 2400 characters), `down_since` and `failed_boots`. A slot is down
   when its child start failed for a cause that can clear; it takes no task and
   boots again after a growing wait. Match both variants.

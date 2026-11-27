@@ -880,7 +880,7 @@ class TestParameterDefaults:
     def test_workflow_ctx_and_args_from_slots_are_exempt(self) -> None:
         def task(
             *,
-            workflow_ctx: WorkflowContext | None = None,
+            workflow_context: WorkflowContext | None = None,
             value: TaskOutcome[int, TaskError] | None = None,
         ) -> Result[int, TaskError]:
             return Ok(1)
@@ -1144,7 +1144,7 @@ class TestFillOmittedDefaults:
     def test_engine_filled_parameters_are_skipped(self) -> None:
         def task(
             *,
-            workflow_ctx: WorkflowContext | None = None,
+            workflow_context: WorkflowContext | None = None,
             value: TaskOutcome[int, TaskError] | None = None,
         ) -> Result[int, TaskError]:
             return Ok(1)
@@ -1267,7 +1267,7 @@ class TestDefaultOnASchedule:
         return TaskSchedule(
             name='nightly',
             task_name=task_name,
-            pattern=IntervalSchedule(hours=1),
+            pattern=IntervalSchedule(every=datetime.timedelta(hours=1)),
         )
 
     def test_a_refused_default_is_a_boot_refusal(self) -> None:
@@ -1546,7 +1546,7 @@ class TestDefinitionOfAny:
                     return Err(error)
 
         source = SubWorkflowNode(workflow_def=self._child('any_source'))
-        node = TaskNode(fn=target, waits_for=[source], args_from={'value': source})
+        node = TaskNode(function=target, waits_for=[source], args_from={'value': source})
 
         with pytest.raises(WorkflowValidationError) as refused:
             WorkflowSpec(name='parent', tasks=[source, node])
@@ -1581,7 +1581,7 @@ class TestDefinitionOfAny:
                     return Err(error)
 
         source = SubWorkflowNode(workflow_def=Child)
-        node = TaskNode(fn=target, waits_for=[source], args_from={'value': source})
+        node = TaskNode(function=target, waits_for=[source], args_from={'value': source})
 
         with pytest.raises(WorkflowValidationError) as refused:
             WorkflowSpec(name='parent', tasks=[source, node])

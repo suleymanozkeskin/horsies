@@ -21,9 +21,9 @@ Adjust to your needs.
 
 | Category | Source | Examples | Auto-Retry? |
 | -------- | ------ | -------- | ----------- |
-| Read errors | `handle.get()` gave no outcome | `WaitTimeout`, `ReadDatabaseError` | No |
-| Execution errors | Task raised an exception, or its worker process died | `UNHANDLED_EXCEPTION`, `TASK_EXCEPTION`, `WORKER_CRASHED` | If in `auto_retry_for` |
-| Domain errors | User returned error | `"RATE_LIMITED"`, `"VALIDATION_FAILED"` | If in `auto_retry_for` |
+| Read errors | `handle.get()` gave no outcome | `ReadWaitTimeout`, `ReadDatabaseError` | No |
+| Execution errors | Task raised an exception, or its worker process died | `UNHANDLED_EXCEPTION`, `TASK_EXCEPTION`, `WORKER_CRASHED` | If in `retry_for` |
+| Domain errors | User returned error | `"RATE_LIMITED"`, `"VALIDATION_FAILED"` | If in `retry_for` |
 
 A read gives an execution error or a domain error as `Ok(Failed(task_error))`. It gives a read error as `Err(read_error)`. The read errors are on [ReadError](/horsies/concepts/result-handling/#readerror).
 
@@ -32,14 +32,14 @@ A read gives an execution error or a domain error as `Ok(Failed(task_error))`. I
 Handle errors when:
 
 - The error is a **read error** (task may still complete)
-- The error is **not in `auto_retry_for`** (won't be retried)
+- The error is **not in `retry_for`** (won't be retried)
 - The task has **exhausted retries** (final failure)
 
 ## How To
 
 ### Configure Automatic Retries
 
-The library handles retries automatically when `auto_retry_for` matches the error. The entries are code members: built-in members, and members of the `Enum` class that the task declares with `error_codes=`:
+The library handles retries automatically when `retry_for` matches the error. The entries are code members: built-in members, and members of the `Enum` class that the task declares with `error_codes=`:
 
 ```python
 from enum import Enum
@@ -58,7 +58,7 @@ class FetchCode(str, Enum):
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=3,
-        auto_retry_for=[OperationalCode.UNHANDLED_EXCEPTION, FetchCode.RATE_LIMITED],
+        retry_for=[OperationalCode.UNHANDLED_EXCEPTION, FetchCode.RATE_LIMITED],
     ),
 )
 def fetch_api_data(*, url: str) -> Result[dict[str, JsonValue], TaskError]:
@@ -83,7 +83,7 @@ To avoid try/except boilerplate for mapping exceptions to error codes, use `exce
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=3,
-        auto_retry_for=[FetchCode.RATE_LIMITED, FetchCode.TIMEOUT],
+        retry_for=[FetchCode.RATE_LIMITED, FetchCode.TIMEOUT],
     ),
     exception_mapper={
         RateLimitError: "RATE_LIMITED",
@@ -139,7 +139,7 @@ class ProductRecord:
 def fetch_product_page(*, url: str) -> Result[str, TaskError]:
     if "missing" in url:
         return Err(TaskError(
-            error_code="FETCH_FAILED",
+            code="FETCH_FAILED",
             message=f"Could not fetch {url}",
         ))
     return Ok("<html>...</html>")
@@ -153,7 +153,7 @@ def parse_product_page(
     match page_result:
         case Failed():
             return Err(TaskError(
-                error_code="UPSTREAM_FAILED",
+                code="UPSTREAM_FAILED",
                 message="Cannot parse product page: fetch failed",
             ))
         case Succeeded():
@@ -172,7 +172,7 @@ def save_product_record(
     match product_result:
         case Failed():
             return Err(TaskError(
-                error_code="UPSTREAM_FAILED",
+                code="UPSTREAM_FAILED",
                 message="Cannot save product: parse failed",
             ))
         case Succeeded(product):
@@ -181,19 +181,19 @@ def save_product_record(
 
 
 fetch: TaskNode[str] = TaskNode(
-    fn=fetch_product_page,
+    function=fetch_product_page,
     kwargs={'url': "https://example.com/missing"},
     node_id="fetch_product_page",
 )
 parse: TaskNode[ProductRecord] = TaskNode(
-    fn=parse_product_page,
+    function=parse_product_page,
     waits_for=[fetch],
     args_from={"page_result": fetch},
     allow_failed_dependencies=True,
     node_id="parse_product_page",
 )
 save: TaskNode[None] = TaskNode(
-    fn=save_product_record,
+    function=save_product_record,
     waits_for=[parse],
     args_from={"product_result": parse},
     allow_failed_dependencies=True,
@@ -209,7 +209,7 @@ spec = app.workflow(
 )
 match spec.start():
     case Ok(handle):
-        handle.get(timeout_ms=30000)
+        handle.get(wait_ms=30000)
     case Err(start_err):
         raise RuntimeError(f"Start failed: {start_err.code}")
 ```
@@ -222,7 +222,7 @@ Prefer explicit returns over raising exceptions:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import Err, Failed, Ok, Succeeded, TaskNotFound, WaitTimeout
+from horsies import Err, Failed, Ok, ReadTaskNotFound, ReadWaitTimeout, Succeeded
 from instance import my_task
 
 def process_task() -> str | None:
@@ -233,18 +233,18 @@ def process_task() -> str | None:
         case Ok(handle):
             pass
 
-    match handle.get(timeout_ms=5000):
+    match handle.get(wait_ms=5000):
         case Ok(Succeeded(value)):
             return value
         case Ok(Failed(task_error)):
             # Pass to centralized handler
             handle_error(task_error)
             return None
-        case Err(WaitTimeout()):
+        case Err(ReadWaitTimeout()):
             # Task may still be running
             # check status again using task id if you need absolute decisions
             return None
-        case Err(TaskNotFound()):
+        case Err(ReadTaskNotFound()):
             return None
         case Err(read_error):
             # Pass to centralized handler
@@ -265,7 +265,7 @@ Create a handler that **returns actions**, not just logs.
 # Wrong - exceptions break control flow
 match handle.get():
     case Ok(Failed(task_error)):
-        raise RuntimeError(f"Task failed: {task_error.error_code}")
+        raise RuntimeError(f"Task failed: {task_error.code}")
     case _:
         ...  # the other arms
 
@@ -294,7 +294,7 @@ match handle.get():
 match handle.get():
     case Ok(Failed(task_error)):
         handle_error(task_error)
-        return task_error.error_code
+        return task_error.code
     case _:
         ...  # the other arms
 ```
@@ -304,14 +304,14 @@ match handle.get():
 <!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong - duplicates library retry logic
-if error.error_code == "RATE_LIMITED":
+if error.code == "RATE_LIMITED":
     manually_schedule_retry(task_id)
 
-# Correct - configure auto_retry_for on the retry policy
+# Correct - configure retry_for on the retry policy
 @app.task(
     "my_task",
     error_codes=FetchCode,
-    retry_policy=RetryPolicy.fixed([60, 120, 300], auto_retry_for=[FetchCode.RATE_LIMITED]),
+    retry_policy=RetryPolicy.fixed([60, 120, 300], retry_for=[FetchCode.RATE_LIMITED]),
 )
 def my_task() -> Result[str, TaskError]:
     ...

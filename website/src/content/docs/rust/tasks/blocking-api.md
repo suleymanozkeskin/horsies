@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = add.blocking().send(add_numbers::Input { a: 2, b: 3 })?;
     match handle.blocking().get(WaitLimit::NoLimit)? {
         TaskOutcome::Succeeded(sum) => println!("sum = {sum}"),
-        TaskOutcome::Failed(error) => println!("failed with {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("failed with {}", error.code().as_str()),
     }
     Ok(())
 }
@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = daily_report.blocking().start()?;
     match handle.blocking().get(WaitLimit::NoLimit)? {
         TaskOutcome::Succeeded(length) => println!("published {length} bytes"),
-        TaskOutcome::Failed(error) => println!("the workflow ended with {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("the workflow ended with {}", error.code().as_str()),
     }
     let status = handle.blocking().status()?;
     println!("status: {status:?}");
@@ -65,8 +65,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | View | From | Methods |
 |------|------|---------|
-| `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `with_options`, `retry_send` |
-| `TaskFunctionSendOptionsView` | `task_function.blocking().with_options(options)` | `send` |
+| `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `with_options`, `resend` |
+| `TaskFunctionWithOptionsView` | `task_function.blocking().with_options(options)` | `send` |
 | `TaskHandleView` | `handle.blocking()` | `get`, `info` |
 | `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_execution_class_coverage`, `get_execution_class_report`, `check_live`, `start`, `start_with_id`, `start_workflow`, `start_workflow_with` |
 | `WorkflowFunctionView` | `workflow_function.blocking()` | `start`, `start_with_id`, `retry_start` |
@@ -85,7 +85,7 @@ A blocking call on a thread where a tokio runtime is current (`tokio::runtime::H
 
 | Call | Error |
 |------|-------|
-| A send or a retry | `TaskSendError::AsyncContext` with the prepared `task_id` and `payload`, and nothing written |
+| A send or a resend | `TaskSendError::AsyncContext` with the prepared `task_id` and `payload`, and nothing written |
 | `get`, `info`, `get_result`, `get_raw_result`, `get_task_info` | `ReadError::AsyncContext { message }` |
 | A health read | `DatabaseOperationError::AsyncContext`, not retryable |
 | `check_live` | `ValidationReport` with `HRS-217` (`CheckLiveAsyncContext`), after the static check passed |
@@ -93,7 +93,7 @@ A blocking call on a thread where a tokio runtime is current (`tokio::runtime::H
 | `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `WorkflowHandleError::AsyncContext`, not retryable |
 | `WorkflowHandleView::get`, `result_for` | `WorkflowReadError::AsyncContext { message }` |
 
-`retry_send(&error).await` with a `TaskSendError::AsyncContext` completes the same send from async code, with the same task id and payload. See [Retry a Failed Send](/horsies/rust/tasks/sending-tasks/#retry-a-failed-send).
+`resend(&error).await` with a `TaskSendError::AsyncContext` completes the same send from async code, with the same task id and payload. See [Resend a Failed Send](/horsies/rust/tasks/sending-tasks/#resend-a-failed-send).
 
 `retry_start(&error).await` with a `WorkflowStartError::AsyncContext` error completes the same start from async code, with the error's `workflow_id`.
 
@@ -113,13 +113,13 @@ When the operating system refused the threads of the core's process runtime, the
 
 | Call | Error |
 |------|-------|
-| A send or a retry | `TaskSendError::EnqueueFailed` with the task id and payload |
-| A read | `ReadError::Database` |
+| A send or a resend | `TaskSendError::EnqueueFailed` with the task id and payload |
+| A read | `ReadError::DatabaseError` |
 | A health read | `DatabaseOperationError::OperationFailed` with the code of the read |
 | `check_live` | `ValidationReport` with the connectivity refusal |
 | A workflow start | `WorkflowStartError::EnqueueFailed` with the `workflow_id` of the start |
 | `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `WorkflowHandleError::DatabaseOperationFailed` |
-| `WorkflowHandleView::get`, `result_for` | `WorkflowReadError::Database` with `DatabaseOperationFailed` |
+| `WorkflowHandleView::get`, `result_for` | `WorkflowReadError::DatabaseError` with `DatabaseOperationFailed` |
 
 In a process that was forked without `exec` after the process runtime started, every call panics: see [Process-State Refusals](/horsies/tasks/error-types/#process-state-refusals).
 

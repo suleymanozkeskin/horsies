@@ -13,9 +13,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use horsies::{
-    blocking_task, task, AppConfig, ChildPreload, Horsies, HorsiesError, IsolatedChildren,
-    SharedAsyncChildren, SharedThreadChildren, TaskError, TaskOutcome, TaskRuntime, UserErrorCode,
-    WaitLimit, WorkerProfile,
+    blocking_task, task, AppConfig, ChildPreload, CustomErrorCode, Horsies, HorsiesError,
+    IsolatedChildren, SharedAsyncChildren, SharedThreadChildren, TaskError, TaskOutcome,
+    TaskRuntime, WaitLimit, WorkerProfile,
 };
 use horsies_examples::{app_refused, database_url, main_of, DemoResult};
 
@@ -29,7 +29,7 @@ const THREAD_CHILDREN: u32 = 1;
 const THREAD_SEATS: u32 = 4;
 
 /// The codes of `fetch_page`'s own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum FetchCode {
     Interrupted,
 }
@@ -51,7 +51,7 @@ fn checksum(data: Vec<u8>) -> Result<u64, TaskError<Infallible>> {
 async fn fetch_page(rt: TaskRuntime, path: String) -> Result<usize, TaskError<FetchCode>> {
     tokio::select! {
         () = tokio::time::sleep(Duration::from_millis(100)) => Ok(path.len()),
-        () = rt.cancelled() => Err(TaskError::user(FetchCode::Interrupted, "cancelled at the deadline")),
+        () = rt.cancelled() => Err(TaskError::custom(FetchCode::Interrupted, "cancelled at the deadline")),
     }
 }
 

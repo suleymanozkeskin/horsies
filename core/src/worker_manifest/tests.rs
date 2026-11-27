@@ -546,15 +546,15 @@ fn the_handler_fields_are_required_and_closed() {
 #[test]
 fn the_declared_codes_of_a_task_give_its_error_code_labels() {
     use crate::core::task::{
-        error_code_label, ErrorCodeLabel, OperationalCode, TaskErrorCode, UserCode,
+        error_code_label, CustomCode, ErrorCodeLabel, OperationalCode, TaskErrorCode,
     };
     let manifest = parsed(&manifest(
         &json!({"batch": full_profile()}),
         &named("batch"),
     ));
     let fetch = &manifest.tasks["app.tasks.fetch"].error_codes;
-    let declared = TaskErrorCode::User(UserCode::parse("RATE_LIMITED").expect("a user code"));
-    let other = TaskErrorCode::User(UserCode::parse("GONE").expect("a user code"));
+    let declared = TaskErrorCode::Custom(CustomCode::parse("RATE_LIMITED").expect("a custom code"));
+    let other = TaskErrorCode::Custom(CustomCode::parse("GONE").expect("a custom code"));
     let built_in = TaskErrorCode::from(OperationalCode::DatabaseError);
     assert_eq!(error_code_label(fetch, &declared).value(), "RATE_LIMITED");
     assert_eq!(error_code_label(fetch, &other), ErrorCodeLabel::Undeclared);

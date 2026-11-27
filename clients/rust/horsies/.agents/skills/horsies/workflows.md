@@ -46,13 +46,13 @@ async fn send_receipt(
 ) -> Result<String, TaskError<Infallible>> {
     match charged {
         TaskOutcome::Succeeded(cents) => Ok(format!("{order_id}: charged {cents}")),
-        TaskOutcome::Failed(error) => Ok(format!("{order_id}: {}", error.code().text())),
+        TaskOutcome::Failed(error) => Ok(format!("{order_id}: {}", error.code().as_str())),
     }
 }
 
-#[task("audit_checkout", workflow_ctx)]
-async fn audit_checkout(workflow_ctx: WorkflowContext) -> Result<bool, TaskError<Infallible>> {
-    let charged = workflow_ctx.result_for::<u64, Infallible>(&NodeKey::new("charge"));
+#[task("audit_checkout", workflow_context)]
+async fn audit_checkout(workflow_context: WorkflowContext) -> Result<bool, TaskError<Infallible>> {
+    let charged = workflow_context.result_for::<u64, Infallible>(&NodeKey::new("charge"));
     Ok(matches!(charged, Ok(TaskOutcome::Succeeded(_))))
 }
 
@@ -79,13 +79,13 @@ impl WorkflowDefinition for Checkout {
         let charged = builder.task(
             charge_order::node()
                 .node_id("charge")
-                .set(charge_order::params::order(), params.order)?,
+                .set(charge_order::fields::order(), params.order)?,
         )?;
         let receipt = builder.task(
             send_receipt::node()
                 .node_id("receipt")
-                .set(send_receipt::params::order_id(), order_id)?
-                .arg_from(send_receipt::params::charged(), charged),
+                .set(send_receipt::fields::order_id(), order_id)?
+                .arg_from(send_receipt::fields::charged(), charged),
         )?;
         let _audit = builder.task(
             audit_checkout::node()
@@ -167,10 +167,10 @@ the task's registration on the builder's app.
 | `.key()` | `Option<NodeKey<T>>`: the key when the node has a given node id |
 
 - `set` and `arg_from` take the field tokens of the task's own module:
-  `task_name::params::<name>()`. A token of another task, or a source of
+  `task_name::fields::<name>()`. A token of another task, or a source of
   another output type, is a compile error.
-- `E` in `TaskOutcome<S, E>` reads the source's user codes. `UserCode`
-  reads any user code as checked text.
+- `E` in `TaskOutcome<S, E>` reads the source's custom codes. `CustomCode`
+  reads any custom code as checked text.
 - The field `S` of `arg_from` must be the source's output type.
 
 Data flow rules:
@@ -188,8 +188,8 @@ ended. Give that node its dependency results through the workflow context.
 
 ## The Workflow Context
 
-A task that takes the context has the attribute `workflow_ctx` and a
-parameter named `workflow_ctx` of type `WorkflowContext`. The child of the
+A task that takes the context has the attribute `workflow_context` and a
+parameter named `workflow_context` of type `WorkflowContext`. The child of the
 worker writes the context into that parameter.
 
 | Method | Returns |
@@ -203,10 +203,11 @@ worker writes the context into that parameter.
 | `output_for::<T>(&key)` | `Result<Option<T>, WorkflowContextError>`: the child's output |
 
 - `WorkflowContextError`: `NotInContext { node_id }` (the node is not in
-  `workflow_context_from`, or it did not end), `Unreadable { node_id, cause }`,
-  `UnknownUserCode { node_id, cause }`.
+  `workflow_context_from`, or it did not end),
+  `ResultDeserializationError { node_id, cause }`,
+  `UnknownCustomCode { node_id, cause }`.
 - Each node of `workflow_context_from` must be a dependency of the node.
-- `workflow_context_from` on a task without the `workflow_ctx` attribute is
+- `workflow_context_from` on a task without the `workflow_context` attribute is
   refused (`HRS-010`).
 - Use a given `node_id` for each context source, and read it with
   `NodeKey::new(id)`.
@@ -246,7 +247,7 @@ impl WorkflowDefinition for RegionReport {
     ) -> Result<WorkflowSpec, HorsiesError> {
         builder.definition_key(Self::definition_key());
         let _fetched = builder.task(
-            fetch_report::node().set(fetch_report::params::region(), params.region)?,
+            fetch_report::node().set(fetch_report::fields::region(), params.region)?,
         )?;
         builder.build()
     }
@@ -347,7 +348,7 @@ async fn run_checkout(
     let handle = checkout.start(CheckoutParams { order }).await?;
     match handle.get(WaitLimit::Within(Duration::from_secs(60))).await? {
         TaskOutcome::Succeeded(receipt) => println!("{receipt}"),
-        TaskOutcome::Failed(error) => println!("checkout ended with {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("checkout ended with {}", error.code().as_str()),
     }
     Ok(())
 }
@@ -418,7 +419,7 @@ with the error's id.
 | Method | Returns |
 |---|---|
 | `workflow_id()` | `Uuid` |
-| `get(limit)` | `Result<TaskOutcome<T, UserCode>, WorkflowReadError>`: waits while the workflow runs, up to `limit`. A `WaitLimit::Within` limit above `MAX_WAIT_LIMIT_MS` is `InvalidInput`, as the first check |
+| `get(wait)` | `Result<TaskOutcome<T, CustomCode>, WorkflowReadError>`: waits while the workflow runs, up to `wait`. A `WaitLimit::Within` limit above `MAX_WAIT_LIMIT_MS` is `InvalidInput`, as the first check |
 | `result_for::<V, E>(&key)` | `Result<TaskOutcome<V, E>, WorkflowReadError>`: one node, read with its types. Not a wait |
 | `status()` | `HandleResult<WorkflowStatus>` |
 | `results()` | `HandleResult<BTreeMap<String, NodeResult>>`: the stored result of each node with a node id |
@@ -427,15 +428,15 @@ with the error's id.
 | `pause()` | `HandleResult<bool>`: `true` when a RUNNING workflow paused |
 | `resume()` | `HandleResult<bool>`: `true` when a PAUSED workflow resumed. The owed children build from the app's registered definitions |
 
-- `get` reads user codes as checked text (`UserCode`), because a workflow
+- `get` reads custom codes as checked text (`CustomCode`), because a workflow
   holds the codes of many tasks. A FAILED, CANCELLED or EXPIRED workflow
   is `Failed` with its stored error, or the code of its status. A PAUSED
   workflow is `Failed` with `WORKFLOW_PAUSED`; a resume can continue it.
 - A workflow with no output node is read as `OutputlessResults`: `get(id)`,
   `iter()`, `len()`, `is_empty()`, each outcome as
-  `TaskOutcome<JsonText, UserCode>`: the value as its stored text, read with
+  `TaskOutcome<JsonText, CustomCode>`: the value as its stored text, read with
   `decode::<T>()`.
-- `NodeResult` is `Outcome(TaskOutcome<JsonText, UserCode>)` or
+- `NodeResult` is `Outcome(TaskOutcome<JsonText, CustomCode>)` or
   `Unreadable { cause }`.
 - `WorkflowNodeInfo` has `node_id`, `index`, `name`, `status`
   (`WorkflowTaskStatus`), `result`, `started_at`, `completed_at`,
@@ -443,15 +444,15 @@ with the error's id.
 
 | `WorkflowReadError` | Code | When |
 |---|---|---|
-| `WaitTimedOut { workflow_id }` | `WAIT_TIMEOUT` | The workflow had not ended when the limit passed |
+| `WaitTimeout { workflow_id }` | `WAIT_TIMEOUT` | The workflow had not ended when the limit passed |
 | `WorkflowNotFound { workflow_id }` | `WORKFLOW_NOT_FOUND` | No workflow has the id |
 | `ResultNotReady { workflow_id, node_id }` | `RESULT_NOT_READY` | `result_for`: the node stores no result yet, or no node has the id |
-| `StoredResultUnreadable { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored value does not read with the handle's types |
-| `UnknownUserCode { workflow_id, cause }` | `UNKNOWN_CUSTOM_CODE` | The stored user code is not a code of `E` |
+| `ResultDeserializationError { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored value does not read with the handle's types |
+| `UnknownCustomCode { workflow_id, cause }` | `UNKNOWN_CUSTOM_CODE` | The stored custom code is not a code of `E` |
 | `InvalidInput { workflow_id, cause }` | `INVALID_INPUT` | `get`: the `Within` limit is above `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms); `cause` is `WaitLimitRefused`. The first check, before any statement |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A wait in a worker child. Nothing was read |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking `get` or `result_for` on a thread that runs a tokio runtime. Nothing was read |
-| `Database { code, message, retryable }` | `DATABASE_ERROR` | The database or the connection failed. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
+| `DatabaseError { database_code, message, retryable }` | `DATABASE_ERROR` | The database or the connection failed; `database_code` is the handle code of the failed operation. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
 
 `WorkflowHandleError` (from `status`, `results`, `tasks`, `cancel`,
 `pause`, `resume`) is an enum with one variant per state; every variant
@@ -514,7 +515,7 @@ fn region_spec(
 ) -> Result<WorkflowSpec, HorsiesError> {
     builder.definition_key("reports.region_fetch.v1");
     let fetched = builder.task(
-        fetch_report::node().set(fetch_report::params::region(), region.clone())?,
+        fetch_report::node().set(fetch_report::fields::region(), region.clone())?,
     )?;
     builder.output(fetched);
     builder.build()
@@ -542,7 +543,7 @@ For a template, pass the builder to `build_with`:
 |---|---|
 | `HRS-004` | Two nodes with one node id |
 | `HRS-006`, `HRS-011`, `HRS-012` | A reference of another builder (dependency, output, success policy) |
-| `HRS-010` | `workflow_context_from` on a task without `workflow_ctx` |
+| `HRS-010` | `workflow_context_from` on a task without `workflow_context` |
 | `HRS-013` | A quorum outside 1 to the node's dependencies, or `arg_from` on an `any` or quorum join |
 | `HRS-016` | A definition with an empty definition key |
 | `HRS-017` | A definition key or a workflow name that another registered definition has |
@@ -599,6 +600,6 @@ use horsies::{
     // Handle
     WorkflowHandle, WorkflowReadError, NodeResult, WorkflowNodeInfo, WorkflowStatus,
     WorkflowTaskStatus, WorkflowHandleError, WorkflowHandleErrorCode, HandleResult,
-    TaskOutcome, UserCode, WaitLimit,
+    TaskOutcome, CustomCode, WaitLimit,
 };
 ```

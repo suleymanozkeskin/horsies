@@ -260,8 +260,8 @@ async fn seed_parent_of_an_ended_child(
         "FAILED" => {
             child_seed.error = Some(
                 serde_json::to_string(
-                    &TaskError::new("CHILD_CRASH", "child task crashed")
-                        .expect("a user error code"),
+                    &TaskError::custom("CHILD_CRASH", "child task crashed")
+                        .expect("a custom error code"),
                 )
                 .expect("encode the child error"),
             );
@@ -426,7 +426,7 @@ async fn recovery_fails_a_workflow_whose_node_failed_with_its_error_and_no_resul
 async fn recovery_fails_a_workflow_with_the_error_of_its_first_failed_node() {
     let db = IsolatedDatabase::create().await;
     let later = serde_json::to_string(
-        &TaskError::new("SECOND_ERROR", "Second failure").expect("a user error code"),
+        &TaskError::custom("SECOND_ERROR", "Second failure").expect("a custom error code"),
     )
     .expect("encode the stored error");
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running().error(later)).await;
@@ -521,7 +521,7 @@ async fn crash_the_task_of_node_0(pool: &TestPool, workflow_id: Uuid) {
         .await
         .task_id
         .expect("node 0 has a task");
-    let crashed: TaskResult<serde_json::Value> = TaskResult::Err(TaskError::builtin(
+    let crashed: TaskResult<serde_json::Value> = TaskResult::Err(TaskError::built_in(
         OperationalCode::WorkerCrashed,
         "Worker died",
     ));

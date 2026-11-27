@@ -38,12 +38,12 @@ from . import store_failure
 
 @app.task(
     'book_courier',
-    queue_name=QUEUE_FULFILLMENT,
+    queue=QUEUE_FULFILLMENT,
     error_codes=ShippingRetryCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=tuning.COURIER_RETRY_BASE_SECONDS,
         max_retries=tuning.COURIER_MAX_RETRIES,
-        auto_retry_for=[ShippingRetryCode.COURIER_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
+        retry_for=[ShippingRetryCode.COURIER_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
     ),
 )
 def book_courier(
@@ -76,7 +76,7 @@ def book_courier(
     if flaking and attempt <= tuning.COURIER_FAILING_ATTEMPTS:
         return Err(
             TaskError(
-                error_code=COURIER_UNAVAILABLE,
+                code=COURIER_UNAVAILABLE,
                 message=f'{courier} refused the booking on attempt {attempt}',
                 data={'order_id': order_id, 'courier': courier, 'attempt': attempt},
             ),
@@ -90,7 +90,7 @@ def book_courier(
             if not stored:
                 return Err(
                     TaskError(
-                        error_code=SHIPMENT_NOT_FOUND,
+                        code=SHIPMENT_NOT_FOUND,
                         message=f'no shipment row for order {order_id}',
                         data={'order_id': order_id},
                     ),
@@ -109,10 +109,10 @@ def book_courier(
 
 @app.task(
     'print_label',
-    queue_name=QUEUE_FULFILLMENT,
+    queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def print_label(
@@ -137,7 +137,7 @@ def print_label(
             if not stored:
                 return Err(
                     TaskError(
-                        error_code=SHIPMENT_NOT_FOUND,
+                        code=SHIPMENT_NOT_FOUND,
                         message=f'no shipment row for order {order_id}',
                         data={'order_id': order_id},
                     ),
@@ -153,10 +153,10 @@ def print_label(
 
 @app.task(
     'tracking_seed',
-    queue_name=QUEUE_FULFILLMENT,
+    queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def tracking_seed(
@@ -180,7 +180,7 @@ def tracking_seed(
             if shipment is None:
                 return Err(
                     TaskError(
-                        error_code=SHIPMENT_NOT_FOUND,
+                        code=SHIPMENT_NOT_FOUND,
                         message=f'no shipment row for order {order_id}',
                         data={'order_id': order_id},
                     ),

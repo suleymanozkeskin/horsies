@@ -25,7 +25,7 @@ fn main() {
     let produced = builder.task(produce_number::node()).unwrap();
     let _ = consume_number::node()
         .node_id("consume")
-        .arg_from(other_number::params::value(), produced);
+        .arg_from(other_number::fields::value(), produced);
 }
 
 fn app() -> Horsies {

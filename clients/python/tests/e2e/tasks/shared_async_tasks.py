@@ -37,7 +37,7 @@ async def remember_the_loop() -> None:
 
 
 @app.task(
-    task_name='e2e_shared_sleep',
+    name='e2e_shared_sleep',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=30_000,
 )
@@ -49,7 +49,7 @@ async def shared_sleep(*, seconds: float) -> Result[str, TaskError]:
 
 
 @app.task(
-    task_name='e2e_shared_task_send_pool',
+    name='e2e_shared_task_send_pool',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=30_000,
 )
@@ -66,7 +66,7 @@ once: more than any executor size that the e2e profiles set."""
 
 
 @app.task(
-    task_name='e2e_shared_executor_threads',
+    name='e2e_shared_executor_threads',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=30_000,
 )
@@ -93,7 +93,7 @@ async def shared_executor_threads() -> Result[int, TaskError]:
 
 
 @app.task(
-    task_name='e2e_shared_hang',
+    name='e2e_shared_hang',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=HANG_TIMEOUT_MS,
     cancel_grace_ms=1_000,
@@ -119,11 +119,11 @@ def _first_attempt(marker: str) -> bool:
 
 
 @app.task(
-    task_name='e2e_shared_stuck_once',
+    name='e2e_shared_stuck_once',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=STOP_TIMEOUT_MS,
     cancel_grace_ms=100,
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=[OutcomeCode.TASK_TIMEOUT]),
+    retry_policy=RetryPolicy.fixed([1], retry_for=[OutcomeCode.TASK_TIMEOUT]),
 )
 async def shared_stuck_once(*, marker: str) -> Result[str, TaskError]:
     """The first attempt ignores every cancel; the retry returns its pid."""
@@ -137,10 +137,10 @@ async def shared_stuck_once(*, marker: str) -> Result[str, TaskError]:
 
 
 @app.task(
-    task_name='e2e_shared_blocks_once',
+    name='e2e_shared_blocks_once',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=30_000,
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=[OperationalCode.TASK_BLOCKED_LOOP]),
+    retry_policy=RetryPolicy.fixed([1], retry_for=[OperationalCode.TASK_BLOCKED_LOOP]),
 )
 async def shared_blocks_once(*, marker: str) -> Result[str, TaskError]:
     """The first attempt blocks the event loop past the block limit; the
@@ -165,7 +165,7 @@ async def _keepalive() -> None:
 
 
 @app.task(
-    task_name='e2e_shared_lazy_client',
+    name='e2e_shared_lazy_client',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=LAZY_CLIENT_TIMEOUT_MS,
     cancel_grace_ms=LAZY_CLIENT_GRACE_MS,
@@ -179,7 +179,7 @@ async def shared_lazy_client() -> Result[str, TaskError]:
 
 
 @app.task(
-    task_name='e2e_shared_hook_loop',
+    name='e2e_shared_hook_loop',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=10_000,
 )
@@ -190,7 +190,7 @@ async def shared_hook_loop() -> Result[str, TaskError]:
 
 
 @app.task(
-    task_name='e2e_shared_sends',
+    name='e2e_shared_sends',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=10_000,
 )
@@ -201,5 +201,5 @@ async def shared_sends(*, x: int) -> Result[str, TaskError]:
             return Ok(str(handle.task_id))
         case Err(send_err):
             return Err(
-                TaskError(error_code='SEND_FAILED', message=send_err.message),
+                TaskError(code='SEND_FAILED', message=send_err.message),
             )

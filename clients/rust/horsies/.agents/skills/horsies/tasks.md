@@ -31,9 +31,9 @@ first. The attributes after it:
 | `execution` | `isolated` (default), `shared_async`, `shared_thread` | An `async fn` takes `isolated` or `shared_async`; a `fn` takes `isolated` or `shared_thread`. Another class is a compile error |
 | `timeout_ms` | `1000..=4294967295` | The deadline of a run. A shared class without `timeout_ms` is a compile error |
 | `cancel_grace_ms` | `100..=10000` | `shared_async`: the time from the cancel signal (the deadline, or an operator cancel) to the drop of the body; default 1,000. `isolated`: the time from an operator cancel to the kill of the child when the body has not ended; no default, so no kill. On `shared_thread` it is a compile error |
-| `retry_policy` | a `RetryPolicy` expression | Goes with `auto_retry_for` |
-| `auto_retry_for` | `["CODE", ...]` | Goes with `retry_policy`, with at least one code. Each entry is a built-in code or a code of `E`; another entry is a compile error |
-| `workflow_ctx` | no value | The task takes the workflow context in its parameter `workflow_ctx` (see `workflows.md`) |
+| `retry_policy` | a `RetryPolicy` expression | Goes with `retry_for` |
+| `retry_for` | `["CODE", ...]` | Goes with `retry_policy`, with at least one code. Each entry is a built-in code or a code of `E`; another entry is a compile error |
+| `workflow_context` | no value | The task takes the workflow context in its parameter `workflow_context` (see `workflows.md`) |
 
 - An unknown attribute is a compile error that lists the known ones.
 - `good_until` is not a task attribute. Set a deadline per send with
@@ -87,8 +87,8 @@ app. Two apps in one process share no registration.
 | `validate_order::send(&app, order)` | Sends now through `app` |
 | `validate_order::with_options(options).send(&app, order)` | Sends through `app` with `TaskSendOptions`; the delay is `TaskSendOptions::delay(WholeSeconds)` |
 | `validate_order::node()` | `TaskNode<T, validate_order::Input>`: a workflow node. `builder.task(node)` resolves it against the builder's app |
-| `validate_order::params::order()` | The field token `InputField<validate_order::Input, Order>` of a workflow node |
-| `validate_order::handle(&runtime)` | `Result<TaskFunction<..>, TaskFunctionNotFound>` from a `TaskRuntime` |
+| `validate_order::fields::order()` | The field token `InputField<validate_order::Input, Order>` of a workflow node |
+| `validate_order::function(&runtime)` | `Result<TaskFunction<..>, TaskFunctionNotFound>` from a `TaskRuntime` |
 
 - `send` and `with_options(..).send` through an app that does not register
   the task return `TaskSendError::ValidationFailed` with the cause
@@ -96,7 +96,7 @@ app. Two apps in one process share no registration.
 - `builder.task(node)` on a builder of an app that does not register the
   task returns a `HorsiesError` with `HRS-302`
   (`HorsiesErrorCode::WorkflowUnregisteredTask`). The node is not added.
-- `register` checks the codes of the code type (`UserErrorCode::CODES`):
+- `register` checks the codes of the code type (`CustomErrorCode::CODES`):
   a built-in or reserved name is `HRS-212`; a code that is empty, not
   `UPPER_SNAKE_CASE` or an exception class name is `HRS-112`; a code given
   twice is `HRS-113`. The derive refuses a built-in or reserved name and a
@@ -105,7 +105,7 @@ app. Two apps in one process share no registration.
   hand-written impl reach the registration check.
 - `CODES` are the task's declared error codes. `horsies check` lists them.
   The `error_code` metric label of the task has each built-in code, each
-  declared code and `undeclared`; another user code counts as `undeclared`.
+  declared code and `undeclared`; another custom code counts as `undeclared`.
   No user work is needed: the task macros fill the codes from `E`.
 - `TaskFunctionNotFound` is `NotRegistered { task_name }` or
   `OtherTypes { task_name, registered, asked }`.
@@ -113,9 +113,9 @@ app. Two apps in one process share no registration.
 ## `TaskError<E>`
 
 ```rust
-use horsies::{task, OperationalCode, TaskError, UserErrorCode};
+use horsies::{task, CustomErrorCode, TaskError, OperationalCode};
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum ChargeCode {
     CardDeclined, // CARD_DECLINED
     RateLimited,  // RATE_LIMITED
@@ -124,25 +124,25 @@ enum ChargeCode {
 #[task("charge_card")]
 async fn charge_card(amount_cents: u64) -> Result<String, TaskError<ChargeCode>> {
     if amount_cents == 0 {
-        return Err(TaskError::library(OperationalCode::TaskException, "nothing to charge"));
+        return Err(TaskError::built_in(OperationalCode::TaskException, "nothing to charge"));
     }
-    Err(TaskError::user(ChargeCode::CardDeclined, "the issuer declined the card")
+    Err(TaskError::custom(ChargeCode::CardDeclined, "the issuer declined the card")
         .with_data(serde_json::json!({ "amount_cents": amount_cents })))
 }
 ```
 
-`#[derive(UserErrorCode)]` goes on an enum of unit variants. Each variant's
+`#[derive(CustomErrorCode)]` goes on an enum of unit variants. Each variant's
 code is its name in UPPER_SNAKE_CASE. These are compile errors: a variant
 with fields, two variants with one code, a generic enum, a code with the
 name of a built-in code or of the reserved code `WORKFLOW_STOPPED`.
 
 | Item | Returns |
 |---|---|
-| `TaskError::user(code, message)` | An error with a code of `E` |
-| `TaskError::library(code, message)` | An error with a library code: `BuiltInTaskCode` or a family (`OperationalCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`) |
+| `TaskError::custom(code, message)` | An error with a custom code: a code of `E` |
+| `TaskError::built_in(code, message)` | An error with a built-in code: `BuiltInTaskCode` or a family (`OperationalCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`) |
 | `.with_data(value)` | This error with `data`. Never fails |
-| `.code()` | `&TaskErrorCode<E>`: `Library(BuiltInTaskCode)` or `User(E)` |
-| `.code().text()` | The stored code text |
+| `.code()` | `&TaskErrorCode<E>`: `BuiltIn(BuiltInTaskCode)` or `Custom(E)` |
+| `.code().as_str()` | The stored code text |
 | `.message()` | `Option<&str>` |
 | `.data()` | `Option<&JsonText>`: the stored text; `decode::<T>()` reads it, an integer of any width with all its digits |
 | `.exception()` | `Option<&ExceptionRecord>`: set by the library for a panic of the body |
@@ -160,7 +160,7 @@ name of a built-in code or of the reserved code `WORKFLOW_STOPPED`.
   bound.
 - A `BuiltInTaskCode` is `Operational(..)`, `Contract(..)`, `Retrieval(..)`
   or `Outcome(..)`. Match a stored timeout as
-  `TaskErrorCode::Library(BuiltInTaskCode::Outcome(OutcomeCode::TaskTimeout))`.
+  `TaskErrorCode::BuiltIn(BuiltInTaskCode::Outcome(OutcomeCode::TaskTimeout))`.
 
 What the library records:
 
@@ -169,7 +169,7 @@ What the library records:
 | The stored input does not decode with `A` | `WORKER_SERIALIZATION_ERROR`. The message names the type, the field path and the kind of failure; a part that comes from the input is written as `<input>` |
 | The returned value does not read back with `T` | `WORKER_SERIALIZATION_ERROR`. The child encodes the value, decodes the text with `T`, encodes it again, and stores it only when the two texts are equal |
 | The body panics | `.exception()` holds the record of the panic |
-| Timeout, crash, cancel, expiry | The library code: `TASK_TIMEOUT`, `WORKER_CRASHED`, `TASK_CANCELLED`, `TASK_EXPIRED`, ... (shared docs page `tasks/errors`) |
+| Timeout, crash, cancel, expiry | The built-in code: `TASK_TIMEOUT`, `WORKER_CRASHED`, `TASK_CANCELLED`, `TASK_EXPIRED`, ... (shared docs page `tasks/errors`) |
 
 ## `TaskRuntime`
 
@@ -178,13 +178,13 @@ state, the cancel and the fencing token of its run, and work that belongs
 to its run.
 
 ```rust
-use horsies::{task, Horsies, HorsiesError, TaskError, TaskRuntime, UserErrorCode};
+use horsies::{task, CustomErrorCode, Horsies, HorsiesError, TaskError, TaskRuntime};
 
 struct Mailer {
     sender: String,
 }
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum MailCode {
     NotConfigured,
 }
@@ -193,7 +193,7 @@ enum MailCode {
 async fn send_welcome(rt: TaskRuntime, address: String) -> Result<String, TaskError<MailCode>> {
     let mailer = rt
         .state::<Mailer>()
-        .map_err(|missing| TaskError::user(MailCode::NotConfigured, missing.to_string()))?;
+        .map_err(|missing| TaskError::custom(MailCode::NotConfigured, missing.to_string()))?;
     Ok(format!("{} -> {address}", mailer.sender))
 }
 
@@ -212,7 +212,7 @@ fn register_mail(app: &mut Horsies) -> Result<(), HorsiesError> {
 | `cancel_state()` | `RunCancelState`: `NotRequested`, `Requested { cause: CancelCause::Operator \| CancelCause::Deadline }`, or `NotInARun` |
 | `spawn(name, future)` | `Result<tokio::task::JoinHandle<_>, RunSpawnRefused>`: starts `future` as work of the run |
 | `fencing_token()` | `Result<FencingToken, FencingTokenRefused>`: the task id (`task_id()`) and the value (`value().get()`) of the run |
-| `task_handle::<A, T, E>(task_name)` | `Result<TaskFunction<A, T, E>, TaskFunctionNotFound>` |
+| `task_function::<A, T, E>(task_name)` | `Result<TaskFunction<A, T, E>, TaskFunctionNotFound>` |
 | `workflow_builder(name)` | A `WorkflowSpecBuilder` of the app of the runtime; its task nodes resolve against that app |
 | `start::<T>(&spec)`, `start_with_id::<T>(&spec, workflow_id)` | Starts a workflow that the task built (see `workflows.md`) |
 
@@ -231,9 +231,9 @@ the value is the attempt number: compare values of one task id, and do not
 depend on the number.
 
 ```rust
-use horsies::{task, TaskError, TaskRuntime, UserErrorCode};
+use horsies::{task, CustomErrorCode, TaskError, TaskRuntime};
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum ExportCode {
     NotInARun,
 }
@@ -245,7 +245,7 @@ async fn export_report(
 ) -> Result<String, TaskError<ExportCode>> {
     let token = rt
         .fencing_token()
-        .map_err(|refused| TaskError::user(ExportCode::NotInARun, refused.to_string()))?;
+        .map_err(|refused| TaskError::custom(ExportCode::NotInARun, refused.to_string()))?;
     // UPDATE exports SET fence = $2, ... WHERE task_id = $1 AND fence <= $2
     // Zero rows changed: a later attempt holds the fence, so stop.
     Ok(format!("{report_id}:{}:{}", token.task_id(), token.value().get()))
@@ -284,9 +284,9 @@ reconnect, or after a runner heartbeat of the run that does not land (at
 most `runner_heartbeat_interval_ms`, default 30 s).
 
 ```rust
-use horsies::{task, TaskError, TaskRuntime, UserErrorCode};
+use horsies::{task, CustomErrorCode, TaskError, TaskRuntime};
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum FeedCode {
     Interrupted,
     WorkRefused,
@@ -301,7 +301,7 @@ async fn fetch_items(feed_url: &str) -> usize {
 async fn sync_feed(rt: TaskRuntime, feed_url: String) -> Result<usize, TaskError<FeedCode>> {
     tokio::select! {
         count = fetch_items(&feed_url) => Ok(count),
-        () = rt.cancelled() => Err(TaskError::user(FeedCode::Interrupted, "cancelled")),
+        () = rt.cancelled() => Err(TaskError::custom(FeedCode::Interrupted, "cancelled")),
     }
 }
 
@@ -309,9 +309,9 @@ async fn sync_feed(rt: TaskRuntime, feed_url: String) -> Result<usize, TaskError
 async fn index_feed(rt: TaskRuntime, feed_urls: Vec<String>) -> Result<usize, TaskError<FeedCode>> {
     let work = rt
         .spawn("count-feeds", async move { feed_urls.len() })
-        .map_err(|refused| TaskError::user(FeedCode::WorkRefused, refused.to_string()))?;
+        .map_err(|refused| TaskError::custom(FeedCode::WorkRefused, refused.to_string()))?;
     work.await
-        .map_err(|join_error| TaskError::user(FeedCode::WorkFailed, join_error.to_string()))
+        .map_err(|join_error| TaskError::custom(FeedCode::WorkFailed, join_error.to_string()))
 }
 ```
 
@@ -346,11 +346,11 @@ An `isolated` or `shared_thread` timeout has no `cancel_end`. Read it from
 the stored error:
 
 ```rust
-use horsies::{BuiltInTaskCode, OutcomeCode, TaskError, TaskErrorCode, UserErrorCode};
+use horsies::{BuiltInTaskCode, CustomErrorCode, OutcomeCode, TaskError, TaskErrorCode};
 
-fn cancel_end<E: UserErrorCode>(error: &TaskError<E>) -> Option<String> {
+fn cancel_end<E: CustomErrorCode>(error: &TaskError<E>) -> Option<String> {
     match error.code() {
-        TaskErrorCode::Library(BuiltInTaskCode::Outcome(OutcomeCode::TaskTimeout)) => {
+        TaskErrorCode::BuiltIn(BuiltInTaskCode::Outcome(OutcomeCode::TaskTimeout)) => {
             let data: serde_json::Value = error.data()?.decode().ok()?;
             data.get("cancel_end")?.as_str().map(str::to_owned)
         }
@@ -395,9 +395,9 @@ each task status on `monitoring/action-semantics`.
 ## Retry Policy
 
 ```rust
-use horsies::{task, RetryPolicy, TaskError, UserErrorCode};
+use horsies::{task, CustomErrorCode, RetryPolicy, TaskError};
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum FetchCode {
     RateLimited,
 }
@@ -405,22 +405,22 @@ enum FetchCode {
 #[task(
     "fetch_prices",
     retry_policy = RetryPolicy::fixed(vec![30, 60, 120], true).expect("a valid policy"),
-    auto_retry_for = ["RATE_LIMITED", "TASK_TIMEOUT", "WORKER_CRASHED"],
+    retry_for = ["RATE_LIMITED", "TASK_TIMEOUT", "WORKER_CRASHED"],
     timeout_ms = 5_000
 )]
 async fn fetch_prices(symbol: String) -> Result<String, TaskError<FetchCode>> {
-    Err(TaskError::user(FetchCode::RateLimited, format!("rate limited for {symbol}")))
+    Err(TaskError::custom(FetchCode::RateLimited, format!("rate limited for {symbol}")))
 }
 ```
 
 | Constructor | Policy |
 |---|---|
-| `RetryPolicy::fixed(intervals, jitter)` | One delay per retry, in seconds. The number of intervals is the number of retries |
+| `RetryPolicy::fixed(intervals_seconds, jitter)` | One delay per retry, in seconds. The number of intervals is the number of retries |
 | `RetryPolicy::exponential(base_seconds, max_retries, jitter)` | Delay `base_seconds * 2^(attempt - 1)` |
 | `.with_max_delay_seconds(seconds)` | A cap on the delay, after backoff and jitter |
 
 Each interval is 1 to 86,400 s, and a policy has 1 to 20 retries. A value
-outside is `RetryPolicyError`. A built-in name in `auto_retry_for` is stored
+outside is `RetryPolicyError`. A built-in name in `retry_for` is stored
 as the built-in code. When a retry starts is on the shared docs page
 `tasks/retry-policy`.
 
@@ -433,12 +433,12 @@ as the built-in code. When a retry starts is on the shared docs page
 |---|---|
 | `send(input)` | Now |
 | `send_with_options(options, input)` | With `TaskSendOptions`: now, or after `TaskSendOptions::delay(WholeSeconds::from_secs(300))` |
-| `with_options(options)` | A `TaskFunctionSendOptions` with `send(input)` |
-| `retry_send(&error)` | The task of a failed send again, the delay included (below) |
+| `with_options(options)` | A `TaskFunctionWithOptions` with `send(input)` |
+| `resend(&error)` | The task of a failed send again, the delay included (below) |
 | `node()` | A workflow node (see `workflows.md`) |
 | `blocking()` | The blocking view (see Blocking API) |
 
-`task_name()`, `queue_name()`, `priority()` and `task_options()` read the
+`task_name()`, `queue()`, `priority()` and `task_options()` read the
 registration.
 
 A send runs these steps in order and stops at the first refusal:
@@ -488,7 +488,7 @@ fn invoice_options(invoice_id: u64) -> TaskSendOptions {
 
 ### `TaskSendError`
 
-| Variant | Code | Fields | Retry methods |
+| Variant | Code | Fields | `resend` |
 |---|---|---|---|
 | `Suppressed` | `SEND_SUPPRESSED` | `message` | Refused |
 | `AsyncContext` | `ASYNC_CONTEXT` | `task_id`, `payload`, `message` | Accepted |
@@ -527,20 +527,20 @@ async fn send_receipt(order_id: String) -> Result<(), TaskError<std::convert::In
     Ok(())
 }
 
-async fn send_with_one_retry(
+async fn send_with_one_resend(
     receipt: &TaskFunction<send_receipt::Input, (), std::convert::Infallible>,
     order_id: String,
 ) -> Result<TaskHandle<(), std::convert::Infallible>, TaskSendError> {
     match receipt.send(send_receipt::Input { order_id }).await {
         Err(error @ TaskSendError::EnqueueFailed { retryable: true, .. }) => {
-            receipt.retry_send(&error).await
+            receipt.resend(&error).await
         }
         other => other,
     }
 }
 ```
 
-`retry_send` sends the same task id and payload again, as a repeat. The
+`resend` sends the same task id and payload again, as a repeat. The
 payload of a send with a delay keeps its delay. A task that an earlier call
 wrote answers with its id, also after it finished, and does not run again.
 It refuses with `ValidationFailed` an error with no payload and the error of
@@ -561,7 +561,7 @@ async fn print_outcome(
 ) -> Result<(), ReadError> {
     match handle.get(WaitLimit::Within(Duration::from_secs(30))).await? {
         TaskOutcome::Succeeded(order_id) => println!("validated {order_id}"),
-        TaskOutcome::Failed(error) => println!("failed with {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("failed with {}", error.code().as_str()),
     }
     Ok(())
 }
@@ -584,17 +584,17 @@ async fn print_outcome(
 
 | `ReadError` | Code | When | Kept by the handle |
 |---|---|---|---|
-| `WaitTimedOut { task_id, status }` | `WAIT_TIMEOUT` | The task had not ended when the limit passed | No |
+| `WaitTimeout { task_id, status }` | `WAIT_TIMEOUT` | The task had not ended when the limit passed | No |
 | `TaskNotFound { task_id, reason }` | `TASK_NOT_FOUND` | Neither the live table nor the history holds the task | No |
 | `ResultNotAvailable { task_id, status }` | `RESULT_NOT_AVAILABLE` | Terminal status with no stored result | Yes |
-| `StoredResultUnreadable { task_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored result does not read with `T` and `E` | Yes |
-| `UnknownUserCode { task_id, code, code_type }` | `UNKNOWN_CUSTOM_CODE` | The stored user code is not a code of `E` | Yes |
+| `ResultDeserializationError { task_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored result does not read with `T` and `E` | Yes |
+| `UnknownCustomCode { task_id, stored_code, code_type }` | `UNKNOWN_CUSTOM_CODE` | The stored custom code is not a code of `E` | Yes |
 | `InvalidInput { task_id, cause }` | `INVALID_INPUT` | The `Within` limit is above `MAX_WAIT_LIMIT_MS`; `cause` is `WaitLimitRefused`. Nothing was read | No |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A result wait in a worker child. Nothing was read | No |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking read on a thread that runs a tokio runtime. Nothing was read | No |
-| `Database { code, message, retryable }` | `DATABASE_ERROR` | The database or the connection failed | No |
+| `DatabaseError { database_code, message, retryable }` | `DATABASE_ERROR` | The database or the connection failed; `database_code` is the code of the failed operation | No |
 
-- `ReadError::code()` returns the library code of the failure.
+- `ReadError::code()` returns the built-in code of the failure.
 - `reason` is a `TaskAbsenceReason`: `PredatesRetainedHistory` (retention
   can have removed the task), `WithinRetainedHistory` (no removed history
   leaf can have held it), `NotClassified` (the id is not a UUIDv7).
@@ -606,15 +606,15 @@ async fn print_outcome(
 `TaskInfo`: status and times, plus the parts asked for (attempts newest
 first). Its `result` is a `TaskResult<JsonText>`: the value as its stored
 text, read with `decode::<T>()`. The info is not kept. Its errors are `TaskNotFound`,
-`StoredResultUnreadable` and `Database`.
+`ResultDeserializationError` and `DatabaseError`.
 
 Reads by task id, on the app:
 
 | Method | Returns |
 |---|---|
-| `app.task_handle_of::<T, E>(task_id)` | A `TaskHandle<T, E>`. No I/O |
-| `app.get_result::<T, E>(task_id, limit)` | `Result<TaskOutcome<T, E>, ReadError>`. Nothing is kept |
-| `app.get_raw_result(task_id, limit)` | `Result<StoredResult, ReadError>`: `task_id`, `task_name`, `status`, `envelope_json` |
+| `app.task_handle::<T, E>(task_id)` | A `TaskHandle<T, E>`. No I/O |
+| `app.get_result::<T, E>(task_id, wait)` | `Result<TaskOutcome<T, E>, ReadError>`. Nothing is kept |
+| `app.get_raw_result(task_id, wait)` | `Result<StoredResult, ReadError>`: `task_id`, `task_name`, `status`, `envelope_json` |
 | `app.get_task_info(task_id, parts)` | `Result<TaskInfo, ReadError>` |
 
 ## Blocking API
@@ -626,7 +626,7 @@ calling thread.
 
 | View | From | Methods |
 |---|---|---|
-| `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `with_options(..).send`, `retry_send` |
+| `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `with_options(..).send`, `resend` |
 | `TaskHandleView` | `handle.blocking()` | `get`, `info` |
 | `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_execution_class_coverage`, `get_execution_class_report`, `check_live`, `start`, `start_with_id`, `start_workflow`, `start_workflow_with` |
 | `WorkflowFunctionView` | `workflow_function.blocking()` | `start`, `start_with_id`, `retry_start` |
@@ -640,7 +640,7 @@ The starts of a definition by its type are methods of the app view:
 - On a thread that runs a tokio runtime, a blocking call runs nothing and
   returns the `ASYNC_CONTEXT` member of its catalog:
   `TaskSendError::AsyncContext` (with the prepared task id and payload, so
-  `retry_send(&error).await` completes the same send),
+  `resend(&error).await` completes the same send),
   `ReadError::AsyncContext`, `DatabaseOperationError::AsyncContext`, a
   `ValidationReport` with `HRS-217`,
   `WorkflowStartError::AsyncContext` (with the `workflow_id` of the
@@ -666,12 +666,12 @@ but `Enqueued` writes nothing.
 In a transaction of the app:
 
 ```rust
-use horsies::rerun::{AppRerunError, RerunEnqueuePolicy, RerunOutcome, RerunTask};
+use horsies::rerun::{AppRerunError, RerunCommand, RerunEnqueuePolicy, RerunOutcome};
 use horsies::Horsies;
 use uuid::Uuid;
 
 async fn rerun_failed(app: &Horsies, source_task_id: Uuid) -> Result<Option<Uuid>, AppRerunError> {
-    let command = RerunTask::new(source_task_id, None, None);
+    let command = RerunCommand::new(source_task_id, None, None);
     let policy = RerunEnqueuePolicy::standard(true);
     match app.rerun_task(command, policy).await? {
         RerunOutcome::Enqueued { new_task_id, .. } => Ok(Some(new_task_id)),
@@ -693,7 +693,7 @@ In a transaction that the caller owns (feature `sqlx`; feature
 
 ```rust
 use chrono::Utc;
-use horsies::rerun::{rerun_task_in, RerunEnqueuePolicy, RerunOutcome, RerunTask, SqlxCaller};
+use horsies::rerun::{rerun_task_in, RerunCommand, RerunEnqueuePolicy, RerunOutcome, SqlxCaller};
 use horsies::Horsies;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -710,7 +710,7 @@ async fn rerun_with_audit(
         .await?;
     let outcome = rerun_task_in(
         &mut SqlxCaller::new(&mut transaction),
-        &RerunTask::new(source_task_id, None, None),
+        &RerunCommand::new(source_task_id, None, None),
         &RerunEnqueuePolicy::standard(true),
         &app.registered_task_codes(),
         Utc::now(),
@@ -721,21 +721,25 @@ async fn rerun_with_audit(
 }
 ```
 
-- `RerunTask::new(source_task_id, deadline, caller_key)`: `deadline` is an
-  `Option<DateTime<Utc>>` for the new task; `caller_key` is an
-  `Option<String>` idempotency key of the rerun.
-- `RerunEnqueuePolicy::new(retention_class_key, retain_rerun_input,
-  reservation_window)` returns `Result<_, RerunError>`.
+- `RerunCommand::new(source_task_id, good_until, idempotency_key)`:
+  `good_until` is an `Option<DateTime<Utc>>`, the latest start time of the
+  new task; `idempotency_key` is an `Option<String>` idempotency key of the
+  rerun.
+- `RerunEnqueuePolicy::new(retention, retain_rerun_input,
+  reservation_window)` returns `Result<_, RerunError>`. `retention` is an
+  `EnqueueRetention`: `Default` (the class `standard_30d`), `Forever`, or
+  `Period(RetentionDays)`. The policy derives the class key of the new task
+  from it.
   `RerunEnqueuePolicy::standard(retain_rerun_input)` uses the class
   `standard_30d` and a 24-hour window.
 - `rerun_task_in` commits nothing. The caller's commit keeps the new task
   and the key claim; its rollback drops them. After an error the
   transaction may hold the key claim or the new row: do not commit it.
-- `AppRerunError`: `Connect(BrokerError)` (nothing ran) or
+- `AppRerunError`: `ConnectFailed(BrokerError)` (nothing ran) or
   `Rerun(RerunError)`.
-- `CallerRerunError<E>`: `Driver(E)`, `ClassNotRegistered { key }`,
+- `CallerRerunError<E>`: `DriverFailed(E)`, `ClassNotRegistered { key }`,
   `ClientFamilyMismatch { stored }`, `UnknownStoredFamily` (a family row
-  that holds no client family), `CallerKeyRefused`,
+  that holds no client family), `IdempotencyKeyRefused`,
   `RetryCodeNotDeclared { task_name, retry_code }`, `TaskNotRegistered
   { task_name }`, `IdMintRefused`, `Row`.
 - The stored retry list of the source is checked before the write: a
@@ -757,8 +761,8 @@ async fn rerun_with_audit(
 | `NotEligible { task_id, reason }` | `NotEligibleReason::CompletedSource` or `WorkflowTask` |
 | `InputUnavailable { task_id, disposition }` | The source stores no input; `disposition` is the stored reason (`DECLINED_BY_POLICY`, `OVER_BOUND`) |
 | `InputCorrupt { task_id, detail }` | The stored input fails its integrity or shape check |
-| `KeyConflict { task_id, reserved_by_task_id }` | The caller key is held by another command |
-| `KeyReplay { existing_task_id }` | The caller key already holds this rerun command; the existing task answers |
+| `KeyConflict { task_id, owner_task_id }` | Another command holds the idempotency key; `owner_task_id` is its task |
+| `KeyReplay { existing_task_id }` | The idempotency key already holds this rerun command; the existing task answers |
 
 The rules are on the shared docs page `monitoring/action-semantics`
 ("Task rerun").
@@ -768,9 +772,12 @@ The rules are on the shared docs page `monitoring/action-semantics`
 `async_task_fn!(function, InputType)` and
 `blocking_task_fn!(function, InputType)` build a `RegisteredTask` from a
 function that takes one input value. `app.register(name, task)` registers
-it; `RegisteredTask::with_task_options(options)` sets its options. Prefer
-the attributes: a task registered by hand has no generated module and no
-typed function.
+it; `RegisteredTask::with_task_options(options)` sets its options. The
+`cancel_grace_ms` of the options is a plain `Option<u32>`: the registration
+refuses a grace outside 100 to 10,000 ms (`HRS-111`), and
+`DEFAULT_CANCEL_GRACE_MS` is the default grace of a `SHARED_ASYNC` task.
+Prefer the attributes: a task registered by hand has no generated module and
+no typed function.
 
 ## Common Pitfalls
 
@@ -788,7 +795,7 @@ let total = other_task_handle.get(WaitLimit::NoLimit).await;
 
 // CORRECT: a workflow node receives the dependency's outcome
 // fn report(total: TaskOutcome<u64, Infallible>) ...
-// builder.task(report::node().arg_from(report::params::total(), totals_node))?
+// builder.task(report::node().arg_from(report::fields::total(), totals_node))?
 ```
 
 **Rename a parameter only when nothing stored holds the old name.** The
@@ -821,15 +828,15 @@ no codes of its own.
 ```rust
 use horsies::{
     // Task definition
-    blocking_task, task, UserErrorCode, TaskError, TaskErrorCode, TaskRuntime,
+    blocking_task, task, CustomErrorCode, TaskError, TaskErrorCode, TaskRuntime,
     RunCancelState, CancelCause, FencingToken, FencingTokenRefused,
     StoredDateTime, RetryPolicy, RetryPolicyError, Execution, TaskOptions,
     RegisteredTask, async_task_fn, blocking_task_fn,
-    // Library codes
+    // Built-in codes
     BuiltInTaskCode, OperationalCode, ContractCode, RetrievalCode, OutcomeCode,
-    ExceptionRecord, SubWorkflowFailure, UserCode, UserCodeRefused, UnknownUserCode,
+    ExceptionRecord, SubWorkflowFailure, CustomCode, CustomCodeRefused, UnknownCustomCode,
     // Sends
-    TaskFunction, TaskFunctionSendOptions, TaskFunctionNotFound, TaskSendOptions,
+    TaskFunction, TaskFunctionWithOptions, TaskFunctionNotFound, TaskSendOptions,
     SendRetention, RetentionDays, WholeSeconds, TaskSendError, TaskSendErrorCode,
     TaskSendPayload,
     // Reads
@@ -838,7 +845,7 @@ use horsies::{
 };
 use horsies::blocking::{HorsiesView, TaskFunctionView, TaskHandleView};
 use horsies::rerun::{
-    rerun_task_in, AppRerunError, CallerRerunError, CallerTransaction, NotEligibleReason,
-    RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
+    rerun_task_in, AppRerunError, CallerRerunError, CallerTransaction, EnqueueRetention,
+    NotEligibleReason, RerunCommand, RerunEnqueuePolicy, RerunError, RerunOutcome,
 };
 ```

@@ -50,13 +50,15 @@ impl TaskInfoRow {
             task_id: self.id,
             task_name: self.task_name,
             status,
-            queue_name: self.queue_name,
+            // Column horsies_tasks.queue_name.
+            queue: self.queue_name,
             priority: self.priority,
             retry_count: self.retry_count as u32,
             max_retries: self.max_retries as u32,
             next_retry_at: self.next_retry_at,
             sent_at: self.sent_at,
-            enqueued_at: self.enqueued_at,
+            // Column horsies_tasks.enqueued_at: the time the row became due.
+            due_at: self.enqueued_at,
             claimed_at: self.claimed_at,
             started_at: self.started_at,
             completed_at: self.completed_at,

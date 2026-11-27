@@ -1,17 +1,17 @@
 //! The text rule of an error code that retry matching names (Python
 //! `validate_error_code_string`, `core/exception_mapper.py:64-84`).
 //!
-//! Python applies the rule to the codes of `RetryPolicy.auto_retry_for`
+//! Python applies the rule to the codes of `RetryPolicy.retry_for`
 //! (`validate_error_code_fields`, `core/models/tasks.py:593-600`), to the
 //! codes of an exception mapper and to `default_unhandled_error_code`. It
 //! does not apply it to the code of a `TaskError`, which may be any text that
 //! is not a built-in or reserved name, such as `my_user_code`. So
-//! [`super::UserCode::parse`] does not apply it either: that parse also reads
+//! [`super::CustomCode::parse`] does not apply it either: that parse also reads
 //! the stored errors that Python tasks write.
 //!
 //! Callers: the stored retry policy reader of the worker
 //! (`worker/retry/stored_policy.rs`) and the check of a task's
-//! `auto_retry_for` in the Rust client (`clients/rust/horsies/src/check.rs`).
+//! `retry_for` in the Rust client (`clients/rust/horsies/src/check.rs`).
 
 use super::RESERVED_NON_TASK_CODES;
 
@@ -85,43 +85,43 @@ fn is_upper_snake_case(code: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        ContractCode, OperationalCode, OutcomeCode, RetrievalCode, TaskErrorCode, UserCode,
+        ContractCode, CustomCode, OperationalCode, OutcomeCode, RetrievalCode, TaskErrorCode,
     };
     use super::*;
     use crate::catalog::CodeEnum;
 
     /// Each refusal with Python's text, as `validate_error_code_string(code,
-    /// field_name='auto_retry_for')` returns it.
+    /// field_name='retry_for')` returns it.
     #[test]
     fn each_refusal_has_python_s_text() {
         let cases = [
             (
                 "",
                 CodeTextRefusal::Empty,
-                "auto_retry_for must be a non-empty string, got ''",
+                "retry_for must be a non-empty string, got ''",
             ),
             (
                 "RateLimitError",
                 CodeTextRefusal::ExceptionClassName,
-                "auto_retry_for 'RateLimitError' looks like an exception class name; retry \
+                "retry_for 'RateLimitError' looks like an exception class name; retry \
                  matching is error-code-only, use UPPER_SNAKE_CASE code names",
             ),
             (
                 "my_error",
                 CodeTextRefusal::NotUpperSnakeCase,
-                "auto_retry_for 'my_error' is invalid; expected UPPER_SNAKE_CASE (e.g. \
+                "retry_for 'my_error' is invalid; expected UPPER_SNAKE_CASE (e.g. \
                  RATE_LIMITED)",
             ),
             (
                 "WORKFLOW_STOPPED",
                 CodeTextRefusal::ReservedName,
-                "auto_retry_for 'WORKFLOW_STOPPED' is a reserved error code name and is not a \
+                "retry_for 'WORKFLOW_STOPPED' is a reserved error code name and is not a \
                  task code; use another UPPER_SNAKE_CASE code",
             ),
         ];
         for (code, refusal, text) in cases {
             assert_eq!(check_error_code_text(code), Err(refusal), "{code:?}");
-            assert_eq!(refusal.message("auto_retry_for", code), text);
+            assert_eq!(refusal.message("retry_for", code), text);
         }
     }
 
@@ -163,7 +163,7 @@ mod tests {
         }
     }
 
-    /// Python checks the value of a built-in code in `auto_retry_for` too;
+    /// Python checks the value of a built-in code in `retry_for` too;
     /// each one passes.
     #[test]
     fn every_built_in_code_passes() {
@@ -182,15 +182,15 @@ mod tests {
     }
 
     /// The two rules differ, as in Python: a task error may carry
-    /// `my_user_code` (Python `clients/python/tests/unit/test_typed_codec.py:528`), and a
-    /// stored error with that code reads, while `auto_retry_for` refuses it.
+    /// `my_user_code` (Python `clients/python/tests/unit/test_typed_codec.py:529`), and a
+    /// stored error with that code reads, while `retry_for` refuses it.
     #[test]
     fn a_task_error_code_is_not_held_to_the_retry_code_rule() {
-        let code = UserCode::parse("my_user_code").expect("a task error accepts any free text");
+        let code = CustomCode::parse("my_user_code").expect("a task error accepts any free text");
         assert_eq!(code.as_str(), "my_user_code");
         assert_eq!(
             serde_json::from_str::<TaskErrorCode>(r#""my_user_code""#).ok(),
-            Some(TaskErrorCode::User(code))
+            Some(TaskErrorCode::Custom(code))
         );
         assert_eq!(
             check_error_code_text("my_user_code"),

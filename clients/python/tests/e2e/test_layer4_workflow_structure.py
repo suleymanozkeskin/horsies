@@ -29,7 +29,7 @@ from typing import Any, Awaitable, Callable, cast
 import pytest
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.outcome import Succeeded, WaitTimeout
+from horsies.core.models.outcome import ReadWaitTimeout, Succeeded
 from horsies.core.models.workflow import TaskNode, WorkflowTerminalResults
 
 from horsies.core.types.result import is_ok
@@ -66,7 +66,7 @@ def _make_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(healthcheck.send())
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
@@ -504,7 +504,7 @@ async def test_explicit_output_task(broker: PostgresBroker) -> None:
         assert status == 'COMPLETED'
 
         # Get result via sync handle.get() - should work after workflow completes
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
         # Should return node_output_final's result directly (not dict of terminals)
         output = succeeded_value(result)
@@ -530,7 +530,7 @@ async def test_default_terminal_results(broker: PostgresBroker) -> None:
         assert status == 'COMPLETED'
 
         # Get result via sync handle.get() - should work after workflow completes
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
         # Returns dict keyed by node_id
         value_of_get = succeeded_value(result)
@@ -603,7 +603,7 @@ async def test_workflow_task_expires_before_claim(broker: PostgresBroker) -> Non
     expiry = datetime.now(timezone.utc) + timedelta(milliseconds=500)
 
     node_expiring = TaskNode(
-        fn=wf_tasks.step_task,
+        function=wf_tasks.step_task,
         kwargs={'step': 'expiring'},
         good_until=expiry,
     )
@@ -659,7 +659,7 @@ async def test_workflow_task_completes_before_expiry(broker: PostgresBroker) -> 
     expiry = datetime.now(timezone.utc) + timedelta(seconds=60)
 
     node_valid = TaskNode(
-        fn=wf_tasks.step_task,
+        function=wf_tasks.step_task,
         kwargs={'step': 'valid'},
         good_until=expiry,
     )
@@ -720,7 +720,7 @@ async def test_single_node_workflow(broker: PostgresBroker) -> None:
         assert task['started_at'] is not None
         assert task['completed_at'] is not None
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=2000)
+        result = await asyncio.to_thread(handle.get, wait_ms=2000)
         output = succeeded_value(result)
         # Default terminal results: dict keyed by node_id
         assert isinstance(output, dict)
@@ -772,7 +772,7 @@ async def test_linear_failure_cascades_to_skip(broker: PostgresBroker) -> None:
 async def test_handle_get_returns_error_on_failed_workflow(
     broker: PostgresBroker,
 ) -> None:
-    """handle.get() returns err with first failed task's error_code."""
+    """handle.get() returns err with first failed task's code."""
     with run_worker(
         DEFAULT_INSTANCE,
         profile='isolated-1',
@@ -785,7 +785,7 @@ async def test_handle_get_returns_error_on_failed_workflow(
         )
         assert status == 'FAILED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=2000)
+        result = await asyncio.to_thread(handle.get, wait_ms=2000)
         assert_failed(result, 'MID_FAIL')
 
 
@@ -910,7 +910,7 @@ async def test_workflow_cancellation(broker: PostgresBroker) -> None:
                 'SKIPPED', 'COMPLETED', 'RUNNING',
             ), f"Task {task['task_index']} has unexpected status: {task['status']}"
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=2000)
+        result = await asyncio.to_thread(handle.get, wait_ms=2000)
         assert_failed(result, 'WORKFLOW_CANCELLED')
 
 
@@ -922,10 +922,10 @@ async def test_workflow_cancellation(broker: PostgresBroker) -> None:
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
 async def test_handle_get_timeout(broker: PostgresBroker) -> None:
-    """handle.get() returns WaitTimeout when workflow does not complete."""
+    """handle.get() returns ReadWaitTimeout when workflow does not complete."""
     _ = broker  # Fixture ensures DB schema is initialized
     # Start workflow WITHOUT a worker — tasks stay non-terminal
     handle = await start_ok_in_thread(wf_tasks.spec_slow_linear)
 
-    result = await asyncio.to_thread(handle.get, timeout_ms=200)
-    assert isinstance(read_error(result), WaitTimeout), result
+    result = await asyncio.to_thread(handle.get, wait_ms=200)
+    assert isinstance(read_error(result), ReadWaitTimeout), result

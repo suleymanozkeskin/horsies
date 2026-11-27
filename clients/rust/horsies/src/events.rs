@@ -6,7 +6,7 @@
 //! [`AttemptNotStarted`], [`AttemptEnded`], [`AttemptRecorded`],
 //! [`TaskRecovered`], [`ChildStarted`], [`ChildReplaced`], [`SlotDown`] and
 //! [`SlotRecovered`]. The types are the core's: one definition for both
-//! clients.
+//! clients. [`AnyEvent`] is their union (Python `AnyEvent`).
 //!
 //! - [`Horsies::on_event`] registers an async handler of one event type,
 //!   [`Horsies::on_event_blocking`] a blocking one. A handler takes one
@@ -25,13 +25,14 @@
 
 use horsies_core::EventHandlerRefused;
 
+pub use horsies_core::events::AnyEvent;
 pub use horsies_core::events::{
     AttemptEnd, AttemptEnded, AttemptErrorCode, AttemptNotStarted, AttemptNumber, AttemptPlaced,
     AttemptRecord, AttemptRecorded, AttemptStart, ChildReplaced, ChildResult, ChildStarted,
-    ClaimReleased, OperatorCancelEnd, Priority, QueueName, RecoveryAction, ReleaseReason,
-    ReplaceReason, RetryCount, RunTrace, ShortageErrno, SlotDown, SlotDownCause, SlotIndex,
-    SlotRecovered, StopReason, TaskClaimed, TaskName, TaskRecovered, TraceCarrierText, UnionEvent,
-    UserCodeText, WorkerDecision, WorkerIdText, WorkflowPlace,
+    ClaimReleased, CustomCodeText, OperatorCancelEnd, Priority, QueueName, RecoveryAction,
+    ReleaseReason, ReplaceReason, RetryCount, RunTrace, ShortageErrno, SlotDown, SlotDownCause,
+    SlotIndex, SlotRecovered, StopReason, TaskClaimed, TaskName, TaskRecovered, TraceCarrierText,
+    UnionEvent, WorkerDecision, WorkerIdText, WorkflowPlace,
 };
 pub use horsies_core::{
     HandlerError, HANDLER_DRAIN, HANDLER_ERROR_LOG_EVERY, HANDLER_QUEUE_EVENTS,

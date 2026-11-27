@@ -569,16 +569,16 @@ pub const DEFAULT_RETENTION_CLASS: NewTypeConstant = NewTypeConstant {
 /// Every `NewType` that the Python package gets, in render order.
 pub const TEXT_NEW_TYPES: &[TextNewType] = &[RETENTION_CLASS_KEY];
 
-/// The payload of a send that the retry methods send again (Python
+/// The payload of a send that the resend methods send again (Python
 /// `TaskSendPayload`). The core's [`crate::core::task::send_types::TaskSendPayload`]
 /// holds the same facts with a resolved retention.
 pub const TASK_SEND_PAYLOAD: RecordClass = RecordClass {
     python_module: <TaskSendError as ErrorEnum>::ERROR_CATALOG.python_module,
     python_class: "TaskSendPayload",
-    doc: "Serialized envelope for idempotent retry.\n\
+    doc: "Serialized envelope for an idempotent resend.\n\
           \n\
           All value fields are pre-serialized to avoid round-trip issues.\n\
-          The retry methods extract this payload directly — no user args needed.",
+          The resend methods extract this payload directly — no user args needed.",
     fields: &[
         RecordField {
             name: "task_name",

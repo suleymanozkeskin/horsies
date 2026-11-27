@@ -151,38 +151,38 @@ def _body_work() -> None:
         logging.getLogger(BODY_LOGGER).warning('inside the body')
 
 
-@APP.task(task_name='isolated_work')
+@APP.task(name='isolated_work')
 def isolated_work() -> Result[int, TaskError]:
     _body_work()
     return Ok(1)
 
 
-@APP.task(task_name='isolated_async_work')
+@APP.task(name='isolated_async_work')
 async def isolated_async_work() -> Result[int, TaskError]:
     await asyncio.sleep(0)
     _body_work()
     return Ok(1)
 
 
-@APP.task(task_name='seat_work', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
+@APP.task(name='seat_work', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
 async def seat_work() -> Result[int, TaskError]:
     await asyncio.sleep(0)
     _body_work()
     return Ok(1)
 
 
-@APP.task(task_name='thread_work', execution=Execution.SHARED_THREAD, timeout_ms=10_000)
+@APP.task(name='thread_work', execution=Execution.SHARED_THREAD, timeout_ms=10_000)
 def thread_seat_work() -> Result[int, TaskError]:
     _body_work()
     return Ok(1)
 
 
-@APP.task(task_name='returns_error')
+@APP.task(name='returns_error')
 def returns_error() -> Result[int, TaskError]:
-    return Err(TaskError(error_code='LIMIT_REACHED', message='over the limit'))
+    return Err(TaskError(code='LIMIT_REACHED', message='over the limit'))
 
 
-@APP.task(task_name='raises')
+@APP.task(name='raises')
 def raises() -> Result[int, TaskError]:
     raise ValueError('bad input')
 
@@ -1143,9 +1143,9 @@ class TestTheOutcomeOfAResult:
     def test_a_value_succeeds(self) -> None:
         assert child_runner.result_outcome_of(Ok(3)) == ResultSucceeded()
 
-    def test_a_user_code_fails_with_its_text(self) -> None:
+    def test_a_custom_code_fails_with_its_text(self) -> None:
         out: Result[int, TaskError] = Err(
-            TaskError(error_code='LIMIT_REACHED', message='m'),
+            TaskError(code='LIMIT_REACHED', message='m'),
         )
         assert child_runner.result_outcome_of(out) == ResultFailed('LIMIT_REACHED', NothingRaised())
 
@@ -1153,7 +1153,7 @@ class TestTheOutcomeOfAResult:
         exception = ValueError('v')
         out: Result[int, TaskError] = Err(
             TaskError(
-                error_code=child_runner.OperationalCode.TASK_EXCEPTION,
+                code=child_runner.OperationalCode.TASK_EXCEPTION,
                 message='m',
                 exception=exception,
             ),

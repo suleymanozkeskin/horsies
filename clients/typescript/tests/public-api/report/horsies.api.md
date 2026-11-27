@@ -195,7 +195,7 @@ export interface AttemptPlaced {
     // (undocumented)
     readonly attempt: number;
     // (undocumented)
-    readonly childKind: Execution;
+    readonly childExecution: Execution;
     // (undocumented)
     readonly childPid: number;
     // (undocumented)
@@ -555,7 +555,7 @@ export interface ChildReplaced {
     // (undocumented)
     readonly at: Temporal.Instant;
     // (undocumented)
-    readonly childKind: Execution;
+    readonly childExecution: Execution;
     // (undocumented)
     readonly childPid: number;
     // (undocumented)
@@ -610,7 +610,7 @@ export interface ChildStarted {
     // (undocumented)
     readonly bootDuration: Temporal.Duration;
     // (undocumented)
-    readonly childKind: Execution;
+    readonly childExecution: Execution;
     // (undocumented)
     readonly childPid: number;
     // (undocumented)
@@ -1383,7 +1383,7 @@ export type Err<E> = {
 };
 
 // @public
-export type ErrorCategory = "OPERATIONAL" | "CONTRACT" | "RETRIEVAL" | "OUTCOME" | "DOMAIN";
+export type ErrorCategory = "OPERATIONAL" | "CONTRACT" | "RETRIEVAL" | "OUTCOME" | "CUSTOM";
 
 // @public
 export type ErrorClass = abstract new (...parameters: never[]) => Error;
@@ -2945,18 +2945,6 @@ export type ReplaceReason = "CHILD_DIED" | "CHANNEL_LOST" | "PROTOCOL_VIOLATION"
 export type RequiredWire = Wire<unknown, unknown, "required", "value">;
 
 // @public
-export interface RerunCallerKeyRefused {
-    // (undocumented)
-    readonly code: typeof RerunErrorCode.CALLER_KEY_REFUSED;
-    // (undocumented)
-    readonly kind: "callerKeyRefused";
-    // (undocumented)
-    readonly message: string;
-    // (undocumented)
-    readonly retryable: false;
-}
-
-// @public
 export interface RerunClassNotRegistered {
     // (undocumented)
     readonly classKey: string;
@@ -3072,7 +3060,7 @@ export const RerunErrorCode: {
     readonly INVALID_COMMAND: "INVALID_COMMAND";
     readonly INVALID_POLICY: "INVALID_POLICY";
     readonly CLASS_NOT_REGISTERED: "CLASS_NOT_REGISTERED";
-    readonly CALLER_KEY_REFUSED: "CALLER_KEY_REFUSED";
+    readonly IDEMPOTENCY_KEY_REFUSED: "IDEMPOTENCY_KEY_REFUSED";
     readonly ID_MINT_REFUSED: "ID_MINT_REFUSED";
     readonly CLIENT_FAMILY_MISMATCH: "CLIENT_FAMILY_MISMATCH";
     readonly UNKNOWN_STORED_FAMILY: "UNKNOWN_STORED_FAMILY";
@@ -3099,6 +3087,18 @@ export interface RerunFamilyCheckFailed {
     readonly message: string;
     // (undocumented)
     readonly retryable: boolean;
+}
+
+// @public
+export interface RerunIdempotencyKeyRefused {
+    // (undocumented)
+    readonly code: typeof RerunErrorCode.IDEMPOTENCY_KEY_REFUSED;
+    // (undocumented)
+    readonly kind: "idempotencyKeyRefused";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
 }
 
 // @public
@@ -3301,7 +3301,7 @@ export interface RerunStatementFailed {
 export type RerunStatementOutcome = "notCommitted" | "unknown";
 
 // @public
-export type RerunStepRefused = RerunClassNotRegistered | RerunCallerKeyRefused | RerunIdMintRefused | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunRetryCodeNotDeclared | RerunTaskNotRegistered | RerunContractViolation;
+export type RerunStepRefused = RerunClassNotRegistered | RerunIdempotencyKeyRefused | RerunIdMintRefused | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunRetryCodeNotDeclared | RerunTaskNotRegistered | RerunContractViolation;
 
 // @public
 export type RerunStoredFamily = {
@@ -3787,7 +3787,7 @@ export interface SlotDown {
     // (undocumented)
     readonly cause: SlotDownCause;
     // (undocumented)
-    readonly childKind: Execution;
+    readonly childExecution: Execution;
     // (undocumented)
     readonly kind: "SlotDown";
     // (undocumented)
@@ -3824,7 +3824,7 @@ export interface SlotRecovered {
     // (undocumented)
     readonly at: Temporal.Instant;
     // (undocumented)
-    readonly childKind: Execution;
+    readonly childExecution: Execution;
     // (undocumented)
     readonly kind: "SlotRecovered";
     // (undocumented)
@@ -4365,7 +4365,7 @@ export interface TaskInfo {
     // (undocumented)
     readonly completedAt: Recorded<Temporal.Instant>;
     // (undocumented)
-    readonly enqueuedAt: Temporal.Instant;
+    readonly dueAt: Temporal.Instant;
     // (undocumented)
     readonly errorCode: Recorded<string>;
     // (undocumented)
@@ -4381,7 +4381,7 @@ export interface TaskInfo {
     // (undocumented)
     readonly priority: number;
     // (undocumented)
-    readonly queueName: string;
+    readonly queue: string;
     // (undocumented)
     readonly retryCount: number;
     // (undocumented)

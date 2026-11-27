@@ -31,7 +31,7 @@ pub enum LabelName {
     Task,
     Queue,
     Execution,
-    Kind,
+    ChildExecution,
     Outcome,
     ErrorCode,
     Reason,
@@ -60,7 +60,7 @@ impl LabelName {
             Self::Task => "task",
             Self::Queue => "queue",
             Self::Execution => "execution",
-            Self::Kind => "kind",
+            Self::ChildExecution => "execution",
             Self::Outcome => "outcome",
             Self::ErrorCode => "error_code",
             Self::Reason => "reason",
@@ -91,7 +91,7 @@ impl LabelName {
             Self::Task => "horsies.task.name",
             Self::Queue => "horsies.queue",
             Self::Execution => "horsies.task.execution",
-            Self::Kind => "horsies.child.kind",
+            Self::ChildExecution => "horsies.child.execution",
             Self::Outcome => "horsies.task.outcome",
             Self::ErrorCode => "error.type",
             Self::Reason => "horsies.reason",
@@ -152,10 +152,10 @@ pub enum DeclaredSource {
     QueueNames,
     /// The names of the registered event handlers.
     HandlerNames,
-    /// The user error codes that the tasks declare
+    /// The custom error codes that the tasks declare
     /// (`DeclaredErrorCodes` of each task); the fallback is
     /// [`UNDECLARED_LABEL`].
-    UserErrorCodes,
+    CustomErrorCodes,
     /// The names of the schedules of the config.
     ScheduleNames,
 }
@@ -166,7 +166,7 @@ impl DeclaredSource {
         match self {
             Self::TaskNames => "(unregistered)",
             Self::QueueNames | Self::HandlerNames | Self::ScheduleNames => "(unknown)",
-            Self::UserErrorCodes => UNDECLARED_LABEL,
+            Self::CustomErrorCodes => UNDECLARED_LABEL,
         }
     }
 
@@ -176,7 +176,7 @@ impl DeclaredSource {
             Self::TaskNames => "task names",
             Self::QueueNames => "queue names",
             Self::HandlerNames => "handler names",
-            Self::UserErrorCodes => "user error codes",
+            Self::CustomErrorCodes => "custom error codes",
             Self::ScheduleNames => "schedule names",
         }
     }
@@ -242,9 +242,9 @@ pub const ERROR_CODE_FIXED: &[ValueGroup] = &[
 ];
 
 /// The values of the `error_code` label: no code, every built-in task code,
-/// the user codes that the tasks declare, and `undeclared`.
+/// the custom codes that the tasks declare, and `undeclared`.
 pub const ERROR_CODE_VALUES: LabelValues =
-    LabelValues::FixedThenDeclared(ERROR_CODE_FIXED, DeclaredSource::UserErrorCodes);
+    LabelValues::FixedThenDeclared(ERROR_CODE_FIXED, DeclaredSource::CustomErrorCodes);
 
 /// The value of the `result` label of a send that succeeded.
 pub const SEND_OK_RESULT: &str = "ok";
@@ -1025,7 +1025,7 @@ mod tests {
         assert_eq!(texts.len(), 1 + built_in);
         let unique: std::collections::HashSet<&str> = texts.iter().copied().collect();
         assert_eq!(unique.len(), texts.len());
-        assert!(!texts.contains(&DeclaredSource::UserErrorCodes.fallback()));
+        assert!(!texts.contains(&DeclaredSource::CustomErrorCodes.fallback()));
     }
 
     #[test]
@@ -1040,7 +1040,7 @@ mod tests {
             DeclaredSource::TaskNames,
             DeclaredSource::QueueNames,
             DeclaredSource::HandlerNames,
-            DeclaredSource::UserErrorCodes,
+            DeclaredSource::CustomErrorCodes,
             DeclaredSource::ScheduleNames,
         ] {
             assert!(!source.fallback().is_empty(), "{source:?}");

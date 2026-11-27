@@ -23,7 +23,7 @@ export type {
 
 export type {
   CallerRerunError,
-  RerunCallerKeyRefused,
+  RerunIdempotencyKeyRefused,
   RerunClassNotRegistered,
   RerunClientFamily,
   RerunClientFamilyMismatch,

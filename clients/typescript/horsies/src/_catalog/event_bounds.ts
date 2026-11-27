@@ -8,7 +8,7 @@ export const MAX_EVENT_TASK_NAME_CHARS = 255;
 
 export const MAX_EVENT_QUEUE_NAME_CHARS = 52;
 
-export const MAX_EVENT_USER_CODE_CHARS = 128;
+export const MAX_EVENT_CUSTOM_CODE_CHARS = 128;
 
 export const MAX_EVENT_TRACE_CARRIER_CHARS = 2048;
 

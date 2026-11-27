@@ -10,7 +10,7 @@
 //!
 //! The handle keeps the first final read, as Python does: an outcome,
 //! `RESULT_NOT_AVAILABLE`, a stored result that does not read, and a stored
-//! user code that `E` does not name. A wait that timed out, a task not
+//! custom code that `E` does not name. A wait that timed out, a task not
 //! found, a wait limit above the bound, a refused wait and a database
 //! failure are not kept: a later read may succeed.
 
@@ -36,7 +36,7 @@ use uuid::Uuid;
 
 use crate::process_state::refuse_in_a_fork;
 use crate::task::body::value_free_decode_text;
-use crate::{TaskError, UserErrorCode};
+use crate::{CustomErrorCode, TaskError};
 
 /// Why neither the live table nor the task history holds a task.
 pub use horsies_core::TaskAbsenceReason;
@@ -74,7 +74,7 @@ pub enum ReadError {
         "timed out waiting for task {task_id}; its status is {} and it may still run",
         .status.wire_value()
     )]
-    WaitTimedOut { task_id: Uuid, status: TaskStatus },
+    WaitTimeout { task_id: Uuid, status: TaskStatus },
     /// `TASK_NOT_FOUND`: neither the live table nor the task history holds
     /// the task. `reason` tells a task that retention can have removed
     /// (`PredatesRetainedHistory`) from an id that no retained history held
@@ -95,16 +95,16 @@ pub enum ReadError {
     /// `RESULT_DESERIALIZATION_ERROR`: the stored result does not read as
     /// the result of this task's types. `cause` names no value.
     #[error("the stored result of task {task_id} does not read: {cause}")]
-    StoredResultUnreadable { task_id: Uuid, cause: String },
-    /// `UNKNOWN_CUSTOM_CODE`: the stored error has a user code that `E`
+    ResultDeserializationError { task_id: Uuid, cause: String },
+    /// `UNKNOWN_CUSTOM_CODE`: the stored error has a custom code that `E`
     /// does not name: the task that stored it has another code type, or
-    /// another version of it.
+    /// another version of it. `stored_code` is the stored text.
     #[error(
-        "the stored error of task {task_id} has user code {code}, which {code_type} does not name"
+        "the stored error of task {task_id} has custom code {stored_code}, which {code_type} does not name"
     )]
-    UnknownUserCode {
+    UnknownCustomCode {
         task_id: Uuid,
-        code: String,
+        stored_code: String,
         code_type: &'static str,
     },
     /// `INVALID_INPUT`: the `WaitLimit::Within` limit is above
@@ -124,33 +124,34 @@ pub enum ReadError {
     /// async form reads.
     #[error("{message}")]
     AsyncContext { message: String },
-    /// `DATABASE_ERROR`: the database or the connection failed; `retryable`
-    /// is the classification of the cause.
-    #[error("the read failed ({code}): {message}")]
-    Database {
-        code: DatabaseErrorCode,
+    /// `DATABASE_ERROR`: the database or the connection failed.
+    /// `database_code` is the code of the failed database operation;
+    /// `retryable` is the classification of the cause.
+    #[error("the read failed ({database_code}): {message}")]
+    DatabaseError {
+        database_code: DatabaseErrorCode,
         message: String,
         retryable: bool,
     },
 }
 
 impl ReadError {
-    /// The library code of this failure, as Python's `TaskHandle.get`
-    /// stores it. A user code that `E` does not name is
+    /// The built-in code of this failure, as Python's `TaskHandle.get`
+    /// stores it. A custom code that `E` does not name is
     /// `UNKNOWN_CUSTOM_CODE`.
     pub fn code(&self) -> BuiltInTaskCode {
         match self {
-            Self::WaitTimedOut { .. } => RetrievalCode::WaitTimeout.into(),
+            Self::WaitTimeout { .. } => RetrievalCode::WaitTimeout.into(),
             Self::TaskNotFound { .. } => RetrievalCode::TaskNotFound.into(),
             Self::ResultNotAvailable { .. } => RetrievalCode::ResultNotAvailable.into(),
-            Self::StoredResultUnreadable { .. } => {
+            Self::ResultDeserializationError { .. } => {
                 OperationalCode::ResultDeserializationError.into()
             }
-            Self::UnknownUserCode { .. } => RetrievalCode::UnknownCustomCode.into(),
+            Self::UnknownCustomCode { .. } => RetrievalCode::UnknownCustomCode.into(),
             Self::InvalidInput { .. } => RetrievalCode::InvalidInput.into(),
             Self::WaitInsideTask { .. } => RetrievalCode::WaitInsideTask.into(),
             Self::AsyncContext { .. } => RetrievalCode::AsyncContext.into(),
-            Self::Database { .. } => OperationalCode::DatabaseError.into(),
+            Self::DatabaseError { .. } => OperationalCode::DatabaseError.into(),
         }
     }
 
@@ -159,21 +160,21 @@ impl ReadError {
     fn is_final(&self) -> bool {
         match self {
             Self::ResultNotAvailable { .. }
-            | Self::StoredResultUnreadable { .. }
-            | Self::UnknownUserCode { .. } => true,
-            Self::WaitTimedOut { .. }
+            | Self::ResultDeserializationError { .. }
+            | Self::UnknownCustomCode { .. } => true,
+            Self::WaitTimeout { .. }
             | Self::TaskNotFound { .. }
             | Self::InvalidInput { .. }
             | Self::WaitInsideTask { .. }
             | Self::AsyncContext { .. }
-            | Self::Database { .. } => false,
+            | Self::DatabaseError { .. } => false,
         }
     }
 
     /// The failure of a connect or a schema install before the read.
     pub(crate) fn of_broker(error: &BrokerError) -> Self {
-        Self::Database {
-            code: DatabaseErrorCode::TaskInfoQueryFailed,
+        Self::DatabaseError {
+            database_code: DatabaseErrorCode::TaskInfoQueryFailed,
             message: error.to_string(),
             retryable: error.is_retryable(),
         }
@@ -184,13 +185,13 @@ impl ReadError {
     pub(crate) fn of_operation(task_id: Uuid, error: DatabaseOperationError) -> Self {
         match error {
             DatabaseOperationError::InvalidJsonPayload { message, .. } => {
-                Self::StoredResultUnreadable {
+                Self::ResultDeserializationError {
                     task_id,
                     cause: message,
                 }
             }
-            other => Self::Database {
-                code: other.code(),
+            other => Self::DatabaseError {
+                database_code: other.code(),
                 message: other.message().to_owned(),
                 retryable: other.retryable(),
             },
@@ -253,10 +254,10 @@ impl<T, E> TaskHandle<T, E> {
 impl<T, E> TaskHandle<T, E>
 where
     T: DeserializeOwned + Clone,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     /// The outcome of the task, waiting while it has not finished, up to
-    /// `limit` (`WaitLimit::NoLimit` waits until it ends).
+    /// `wait` (`WaitLimit::NoLimit` waits until it ends).
     ///
     /// The limit is the first check: a `Within` limit above
     /// `MAX_WAIT_LIMIT_MS` is `InvalidInput`, also when a read is kept. The
@@ -265,8 +266,8 @@ where
     /// `WaitInsideTask` before any statement.
     ///
     /// Errors: [`ReadError`].
-    pub async fn get(&self, limit: WaitLimit) -> Result<TaskOutcome<T, E>, ReadError> {
-        let wait = checked_task_wait(self.task_id, limit)?;
+    pub async fn get(&self, wait: WaitLimit) -> Result<TaskOutcome<T, E>, ReadError> {
+        let checked = checked_task_wait(self.task_id, wait)?;
         if let Some(kept) = self.kept.get() {
             return kept.clone();
         }
@@ -276,7 +277,7 @@ where
                 self.task_id
             )));
         }
-        let read = self.read(wait).await;
+        let read = self.read(checked).await;
         match &read {
             Ok(_) => self.keep(read),
             Err(failure) if failure.is_final() => self.keep(read),
@@ -287,8 +288,8 @@ where
     /// The info of the task with the `parts` asked for. Not kept: a status
     /// changes.
     ///
-    /// Errors: `TaskNotFound` for a task held nowhere; `StoredResultUnreadable`
-    /// for a stored result that is not a task result; `Database`.
+    /// Errors: `TaskNotFound` for a task held nowhere; `ResultDeserializationError`
+    /// for a stored result that is not a task result; `DatabaseError`.
     pub async fn info(&self, parts: TaskInfoParts) -> Result<TaskInfo, ReadError> {
         read_task_info(&self.reads, self.task_id, parts).await
     }
@@ -371,7 +372,7 @@ pub(crate) async fn read_task_info(
 /// `Horsies.get_task_info_async`, which decodes the envelope that the
 /// broker's read returns). Pure.
 ///
-/// Errors: `StoredResultUnreadable` for a stored result that is not a task
+/// Errors: `ResultDeserializationError` for a stored result that is not a task
 /// result envelope, or whose error does not read; the cause names no value.
 fn task_info_of_stored(
     info: horsies_core::TaskInfo<StoredEnvelopeText>,
@@ -379,7 +380,7 @@ fn task_info_of_stored(
     let task_id = info.task_id;
     info.try_map_result(|envelope| {
         task_result_from_json_str::<JsonText>(envelope.as_str()).map_err(|error| {
-            ReadError::StoredResultUnreadable {
+            ReadError::ResultDeserializationError {
                 task_id,
                 cause: unreadable_cause(&error),
             }
@@ -394,9 +395,9 @@ fn task_info_of_stored(
 /// Errors: [`WaitLimitRefused`] for a `Within` limit above
 /// `MAX_WAIT_LIMIT_MS`.
 pub(crate) fn checked_wait(
-    limit: WaitLimit,
+    wait: WaitLimit,
 ) -> Result<Option<std::time::Duration>, WaitLimitRefused> {
-    match limit {
+    match wait {
         WaitLimit::NoLimit => Ok(None),
         WaitLimit::Within(duration) => {
             BoundedWait::try_from(duration).map(|bounded| Some(bounded.duration()))
@@ -409,29 +410,29 @@ pub(crate) fn checked_wait(
 /// Errors: `InvalidInput` with the task id and the refusal.
 pub(crate) fn checked_task_wait(
     task_id: Uuid,
-    limit: WaitLimit,
+    wait: WaitLimit,
 ) -> Result<Option<std::time::Duration>, ReadError> {
-    checked_wait(limit).map_err(|cause| ReadError::InvalidInput { task_id, cause })
+    checked_wait(wait).map_err(|cause| ReadError::InvalidInput { task_id, cause })
 }
 
 /// The outcome of a stored record (Python `_record_to_task_result`). Pure.
 ///
 /// - `CANCELLED`: `TASK_CANCELLED` with the task id in `data`.
 /// - no result, terminal status: `ResultNotAvailable`.
-/// - no result, another status: the wait limit passed, `WaitTimedOut`.
+/// - no result, another status: the wait limit passed, `WaitTimeout`.
 /// - a result: the envelope read with `T` and `E`.
 pub(crate) fn outcome_of_record<T, E>(
     record: RawResultRecord,
 ) -> Result<TaskOutcome<T, E>, ReadError>
 where
     T: DeserializeOwned,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     let task_id = record.task_id;
     let envelope = match (record.status, record.raw_result) {
         (TaskStatus::Cancelled, _) => {
             return Ok(TaskOutcome::Failed(
-                TaskError::library(
+                TaskError::built_in(
                     OutcomeCode::TaskCancelled,
                     format!("Task {task_id} was cancelled before completion"),
                 )
@@ -442,12 +443,12 @@ where
             return Err(ReadError::ResultNotAvailable { task_id, status })
         }
         (status @ (TaskStatus::Pending | TaskStatus::Claimed | TaskStatus::Running), None) => {
-            return Err(ReadError::WaitTimedOut { task_id, status })
+            return Err(ReadError::WaitTimeout { task_id, status })
         }
         (_, Some(envelope)) => envelope,
     };
     let stored = read_stored_result::<T>(envelope.as_str()).map_err(|refused| {
-        ReadError::StoredResultUnreadable {
+        ReadError::ResultDeserializationError {
             task_id,
             cause: refused.cause,
         }
@@ -456,9 +457,9 @@ where
         TaskResult::Ok(value) => Ok(TaskOutcome::Succeeded(value)),
         TaskResult::Err(error) => TaskError::from_stored(error)
             .map(TaskOutcome::Failed)
-            .map_err(|unknown| ReadError::UnknownUserCode {
+            .map_err(|unknown| ReadError::UnknownCustomCode {
                 task_id,
-                code: unknown.code,
+                stored_code: unknown.stored_code,
                 code_type: unknown.code_type,
             }),
     }
@@ -571,10 +572,10 @@ mod tests {
         Declined,
     }
 
-    impl UserErrorCode for ChargeCode {
+    impl CustomErrorCode for ChargeCode {
         const CODES: &'static [&'static str] = &["DECLINED"];
 
-        fn code(&self) -> &'static str {
+        fn as_str(&self) -> &'static str {
             match self {
                 Self::Declined => "DECLINED",
             }
@@ -629,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_user_error_is_failed_with_the_code_of_the_type() {
+    fn a_stored_custom_error_is_failed_with_the_code_of_the_type() {
         let Ok(TaskOutcome::Failed(error)) =
             outcome(record(TaskStatus::Failed, Some(error_envelope("DECLINED"))))
         else {
@@ -637,12 +638,12 @@ mod tests {
         };
         assert_eq!(
             error.code(),
-            &crate::TaskErrorCode::User(ChargeCode::Declined)
+            &crate::TaskErrorCode::Custom(ChargeCode::Declined)
         );
     }
 
     #[test]
-    fn a_stored_library_code_is_failed() {
+    fn a_stored_built_in_code_is_failed() {
         let envelope = json!({
             "__h_task_result__": true,
             "ok": null,
@@ -657,7 +658,7 @@ mod tests {
         else {
             panic!("a stored library error is a failed outcome");
         };
-        assert_eq!(error.code().text(), "TASK_TIMEOUT");
+        assert_eq!(error.code().as_str(), "TASK_TIMEOUT");
     }
 
     #[test]
@@ -665,7 +666,7 @@ mod tests {
         let Ok(TaskOutcome::Failed(error)) = outcome(record(TaskStatus::Cancelled, None)) else {
             panic!("a cancelled task is a failed outcome");
         };
-        assert_eq!(error.code().text(), "TASK_CANCELLED");
+        assert_eq!(error.code().as_str(), "TASK_CANCELLED");
         assert_eq!(
             error
                 .data()
@@ -679,7 +680,7 @@ mod tests {
         )) else {
             panic!("a cancelled task with a stored result is a failed outcome");
         };
-        assert_eq!(stored.code().text(), "TASK_CANCELLED");
+        assert_eq!(stored.code().as_str(), "TASK_CANCELLED");
     }
 
     /// A stored result that is not a result envelope (the legacy
@@ -701,7 +702,7 @@ mod tests {
         for stored in [legacy, json!({"random": 1})] {
             let read = outcome(record(TaskStatus::Completed, Some(stored.clone())));
             assert!(
-                matches!(read, Err(ReadError::StoredResultUnreadable { .. })),
+                matches!(read, Err(ReadError::ResultDeserializationError { .. })),
                 "{stored}: {read:?}"
             );
         }
@@ -725,19 +726,19 @@ mod tests {
         else {
             panic!("an expired task with a stored error is a failed outcome");
         };
-        assert_eq!(error.code().text(), "TASK_EXPIRED");
+        assert_eq!(error.code().as_str(), "TASK_EXPIRED");
     }
 
     #[test]
-    fn a_stored_user_code_that_the_type_does_not_name_is_unknown() {
+    fn a_stored_custom_code_that_the_type_does_not_name_is_unknown() {
         assert_eq!(
             outcome(record(
                 TaskStatus::Failed,
                 Some(error_envelope("OUT_OF_STOCK"))
             )),
-            Err(ReadError::UnknownUserCode {
+            Err(ReadError::UnknownCustomCode {
                 task_id: task(),
-                code: "OUT_OF_STOCK".to_owned(),
+                stored_code: "OUT_OF_STOCK".to_owned(),
                 code_type: std::any::type_name::<ChargeCode>(),
             })
         );
@@ -749,7 +750,7 @@ mod tests {
             TaskStatus::Completed,
             Some(json!({"__h_task_result__": true, "ok": MARKER, "err": null})),
         ));
-        let Err(ReadError::StoredResultUnreadable { cause, .. }) = read else {
+        let Err(ReadError::ResultDeserializationError { cause, .. }) = read else {
             panic!("a value of another type is unreadable");
         };
         assert!(!cause.contains(MARKER), "{cause}");
@@ -796,13 +797,13 @@ mod tests {
         };
         assert!(matches!(
             read(r#"{"a": [{"__h_marker": 1}]}"#),
-            Err(ReadError::StoredResultUnreadable { .. })
+            Err(ReadError::ResultDeserializationError { .. })
         ));
         let nested = |levels: usize| format!("{}{}", "[".repeat(levels), "]".repeat(levels));
         assert!(read(&nested(200)).is_ok());
         assert!(matches!(
             read(&nested(201)),
-            Err(ReadError::StoredResultUnreadable { .. })
+            Err(ReadError::ResultDeserializationError { .. })
         ));
     }
 
@@ -818,7 +819,7 @@ mod tests {
                 "err": {"exception": MARKER, "error_code": "DECLINED", "data": null, "message": "no"}
             })),
         ));
-        let Err(ReadError::StoredResultUnreadable { cause, .. }) = read else {
+        let Err(ReadError::ResultDeserializationError { cause, .. }) = read else {
             panic!("a stored error with a field that does not parse is unreadable");
         };
         assert!(!cause.contains(MARKER), "{cause}");
@@ -836,7 +837,7 @@ mod tests {
         );
         assert_eq!(
             outcome(record(TaskStatus::Claimed, None)),
-            Err(ReadError::WaitTimedOut {
+            Err(ReadError::WaitTimeout {
                 task_id: task(),
                 status: TaskStatus::Claimed
             })
@@ -850,19 +851,19 @@ mod tests {
                 task_id: task(),
                 status: TaskStatus::Failed,
             },
-            ReadError::StoredResultUnreadable {
+            ReadError::ResultDeserializationError {
                 task_id: task(),
                 cause: "x".to_owned(),
             },
-            ReadError::UnknownUserCode {
+            ReadError::UnknownCustomCode {
                 task_id: task(),
-                code: "X".to_owned(),
+                stored_code: "X".to_owned(),
                 code_type: "T",
             },
         ];
         assert!(kept.iter().all(ReadError::is_final));
         let not_kept = [
-            ReadError::WaitTimedOut {
+            ReadError::WaitTimeout {
                 task_id: task(),
                 status: TaskStatus::Running,
             },
@@ -878,8 +879,8 @@ mod tests {
             ReadError::AsyncContext {
                 message: "blocking get on a runtime thread".to_owned(),
             },
-            ReadError::Database {
-                code: DatabaseErrorCode::TaskInfoQueryFailed,
+            ReadError::DatabaseError {
+                database_code: DatabaseErrorCode::TaskInfoQueryFailed,
                 message: "down".to_owned(),
                 retryable: true,
             },
@@ -905,7 +906,7 @@ mod tests {
     #[test]
     fn each_read_error_has_python_s_code() {
         let codes: Vec<String> = [
-            ReadError::WaitTimedOut {
+            ReadError::WaitTimeout {
                 task_id: task(),
                 status: TaskStatus::Running,
             },
@@ -917,6 +918,15 @@ mod tests {
                 task_id: task(),
                 status: TaskStatus::Failed,
             },
+            ReadError::ResultDeserializationError {
+                task_id: task(),
+                cause: "x".to_owned(),
+            },
+            ReadError::UnknownCustomCode {
+                task_id: task(),
+                stored_code: "X".to_owned(),
+                code_type: "T",
+            },
             ReadError::InvalidInput {
                 task_id: task(),
                 cause: WaitLimitRefused,
@@ -927,7 +937,7 @@ mod tests {
             },
         ]
         .iter()
-        .map(|error| error.code().value())
+        .map(|error| error.code().as_str().to_owned())
         .collect();
         assert_eq!(
             codes,
@@ -935,6 +945,8 @@ mod tests {
                 "WAIT_TIMEOUT",
                 "TASK_NOT_FOUND",
                 "RESULT_NOT_AVAILABLE",
+                "RESULT_DESERIALIZATION_ERROR",
+                "UNKNOWN_CUSTOM_CODE",
                 "INVALID_INPUT",
                 "WAIT_INSIDE_TASK",
                 "ASYNC_CONTEXT"
@@ -970,7 +982,7 @@ mod tests {
         );
         assert!(matches!(
             unreadable,
-            ReadError::StoredResultUnreadable { .. }
+            ReadError::ResultDeserializationError { .. }
         ));
         let database = ReadError::of_operation(
             task(),
@@ -983,7 +995,7 @@ mod tests {
         );
         assert!(matches!(
             database,
-            ReadError::Database {
+            ReadError::DatabaseError {
                 retryable: true,
                 ..
             }
@@ -997,13 +1009,13 @@ mod tests {
             task_id: task(),
             task_name: "charge".to_owned(),
             status: TaskStatus::Failed,
-            queue_name: "default".to_owned(),
+            queue: "default".to_owned(),
             priority: 100,
             retry_count: 1,
             max_retries: 2,
             next_retry_at: None,
             sent_at: None,
-            enqueued_at: chrono::Utc::now(),
+            due_at: chrono::Utc::now(),
             claimed_at: None,
             started_at: None,
             completed_at: None,
@@ -1082,7 +1094,7 @@ mod tests {
             json!({"__h_task_result__": true, "ok": null, "err": {"error_code": "TASK_EXPIRED"}}),
             json!({"not": MARKER}),
         ] {
-            let Err(ReadError::StoredResultUnreadable { task_id, cause }) =
+            let Err(ReadError::ResultDeserializationError { task_id, cause }) =
                 task_info_of_stored(stored_info(Some(stored.clone())))
             else {
                 panic!("{stored}: the client reads only a task result");
@@ -1128,7 +1140,7 @@ mod tests {
     }
 
     /// The limit is checked before any statement: the app's address has
-    /// no database, so a read that ran would fail as `Database`. Nothing
+    /// no database, so a read that ran would fail as `DatabaseError`. Nothing
     /// is kept.
     #[tokio::test]
     async fn a_get_above_the_bound_is_invalid_input_before_any_statement() {
@@ -1136,7 +1148,7 @@ mod tests {
             "postgresql://127.0.0.1:1/nothing",
         ))
         .unwrap();
-        let handle: TaskHandle<u32, ChargeCode> = app.task_handle_of(task());
+        let handle: TaskHandle<u32, ChargeCode> = app.task_handle(task());
         let refused = handle.get(above_the_bound()).await.unwrap_err();
         assert_eq!(
             refused,
@@ -1145,7 +1157,7 @@ mod tests {
                 cause: WaitLimitRefused,
             },
         );
-        assert_eq!(refused.code().value(), "INVALID_INPUT");
+        assert_eq!(refused.code().as_str(), "INVALID_INPUT");
         assert!(handle.kept().is_none());
     }
 
@@ -1157,7 +1169,7 @@ mod tests {
             "postgresql://127.0.0.1:1/nothing",
         ))
         .unwrap();
-        let handle: TaskHandle<u32, ChargeCode> = app.task_handle_of(task());
+        let handle: TaskHandle<u32, ChargeCode> = app.task_handle(task());
         let _kept = handle.keep(Ok(TaskOutcome::Succeeded(4)));
         assert!(matches!(
             handle.get(above_the_bound()).await,
@@ -1209,7 +1221,7 @@ mod tests {
             "postgresql://127.0.0.1:1/nothing",
         ))
         .unwrap();
-        let handle: TaskHandle<u32, ChargeCode> = app.task_handle_of(task());
+        let handle: TaskHandle<u32, ChargeCode> = app.task_handle(task());
         let kept = handle.keep(Ok(TaskOutcome::Succeeded(4)));
         assert_eq!(kept, Ok(TaskOutcome::Succeeded(4)));
         let again = handle.keep(Ok(TaskOutcome::Succeeded(5)));

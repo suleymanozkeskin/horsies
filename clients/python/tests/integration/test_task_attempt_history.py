@@ -285,7 +285,7 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """mark_stale_tasks_as_failed retries when WORKER_CRASHED is in auto_retry_for.
+    """mark_stale_tasks_as_failed retries when WORKER_CRASHED is in retry_for.
 
     No worker runs here, so no reaper runs the stale RUNNING pass, as with
     ``fail_stale_running=False``: the call runs the pass on demand.
@@ -298,10 +298,10 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
             'task_name': 'stale_retry_test',
             'retry_policy': {
                 'max_retries': 3,
-                'intervals': [60, 300, 900],
+                'intervals_seconds': [60, 300, 900],
                 'backoff_strategy': 'fixed',
                 'jitter': False,
-                'auto_retry_for': ['WORKER_CRASHED'],
+                'retry_for': ['WORKER_CRASHED'],
             },
         }
     )

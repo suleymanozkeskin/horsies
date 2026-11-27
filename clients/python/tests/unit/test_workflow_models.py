@@ -12,7 +12,7 @@ from horsies import JsonValue
 from horsies.core.models.outcome import Succeeded, TaskOutcome
 from horsies.core.models.tasks import TaskError
 from horsies.core.models.task_send_types import TaskSendError, TaskSendResult
-from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskSendOptions, from_node
+from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskFunctionWithOptions, from_node
 from horsies.core.types.result import Ok, Result
 from horsies.core.models.workflow import (
     NODE_ID_PATTERN,
@@ -65,7 +65,7 @@ def _open_target(
 def _ctx_target(
     *,
     input: TaskOutcome[Any, TaskError] | None = None,
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[Any, TaskError]:
     return Ok(None)
 
@@ -82,10 +82,10 @@ def _params_target(
 class MockTaskWrapper(TaskFunction[Any, Any]):
     """Mock TaskWrapper for unit tests."""
 
-    _original_fn = staticmethod(_open_target)
+    _original_function = staticmethod(_open_target)
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
@@ -98,25 +98,13 @@ class MockTaskWrapper(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
@@ -134,7 +122,7 @@ class MockTaskWrapper(TaskFunction[Any, Any]):
         node_id: Any = None,
     ) -> NodeFactory[Any, Any]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
             workflow_context_from=workflow_context_from,
             args_from=args_from,
@@ -150,18 +138,18 @@ class MockTaskWrapper(TaskFunction[Any, Any]):
 
 @dataclass
 class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
-    """Mock TaskWrapper that accepts workflow_ctx."""
+    """Mock TaskWrapper that accepts workflow_context."""
 
-    _original_fn = staticmethod(_ctx_target)
+    _original_function = staticmethod(_ctx_target)
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(
         self,
-        workflow_ctx: WorkflowContext | None = None,
+        workflow_context: WorkflowContext | None = None,
         *args: Any,
         **kwargs: Any,
     ) -> Result[Any, TaskError]:
@@ -173,25 +161,13 @@ class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
@@ -209,7 +185,7 @@ class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
         node_id: Any = None,
     ) -> NodeFactory[Any, Any]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
             workflow_context_from=workflow_context_from,
             args_from=args_from,
@@ -227,10 +203,10 @@ class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
 class MockTaskWrapperWithParams(TaskFunction[Any, Any]):
     """Mock TaskWrapper with required parameters for signature validation."""
 
-    _original_fn = staticmethod(_params_target)
+    _original_function = staticmethod(_params_target)
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
@@ -248,25 +224,13 @@ class MockTaskWrapperWithParams(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
@@ -284,7 +248,7 @@ class MockTaskWrapperWithParams(TaskFunction[Any, Any]):
         node_id: Any = None,
     ) -> NodeFactory[Any, Any]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
             workflow_context_from=workflow_context_from,
             args_from=args_from,
@@ -303,7 +267,7 @@ class MockTaskWrapperWithOptionalParam(TaskFunction[Any, Any]):
     """Mock TaskWrapper whose args_from target has a default value."""
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
@@ -319,25 +283,13 @@ class MockTaskWrapperWithOptionalParam(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
@@ -355,7 +307,7 @@ class MockTaskWrapperWithOptionalParam(TaskFunction[Any, Any]):
         node_id: Any = None,
     ) -> NodeFactory[Any, Any]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
             workflow_context_from=workflow_context_from,
             args_from=args_from,
@@ -374,7 +326,7 @@ class MockTaskWrapperWithKwargs(TaskFunction[Any, Any]):
     """Mock TaskWrapper that accepts **kwargs (validation should allow any key)."""
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
@@ -388,25 +340,13 @@ class MockTaskWrapperWithKwargs(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
@@ -424,7 +364,7 @@ class MockTaskWrapperWithKwargs(TaskFunction[Any, Any]):
         node_id: Any = None,
     ) -> NodeFactory[Any, Any]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
             workflow_context_from=workflow_context_from,
             args_from=args_from,
@@ -443,7 +383,7 @@ class MockTaskWrapperWithRequiredMeta(TaskFunction[Any, Any]):
     """Mock TaskWrapper with required workflow_meta for signature validation."""
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
@@ -460,25 +400,13 @@ class MockTaskWrapperWithRequiredMeta(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
@@ -496,7 +424,7 @@ class MockTaskWrapperWithRequiredMeta(TaskFunction[Any, Any]):
         node_id: Any = None,
     ) -> NodeFactory[Any, Any]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
             workflow_context_from=workflow_context_from,
             args_from=args_from,
@@ -515,7 +443,7 @@ class MockTaskWrapperInt(TaskFunction[Any, int]):
     """Mock producer wrapper with concrete ok-type int."""
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = int
 
@@ -530,25 +458,13 @@ class MockTaskWrapperInt(TaskFunction[Any, int]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[int]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[int]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[int]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
         return Ok(TaskHandle('mock'))
 
     def node(
@@ -566,7 +482,7 @@ class MockTaskWrapperInt(TaskFunction[Any, int]):
         node_id: Any = None,
     ) -> NodeFactory[Any, int]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
             workflow_context_from=workflow_context_from,
             args_from=args_from,
@@ -585,7 +501,7 @@ class MockTaskWrapperWithStringResultParam(TaskFunction[Any, Any]):
     """Mock consumer expecting TaskOutcome[str, TaskError] for args_from."""
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
@@ -605,25 +521,13 @@ class MockTaskWrapperWithStringResultParam(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
@@ -641,7 +545,7 @@ class MockTaskWrapperWithStringResultParam(TaskFunction[Any, Any]):
         node_id: Any = None,
     ) -> NodeFactory[Any, Any]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
             workflow_context_from=workflow_context_from,
             args_from=args_from,
@@ -660,7 +564,7 @@ class MockTaskWrapperWithRawParam(TaskFunction[Any, Any]):
     """Mock consumer with non-TaskOutcome annotation for args_from validation."""
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
@@ -680,25 +584,13 @@ class MockTaskWrapperWithRawParam(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
@@ -716,7 +608,7 @@ class MockTaskWrapperWithRawParam(TaskFunction[Any, Any]):
         node_id: Any = None,
     ) -> NodeFactory[Any, Any]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
             workflow_context_from=workflow_context_from,
             args_from=args_from,
@@ -743,11 +635,11 @@ class TestTaskNode:
         """TaskNode can be constructed with fn and kwargs."""
         mock_fn = MockTaskWrapper(task_name='test_task')
         node = TaskNode(
-            fn=mock_fn,
+            function=mock_fn,
             kwargs={'key': 'value'},
         )
 
-        assert node.fn == mock_fn
+        assert node.function == mock_fn
         assert node.args == ()
         assert node.kwargs == {'key': 'value'}
 
@@ -755,19 +647,19 @@ class TestTaskNode:
         """TaskNode constructor rejects args=... (kwargs-only contract)."""
         mock_fn = MockTaskWrapper(task_name='test_task')
         with pytest.raises(TypeError, match="unexpected keyword argument 'args'"):
-            TaskNode(fn=mock_fn, args=(1,))  # type: ignore[call-arg]
+            TaskNode(function=mock_fn, args=(1,))  # type: ignore[call-arg]
 
     def test_tasknode_name_property(self) -> None:
         """name property returns fn.task_name."""
         mock_fn = MockTaskWrapper(task_name='my_task_name')
-        node = TaskNode(fn=mock_fn)
+        node = TaskNode(function=mock_fn)
 
         assert node.name == 'my_task_name'
 
     def test_tasknode_defaults(self) -> None:
         """Default values for optional fields."""
         mock_fn = MockTaskWrapper(task_name='test')
-        node = TaskNode(fn=mock_fn)
+        node = TaskNode(function=mock_fn)
 
         assert node.args == ()
         assert node.kwargs == {}
@@ -781,14 +673,14 @@ class TestTaskNode:
     def test_tasknode_allow_failed_dependencies_default(self) -> None:
         """allow_failed_dependencies defaults to False."""
         mock_fn = MockTaskWrapper(task_name='test')
-        node = TaskNode(fn=mock_fn)
+        node = TaskNode(function=mock_fn)
 
         assert node.allow_failed_dependencies is False
 
     def test_tasknode_allow_failed_dependencies_true(self) -> None:
         """allow_failed_dependencies can be set to True."""
         mock_fn = MockTaskWrapper(task_name='test')
-        node = TaskNode(fn=mock_fn, allow_failed_dependencies=True)
+        node = TaskNode(function=mock_fn, allow_failed_dependencies=True)
 
         assert node.allow_failed_dependencies is True
 
@@ -814,9 +706,9 @@ class TestWorkflowSpecValidation:
         fn_b = MockTaskWrapper(task_name='task_b')
         fn_c = MockTaskWrapperWithCtx(task_name='task_c')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a])
-        node_c = TaskNode(fn=fn_c, waits_for=[node_b])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a])
+        node_c = TaskNode(function=fn_c, waits_for=[node_b])
 
         # Should not raise
         spec = WorkflowSpec(name='linear', tasks=[node_a, node_b, node_c])
@@ -829,10 +721,10 @@ class TestWorkflowSpecValidation:
         fn_c = MockTaskWrapperWithCtx(task_name='task_c')
         fn_d = MockTaskWrapper(task_name='task_d')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a])
-        node_c = TaskNode(fn=fn_c, waits_for=[node_a])
-        node_d = TaskNode(fn=fn_d, waits_for=[node_b, node_c])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a])
+        node_c = TaskNode(function=fn_c, waits_for=[node_a])
+        node_d = TaskNode(function=fn_d, waits_for=[node_b, node_c])
 
         spec = WorkflowSpec(name='diamond', tasks=[node_a, node_b, node_c, node_d])
         assert len(spec.tasks) == 4
@@ -843,8 +735,8 @@ class TestWorkflowSpecValidation:
         fn_b = MockTaskWrapper(task_name='task_b')
 
         # Create circular dependency manually (both depend on each other)
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)
 
         # Manually set deps to create no-root scenario
         node_a.waits_for = [node_b]
@@ -863,8 +755,8 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a])
 
         # Create cycle: A waits for B
         node_a.waits_for = [node_b]
@@ -887,9 +779,9 @@ class TestWorkflowSpecValidation:
         fn_b = MockTaskWrapper(task_name='task_b')
         fn_c = MockTaskWrapperWithCtx(task_name='task_c')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a])
-        node_c = TaskNode(fn=fn_c, waits_for=[node_b])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a])
+        node_c = TaskNode(function=fn_c, waits_for=[node_b])
 
         # Create cycle: A waits for C
         node_a.waits_for = [node_c]
@@ -916,8 +808,8 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a, node_a])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a, node_a])
 
         spec = WorkflowSpec(name='duplicate_dep', tasks=[node_a, node_b])
 
@@ -930,9 +822,9 @@ class TestWorkflowSpecValidation:
         fn_b = MockTaskWrapper(task_name='task_b')
         fn_c = MockTaskWrapper(task_name='task_c')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)
-        node_c = TaskNode(fn=fn_c, waits_for=[node_a, node_b, node_a])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)
+        node_c = TaskNode(function=fn_c, waits_for=[node_a, node_b, node_a])
 
         spec = WorkflowSpec(name='ordered_dupes', tasks=[node_a, node_b, node_c])
 
@@ -951,8 +843,8 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a])
 
         spec = WorkflowSpec(name='post_construction_dupe', tasks=[node_a, node_b])
 
@@ -974,9 +866,9 @@ class TestWorkflowSpecValidation:
         fn_b = MockTaskWrapper(task_name='task_b')
         fn_external = MockTaskWrapper(task_name='external')
 
-        node_a = TaskNode(fn=fn_a)
-        node_external = TaskNode(fn=fn_external)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_external])
+        node_a = TaskNode(function=fn_a)
+        node_external = TaskNode(function=fn_external)
+        node_b = TaskNode(function=fn_b, waits_for=[node_external])
 
         # node_external is NOT in tasks list
         with pytest.raises(WorkflowValidationError, match='not in workflow') as exc_info:
@@ -990,11 +882,11 @@ class TestWorkflowSpecValidation:
         fn_b = MockTaskWrapper(task_name='task_b')
         fn_c = MockTaskWrapperWithCtx(task_name='task_c')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)
         # node_c has args_from pointing to node_a, but only waits_for node_b
         node_c = TaskNode(
-            fn=fn_c,
+            function=fn_c,
             waits_for=[node_b],
             args_from={'input': node_a},
         )
@@ -1009,14 +901,14 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
         # Use MockTaskWrapperWithCtx so only the waits_for check fires
-        # (not also CTX_PARAM_MISSING for lacking workflow_ctx param)
+        # (not also CTX_PARAM_MISSING for lacking workflow_context param)
         fn_c = MockTaskWrapperWithCtx(task_name='task_c')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)
         # node_c has workflow_context_from pointing to node_a, but only waits_for node_b
         node_c = TaskNode(
-            fn=fn_c,
+            function=fn_c,
             waits_for=[node_b],
             workflow_context_from=[node_a],
         )
@@ -1027,27 +919,27 @@ class TestWorkflowSpecValidation:
         assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_CONTEXT_FROM
 
     def test_workflow_context_from_requires_workflow_ctx_param(self) -> None:
-        """workflow_context_from requires workflow_ctx param → WORKFLOW_CONTEXT_PARAMETER_MISSING."""
+        """workflow_context_from requires workflow_context param → WORKFLOW_CONTEXT_PARAMETER_MISSING."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_with_ctx = MockTaskWrapperWithCtx(task_name='task_with_ctx')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_with_ctx,
+            function=fn_with_ctx,
             waits_for=[node_a],
             workflow_context_from=[node_a],
         )
         WorkflowSpec(name='ctx_param_ok', tasks=[node_a, node_b])
 
         node_c = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             workflow_context_from=[node_a],
         )
 
         with pytest.raises(
-            WorkflowValidationError, match='missing workflow_ctx param',
+            WorkflowValidationError, match='missing workflow_context param',
         ) as exc_info:
             WorkflowSpec(name='ctx_param_missing', tasks=[node_a, node_c])
 
@@ -1058,11 +950,11 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         _ = node_a
         with pytest.raises(TypeError, match="unexpected keyword argument 'args'"):
             TaskNode(  # type: ignore[call-arg]
-                fn=fn_b,
+                function=fn_b,
                 args=(1,),
                 waits_for=[node_a],
                 args_from={'input': node_a},
@@ -1075,11 +967,11 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_args_with_args_from'
             definition_key = _definition_key('child_args_with_args_from')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         _ = node_a
         with pytest.raises(TypeError, match="unexpected keyword argument 'args'"):
             SubWorkflowNode(  # type: ignore[call-arg]
@@ -1096,7 +988,7 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_default_build_with'
             definition_key = _definition_key('child_default_build_with')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1117,14 +1009,14 @@ class TestWorkflowSpecValidation:
         class BaseChildWorkflow(WorkflowDefinition[int]):
             name = 'base_child_default_build_with'
             definition_key = _definition_key('base_child_default_build_with')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
         class InheritedDefaultWorkflow(BaseChildWorkflow):
             name = 'inherited_default_build_with'
             definition_key = _definition_key('inherited_default_build_with')
-            child2 = TaskNode(fn=fn_a)
+            child2 = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child2)
 
@@ -1148,7 +1040,7 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_default_build_with_no_params'
             definition_key = _definition_key('child_default_build_with_no_params')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1164,7 +1056,7 @@ class TestWorkflowSpecValidation:
         class BaseChildWorkflow(WorkflowDefinition[int]):
             name = 'base_child_custom_build_with_missing'
             definition_key = _definition_key('base_child_custom_build_with_missing')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1176,7 +1068,7 @@ class TestWorkflowSpecValidation:
         class InheritedCustomWorkflow(BaseChildWorkflow):
             name = 'inherited_custom_build_with_missing'
             definition_key = _definition_key('inherited_custom_build_with_missing')
-            child2 = TaskNode(fn=fn_a)
+            child2 = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child2)
 
@@ -1200,7 +1092,7 @@ class TestWorkflowSpecValidation:
         class BaseChildWorkflow(WorkflowDefinition[int]):
             name = 'base_child_custom_build_with_invalid_key'
             definition_key = _definition_key('base_child_custom_build_with_invalid_key')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1212,7 +1104,7 @@ class TestWorkflowSpecValidation:
         class InheritedCustomWorkflow(BaseChildWorkflow):
             name = 'inherited_custom_build_with_invalid_key'
             definition_key = _definition_key('inherited_custom_build_with_invalid_key')
-            child2 = TaskNode(fn=fn_a)
+            child2 = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child2)
 
@@ -1236,14 +1128,14 @@ class TestWorkflowSpecValidation:
         class BaseChildWorkflow(WorkflowDefinition[int]):
             name = 'base_child_inherited_definition_key'
             definition_key = _definition_key('base_child_inherited_definition_key')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
         class InheritedKeyWorkflow(BaseChildWorkflow):
             name = 'inherited_definition_key_child'
             definition_key = _definition_key('inherited_definition_key_child')
-            child2 = TaskNode(fn=fn_a)
+            child2 = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child2)
 
@@ -1263,7 +1155,7 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_build_with_positional_rejected'
             definition_key = _definition_key('child_build_with_positional_rejected')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1286,7 +1178,7 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_build_with_mutated_args'
             definition_key = _definition_key('child_build_with_mutated_args')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1308,9 +1200,9 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapperWithParams(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             kwargs={'flag': True},
             args_from={'required': node_a, 'typo': node_a},
@@ -1326,9 +1218,9 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapperWithParams(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             kwargs={'required': 42, 'flag': True},
             args_from={'required': node_a},
@@ -1344,9 +1236,9 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapperWithParams(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             kwargs={'flag': True},
             args_from={'required': node_a},
@@ -1360,9 +1252,9 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapperInt(task_name='task_a_int')
         fn_b = MockTaskWrapperWithStringResultParam(task_name='task_b_expects_str')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             kwargs={'flag': True},
             args_from={'required': node_a},
@@ -1378,9 +1270,9 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapperInt(task_name='task_a_int')
         fn_b = MockTaskWrapperWithRawParam(task_name='task_b_raw_param')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             kwargs={'flag': True},
             args_from={'required': node_a},
@@ -1396,9 +1288,9 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapperInt(task_name='task_a_int')
         fn_b = MockTaskWrapperWithParams(task_name='task_b_expects_int')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             kwargs={'flag': True},
             args_from={'required': node_a},
@@ -1414,7 +1306,7 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_overlap'
             definition_key = _definition_key('child_overlap')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1423,7 +1315,7 @@ class TestWorkflowSpecValidation:
                 _ = value
                 return cls.build(app)
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         child_node = SubWorkflowNode(
             workflow_def=ChildWorkflow,
             waits_for=[node_a],
@@ -1443,12 +1335,12 @@ class TestWorkflowSpecValidation:
         """TaskNode constructor rejects args=... immediately."""
         fn_a = MockTaskWrapperWithParams(task_name='task_a')
         with pytest.raises(TypeError, match="unexpected keyword argument 'args'"):
-            TaskNode(fn=fn_a, args=(1,), kwargs={'flag': True})  # type: ignore[call-arg]
+            TaskNode(function=fn_a, args=(1,), kwargs={'flag': True})  # type: ignore[call-arg]
 
     def test_mutated_tasknode_positional_args_rejected_by_validator(self) -> None:
         """Validator rejects positional args even if set after construction."""
         fn_a = MockTaskWrapperWithParams(task_name='task_a')
-        node_a = TaskNode(fn=fn_a, kwargs={'required': 1, 'flag': True})
+        node_a = TaskNode(function=fn_a, kwargs={'required': 1, 'flag': True})
         node_a.args = (1,)  # defensive validation path
 
         with pytest.raises(WorkflowValidationError) as exc:
@@ -1461,9 +1353,9 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='producer')
         fn_b = MockTaskWrapper(task_name='consumer')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             kwargs={'payload': from_node(node_a)},
         )
@@ -1476,7 +1368,7 @@ class TestWorkflowSpecValidation:
     def test_missing_required_params_rejected(self) -> None:
         """Missing required parameters raises validation error."""
         fn_a = MockTaskWrapperWithParams(task_name='task_a')
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
 
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='missing_required', tasks=[node_a])
@@ -1486,7 +1378,7 @@ class TestWorkflowSpecValidation:
     def test_required_workflow_meta_treated_as_injected(self) -> None:
         """Required workflow_meta is treated as auto-injected by validator."""
         fn_a = MockTaskWrapperWithRequiredMeta(task_name='task_requires_meta')
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
 
         # Should not raise WORKFLOW_MISSING_REQUIRED_PARAMS
         spec = WorkflowSpec(name='required_workflow_meta_ok', tasks=[node_a])
@@ -1499,7 +1391,7 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_missing_required'
             definition_key = _definition_key('child_missing_required')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1524,7 +1416,7 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_invalid_kwargs'
             definition_key = _definition_key('child_invalid_kwargs')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1550,7 +1442,7 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_invalid_args_from'
             definition_key = _definition_key('child_invalid_args_from')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1559,7 +1451,7 @@ class TestWorkflowSpecValidation:
                 _ = source
                 return cls.build(app)
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         child_node = SubWorkflowNode(
             workflow_def=ChildWorkflow,
             waits_for=[node_a],
@@ -1579,7 +1471,7 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_type_mismatch'
             definition_key = _definition_key('child_type_mismatch')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1590,7 +1482,7 @@ class TestWorkflowSpecValidation:
                 _ = source
                 return cls.build(app)
 
-        node_a = TaskNode(fn=MockTaskWrapperInt(task_name='producer_int'))
+        node_a = TaskNode(function=MockTaskWrapperInt(task_name='producer_int'))
         child_node = SubWorkflowNode(
             workflow_def=ChildWorkflow,
             waits_for=[node_a],
@@ -1606,7 +1498,7 @@ class TestWorkflowSpecValidation:
         """A catch-all has no declared type, so no key binds to it."""
         fn_a = MockTaskWrapperWithKwargs(task_name='task_a')
         node_a = TaskNode(
-            fn=fn_a,
+            function=fn_a,
             kwargs={'unknown': 1, 'another': 2},
         )
 
@@ -1623,7 +1515,7 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_kwargs_build_with'
             definition_key = _definition_key('child_kwargs_build_with')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1649,7 +1541,7 @@ class TestWorkflowSpecValidation:
         class SameNameLeafWorkflow(WorkflowDefinition[int]):
             name = 'same_name_child'
             definition_key = _definition_key('same_name_leaf')
-            leaf = TaskNode(fn=fn_leaf)
+            leaf = TaskNode(function=fn_leaf)
 
         class SameNameParentWorkflow(WorkflowDefinition[int]):
             name = 'same_name_child'
@@ -1667,7 +1559,7 @@ class TestWorkflowSpecValidation:
         class SafeSharedNameWorkflow(WorkflowDefinition[int]):
             name = 'shared_workflow_name'
             definition_key = _definition_key('safe_shared_name')
-            leaf = TaskNode(fn=fn_safe)
+            leaf = TaskNode(function=fn_safe)
 
         class CyclicSharedNameWorkflow(WorkflowDefinition[int]):
             name = 'shared_workflow_name'
@@ -1695,8 +1587,8 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_external = MockTaskWrapper(task_name='external')
 
-        node_a = TaskNode(fn=fn_a)
-        node_external = TaskNode(fn=fn_external)
+        node_a = TaskNode(function=fn_a)
+        node_external = TaskNode(function=fn_external)
 
         with pytest.raises(WorkflowValidationError, match='not in workflow') as exc_info:
             WorkflowSpec(name='bad_output', tasks=[node_a], output=node_external)
@@ -1709,9 +1601,9 @@ class TestWorkflowSpecValidation:
         fn_b = MockTaskWrapper(task_name='task_b')
         fn_c = MockTaskWrapper(task_name='task_c')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a])
-        node_c = TaskNode(fn=fn_c, waits_for=[node_b])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a])
+        node_c = TaskNode(function=fn_c, waits_for=[node_b])
 
         spec = WorkflowSpec(name='indexed', tasks=[node_a, node_b, node_c])
 
@@ -1724,8 +1616,8 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a])
 
         spec = WorkflowSpec(name='node_id_auto', tasks=[node_a, node_b])
         assert spec.tasks[0].node_id == 'node_id_auto:0'
@@ -1736,8 +1628,8 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a, node_id='dup')
-        node_b = TaskNode(fn=fn_b, node_id='dup')
+        node_a = TaskNode(function=fn_a, node_id='dup')
+        node_b = TaskNode(function=fn_b, node_id='dup')
 
         with pytest.raises(WorkflowValidationError, match='duplicate node_id') as exc_info:
             WorkflowSpec(name='dup_ids', tasks=[node_a, node_b])
@@ -1747,7 +1639,7 @@ class TestWorkflowSpecValidation:
     def test_node_id_invalid_characters_raises(self) -> None:
         """Invalid node_id characters raise WORKFLOW_INVALID_NODE_ID."""
         fn_a = MockTaskWrapper(task_name='task_a')
-        node_a = TaskNode(fn=fn_a, node_id='bad id')
+        node_a = TaskNode(function=fn_a, node_id='bad id')
 
         with pytest.raises(
             WorkflowValidationError, match='contains invalid characters',
@@ -1759,7 +1651,7 @@ class TestWorkflowSpecValidation:
     def test_success_policy_empty_cases_raises(self) -> None:
         """SuccessPolicy with empty cases list raises HRS-012."""
         fn_a = MockTaskWrapper(task_name='task_a')
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
 
         policy = SuccessPolicy(cases=[])
 
@@ -1771,7 +1663,7 @@ class TestWorkflowSpecValidation:
     def test_success_policy_empty_required_raises(self) -> None:
         """SuccessCase with empty required list raises HRS-012."""
         fn_a = MockTaskWrapper(task_name='task_a')
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
 
         policy = SuccessPolicy(cases=[SuccessCase(required=[])])
 
@@ -1785,8 +1677,8 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)  # Not in tasks list
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)  # Not in tasks list
 
         policy = SuccessPolicy(cases=[SuccessCase(required=[node_b])])
 
@@ -1802,8 +1694,8 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)
 
         policy = SuccessPolicy(
             cases=[SuccessCase(required=[node_a])],
@@ -1823,9 +1715,9 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             join='quorum',
             # min_success not set
@@ -1840,9 +1732,9 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             join='quorum',
             min_success=5,  # Only 1 dep, but min_success is 5
@@ -1857,9 +1749,9 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             join='quorum',
             min_success=0,
@@ -1874,9 +1766,9 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             join='all',
             min_success=1,  # Invalid - min_success only for quorum
@@ -1893,9 +1785,9 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             join='any',
             min_success=1,  # Invalid - min_success only for quorum
@@ -1918,10 +1810,10 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapperInt(task_name='task_a_int')
         fn_b = MockTaskWrapperWithParams(task_name='task_b_required')
 
-        node_a = TaskNode(fn=fn_a)
-        node_c = TaskNode(fn=MockTaskWrapperInt(task_name='task_c_int'))
+        node_a = TaskNode(function=fn_a)
+        node_c = TaskNode(function=MockTaskWrapperInt(task_name='task_c_int'))
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a, node_c],
             kwargs={'flag': True},
             args_from={'required': node_a},
@@ -1942,10 +1834,10 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapperInt(task_name='task_a_int')
         fn_b = MockTaskWrapperWithOptionalParam(task_name='task_b_optional')
 
-        node_a = TaskNode(fn=fn_a)
-        node_c = TaskNode(fn=MockTaskWrapperInt(task_name='task_c_int'))
+        node_a = TaskNode(function=fn_a)
+        node_c = TaskNode(function=MockTaskWrapperInt(task_name='task_c_int'))
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a, node_c],
             args_from={'maybe_result': node_a},
             join='any',
@@ -1964,11 +1856,11 @@ class TestWorkflowSpecValidation:
         fn_c = MockTaskWrapper(task_name='task_c')
         fn_d = MockTaskWrapper(task_name='task_d')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)
-        node_c = TaskNode(fn=fn_c)
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)
+        node_c = TaskNode(function=fn_c)
         node_d = TaskNode(
-            fn=fn_d,
+            function=fn_d,
             waits_for=[node_a, node_b, node_c],
             join='quorum',
             min_success=2,  # 2 out of 3
@@ -1984,10 +1876,10 @@ class TestWorkflowSpecValidation:
         fn_b = MockTaskWrapper(task_name='task_b')
         fn_c = MockTaskWrapper(task_name='task_c')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)
         node_c = TaskNode(
-            fn=fn_c,
+            function=fn_c,
             waits_for=[node_a, node_b],
             join='any',
         )
@@ -2036,7 +1928,7 @@ class TestWorkflowContext:
 
         # Create a mock node with node_id set
         mock_task = MockTaskWrapper('producer')
-        node: TaskNode[int] = TaskNode(fn=mock_task)
+        node: TaskNode[int] = TaskNode(function=mock_task)
         node.node_id = 'node-0'  # Simulate WorkflowSpec having assigned node_id
 
         result = ctx.result_for(node)
@@ -2073,7 +1965,7 @@ class TestWorkflowContext:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_result_for'
             definition_key = _definition_key('child_result_for')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -2132,7 +2024,7 @@ class TestWorkflowContext:
         )
 
         mock_task = MockTaskWrapper('producer')
-        node: TaskNode[int] = TaskNode(fn=mock_task)
+        node: TaskNode[int] = TaskNode(function=mock_task)
         # node.node_id is None (not assigned)
 
         with pytest.raises(RuntimeError, match='TaskNode node_id is not set'):
@@ -2148,7 +2040,7 @@ class TestWorkflowContext:
         )
 
         mock_task = MockTaskWrapper('producer')
-        node: TaskNode[int] = TaskNode(fn=mock_task)
+        node: TaskNode[int] = TaskNode(function=mock_task)
         node.node_id = 'node-0'
 
         with pytest.raises(KeyError, match='not in workflow context'):
@@ -2165,13 +2057,13 @@ class TestWorkflowContext:
         )
 
         mock_task = MockTaskWrapper('producer')
-        node_with_result: TaskNode[int] = TaskNode(fn=mock_task)
+        node_with_result: TaskNode[int] = TaskNode(function=mock_task)
         node_with_result.node_id = 'node-0'
 
-        node_without_result: TaskNode[int] = TaskNode(fn=mock_task)
+        node_without_result: TaskNode[int] = TaskNode(function=mock_task)
         node_without_result.node_id = 'node-99'
 
-        node_no_index: TaskNode[int] = TaskNode(fn=mock_task)
+        node_no_index: TaskNode[int] = TaskNode(function=mock_task)
         # node_no_index.node_id is None
 
         assert ctx.has_result(node_with_result) is True
@@ -2257,8 +2149,8 @@ class TestWorkflowDefinition:
         class SimpleWorkflow(WorkflowDefinition):
             name = 'simple'
             definition_key = _definition_key('simple_workflow')
-            fetch = TaskNode(fn=fn_a, kwargs={'payload': 1})
-            process = TaskNode(fn=fn_b, waits_for=[fetch], args_from={'data': fetch})
+            fetch = TaskNode(function=fn_a, kwargs={'payload': 1})
+            process = TaskNode(function=fn_b, waits_for=[fetch], args_from={'data': fetch})
 
         # Create minimal app (no broker connection needed for build)
         app = Horsies(
@@ -2288,8 +2180,8 @@ class TestWorkflowDefinition:
         class NodeIdWorkflow(WorkflowDefinition):
             name = 'node_id_test'
             definition_key = _definition_key('node_id_workflow')
-            fetch = TaskNode(fn=fn_a)
-            parse = TaskNode(fn=fn_b, waits_for=[fetch])
+            fetch = TaskNode(function=fn_a)
+            parse = TaskNode(function=fn_b, waits_for=[fetch])
 
         app = Horsies(
             config=AppConfig(
@@ -2317,7 +2209,7 @@ class TestWorkflowDefinition:
         class ExplicitIdWorkflow(WorkflowDefinition):
             name = 'explicit_id'
             definition_key = _definition_key('explicit_id_workflow')
-            fetch = TaskNode(fn=fn_a, node_id='my_custom_id')
+            fetch = TaskNode(function=fn_a, node_id='my_custom_id')
 
         app = Horsies(
             config=AppConfig(
@@ -2344,8 +2236,8 @@ class TestWorkflowDefinition:
         class OutputWorkflow(WorkflowDefinition):
             name = 'output_test'
             definition_key = _definition_key('output_workflow')
-            fetch = TaskNode(fn=fn_a)
-            process = TaskNode(fn=fn_b, waits_for=[fetch])
+            fetch = TaskNode(function=fn_a)
+            process = TaskNode(function=fn_b, waits_for=[fetch])
 
             config = WorkflowDefinitionConfig(output=process)
 
@@ -2374,7 +2266,7 @@ class TestWorkflowDefinition:
         class PauseWorkflow(WorkflowDefinition):
             name = 'pause_test'
             definition_key = _definition_key('pause_workflow')
-            fetch = TaskNode(fn=fn_a)
+            fetch = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(on_error=OnError.PAUSE)
 
@@ -2402,7 +2294,7 @@ class TestWorkflowDefinition:
         class NoNameWorkflow(WorkflowDefinition):
             definition_key = _definition_key('no_name_workflow')
             # name not defined
-            fetch = TaskNode(fn=fn_a)
+            fetch = TaskNode(function=fn_a)
 
         app = Horsies(
             config=AppConfig(
@@ -2451,7 +2343,7 @@ class TestWorkflowDefinition:
 
         class MissingTypeWorkflow(WorkflowDefinition):
             name = 'missing_type'
-            fetch = TaskNode(fn=fn_a)
+            fetch = TaskNode(function=fn_a)
 
         app = Horsies(
             config=AppConfig(
@@ -2477,9 +2369,9 @@ class TestWorkflowDefinition:
         class MultiFetchWorkflow(WorkflowDefinition):
             name = 'multi_fetch'
             definition_key = _definition_key('multi_fetch_workflow')
-            fetch_a = TaskNode(fn=fn_fetch, kwargs={'url': 'url_a'})
-            fetch_b = TaskNode(fn=fn_fetch, kwargs={'url': 'url_b'})
-            fetch_c = TaskNode(fn=fn_fetch, kwargs={'url': 'url_c'})
+            fetch_a = TaskNode(function=fn_fetch, kwargs={'url': 'url_a'})
+            fetch_b = TaskNode(function=fn_fetch, kwargs={'url': 'url_b'})
+            fetch_c = TaskNode(function=fn_fetch, kwargs={'url': 'url_c'})
 
         app = Horsies(
             config=AppConfig(
@@ -2505,15 +2397,15 @@ class TestWorkflowDefinition:
 
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
-        # fn_c must accept workflow_ctx since audit_node uses workflow_context_from
+        # fn_c must accept workflow_context since audit_node uses workflow_context_from
         fn_c = MockTaskWrapperWithCtx(task_name='task_c')
 
         # Define nodes outside so we can reference them in waits_for and workflow_context_from
-        fetch_node = TaskNode(fn=fn_a)
-        parse_node = TaskNode(fn=fn_b, waits_for=[fetch_node])
+        fetch_node = TaskNode(function=fn_a)
+        parse_node = TaskNode(function=fn_b, waits_for=[fetch_node])
         # audit waits for both fetch and parse so workflow_context_from is valid
         audit_node = TaskNode(
-            fn=fn_c,
+            function=fn_c,
             waits_for=[fetch_node, parse_node],
             workflow_context_from=[fetch_node, parse_node],
         )
@@ -2570,7 +2462,7 @@ class TestWorkflowOutputTypeMismatch:
         class IntWorkflow(WorkflowDefinition[int]):
             name = 'int_workflow'
             definition_key = _definition_key('int_workflow')
-            produce = TaskNode(fn=fn_int)
+            produce = TaskNode(function=fn_int)
 
             config = WorkflowDefinitionConfig(output=produce)
 
@@ -2586,7 +2478,7 @@ class TestWorkflowOutputTypeMismatch:
         class MismatchWorkflow(WorkflowDefinition[int]):
             name = 'mismatch_workflow'
             definition_key = _definition_key('mismatch_workflow')
-            produce = TaskNode(fn=fn_str)
+            produce = TaskNode(function=fn_str)
 
             config = WorkflowDefinitionConfig(output=produce)
 
@@ -2606,7 +2498,7 @@ class TestWorkflowOutputTypeMismatch:
         class UntypedWorkflow(WorkflowDefinition):
             name = 'untyped_workflow'
             definition_key = _definition_key('untyped_workflow')
-            produce = TaskNode(fn=fn_str)
+            produce = TaskNode(function=fn_str)
 
             config = WorkflowDefinitionConfig(output=produce)
 
@@ -2622,7 +2514,7 @@ class TestWorkflowOutputTypeMismatch:
         class AnyWorkflow(WorkflowDefinition[Any]):
             name = 'any_workflow'
             definition_key = _definition_key('any_workflow')
-            produce = TaskNode(fn=fn_str)
+            produce = TaskNode(function=fn_str)
 
             config = WorkflowDefinitionConfig(output=produce)
 
@@ -2638,7 +2530,7 @@ class TestWorkflowOutputTypeMismatch:
         class NoOutputWorkflow(WorkflowDefinition[int]):
             name = 'no_output_workflow'
             definition_key = _definition_key('no_output_workflow')
-            task_a = TaskNode(fn=fn_a)
+            task_a = TaskNode(function=fn_a)
 
         with pytest.raises(WorkflowValidationError) as exc:
             NoOutputWorkflow.build(app)
@@ -2656,7 +2548,7 @@ class TestWorkflowOutputTypeMismatch:
         class NoOutputWorkflow(WorkflowDefinition[None]):
             name = 'none_output_workflow'
             definition_key = _definition_key('none_output_workflow')
-            task_a = TaskNode(fn=fn_a)
+            task_a = TaskNode(function=fn_a)
 
         spec = NoOutputWorkflow.build(app)
         assert spec.output is None
@@ -2669,7 +2561,7 @@ class TestWorkflowOutputTypeMismatch:
         class NoOutputWorkflow(WorkflowDefinition[Any]):
             name = 'any_outputless_workflow'
             definition_key = _definition_key('any_outputless_workflow')
-            task_a = TaskNode(fn=fn_a)
+            task_a = TaskNode(function=fn_a)
 
         spec = NoOutputWorkflow.build(app)
         assert spec.output is None
@@ -2682,7 +2574,7 @@ class TestWorkflowOutputTypeMismatch:
         class NoOutputWorkflow(WorkflowDefinition[WorkflowTerminalResults]):
             name = 'terminal_results_outputless_workflow'
             definition_key = _definition_key('terminal_results_outputless_workflow')
-            task_a = TaskNode(fn=fn_a)
+            task_a = TaskNode(function=fn_a)
 
         with pytest.raises(WorkflowValidationError) as exc:
             NoOutputWorkflow.build(app)
@@ -2707,7 +2599,7 @@ class TestWorkflowOutputTypeMismatch:
         class SubclassWorkflow(WorkflowDefinition[Base]):
             name = 'subclass_workflow'
             definition_key = _definition_key('subclass_workflow')
-            produce = TaskNode(fn=fn_derived)
+            produce = TaskNode(function=fn_derived)
 
             config = WorkflowDefinitionConfig(output=produce)
 
@@ -2748,7 +2640,7 @@ class TestWorkflowDefinitionConfig:
         class DefaultWorkflow(WorkflowDefinition[None]):
             name = 'default_config'
             definition_key = _definition_key('default_config')
-            fetch = TaskNode(fn=fn_a)
+            fetch = TaskNode(function=fn_a)
 
         spec = DefaultWorkflow.build(self._make_app())
 
@@ -2764,14 +2656,14 @@ class TestWorkflowDefinitionConfig:
         class ParentWorkflow(WorkflowDefinition[None]):
             name = 'parent_config'
             definition_key = _definition_key('parent_config')
-            fetch = TaskNode(fn=fn_a)
+            fetch = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(on_error=OnError.PAUSE)
 
         class ChildWorkflow(ParentWorkflow):
             name = 'child_inherits_config'
             definition_key = _definition_key('child_inherits_config')
-            other = TaskNode(fn=fn_a)
+            other = TaskNode(function=fn_a)
 
         spec = ChildWorkflow.build(self._make_app())
 
@@ -2787,7 +2679,7 @@ class TestWorkflowDefinitionConfig:
             class OldStyleWorkflow(WorkflowDefinition[None]):
                 name = 'old_style_meta'
                 definition_key = _definition_key('old_style_meta')
-                fetch = TaskNode(fn=fn_a)
+                fetch = TaskNode(function=fn_a)
 
                 class Meta:
                     on_error = OnError.PAUSE
@@ -2809,7 +2701,7 @@ class TestWorkflowDefinitionConfig:
             class NamespaceMetaWorkflow(WorkflowDefinition[None]):
                 name = 'namespace_meta'
                 definition_key = _definition_key('namespace_meta')
-                fetch = TaskNode(fn=fn_a)
+                fetch = TaskNode(function=fn_a)
                 Meta = SimpleNamespace(on_error=OnError.PAUSE)
 
             _ = NamespaceMetaWorkflow  # not reached: class creation raises
@@ -2829,7 +2721,7 @@ class TestWorkflowDefinitionConfig:
             class MixinWorkflow(OptionsMixin, WorkflowDefinition[None]):
                 name = 'mixin_meta'
                 definition_key = _definition_key('mixin_meta')
-                fetch = TaskNode(fn=fn_a)
+                fetch = TaskNode(function=fn_a)
 
             _ = MixinWorkflow  # not reached: class creation raises
 
@@ -2844,7 +2736,7 @@ class TestWorkflowDefinitionConfig:
             class WrongConfigWorkflow(WorkflowDefinition[None]):
                 name = 'wrong_config'
                 definition_key = _definition_key('wrong_config')
-                fetch = TaskNode(fn=fn_a)
+                fetch = TaskNode(function=fn_a)
 
                 config = {'on_error': OnError.PAUSE}  # type: ignore[assignment]
 
@@ -2876,8 +2768,8 @@ class TestMultiErrorWorkflowCollection:
         """Circular DAG collects both 'no roots' and 'cycle' errors."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)
         node_a.waits_for = [node_b]
         node_b.waits_for = [node_a]
 
@@ -2895,9 +2787,9 @@ class TestMultiErrorWorkflowCollection:
         fn_root = MockTaskWrapper(task_name='root')
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
-        root = TaskNode(fn=fn_root)
-        node_a = TaskNode(fn=fn_a, waits_for=[root], join='quorum')  # missing min_success
-        node_b = TaskNode(fn=fn_b, waits_for=[root], join='all', min_success=3)  # min_success on 'all'
+        root = TaskNode(function=fn_root)
+        node_a = TaskNode(function=fn_a, waits_for=[root], join='quorum')  # missing min_success
+        node_b = TaskNode(function=fn_b, waits_for=[root], join='all', min_success=3)  # min_success on 'all'
 
         with pytest.raises(MultipleValidationErrors) as exc_info:
             WorkflowSpec(name='bad_joins', tasks=[root, node_a, node_b])
@@ -2909,7 +2801,7 @@ class TestMultiErrorWorkflowCollection:
         """Node ID errors prevent subsequent validation from running."""
         fn_a = MockTaskWrapper(task_name='task_a')
         # Explicitly set an invalid node_id
-        node_a = TaskNode(fn=fn_a, node_id='invalid chars!')
+        node_a = TaskNode(function=fn_a, node_id='invalid chars!')
 
         with pytest.raises(WorkflowValidationError, match='invalid characters'):
             WorkflowSpec(name='bad_id', tasks=[node_a])
@@ -2919,9 +2811,9 @@ class TestMultiErrorWorkflowCollection:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
         fn_c = MockTaskWrapper(task_name='task_c')
-        node_a = TaskNode(fn=fn_a, node_id='shared')
-        node_b = TaskNode(fn=fn_b, node_id='shared')
-        node_c = TaskNode(fn=fn_c, node_id='shared')
+        node_a = TaskNode(function=fn_a, node_id='shared')
+        node_b = TaskNode(function=fn_b, node_id='shared')
+        node_c = TaskNode(function=fn_c, node_id='shared')
 
         with pytest.raises(HorsiesError, match='duplicate node_id'):
             WorkflowSpec(name='dup_ids', tasks=[node_a, node_b, node_c])
@@ -2930,12 +2822,12 @@ class TestMultiErrorWorkflowCollection:
         """Single workflow validation error preserves original type."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a])
         # args_from ref not in waits_for — single error
         fn_c = MockTaskWrapper(task_name='task_c')
         node_c = TaskNode(
-            fn=fn_c,
+            function=fn_c,
             waits_for=[node_b],
             args_from={'input': node_a},
         )
@@ -2953,9 +2845,9 @@ class TestMultiErrorWorkflowCollection:
         producer = MockTaskWrapperInt(task_name='producer_int')
         consumer = MockTaskWrapperWithParams(task_name='consumer')
 
-        node_a = TaskNode(fn=producer)
+        node_a = TaskNode(function=producer)
         node_b = TaskNode(
-            fn=consumer,
+            function=consumer,
             waits_for=[node_a],
             kwargs={'required': 42},  # overlaps with args_from key below
             # 'required' overlaps; 'flag' is bool (not TaskOutcome) -> type mismatch
@@ -2980,10 +2872,10 @@ class TestMultiErrorWorkflowCollection:
         orphan = MockTaskWrapperInt(task_name='orphan_int')
         consumer = MockTaskWrapperWithParams(task_name='consumer')
 
-        node_dep = TaskNode(fn=dep)
-        node_orphan = TaskNode(fn=orphan)  # in tasks, but not in consumer.waits_for
+        node_dep = TaskNode(function=dep)
+        node_orphan = TaskNode(function=orphan)  # in tasks, but not in consumer.waits_for
         node_b = TaskNode(
-            fn=consumer,
+            function=consumer,
             waits_for=[node_dep],
             # 'flag' source is a dependency but bool-typed -> type mismatch;
             # 'required' source is the orphan -> WORKFLOW_INVALID_ARGS_FROM
@@ -3010,7 +2902,7 @@ class TestNodeKey:
     def test_tasknode_key_returns_node_key(self) -> None:
         """TaskNode.key() returns NodeKey with correct node_id."""
         fn = MockTaskWrapper(task_name='task_a')
-        node = TaskNode(fn=fn, node_id='my-node')
+        node = TaskNode(function=fn, node_id='my-node')
 
         key = node.key()
 
@@ -3020,7 +2912,7 @@ class TestNodeKey:
     def test_tasknode_key_raises_when_node_id_none(self) -> None:
         """TaskNode.key() raises WorkflowValidationError if node_id is None."""
         fn = MockTaskWrapper(task_name='task_a')
-        node = TaskNode(fn=fn)
+        node = TaskNode(function=fn)
         # node_id is None by default
 
         with pytest.raises(WorkflowValidationError, match='node_id is not set'):
@@ -3033,7 +2925,7 @@ class TestNodeKey:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_key_test'
             definition_key = _definition_key('child_key_test')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -3051,7 +2943,7 @@ class TestNodeKey:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_key_none'
             definition_key = _definition_key('child_key_none')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -3078,7 +2970,7 @@ class TestSubWorkflowNode:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_defaults'
             definition_key = _definition_key('child_defaults')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -3102,7 +2994,7 @@ class TestSubWorkflowNode:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'my_child_workflow'
             definition_key = _definition_key('my_child_workflow')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -3144,7 +3036,7 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_summary'
             definition_key = _definition_key('child_summary')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -3195,7 +3087,7 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[ChildOutput]):
             name = 'child_pydantic_output'
             definition_key = _definition_key('child_pydantic_output')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -3235,7 +3127,7 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[Any]):
             name = 'child_any_output'
             definition_key = _definition_key('child_any_output')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -3281,7 +3173,7 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[ChildOutput]):
             name = 'child_no_mutation'
             definition_key = _definition_key('child_no_mutation')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -3328,7 +3220,7 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[ChildOutput]):
             name = 'child_none_output'
             definition_key = _definition_key('child_none_output')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -3367,7 +3259,7 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_summary_dump'
             definition_key = _definition_key('child_summary_dump')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -3417,7 +3309,7 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_summary_json_dump'
             definition_key = _definition_key('child_summary_json_dump')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -3443,7 +3335,7 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_no_id'
             definition_key = _definition_key('child_no_id')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -3468,7 +3360,7 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_missing'
             definition_key = _definition_key('child_missing')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -3501,7 +3393,7 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_has_sum'
             definition_key = _definition_key('child_has_sum')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -3524,7 +3416,7 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_no_sum'
             definition_key = _definition_key('child_no_sum')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -3546,7 +3438,7 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_no_id2'
             definition_key = _definition_key('child_no_id2')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -3748,7 +3640,7 @@ class TestNodeIdLengthValidation:
         """Explicit node_id > 128 characters raises WORKFLOW_INVALID_NODE_ID."""
         fn_a = MockTaskWrapper(task_name='task_a')
         long_id = 'a' * 129
-        node_a = TaskNode(fn=fn_a, node_id=long_id)
+        node_a = TaskNode(function=fn_a, node_id=long_id)
 
         with pytest.raises(WorkflowValidationError) as exc_info:
             WorkflowSpec(name='long_id', tasks=[node_a])
@@ -3783,7 +3675,7 @@ class TestTaskNodeOptionValidation:
 
     @pytest.mark.parametrize('priority', [0, 101, -1])
     def test_priority_outside_the_range_is_refused(self, priority: int) -> None:
-        node = TaskNode(fn=MockTaskWrapper(task_name='rank'), priority=priority)
+        node = TaskNode(function=MockTaskWrapper(task_name='rank'), priority=priority)
 
         with pytest.raises(WorkflowValidationError) as exc_info:
             WorkflowSpec(name='bad_priority', tasks=[node])
@@ -3795,7 +3687,7 @@ class TestTaskNodeOptionValidation:
     def test_priority_inside_the_range_or_unset_is_accepted(
         self, priority: int | None,
     ) -> None:
-        node = TaskNode(fn=MockTaskWrapper(task_name='rank'), priority=priority)
+        node = TaskNode(function=MockTaskWrapper(task_name='rank'), priority=priority)
 
         spec: WorkflowSpec[Any] = WorkflowSpec(name='good_priority', tasks=[node])
 
@@ -3805,7 +3697,7 @@ class TestTaskNodeOptionValidation:
 
     def test_naive_good_until_is_refused(self) -> None:
         naive = datetime(2030, 1, 1, 12, 0)
-        node = TaskNode(fn=MockTaskWrapper(task_name='expire'), good_until=naive)
+        node = TaskNode(function=MockTaskWrapper(task_name='expire'), good_until=naive)
 
         with pytest.raises(WorkflowValidationError) as exc_info:
             WorkflowSpec(name='naive_deadline', tasks=[node])
@@ -3825,7 +3717,7 @@ class TestTaskNodeOptionValidation:
     def test_aware_or_unset_good_until_is_accepted(
         self, good_until: datetime | None,
     ) -> None:
-        node = TaskNode(fn=MockTaskWrapper(task_name='expire'), good_until=good_until)
+        node = TaskNode(function=MockTaskWrapper(task_name='expire'), good_until=good_until)
 
         spec: WorkflowSpec[Any] = WorkflowSpec(name='aware_deadline', tasks=[node])
 
@@ -3834,9 +3726,9 @@ class TestTaskNodeOptionValidation:
         assert built.good_until == good_until
 
     def test_a_node_that_is_not_a_root_is_checked(self) -> None:
-        root = TaskNode(fn=MockTaskWrapper(task_name='root'))
+        root = TaskNode(function=MockTaskWrapper(task_name='root'))
         child = TaskNode(
-            fn=MockTaskWrapper(task_name='child'), waits_for=[root], priority=0,
+            function=MockTaskWrapper(task_name='child'), waits_for=[root], priority=0,
         )
 
         with pytest.raises(WorkflowValidationError) as exc_info:
@@ -3847,7 +3739,7 @@ class TestTaskNodeOptionValidation:
 
     def test_both_rules_on_one_node_are_reported_together(self) -> None:
         node = TaskNode(
-            fn=MockTaskWrapper(task_name='both'),
+            function=MockTaskWrapper(task_name='both'),
             priority=101,
             good_until=datetime(2030, 1, 1),
         )
@@ -3879,7 +3771,7 @@ class TestTaskNodeOptionValidation:
         class NaiveDeadlineWorkflow(WorkflowDefinition[None]):
             name = 'definition_naive_deadline'
             definition_key = _definition_key('definition_naive_deadline')
-            expire = TaskNode(fn=fn, good_until=datetime(2030, 1, 1))
+            expire = TaskNode(function=fn, good_until=datetime(2030, 1, 1))
 
         with pytest.raises(WorkflowValidationError) as exc_info:
             NaiveDeadlineWorkflow.build(_minimal_app())
@@ -3901,8 +3793,8 @@ class TestSuccessPolicyOptionalValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_external = MockTaskWrapper(task_name='external')
 
-        node_a = TaskNode(fn=fn_a)
-        node_external = TaskNode(fn=fn_external)
+        node_a = TaskNode(function=fn_a)
+        node_external = TaskNode(function=fn_external)
 
         policy = SuccessPolicy(
             cases=[SuccessCase(required=[node_a])],

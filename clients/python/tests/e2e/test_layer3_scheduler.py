@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -253,9 +253,9 @@ async def test_repeating_schedule(scheduler_broker: PostgresBroker) -> None:
 @pytest.mark.e2e
 def test_invalid_schedule_configuration() -> None:
     """T3.5: Invalid schedule configuration is rejected at config time."""
-    # Test that IntervalSchedule requires at least one time unit
-    with pytest.raises(ConfigurationError, match='at least one time unit'):
-        IntervalSchedule()  # No time units specified
+    # Test that IntervalSchedule refuses a length of zero
+    with pytest.raises(ConfigurationError, match='outside 1 second to 365 days'):
+        IntervalSchedule(every=timedelta(0))
 
     # Test that ScheduleConfig validates unique schedule names
     with pytest.raises(ConfigurationError, match='duplicate schedule names'):
@@ -264,12 +264,12 @@ def test_invalid_schedule_configuration() -> None:
                 TaskSchedule(
                     name='duplicate_name',
                     task_name='some_task',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                 ),
                 TaskSchedule(
                     name='duplicate_name',  # Duplicate!
                     task_name='another_task',
-                    pattern=IntervalSchedule(seconds=10),
+                    pattern=IntervalSchedule(every=timedelta(seconds=10)),
                 ),
             ]
         )
@@ -504,8 +504,6 @@ async def test_catch_up_missed_enqueues_missed_runs(
         assert state is not None, 'Catch-up schedule state should be initialized'
 
     # Phase 2: Set next_run_at to 5 seconds in the past to simulate downtime
-    from datetime import timedelta
-
     past_time = datetime.now(timezone.utc) - timedelta(seconds=5)
     async with current_resources(scheduler_broker).session_factory() as session:
         await session.execute(

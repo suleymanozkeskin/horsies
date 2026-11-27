@@ -62,7 +62,7 @@ A failover promotes a standby to primary. Under asynchronous replication, the st
 A commit whose reply did not arrive is a different case. The write fails with a retryable connection error, and it is sent again on a new connection:
 
 - The worker sends a failed write of a task end again, up to the retry bound of its stage.
-- A send returns a retryable error. `resend_on_transient_error`, or the retry method of the client, sends it again with the same task id.
+- A send returns a retryable error. `resend_on_transient_error`, or the resend method of the client, sends it again with the same task id.
 
 The repeat applies the write once. A write that reached the new primary is not applied a second time.
 
@@ -91,7 +91,7 @@ Each row is one transaction that the old primary committed and the standby did n
 
 After a lost task end, recovery applies the retry policy of the task:
 
-- With `WORKER_CRASHED` in `auto_retry_for` and retries remaining, the task is retried. Its body runs again.
+- With `WORKER_CRASHED` in `retry_for` and retries remaining, the task is retried. Its body runs again.
 - Otherwise the task ends `FAILED` with `WORKER_CRASHED`, although its body ran and returned.
 - A workflow task that ends `FAILED` applies the `on_error` policy of its workflow.
 - With `fail_stale_running=False`, the row stays `RUNNING` until a [manual recovery](/horsies/workers/heartbeats-recovery/#manual-recovery).
@@ -112,7 +112,7 @@ The rules of the lock are on [Worker Liveness Lock](/horsies/workers/heartbeats-
 When the horsies instance uses asynchronous replication, design for a task body that runs two times:
 
 - Make each effect outside horsies idempotent. Key the effect by a value of the task input. A send that is repeated after a lost send can carry a new task id.
-- Put `WORKER_CRASHED` in `auto_retry_for` of a task that must run again, not end `FAILED`, after a lost task end. See [Retry Policy](/horsies/tasks/retry-policy/).
+- Put `WORKER_CRASHED` in `retry_for` of a task that must run again, not end `FAILED`, after a lost task end. See [Retry Policy](/horsies/tasks/retry-policy/).
 - Keep the idempotency key of each send with its application write. After a failover, repeat the sends of the period before it with the same keys. A send whose task exists returns that task. A lost send enqueues its task again. This holds only inside the reservation window: see [Guarantees That End with Retention](/horsies/configuration/retention-config/#guarantees-that-end-with-retention).
 - Start each workflow with a deterministic workflow id. After a failover, repeat the starts of the period before it with the same ids.
 

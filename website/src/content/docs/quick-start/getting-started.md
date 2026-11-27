@@ -66,7 +66,7 @@ def add_numbers(*, a: int, b: int) -> Result[int, TaskError]:
 def process_data(*, data: dict[str, JsonValue]) -> Result[str, TaskError]:
     if not data:
         return Err(TaskError(
-            error_code="EMPTY_DATA",
+            code="EMPTY_DATA",
             message="Data cannot be empty",
         ))
     return Ok(f"Processed {len(data)} items")
@@ -107,7 +107,7 @@ match add_numbers.send(a=5, b=3):
 # Send with blocking timeout
 match process_data.send(data={"key": "value"}):
     case Ok(handle):
-        result = handle.get(timeout_ms=5000)
+        result = handle.get(wait_ms=5000)
     case Err(send_err):
         print(f"Send failed: {send_err.code}")
 ```
@@ -131,7 +131,7 @@ from instance import add_numbers
 async def my_endpoint():
     match await add_numbers.send_async(a=10, b=20):
         case Ok(handle):
-            match await handle.get_async(timeout_ms=10000):
+            match await handle.get_async(wait_ms=10000):
                 case Ok(Succeeded(total)):
                     return {"result": total}
                 case Ok(Failed(task_error)):
@@ -142,7 +142,7 @@ async def my_endpoint():
             return {"error": send_err.message}
 ```
 
-`get()` and `get_async()` return `ReadResult[T, TaskError]`. `Ok(Succeeded(value))` holds the value of the task. `Ok(Failed(task_error))` holds the error of the task. `Err(read_error)` means the read gave no outcome, for example `WaitTimeout`.
+`get()` and `get_async()` return `ReadResult[T, TaskError]`. `Ok(Succeeded(value))` holds the value of the task. `Ok(Failed(task_error))` holds the error of the task. `Err(read_error)` means the read gave no outcome, for example `ReadWaitTimeout`.
 
 These async APIs are producer-side I/O helpers; task execution still happens in worker processes.
 

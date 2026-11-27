@@ -1,5 +1,5 @@
 {
-  "contract_version": 8,
+  "contract_version": 9,
   "vectors": [
     {
       "name": "task_claimed",

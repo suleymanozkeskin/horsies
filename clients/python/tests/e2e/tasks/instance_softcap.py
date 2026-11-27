@@ -56,12 +56,12 @@ app.discover_tasks(
 )
 
 
-@app.task(task_name='e2e_softcap_healthcheck')
+@app.task(name='e2e_softcap_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='e2e_softcap_slow')
+@app.task(name='e2e_softcap_slow')
 def slow_task(*, duration_ms: int) -> Result[str, TaskError]:
     """Task that sleeps for specified duration."""
     import time
@@ -70,7 +70,7 @@ def slow_task(*, duration_ms: int) -> Result[str, TaskError]:
     return Ok(f'slept_{duration_ms}')
 
 
-@app.task(task_name='e2e_softcap_blocker')
+@app.task(name='e2e_softcap_blocker')
 def blocker_task(*, duration_ms: int) -> Result[str, TaskError]:
     """Single-process blocker used to keep a worker process busy during reclaim races."""
     import time
@@ -79,7 +79,7 @@ def blocker_task(*, duration_ms: int) -> Result[str, TaskError]:
     return Ok(f'blocked_{duration_ms}')
 
 
-@app.task(task_name='e2e_softcap_slow_idempotent')
+@app.task(name='e2e_softcap_slow_idempotent')
 def slow_idempotent_task(*, token: str, duration_ms: int) -> Result[str, TaskError]:
     """Slow task with atomic file detection for double-execution testing.
 
@@ -94,7 +94,7 @@ def slow_idempotent_task(*, token: str, duration_ms: int) -> Result[str, TaskErr
     if not log_dir:
         return Err(
             TaskError(
-                error_code='CONFIG_ERROR',
+                code='CONFIG_ERROR',
                 message='E2E_IDEMPOTENT_LOG_DIR not set',
             )
         )
@@ -108,13 +108,13 @@ def slow_idempotent_task(*, token: str, duration_ms: int) -> Result[str, TaskErr
     except FileExistsError:
         return Err(
             TaskError(
-                error_code='DOUBLE_EXECUTION',
+                code='DOUBLE_EXECUTION',
                 message=f'Token {token} already executed',
             )
         )
 
 
-@app.task(task_name='e2e_softcap_db_ledger')
+@app.task(name='e2e_softcap_db_ledger')
 def db_ledger_task(*, token: str) -> Result[str, TaskError]:
     """Record task-body entry in DB and enforce a single winner via unique token."""
     import psycopg
@@ -147,7 +147,7 @@ def db_ledger_task(*, token: str) -> Result[str, TaskError]:
     except Exception as exc:
         return Err(
             TaskError(
-                error_code='LEDGER_DB_ERROR',
+                code='LEDGER_DB_ERROR',
                 message=f'{type(exc).__name__}: {exc}',
                 data={'token': token, 'worker_identity': worker_identity},
             )
@@ -156,7 +156,7 @@ def db_ledger_task(*, token: str) -> Result[str, TaskError]:
     if winner_row is None:
         return Err(
             TaskError(
-                error_code='DOUBLE_EXECUTION',
+                code='DOUBLE_EXECUTION',
                 message=f'Token {token} already won by another worker',
                 data={'token': token, 'worker_identity': worker_identity},
             )

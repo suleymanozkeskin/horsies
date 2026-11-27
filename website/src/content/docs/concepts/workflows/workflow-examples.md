@@ -69,24 +69,24 @@ def process(*, data: TaskOutcome[int, TaskError]) -> Result[str, TaskError]:
     match data:
         case Failed():
             return Err(TaskError(
-                error_code="UPSTREAM_FAILED",
+                code="UPSTREAM_FAILED",
                 message="Upstream task failed",
             ))
         case Succeeded(value):
             return Ok(str(value))
 
-node_a: TaskNode[int] = TaskNode(fn=produce)
+node_a: TaskNode[int] = TaskNode(function=produce)
 
 # Default (join="all", allow_failed_dependencies=False): downstream is SKIPPED when upstream fails
 node_b_skip: TaskNode[str] = TaskNode(
-    fn=process,
+    function=process,
     waits_for=[node_a],
     args_from={"data": node_a},
 )
 
 # With allow_failed_dependencies: downstream runs and receives Failed(task_error)
 node_b_recover: TaskNode[str] = TaskNode(
-    fn=process,
+    function=process,
     waits_for=[node_a],
     args_from={"data": node_a},
     allow_failed_dependencies=True,
@@ -121,7 +121,7 @@ See [Join Modes](/horsies/concepts/workflows/workflow-semantics/#join-modes).
 ```python
 # Task runs when any dependency succeeds
 aggregator = TaskNode(
-    fn=aggregate,
+    function=aggregate,
     waits_for=[branch_a, branch_b, branch_c],
     join="any",
 )
@@ -131,7 +131,7 @@ aggregator = TaskNode(
 ```python
 # Task runs when at least 2 of 3 dependencies succeed
 quorum_task = TaskNode(
-    fn=quorum_handler,
+    function=quorum_handler,
     waits_for=[replica_a, replica_b, replica_c],
     join="quorum",
     min_success=2,
@@ -146,10 +146,10 @@ A node with `allow_failed_dependencies=True` receives `Failed(task_error)` for a
 ```python
 from horsies import Failed, Ok, OutcomeCode, Result, Succeeded, TaskError, TaskOutcome
 
-@app.task(task_name="recovery_handler")
+@app.task(name="recovery_handler")
 def recovery_handler(*, input_result: TaskOutcome[Data, TaskError]) -> Result[...]:
     match input_result:
-        case Failed(err) if err.error_code == OutcomeCode.UPSTREAM_SKIPPED:
+        case Failed(err) if err.code == OutcomeCode.UPSTREAM_SKIPPED:
             # Dependency was skipped (upstream failure)
             return Ok({"status": "skipped_upstream"})
         case Failed(err):
@@ -166,7 +166,7 @@ The entry that a node with `allow_failed_dependencies=True` receives for a SKIPP
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 Failed(TaskError(
-    error_code=OutcomeCode.UPSTREAM_SKIPPED,
+    code=OutcomeCode.UPSTREAM_SKIPPED,
     message="Upstream dependency was SKIPPED",
     data={"dependency_index": <index>},
 ))
@@ -177,7 +177,7 @@ The entry for a dependency with no stored result:
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 Failed(TaskError(
-    error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
+    code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
     message="Dependency node <node_id> (index <index>, task <task_name>) is <status> with no stored result",
     data={"dependency_index": <index>},
 ))
@@ -215,14 +215,14 @@ class FetchCode(str, Enum):
     retry_policy=RetryPolicy.exponential(
         base_seconds=1,
         max_retries=3,
-        auto_retry_for=[OperationalCode.UNHANDLED_EXCEPTION, FetchCode.NETWORK_ERROR],
+        retry_for=[OperationalCode.UNHANDLED_EXCEPTION, FetchCode.NETWORK_ERROR],
     ),
 )
 def fetch_data(*, url: str) -> Result[dict[str, JsonValue], TaskError]:
     ...
 
 # This task will retry up to 3 times when used in a workflow
-node = TaskNode(fn=fetch_data, kwargs={'url': "https://api.example.com"})
+node = TaskNode(function=fetch_data, kwargs={'url': "https://api.example.com"})
 ```
 
 ## Success Policy
@@ -257,11 +257,11 @@ A package delivery workflow where multiple delivery outcomes are acceptable:
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Define tasks
-pickup = TaskNode(fn=pickup_package)
-deliver_recipient = TaskNode(fn=deliver_to_recipient, waits_for=[pickup])
-deliver_neighbor = TaskNode(fn=deliver_to_neighbor, waits_for=[pickup])
-deliver_locker = TaskNode(fn=deliver_to_locker, waits_for=[pickup])
-notify = TaskNode(fn=send_notification, waits_for=[pickup])
+pickup = TaskNode(function=pickup_package)
+deliver_recipient = TaskNode(function=deliver_to_recipient, waits_for=[pickup])
+deliver_neighbor = TaskNode(function=deliver_to_neighbor, waits_for=[pickup])
+deliver_locker = TaskNode(function=deliver_to_locker, waits_for=[pickup])
+notify = TaskNode(function=send_notification, waits_for=[pickup])
 
 # Success policy: any delivery method is acceptable
 policy = SuccessPolicy(
@@ -297,10 +297,10 @@ from horsies import Err, Failed, Ok, OutcomeCode, Succeeded, WorkflowHandle
 
 
 def read_label(handle: WorkflowHandle[str]) -> str | None:
-    match handle.get(timeout_ms=30000):
+    match handle.get(wait_ms=30000):
         case Ok(Succeeded(label)):
             return label
-        case Ok(Failed(error)) if error.error_code == OutcomeCode.WORKFLOW_OUTPUT_SKIPPED:
+        case Ok(Failed(error)) if error.code == OutcomeCode.WORKFLOW_OUTPUT_SKIPPED:
             return None  # The workflow succeeded and has no label.
         case Ok(Failed(error)):
             raise RuntimeError(error.message)
@@ -315,11 +315,11 @@ def read_label(handle: WorkflowHandle[str]) -> str | None:
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Primary task that can fail
-primary = TaskNode(fn=fetch_data)
+primary = TaskNode(function=fetch_data)
 
 # Recovery handler receives the error
 recovery = TaskNode(
-    fn=recovery_handler,
+    function=recovery_handler,
     allow_failed_dependencies=True,
     waits_for=[primary],
     args_from={"primary": primary},
@@ -334,7 +334,7 @@ Structure DAGs so failures are visible in one node's result. The workflow is sti
 ```python
 # Final aggregator that reports all branch outcomes
 final = TaskNode(
-    fn=summarize_results,
+    function=summarize_results,
     allow_failed_dependencies=True,
     waits_for=[branch_a, branch_b, branch_c],
 )
@@ -351,7 +351,7 @@ def review_step() -> Result[str, TaskError]:
 
 workflow = app.workflow(
     "critical_pipeline",
-    tasks=[TaskNode(fn=review_step, node_id="review")],
+    tasks=[TaskNode(function=review_step, node_id="review")],
     on_error=OnError.PAUSE,  # Stop for manual review on failure
     definition_key="myapp.critical_pipeline.v1",
 )
@@ -374,8 +374,8 @@ workflow = app.workflow(
 
 ```python
 # Same task used twice
-fetch_a = TaskNode(fn=fetch_data, kwargs={'url': "url_a"})  # index 0
-fetch_b = TaskNode(fn=fetch_data, kwargs={'url': "url_b"})  # index 1
+fetch_a = TaskNode(function=fetch_data, kwargs={'url': "url_a"})  # index 0
+fetch_b = TaskNode(function=fetch_data, kwargs={'url': "url_b"})  # index 1
 
 spec = WorkflowSpec(
     name="parallel_fetch",
@@ -392,7 +392,7 @@ match await spec.start_async():
         pass
 
 # Wait for workflow completion first
-await handle.get_async(timeout_ms=30000)
+await handle.get_async(wait_ms=30000)
 
 # Now safe to access individual results (node_id keys)
 # results() returns Ok(dict) or Err(WorkflowHandleError)
@@ -413,28 +413,28 @@ typed_b = handle.result_for(fetch_b)
 
 ## WorkflowContext
 
-Set `workflow_context_from` on the node, and declare `workflow_ctx: WorkflowContext | None` in the task. See [WorkflowContext](/horsies/concepts/workflows/workflow-semantics/#workflowcontext-type-safe-result-access) for its scope.
+Set `workflow_context_from` on the node, and declare `workflow_context: WorkflowContext | None` in the task. See [WorkflowContext](/horsies/concepts/workflows/workflow-semantics/#workflowcontext-type-safe-result-access) for its scope.
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import Err, Failed, Ok, Result, Succeeded, TaskError, TaskNode, TaskOutcome, WorkflowContext
 
-node_a: TaskNode[int] = TaskNode(fn=fetch_data, kwargs={'url': "url"})
-node_b: TaskNode[str] = TaskNode(fn=transform, waits_for=[node_a], args_from={"data": node_a})
+node_a: TaskNode[int] = TaskNode(function=fetch_data, kwargs={'url': "url"})
+node_b: TaskNode[str] = TaskNode(function=transform, waits_for=[node_a], args_from={"data": node_a})
 node_c: TaskNode[Summary] = TaskNode(
-    fn=aggregate,
+    function=aggregate,
     waits_for=[node_a, node_b],
     workflow_context_from=[node_a, node_b],  # Include both in context
 )
 
-@app.task(task_name="aggregate")
-def aggregate(*, workflow_ctx: WorkflowContext | None = None) -> Result[Summary, TaskError]:
-    if workflow_ctx is None:
-        return Err(TaskError(error_code="NO_CTX", message="Missing context"))
+@app.task(name="aggregate")
+def aggregate(*, workflow_context: WorkflowContext | None = None) -> Result[Summary, TaskError]:
+    if workflow_context is None:
+        return Err(TaskError(code="NO_CTX", message="Missing context"))
 
     # Type-safe access: result_for returns TaskOutcome[T, TaskError] matching the node's type
-    a_result: TaskOutcome[int, TaskError] = workflow_ctx.result_for(node_a)
-    b_result: TaskOutcome[str, TaskError] = workflow_ctx.result_for(node_b)
+    a_result: TaskOutcome[int, TaskError] = workflow_context.result_for(node_a)
+    b_result: TaskOutcome[str, TaskError] = workflow_context.result_for(node_b)
 
     match (a_result, b_result):
         case (Failed(error), _):
@@ -469,7 +469,7 @@ match a_result:
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 key_a = node_a.key()  # NodeKey[int]
-result = workflow_ctx.result_for(key_a)
+result = workflow_context.result_for(key_a)
 ```
 
 For dynamic workflows where node references are not available inside the task function, construct a `NodeKey` from the string ID:
@@ -497,12 +497,12 @@ config = AppConfig(
 app = Horsies(config)
 
 @app.task("fan_in")
-def fan_in(*, workflow_ctx: WorkflowContext | None = None) -> Result[str, TaskError]:
-    if workflow_ctx is None:
-        return Err(TaskError(error_code="NO_CTX", message="Missing context"))
+def fan_in(*, workflow_context: WorkflowContext | None = None) -> Result[str, TaskError]:
+    if workflow_context is None:
+        return Err(TaskError(code="NO_CTX", message="Missing context"))
 
     i: int = 0
-    match workflow_ctx.result_for(NodeKey(f"save_{i}")):
+    match workflow_context.result_for(NodeKey(f"save_{i}")):
         case Failed(error):
             return Err(error)
         case Succeeded():
@@ -542,7 +542,7 @@ A task that needs only the workflow metadata declares a `WorkflowMeta` parameter
 ```python
 from horsies import WorkflowMeta
 
-@app.task(task_name="my_task")
+@app.task(name="my_task")
 def my_task(*, workflow_meta: WorkflowMeta | None = None) -> Result[str, TaskError]:
     if workflow_meta:
         print(f"Running in workflow {workflow_meta.workflow_id}")
@@ -592,9 +592,9 @@ def transform(*, data: TaskOutcome[int, TaskError]) -> Result[str, TaskError]:
         case Succeeded(value):
             return Ok(str(value))
 
-node_a: TaskNode[int] = TaskNode(fn=produce_number)
+node_a: TaskNode[int] = TaskNode(function=produce_number)
 node_b: TaskNode[str] = TaskNode(
-    fn=transform,
+    function=transform,
     waits_for=[node_a],
     args_from={"data": node_a},
 )
@@ -604,7 +604,7 @@ node_b: TaskNode[str] = TaskNode(
 
 ### Fire-and-Forget with result_for()
 
-`result_for()` is non-blocking. It queries the database once and returns immediately. If the task hasn't completed, it returns `Err(ResultNotReady(...))`.
+`result_for()` is non-blocking. It queries the database once and returns immediately. If the task hasn't completed, it returns `Err(ReadResultNotReady(...))`.
 
 **Don't do this:**
 
@@ -615,14 +615,14 @@ match spec.start():
         raise RuntimeError(start_error.message)
     case Ok(handle):
         # Immediately call result_for() - task likely hasn't completed yet
-        result = handle.result_for(node)  # Returns Err(ResultNotReady(...))
+        result = handle.result_for(node)  # Returns Err(ReadResultNotReady(...))
 ```
 
 **Do this instead:**
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import Err, Ok, ResultNotReady
+from horsies import Err, Ok, ReadResultNotReady
 
 match spec.start():
     case Err(start_error):
@@ -631,12 +631,12 @@ match spec.start():
         pass
 
 # Option 1: Wait for workflow completion first
-handle.get(timeout_ms=30000)
-result = handle.result_for(node)  # `ResultNotReady` is still possible depending on your workflow definition
+handle.get(wait_ms=30000)
+result = handle.result_for(node)  # `ReadResultNotReady` is still possible depending on your workflow definition
 
 # Option 2: Check if result is ready
 match handle.result_for(node):
-    case Err(ResultNotReady()):
+    case Err(ReadResultNotReady()):
         # Handle not-ready case: poll, wait, or skip, decide for your use case
         do_something()
     case _:
@@ -647,4 +647,4 @@ match handle.result_for(node):
 
 - Workflows can be long-running (minutes to hours)
 - `result_for()` does not block or poll - it's a single database query
-- Use `handle.get(timeout_ms=...)` to wait for completion before accessing individual task results
+- Use `handle.get(wait_ms=...)` to wait for completion before accessing individual task results

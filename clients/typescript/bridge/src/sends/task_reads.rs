@@ -467,13 +467,13 @@ pub struct TaskInfoRecord {
     pub task_id: String,
     pub task_name: String,
     pub status: TaskStatusName,
-    pub queue_name: String,
+    pub queue: String,
     pub priority: f64,
     pub retry_count: f64,
     pub max_retries: f64,
     pub next_retry_at: RecordedInstant,
     pub sent_at: RecordedInstant,
-    pub enqueued_at_micros: BigInt,
+    pub due_at_micros: BigInt,
     pub claimed_at: RecordedInstant,
     pub started_at: RecordedInstant,
     pub completed_at: RecordedInstant,
@@ -499,13 +499,13 @@ impl TaskInfoRecord {
             task_id: text_of_uuid(info.task_id),
             task_name: info.task_name,
             status: TaskStatusName::of(info.status),
-            queue_name: info.queue_name,
+            queue: info.queue,
             priority: f64::from(info.priority),
             retry_count: f64::from(info.retry_count),
             max_retries: f64::from(info.max_retries),
             next_retry_at: RecordedInstant::of(info.next_retry_at),
             sent_at: RecordedInstant::of(info.sent_at),
-            enqueued_at_micros: epoch_micros_of(info.enqueued_at),
+            due_at_micros: epoch_micros_of(info.due_at),
             claimed_at: RecordedInstant::of(info.claimed_at),
             started_at: RecordedInstant::of(info.started_at),
             completed_at: RecordedInstant::of(info.completed_at),
@@ -770,20 +770,20 @@ mod tests {
 
     #[test]
     fn a_task_info_maps_each_fact_and_each_attempt() {
-        let enqueued_at =
+        let due_at =
             DateTime::<Utc>::from_timestamp(1_786_525_812, 0).expect("the instant is in range");
-        let started_at = enqueued_at + chrono::Duration::seconds(5);
+        let started_at = due_at + chrono::Duration::seconds(5);
         let info = TaskInfo::<StoredEnvelopeText> {
             task_id: task(),
             task_name: "charge".to_owned(),
             status: TaskStatus::Failed,
-            queue_name: "billing".to_owned(),
+            queue: "billing".to_owned(),
             priority: 7,
             retry_count: 1,
             max_retries: 3,
             next_retry_at: None,
-            sent_at: Some(enqueued_at),
-            enqueued_at,
+            sent_at: Some(due_at),
+            due_at,
             claimed_at: None,
             started_at: Some(started_at),
             completed_at: None,
@@ -818,13 +818,13 @@ mod tests {
         };
         assert_eq!(record.task_id, text_of_uuid(task()));
         assert_eq!(record.status, TaskStatusName::Failed);
-        assert_eq!(record.queue_name, "billing");
+        assert_eq!(record.queue, "billing");
         assert_eq!(record.priority, 7.0);
         assert_eq!(record.next_retry_at, RecordedInstant::NotRecorded);
         assert_eq!(
             record.sent_at,
             RecordedInstant::Recorded {
-                epoch_micros: epoch_micros_of(enqueued_at)
+                epoch_micros: epoch_micros_of(due_at)
             }
         );
         assert_eq!(

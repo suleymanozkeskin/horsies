@@ -80,7 +80,7 @@ class ScheduleSendManifest:
     task_name: str
     """The task that each slot sends."""
 
-    queue_name: str
+    queue: str
     """The queue of each slot: the schedule's queue, else the task's queue."""
 
     priority: int

@@ -306,6 +306,7 @@ fn field_parts(value: ValueType) -> (Container, ItemType) {
         ValueType::Int(bound) => (Container::Single, ItemType::Int(bound)),
         ValueType::Named(name) => (Container::Single, ItemType::Named(name)),
         ValueType::TimeOfDay => (Container::Single, ItemType::TimeOfDay),
+        ValueType::Duration(bound) => (Container::Single, ItemType::Duration(bound)),
         ValueType::List(item) => (Container::List, item),
         ValueType::Map(item) => (Container::Map, item),
         ValueType::Optional(item) => (Container::Optional, item),
@@ -329,6 +330,7 @@ fn item_type_text(item: ItemType) -> String {
         },
         ItemType::Named(name) => name.to_owned(),
         ItemType::TimeOfDay => "Temporal.PlainTime".to_owned(),
+        ItemType::Duration(_) => "Temporal.Duration".to_owned(),
     }
 }
 
@@ -457,6 +459,9 @@ enum Conversion {
     Converter(String),
     /// A time of day: its text.
     TimeOfDayText,
+    /// A length of time: its ISO 8601 duration text. The core's reader
+    /// checks the form and the bound.
+    DurationText,
 }
 
 /// How an item of `module` becomes its wire value. Pure.
@@ -474,6 +479,7 @@ fn item_wire(module: &ManifestModule, item: ItemType) -> ItemWire {
             ManifestShape::Choice { .. } => ItemWire::AsIs,
         },
         ItemType::TimeOfDay => ItemWire::Converted(Conversion::TimeOfDayText),
+        ItemType::Duration(_) => ItemWire::Converted(Conversion::DurationText),
     }
 }
 
@@ -484,7 +490,7 @@ fn conversion_expression(conversion: &Conversion, access: &str, subject: &str) -
             format!("{INTEGER_HELPER}({access}, {})", string_literal(subject))
         }
         Conversion::Converter(name) => format!("{name}({access})"),
-        Conversion::TimeOfDayText => format!("{access}.toString()"),
+        Conversion::TimeOfDayText | Conversion::DurationText => format!("{access}.toString()"),
     }
 }
 
@@ -590,7 +596,8 @@ fn member_default_constant(holder: &str, field: &ManifestField) -> Option<String
             | ValueType::List(_)
             | ValueType::Map(_)
             | ValueType::Optional(_)
-            | ValueType::TimeOfDay) => panic!(
+            | ValueType::TimeOfDay
+            | ValueType::Duration(_)) => panic!(
                 "{holder}.{} has a member default, but its value {value:?} is not an integer",
                 field.name
             ),
@@ -1197,6 +1204,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_length_of_time_is_a_duration_whose_wire_value_is_its_text() {
+        let every = PythonValue::Duration(EVERY_BOUND);
+        assert_eq!(field_type_text(&field("every", every)), "Temporal.Duration");
+        assert_eq!(
+            member_entry(&SAMPLE, "Root", &field("every", every)),
+            "[\"every\", value.every.toString()]"
+        );
+    }
+
+    const EVERY_BOUND: IntBound = IntBound {
+        name: "EVERY_SECONDS",
+        min: 1,
+        max: 31_536_000,
+    };
+
     const DAILY: ManifestType = ManifestType {
         python_name: "Daily",
         doc: "",
@@ -1548,10 +1571,7 @@ mod tests {
         assert_eq!(
             bounds,
             [
-                "INTERVAL_SECONDS",
-                "INTERVAL_MINUTES",
-                "INTERVAL_HOURS",
-                "INTERVAL_DAYS",
+                "INTERVAL_EVERY_SECONDS",
                 "HOURLY_MINUTE",
                 "HOURLY_SECOND",
                 "MONTHLY_DAY",
@@ -1575,13 +1595,14 @@ mod tests {
         );
         for part in [
             "\nexport interface SchedulePatternInterval extends IntervalSchedule {\n  \
-             readonly type: \"interval\";\n}\n",
-            "\n  readonly seconds: number | null;\n",
+             readonly kind: \"interval\";\n}\n",
+            "\n  readonly every: Temporal.Duration;\n",
+            "new Map<string, WireJson>([[\"every\", value.every.toString()]])",
             "\n  readonly time: Temporal.PlainTime;\n",
             "\nexport type Weekday =\n  | \"monday\"\n",
             "\nexport function schedulePatternToWire(value: SchedulePattern): \
-             ReadonlyMap<string, WireJson> {\n  switch (value.type) {\n",
-            "\n        [\"type\", \"cron\"],\n        ...cronScheduleToWire(value),\n",
+             ReadonlyMap<string, WireJson> {\n  switch (value.kind) {\n",
+            "\n        [\"kind\", \"cron\"],\n        ...cronScheduleToWire(value),\n",
         ] {
             assert!(text.contains(part), "{part}");
         }

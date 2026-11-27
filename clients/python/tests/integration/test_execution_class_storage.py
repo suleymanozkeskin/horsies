@@ -130,7 +130,7 @@ class TestSendPaths:
         def delayed(*, n: int) -> Result[int, TaskError]:
             return Ok(n)
 
-        task_id = _sent_id(await delayed.schedule_async(600, n=1))
+        task_id = _sent_id(await delayed.with_options(delay_seconds=600).send_async(n=1))
 
         assert await _stored_class(session, task_id) == 'SHARED_THREAD'
 
@@ -273,7 +273,7 @@ class TestWorkflowPaths:
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
                 _ = args, params
-                node = TaskNode(fn=child_task, kwargs={'value': 1})
+                node = TaskNode(function=child_task, kwargs={'value': 1})
                 return app.workflow(name=cls.name, tasks=[node], output=node)
 
         parent = app.workflow(

@@ -22,19 +22,19 @@ import pytest
 from pydantic import SecretStr
 
 from horsies import (
-    AsyncContext,
-    ReadDatabaseError,
     Failed,
-    InvalidInput,
-    NoTypeAvailable,
+    ReadAsyncContext,
+    ReadDatabaseError,
+    ReadInvalidInput,
+    ReadNoTypeAvailable,
     ReadResult,
-    ResultDeserializationError,
-    ResultNotAvailable,
+    ReadResultDeserializationError,
+    ReadResultNotAvailable,
+    ReadTaskNotFound,
+    ReadWaitInsideTask,
+    ReadWaitTimeout,
+    ReadWorkflowContextMissingId,
     Succeeded,
-    TaskNotFound,
-    WaitInsideTask,
-    WaitTimeout,
-    WorkflowCtxMissingId,
 )
 from horsies.core import process_role as process_role_module
 from horsies.core.app import Horsies
@@ -47,7 +47,7 @@ from horsies.core.brokers.result_types import (
     DatabaseOperationFailed,
     DatabaseResult,
     DatabaseWaitInsideTask,
-    RawResultRecord,
+    StoredResult,
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
@@ -81,8 +81,8 @@ WAIT_ABOVE_LIMIT_MS = 2**32
 """One more than the largest wait, 4,294,967,295 ms: every read refuses it."""
 
 
-def _record(status: TaskStatus, raw_result: dict[str, Any] | None) -> DatabaseResult[RawResultRecord | None]:
-    return Ok(RawResultRecord(
+def _record(status: TaskStatus, raw_result: dict[str, Any] | None) -> DatabaseResult[StoredResult | None]:
+    return Ok(StoredResult(
         task_id=TASK_ID, task_name='produce', status=status, raw_result=raw_result,
     ))
 
@@ -100,7 +100,7 @@ def _err_envelope(code: str) -> dict[str, Any]:
 
 
 def _read(
-    answer: DatabaseResult[RawResultRecord | None], ok_type: object | None = int,
+    answer: DatabaseResult[StoredResult | None], ok_type: object | None = int,
 ) -> ReadResult[Any, TaskError]:
     return read_of_record(TASK_ID, answer, ok_type, 1_000, TextCodes())
 
@@ -124,7 +124,7 @@ def test_stored_value_reads_as_succeeded() -> None:
 
 def test_stored_error_reads_as_failed() -> None:
     match _read(_record(TaskStatus.FAILED, _err_envelope('CARD_DECLINED'))):
-        case Ok(Failed(TaskError(error_code='CARD_DECLINED', message='stored failure'))):
+        case Ok(Failed(TaskError(code='CARD_DECLINED', message='stored failure'))):
             pass
         case other:
             pytest.fail(f'expected Ok(Failed(CARD_DECLINED)), got {other!r}')
@@ -132,39 +132,39 @@ def test_stored_error_reads_as_failed() -> None:
 
 def test_cancelled_row_reads_as_failed_task_cancelled() -> None:
     match _read(_record(TaskStatus.CANCELLED, None)):
-        case Ok(Failed(TaskError(error_code=OutcomeCode.TASK_CANCELLED))):
+        case Ok(Failed(TaskError(code=OutcomeCode.TASK_CANCELLED))):
             pass
         case other:
             pytest.fail(f'expected Ok(Failed(TASK_CANCELLED)), got {other!r}')
 
 
 def test_no_row_is_task_not_found() -> None:
-    assert isinstance(_read_error(_read(Ok(None))), TaskNotFound)
+    assert isinstance(_read_error(_read(Ok(None))), ReadTaskNotFound)
 
 
 def test_unfinished_row_after_the_wait_is_wait_timeout() -> None:
-    assert isinstance(_read_error(_read(_record(TaskStatus.RUNNING, None))), WaitTimeout)
+    assert isinstance(_read_error(_read(_record(TaskStatus.RUNNING, None))), ReadWaitTimeout)
 
 
 def test_terminal_row_without_result_is_result_not_available() -> None:
     error = _read_error(_read(_record(TaskStatus.COMPLETED, None)))
-    assert isinstance(error, ResultNotAvailable)
+    assert isinstance(error, ReadResultNotAvailable)
 
 
 def test_malformed_envelope_is_result_deserialization_error() -> None:
     malformed = {'__h_task_result__': True, 'ok': 1, 'err': {'error_code': 'X'}}
     error = _read_error(_read(_record(TaskStatus.COMPLETED, malformed)))
-    assert isinstance(error, ResultDeserializationError)
+    assert isinstance(error, ReadResultDeserializationError)
 
 
 def test_value_of_another_type_is_result_deserialization_error() -> None:
     error = _read_error(_read(_record(TaskStatus.COMPLETED, _ok_envelope('seven'))))
-    assert isinstance(error, ResultDeserializationError)
+    assert isinstance(error, ReadResultDeserializationError)
 
 
 def test_stored_value_without_a_declared_type_is_no_type_available() -> None:
     error = _read_error(_read(_record(TaskStatus.COMPLETED, _ok_envelope(7)), ok_type=None))
-    assert isinstance(error, NoTypeAvailable)
+    assert isinstance(error, ReadNoTypeAvailable)
 
 
 def test_stored_error_reads_without_a_declared_type() -> None:
@@ -174,7 +174,7 @@ def test_stored_error_reads_without_a_declared_type() -> None:
 
 def test_broker_failure_is_broker_error_with_its_cause_and_class() -> None:
     cause = ConnectionError('lost')
-    answer: DatabaseResult[RawResultRecord | None] = Err(DatabaseOperationFailed(
+    answer: DatabaseResult[StoredResult | None] = Err(DatabaseOperationFailed(
         code=DatabaseErrorCode.TASK_INFO_QUERY_FAILED,
         message='read failed',
         retryable=True,
@@ -188,24 +188,24 @@ def test_broker_failure_is_broker_error_with_its_cause_and_class() -> None:
 
 
 def test_broker_payload_refusal_is_result_deserialization_error() -> None:
-    answer: DatabaseResult[RawResultRecord | None] = Err(DatabaseInvalidJsonPayload(
+    answer: DatabaseResult[StoredResult | None] = Err(DatabaseInvalidJsonPayload(
         message='not JSON', cause=NoCause(),
     ))
-    assert isinstance(_read_error(_read(answer)), ResultDeserializationError)
+    assert isinstance(_read_error(_read(answer)), ReadResultDeserializationError)
 
 
 def test_broker_missing_type_is_no_type_available() -> None:
-    answer: DatabaseResult[RawResultRecord | None] = Err(DatabaseNoTypeAvailable(message='no type'))
-    assert isinstance(_read_error(_read(answer)), NoTypeAvailable)
+    answer: DatabaseResult[StoredResult | None] = Err(DatabaseNoTypeAvailable(message='no type'))
+    assert isinstance(_read_error(_read(answer)), ReadNoTypeAvailable)
 
 
 def test_broker_wait_inside_task_is_wait_inside_task() -> None:
-    answer: DatabaseResult[RawResultRecord | None] = Err(DatabaseWaitInsideTask(message='inside'))
-    assert isinstance(_read_error(_read(answer)), WaitInsideTask)
+    answer: DatabaseResult[StoredResult | None] = Err(DatabaseWaitInsideTask(message='inside'))
+    assert isinstance(_read_error(_read(answer)), ReadWaitInsideTask)
 
 
 def test_broker_async_context_is_a_defect() -> None:
-    answer: DatabaseResult[RawResultRecord | None] = Err(DatabaseAsyncContext(message='loop'))
+    answer: DatabaseResult[StoredResult | None] = Err(DatabaseAsyncContext(message='loop'))
     with pytest.raises(AssertionError, match='ASYNC_CONTEXT'):
         _ = _read(answer)
 
@@ -214,15 +214,15 @@ def test_broker_async_context_is_a_defect() -> None:
     ('read', 'final'),
     [
         (Ok(Succeeded(1)), True),
-        (Ok(Failed(TaskError(error_code='X'))), True),
-        (Err(ResultNotAvailable(message='m')), True),
-        (Err(ResultDeserializationError(message='m')), True),
-        (Err(NoTypeAvailable(message='m')), True),
-        (Err(WaitTimeout(message='m')), False),
-        (Err(TaskNotFound(message='m')), False),
+        (Ok(Failed(TaskError(code='X'))), True),
+        (Err(ReadResultNotAvailable(message='m')), True),
+        (Err(ReadResultDeserializationError(message='m')), True),
+        (Err(ReadNoTypeAvailable(message='m')), True),
+        (Err(ReadWaitTimeout(message='m')), False),
+        (Err(ReadTaskNotFound(message='m')), False),
         (Err(ReadDatabaseError(message='m', retryable=True, cause=NoCause())), False),
-        (Err(WaitInsideTask(message='m')), False),
-        (Err(InvalidInput(message='m')), False),
+        (Err(ReadWaitInsideTask(message='m')), False),
+        (Err(ReadInvalidInput(message='m')), False),
     ],
 )
 def test_a_handle_keeps_only_final_reads(read: ReadResult[Any, TaskError], final: bool) -> None:
@@ -264,11 +264,11 @@ def _task_handle(app: Horsies) -> TaskHandle[int]:
 
 
 READS: dict[str, Callable[[Horsies, int | None], ReadResult[Any, TaskError]]] = {
-    'TaskHandle.get': lambda app, wait: _task_handle(app).get(timeout_ms=wait),
-    'TaskHandle.get_async': lambda app, wait: asyncio.run(_task_handle(app).get_async(timeout_ms=wait)),
-    'WorkflowHandle.get': lambda app, wait: _workflow_handle(app).get(timeout_ms=wait),
+    'TaskHandle.get': lambda app, wait: _task_handle(app).get(wait_ms=wait),
+    'TaskHandle.get_async': lambda app, wait: asyncio.run(_task_handle(app).get_async(wait_ms=wait)),
+    'WorkflowHandle.get': lambda app, wait: _workflow_handle(app).get(wait_ms=wait),
     'WorkflowHandle.get_async': lambda app, wait: asyncio.run(
-        _workflow_handle(app).get_async(timeout_ms=wait),
+        _workflow_handle(app).get_async(wait_ms=wait),
     ),
     'app.get_result': lambda app, wait: app.get_result(TASK_ID, wait),
     'app.get_result_async': lambda app, wait: asyncio.run(app.get_result_async(TASK_ID, wait)),
@@ -278,7 +278,7 @@ READS: dict[str, Callable[[Horsies, int | None], ReadResult[Any, TaskError]]] = 
 @pytest.mark.parametrize('read_name', sorted(READS))
 def test_wait_above_the_limit_is_invalid_input(app: Horsies, read_name: str) -> None:
     error = _read_error(READS[read_name](app, WAIT_ABOVE_LIMIT_MS))
-    assert isinstance(error, InvalidInput)
+    assert isinstance(error, ReadInvalidInput)
     assert _nothing_ran(app)
 
 
@@ -289,7 +289,7 @@ def test_bad_wait_inside_a_task_is_invalid_input(app: Horsies, read_name: str) -
     process that runs task bodies: the same input gives the same code in
     every client."""
     error = _read_error(READS[read_name](app, WAIT_ABOVE_LIMIT_MS))
-    assert isinstance(error, InvalidInput)
+    assert isinstance(error, ReadInvalidInput)
     assert _nothing_ran(app)
 
 
@@ -297,7 +297,7 @@ def test_bad_wait_inside_a_task_is_invalid_input(app: Horsies, read_name: str) -
 @pytest.mark.usefixtures('task_process')
 def test_valid_wait_inside_a_task_is_wait_inside_task(app: Horsies, read_name: str) -> None:
     error = _read_error(READS[read_name](app, 0))
-    assert isinstance(error, WaitInsideTask)
+    assert isinstance(error, ReadWaitInsideTask)
     assert _nothing_ran(app)
 
 
@@ -318,20 +318,20 @@ def test_bad_raw_wait_inside_a_task_is_invalid_input(app: Horsies, read_name: st
 def test_sync_reads_on_an_event_loop_are_async_context(app: Horsies) -> None:
     async def sync_reads() -> list[ReadResult[Any, TaskError]]:
         return [
-            _task_handle(app).get(timeout_ms=0),
-            _workflow_handle(app).get(timeout_ms=0),
+            _task_handle(app).get(wait_ms=0),
+            _workflow_handle(app).get(wait_ms=0),
             _workflow_handle(app).result_for(NodeKey[int]('n')),
             app.get_result(TASK_ID, 0),
         ]
 
     for read in asyncio.run(sync_reads()):
-        assert isinstance(_read_error(read), AsyncContext)
+        assert isinstance(_read_error(read), ReadAsyncContext)
     assert _nothing_ran(app)
 
 
 def test_handle_with_no_broker_and_no_result_is_result_not_available() -> None:
     handle: TaskHandle[int] = TaskHandle(TASK_ID)
-    assert isinstance(_read_error(handle.get()), ResultNotAvailable)
+    assert isinstance(_read_error(handle.get()), ReadResultNotAvailable)
 
 
 def test_handle_returns_its_immediate_result() -> None:
@@ -342,10 +342,10 @@ def test_handle_returns_its_immediate_result() -> None:
 
 def test_result_for_a_node_with_no_id_is_workflow_ctx_missing_id(app: Horsies) -> None:
     match _workflow_handle(app)._node_result_key(NodeKey[int](node_id=None)):  # pyright: ignore[reportArgumentType]
-        case Err(err_value=WorkflowCtxMissingId()):
+        case Err(err_value=ReadWorkflowContextMissingId()):
             pass
         case other:
-            pytest.fail(f'expected Err(WorkflowCtxMissingId), got {other!r}')
+            pytest.fail(f'expected Err(ReadWorkflowContextMissingId), got {other!r}')
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +355,7 @@ def test_result_for_a_node_with_no_id_is_workflow_ctx_missing_id(app: Horsies) -
 
 def test_failed_workflow_without_stored_error_is_failed_workflow_failed() -> None:
     match _ended_workflow_error(str(WORKFLOW_ID), WorkflowStatus.FAILED, None):
-        case Ok(Failed(TaskError(error_code=OutcomeCode.WORKFLOW_FAILED))):
+        case Ok(Failed(TaskError(code=OutcomeCode.WORKFLOW_FAILED))):
             pass
         case other:
             pytest.fail(f'expected Ok(Failed(WORKFLOW_FAILED)), got {other!r}')
@@ -363,17 +363,17 @@ def test_failed_workflow_without_stored_error_is_failed_workflow_failed() -> Non
 
 def test_stored_workflow_error_that_does_not_read_is_result_deserialization_error() -> None:
     read = _ended_workflow_error(str(WORKFLOW_ID), WorkflowStatus.FAILED, 'not json')
-    assert isinstance(_read_error(read), ResultDeserializationError)
+    assert isinstance(_read_error(read), ReadResultDeserializationError)
 
 
 def test_completed_workflow_without_stored_result_is_result_deserialization_error() -> None:
     read = _completed_without_stored_result(str(WORKFLOW_ID))
-    assert isinstance(_read_error(read), ResultDeserializationError)
+    assert isinstance(_read_error(read), ReadResultDeserializationError)
 
 
 def test_workflow_value_without_a_declared_type_is_no_type_available() -> None:
     read = _decode_workflow_envelope(_ok_envelope(7), None, app=None, workflow_id=str(WORKFLOW_ID))
-    assert isinstance(_read_error(read), NoTypeAvailable)
+    assert isinstance(_read_error(read), ReadNoTypeAvailable)
 
 
 def test_workflow_value_reads_as_succeeded() -> None:
@@ -438,7 +438,7 @@ def test_node_input_of_a_succeeded_source_is_succeeded() -> None:
 @pytest.mark.usefixtures('worker_app')
 def test_node_input_of_a_failed_source_is_failed() -> None:
     match _prepared_dep(_node_input(_err_envelope('UPSTREAM_BAD'))):
-        case Failed(TaskError(error_code='UPSTREAM_BAD', message='stored failure')):
+        case Failed(TaskError(code='UPSTREAM_BAD', message='stored failure')):
             pass
         case other:
             pytest.fail(f'expected Failed(UPSTREAM_BAD), got {other!r}')

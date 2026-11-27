@@ -255,7 +255,7 @@ async def thread_app(app: Horsies, broker: PostgresBroker) -> Horsies:
     of the suite has fewer connections than ``SEATS``
     (``TEST_CHILD_POOL``)."""
 
-    @app.task(task_name=TASK_NAME, execution=Execution.SHARED_THREAD, timeout_ms=30_000)
+    @app.task(name=TASK_NAME, execution=Execution.SHARED_THREAD, timeout_ms=30_000)
     def thread_lifecycle_sleep() -> Result[str, TaskError]:
         started = time.time()
         time.sleep(BODY_S)
@@ -322,7 +322,7 @@ async def test_a_refusal_sets_the_row_running_and_fails_before_resolve(
     [end] = _run_on_seats([(task_id, claimed_at, REFUSAL)])
 
     error = _failed_error(_envelope(end).text)
-    assert error.error_code == OperationalCode.WORKER_SERIALIZATION_ERROR
+    assert error.code == OperationalCode.WORKER_SERIALIZATION_ERROR
     row = await _row(session, task_id)
     assert row.status == 'RUNNING'
     assert row.finalizing_at is not None

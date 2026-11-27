@@ -21,7 +21,11 @@ from horsies.core.models.tracing import (
     tracing_label,
 )
 from horsies.core.models.log_format import LogFormat, TextLogs
-from horsies.core.models.schedule import ScheduleConfig, SchedulePattern
+from horsies.core.models.schedule import (
+    ScheduleConfig,
+    SchedulePattern,
+    interval_summary,
+)
 from horsies.core.models.worker_profile import (
     WorkerProfile,
     describe_worker_profile,
@@ -578,26 +582,17 @@ class AppConfig(BaseModel):
     @staticmethod
     def _format_schedule_pattern(pattern: SchedulePattern) -> str:
         """Format schedule pattern for concise logging."""
-        match pattern.type:
+        match pattern.kind:
             case 'interval':
-                parts: list[str] = []
-                if pattern.days:
-                    parts.append(f'{pattern.days}d')
-                if pattern.hours:
-                    parts.append(f'{pattern.hours}h')
-                if pattern.minutes:
-                    parts.append(f'{pattern.minutes}m')
-                if pattern.seconds:
-                    parts.append(f'{pattern.seconds}s')
-                return f"every {' '.join(parts)}"
+                return f'every {interval_summary(pattern.every)}'
             case 'hourly':
                 return f'hourly at :{pattern.minute:02d}:{pattern.second:02d}'
             case 'daily':
                 return f"daily at {pattern.time.strftime('%H:%M:%S')}"
             case 'weekly':
-                days = ', '.join(d.value for d in pattern.days)
-                return f"weekly on {days} at {pattern.time.strftime('%H:%M:%S')}"
+                weekdays = ', '.join(d.value for d in pattern.weekdays)
+                return f"weekly on {weekdays} at {pattern.time.strftime('%H:%M:%S')}"
             case 'monthly':
-                return f"monthly on day {pattern.day} at {pattern.time.strftime('%H:%M:%S')}"
+                return f"monthly on day {pattern.day_of_month} at {pattern.time.strftime('%H:%M:%S')}"
             case 'cron':
                 return pattern.summary()

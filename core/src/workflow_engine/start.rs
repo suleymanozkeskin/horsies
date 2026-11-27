@@ -78,7 +78,7 @@ pub(crate) fn child_workflow_depth(
                 "workflow_id": parent_workflow_id.to_string(),
                 "task_index": task_index,
             }))),
-            ..TaskError::builtin(
+            ..TaskError::built_in(
                 OperationalCode::SubworkflowDepthLimitReached,
                 format!(
                     "Subworkflow not started: the child workflow would have depth {child_depth}, \
@@ -699,8 +699,8 @@ mod tests {
         let task_name = "start_refused_retry_policy_node";
         let exponential = |max_retries: &str| {
             format!(
-                r#"{{"retry_policy": {{"max_retries": {max_retries}, "intervals": [60],
-                    "backoff_strategy": "exponential", "jitter": true, "auto_retry_for": ["X"]}}}}"#
+                r#"{{"retry_policy": {{"max_retries": {max_retries}, "intervals_seconds": [60],
+                    "backoff_strategy": "exponential", "jitter": true, "retry_for": ["X"]}}}}"#
             )
         };
         // The detail of Python's refusal, where the case pins it
@@ -853,8 +853,8 @@ mod tests {
         let mut root = node_with(false, Some(17));
         root.task_name = "start_fitting_retry_policy_node".to_owned();
         root.task_options_json = Some(
-            r#"{"retry_policy": {"max_retries": 4, "intervals": [60],
-                "backoff_strategy": "exponential", "jitter": true, "auto_retry_for": ["X"]}}"#
+            r#"{"retry_policy": {"max_retries": 4, "intervals_seconds": [60],
+                "backoff_strategy": "exponential", "jitter": true, "retry_for": ["X"]}}"#
                 .to_owned(),
         );
         let spec = keyed_spec(Some("tests.start.fitting_retry_policy.v1"), vec![root]);

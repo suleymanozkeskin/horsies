@@ -15,6 +15,8 @@ from horsies.core.errors import (
     MultipleValidationErrors,
 )
 from horsies.core.models.schedule import (
+    INTERVAL_EVERY_SECONDS_MAX,
+    INTERVAL_EVERY_SECONDS_MIN,
     DailySchedule,
     HourlySchedule,
     IntervalSchedule,
@@ -35,65 +37,132 @@ from horsies.core.models.schedule import (
 class TestIntervalSchedule:
     """Tests for IntervalSchedule model."""
 
-    def test_valid_seconds_only(self) -> None:
-        """Seconds-only interval constructs correctly."""
-        schedule = IntervalSchedule(seconds=30)
+    def test_valid_construction(self) -> None:
+        """An interval holds its length in `every`."""
+        schedule = IntervalSchedule(every=timedelta(seconds=30))
 
-        assert schedule.seconds == 30
-        assert schedule.minutes is None
-        assert schedule.hours is None
-        assert schedule.days is None
-        assert schedule.type == 'interval'
+        assert schedule.every == timedelta(seconds=30)
+        assert schedule.kind == 'interval'
 
-    def test_valid_all_fields(self) -> None:
-        """All time units can be combined."""
-        schedule = IntervalSchedule(seconds=10, minutes=5, hours=2, days=1)
+    @pytest.mark.parametrize(
+        'every',
+        [
+            pytest.param(
+                timedelta(seconds=INTERVAL_EVERY_SECONDS_MIN),
+                id='one_second',
+            ),
+            pytest.param(timedelta(days=1, hours=2, minutes=5, seconds=10), id='mixed'),
+            pytest.param(timedelta(seconds=INTERVAL_EVERY_SECONDS_MAX), id='365_days'),
+        ],
+    )
+    def test_a_length_inside_the_bound_is_accepted(self, every: timedelta) -> None:
+        """The bound ends, 1 second and 365 days, are lengths of an interval."""
+        assert IntervalSchedule(every=every).every == every
 
-        assert schedule.seconds == 10
-        assert schedule.minutes == 5
-        assert schedule.hours == 2
-        assert schedule.days == 1
+    def test_the_bound_is_1_second_to_365_days(self) -> None:
+        """The bound constants hold 1 second and 365 days, in seconds."""
+        assert INTERVAL_EVERY_SECONDS_MIN == 1
+        assert INTERVAL_EVERY_SECONDS_MAX == timedelta(days=365) // timedelta(seconds=1)
 
-    def test_total_seconds_single_unit(self) -> None:
-        """total_seconds returns correct value for single unit."""
-        assert IntervalSchedule(seconds=45).total_seconds() == 45
-        assert IntervalSchedule(minutes=2).total_seconds() == 120
-        assert IntervalSchedule(hours=1).total_seconds() == 3600
-        assert IntervalSchedule(days=1).total_seconds() == 86400
-
-    def test_total_seconds_combined(self) -> None:
-        """total_seconds sums all units correctly."""
-        schedule = IntervalSchedule(seconds=10, minutes=5, hours=1, days=1)
-
-        expected = 10 + (5 * 60) + (1 * 3600) + (1 * 86400)
-        assert schedule.total_seconds() == expected
-
-    def test_empty_raises_configuration_error(self) -> None:
-        """No time units raises ConfigurationError HRS-205."""
+    @pytest.mark.parametrize(
+        ('every', 'note'),
+        [
+            pytest.param(timedelta(0), 'every: 0:00:00', id='zero'),
+            pytest.param(
+                timedelta(seconds=-5),
+                'every: -1 day, 23:59:55',
+                id='negative',
+            ),
+            pytest.param(
+                timedelta(days=365, seconds=1),
+                'every: 365 days, 0:00:01',
+                id='above_365_days',
+            ),
+        ],
+    )
+    def test_a_length_outside_the_bound_is_refused(
+        self, every: timedelta, note: str,
+    ) -> None:
+        """Zero, a negative length and a length above 365 days are refused."""
         with pytest.raises(ConfigurationError) as exc_info:
-            IntervalSchedule()
+            IntervalSchedule(every=every)
 
         exc = exc_info.value
         assert exc.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
-        assert 'at least one time unit' in exc.message
-        assert any('all time units' in note for note in exc.notes)
-        assert exc.help_text is not None
-        assert 'seconds' in exc.help_text
+        assert exc.message == 'IntervalSchedule every is outside 1 second to 365 days'
+        assert exc.notes == [note]
+        assert exc.help_text == 'give every from 1 second to 365 days'
 
-    def test_seconds_below_minimum_raises_validation_error(self) -> None:
-        """seconds=0 violates ge=1 constraint via pydantic ValidationError."""
-        with pytest.raises(ValidationError):
-            IntervalSchedule(seconds=0)
+    def test_a_length_with_microseconds_is_refused(self) -> None:
+        """Slots fire at whole seconds, so a fraction of a second is refused."""
+        with pytest.raises(ConfigurationError) as exc_info:
+            IntervalSchedule(every=timedelta(seconds=1, microseconds=500))
 
-    def test_seconds_above_maximum_raises_validation_error(self) -> None:
-        """seconds=86401 violates le=86400 constraint."""
-        with pytest.raises(ValidationError):
-            IntervalSchedule(seconds=86401)
+        exc = exc_info.value
+        assert exc.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
+        assert exc.message == 'IntervalSchedule every has microseconds'
+        assert exc.notes == ['every: 0:00:01.000500']
+        assert exc.help_text == (
+            'schedules fire at whole seconds; give every in whole seconds'
+        )
 
-    def test_days_above_maximum_raises_validation_error(self) -> None:
-        """days=366 violates le=365 constraint."""
+    def test_a_length_that_breaks_both_rules_reports_both(self) -> None:
+        """A length below 1 second with microseconds breaks both rules."""
+        with pytest.raises(MultipleValidationErrors) as exc_info:
+            IntervalSchedule(every=timedelta(microseconds=500))
+
+        messages = sorted(error.message for error in exc_info.value.report.refusals)
+        assert messages == [
+            'IntervalSchedule every has microseconds',
+            'IntervalSchedule every is outside 1 second to 365 days',
+        ]
+
+    def test_every_is_required(self) -> None:
+        """every field is required; omitting raises ValidationError."""
         with pytest.raises(ValidationError):
-            IntervalSchedule(days=366)
+            IntervalSchedule()  # type: ignore[call-arg]
+
+    @pytest.mark.parametrize(
+        ('every', 'text'),
+        [
+            pytest.param(timedelta(seconds=30), 'PT30S', id='seconds'),
+            pytest.param(timedelta(seconds=90), 'PT1M30S', id='seconds_split'),
+            pytest.param(timedelta(minutes=90), 'PT1H30M', id='minutes_split'),
+            pytest.param(timedelta(days=1), 'P1D', id='one_day'),
+            pytest.param(timedelta(days=1, hours=2), 'P1DT2H', id='day_and_hours'),
+            pytest.param(timedelta(days=1, seconds=1), 'P1DT1S', id='day_and_second'),
+            pytest.param(timedelta(days=365), 'P365D', id='365_days'),
+        ],
+    )
+    def test_the_json_text_puts_the_largest_unit_first_and_writes_no_zero_part(
+        self, every: timedelta, text: str,
+    ) -> None:
+        """The JSON form of every is ISO 8601 text of days, hours, minutes, seconds."""
+        schedule = IntervalSchedule(every=every)
+
+        assert schedule.model_dump(mode='json') == {'kind': 'interval', 'every': text}
+        assert schedule.model_dump() == {'kind': 'interval', 'every': every}
+
+    def test_a_json_text_reads_back_to_its_length(self) -> None:
+        """The text that the model writes reads back to the same length."""
+        schedule = IntervalSchedule.model_validate_json(
+            '{"kind":"interval","every":"P1DT2H"}',
+        )
+
+        assert schedule.every == timedelta(days=1, hours=2)
+
+    @pytest.mark.parametrize(
+        'pattern',
+        [
+            pytest.param({'seconds': 30}, id='four_parts'),
+            pytest.param({'every': 'PT30S', 'minutes': 1}, id='every_and_a_part'),
+            pytest.param({'type': 'interval', 'every': 'PT30S'}, id='tag_type'),
+        ],
+    )
+    def test_the_old_keys_are_refused(self, pattern: dict[str, object]) -> None:
+        """The four parts and the tag `type` are unknown keys."""
+        with pytest.raises(ValidationError):
+            IntervalSchedule.model_validate(pattern)
 
 
 # =============================================================================
@@ -111,7 +180,7 @@ class TestHourlySchedule:
 
         assert schedule.minute == 30
         assert schedule.second == 0
-        assert schedule.type == 'hourly'
+        assert schedule.kind == 'hourly'
 
     def test_valid_with_explicit_second(self) -> None:
         """Both minute and second can be set."""
@@ -150,7 +219,7 @@ class TestDailySchedule:
         schedule = DailySchedule(time=datetime_time(15, 30, 0))
 
         assert schedule.time == datetime_time(15, 30, 0)
-        assert schedule.type == 'daily'
+        assert schedule.kind == 'daily'
 
     def test_time_is_required(self) -> None:
         """time field is required; omitting raises ValidationError."""
@@ -168,43 +237,49 @@ class TestWeeklySchedule:
     """Tests for WeeklySchedule model."""
 
     def test_valid_construction(self) -> None:
-        """WeeklySchedule with days and time."""
+        """WeeklySchedule with weekdays and time."""
         schedule = WeeklySchedule(
-            days=[Weekday.MONDAY, Weekday.FRIDAY],
+            weekdays=[Weekday.MONDAY, Weekday.FRIDAY],
             time=datetime_time(9, 0, 0),
         )
 
-        assert schedule.days == [Weekday.MONDAY, Weekday.FRIDAY]
+        assert schedule.weekdays == [Weekday.MONDAY, Weekday.FRIDAY]
         assert schedule.time == datetime_time(9, 0, 0)
-        assert schedule.type == 'weekly'
+        assert schedule.kind == 'weekly'
 
-    def test_duplicate_days_raises_configuration_error(self) -> None:
-        """Duplicate days raises ConfigurationError HRS-205."""
+    def test_duplicate_weekdays_raises_configuration_error(self) -> None:
+        """Duplicate weekdays raises ConfigurationError HRS-205."""
         with pytest.raises(ConfigurationError) as exc_info:
             WeeklySchedule(
-                days=[Weekday.MONDAY, Weekday.MONDAY],
+                weekdays=[Weekday.MONDAY, Weekday.MONDAY],
                 time=datetime_time(9, 0, 0),
             )
 
         exc = exc_info.value
         assert exc.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
-        assert 'duplicate days' in exc.message
-        assert exc.help_text is not None
+        assert exc.message == 'WeeklySchedule has duplicate weekdays'
+        assert exc.notes == ["weekdays: ['monday', 'monday']"]
+        assert exc.help_text == 'each weekday should appear only once in the list'
 
-    def test_empty_days_raises_validation_error(self) -> None:
-        """Empty days list violates min_length=1 constraint."""
+    def test_empty_weekdays_raises_validation_error(self) -> None:
+        """Empty weekdays list violates min_length=1 constraint."""
         with pytest.raises(ValidationError):
-            WeeklySchedule(days=[], time=datetime_time(9, 0, 0))
+            WeeklySchedule(weekdays=[], time=datetime_time(9, 0, 0))
 
-    def test_all_seven_days_valid(self) -> None:
+    def test_all_seven_weekdays_valid(self) -> None:
         """All 7 weekdays accepted without error."""
         all_days = list(Weekday)
         schedule = WeeklySchedule(
-            days=all_days,
+            weekdays=all_days,
             time=datetime_time(12, 0, 0),
         )
 
-        assert len(schedule.days) == 7
+        assert len(schedule.weekdays) == 7
+
+    def test_the_old_key_days_is_refused(self) -> None:
+        """`days` is an unknown key: the weekdays are in `weekdays`."""
+        with pytest.raises(ValidationError):
+            WeeklySchedule.model_validate({'days': ['monday'], 'time': '09:00:00'})
 
 
 # =============================================================================
@@ -217,22 +292,27 @@ class TestMonthlySchedule:
     """Tests for MonthlySchedule model."""
 
     def test_valid_construction(self) -> None:
-        """MonthlySchedule with day and time."""
-        schedule = MonthlySchedule(day=15, time=datetime_time(3, 0, 0))
+        """MonthlySchedule with day_of_month and time."""
+        schedule = MonthlySchedule(day_of_month=15, time=datetime_time(3, 0, 0))
 
-        assert schedule.day == 15
+        assert schedule.day_of_month == 15
         assert schedule.time == datetime_time(3, 0, 0)
-        assert schedule.type == 'monthly'
+        assert schedule.kind == 'monthly'
 
-    def test_day_below_minimum_raises_validation_error(self) -> None:
-        """day=0 violates ge=1 constraint."""
+    def test_day_of_month_below_minimum_raises_validation_error(self) -> None:
+        """day_of_month=0 violates ge=1 constraint."""
         with pytest.raises(ValidationError):
-            MonthlySchedule(day=0, time=datetime_time(0, 0, 0))
+            MonthlySchedule(day_of_month=0, time=datetime_time(0, 0, 0))
 
-    def test_day_above_maximum_raises_validation_error(self) -> None:
-        """day=32 violates le=31 constraint."""
+    def test_day_of_month_above_maximum_raises_validation_error(self) -> None:
+        """day_of_month=32 violates le=31 constraint."""
         with pytest.raises(ValidationError):
-            MonthlySchedule(day=32, time=datetime_time(0, 0, 0))
+            MonthlySchedule(day_of_month=32, time=datetime_time(0, 0, 0))
+
+    def test_the_old_key_day_is_refused(self) -> None:
+        """`day` is an unknown key: the day is in `day_of_month`."""
+        with pytest.raises(ValidationError):
+            MonthlySchedule.model_validate({'day': 15, 'time': '03:00:00'})
 
 
 # =============================================================================
@@ -248,11 +328,11 @@ def _daily(time_of_day: datetime_time) -> _TimePattern:
 
 
 def _weekly(time_of_day: datetime_time) -> _TimePattern:
-    return WeeklySchedule(days=[Weekday.MONDAY], time=time_of_day)
+    return WeeklySchedule(weekdays=[Weekday.MONDAY], time=time_of_day)
 
 
 def _monthly(time_of_day: datetime_time) -> _TimePattern:
-    return MonthlySchedule(day=1, time=time_of_day)
+    return MonthlySchedule(day_of_month=1, time=time_of_day)
 
 
 _TIME_PATTERNS = [
@@ -332,7 +412,7 @@ class TestTimeOfDayFromText:
     def test_a_time_text_with_a_fraction_of_a_second_is_refused(self) -> None:
         with pytest.raises(ConfigurationError) as exc_info:
             WeeklySchedule.model_validate(
-                {'days': ['monday'], 'time': '09:00:00.000500'},
+                {'weekdays': ['monday'], 'time': '09:00:00.000500'},
             )
 
         assert exc_info.value.message == 'WeeklySchedule time has microseconds'
@@ -352,7 +432,7 @@ class TestTaskSchedule:
         schedule = TaskSchedule(
             name='test',
             task_name='my_task',
-            pattern=IntervalSchedule(seconds=10),
+            pattern=IntervalSchedule(every=timedelta(seconds=10)),
         )
 
         assert schedule.enabled is True
@@ -360,16 +440,16 @@ class TestTaskSchedule:
         assert schedule.max_catch_up_runs == 100
         assert schedule.timezone == 'UTC'
         assert schedule.kwargs == {}
-        assert schedule.queue_name is None
+        assert schedule.queue is None
 
     def test_all_fields(self) -> None:
         """All fields can be set explicitly."""
         schedule = TaskSchedule(
             name='full',
             task_name='my_task',
-            pattern=IntervalSchedule(minutes=5),
+            pattern=IntervalSchedule(every=timedelta(minutes=5)),
             kwargs={'key': 'value'},
-            queue_name='high',
+            queue='high',
             enabled=False,
             timezone='America/New_York',
             catch_up_missed=True,
@@ -379,7 +459,7 @@ class TestTaskSchedule:
         assert schedule.name == 'full'
         assert schedule.task_name == 'my_task'
         assert schedule.kwargs == {'key': 'value'}
-        assert schedule.queue_name == 'high'
+        assert schedule.queue == 'high'
         assert schedule.enabled is False
         assert schedule.timezone == 'America/New_York'
         assert schedule.catch_up_missed is True
@@ -391,8 +471,20 @@ class TestTaskSchedule:
             TaskSchedule(
                 name='s',
                 task_name='my_task',
-                pattern=IntervalSchedule(seconds=10),
+                pattern=IntervalSchedule(every=timedelta(seconds=10)),
                 args=(1,),  # type: ignore[call-arg]
+            )
+
+    def test_the_old_key_queue_name_is_refused(self) -> None:
+        """`queue_name` is an unknown key: the queue is in `queue`."""
+        with pytest.raises(ValidationError):
+            TaskSchedule.model_validate(
+                {
+                    'name': 's',
+                    'task_name': 'my_task',
+                    'pattern': {'kind': 'interval', 'every': 'PT10S'},
+                    'queue_name': 'high',
+                },
             )
 
     def test_name_is_required(self) -> None:
@@ -400,7 +492,7 @@ class TestTaskSchedule:
         with pytest.raises(ValidationError):
             TaskSchedule(  # type: ignore[call-arg]
                 task_name='my_task',
-                pattern=IntervalSchedule(seconds=10),
+                pattern=IntervalSchedule(every=timedelta(seconds=10)),
             )
 
     def test_max_catch_up_runs_validation(self) -> None:
@@ -409,7 +501,7 @@ class TestTaskSchedule:
             TaskSchedule(
                 name='test',
                 task_name='my_task',
-                pattern=IntervalSchedule(seconds=10),
+                pattern=IntervalSchedule(every=timedelta(seconds=10)),
                 max_catch_up_runs=0,
             )
 
@@ -439,12 +531,12 @@ class TestScheduleConfig:
                     TaskSchedule(
                         name='dup',
                         task_name='task_a',
-                        pattern=IntervalSchedule(seconds=5),
+                        pattern=IntervalSchedule(every=timedelta(seconds=5)),
                     ),
                     TaskSchedule(
                         name='dup',
                         task_name='task_b',
-                        pattern=IntervalSchedule(seconds=10),
+                        pattern=IntervalSchedule(every=timedelta(seconds=10)),
                     ),
                 ],
             )

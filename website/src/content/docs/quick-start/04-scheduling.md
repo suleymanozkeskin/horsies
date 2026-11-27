@@ -15,21 +15,21 @@ For full scheduler documentation, see [Scheduler Overview](/horsies/scheduling/s
 from horsies import Ok, Result, TaskError, JsonValue
 from .config import app
 
-@app.task("sync_inventory", queue_name="low")
+@app.task("sync_inventory", queue="low")
 def sync_inventory() -> Result[dict[str, JsonValue], TaskError]:
     return Ok({
         "synced_items": 150,
         "status": "completed",
     })
 
-@app.task("generate_shipping_report", queue_name="low")
+@app.task("generate_shipping_report", queue="low")
 def generate_shipping_report() -> Result[dict[str, JsonValue], TaskError]:
     return Ok({
         "report_id": "RPT-2024-001",
         "orders_shipped": 42,
     })
 
-@app.task("cleanup_completed_orders", queue_name="low")
+@app.task("cleanup_completed_orders", queue="low")
 def cleanup_completed_orders() -> Result[dict[str, JsonValue], TaskError]:
     return Ok({
         "archived_count": 100,
@@ -40,7 +40,7 @@ def cleanup_completed_orders() -> Result[dict[str, JsonValue], TaskError]:
 
 ```python
 from pydantic import SecretStr
-from datetime import time as datetime_time
+from datetime import time as datetime_time, timedelta
 from horsies import AppConfig, PostgresConfig, QueueMode, CustomQueueConfig
 from horsies import (
     ScheduleConfig,
@@ -57,7 +57,7 @@ schedule_config = ScheduleConfig(
         TaskSchedule(
             name="inventory_sync",
             task_name="sync_inventory",
-            pattern=IntervalSchedule(minutes=30),
+            pattern=IntervalSchedule(every=timedelta(minutes=30)),
         ),
         TaskSchedule(
             name="daily_shipping_report",
@@ -68,7 +68,7 @@ schedule_config = ScheduleConfig(
             name="weekly_cleanup",
             task_name="cleanup_completed_orders",
             pattern=WeeklySchedule(
-                days=[Weekday.SUNDAY],
+                weekdays=[Weekday.SUNDAY],
                 time=datetime_time(3, 0, 0),
             ),
         ),
@@ -94,11 +94,11 @@ config = AppConfig(
 
 | Pattern | Example | Use Case |
 |---------|---------|----------|
-| `IntervalSchedule` | `minutes=30` | Frequent syncs |
+| `IntervalSchedule` | `every=timedelta(minutes=30)` | Frequent syncs |
 | `HourlySchedule` | `minute=0` | Hourly reports |
 | `DailySchedule` | `time=02:00` | Nightly jobs |
 | `WeeklySchedule` | `SUNDAY 03:00` | Weekly cleanup |
-| `MonthlySchedule` | `day=1` | Monthly reports |
+| `MonthlySchedule` | `day_of_month=1` | Monthly reports |
 
 ## Running the Scheduler
 

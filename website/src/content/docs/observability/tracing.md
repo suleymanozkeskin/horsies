@@ -85,8 +85,8 @@ So every attempt of every task of a workflow, at every depth, is a child of the 
 
 - The scheduler inserts the task row of a schedule run in SQL, with no send span and no carrier. Each attempt of a scheduled task is the root of a new trace.
 - A rerun of the Rust client (feature `otel`) opens no span and stores the carrier of the caller's current context: the attempts of the new task are children of the caller's span. With no valid span in that context it stores no carrier.
-- A rerun of the Python client through the app (`app.rerun_task`, `app.rerun_task_async`) with `OtelTracing()` does the same. With `NoTracing()` it stores no carrier.
-- The free function `rerun_task` of the Python client has no app, so it stores no carrier. Each attempt of its new task is the root of a new trace.
+- A rerun of the Python client through the app (`app.rerun_task_in`, `app.rerun_task_in_async`) with `OtelTracing()` does the same. With `NoTracing()` it stores no carrier.
+- The free function `rerun_task_in_async` of the Python client has no app, so it stores no carrier. Each attempt of its new task is the root of a new trace.
 
 ## Attributes
 
@@ -178,4 +178,4 @@ The log records of the worker for an attempt carry the same trace id. See [Logs]
 
 **Don't set a different propagator in the worker children.** The child extracts the carrier with its own global propagator. A propagator that does not read the keys that the sender wrote gives the attempt span no parent.
 
-**Don't expect a trace for a scheduled task, or for a rerun through the free function `rerun_task` of the Python client, to start at the scheduler or at the rerun call.** Neither stores a carrier: each attempt is the root of its own trace. Use `app.rerun_task` or `app.rerun_task_async` for a rerun that continues the trace of the caller.
+**Don't expect a trace for a scheduled task, or for a rerun through the free function `rerun_task_in_async` of the Python client, to start at the scheduler or at the rerun call.** Neither stores a carrier: each attempt is the root of its own trace. Use `app.rerun_task_in` or `app.rerun_task_in_async` for a rerun that continues the trace of the caller.

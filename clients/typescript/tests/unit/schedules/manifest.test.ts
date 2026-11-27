@@ -20,7 +20,7 @@ function onlyManifest(manifests: readonly string[]): string {
 function sendOf(task: string, queue: string, priority: number, inputJson: string, retention: string, retainRerunInput: boolean): object {
   return {
     task_name: task,
-    queue_name: queue,
+    queue: queue,
     priority,
     input_json: inputJson,
     task_options: { kind: "ENCODED", json: OPTIONS_TEXT },
@@ -58,7 +58,7 @@ describe("the scheduler manifest of a declaration", () => {
           name: "daily-report",
           activation: {
             kind: "ENABLED",
-            pattern_json: '{"type":"daily","time":"09:00:00"}',
+            pattern_json: '{"kind":"daily","time":"09:00:00"}',
             timezone: "Europe/Berlin",
             catch_up_missed: true,
             max_catch_up_runs: 5,

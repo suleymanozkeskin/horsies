@@ -59,7 +59,7 @@ def _child_definition(work: TaskFunction[..., int]) -> type[WorkflowDefinition[i
     class Child(WorkflowDefinition[int]):
         name = 'success_policy_sub_child'
         definition_key = _key('child')
-        step = TaskNode(fn=work)
+        step = TaskNode(function=work)
 
         config = WorkflowDefinitionConfig(output=step)
 
@@ -70,7 +70,7 @@ class TestSpecValidation:
     def test_a_subworkflow_node_in_required_and_optional_is_accepted(self) -> None:
         app, work = _app_with_tasks()
         child = SubWorkflowNode(workflow_def=_child_definition(work))
-        other = TaskNode(fn=work)
+        other = TaskNode(function=work)
         policy = SuccessPolicy(
             cases=[SuccessCase(required=[child])],
             optional=[other],
@@ -87,7 +87,7 @@ class TestSpecValidation:
 
     def test_a_subworkflow_node_outside_the_workflow_is_refused(self) -> None:
         app, work = _app_with_tasks()
-        inside = TaskNode(fn=work)
+        inside = TaskNode(function=work)
         outside = SubWorkflowNode(workflow_def=_child_definition(work))
         policy = SuccessPolicy(cases=[SuccessCase(required=[outside])])
 
@@ -133,7 +133,7 @@ class TestDefinitionCopy:
             name = 'success_policy_sub_parent'
             definition_key = _key('parent')
             child = SubWorkflowNode(workflow_def=child_definition)
-            extra = TaskNode(fn=work)
+            extra = TaskNode(function=work)
 
             config = WorkflowDefinitionConfig(
                 success_policy=SuccessPolicy(

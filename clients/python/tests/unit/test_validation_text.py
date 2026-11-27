@@ -423,7 +423,7 @@ class TestReturnTypeMismatch:
 
         assert isinstance(result, Err)
         err = result.err_value
-        assert err.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert err.code == ContractCode.RETURN_TYPE_MISMATCH
         assert err.exception is None
         assert MARKER not in (err.message or '')
         assert MARKER not in json.dumps(err.data)
@@ -501,7 +501,7 @@ class TestDefinitionTimeOptions:
 
         with pytest.raises(TaskDefinitionError) as caught:
             refused_options: dict[str, Any] = {'timeout_ms': MARKER}
-            app.task(task_name='test.bad_timeout', **refused_options)(task_fn)
+            app.task(name='test.bad_timeout', **refused_options)(task_fn)
 
         notes = ' '.join(caught.value.notes)
         assert caught.value.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
@@ -516,7 +516,7 @@ class TestDefinitionTimeOptions:
         )
         app.tasks['test.metadata'] = cast(Any, SimpleNamespace(
             task_options_json=json.dumps({
-                'retry_policy': {'max_retries': MARKER, 'auto_retry_for': ['TRANSIENT']},
+                'retry_policy': {'max_retries': MARKER, 'retry_for': ['TRANSIENT']},
             }),
         ))
 

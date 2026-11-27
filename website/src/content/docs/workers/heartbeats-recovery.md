@@ -145,7 +145,7 @@ When a CLAIMED task has no recent claimer heartbeat:
 When a RUNNING task has no recent runner heartbeat:
 
 - **Not safe to blindly requeue**: Code was executing, may have partial side effects
-- If the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining: scheduled for retry (returns to PENDING with `next_retry_at`)
+- If the task has a retry policy with `WORKER_CRASHED` in `retry_for` and retries remaining: scheduled for retry (returns to PENDING with `next_retry_at`)
 - Otherwise: marked as FAILED with `WORKER_CRASHED` error
 - Recent `finalizing_at` suppresses recovery so a completed child is not failed
   while the parent is still writing terminal state
@@ -171,7 +171,7 @@ Each task runs in its own child process. When a child exits abnormally (a segfau
 
 <!-- members: TaskStatus subset -->
 - CLAIMED task (user code not started): returned to PENDING
-- RUNNING task (user code started): if the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining, scheduled for retry; otherwise marked as FAILED with `WORKER_CRASHED` error
+- RUNNING task (user code started): if the task has a retry policy with `WORKER_CRASHED` in `retry_for` and retries remaining, scheduled for retry; otherwise marked as FAILED with `WORKER_CRASHED` error
 
 The worker writes this only after it sees the child exit. If the child does not exit within 30 seconds of a kill by the worker, the worker writes nothing and logs at critical level. A RUNNING task then goes through the stale RUNNING recovery above, and a CLAIMED task is claimed again when its claim lease ends.
 

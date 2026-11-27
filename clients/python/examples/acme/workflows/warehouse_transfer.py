@@ -46,12 +46,12 @@ class WarehouseTransfer(WorkflowDefinition[StockRelease]):
     ) -> WorkflowSpec[StockRelease]:
         """Build a fresh spec for one transfer."""
         allocate = TaskNode(
-            fn=allocate_warehouse,
+            function=allocate_warehouse,
             kwargs={'sku': sku, 'quantity': quantity},
             node_id='allocate_warehouse',
         )
         release = TaskNode(
-            fn=release_stock,
+            function=release_stock,
             kwargs={'sku': sku, 'quantity': quantity},
             waits_for=[allocate],
             node_id='release_stock',

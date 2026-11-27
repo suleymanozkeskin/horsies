@@ -1,9 +1,9 @@
-"""Type pin: the retry methods accept only the ``TaskSendRetryable`` variants.
+"""Type pin: the resend methods accept only the ``TaskSendResendable`` variants.
 
 pyright checks this file through ``pyrightconfig.clean.json``. pytest does
 not collect it (no ``test_`` prefix), and nothing calls its functions. Each
 call that pyright must refuse carries an ignore comment for its rule. The
-config makes an unneeded ignore comment an error, so a retry method that
+config makes an unneeded ignore comment an error, so a resend method that
 accepts a refused variant, or a cause field that ``raise ... from`` accepts
 without a match, fails the check.
 """
@@ -23,7 +23,7 @@ from horsies import (
 from horsies.core.task_decorator import TaskFunction
 
 
-def sync_retries(
+def sync_resends(
     task: TaskFunction[..., int],
     suppressed: TaskSendSuppressed,
     async_context: TaskSendAsyncContext,
@@ -33,29 +33,26 @@ def sync_retries(
     payload_too_large: TaskSendPayloadTooLarge,
     key_conflict: TaskSendIdempotencyKeyConflict,
 ) -> None:
-    _ = task.retry_send(enqueue_failed)
-    _ = task.retry_send(async_context)
-    _ = task.retry_send(key_conflict)  # pyright: ignore[reportArgumentType]
-    _ = task.retry_send(suppressed)  # pyright: ignore[reportArgumentType]
-    _ = task.retry_send(validation_failed)  # pyright: ignore[reportArgumentType]
-    _ = task.retry_send(payload_mismatch)  # pyright: ignore[reportArgumentType]
-    _ = task.retry_send(payload_too_large)  # pyright: ignore[reportArgumentType]
-    _ = task.retry_schedule(enqueue_failed)
-    _ = task.retry_schedule(payload_mismatch)  # pyright: ignore[reportArgumentType]
+    _ = task.resend(enqueue_failed)
+    _ = task.resend(async_context)
+    _ = task.resend(key_conflict)  # pyright: ignore[reportArgumentType]
+    _ = task.resend(suppressed)  # pyright: ignore[reportArgumentType]
+    _ = task.resend(validation_failed)  # pyright: ignore[reportArgumentType]
+    _ = task.resend(payload_mismatch)  # pyright: ignore[reportArgumentType]
+    _ = task.resend(payload_too_large)  # pyright: ignore[reportArgumentType]
 
 
-async def async_retries(
+async def async_resends(
     task: TaskFunction[..., int],
     enqueue_failed: TaskSendEnqueueFailed,
     payload_mismatch: TaskSendPayloadMismatch,
     async_context: TaskSendAsyncContext,
+    key_conflict: TaskSendIdempotencyKeyConflict,
 ) -> None:
-    _ = await task.retry_send_async(enqueue_failed)
-    _ = await task.retry_send_async(async_context)
-    _ = await task.retry_schedule_async(async_context)
-    _ = await task.retry_send_async(payload_mismatch)  # pyright: ignore[reportArgumentType]
-    _ = await task.retry_schedule_async(enqueue_failed)
-    _ = await task.retry_schedule_async(payload_mismatch)  # pyright: ignore[reportArgumentType]
+    _ = await task.resend_async(enqueue_failed)
+    _ = await task.resend_async(async_context)
+    _ = await task.resend_async(key_conflict)  # pyright: ignore[reportArgumentType]
+    _ = await task.resend_async(payload_mismatch)  # pyright: ignore[reportArgumentType]
 
 
 def chain_the_cause(enqueue_failed: TaskSendEnqueueFailed) -> None:

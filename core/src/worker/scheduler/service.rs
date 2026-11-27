@@ -481,7 +481,7 @@ fn manifest_command(send: &ScheduleSendManifest) -> Result<SendCommand, BrokerEr
         i32::try_from(send.priority.0.get()).expect("a queue priority of at most 100 fits an i32");
     SendCommand::prepare(
         &send.task_name,
-        &send.queue_name,
+        &send.queue,
         priority,
         &send.input_json,
         send.task_options.text(),
@@ -1239,8 +1239,8 @@ mod start_and_boundary_tests {
         ));
     }
 
-    /// An enabled UTC schedule of `interval`. An interval with no unit has
-    /// no next slot: a pattern that never fires again, which the manifest
+    /// An enabled UTC schedule of `interval`. An interval of zero has no
+    /// next slot: a pattern that never fires again, which the manifest
     /// parser refuses, so the test builds the schedule directly.
     fn enabled_interval(name: &str, interval: IntervalSchedule) -> EnabledSchedule {
         EnabledSchedule {
@@ -1259,11 +1259,15 @@ mod start_and_boundary_tests {
             enabled_interval(
                 "fires",
                 IntervalSchedule {
-                    seconds: Some(60),
-                    ..IntervalSchedule::default()
+                    every: Duration::from_secs(60),
                 },
             ),
-            enabled_interval("never", IntervalSchedule::default()),
+            enabled_interval(
+                "never",
+                IntervalSchedule {
+                    every: Duration::ZERO,
+                },
+            ),
         ];
         assert!(matches!(
             check_next_slots(&schedules, database_now),

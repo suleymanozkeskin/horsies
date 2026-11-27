@@ -21,14 +21,13 @@ fn enabled_schedule(name: &str, task_name: &str, timezone: &str, options: &Value
         "name": name,
         "activation": {
             "kind": "ENABLED",
-            "pattern_json":
-                "{\"type\":\"interval\",\"seconds\":60,\"minutes\":null,\"hours\":null,\"days\":null}",
+            "pattern_json": "{\"kind\":\"interval\",\"every\":\"PT1M\"}",
             "timezone": timezone,
             "catch_up_missed": false,
             "max_catch_up_runs": 100,
             "send": {
                 "task_name": task_name,
-                "queue_name": "default",
+                "queue": "default",
                 "priority": 40,
                 "input_json": INPUT_TEXT,
                 "task_options": options,
@@ -164,10 +163,7 @@ async fn a_manifest_scheduler_starts_and_fires_with_the_send_facts_of_the_manife
         .expect("the start writes the state row of the enabled schedule");
     let digest = crate::worker::scheduler::config_digest::config_digest(
         &SchedulePattern::Interval(crate::core::config::IntervalSchedule {
-            seconds: Some(60),
-            minutes: None,
-            hours: None,
-            days: None,
+            every: std::time::Duration::from_secs(60),
         }),
         "UTC",
     );

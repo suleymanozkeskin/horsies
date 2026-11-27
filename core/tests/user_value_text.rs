@@ -1374,7 +1374,7 @@ impl<'de> Deserialize<'de> for Code {
 
 mod inline {
     fn decode(bytes: &[u8]) {
-        let members = BTreeMap::<String, TaskOutcome<serde_json::Value, UserCode>>::deserialize(d);
+        let members = BTreeMap::<String, TaskOutcome<serde_json::Value, CustomCode>>::deserialize(d);
     }
     mod declared;
 }

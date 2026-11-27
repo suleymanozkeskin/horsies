@@ -92,7 +92,7 @@ async fn archived_phases(suite: &Suite, task_id: Uuid) -> ArchivedPhases {
 async fn each_attempt_records_its_placement(instance: Instance) {
     let suite = Suite::start(BIN, instance).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let simple = suite.function(basic::simple::handle);
+    let simple = suite.function(basic::simple::function);
     let mut task_ids = Vec::new();
     for x in 0..TASKS {
         let handle = simple

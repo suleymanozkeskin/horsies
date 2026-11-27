@@ -63,7 +63,7 @@ broker.app = app
 _LEFT_WORK: list[asyncio.Task[None]] = []
 
 
-@app.task(task_name='e2e_left_work_marker_healthcheck')
+@app.task(name='e2e_left_work_marker_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
@@ -77,7 +77,7 @@ async def _hold_the_loop_then_write(path: str, seconds: float) -> None:
         marker.write('ended')
 
 
-@app.task(task_name='e2e_left_work_holds_the_loop')
+@app.task(name='e2e_left_work_holds_the_loop')
 async def left_work_holds_the_loop(
     *,
     marker_path: str,

@@ -62,7 +62,7 @@ def _make_ready_check() -> Callable[[], bool]:
             if is_err(sent):
                 return False
             handle = sent.ok_value
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
@@ -75,7 +75,7 @@ async def _wait_for_file(path: Path) -> None:
 
 
 async def _ok_pid(handle: TaskHandle[int]) -> int:
-    result = await handle.get_async(timeout_ms=RESULT_TIMEOUT_MS)
+    result = await handle.get_async(wait_ms=RESULT_TIMEOUT_MS)
     return succeeded_value(result)
 
 

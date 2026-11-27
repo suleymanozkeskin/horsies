@@ -86,33 +86,33 @@ RAN: list[str] = []
 
 
 @APP.task(
-    task_name='thread_double', execution=Execution.SHARED_THREAD, timeout_ms=10_000
+    name='thread_double', execution=Execution.SHARED_THREAD, timeout_ms=10_000
 )
 def thread_double(*, x: int) -> Result[int, TaskError]:
     RAN.append(threading.current_thread().name)
     return Ok(x * 2)
 
 
-@APP.task(task_name='thread_async', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
+@APP.task(name='thread_async', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
 async def thread_async() -> Result[int, TaskError]:
     RAN.append('thread_async')
     return Ok(1)
 
 
-@APP.task(task_name='thread_raises', execution=Execution.SHARED_THREAD, timeout_ms=1000)
+@APP.task(name='thread_raises', execution=Execution.SHARED_THREAD, timeout_ms=1000)
 def thread_raises() -> Result[int, TaskError]:
     raise ValueError('bad input')
 
 
 @APP.task(
-    task_name='thread_core_stopped', execution=Execution.SHARED_THREAD, timeout_ms=1000
+    name='thread_core_stopped', execution=Execution.SHARED_THREAD, timeout_ms=1000
 )
 def thread_core_stopped() -> Result[int, TaskError]:
     """A core call of the body met the stopped core of the child."""
     raise core.CoreStopped('log forwarder', 'planned panic')
 
 
-@APP.task(task_name='thread_never', execution=Execution.SHARED_THREAD, timeout_ms=1000)
+@APP.task(name='thread_never', execution=Execution.SHARED_THREAD, timeout_ms=1000)
 def thread_never() -> Result[int, TaskError]:
     RAN.append('thread_never')
     return Ok(1)
@@ -243,7 +243,7 @@ def test_an_async_def_task_is_refused_before_it_runs(steps: _Steps) -> None:
     envelope = _set_running(_run(_frame('thread_async')))
 
     error = _failed(_result(envelope, int))
-    assert error.error_code == OperationalCode.WORKER_RESOLUTION_ERROR
+    assert error.code == OperationalCode.WORKER_RESOLUTION_ERROR
     assert error.message == (
         'Failed to resolve thread_async: the task is async def, and a shared '
         'thread child runs only def tasks'
@@ -268,7 +268,7 @@ def test_a_refusal_fails_the_task_after_running_and_before_resolve(
         TimeoutValueInvalid(reason=reason),
     ).envelope
     error = _failed(_result(envelope, int))
-    assert error.error_code == OperationalCode.WORKER_SERIALIZATION_ERROR
+    assert error.code == OperationalCode.WORKER_SERIALIZATION_ERROR
     assert error.data == {
         'task_name': 'thread_double',
         'field': 'timeout_ms',
@@ -293,7 +293,7 @@ def test_a_task_that_raises_is_mapped(steps: _Steps) -> None:
     envelope = _set_running(_run(_frame('thread_raises')))
 
     error = _failed(_result(envelope, int))
-    assert error.error_code == OperationalCode.UNHANDLED_EXCEPTION
+    assert error.code == OperationalCode.UNHANDLED_EXCEPTION
 
 
 class _Exited(BaseException):
@@ -336,7 +336,7 @@ def test_an_unknown_task_is_a_resolution_error(steps: _Steps) -> None:
     envelope = _set_running(_run(_frame('not_registered')))
 
     error = _failed(_result(envelope, int))
-    assert error.error_code == OperationalCode.WORKER_RESOLUTION_ERROR
+    assert error.code == OperationalCode.WORKER_RESOLUTION_ERROR
 
 
 class TestTheMarkerOfAThreadSeat:

@@ -7,6 +7,7 @@ skip) and the ``app.check()`` integration including the worker-role gate.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -66,10 +67,10 @@ def _make_mock_app(tasks: dict[str, MagicMock] | None = None) -> MagicMock:
 
 
 def _make_task_mock(fn: object, *, task_options_json: str | None = None) -> MagicMock:
-    """Mock task object exposing _original_fn, a default queue and its options text."""
+    """Mock task object exposing _original_function, a default queue and its options text."""
     task = MagicMock()
-    task._original_fn = fn
-    task.task_queue_name = None
+    task._original_function = fn
+    task.queue = None
     task.task_options_json = task_options_json
     return task
 
@@ -81,16 +82,16 @@ def _schedule(
     timezone: str = 'UTC',
     enabled: bool = True,
     kwargs: dict[str, object] | None = None,
-    queue_name: str | None = None,
+    queue: str | None = None,
 ) -> TaskSchedule:
     return TaskSchedule(
         name=name,
         task_name=task_name,
-        pattern=IntervalSchedule(seconds=5),
+        pattern=IntervalSchedule(every=timedelta(seconds=5)),
         timezone=timezone,
         enabled=enabled,
         kwargs=kwargs or {},
-        queue_name=queue_name,
+        queue=queue,
     )
 
 
@@ -378,6 +379,21 @@ class TestCollectScheduleErrors:
         assert isinstance(errors[0], ConfigurationError)
         assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'invalid queue configuration' in errors[0].message
+        assert errors[0].help_text == (
+            'check queue in schedule matches app.config queue settings'
+        )
+
+    def test_the_schedule_queue_is_checked_in_place_of_the_task_queue(self) -> None:
+        """The schedule's `queue` is the queue that the app checks."""
+        def fn(x: int) -> str:
+            return str(x)
+
+        app = _make_mock_app(tasks={'task_a': _make_task_mock(fn)})
+
+        errors = self._collect([_schedule(kwargs={'x': 1}, queue='reports')], app=app)
+
+        assert errors == []
+        app.validate_queue.assert_called_once_with('reports')
 
     def test_signature_mismatch(self) -> None:
         """Kwargs that do not bind to the task signature are rejected."""

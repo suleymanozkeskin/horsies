@@ -109,7 +109,7 @@ class TestWrapStrategy:
 # =============================================================================
 
 READ_METHODS: Final[dict[str, tuple[str, Callable[[WorkflowHandle[Any]], Any]]]] = {
-    'get': ('wait_workflow_result', lambda handle: handle.get(timeout_ms=100)),
+    'get': ('wait_workflow_result', lambda handle: handle.get(wait_ms=100)),
     'result_for': ('workflow_node_result', lambda handle: handle.result_for(NODE_KEY)),
 }
 
@@ -151,7 +151,7 @@ class TestReadStrategy:
         handle, broker = _make_handle('wait_workflow_result', completed)
         handle.out_type = int
 
-        result = handle.get(timeout_ms=100)
+        result = handle.get(wait_ms=100)
 
         assert result == Ok(Succeeded(42))
         broker._core_handle.wait_workflow_result.assert_called_once_with(

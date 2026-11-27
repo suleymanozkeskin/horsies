@@ -63,15 +63,15 @@ class ErrorCategory(str, enum.Enum):
     An operator reads these differently: ``OPERATIONAL`` means infrastructure
     is failing, ``CONTRACT`` means a task's code or serialization is wrong,
     ``OUTCOME`` is a terminal lifecycle state (cancelled/expired/timeout),
-    ``RETRIEVAL`` is a result-fetch state, and ``DOMAIN`` is a business error
-    the task itself chose to return.
+    ``RETRIEVAL`` is a result-fetch state, and ``CUSTOM`` is a code that the
+    task itself chose to return (a code outside the built-in codes).
     """
 
     OPERATIONAL = 'OPERATIONAL'
     CONTRACT = 'CONTRACT'
     RETRIEVAL = 'RETRIEVAL'
     OUTCOME = 'OUTCOME'
-    DOMAIN = 'DOMAIN'
+    CUSTOM = 'CUSTOM'
 
 
 # --------------------------------------------------------------------------- #

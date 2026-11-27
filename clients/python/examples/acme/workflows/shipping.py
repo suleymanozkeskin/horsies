@@ -41,19 +41,19 @@ class ShippingWorkflow(WorkflowDefinition[TrackingSeed]):
     ) -> WorkflowSpec[TrackingSeed]:
         """Build a fresh spec for one order's shipment."""
         book = TaskNode(
-            fn=book_courier,
+            function=book_courier,
             kwargs={'order_id': order_id, 'courier': courier, 'express': express},
             node_id='book_courier',
         )
         label = TaskNode(
-            fn=print_label,
+            function=print_label,
             kwargs={'order_id': order_id},
             waits_for=[book],
             args_from={'booking': book},
             node_id='print_label',
         )
         seed = TaskNode(
-            fn=tracking_seed,
+            function=tracking_seed,
             kwargs={'order_id': order_id},
             waits_for=[label],
             args_from={'label': label},

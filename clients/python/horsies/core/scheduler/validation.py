@@ -176,9 +176,9 @@ def _resolve_queue_error(
 ) -> HorsiesError | None:
     """Resolve the schedule's queue (explicit, else task default) and validate it."""
     task = app.tasks.get(schedule.task_name)
-    task_queue = task.task_queue_name if task is not None else None
+    task_queue = task.queue if task is not None else None
     queue_name = (
-        schedule.queue_name if schedule.queue_name is not None else task_queue
+        schedule.queue if schedule.queue is not None else task_queue
     )
     try:
         app.validate_queue(queue_name)
@@ -187,7 +187,7 @@ def _resolve_queue_error(
             message=f"invalid queue configuration for schedule '{schedule.name}'",
             code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
             notes=[f'underlying error: {exc}'],
-            help_text='check queue_name in schedule matches app.config queue settings',
+            help_text='check queue in schedule matches app.config queue settings',
         )
     return None
 
@@ -202,13 +202,13 @@ def _signature_error(
     the runtime on each run, so a schedule does not supply it, and a schedule
     kwarg with its name does not bind."""
     task = app.tasks.get(schedule.task_name)
-    original_fn = getattr(task, '_original_fn', None) if task else None
-    if original_fn is None:
+    original_function = getattr(task, '_original_function', None) if task else None
+    if original_function is None:
         return None  # Cannot validate without original function signature
 
     sig = without_runtime_parameter(
-        inspect.signature(original_fn),
-        task_runtime_parameter(original_fn),
+        inspect.signature(original_function),
+        task_runtime_parameter(original_function),
     )
     try:
         sig.bind(**schedule.kwargs)
@@ -230,7 +230,7 @@ def _encode_schedule_kwargs(
 
     ``sig.bind`` only checks parameter names/arity, not the strict-serde wire
     contract. This refuses a kwarg that targets an engine-injected parameter
-    (``workflow_ctx``/``workflow_meta``), a TaskOutcome-typed parameter, a value
+    (``workflow_context``/``workflow_meta``), a TaskOutcome-typed parameter, a value
     that cannot be JSON-serialized, and kwargs over ``payload.reject_bytes``.
     Each repeats on every fire, so the schedule is refused once at boot.
 
@@ -248,7 +248,7 @@ def _encode_schedule_kwargs(
             message=f"schedule '{schedule.name}' kwargs are not encodable for task '{schedule.task_name}'",
             code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
             notes=[f'encode error: {exc}'],
-            help_text='schedules are kwargs-only and must satisfy the task\'s typed signature; do not supply engine-injected (workflow_ctx/workflow_meta) or TaskOutcome-typed kwargs',
+            help_text='schedules are kwargs-only and must satisfy the task\'s typed signature; do not supply engine-injected (workflow_context/workflow_meta) or TaskOutcome-typed kwargs',
         ))
     ser = dumps_json(encoded)
     if is_err(ser):

@@ -84,7 +84,7 @@ __all__ = [
     'decode_event',
 ]
 
-EVENT_CONTRACT_VERSION: Final = 8
+EVENT_CONTRACT_VERSION: Final = 9
 """The version of the event contract that this module reads."""
 
 
@@ -355,9 +355,9 @@ class AttemptEndDecidedByWorker:
     worker): the start of the span.
     """
 
-    child_kind: Execution = field(repr=False)
-    """Internal: the kind of the child that ran the attempt, the
-    `horsies.task.execution` of the span.
+    child_execution: Execution = field(repr=False)
+    """Internal: the execution class of the child that ran the
+    attempt, the `horsies.task.execution` of the span.
     """
 
     worker_id: str = field(repr=False)
@@ -601,10 +601,10 @@ class AttemptPlaced:
 
     attempt: int
 
-    child_kind: Execution
-    """The kind of the child that took the task. A worker that runs no
-    child of a shared class serves that class on its isolated children,
-    so a task of a shared class can run on an isolated child.
+    child_execution: Execution
+    """The execution class of the child that took the task. A worker that
+    runs no child of a shared class serves that class on its isolated
+    children, so a task of a shared class can run on an isolated child.
     """
 
     child_pid: int
@@ -708,8 +708,8 @@ class ChildStarted:
     at: datetime
     """When the ready frame reached the worker (wall clock of the worker)."""
 
-    child_kind: Execution
-    """The kind of the child: the execution class of its slot."""
+    child_execution: Execution
+    """The execution class of the child: the class of its slot."""
 
     slot: int
 
@@ -728,7 +728,7 @@ class ChildReplaced:
     at: datetime
     """When the worker ended the old child (wall clock of the worker)."""
 
-    child_kind: Execution
+    child_execution: Execution
 
     slot: int
 
@@ -745,7 +745,7 @@ class SlotDown:
     at: datetime
     """When the boot failed (wall clock of the worker)."""
 
-    child_kind: Execution
+    child_execution: Execution
 
     slot: int
 
@@ -761,7 +761,7 @@ class SlotRecovered:
     worker).
     """
 
-    child_kind: Execution
+    child_execution: Execution
 
     slot: int
 
@@ -1446,7 +1446,7 @@ def _read_attempt_end_decided_by_worker(fields: list[object], here: _At) -> Resu
             wire_error_code,
             wire_trace,
             wire_placed_at,
-            wire_child_kind,
+            wire_child_execution,
             wire_worker_id,
             wire_workflow,
         ]:
@@ -1473,8 +1473,8 @@ def _read_attempt_end_decided_by_worker(fields: list[object], here: _At) -> Resu
             pass
         case Err() as refused:
             return refused
-    match _read_execution(wire_child_kind, here.inside('child_kind')):
-        case Ok(value_child_kind):
+    match _read_execution(wire_child_execution, here.inside('child_execution')):
+        case Ok(value_child_execution):
             pass
         case Err() as refused:
             return refused
@@ -1494,7 +1494,7 @@ def _read_attempt_end_decided_by_worker(fields: list[object], here: _At) -> Resu
             error_code=value_error_code,
             trace=value_trace,
             placed_at=value_placed_at,
-            child_kind=value_child_kind,
+            child_execution=value_child_execution,
             worker_id=value_worker_id,
             workflow=value_workflow,
         )
@@ -1904,7 +1904,7 @@ def _read_attempt_placed(fields: list[object], here: _At) -> Result[AttemptPlace
             wire_queue,
             wire_execution,
             wire_attempt,
-            wire_child_kind,
+            wire_child_execution,
             wire_child_pid,
             wire_slot_wait,
         ]:
@@ -1941,8 +1941,8 @@ def _read_attempt_placed(fields: list[object], here: _At) -> Result[AttemptPlace
             pass
         case Err() as refused:
             return refused
-    match _read_execution(wire_child_kind, here.inside('child_kind')):
-        case Ok(value_child_kind):
+    match _read_execution(wire_child_execution, here.inside('child_execution')):
+        case Ok(value_child_execution):
             pass
         case Err() as refused:
             return refused
@@ -1964,7 +1964,7 @@ def _read_attempt_placed(fields: list[object], here: _At) -> Result[AttemptPlace
             queue=value_queue,
             execution=value_execution,
             attempt=value_attempt,
-            child_kind=value_child_kind,
+            child_execution=value_child_execution,
             child_pid=value_child_pid,
             slot_wait=value_slot_wait,
         )
@@ -2214,7 +2214,7 @@ def _read_child_started(fields: list[object], here: _At) -> Result[ChildStarted,
     match fields:
         case [
             wire_at,
-            wire_child_kind,
+            wire_child_execution,
             wire_slot,
             wire_child_pid,
             wire_boot_duration,
@@ -2227,8 +2227,8 @@ def _read_child_started(fields: list[object], here: _At) -> Result[ChildStarted,
             pass
         case Err() as refused:
             return refused
-    match _read_execution(wire_child_kind, here.inside('child_kind')):
-        case Ok(value_child_kind):
+    match _read_execution(wire_child_execution, here.inside('child_execution')):
+        case Ok(value_child_execution):
             pass
         case Err() as refused:
             return refused
@@ -2250,7 +2250,7 @@ def _read_child_started(fields: list[object], here: _At) -> Result[ChildStarted,
     return Ok(
         ChildStarted(
             at=value_at,
-            child_kind=value_child_kind,
+            child_execution=value_child_execution,
             slot=value_slot,
             child_pid=value_child_pid,
             boot_duration=value_boot_duration,
@@ -2263,7 +2263,7 @@ def _read_child_replaced(fields: list[object], here: _At) -> Result[ChildReplace
     match fields:
         case [
             wire_at,
-            wire_child_kind,
+            wire_child_execution,
             wire_slot,
             wire_child_pid,
             wire_reason,
@@ -2276,8 +2276,8 @@ def _read_child_replaced(fields: list[object], here: _At) -> Result[ChildReplace
             pass
         case Err() as refused:
             return refused
-    match _read_execution(wire_child_kind, here.inside('child_kind')):
-        case Ok(value_child_kind):
+    match _read_execution(wire_child_execution, here.inside('child_execution')):
+        case Ok(value_child_execution):
             pass
         case Err() as refused:
             return refused
@@ -2299,7 +2299,7 @@ def _read_child_replaced(fields: list[object], here: _At) -> Result[ChildReplace
     return Ok(
         ChildReplaced(
             at=value_at,
-            child_kind=value_child_kind,
+            child_execution=value_child_execution,
             slot=value_slot,
             child_pid=value_child_pid,
             reason=value_reason,
@@ -2312,7 +2312,7 @@ def _read_slot_down(fields: list[object], here: _At) -> Result[SlotDown, Malform
     match fields:
         case [
             wire_at,
-            wire_child_kind,
+            wire_child_execution,
             wire_slot,
             wire_cause,
         ]:
@@ -2324,8 +2324,8 @@ def _read_slot_down(fields: list[object], here: _At) -> Result[SlotDown, Malform
             pass
         case Err() as refused:
             return refused
-    match _read_execution(wire_child_kind, here.inside('child_kind')):
-        case Ok(value_child_kind):
+    match _read_execution(wire_child_execution, here.inside('child_execution')):
+        case Ok(value_child_execution):
             pass
         case Err() as refused:
             return refused
@@ -2342,7 +2342,7 @@ def _read_slot_down(fields: list[object], here: _At) -> Result[SlotDown, Malform
     return Ok(
         SlotDown(
             at=value_at,
-            child_kind=value_child_kind,
+            child_execution=value_child_execution,
             slot=value_slot,
             cause=value_cause,
         )
@@ -2354,7 +2354,7 @@ def _read_slot_recovered(fields: list[object], here: _At) -> Result[SlotRecovere
     match fields:
         case [
             wire_at,
-            wire_child_kind,
+            wire_child_execution,
             wire_slot,
         ]:
             pass
@@ -2365,8 +2365,8 @@ def _read_slot_recovered(fields: list[object], here: _At) -> Result[SlotRecovere
             pass
         case Err() as refused:
             return refused
-    match _read_execution(wire_child_kind, here.inside('child_kind')):
-        case Ok(value_child_kind):
+    match _read_execution(wire_child_execution, here.inside('child_execution')):
+        case Ok(value_child_execution):
             pass
         case Err() as refused:
             return refused
@@ -2378,7 +2378,7 @@ def _read_slot_recovered(fields: list[object], here: _At) -> Result[SlotRecovere
     return Ok(
         SlotRecovered(
             at=value_at,
-            child_kind=value_child_kind,
+            child_execution=value_child_execution,
             slot=value_slot,
         )
     )

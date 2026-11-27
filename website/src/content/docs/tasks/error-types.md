@@ -14,12 +14,12 @@ The Python types that carry the error codes of the [Errors Reference](/horsies/t
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `error_code` | `BuiltInTaskCode \| str` | Required. Library or domain error code |
+| `code` | `BuiltInTaskCode \| str` | Required. Built-in or custom error code |
 | `message` | `str \| None` | Human-readable description |
 | `data` | `JsonInput` on write, `JsonValue` on read | Additional context (task_id, etc.) |
 | `exception` | `BaseException \| ExceptionRecord \| None` | Live exception in-process; flattened to a `ExceptionRecord` TypedDict (`type`, `module`, `message`, `repr`, `traceback`) when serialized to the wire |
 
-`error_code` must not be null: `auto_retry_for` and outcome routing read it. `TaskError` refuses a key that it does not declare, at construction and at decode. `SubWorkflowFailure` adds `sub_workflow_id` and `sub_workflow_summary`, and it refuses any other key. A stored error with an unknown key, or without `error_code`, is stored data that does not parse: see [Decode Errors](/horsies/tasks/task-types/#decode-errors).
+`code` must not be null: `retry_for` and outcome routing read it. `TaskError` refuses a key that it does not declare, at construction and at decode. `SubWorkflowFailure` adds `sub_workflow_id` and `sub_workflow_summary`, and it refuses any other key. A stored error with an unknown key, or without the key `error_code` (the stored key of `code`), is stored data that does not parse: see [Decode Errors](/horsies/tasks/task-types/#decode-errors).
 
 ## Validation Failure Text
 
@@ -45,42 +45,42 @@ The cause object follows the same rule. Where the library catches a pydantic `Va
 
 | Class | `code` | When | Kept by a `TaskHandle` |
 | ----- | ------ | ---- | ---------------------- |
-| `WaitTimeout` | `RetrievalCode.WAIT_TIMEOUT` | The task or the workflow did not end before the wait limit. It may still run | No |
-| `TaskNotFound` | `RetrievalCode.TASK_NOT_FOUND` | Neither the live table nor the task history holds the task. A handle built by id can race the commit of its send | No |
-| `WorkflowNotFound` | `RetrievalCode.WORKFLOW_NOT_FOUND` | No workflow has the id of the handle | – |
-| `ResultNotAvailable` | `RetrievalCode.RESULT_NOT_AVAILABLE` | The task reached a terminal status and stored no result, or the handle has no broker | Yes |
-| `ResultNotReady` | `RetrievalCode.RESULT_NOT_READY` | `result_for()`: the node stores no result yet | – |
-| `WaitInsideTask` | `RetrievalCode.WAIT_INSIDE_TASK` | A result wait in a process that runs task bodies. Nothing was read | No |
-| `AsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form | No |
-| `InvalidInput` | `RetrievalCode.INVALID_INPUT` | `timeout_ms` is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`. Nothing was read | No |
-| `ResultDeserializationError` | `OperationalCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types | Yes |
-| `UnknownCustomCode` | `RetrievalCode.UNKNOWN_CUSTOM_CODE` | The stored error has a custom code that the declared `Enum` of the task does not name. `custom_code` holds the stored text | Yes |
+| `ReadWaitTimeout` | `RetrievalCode.WAIT_TIMEOUT` | The task or the workflow did not end before the wait limit. It may still run | No |
+| `ReadTaskNotFound` | `RetrievalCode.TASK_NOT_FOUND` | Neither the live table nor the task history holds the task. A handle built by id can race the commit of its send | No |
+| `ReadWorkflowNotFound` | `RetrievalCode.WORKFLOW_NOT_FOUND` | No workflow has the id of the handle | – |
+| `ReadResultNotAvailable` | `RetrievalCode.RESULT_NOT_AVAILABLE` | The task reached a terminal status and stored no result, or the handle has no broker | Yes |
+| `ReadResultNotReady` | `RetrievalCode.RESULT_NOT_READY` | `result_for()`: the node stores no result yet | – |
+| `ReadWaitInsideTask` | `RetrievalCode.WAIT_INSIDE_TASK` | A result wait in a process that runs task bodies. Nothing was read | No |
+| `ReadAsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form | No |
+| `ReadInvalidInput` | `RetrievalCode.INVALID_INPUT` | `wait_ms` is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`. Nothing was read | No |
+| `ReadResultDeserializationError` | `OperationalCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types | Yes |
+| `ReadUnknownCustomCode` | `RetrievalCode.UNKNOWN_CUSTOM_CODE` | The stored error has a custom code that the declared `Enum` of the task does not name. `custom_code` holds the stored text | Yes |
 | `ReadDatabaseError` | `OperationalCode.DATABASE_ERROR` | The database, the connection or the core call failed. A later read may succeed | No |
-| `NoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The task succeeded, and this process has no declared type to read the value: the handle was built by id, or the task is not registered here | Yes |
-| `WorkflowCtxMissingId` | `ContractCode.WORKFLOW_CONTEXT_MISSING_ID` | `result_for()` got a node with no `node_id`. Nothing was read | – |
+| `ReadNoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The task succeeded, and this process has no declared type to read the value: the handle was built by id, or the task is not registered here | Yes |
+| `ReadWorkflowContextMissingId` | `ContractCode.WORKFLOW_CONTEXT_MISSING_ID` | `result_for()` got a node with no `node_id`. Nothing was read | – |
 
-A failed task decodes without a declared type, so `NoTypeAvailable` comes only for a task that succeeded. A process that does not import the task code still reads failed tasks.
+A failed task decodes without a declared type, so `ReadNoTypeAvailable` comes only for a task that succeeded. A process that does not import the task code still reads failed tasks.
 
 A read does its checks before it reads, in this order. Only the first check that fails gives its class:
 
-1. `InvalidInput`: the wait limit (`timeout_ms`) is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`.
-2. `WaitInsideTask`: the read runs in a process that runs task bodies.
+1. `ReadInvalidInput`: the wait limit (`wait_ms`) is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`.
+2. `ReadWaitInsideTask`: the read runs in a process that runs task bodies.
 3. A `TaskHandle` returns the read that it keeps.
-4. `AsyncContext`: a sync read runs on a thread that runs an event loop.
+4. `ReadAsyncContext`: a sync read runs on a thread that runs an event loop.
 
-The Rust and the TypeScript clients use the same order. So a read inside a task with a wait above the limit gives `InvalidInput` in each client.
+The Rust and the TypeScript clients use the same order. So a read inside a task with a wait above the limit gives `INVALID_INPUT` in each client.
 
 ```python
 from horsies import (
-    ReadDatabaseError,
     Err,
     Failed,
     Ok,
+    ReadDatabaseError,
     ReadResult,
+    ReadTaskNotFound,
+    ReadWaitTimeout,
     Succeeded,
     TaskError,
-    TaskNotFound,
-    WaitTimeout,
 )
 
 
@@ -89,8 +89,8 @@ def describe_read(read: ReadResult[int, TaskError]) -> str:
         case Ok(Succeeded(value)):
             return f'value: {value}'
         case Ok(Failed(task_error)):
-            return f'task failed: {task_error.error_code}'
-        case Err(WaitTimeout() | TaskNotFound() | ReadDatabaseError()):
+            return f'task failed: {task_error.code}'
+        case Err(ReadWaitTimeout() | ReadTaskNotFound() | ReadDatabaseError()):
             return 'no outcome yet: read again later'
         case Err(read_error):
             return f'no outcome: {read_error.code}: {read_error.message}'
@@ -116,7 +116,7 @@ They also require `send_kind` (`from horsies import SendKind`): `SendKind.FIRST`
 
 ### Calls That Run on the Core
 
-These calls run on the core of the process: `enqueue()`, `enqueue_async()`, `ensure_schema_initialized()`, `get_task_info()`, `get_task_info_async()`, `get_raw_result_record()`, `get_raw_result_record_async()`, `ping_database_async()`, `ping_workers_async()`, and the task sends (`send()`, `send_async()`, `schedule()`, `schedule_async()` and the four retry methods). The core has one set of pools per broker, for every thread and event loop.
+These calls run on the core of the process: `enqueue()`, `enqueue_async()`, `ensure_schema_initialized()`, `get_task_info()`, `get_task_info_async()`, `get_raw_result_record()`, `get_raw_result_record_async()`, `ping_database_async()`, `ping_workers_async()`, and the task sends (`send()`, `send_async()` and the two resend methods). The core has one set of pools per broker, for every thread and event loop.
 
 - The sync forms `enqueue()`, `get_task_info()` and `get_raw_result_record()` call the core on the calling thread. They return `ASYNC_CONTEXT` on a thread that runs an event loop.
 
@@ -135,7 +135,7 @@ Two more core errors are never a result: see [Process-State Refusals](#process-s
 `ForkedAfterCoreStart` and `CoreStopped` are states of the process, not of one call. The core refuses every later call in the process, so a retry in the same process gets the same refusal. Import both from `horsies`.
 
 - Every call that runs on the core raises them. No call returns them as a result, and no result type has a variant for them.
-- This covers the task sends and the four retry methods, `enqueue()`, the task, result and health reads of the app and the broker, the broker's task lists and recovery passes, `ensure_schema_initialized()`, `check(live=True)`, the workflow start and its retry, every `WorkflowHandle` method that reads or changes the workflow, `pause_workflow()` and `resume_workflow()`, the reads and `cancel_task()` of `horsies.monitoring`, and the schema probe of `horsies web`. Each sync form and each `*_async` form raises them.
+- This covers the task sends and the two resend methods, `enqueue()`, the task, result and health reads of the app and the broker, the broker's task lists and recovery passes, `ensure_schema_initialized()`, `check(live=True)`, the workflow start and its retry, every `WorkflowHandle` method that reads or changes the workflow, `pause_workflow()` and `resume_workflow()`, the reads and `cancel_task()` of `horsies.monitoring`, and the schema probe of `horsies web`. Each sync form and each `*_async` form raises them.
 - Nothing ran. `close()` and `close_async()` raise them from the close of the core handle.
 - In a worker child, the child ends itself at its next core call and the worker replaces it. The child exits with code 80; its last log line names the cause.
   - At the start of a task, before task code ran: the worker releases the claim with no attempt charged, and a new child runs the task.
@@ -241,11 +241,11 @@ def raise_broker_error(err: DatabaseOperationError) -> None:
 
 ## Send Errors (TaskSendResult)
 
-Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.send_async()`, `.schedule()` and `.schedule_async()`. These are separate from the result of the task: they indicate that enqueuing the task itself failed, not that task execution failed.
+Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.send_async()`, `.resend()` and `.resend_async()`. These are separate from the result of the task: they indicate that enqueuing the task itself failed, not that task execution failed.
 
 ### TaskSendError
 
-`TaskSendError` is a union with one frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure, and `err.code` names its member. Match on the variant; a `match` that omits a variant fails pyright's exhaustiveness check. The handling pattern is in [Sending Tasks](/horsies/tasks/sending-tasks/#retrying-failed-sends).
+`TaskSendError` is a union with one frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure, and `err.code` names its member. Match on the variant; a `match` that omits a variant fails pyright's exhaustiveness check. The handling pattern is in [Sending Tasks](/horsies/tasks/sending-tasks/#resending-failed-sends).
 
 | Variant | `code` | Fields |
 | ------- | ------ | ------ |
@@ -261,7 +261,7 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | ----- | ---- | ----------- |
 | `message` | `str` | Human-readable description |
 | `task_id` | `uuid.UUID` | Task id of the prepared send |
-| `payload` | `TaskSendPayload` | Serialized envelope that the retry methods send again |
+| `payload` | `TaskSendPayload` | Serialized envelope that the resend methods send again |
 | `retryable` | `bool` | `TaskSendEnqueueFailed`: the core's classification of the cause, `True` when the condition may clear, for example a lost connection or `TooManyPendingCalls`. `TaskSendIdempotencyKeyConflict`: a class variable that is always `False`, because a repeat of the same send does not complete it |
 | `cause` | `BaseException \| NoCause` | The exception of the cause. `NoCause()` when a check found the failure without a Python exception |
 | `owner_task_id` | `uuid.UUID` | The task that holds the idempotency key |
@@ -290,13 +290,13 @@ def log_enqueue_failure(err: TaskSendEnqueueFailed) -> None:
 
 For a validation failure, the cause names the field, the message and the type, not the value. Text from your own validators is kept as written ([Validation Failure Text](#validation-failure-text)).
 
-`TaskSendRetryable` is `TaskSendEnqueueFailed | TaskSendAsyncContext`. It is the parameter type of `.retry_send()`, `.retry_send_async()`, `.retry_schedule()` and `.retry_schedule_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. These two variants carry a `TaskSendPayload`, and the retry methods send that exact payload again: the same task id, command and `sent_at`. If the first send was written, the broker finds the same command fingerprint and `sent_at` on that task id and answers with the task id instead of writing a second row, also when the task already finished (a retry reads the task history).
+`TaskSendResendable` is `TaskSendEnqueueFailed | TaskSendAsyncContext`. It is the parameter type of `.resend()` and `.resend_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. These two variants carry a `TaskSendPayload`, and the resend methods send that exact payload again: the same task id, command, `sent_at` and delay. If the first send was written, the broker finds the same command fingerprint and `sent_at` on that task id and answers with the task id instead of writing a second row, also when the task already finished (a resend reads the task history).
 
 ## Workflow Start Errors (WorkflowStartResult)
 
 `spec.start()`, `start_async()`, `retry_start()` and `retry_start_async()` return `WorkflowStartResult[WorkflowHandle[T]]` = `Result[WorkflowHandle[T], WorkflowStartError]`. `WorkflowStartError` is a union with one frozen variant per code; the variants and their fields are on the [Workflow API](/horsies/concepts/workflows/workflow-api/) page.
 
-The retry methods accept `ENQUEUE_FAILED` and `ASYNC_CONTEXT` (`WorkflowStartRetryable`).
+The retry methods accept `ENQUEUE_FAILED` and `ASYNC_CONTEXT` (`WorkflowStartResendable`).
 
 ## Workflow Handle Errors (HandleResult)
 
@@ -306,7 +306,7 @@ The retry methods accept `ENQUEUE_FAILED` and `ASYNC_CONTEXT` (`WorkflowStartRet
 
 `WorkflowHandle.for_id(text, broker)` returns `WorkflowHandleInvalidWorkflowId` for a workflow id text that is not a UUID: `code` (`INVALID_WORKFLOW_ID`), `message`, `workflow_id_text` and `cause` (the `ValueError` of `uuid.UUID`). No handle is built. It is not a `WorkflowHandleError` variant.
 
-## User-Defined Error Codes
+## Custom Error Codes
 
 Domain-specific errors use string codes:
 
@@ -320,7 +320,7 @@ def validate_order(*, order_id: str) -> Result[dict[str, JsonValue], TaskError]:
 
     if order.total > 10000:
         return Err(TaskError(
-            error_code="ORDER_LIMIT_EXCEEDED",
+            code="ORDER_LIMIT_EXCEEDED",
             message=f"Order {order_id} exceeds limit",
             data={"order_id": order_id, "total": order.total},
         ))
@@ -328,7 +328,7 @@ def validate_order(*, order_id: str) -> Result[dict[str, JsonValue], TaskError]:
     return Ok({"status": "valid"})
 ```
 
-Declare a task's codes with `error_codes=` to give each one its own value of the `error_code` metric label; another user code counts as `undeclared` there. See [Declare Error Codes](/horsies/tasks/defining-tasks/#declare-error-codes).
+Declare a task's codes with `error_codes=` to give each one its own value of the `error_code` metric label; another custom code counts as `undeclared` there. See [Declare Error Codes](/horsies/tasks/defining-tasks/#declare-error-codes).
 
 With an `Enum` and `TaskError[E]`, the codes are typed from the body to the reader. A `match` on the code names each member and each built-in family:
 
@@ -358,16 +358,16 @@ def welcome_text(read: ReadResult[str, TaskError[WelcomeCode]]) -> str:
         case Ok(Succeeded(message)):
             return message
         case Ok(Failed(task_error)):
-            match task_error.error_code:
+            match task_error.code:
                 case WelcomeCode.INVALID_EMAIL:
                     return "the address is not valid"
                 case OperationalCode() | ContractCode() | RetrievalCode() | OutcomeCode():
-                    return f"library failure: {task_error.error_code.value}"
+                    return f"library failure: {task_error.code.value}"
         case Err(read_error):
             return f"no outcome: {read_error.code}"
 ```
 
-User-defined codes are auto-retried when `auto_retry_for` lists their members. `auto_retry_for` takes code members only: built-in members, and members of the `Enum` class of `error_codes=`. `@app.task` refuses a plain `str` with `TASK_INVALID_OPTIONS`:
+Custom codes are auto-retried when `auto_retry_for` lists their members. `retry_for` takes code members only: built-in members, and members of the `Enum` class of `error_codes=`. `@app.task` refuses a plain `str` with `TASK_INVALID_OPTIONS`:
 
 ```python
 class ApiCode(str, Enum):
@@ -380,7 +380,7 @@ class ApiCode(str, Enum):
     error_codes=ApiCode,
     retry_policy=RetryPolicy.fixed(
         [30, 60, 120],
-        auto_retry_for=[ApiCode.RATE_LIMITED, ApiCode.SERVICE_UNAVAILABLE],
+        retry_for=[ApiCode.RATE_LIMITED, ApiCode.SERVICE_UNAVAILABLE],
     ),
 )
 def call_api(*, url: str) -> Result[dict[str, JsonValue], TaskError[ApiCode]]:
@@ -389,19 +389,19 @@ def call_api(*, url: str) -> Result[dict[str, JsonValue], TaskError[ApiCode]]:
 
 ## Reserved Built-In Code Enforcement
 
-All string values used by the built-in error code families (`OperationalCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`) are **reserved**. User-defined error codes must not collide with these values.
+All string values used by the built-in error code families (`OperationalCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`) are **reserved**. Custom error codes must not collide with these values.
 
-**Runtime enforcement**: `TaskError(error_code="DATABASE_ERROR", message="db down")` raises `ValueError` at construction time. Built-in codes must be passed as enum members. User-defined codes must be plain `str`, not `str, Enum` subclasses:
+**Runtime enforcement**: `TaskError(code="DATABASE_ERROR", message="db down")` raises `ValueError` at construction time. Built-in codes must be passed as enum members. Custom codes must be plain `str`, not `str, Enum` subclasses:
 
 ```python
-TaskError(error_code=OperationalCode.DATABASE_ERROR, message="db down")  # correct
-TaskError(error_code="MY_CUSTOM_CODE", message="card declined")             # correct — user string
-TaskError(error_code="DATABASE_ERROR", message="db down")                     # ValueError — reserved
+TaskError(code=OperationalCode.DATABASE_ERROR, message="db down")  # correct
+TaskError(code="MY_CUSTOM_CODE", message="card declined")             # correct — custom code
+TaskError(code="DATABASE_ERROR", message="db down")                     # ValueError — reserved
 ```
 
-`WORKFLOW_STOPPED` is also reserved, and it is not a task code: it names a workflow task that stopped before its body ran. `TaskError(error_code="WORKFLOW_STOPPED", ...)` raises `ValueError`, and a stored task error with this code does not decode. An `exception_mapper` value, a `default_unhandled_error_code` or an `auto_retry_for` entry with this name is refused like any other invalid code.
+`WORKFLOW_STOPPED` is also reserved, and it is not a task code: it names a workflow task that stopped before its body ran. `TaskError(code="WORKFLOW_STOPPED", ...)` raises `ValueError`, and a stored task error with this code does not decode. An `exception_mapper` value, a `default_unhandled_error_code` or a `retry_for` entry with this name is refused like any other invalid code.
 
-**Serialization**: built-in codes are serialized as tagged dicts `{"__builtin_task_code__": "DATABASE_ERROR"}` so round-trip identity is preserved through standard `model_validate()` / `model_validate_json()`. User strings are serialized as plain strings. This tagged format eliminates wire-format ambiguity between built-in and user codes, allowing `model_validate()` to work correctly everywhere — including nested models.
+**Serialization**: built-in codes are serialized as tagged dicts `{"__builtin_task_code__": "DATABASE_ERROR"}` so round-trip identity is preserved through standard `model_validate()` / `model_validate_json()`. Custom codes are serialized as plain strings. This tagged format eliminates wire-format ambiguity between built-in and custom codes, allowing `model_validate()` to work correctly everywhere — including nested models. The stored form (the `err` slot of a stored result) has the key `error_code` in place of `code`: `encode_task_error` writes it and `decode_task_error` reads it.
 
 `horsies check` detects reserved-code collisions in statically visible configuration:
 
@@ -461,7 +461,7 @@ Startup errors provide Rust-style formatting automatically. When raised, they di
 error[HRS-007]: cycle detected in workflow DAG
   --> /app/workflows/order.py:12
    |
-12 | node_b = TaskNode(fn=process, waits_for=[node_a])
+12 | node_b = TaskNode(function=process, waits_for=[node_a])
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = note: workflows must be acyclic directed graphs (DAG)
 

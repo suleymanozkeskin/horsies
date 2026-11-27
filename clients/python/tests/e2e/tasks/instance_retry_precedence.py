@@ -44,15 +44,15 @@ class PrecedenceCode(str, Enum):
     TASK_VALUE_ERROR = 'TASK_VALUE_ERROR'
 
 
-@app.task(task_name='e2e_retry_precedence_healthcheck')
+@app.task(name='e2e_retry_precedence_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
 @app.task(
-    task_name='e2e_retry_precedence_task_mapper_wins_no_retry',
+    name='e2e_retry_precedence_task_mapper_wins_no_retry',
     error_codes=PrecedenceCode,
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=[PrecedenceCode.GLOBAL_VALUE_ERROR]),
+    retry_policy=RetryPolicy.fixed([1], retry_for=[PrecedenceCode.GLOBAL_VALUE_ERROR]),
     exception_mapper={ValueError: 'TASK_VALUE_ERROR'},
 )
 def task_mapper_wins_no_retry_task() -> Result[str, TaskError]:
@@ -60,9 +60,9 @@ def task_mapper_wins_no_retry_task() -> Result[str, TaskError]:
 
 
 @app.task(
-    task_name='e2e_retry_precedence_task_mapper_wins_retry',
+    name='e2e_retry_precedence_task_mapper_wins_retry',
     error_codes=PrecedenceCode,
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=[PrecedenceCode.TASK_VALUE_ERROR]),
+    retry_policy=RetryPolicy.fixed([1], retry_for=[PrecedenceCode.TASK_VALUE_ERROR]),
     exception_mapper={ValueError: 'TASK_VALUE_ERROR'},
 )
 def task_mapper_wins_retry_task() -> Result[str, TaskError]:
@@ -70,9 +70,9 @@ def task_mapper_wins_retry_task() -> Result[str, TaskError]:
 
 
 @app.task(
-    task_name='e2e_retry_precedence_global_mapper_retry',
+    name='e2e_retry_precedence_global_mapper_retry',
     error_codes=PrecedenceCode,
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=[PrecedenceCode.GLOBAL_VALUE_ERROR]),
+    retry_policy=RetryPolicy.fixed([1], retry_for=[PrecedenceCode.GLOBAL_VALUE_ERROR]),
 )
 def global_mapper_retry_task() -> Result[str, TaskError]:
     raise ValueError('global mapper should trigger retry')
@@ -83,9 +83,9 @@ ValueErrorClone = type('ValueError', (Exception,), {})
 
 
 @app.task(
-    task_name='e2e_retry_precedence_exception_name_collision',
+    name='e2e_retry_precedence_exception_name_collision',
     error_codes=PrecedenceCode,
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=[PrecedenceCode.GLOBAL_VALUE_ERROR]),
+    retry_policy=RetryPolicy.fixed([1], retry_for=[PrecedenceCode.GLOBAL_VALUE_ERROR]),
 )
 def exception_name_collision_task() -> Result[str, TaskError]:
     raise ValueErrorClone('same name as ValueError, different class object')

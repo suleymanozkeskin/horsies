@@ -9,6 +9,7 @@ tested in ``test_scheduler_facade.py``.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -62,13 +63,13 @@ def _make_app(
 
 
 def _make_task_mock(fn: object) -> MagicMock:
-    """Create a mock task object with _original_fn pointing to a real function.
+    """Create a mock task object with _original_function pointing to a real function.
 
     The task has no options: ``task_options_json`` is None.
     """
     task = MagicMock()
-    task._original_fn = fn
-    task.task_queue_name = None
+    task._original_function = fn
+    task.queue = None
     task.task_options_json = None
     return task
 
@@ -94,7 +95,7 @@ class TestSignatureError:
                 TaskSchedule(
                     name='s',
                     task_name='task_a',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                 ),
             ],
         )
@@ -109,7 +110,7 @@ class TestSignatureError:
         schedule = TaskSchedule(
             name='s',
             task_name='task_a',
-            pattern=IntervalSchedule(seconds=5),
+            pattern=IntervalSchedule(every=timedelta(seconds=5)),
         )
 
         assert _signature_error(app, schedule) is None
@@ -123,7 +124,7 @@ class TestSignatureError:
         schedule = TaskSchedule(
             name='s',
             task_name='task_a',
-            pattern=IntervalSchedule(seconds=5),
+            pattern=IntervalSchedule(every=timedelta(seconds=5)),
         )
 
         error = _signature_error(app, schedule)
@@ -141,7 +142,7 @@ class TestSignatureError:
         schedule = TaskSchedule(
             name='s',
             task_name='task_a',
-            pattern=IntervalSchedule(seconds=5),
+            pattern=IntervalSchedule(every=timedelta(seconds=5)),
             kwargs={'unknown': 42},
         )
 
@@ -159,7 +160,7 @@ class TestSignatureError:
         schedule = TaskSchedule(
             name='s',
             task_name='task_a',
-            pattern=IntervalSchedule(seconds=5),
+            pattern=IntervalSchedule(every=timedelta(seconds=5)),
             kwargs={'value': 42},
         )
 
@@ -174,7 +175,7 @@ class TestSignatureError:
         schedule = TaskSchedule(
             name='s',
             task_name='task_a',
-            pattern=IntervalSchedule(seconds=5),
+            pattern=IntervalSchedule(every=timedelta(seconds=5)),
             kwargs={'a': 1, 'b': 'hello'},
         )
 
@@ -197,7 +198,7 @@ class TestEncodeScheduleKwargs:
                 TaskSchedule(
                     name='s',
                     task_name='task_a',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                 ),
             ],
         )
@@ -207,7 +208,7 @@ class TestEncodeScheduleKwargs:
         return TaskSchedule(
             name='s',
             task_name='task_a',
-            pattern=IntervalSchedule(seconds=5),
+            pattern=IntervalSchedule(every=timedelta(seconds=5)),
             kwargs=kwargs,
         )
 
@@ -235,11 +236,11 @@ class TestEncodeScheduleKwargs:
         assert result == dumps_json({'value': 5})
 
     def test_engine_injected_kwarg_rejected(self) -> None:
-        def f(x: int, workflow_ctx: WorkflowContext | None = None) -> str:
+        def f(x: int, workflow_context: WorkflowContext | None = None) -> str:
             return str(x)
 
         app = self._make_app_with_task(_make_task_mock(f))
-        result = _encode_schedule_kwargs(app, self._schedule({'x': 1, 'workflow_ctx': None}))
+        result = _encode_schedule_kwargs(app, self._schedule({'x': 1, 'workflow_context': None}))
         assert is_err(result)
         assert result.err_value.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'not encodable' in result.err_value.message
@@ -323,7 +324,7 @@ class TestPreloadTaskModules:
                 TaskSchedule(
                     name='s',
                     task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                 ),
             ],
         )
@@ -401,28 +402,28 @@ class TestPreloadTaskModules:
 
 
 # =============================================================================
-# validation._signature_error — no _original_fn
+# validation._signature_error — no _original_function
 # =============================================================================
 
 
 @pytest.mark.unit
 class TestSignatureErrorNoOriginalFn:
-    """Test for _signature_error when task has no _original_fn."""
+    """Test for _signature_error when task has no _original_function."""
 
     def test_no_original_fn_returns_none(self) -> None:
-        """Task without _original_fn → no error (cannot validate)."""
+        """Task without _original_function → no error (cannot validate)."""
         config = ScheduleConfig(
             schedules=[
                 TaskSchedule(
                     name='s',
                     task_name='task_a',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                     kwargs={'anything': 42},
                 ),
             ],
         )
         task_mock = MagicMock()
-        task_mock._original_fn = None
+        task_mock._original_function = None
         app = _make_app(schedule_config=config, tasks={'task_a': task_mock})
 
         # No error despite kwargs that wouldn't match any real function
@@ -445,7 +446,7 @@ class TestPreloadTaskModulesAdditionalPaths:
                 TaskSchedule(
                     name='s',
                     task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                 ),
             ],
         )
@@ -468,7 +469,7 @@ class TestPreloadTaskModulesAdditionalPaths:
                 TaskSchedule(
                     name='s',
                     task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                 ),
             ],
         )
@@ -502,7 +503,7 @@ class TestPreloadTaskModulesAdditionalPaths:
                 TaskSchedule(
                     name='s',
                     task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                 ),
             ],
         )
@@ -541,7 +542,7 @@ class TestPreloadTaskModulesAdditionalPaths:
                 TaskSchedule(
                     name='s',
                     task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                 ),
             ],
         )
@@ -588,7 +589,7 @@ class TestValidateSchedulesCallsSignatureValidation:
                 TaskSchedule(
                     name='s',
                     task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                     kwargs={'x': 42},
                 ),
             ],

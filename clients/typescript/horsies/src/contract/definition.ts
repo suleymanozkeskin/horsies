@@ -12,7 +12,7 @@ import type { ParameterSchema, StandardSchemaMarker, ZodSchemaLike } from "./sch
 const ZOD_VENDOR = "zod";
 
 /** The parameter names that the engine fills in a workflow: a sender and a task never declare them. */
-const ENGINE_PARAMETER_NAMES: ReadonlySet<string> = new Set(["workflow_ctx", "workflow_meta"]);
+const ENGINE_PARAMETER_NAMES: ReadonlySet<string> = new Set(["workflow_context", "workflow_meta"]);
 
 /** A parameter name: a letter or `_`, then letters, digits and `_` (an identifier of every client). */
 const PARAMETER_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;

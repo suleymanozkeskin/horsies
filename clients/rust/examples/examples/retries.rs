@@ -1,4 +1,4 @@
-//! Automatic retries: `retry_policy` with `auto_retry_for`. A retry starts
+//! Automatic retries: `retry_policy` with `retry_for`. A retry starts
 //! when the task ends with one of the listed codes: a code of the task's own
 //! enum, or a built-in code such as `TASK_TIMEOUT`.
 //!
@@ -12,15 +12,15 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use horsies::{
-    task, AppConfig, Horsies, HorsiesError, RetryPolicy, TaskError, TaskInfoParts, TaskOutcome,
-    UserErrorCode, WaitLimit,
+    task, AppConfig, CustomErrorCode, Horsies, HorsiesError, RetryPolicy, TaskError, TaskInfoParts,
+    TaskOutcome, WaitLimit,
 };
 use horsies_examples::{
     app_refused, database_url, isolated_profile, main_of, DemoResult, DEFAULT_PROFILE,
 };
 
 /// The codes of `call_partner`'s own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum PartnerCode {
     /// Retried: the partner asks to try later.
     RateLimited,
@@ -33,13 +33,13 @@ enum PartnerCode {
 #[task(
     "call_partner",
     retry_policy = RetryPolicy::fixed(vec![1, 2], false).expect("a valid policy"),
-    auto_retry_for = ["RATE_LIMITED", "TASK_TIMEOUT"],
+    retry_for = ["RATE_LIMITED", "TASK_TIMEOUT"],
     timeout_ms = 5_000
 )]
 async fn call_partner(request: String) -> Result<String, TaskError<PartnerCode>> {
     match request.is_empty() {
-        true => Err(TaskError::user(PartnerCode::Rejected, "an empty request")),
-        false => Err(TaskError::user(
+        true => Err(TaskError::custom(PartnerCode::Rejected, "an empty request")),
+        false => Err(TaskError::custom(
             PartnerCode::RateLimited,
             format!("the partner is busy: {request}"),
         )),

@@ -258,9 +258,9 @@ class TestTaskSendSpan:
         assert isinstance(trace, core.TraceCarrier)
         assert trace.carrier == {'traceparent': _traceparent(span)}
 
-    def test_a_schedule_is_traced(self, otel: Otel) -> None:
+    def test_a_delayed_send_is_traced(self, otel: Otel) -> None:
         broker = _broker(Ok(uuid.uuid4()))
-        result = _wrapper(_app(otel.telemetry, broker)).schedule(30, amount=5)
+        result = _wrapper(_app(otel.telemetry, broker)).with_options(delay_seconds=30).send(amount=5)
 
         assert is_ok(result)
         span = otel.one_span()

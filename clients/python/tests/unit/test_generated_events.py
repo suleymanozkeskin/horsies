@@ -98,7 +98,7 @@ EXPECTED: Final[dict[str, events.AnyEvent]] = {
         queue='default',
         execution='SHARED_ASYNC',
         attempt=1,
-        child_kind='ISOLATED',
+        child_execution='ISOLATED',
         child_pid=4242,
         slot_wait=timedelta(microseconds=250),
     ),
@@ -169,7 +169,7 @@ EXPECTED: Final[dict[str, events.AnyEvent]] = {
             error_code=OutcomeCode.TASK_TIMEOUT,
             trace=events.RunTraceCarrier(text=CARRIER),
             placed_at=PLACED_AT,
-            child_kind='SHARED_ASYNC',
+            child_execution='SHARED_ASYNC',
             worker_id=WORKER_ID,
             workflow='NOT_IN_WORKFLOW',
         ),
@@ -183,7 +183,7 @@ EXPECTED: Final[dict[str, events.AnyEvent]] = {
             error_code=OperationalCode.NEIGHBOUR_BLOCKED_LOOP,
             trace=events.RunTraceNoCarrier(),
             placed_at=PLACED_AT,
-            child_kind='SHARED_ASYNC',
+            child_execution='SHARED_ASYNC',
             worker_id=WORKER_ID,
             workflow='NOT_IN_WORKFLOW',
         ),
@@ -197,7 +197,7 @@ EXPECTED: Final[dict[str, events.AnyEvent]] = {
             error_code=OperationalCode.WORKER_CRASHED,
             trace=events.RunTraceCarrier(text=CARRIER),
             placed_at=PLACED_AT,
-            child_kind='ISOLATED',
+            child_execution='ISOLATED',
             worker_id=WORKER_ID,
             workflow='WORKFLOW_NOT_KNOWN',
         ),
@@ -228,27 +228,27 @@ EXPECTED: Final[dict[str, events.AnyEvent]] = {
     ),
     'child_started': events.ChildStarted(
         at=AT,
-        child_kind='SHARED_THREAD',
+        child_execution='SHARED_THREAD',
         slot=3,
         child_pid=4243,
         boot_duration=timedelta(microseconds=850000),
     ),
     'child_replaced': events.ChildReplaced(
         at=AT,
-        child_kind='ISOLATED',
+        child_execution='ISOLATED',
         slot=0,
         child_pid=4242,
         reason='MEMORY_LIMIT',
     ),
     'slot_down': events.SlotDown(
         at=AT,
-        child_kind='SHARED_ASYNC',
+        child_execution='SHARED_ASYNC',
         slot=1,
         cause=events.SlotDownCauseResourceShortage(errno='EMFILE'),
     ),
     'slot_recovered': events.SlotRecovered(
         at=AT,
-        child_kind='SHARED_ASYNC',
+        child_execution='SHARED_ASYNC',
         slot=1,
     ),
 }
@@ -301,7 +301,7 @@ def test_an_internal_field_is_left_out_of_repr() -> None:
     assert isinstance(ended.end, events.AttemptEndDecidedByWorker)
     text = repr(ended.end)
     assert 'reason=' in text
-    for internal in ('error_code', 'trace', 'placed_at', 'child_kind', 'worker_id', 'workflow'):
+    for internal in ('error_code', 'trace', 'placed_at', 'child_execution', 'worker_id', 'workflow'):
         assert f'{internal}=' not in text
 
 

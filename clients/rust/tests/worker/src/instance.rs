@@ -228,8 +228,7 @@ pub fn fast_recovery() -> RecoveryConfig {
 fn schedules() -> ScheduleConfig {
     let interval = |seconds: u32| {
         SchedulePattern::Interval(IntervalSchedule {
-            seconds: Some(seconds),
-            ..IntervalSchedule::default()
+            every: Duration::from_secs(u64::from(seconds)),
         })
     };
     ScheduleConfig::new(vec![

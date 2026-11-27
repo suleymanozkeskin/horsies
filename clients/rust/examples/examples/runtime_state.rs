@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use horsies::{
-    task, AppConfig, Horsies, HorsiesError, TaskError, TaskOutcome, TaskRuntime, UserErrorCode,
+    task, AppConfig, CustomErrorCode, Horsies, HorsiesError, TaskError, TaskOutcome, TaskRuntime,
     WaitLimit,
 };
 use horsies_examples::{
@@ -29,7 +29,7 @@ struct Greeter {
 }
 
 /// The codes of `welcome`'s own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum WelcomeCode {
     NotConfigured,
     AuditNotSent,
@@ -39,18 +39,18 @@ enum WelcomeCode {
 async fn welcome(rt: TaskRuntime, user: String) -> Result<String, TaskError<WelcomeCode>> {
     let greeter = rt
         .state::<Greeter>()
-        .map_err(|missing| TaskError::user(WelcomeCode::NotConfigured, missing.to_string()))?;
+        .map_err(|missing| TaskError::custom(WelcomeCode::NotConfigured, missing.to_string()))?;
     let message = format!("{}, {user}", greeter.greeting);
     // A send from a task body goes through the app of its runtime and the
     // producer pool of the child.
-    let audit_function = audit::handle(&rt)
-        .map_err(|missing| TaskError::user(WelcomeCode::AuditNotSent, missing.to_string()))?;
+    let audit_function = audit::function(&rt)
+        .map_err(|missing| TaskError::custom(WelcomeCode::AuditNotSent, missing.to_string()))?;
     let _audit = audit_function
         .send(audit::Input {
             entry: message.clone(),
         })
         .await
-        .map_err(|error| TaskError::user(WelcomeCode::AuditNotSent, error.to_string()))?;
+        .map_err(|error| TaskError::custom(WelcomeCode::AuditNotSent, error.to_string()))?;
     Ok(message)
 }
 

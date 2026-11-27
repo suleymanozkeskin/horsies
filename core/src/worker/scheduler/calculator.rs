@@ -42,12 +42,14 @@ pub fn next_run_at(
     }
 }
 
+/// The instant `interval.every` after `after`; none for a length of zero,
+/// which the config refuses, or a length that `chrono` cannot hold.
 fn next_interval(interval: &IntervalSchedule, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    let secs = interval.total_seconds();
-    if secs == 0 {
-        return None;
+    match chrono::Duration::from_std(interval.every) {
+        Ok(length) if !length.is_zero() => Some(after + length),
+        Ok(_zero) => None,
+        Err(_out_of_range) => None,
     }
-    Some(after + chrono::Duration::seconds(secs as i64))
 }
 
 fn next_hourly(hourly: &HourlySchedule, local: DateTime<Tz>, tz: Tz) -> Option<DateTime<Utc>> {
@@ -92,7 +94,7 @@ fn next_daily(daily: &DailySchedule, local: DateTime<Tz>, tz: Tz) -> Option<Date
 }
 
 fn next_weekly(weekly: &WeeklySchedule, local: DateTime<Tz>, tz: Tz) -> Option<DateTime<Utc>> {
-    if weekly.days.is_empty() {
+    if weekly.weekdays.is_empty() {
         return None;
     }
 
@@ -106,7 +108,11 @@ fn next_weekly(weekly: &WeeklySchedule, local: DateTime<Tz>, tz: Tz) -> Option<D
         let day = local.date_naive() + chrono::Duration::days(offset);
         let weekday = day.weekday();
 
-        if !weekly.days.iter().any(|d| to_chrono_weekday(d) == weekday) {
+        if !weekly
+            .weekdays
+            .iter()
+            .any(|d| to_chrono_weekday(d) == weekday)
+        {
             continue;
         }
 
@@ -124,7 +130,7 @@ fn next_weekly(weekly: &WeeklySchedule, local: DateTime<Tz>, tz: Tz) -> Option<D
 }
 
 fn next_monthly(monthly: &MonthlySchedule, local: DateTime<Tz>, tz: Tz) -> Option<DateTime<Utc>> {
-    let target_day = monthly.day;
+    let target_day = monthly.day_of_month;
     let target_time = monthly.time;
 
     // Scan forward month by month, skipping a month that has no such day (day 31
@@ -277,6 +283,8 @@ fn to_chrono_weekday(day: &crate::core::config::Weekday) -> chrono::Weekday {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn utc(year: i32, month: u32, day: u32, hour: u32, min: u32, sec: u32) -> DateTime<Utc> {
@@ -290,10 +298,7 @@ mod tests {
     #[test]
     fn interval_30s() {
         let pattern = SchedulePattern::Interval(IntervalSchedule {
-            seconds: Some(30),
-            minutes: None,
-            hours: None,
-            days: None,
+            every: Duration::from_secs(30),
         });
         let after = utc(2025, 1, 1, 12, 0, 0);
         let next = next_run_at(&pattern, after, "UTC").unwrap();
@@ -303,10 +308,7 @@ mod tests {
     #[test]
     fn interval_zero_returns_none() {
         let pattern = SchedulePattern::Interval(IntervalSchedule {
-            seconds: Some(0),
-            minutes: None,
-            hours: None,
-            days: None,
+            every: Duration::ZERO,
         });
         let after = utc(2025, 1, 1, 12, 0, 0);
         assert!(next_run_at(&pattern, after, "UTC").is_none());
@@ -357,7 +359,7 @@ mod tests {
     #[test]
     fn weekly_correct_day() {
         let pattern = SchedulePattern::Weekly(WeeklySchedule {
-            days: vec![crate::core::config::Weekday::Wednesday],
+            weekdays: vec![crate::core::config::Weekday::Wednesday],
             time: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
         });
         // 2025-01-06 is Monday
@@ -370,7 +372,7 @@ mod tests {
     #[test]
     fn monthly_future_day() {
         let pattern = SchedulePattern::Monthly(MonthlySchedule {
-            day: 15,
+            day_of_month: 15,
             time: NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
         });
         let after = utc(2025, 1, 10, 12, 0, 0);
@@ -381,7 +383,7 @@ mod tests {
     #[test]
     fn monthly_past_day_goes_to_next_month() {
         let pattern = SchedulePattern::Monthly(MonthlySchedule {
-            day: 5,
+            day_of_month: 5,
             time: NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
         });
         let after = utc(2025, 1, 10, 12, 0, 0);
@@ -393,7 +395,7 @@ mod tests {
     #[test]
     fn monthly_day_doesnt_exist_skips_to_next_valid_month() {
         let pattern = SchedulePattern::Monthly(MonthlySchedule {
-            day: 31,
+            day_of_month: 31,
             time: NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
         });
         let after = utc(2025, 2, 1, 0, 0, 0);
@@ -404,7 +406,7 @@ mod tests {
     #[test]
     fn monthly_day_30_skips_february_lands_on_march() {
         let pattern = SchedulePattern::Monthly(MonthlySchedule {
-            day: 30,
+            day_of_month: 30,
             time: NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
         });
         let after = utc(2025, 1, 31, 0, 0, 0);
@@ -416,7 +418,7 @@ mod tests {
     #[test]
     fn monthly_day_29_fires_in_february_of_a_leap_year_only() {
         let pattern = SchedulePattern::Monthly(MonthlySchedule {
-            day: 29,
+            day_of_month: 29,
             time: NaiveTime::from_hms_opt(8, 0, 0).unwrap(),
         });
         let leap = next_run_at(&pattern, utc(2024, 2, 1, 0, 0, 0), "UTC").unwrap();
@@ -619,7 +621,7 @@ mod tests {
         // not return `None`. day=8 02:30 America/New_York: 2026-03-08 02:30 is
         // the gap, so it skips March and fires 2026-04-08 02:30 EDT (06:30 UTC).
         let pattern = SchedulePattern::Monthly(MonthlySchedule {
-            day: 8,
+            day_of_month: 8,
             time: NaiveTime::from_hms_opt(2, 30, 0).unwrap(),
         });
         // Reference after Feb 8 so "this month" (Feb) is past.
@@ -637,7 +639,7 @@ mod tests {
         // (skipped), and offset 14 (Sun 2026-03-15 02:30 EDT == 06:30 UTC) must
         // resolve. An 8-day scan returned `None` and stopped the schedule forever.
         let pattern = SchedulePattern::Weekly(WeeklySchedule {
-            days: vec![crate::core::config::Weekday::Sunday],
+            weekdays: vec![crate::core::config::Weekday::Sunday],
             time: NaiveTime::from_hms_opt(2, 30, 0).unwrap(),
         });
         // Fired slot Sun 2026-03-01 02:30 EST (== 07:30 UTC).
@@ -716,7 +718,7 @@ mod tests {
             },
         });
         let other = SchedulePattern::Weekly(WeeklySchedule {
-            days: vec![Weekday::Monday, Weekday::Friday],
+            weekdays: vec![Weekday::Monday, Weekday::Friday],
             time: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
         });
         assert_eq!(
@@ -737,7 +739,7 @@ mod tests {
             },
         });
         let other = SchedulePattern::Monthly(MonthlySchedule {
-            day: 15,
+            day_of_month: 15,
             time: NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
         });
         assert_eq!(

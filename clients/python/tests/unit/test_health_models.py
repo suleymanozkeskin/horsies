@@ -94,7 +94,7 @@ class TestJsonForm:
             (
                 DownSlot(
                     slot=1,
-                    cause=ResourceShortage(errno_name=ShortageErrno.EMFILE),
+                    cause=ResourceShortage(errno=ShortageErrno.EMFILE),
                     detail='OSError: [Errno 24] Too many open files',
                     down_since=_AT,
                     failed_boots=2,

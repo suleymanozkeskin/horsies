@@ -32,7 +32,7 @@ struct OptionalReportInput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ContextInput {
-    workflow_ctx: WorkflowContext,
+    workflow_context: WorkflowContext,
 }
 
 fn total<I>() -> InputField<I, TaskOutcome<f64, Infallible>> {
@@ -61,7 +61,7 @@ fn report() -> TaskNode<String, ReportInput> {
 /// The registration of a task whose input takes the workflow context.
 fn context_registration() -> NodeRegistration {
     NodeRegistration {
-        accepts_workflow_ctx: true,
+        accepts_workflow_context: true,
         ..default_registration()
     }
 }

@@ -34,8 +34,8 @@ use crate::HorsiesError;
 ///     fn definition_key() -> &'static str { "shop.checkout.v1" }
 ///
 ///     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-///         let charged = builder.task(charge::node().set(charge::params::order_id(), 7)?)?;
-///         let receipt = builder.task(receipt::node().arg_from(receipt::params::charge(), charged))?;
+///         let charged = builder.task(charge::node().set(charge::fields::order_id(), 7)?)?;
+///         let receipt = builder.task(receipt::node().arg_from(receipt::fields::charge(), charged))?;
 ///         Ok(WorkflowDefConfig::new().output(receipt))
 ///     }
 /// }

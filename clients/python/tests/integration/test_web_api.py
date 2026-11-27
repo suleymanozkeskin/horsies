@@ -384,7 +384,7 @@ class TestTaskReads:
         # The code list follows the selection; the strip's own totals do not,
         # so the categories it does not have selected stay offerable.
         assert [f['value'] for f in facets['error_codes']] == ['TASK_EXCEPTION']
-        assert facets['error_category_totals'] == {'OPERATIONAL': 1, 'DOMAIN': 1}
+        assert facets['error_category_totals'] == {'OPERATIONAL': 1, 'CUSTOM': 1}
 
     async def test_repeated_error_category_params_are_or_combined(
         self, api: AsyncClient, session: AsyncSession
@@ -397,7 +397,7 @@ class TestTaskReads:
         )
 
         body = (
-            await api.get('/api/tasks?error_category=OUTCOME&error_category=DOMAIN')
+            await api.get('/api/tasks?error_category=OUTCOME&error_category=CUSTOM')
         ).json()
 
         assert {row['error_code'] for row in body['rows']} == {
@@ -896,7 +896,7 @@ def _register_child_with_a_corrupt_root(app: Horsies) -> str:
     key."""
     suffix = uuid.uuid4().hex[:8]
 
-    @app.task(task_name=f'web_corrupt_root_{suffix}')
+    @app.task(name=f'web_corrupt_root_{suffix}')
     def corrupt_root(*, value: int) -> Result[int, TaskError]:
         return Ok(value)
 
@@ -910,7 +910,7 @@ def _register_child_with_a_corrupt_root(app: Horsies) -> str:
         def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
             _ = (args, params)
             node = WorkflowTaskNode(
-                fn=corrupt_root,
+                function=corrupt_root,
                 kwargs={'value': 1},
                 good_until=datetime.now(timezone.utc) + timedelta(hours=1),
             )

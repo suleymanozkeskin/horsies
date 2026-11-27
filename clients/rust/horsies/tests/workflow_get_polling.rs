@@ -261,7 +261,7 @@ async fn get_polls_to_the_end_when_the_listener_connect_is_refused() {
 
 /// A wait on a RUNNING workflow whose listener connect is refused polls the
 /// workflow row, and the workflow does not end. At the wait limit `get()`
-/// answers `WaitTimedOut`: it waited for the whole limit, and it did not
+/// answers `WaitTimeout`: it waited for the whole limit, and it did not
 /// hang.
 #[tokio::test]
 async fn get_answers_wait_timed_out_when_the_limit_passes_while_polling() {
@@ -277,10 +277,10 @@ async fn get_answers_wait_timed_out_when_the_limit_passes_while_polling() {
     let waited = started.elapsed();
 
     match answered {
-        Err(WorkflowReadError::WaitTimedOut {
+        Err(WorkflowReadError::WaitTimeout {
             workflow_id: timed_out,
         }) => assert_eq!(timed_out, workflow_id),
-        other => panic!("expected WaitTimedOut, got {other:?}"),
+        other => panic!("expected WaitTimeout, got {other:?}"),
     }
     assert!(
         waited >= SHORT_WAIT_LIMIT,

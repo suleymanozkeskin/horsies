@@ -51,10 +51,10 @@ impl WorkflowDefinition for DailyReport {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let fetched = builder.task(
-            fetch_report::node().set(fetch_report::params::region(), "eu".to_owned())?,
+            fetch_report::node().set(fetch_report::fields::region(), "eu".to_owned())?,
         )?;
         let published = builder.task(
-            publish_report::node().arg_from(publish_report::params::report(), fetched),
+            publish_report::node().arg_from(publish_report::fields::report(), fetched),
         )?;
         Ok(WorkflowDefConfig::new().output(published))
     }
@@ -72,7 +72,7 @@ async fn run_daily_report(
     let handle = daily_report.start().await?;
     match handle.get(WaitLimit::Within(Duration::from_secs(60))).await? {
         TaskOutcome::Succeeded(length) => println!("published {length} bytes"),
-        TaskOutcome::Failed(error) => println!("the workflow ended with {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("the workflow ended with {}", error.code().as_str()),
     }
     Ok(())
 }
@@ -183,12 +183,12 @@ A task can build a spec at run time and start it through its `TaskRuntime`. `rt.
 use std::convert::Infallible;
 
 use horsies::{
-    task, HorsiesError, TaskError, TaskOutcome, TaskRuntime, UserErrorCode, WorkflowSpec,
+    task, CustomErrorCode, HorsiesError, TaskError, TaskOutcome, TaskRuntime, WorkflowSpec,
     WorkflowSpecBuilder,
 };
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum ReportCode {
     SpecRefused,
     StartFailed,
@@ -214,9 +214,9 @@ fn report_spec(
     region: String,
 ) -> Result<WorkflowSpec, HorsiesError> {
     builder.definition_key("reports.regional_report.v1");
-    let sales = builder.task(fetch_sales::node().set(fetch_sales::params::region(), region)?)?;
+    let sales = builder.task(fetch_sales::node().set(fetch_sales::fields::region(), region)?)?;
     let report =
-        builder.task(format_report::node().arg_from(format_report::params::sales(), sales))?;
+        builder.task(format_report::node().arg_from(format_report::fields::sales(), sales))?;
     builder.output(report);
     builder.build()
 }
@@ -224,11 +224,11 @@ fn report_spec(
 #[task("start_report")]
 async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError<ReportCode>> {
     let spec = report_spec(rt.workflow_builder("regional_report"), region)
-        .map_err(|refused| TaskError::user(ReportCode::SpecRefused, refused.to_string()))?;
+        .map_err(|refused| TaskError::custom(ReportCode::SpecRefused, refused.to_string()))?;
     let handle = rt
         .start::<String>(&spec)
         .await
-        .map_err(|error| TaskError::user(ReportCode::StartFailed, error.to_string()))?;
+        .map_err(|error| TaskError::custom(ReportCode::StartFailed, error.to_string()))?;
     Ok(handle.workflow_id())
 }
 ```
@@ -264,7 +264,7 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 | Method | Returns |
 |--------|---------|
 | `workflow_id()` | `Uuid` |
-| `get(limit)` | `Result<TaskOutcome<T, UserCode>, WorkflowReadError>`: waits while the workflow runs, up to `limit: WaitLimit` |
+| `get(wait)` | `Result<TaskOutcome<T, CustomCode>, WorkflowReadError>`: waits while the workflow runs, up to `wait: WaitLimit` |
 | `result_for::<V, E>(&key)` | `Result<TaskOutcome<V, E>, WorkflowReadError>`: the outcome of one node, read with its types. Not a wait |
 | `status()` | `HandleResult<WorkflowStatus>` |
 | `results()` | `HandleResult<BTreeMap<String, NodeResult>>`: the stored result of each node that has one, by node id. A node stored without a node id is left out |
@@ -277,15 +277,15 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 
 `get`:
 
-- reads user codes as checked text (`UserCode`), because a workflow holds the codes of many tasks;
+- reads custom codes as checked text (`CustomCode`), because a workflow holds the codes of many tasks;
 - returns `Failed` with the stored error of a FAILED, CANCELLED or EXPIRED workflow, or with the code of its status when it stored none;
 - returns `Failed` with `WORKFLOW_PAUSED` for a PAUSED workflow, which a resume can continue;
 - checks the limit first: a `WaitLimit::Within` limit above `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms) is `InvalidInput`, before any statement;
 - in a worker child, is refused with `WaitInsideTask` before any statement.
 
-A workflow with no output node is read as `OutputlessResults`: the outcome of each node by node id, as `TaskOutcome<JsonText, UserCode>`. The value is its stored text: `get()` gives the text, `decode::<T>()` reads it with the node's type, an integer of any width with all its digits. It has `get(node_id)`, `iter()`, `len()` and `is_empty()`.
+A workflow with no output node is read as `OutputlessResults`: the outcome of each node by node id, as `TaskOutcome<JsonText, CustomCode>`. The value is its stored text: `get()` gives the text, `decode::<T>()` reads it with the node's type, an integer of any width with all its digits. It has `get(node_id)`, `iter()`, `len()` and `is_empty()`.
 
-`NodeResult` is `Outcome(TaskOutcome<JsonText, UserCode>)` or `Unreadable { cause }`.
+`NodeResult` is `Outcome(TaskOutcome<JsonText, CustomCode>)` or `Unreadable { cause }`.
 
 `WorkflowNodeInfo`:
 
@@ -304,17 +304,17 @@ A workflow with no output node is read as `OutputlessResults`: the outcome of ea
 
 | Variant | Code | When |
 |---------|------|------|
-| `WaitTimedOut { workflow_id }` | `WAIT_TIMEOUT` | The workflow had not ended when the limit passed. A later read may find it ended |
+| `WaitTimeout { workflow_id }` | `WAIT_TIMEOUT` | The workflow had not ended when the limit passed. A later read may find it ended |
 | `WorkflowNotFound { workflow_id }` | `WORKFLOW_NOT_FOUND` | No workflow has the id |
 | `ResultNotReady { workflow_id, node_id }` | `RESULT_NOT_READY` | `result_for`: the node stores no result yet, or no node has the id |
-| `StoredResultUnreadable { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored value does not read with the handle's types; `cause` names no value |
-| `UnknownUserCode { workflow_id, cause }` | `UNKNOWN_CUSTOM_CODE` | The stored user code is not a code of `E` |
+| `ResultDeserializationError { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored value does not read with the handle's types; `cause` names no value |
+| `UnknownCustomCode { workflow_id, cause }` | `UNKNOWN_CUSTOM_CODE` | The stored custom code is not a code of `E` |
 | `InvalidInput { workflow_id, cause }` | `INVALID_INPUT` | `get`: the `Within` limit is above `MAX_WAIT_LIMIT_MS`; `cause` is `WaitLimitRefused`. Nothing was read |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A wait in a worker child. Nothing was read |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking `get` or `result_for` (`handle.blocking()`) on a thread that runs a tokio runtime. Nothing was read |
-| `Database { code, message, retryable }` | `DATABASE_ERROR` | The database or the connection failed; `code` is the `WorkflowHandleErrorCode`. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
+| `DatabaseError { database_code, message, retryable }` | `DATABASE_ERROR` | The database or the connection failed; `database_code` is the `WorkflowHandleErrorCode` of the failed operation. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
 
-`WorkflowReadError::code()` returns the library code of the failure.
+`WorkflowReadError::code()` returns the built-in code of the failure.
 
 ### WorkflowHandleError
 
@@ -386,7 +386,7 @@ fn region_spec(
 ) -> Result<WorkflowSpec, HorsiesError> {
     builder.definition_key("reports.region_fetch.v1");
     let fetched = builder.task(
-        fetch_report::node().set(fetch_report::params::region(), region.clone())?,
+        fetch_report::node().set(fetch_report::fields::region(), region.clone())?,
     )?;
     builder.output(fetched);
     builder.build()

@@ -393,7 +393,7 @@ class TestEntriesTheChildCannotRun:
         set_running.assert_called_once()
         assert (ok, reason) == (True, None)
         error = _failed(decode_task_result(loads_json(payload).unwrap(), int))
-        assert error.error_code is OperationalCode.WORKER_RESOLUTION_ERROR
+        assert error.code is OperationalCode.WORKER_RESOLUTION_ERROR
 
     def test_an_async_task_in_a_child_with_no_task_loop_fails_resolution(
         self,
@@ -413,7 +413,7 @@ class TestEntriesTheChildCannotRun:
 
         assert (ok, reason) == (True, None)
         error = _failed(decode_task_result(loads_json(payload).unwrap(), int))
-        assert error.error_code is OperationalCode.WORKER_RESOLUTION_ERROR
+        assert error.code is OperationalCode.WORKER_RESOLUTION_ERROR
         assert 'no task loop' in (error.message or '')
         assert ran == []
         assert isinstance(no_task_loop.state, LoopNotCreated)
@@ -443,7 +443,7 @@ class TestEntriesTheChildCannotRun:
         set_running.assert_called_once()
         assert (ok, reason) == (True, None)
         error = _failed(decode_task_result(loads_json(payload).unwrap(), int))
-        assert error.error_code is OperationalCode.WORKER_RESOLUTION_ERROR
+        assert error.code is OperationalCode.WORKER_RESOLUTION_ERROR
         assert 'not_registered' in (error.message or '')
 
 
@@ -495,7 +495,7 @@ class TestResultWaitsInsideAnAsyncTask:
                     pass
                 case Err(send_err):
                     return Err(
-                        TaskError(error_code='SEND_FAILED', message=str(send_err)),
+                        TaskError(code='SEND_FAILED', message=str(send_err)),
                     )
             outcomes = [f'send_async:{handle.task_id == enqueued[0]}']
             outcomes.append(_read_refusal(await handle.get_async()))
@@ -559,7 +559,7 @@ class TestTheSendPathLeavesNoLoopTask:
                     return Ok(str(handle.task_id))
                 case Err(send_err):
                     return Err(
-                        TaskError(error_code='SEND_FAILED', message=str(send_err)),
+                        TaskError(code='SEND_FAILED', message=str(send_err)),
                     )
 
         with patch.object(broker, 'enqueue_async', enqueue_async):
@@ -639,7 +639,7 @@ class TestASelfCancel:
         error = _failed(_result(_runner(app, task_loop)('async_cancels_itself'), int))
 
         assert error is not None
-        assert error.error_code == 'CANCELLED_BY_BODY'
+        assert error.code == 'CANCELLED_BY_BODY'
         assert error.message is not None and 'CancelledError' in error.message
 
     def test_with_no_mapping_it_gets_the_unhandled_code(
@@ -651,7 +651,7 @@ class TestASelfCancel:
         error = _failed(_result(_runner(app, task_loop)('async_cancels_itself'), int))
 
         assert error is not None
-        assert error.error_code == OperationalCode.UNHANDLED_EXCEPTION
+        assert error.code == OperationalCode.UNHANDLED_EXCEPTION
 
     def test_the_direct_call_still_lets_the_cancel_pass(self) -> None:
         app = self._cancelling_app({asyncio.CancelledError: 'CANCELLED_BY_BODY'})
@@ -721,8 +721,8 @@ class TestAGeneratorExitFromTheBody:
         async_error = _failed(_result(run('async_raises_generator_exit'), int))
 
         assert sync_error is not None and async_error is not None
-        assert sync_error.error_code == 'BODY_GENERATOR_EXIT'
-        assert async_error.error_code == 'BODY_GENERATOR_EXIT'
+        assert sync_error.code == 'BODY_GENERATOR_EXIT'
+        assert async_error.code == 'BODY_GENERATOR_EXIT'
 
     def test_with_no_mapping_it_gets_the_unhandled_code(
         self,
@@ -736,7 +736,7 @@ class TestAGeneratorExitFromTheBody:
         ))
 
         assert error is not None
-        assert error.error_code == OperationalCode.UNHANDLED_EXCEPTION
+        assert error.code == OperationalCode.UNHANDLED_EXCEPTION
 
     def test_a_keyboard_interrupt_still_skips_the_mappers(
         self,
@@ -751,8 +751,8 @@ class TestAGeneratorExitFromTheBody:
         async_error = _failed(_result(run('async_raises_keyboard_interrupt'), int))
 
         assert sync_error is not None and async_error is not None
-        assert sync_error.error_code == OperationalCode.TASK_EXCEPTION
-        assert async_error.error_code == OperationalCode.TASK_EXCEPTION
+        assert sync_error.code == OperationalCode.TASK_EXCEPTION
+        assert async_error.code == OperationalCode.TASK_EXCEPTION
 
     def test_the_direct_call_still_lets_it_pass(self) -> None:
         app = self._raising_app({GeneratorExit: 'BODY_GENERATOR_EXIT'})
@@ -829,12 +829,12 @@ class TestWorkflowContext:
         @app.task('async_reads_ctx')
         async def reads_ctx(
             *,
-            workflow_ctx: WorkflowContext | None = None,
+            workflow_context: WorkflowContext | None = None,
         ) -> Result[str, TaskError]:
-            assert workflow_ctx is not None
-            match workflow_ctx.result_for(NodeKey[str]('node_a')):
+            assert workflow_context is not None
+            match workflow_context.result_for(NodeKey[str]('node_a')):
                 case Succeeded(value=upstream):
-                    return Ok(f'{workflow_ctx.workflow_id}:{upstream}')
+                    return Ok(f'{workflow_context.workflow_id}:{upstream}')
                 case Failed(error=upstream_error):
                     return Err(upstream_error)
 

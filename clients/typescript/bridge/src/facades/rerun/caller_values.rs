@@ -355,7 +355,7 @@ fn instant_of_iso_text(text: &str) -> Result<DateTime<Utc>, &'static str> {
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, TimeZone};
-    use horsies_core::{rerun_read, RerunEnqueuePolicy, RerunTask};
+    use horsies_core::{rerun_read, EnqueueRetention, RerunCommand, RerunEnqueuePolicy};
     use uuid::Uuid;
 
     use super::*;
@@ -376,9 +376,9 @@ mod tests {
     }
 
     fn read_statement() -> CallerStatement {
-        let policy =
-            RerunEnqueuePolicy::new("forever", true, Duration::hours(24)).expect("a valid policy");
-        rerun_read(&RerunTask::new(SOURCE, None, None), &policy)
+        let policy = RerunEnqueuePolicy::new(EnqueueRetention::Forever, true, Duration::hours(24))
+            .expect("a valid policy");
+        rerun_read(&RerunCommand::new(SOURCE, None, None), &policy)
     }
 
     #[test]

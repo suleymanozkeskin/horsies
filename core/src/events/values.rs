@@ -37,9 +37,9 @@ pub const MAX_EVENT_TASK_NAME_CHARS: usize = 255;
 /// least one byte, so every queue name fits in an event.
 pub const MAX_EVENT_QUEUE_NAME_CHARS: usize = MAX_QUEUE_NAME_BYTES;
 
-/// The most characters of a user error code that an event carries. A longer
+/// The most characters of a custom error code that an event carries. A longer
 /// code is [`AttemptErrorCode::CustomOverBound`].
-pub const MAX_EVENT_USER_CODE_CHARS: usize = 128;
+pub const MAX_EVENT_CUSTOM_CODE_CHARS: usize = 128;
 
 /// The most characters of a stored trace carrier that an event carries: the
 /// byte bound of the stored text. A character has at least one byte, so every
@@ -70,9 +70,9 @@ pub type TaskName = BoundedText<MAX_EVENT_TASK_NAME_CHARS>;
 /// The name of a queue.
 pub type QueueName = BoundedText<MAX_EVENT_QUEUE_NAME_CHARS>;
 
-/// The text of a user error code, at most [`MAX_EVENT_USER_CODE_CHARS`]
+/// The text of a custom error code, at most [`MAX_EVENT_CUSTOM_CODE_CHARS`]
 /// characters.
-pub type UserCodeText = BoundedText<MAX_EVENT_USER_CODE_CHARS>;
+pub type CustomCodeText = BoundedText<MAX_EVENT_CUSTOM_CODE_CHARS>;
 
 /// The text of a stored trace carrier, at most
 /// [`MAX_EVENT_TRACE_CARRIER_CHARS`] characters.
@@ -110,7 +110,7 @@ impl EventValue for BuiltInTaskCode {
     const FORM: ValueForm = ValueForm::Codes(&BUILT_IN_TASK_CODES);
 
     fn to_wire(&self) -> Result<WireValue, EncodeRefusal> {
-        Ok(WireValue::String(self.value()))
+        Ok(WireValue::String(self.as_str().to_owned()))
     }
 
     fn from_wire(wire: &WireValue) -> Result<Self, DecodeRefusal> {
@@ -140,7 +140,7 @@ pub enum AttemptErrorCode {
     /// A built-in code of horsies.
     BuiltIn { code: BuiltInTaskCode },
     /// A code that the task chose, of at most 128 characters.
-    Custom { code: UserCodeText },
+    Custom { code: CustomCodeText },
     /// A code that the task chose, of more than 128 characters. The event
     /// does not carry it; the attempt row and the history row keep it.
     CustomOverBound,
@@ -152,10 +152,12 @@ impl From<&TaskErrorCode> for AttemptErrorCode {
             TaskErrorCode::BuiltIn(built_in) => Self::BuiltIn {
                 code: built_in.clone(),
             },
-            TaskErrorCode::User(user) => match UserCodeText::new(user.as_str().to_owned()) {
-                Ok(text) => Self::Custom { code: text },
-                Err(_over_bound) => Self::CustomOverBound,
-            },
+            TaskErrorCode::Custom(custom) => {
+                match CustomCodeText::new(custom.as_str().to_owned()) {
+                    Ok(text) => Self::Custom { code: text },
+                    Err(_over_bound) => Self::CustomOverBound,
+                }
+            }
         }
     }
 }
@@ -298,10 +300,10 @@ pub enum AttemptEnd {
         /// worker): the start of the span.
         #[event_schema(internal)]
         placed_at: DateTime<Utc>,
-        /// Internal: the kind of the child that ran the attempt, the
-        /// `horsies.task.execution` of the span.
+        /// Internal: the execution class of the child that ran the
+        /// attempt, the `horsies.task.execution` of the span.
         #[event_schema(internal)]
-        child_kind: Execution,
+        child_execution: Execution,
         /// Internal: the worker that claimed the task and ended the attempt.
         #[event_schema(internal)]
         worker_id: WorkerIdText,

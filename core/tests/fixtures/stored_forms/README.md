@@ -77,7 +77,7 @@ every writer stores as the characters, not as `\u` escapes:
 | Error data | `result_deserialization_error_non_ascii_task_name` (the message), `workflow_output_skipped_non_ascii_task_name` (the data) |
 | Workflow spec data | `non_ascii_text` |
 
-The task options hold no user text: an error code of `auto_retry_for` is
+The task options hold no user text: an error code of `retry_for` is
 UPPER_SNAKE_CASE ASCII in both clients.
 
 ## Value notation
@@ -163,7 +163,7 @@ Decoders:
 `{"__h_task_result__":true,"ok":null,"err":<error>}`. An error object has the
 keys `exception`, `error_code`, `data`, `message`, in this order, nulls kept;
 a sub-workflow error adds `sub_workflow_id` and `sub_workflow_summary`. A
-built-in code is `{"__builtin_task_code__": "<NAME>"}`, a user code its text.
+built-in code is `{"__builtin_task_code__": "<NAME>"}`, a custom code its text.
 A vector holds an `ok` typed value (the notation above) or an `err` task error
 (`{"error_code": {"built_in" | "user": ...}, "message", "data", "exception",
 "sub_workflow"?}`).
@@ -218,7 +218,7 @@ Decoders:
 
 The Rust client builds an error from a code, a message and `data`. The
 exception record and the sub-workflow failure are written by the library, and
-`TaskError::user` and `TaskError::library` take a message: the Rust tests only
+`TaskError::custom` and `TaskError::built_in` take a message: the Rust tests only
 read those vectors.
 
 ## Error data (`error_data.json`)
@@ -266,9 +266,9 @@ through `outcome_of_record`.
 
 `{"retry_policy": <policy or null>, "good_until": <instant or null>,
 "timeout_ms": <ms or null>, "execution": <class>, "cancel_grace_ms": <ms or
-null>}`, in this order; the policy holds `max_retries`, `intervals`,
+null>}`, in this order; the policy holds `max_retries`, `intervals_seconds`,
 `backoff_strategy`, `jitter`, `max_delay_seconds` (only when set) and
-`auto_retry_for`, codes by name. Every task stores the text, nulls included.
+`retry_for`, codes by name. Every task stores the text, nulls included.
 A vector's `kind` is `task` (the options of a task), `send` (a send with a
 deadline: the task's text with the deadline in `good_until`, in
 `isoformat()`) or `node` (a workflow

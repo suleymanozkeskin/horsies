@@ -41,7 +41,7 @@ string validates at runtime, but strict type checkers reject it — wrap with
 | `schedule` | `ScheduleConfig \| None` | `None` | Recurring task schedules |
 | `exception_mapper` | `ExceptionMapper` | `{}` | Global exception-to-error-code mapping |
 | `default_unhandled_error_code` | `str` | `"UNHANDLED_EXCEPTION"` | Must be `UPPER_SNAKE_CASE` |
-| `resend_on_transient_error` | `bool` | `False` | Auto-retry transient ENQUEUE_FAILED |
+| `resend_on_transient_error` | `bool` | `False` | Auto-resend transient ENQUEUE_FAILED |
 | `tracing` | `OtelTracing \| NoTracing` | `NoTracing()` | `OtelTracing()`: spans of the sends and of each attempt, and producer metrics, through the OpenTelemetry API; `parentage=ChildOfSend()` (default) or `LinkedToSend()`; `worker_ended_spans=WorkerEndedSpans.MAKE_SPANS` (default: the handler child makes the span of each attempt that the worker ended) or `NO_SPANS`; needs `horsies[otel]`, else HRS-220. `NoTracing()` imports no `opentelemetry` |
 | `log_format` | `LogFormat` (`TextLogs \| JsonLogs`) | `TextLogs()` | Format of the horsies log records; `JsonLogs()`: one JSON object per line |
 | `worker_profiles` | `dict[str, WorkerProfile]` | `{}` | Named worker settings; `horsies worker <app> --profile <name>` runs one. See [Worker profiles](#worker-profiles) |
@@ -360,9 +360,9 @@ def set_up_child_tracing() -> None:
   characters, a value at most 1,024 bytes of printable ASCII, the JSON text
   at most 2,048 bytes. Over a bound: no carrier, the send goes on, one
   WARNING per process. A schedule run and a rerun through the free
-  `rerun_task` store no carrier: each attempt is a new trace.
-- `app.rerun_task_async(connection, command, policy)` (blocking:
-  `app.rerun_task` on a SQLAlchemy `Connection`) opens no span: the new task
+  `rerun_task_in_async` store no carrier: each attempt is a new trace.
+- `app.rerun_task_in_async(connection, command, policy)` (blocking:
+  `app.rerun_task_in` on a SQLAlchemy `Connection`) opens no span: the new task
   stores the carrier of the caller's current context, so its attempt spans
   are children of the caller's span. No valid span, or `NoTracing()`: no
   carrier, and no `opentelemetry` import.
@@ -403,11 +403,11 @@ broker = app.get_broker()
 # Typed result by ID — app-level API (broker.get_result(_async) was removed in 0.1.2).
 # Returns ReadResult[Any, TaskError]: Ok(Succeeded(value)), Ok(Failed(task_error)),
 # or Err(read_error) for a read that gave no outcome (ReadDatabaseError,
-# ResultDeserializationError, NoTypeAvailable, WaitTimeout, ...).
-read = await app.get_result_async("task-uuid", timeout_ms=5000)
-read = app.get_result("task-uuid", timeout_ms=5000)  # sync
+# ReadResultDeserializationError, ReadNoTypeAvailable, ReadWaitTimeout, ...).
+read = await app.get_result_async("task-uuid", wait_ms=5000)
+read = app.get_result("task-uuid", wait_ms=5000)  # sync
 
-# Raw stored envelope, no typed decode — returns DatabaseResult[RawResultRecord | None]
+# Raw stored envelope, no typed decode — returns DatabaseResult[StoredResult | None]
 raw = await broker.get_raw_result_record_async("task-uuid", wait_ms=5000)
 
 # Fetch task metadata by ID — returns DatabaseResult[TaskInfo | None]
@@ -717,12 +717,12 @@ class QueueMode(Enum):
 ### DEFAULT
 
 - Single `"default"` queue.
-- No `queue_name` on `@app.task(...)` — passing one raises HRS-200.
+- No `queue` on `@app.task(...)` — passing one raises HRS-200.
 
 ### CUSTOM
 
 - Named queues via `custom_queues`.
-- Every `@app.task(...)` must include `queue_name` matching a configured queue.
+- Every `@app.task(...)` must include `queue` matching a configured queue.
 
 ## CustomQueueConfig
 
@@ -761,7 +761,7 @@ against the already-serialized JSON string (no extra serialization pass).
 | `warn_bytes` | `int \| None` | `1_048_576` (1 MiB) | >=1; None disables | Warn when a serialized payload exceeds this size in bytes of its UTF-8 text; rate-limited to once per (task_name, kind) per process |
 | `reject_bytes` | `int \| None` | `None` (off) | >=1; None disables | Reject an enqueue whose serialized kwargs exceed this size in bytes of their UTF-8 text before anything is written. A schedule over this size fails scheduler start and `horsies check` |
 
-Coverage: `.send()`/`.schedule()` kwargs warn and reject
+Coverage: `.send()`/`.send_async()` kwargs warn and reject
 (`Err(PAYLOAD_TOO_LARGE)`); scheduled fires warn and reject (slot fails
 via the schedule's enqueue-failure logging); running-flow workflow-node
 enqueues (including `args_from` injection) warn only; task results warn
@@ -971,7 +971,7 @@ All `TaskSchedule.name` values must be unique (HRS-205).
 | `task_name` | `str` | required | Must match a registered task |
 | `pattern` | `SchedulePattern` | required | When to run |
 | `kwargs` | `dict` | `{}` | Keyword args to task — schedules are kwargs-only (`extra='forbid'`; `args`/unknown fields rejected at construction). Encoded once at scheduler start: a `default_factory` or a validator that reads the clock runs once per start, not once per fire |
-| `queue_name` | `str \| None` | `None` | Target queue |
+| `queue` | `str \| None` | `None` | Queue of each run; `None` uses the task's queue |
 | `enabled` | `bool` | `True` | Per-schedule on/off |
 | `timezone` | `str` | `"UTC"` | IANA timezone (validated at scheduler startup; invalid names fail boot) |
 | `catch_up_missed` | `bool` | `False` | `True`: replay missed runs on restart. `False`: drop missed runs, fire only the most recent due slot |
@@ -986,14 +986,16 @@ Use the smallest pattern that describes the schedule. `HourlySchedule`,
 fit. Use `CronSchedule` for wall-clock aligned field combinations such as
 "every 4 hours at minute 15".
 
-**IntervalSchedule** — run every N time units:
+**IntervalSchedule** — run every `every`:
 
 ```python
-IntervalSchedule(seconds=30)
-IntervalSchedule(hours=1, minutes=30)  # total = 90 minutes
+from datetime import timedelta
+
+IntervalSchedule(every=timedelta(seconds=30))
+IntervalSchedule(every=timedelta(hours=1, minutes=30))  # every 90 minutes
 ```
 
-Fields: `seconds`, `minutes`, `hours`, `days` — all `int | None`. At least one must be set (HRS-205).
+Field: `every: timedelta`, in whole seconds, from 1 second to 365 days. A length with microseconds, a length of zero or less, and a length above 365 days are refused at construction (HRS-205).
 
 **HourlySchedule** — every hour at fixed offset:
 
@@ -1010,18 +1012,18 @@ DailySchedule(time=time(3, 0, 0))  # daily at 03:00
 **WeeklySchedule** — specific weekdays at fixed time:
 
 ```python
-WeeklySchedule(days=[Weekday.MONDAY, Weekday.FRIDAY], time=time(9, 0))
+WeeklySchedule(weekdays=[Weekday.MONDAY, Weekday.FRIDAY], time=time(9, 0))
 ```
 
-`days` must have no duplicates (HRS-205).
+`weekdays` must have no duplicates (HRS-205).
 
 **MonthlySchedule** — fixed day of month:
 
 ```python
-MonthlySchedule(day=15, time=time(15, 0))  # 15th at 15:00
+MonthlySchedule(day_of_month=15, time=time(15, 0))  # 15th at 15:00
 ```
 
-If `day` > days in month (e.g., day=31 in Feb), that month is skipped.
+If `day_of_month` > days in month (e.g., `day_of_month=31` in Feb), that month is skipped.
 
 The `time` of `DailySchedule`, `WeeklySchedule` and `MonthlySchedule` is in the schedule's `timezone`. A `time` with `tzinfo` or with microseconds is refused at construction (HRS-205): set the zone in `timezone`, and give whole seconds.
 
@@ -1138,15 +1140,15 @@ class Month(str, Enum):
 
 ## `resend_on_transient_error`
 
-When `True` on `AppConfig`, enables automatic retry of transient `ENQUEUE_FAILED` errors for both task sends and workflow starts.
+When `True` on `AppConfig`, enables automatic resend of transient `ENQUEUE_FAILED` errors for both task sends and workflow starts.
 
-**Retry parameters** (hardcoded, not user-configurable):
-- 3 retries after initial attempt (4 total)
+**Resend parameters** (hardcoded, not user-configurable):
+- 3 resends after the first call (4 total)
 - Initial backoff: 200ms
 - Max backoff: 2000ms
 - Exponential backoff (no jitter)
 
-Only retries `ENQUEUE_FAILED` errors with `retryable=True`. Permanent errors (validation, serialization) and an `IDEMPOTENCY_KEY_CONFLICT` return immediately.
+Only resends `ENQUEUE_FAILED` errors with `retryable=True`. Permanent errors (validation, serialization) and an `IDEMPOTENCY_KEY_CONFLICT` return immediately.
 
 `app.workflow()` copies this setting onto each `WorkflowSpec` automatically.
 

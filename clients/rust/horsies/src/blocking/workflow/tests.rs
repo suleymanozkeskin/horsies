@@ -297,9 +297,9 @@ async fn a_blocking_outcome_read_on_a_runtime_thread_is_async_context() {
         matches!(read, WorkflowReadError::AsyncContext { .. }),
         "{read}"
     );
-    assert_eq!(read.code().value(), "ASYNC_CONTEXT");
+    assert_eq!(read.code().as_str(), "ASYNC_CONTEXT");
     assert!(
-        read.to_string().contains("`handle.get(limit).await`"),
+        read.to_string().contains("`handle.get(wait).await`"),
         "{read}"
     );
     let node = handle

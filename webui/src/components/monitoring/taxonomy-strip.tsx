@@ -33,7 +33,7 @@ interface TaxonomyStripProps {
 /**
  * Error-code counts rolled up by taxonomy family, each chip a filter toggle.
  * Counts every task carrying an error code (including completed tasks that
- * returned a domain error), so it is deliberately NOT labelled "failures".
+ * returned a custom code), so it is deliberately NOT labelled "failures".
  * A chip rests on the `--glass-inset` fill, so its hover steps up to the
  * stronger `--hairline` ink: `--surface-hover` is lighter than the fill.
  */
@@ -51,7 +51,7 @@ export function TaxonomyStrip({
     <div className="flex flex-wrap items-center gap-1.5">
       <span
         className="mr-1.5 text-xs font-semibold text-muted-foreground"
-        title="Tasks carrying an error code, grouped by family. Includes domain errors returned by completed tasks, so this is not the same as the failed count."
+        title="Tasks carrying an error code, grouped by family. Includes custom codes returned by completed tasks, so this is not the same as the failed count."
       >
         Error codes by category
       </span>

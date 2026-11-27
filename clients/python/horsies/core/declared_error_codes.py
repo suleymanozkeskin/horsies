@@ -1,7 +1,7 @@
-"""The user error codes that a task declares: `@app.task(..., error_codes=...)`.
+"""The custom error codes that a task declares: `@app.task(..., error_codes=...)`.
 
 The `error_code` metric label of one task has every built-in code by its
-value, each code that the task declares, and `undeclared`. A user code that
+value, each code that the task declares, and `undeclared`. A custom code that
 the task does not declare counts as `undeclared` in that label only; events,
 traces, logs and the history row keep the exact code. Declaring is
 optional, and no count limits a set.
@@ -22,7 +22,7 @@ The declared set of a task also holds the codes that its exception mappers
 can produce, with no second declaration (`with_mapper_codes`): the values of
 the task's `exception_mapper` and of `AppConfig.exception_mapper`.
 
-The `auto_retry_for` entries of a task are code members
+The `retry_for` entries of a task are code members
 (`check_retry_codes`): members of the built-in code enums, or members of the
 `Enum` class of `error_codes=`. A task that retries on a code of its own
 declares that code in an `Enum` class.
@@ -138,12 +138,12 @@ def with_mapper_codes(
 ) -> tuple[str, ...]:
     """The declared set of a task: the codes that `error_codes=` declares
     (`declared`, as `parse_declared_error_codes` accepted them), then the
-    user codes that the task's exception mapper `task_mapper` can produce,
+    custom codes that the task's exception mapper `task_mapper` can produce,
     then those of the app's mapper `app_mapper`. Each code comes once, in
     the order of its first place: the declaration, then each mapper in the
     order of its entries. Pure.
 
-    A mapper value that is not a user code is not added: a built-in code
+    A mapper value that is not a custom code is not added: a built-in code
     (every built-in code is a value of the `error_code` label already), a
     reserved name, or a text outside the code-text rule. The mapper checks
     refuse such a value: `HRS-209` when the task or the app config is
@@ -155,7 +155,7 @@ def with_mapper_codes(
     )
     codes: list[str] = list(declared)
     for code in (*task_codes, *app_mapper.values()):
-        match _is_user_code(code) and code not in codes:
+        match _is_custom_code(code) and code not in codes:
             case True:
                 codes.append(code)
             case False:
@@ -163,7 +163,7 @@ def with_mapper_codes(
     return tuple(codes)
 
 
-def _is_user_code(code: object) -> bool:
+def _is_custom_code(code: object) -> bool:
     """Whether `code` is a text that a task may declare: it passes the
     code-text rule, it is not a reserved name, and it is not the name of a
     built-in code. Pure."""
@@ -237,7 +237,7 @@ def _checked_entry(
 
 @dataclass(frozen=True, slots=True)
 class RetryEntryNotAMember:
-    """An `auto_retry_for` entry is not a member of an `Enum` class: a plain
+    """A `retry_for` entry is not a member of an `Enum` class: a plain
     `str`, or a value of another type. `index` is its place in the list,
     `entry` its `repr`, and `given` the name of its type."""
 
@@ -248,7 +248,7 @@ class RetryEntryNotAMember:
 
 @dataclass(frozen=True, slots=True)
 class RetryMemberNotDeclared:
-    """An `auto_retry_for` entry is a member of an `Enum` class that is not
+    """A `retry_for` entry is a member of an `Enum` class that is not
     a built-in code enum and not the `Enum` class of the task's
     `error_codes=`. `member` names it as `Class.NAME`."""
 
@@ -257,12 +257,12 @@ class RetryMemberNotDeclared:
 
 
 type RetryEntryRefusal = RetryEntryNotAMember | RetryMemberNotDeclared
-"""Why one `auto_retry_for` entry is refused."""
+"""Why one `retry_for` entry is refused."""
 
 
 @dataclass(frozen=True, slots=True)
 class RetryEntriesRefused:
-    """Every refused `auto_retry_for` entry, in list order; at least one."""
+    """Every refused `retry_for` entry, in list order; at least one."""
 
     refusals: tuple[RetryEntryRefusal, ...]
 
@@ -271,7 +271,7 @@ def check_retry_codes(
     entries: Sequence[object],
     code_enum: type[Enum] | None,
 ) -> Result[None, RetryEntriesRefused]:
-    """Check that each `auto_retry_for` entry of a task is a code member of
+    """Check that each `retry_for` entry of a task is a code member of
     the task. Pure.
 
     An entry is accepted when it is a member of a built-in code enum

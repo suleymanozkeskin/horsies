@@ -74,7 +74,7 @@ APP: Final = Horsies(
 )
 
 
-@APP.task(task_name=TASK_NAME)
+@APP.task(name=TASK_NAME)
 def value_task(*, value: int) -> Result[int, TaskError]:
     return Ok(value)
 
@@ -188,8 +188,8 @@ FACADES: Final[dict[str, Facade]] = {
         },
     ),
     'WorkflowHandle.get': Facade(
-        blocking=lambda handle: handle.get(timeout_ms=250),
-        awaited=lambda handle: handle.get_async(timeout_ms=250),
+        blocking=lambda handle: handle.get(wait_ms=250),
+        awaited=lambda handle: handle.get_async(wait_ms=250),
         blocking_form='wait_workflow_result',
         arguments=(WORKFLOW_KEY,),
         keywords={'timeout_ms': 250},
@@ -430,8 +430,8 @@ def test_get_refuses_a_timeout_as_get_async_refuses_it() -> None:
     """A refused timeout is INVALID_INPUT before any core call, in both forms."""
     answers = _answering('wait_workflow_result', _record(core.WaitTimedOut))
 
-    blocking = _workflow_handle().get(timeout_ms=-1)
-    awaited = asyncio.run(_workflow_handle().get_async(timeout_ms=-1))
+    blocking = _workflow_handle().get(wait_ms=-1)
+    awaited = asyncio.run(_workflow_handle().get_async(wait_ms=-1))
 
     assert outcome_shape(blocking) == outcome_shape(awaited)
     answers.handle.wait_workflow_result.assert_not_called()
@@ -448,7 +448,7 @@ def test_get_with_no_limit_passes_no_limit() -> None:
 def test_result_for_refuses_a_node_without_an_id_as_its_async_form() -> None:
     """A node with no node_id is WORKFLOW_CONTEXT_MISSING_ID before any core call."""
     answers = _answering('workflow_node_result', _record(core.NodeResultNotStored))
-    node: TaskNode[int] = TaskNode(fn=value_task, kwargs={'value': 1})
+    node: TaskNode[int] = TaskNode(function=value_task, kwargs={'value': 1})
 
     blocking = _workflow_handle().result_for(node)
     awaited = asyncio.run(_workflow_handle().result_for_async(node))
@@ -466,7 +466,7 @@ def _spec(
     name: str = 'blocking_forms.flow',
     definition_key: str = 'blocking_forms.flow.v1',
 ) -> WorkflowSpec[int]:
-    node: TaskNode[int] = TaskNode(fn=value_task, kwargs={'value': 1})
+    node: TaskNode[int] = TaskNode(function=value_task, kwargs={'value': 1})
     return APP.workflow(name, [node], output=node, definition_key=definition_key)
 
 

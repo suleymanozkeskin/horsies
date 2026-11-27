@@ -34,7 +34,7 @@ Every stored task result is one shape:
 - Marker `__h_task_result__: true` distinguishes a Horsies envelope from any other JSON in the row.
 - Exactly one of `ok` / `err` is non-null.
 - The `ok` slot carries a JSON value matching the task's declared output type. A structured value (a model, a dataclass, a struct) is stored as its plain JSON form, with no type tag. The reader reconstructs it from its declared type.
-- The `err` slot, when populated, carries the JSON form of the task error: `error_code`, `message`, `data`, and the exception in flattened form (`type`, `module`, `message`, `repr`, `traceback`), never a live exception.
+- The `err` slot, when populated, carries the JSON form of the task error: `error_code` (the field `TaskError.code`), `message`, `data`, and the exception in flattened form (`type`, `module`, `message`, `repr`, `traceback`), never a live exception.
 
 Outputless-workflow envelopes wrap an additional marker:
 
@@ -90,7 +90,7 @@ The core reads and writes JSON text with these rules:
 
 ## The Error Path
 
-An error is the report of a failure, and `auto_retry_for` and outcome routing read its code. So an error always encodes, and its code and message stay.
+An error is the report of a failure, and `retry_for` and outcome routing read its code. So an error always encodes, and its code and message stay.
 
 - A lone surrogate in the code, the message or the exception text is escaped.
 - The `data` of an error must be JSON-native. A value that is not, or that a reader cannot read, is replaced with `{'data_refused': <cause>}`. The cause names a type, never the value.

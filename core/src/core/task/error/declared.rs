@@ -1,8 +1,8 @@
-//! The user error codes that a task declares, and the value of the
+//! The custom error codes that a task declares, and the value of the
 //! `error_code` metric label of an error code.
 //!
 //! The label set of one task is every built-in code by its value, the codes
-//! that the task declares, and [`UNDECLARED_LABEL`]. A user code that the
+//! that the task declares, and [`UNDECLARED_LABEL`]. A custom code that the
 //! task does not declare takes [`UNDECLARED_LABEL`]. A named value closes the
 //! set; no count limits it. Only the label folds a code: events, traces, logs
 //! and the history row keep the exact code.
@@ -13,7 +13,7 @@
 //! code.
 //!
 //! The Python client takes the codes from the task decorator
-//! (`error_codes=`); the Rust client from `UserErrorCode::CODES` of the
+//! (`error_codes=`); the Rust client from `CustomErrorCode::CODES` of the
 //! task's code type. Each client refuses a bad set when the task is defined,
 //! with the HRS code of [`DeclaredCodeRefusal::error_code`].
 
@@ -25,10 +25,10 @@ use super::{check_error_code_text, BuiltInTaskCode, CodeTextRefusal, TaskErrorCo
 use crate::catalog::CodeEnum;
 use crate::core::error::HorsiesErrorCode;
 
-/// The label value of a user code that the task does not declare.
+/// The label value of a custom code that the task does not declare.
 pub const UNDECLARED_LABEL: &str = "undeclared";
 
-/// One user error code that a task declares. Only [`DeclaredErrorCodes::parse`]
+/// One custom error code that a task declares. Only [`DeclaredErrorCodes::parse`]
 /// builds one: the text passes the code-text rule and is not the name of a
 /// built-in code.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -47,7 +47,7 @@ impl std::fmt::Display for DeclaredErrorCode {
     }
 }
 
-/// The user error codes that one task declares, each once, sorted by text.
+/// The custom error codes that one task declares, each once, sorted by text.
 /// Empty when the task declares none.
 ///
 /// The JSON form is an array of the code texts. A read refuses the array as
@@ -222,9 +222,9 @@ pub enum ErrorCodeLabel<'a> {
     /// A built-in code; the label value is its value, for example
     /// `DATABASE_ERROR`.
     BuiltIn(&'a BuiltInTaskCode),
-    /// A user code that the task declares; the label value is the code.
+    /// A custom code that the task declares; the label value is the code.
     Declared(&'a DeclaredErrorCode),
-    /// A user code that the task does not declare; the label value is
+    /// A custom code that the task does not declare; the label value is
     /// [`UNDECLARED_LABEL`].
     Undeclared,
 }
@@ -241,8 +241,8 @@ impl<'a> ErrorCodeLabel<'a> {
 }
 
 /// The `error_code` label of `code` for a task that declares `declared`.
-/// Pure and total: a built-in code is its own label, a user code in
-/// `declared` is its own label, and every other user code is
+/// Pure and total: a built-in code is its own label, a custom code in
+/// `declared` is its own label, and every other custom code is
 /// [`ErrorCodeLabel::Undeclared`]. A task that is not registered declares
 /// no code: pass [`DeclaredErrorCodes::NONE`].
 pub fn error_code_label<'a>(
@@ -251,7 +251,7 @@ pub fn error_code_label<'a>(
 ) -> ErrorCodeLabel<'a> {
     match code {
         TaskErrorCode::BuiltIn(built_in) => ErrorCodeLabel::BuiltIn(built_in),
-        TaskErrorCode::User(user) => match declared.get(user.as_str()) {
+        TaskErrorCode::Custom(user) => match declared.get(user.as_str()) {
             Some(found) => ErrorCodeLabel::Declared(found),
             None => ErrorCodeLabel::Undeclared,
         },
@@ -270,7 +270,7 @@ fn built_in_value(code: &BuiltInTaskCode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{ContractCode, OperationalCode, OutcomeCode, RetrievalCode, UserCode};
+    use super::super::{ContractCode, CustomCode, OperationalCode, OutcomeCode, RetrievalCode};
     use super::*;
 
     fn declared(codes: &[&str]) -> DeclaredErrorCodes {
@@ -299,7 +299,7 @@ mod tests {
     }
 
     fn user(text: &str) -> TaskErrorCode {
-        TaskErrorCode::User(UserCode::parse(text).expect("the test text is a user code"))
+        TaskErrorCode::Custom(CustomCode::parse(text).expect("the test text is a custom code"))
     }
 
     #[test]
@@ -480,12 +480,12 @@ mod tests {
             let code = TaskErrorCode::BuiltIn(built_in.clone());
             let label = error_code_label(&codes, &code);
             assert_eq!(label, ErrorCodeLabel::BuiltIn(&built_in));
-            assert_eq!(label.value(), built_in.value());
+            assert_eq!(label.value(), built_in.as_str());
         }
     }
 
     #[test]
-    fn a_declared_user_code_is_its_own_label() {
+    fn a_declared_custom_code_is_its_own_label() {
         let codes = declared(&["RATE_LIMITED", "CARD_DECLINED"]);
         let code = user("CARD_DECLINED");
         let label = error_code_label(&codes, &code);
@@ -496,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn an_undeclared_user_code_is_undeclared() {
+    fn an_undeclared_custom_code_is_undeclared() {
         let codes = declared(&["RATE_LIMITED"]);
         for text in ["CARD_DECLINED", "my_user_code", "RATE_LIMITED_2"] {
             let code = user(text);
@@ -507,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn a_task_that_declares_nothing_labels_every_user_code_undeclared() {
+    fn a_task_that_declares_nothing_labels_every_custom_code_undeclared() {
         let code = user("RATE_LIMITED");
         assert_eq!(
             error_code_label(&DeclaredErrorCodes::NONE, &code),
@@ -528,7 +528,7 @@ mod tests {
     #[test]
     fn the_label_value_of_a_built_in_code_is_its_catalog_value() {
         for built_in in every_built_in_code() {
-            assert_eq!(built_in_value(&built_in), built_in.value());
+            assert_eq!(built_in_value(&built_in), built_in.as_str());
         }
     }
 }

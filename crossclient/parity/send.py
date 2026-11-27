@@ -33,12 +33,12 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from horsies import (
     MinResponsesAtLeast,
     PingTargetWorker,
+    RerunCommand,
     RerunEnqueued,
     RerunEnqueuePolicy,
-    RerunTask,
     TaskSendAsyncContext,
     WorkerPong,
-    rerun_task,
+    rerun_task_in_async,
 )
 from horsies.core.models.outcome import Failed
 from horsies.core.models.tasks import TaskError
@@ -94,7 +94,7 @@ async def _send_retry(send: Send) -> str:
         case 'parity.add':
             pass
         case other:
-            raise SendRefused(f'the retry form has no task {other!r}')
+            raise SendRefused(f'the resend form has no task {other!r}')
     match parity.add.send(a=_int(kwargs, 'a'), b=_int(kwargs, 'b')):
         case Err(TaskSendAsyncContext() as refused):
             pass
@@ -102,13 +102,13 @@ async def _send_retry(send: Send) -> str:
             raise SendRefused(f'the blocking send of {send.task_name} answered {other}')
     ids: list[str] = []
     for _attempt in range(2):
-        match await parity.add.retry_send_async(refused):
+        match await parity.add.resend_async(refused):
             case Ok(handle):
                 ids.append(str(handle.task_id))
             case Err(error):
-                raise SendRefused(f'the retry of {send.task_name} was refused: {error}')
+                raise SendRefused(f'the resend of {send.task_name} was refused: {error}')
     if ids[0] != ids[1]:
-        raise SendRefused(f'the two retries of {send.task_name} wrote two tasks: {ids}')
+        raise SendRefused(f'the two resends of {send.task_name} wrote two tasks: {ids}')
     return ids[0]
 
 
@@ -184,8 +184,8 @@ async def _rerun_one(rerun: Rerun, sent: list[str]) -> str:
     if not 0 <= rerun.source < len(sent):
         raise SendRefused(f'{rerun} names no earlier task line')
     source = UUID(sent[rerun.source])
-    match await parity.app.get_result_async(source, timeout_ms=RESULT_WAIT_MS):
-        case Ok(Failed(TaskError(error_code='REFUSED'))):
+    match await parity.app.get_result_async(source, wait_ms=RESULT_WAIT_MS):
+        case Ok(Failed(TaskError(code='REFUSED'))):
             pass
         case other:
             raise SendRefused(f'the rerun source {source} did not end with REFUSED: {other}')
@@ -193,9 +193,9 @@ async def _rerun_one(rerun: Rerun, sent: list[str]) -> str:
     engine = create_async_engine(sqlalchemy_url(database_url))
     try:
         async with engine.begin() as connection:
-            outcome = await rerun_task(
+            outcome = await rerun_task_in_async(
                 connection,
-                RerunTask(source_task_id=source, deadline=None),
+                RerunCommand(source_task_id=source, good_until=None),
                 RERUN_POLICY,
                 registered_task_codes=parity.app.registered_task_codes(),
             )

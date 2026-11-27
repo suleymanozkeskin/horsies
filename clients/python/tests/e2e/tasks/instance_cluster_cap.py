@@ -50,12 +50,12 @@ from horsies.core.models.tasks import TaskError
 from horsies.core.types.result import Err, Ok, Result
 
 
-@app.task(task_name='e2e_cluster_cap_healthcheck')
+@app.task(name='e2e_cluster_cap_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='e2e_cluster_cap_slow')
+@app.task(name='e2e_cluster_cap_slow')
 def slow_task(*, duration_ms: int) -> Result[str, TaskError]:
     """Task that sleeps for specified duration."""
     import time
@@ -64,7 +64,7 @@ def slow_task(*, duration_ms: int) -> Result[str, TaskError]:
     return Ok(f'slept_{duration_ms}')
 
 
-@app.task(task_name='e2e_cluster_cap_fail')
+@app.task(name='e2e_cluster_cap_fail')
 def fail_task() -> Result[str, TaskError]:
     """Task that always fails, for cap-leak testing."""
-    return Err(TaskError(error_code='DELIBERATE_FAIL', message='always fails'))
+    return Err(TaskError(code='DELIBERATE_FAIL', message='always fails'))

@@ -17,8 +17,8 @@ use crate::core::history::reads::result::{
     HistoryResultPayload, HistoryTaskResult, TaskResultRead,
 };
 use crate::core::history::rerun::operations::{
-    rerun_first_statement, rerun_task_in_transaction, RegisteredTaskCodes, RerunEnqueuePolicy,
-    RerunError, RerunOutcome, RerunTask,
+    rerun_first_statement, rerun_task_in_transaction, RegisteredTaskCodes, RerunCommand,
+    RerunEnqueuePolicy, RerunError, RerunOutcome,
 };
 use crate::core::{EnqueueRetention, PostgresConfig, TaskInfo};
 
@@ -1483,7 +1483,7 @@ impl PostgresBroker {
     /// `OutcomeUnknown` at `COMMIT`.
     pub async fn rerun_task(
         &self,
-        command: RerunTask,
+        command: RerunCommand,
         policy: RerunEnqueuePolicy,
         codes: &RegisteredTaskCodes,
     ) -> Result<RerunOutcome, RerunError> {
@@ -2941,13 +2941,15 @@ fn history_task_info(
         task_id: detail.task_id,
         task_name: detail.task_name,
         status,
-        queue_name: detail.queue_name,
+        // History column queue_name.
+        queue: detail.queue_name,
         priority: detail.priority,
         retry_count: detail.retry_count as u32,
         max_retries: detail.max_retries as u32,
         next_retry_at: None,
         sent_at: detail.sent_at,
-        enqueued_at: detail.enqueued_at,
+        // History column enqueued_at: the time the row became due.
+        due_at: detail.enqueued_at,
         claimed_at: detail.claimed_at,
         started_at: detail.started_at,
         completed_at: (status == crate::core::TaskStatus::Completed).then_some(terminal_at),
@@ -4979,9 +4981,9 @@ mod enqueue_task_options_tests {
     fn policy(max_retries: u32, extra: &str) -> String {
         let intervals = vec!["60"; max_retries as usize].join(", ");
         format!(
-            r#"{{"retry_policy": {{"max_retries": {max_retries}, "intervals": [{intervals}],
+            r#"{{"retry_policy": {{"max_retries": {max_retries}, "intervals_seconds": [{intervals}],
                 "backoff_strategy": "fixed", "jitter": false,
-                "auto_retry_for": ["STORAGE_ERROR"]{extra}}},
+                "retry_for": ["STORAGE_ERROR"]{extra}}},
               "good_until": null, "timeout_ms": null, "execution": "ISOLATED",
               "cancel_grace_ms": null}}"#
         )
@@ -5231,10 +5233,10 @@ mod enqueue_task_options_tests {
     fn the_core_written_options_are_accepted() {
         let options = crate::core::TaskOptions {
             task_name: "t".to_owned(),
-            queue_name: None,
+            queue: None,
             good_until: None,
-            auto_retry_for: Some(vec![crate::core::TaskErrorCode::User(
-                crate::core::UserCode::parse("X").expect("X is a user code"),
+            retry_for: Some(vec![crate::core::TaskErrorCode::Custom(
+                crate::core::CustomCode::parse("X").expect("X is a custom code"),
             )]),
             retry_policy: Some(crate::core::RetryPolicy::exponential(30, 4, true).unwrap()),
             timeout_ms: Some(1_000),

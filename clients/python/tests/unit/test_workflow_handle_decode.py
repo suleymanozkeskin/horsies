@@ -18,11 +18,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from horsies.core.codec.typed import Json
+from horsies.core.codec.typed import Json, encode_task_error
 from horsies.core.models.outcome import (
     Failed,
     ReadResult,
-    ResultDeserializationError,
+    ReadResultDeserializationError,
     Succeeded,
 )
 from horsies.core.models.tasks import (
@@ -41,12 +41,12 @@ from horsies.core.types.result import Err, Ok
 
 
 def _unreadable_message(result: ReadResult[Any, TaskError]) -> str:
-    """The message of a read that is ``Err(ResultDeserializationError)``."""
+    """The message of a read that is ``Err(ReadResultDeserializationError)``."""
     match result:
-        case Err(ResultDeserializationError(message=message)):
+        case Err(ReadResultDeserializationError(message=message)):
             return message
         case _:
-            pytest.fail(f'expected Err(ResultDeserializationError), got {result!r}')
+            pytest.fail(f'expected Err(ReadResultDeserializationError), got {result!r}')
 
 
 def _typed_envelope(ok: Any) -> dict[str, Any]:
@@ -159,7 +159,7 @@ class TestWorkflowEnvelopeMarkerGuards:
             workflow_id='wf-x',
         )
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultDeserializationError)
+        assert isinstance(result.err_value, ReadResultDeserializationError)
 
     def test_missing_marker_rejected(self) -> None:
         result = _decode_workflow_envelope(
@@ -169,7 +169,7 @@ class TestWorkflowEnvelopeMarkerGuards:
             workflow_id='wf-x',
         )
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultDeserializationError)
+        assert isinstance(result.err_value, ReadResultDeserializationError)
 
 
 @pytest.mark.unit
@@ -200,10 +200,10 @@ class TestWorkflowEnvelopeErrSlot:
                 pytest.fail(f'expected a failed outcome, got {result!r}')
 
     def test_sub_workflow_error_preserved(self) -> None:
-        """SubWorkflowFailure dumped by the engine round-trips with the
+        """SubWorkflowFailure in its stored form round-trips with the
         ``sub_workflow_id`` / ``sub_workflow_summary`` fields intact."""
         original = SubWorkflowFailure(
-            error_code=OperationalCode.UNHANDLED_EXCEPTION,
+            code=OperationalCode.UNHANDLED_EXCEPTION,
             message='nested failure',
             sub_workflow_id='wf-child',
             sub_workflow_summary=SubWorkflowSummary(
@@ -216,7 +216,7 @@ class TestWorkflowEnvelopeErrSlot:
                 error_summary='downstream',
             ),
         )
-        wire = _err_envelope(original.model_dump(mode='json'))
+        wire = _err_envelope(encode_task_error(original))
         result = _decode_workflow_envelope(
             cast(Json, wire),
             out_type=int,
@@ -287,6 +287,6 @@ class TestWorkflowEnvelopeOutputlessPath:
         )
         match result:
             case Ok(Succeeded({'node-0': Failed(task_error)})):
-                assert task_error.error_code == ContractCode.NO_TYPE_AVAILABLE
+                assert task_error.code == ContractCode.NO_TYPE_AVAILABLE
             case _:
                 pytest.fail(f'expected a NO_TYPE_AVAILABLE node entry, got {result!r}')

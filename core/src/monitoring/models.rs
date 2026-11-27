@@ -19,7 +19,7 @@ pub enum ErrorCategory {
     Contract,
     Retrieval,
     Outcome,
-    Domain,
+    Custom,
 }
 
 impl ErrorCategory {
@@ -28,7 +28,7 @@ impl ErrorCategory {
         Self::Contract,
         Self::Retrieval,
         Self::Outcome,
-        Self::Domain,
+        Self::Custom,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -37,7 +37,7 @@ impl ErrorCategory {
             Self::Contract => "CONTRACT",
             Self::Retrieval => "RETRIEVAL",
             Self::Outcome => "OUTCOME",
-            Self::Domain => "DOMAIN",
+            Self::Custom => "CUSTOM",
         }
     }
 }

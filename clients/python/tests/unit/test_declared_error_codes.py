@@ -199,7 +199,7 @@ class TestWithMapperCodes:
         'value',
         ['TASK_TIMEOUT', 'UNHANDLED_EXCEPTION', 'WORKFLOW_STOPPED', 'timeout', '', 7],
     )
-    def test_a_mapper_value_that_is_not_a_user_code_is_not_added(
+    def test_a_mapper_value_that_is_not_a_custom_code_is_not_added(
         self,
         value: object,
     ) -> None:
@@ -280,7 +280,7 @@ class TestDecorator:
         def resize(*, width: int) -> Result[int, TaskError]:
             return Ok(width)
 
-        assert resize.task_error_codes == ()
+        assert resize.error_codes == ()
 
     def test_a_tuple_is_kept_on_the_task_function(self) -> None:
         app = _app()
@@ -289,8 +289,8 @@ class TestDecorator:
         def charge(*, amount: int) -> Result[int, TaskError]:
             return Ok(amount)
 
-        assert charge.task_error_codes == ('RATE_LIMITED', 'CARD_DECLINED')
-        assert app.tasks['charge'].task_error_codes == ('RATE_LIMITED', 'CARD_DECLINED')
+        assert charge.error_codes == ('RATE_LIMITED', 'CARD_DECLINED')
+        assert app.tasks['charge'].error_codes == ('RATE_LIMITED', 'CARD_DECLINED')
 
     def test_an_enum_class_is_kept_as_its_values(self) -> None:
         app = _app()
@@ -299,7 +299,7 @@ class TestDecorator:
         async def charge(*, amount: int) -> Result[int, TaskError]:
             return Ok(amount)
 
-        assert charge.task_error_codes == ('CARD_DECLINED', 'RATE_LIMITED')
+        assert charge.error_codes == ('CARD_DECLINED', 'RATE_LIMITED')
 
     def test_a_value_of_another_form_is_hrs_102(self) -> None:
         with pytest.raises(TaskDefinitionError) as raised:
@@ -376,7 +376,7 @@ class TestDecorator:
         def charge(*, amount: int) -> Result[int, TaskError]:
             return Ok(amount)
 
-        assert charge.task_error_codes == (
+        assert charge.error_codes == (
             'CARD_DECLINED',
             'GATEWAY_SLOW',
             'BAD_AMOUNT',
@@ -395,7 +395,7 @@ class TestDecorator:
         def charge(*, amount: int) -> Result[int, TaskError]:
             return Ok(amount)
 
-        assert charge.task_error_codes == ('CARD_DECLINED',)
+        assert charge.error_codes == ('CARD_DECLINED',)
 
     def test_the_app_lists_a_task_whose_only_codes_come_from_a_mapper(
         self,

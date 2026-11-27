@@ -31,7 +31,7 @@ pub(crate) enum ScheduleManifestRefused {
     TaskNotRegistered { position: usize, task_name: String },
     /// The queue of an enabled schedule is not a queue of the app (Python
     /// `Horsies.validate_queue`).
-    #[error("schedule.schedules[{position}].queue_name: {cause}")]
+    #[error("schedule.schedules[{position}].queue: {cause}")]
     QueueNotAdmitted {
         position: usize,
         cause: HorsiesError,
@@ -124,7 +124,7 @@ fn send_document(
     };
     Ok(json!({
         "task_name": schedule.task_name,
-        "queue_name": queue,
+        "queue": queue,
         "priority": queue_priority(config, &queue),
         "input_json": schedule_input_text(schedule),
         "task_options": task_options,
@@ -141,7 +141,7 @@ fn schedule_queue(
     task: &RegisteredTask,
     schedule: &TaskSchedule,
 ) -> Result<String, HorsiesError> {
-    match (schedule.queue_name.as_deref(), task.queue_name()) {
+    match (schedule.queue.as_deref(), task.queue()) {
         (Some(queue), _) => resolve_task_queue(config, Some(queue)),
         (None, Some(task_queue)) => Ok(task_queue.to_owned()),
         (None, None) => resolve_task_queue(config, None),
@@ -177,6 +177,7 @@ pub(crate) fn schedule_input_text(schedule: &TaskSchedule) -> String {
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMeta};
     use horsies_core::scheduler_manifest::{
@@ -204,9 +205,9 @@ mod tests {
         }
         .with_task_options(TaskOptions {
             task_name: "reports.nightly".to_owned(),
-            queue_name: queue.map(str::to_owned),
+            queue: queue.map(str::to_owned),
             good_until: None,
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: None,
             timeout_ms,
             execution: Execution::Isolated,
@@ -216,10 +217,7 @@ mod tests {
 
     fn every_minute() -> SchedulePattern {
         SchedulePattern::Interval(IntervalSchedule {
-            seconds: Some(60),
-            minutes: None,
-            hours: None,
-            days: None,
+            every: Duration::from_secs(60),
         })
     }
 
@@ -278,7 +276,7 @@ mod tests {
         ));
         let send = send_of(&manifest, 0);
         assert_eq!(send.task_name, "reports.nightly");
-        assert_eq!(send.queue_name, "default");
+        assert_eq!(send.queue, "default");
         assert_eq!(send.priority.0.get(), 100);
         assert_eq!(send.input_json, r#"{"day":"monday","limit":5}"#);
         assert!(matches!(
@@ -375,20 +373,20 @@ mod tests {
             .insert("audit".to_owned(), None);
         let tasks = registry(&config, Some("reports"));
         let on_audit = TaskSchedule {
-            queue_name: Some("audit".to_owned()),
+            queue: Some("audit".to_owned()),
             ..TaskSchedule::new("audit", "reports.nightly", every_minute())
         };
         let schedule = ScheduleConfig::new(vec![nightly(), on_audit]);
         let manifest = scheduler_manifest(&config, &schedule, &tasks).unwrap();
         let task_queue = send_of(&manifest, 0);
-        assert_eq!(task_queue.queue_name, "reports");
+        assert_eq!(task_queue.queue, "reports");
         assert_eq!(task_queue.priority.0.get(), 20);
         assert_eq!(
             task_queue.retention_class_key.retention().class_key(),
             "standard_30d"
         );
         let schedule_queue = send_of(&manifest, 1);
-        assert_eq!(schedule_queue.queue_name, "audit");
+        assert_eq!(schedule_queue.queue, "audit");
         assert_eq!(schedule_queue.priority.0.get(), 5);
         assert_eq!(
             schedule_queue.retention_class_key.retention().class_key(),
@@ -414,7 +412,7 @@ mod tests {
     fn a_named_queue_in_default_mode_is_refused() {
         let config = config();
         let on_default = TaskSchedule {
-            queue_name: Some("default".to_owned()),
+            queue: Some("default".to_owned()),
             ..nightly()
         };
         let schedule = ScheduleConfig::new(vec![on_default]);

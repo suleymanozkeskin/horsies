@@ -3,7 +3,7 @@
 The child workflow ``ShardReport`` is built at run time by
 ``SubWorkflowNode.build_with`` from the result of ``list_shards``. It has one
 count node per shard and a fan-in node that reads the shard results through
-``workflow_ctx.result_for(NodeKey(...))``. The shapes follow the example in
+``workflow_context.result_for(NodeKey(...))``. The shapes follow the example in
 ``website/src/content/docs/concepts/workflows/subworkflows.md``
 ("Dynamic Fan-Out with ``args_from``").
 """
@@ -36,35 +36,35 @@ FANOUT_TENANT_ID = 'tenant-1'
 FANOUT_SHARD_SUFFIXES = ('a', 'b', 'c')
 
 
-@app.task(task_name='e2e_fanout_ready')
+@app.task(name='e2e_fanout_ready')
 def ready_task() -> Result[str, TaskError]:
     """Readiness probe for the fan-out worker."""
     return Ok('ready')
 
 
-@app.task(task_name='e2e_fanout_list_shards')
+@app.task(name='e2e_fanout_list_shards')
 def list_shards(*, tenant_id: str) -> Result[list[str], TaskError]:
     return Ok([f'{tenant_id}-{suffix}' for suffix in FANOUT_SHARD_SUFFIXES])
 
 
-@app.task(task_name='e2e_fanout_count_shard_rows')
+@app.task(name='e2e_fanout_count_shard_rows')
 def count_shard_rows(*, shard: str) -> Result[int, TaskError]:
     return Ok(len(shard))
 
 
-@app.task(task_name='e2e_fanout_sum_shard_rows')
+@app.task(name='e2e_fanout_sum_shard_rows')
 def sum_shard_rows(
     *,
     shard_count: int,
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[int, TaskError]:
-    if workflow_ctx is None:
+    if workflow_context is None:
         return Err(
-            TaskError(error_code='NO_CONTEXT', message='workflow_ctx is missing'),
+            TaskError(code='NO_CONTEXT', message='workflow_context is missing'),
         )
     total = 0
     for position in range(shard_count):
-        match workflow_ctx.result_for(NodeKey[int](f'shard_{position}')):
+        match workflow_context.result_for(NodeKey[int](f'shard_{position}')):
             case Failed(error):
                 return Err(error)
             case Succeeded(rows):

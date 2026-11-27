@@ -40,7 +40,7 @@ No other operation does this:
 
 ### Send After Commit
 
-Commit the application transaction. Then send. Handle the error result of the send: after a retryable enqueue failure, repeat the same send with the retry method of the client. The repeat has the same task id and payload.
+Commit the application transaction. Then send. Handle the error result of the send: after a retryable enqueue failure, repeat the same send with the resend method of the client. The repeat has the same task id and payload.
 
 ### Resend Transient Failures
 

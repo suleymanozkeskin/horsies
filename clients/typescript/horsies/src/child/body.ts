@@ -3,7 +3,7 @@
 //
 // 1. The input decodes with the contract's parameters, in the worker form (defaults filled). A refusal is
 //    `WORKER_SERIALIZATION_ERROR`: its text names the input, the field path and the kind of the failure, never a
-//    value. In a child, the `workflow_ctx` member of the input of a task with `workflowContext: true` is taken out
+//    value. In a child, the `workflow_context` member of the input of a task with `workflowContext: true` is taken out
 //    first and given as the runtime's `workflowContext` (`workflow-input.ts`); a member that does not read is
 //    `WORKER_SERIALIZATION_ERROR` too, as the Rust client's input decode gives it.
 // 2. The body runs inside the run store, with the run held in the loop marks for its synchronous part, through the
@@ -421,7 +421,7 @@ function serializationError(
 }
 
 /**
- * `WORKER_SERIALIZATION_ERROR` for an input whose `workflow_ctx` member does not read as a workflow context: the text
+ * `WORKER_SERIALIZATION_ERROR` for an input whose `workflow_context` member does not read as a workflow context: the text
  * names the member and the rule, never a value. Pure.
  */
 function contextRefusedOutcome(taskName: string, refused: ContextRefused): StoredBodyOutcome {

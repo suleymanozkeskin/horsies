@@ -56,7 +56,7 @@ def _plain_fn(x: int, y: str) -> str:
     return f"{x}{y}"  # pragma: no cover
 
 
-def _fn_with_workflow_ctx(workflow_ctx: Any, x: int) -> None:
+def _fn_with_workflow_ctx(workflow_context: Any, x: int) -> None:
     pass  # pragma: no cover
 
 
@@ -102,7 +102,7 @@ class TestGetInspectTarget:
         def original() -> None:
             pass  # pragma: no cover
 
-        wrapper._original_fn = original  # type: ignore[attr-defined]
+        wrapper._original_function = original  # type: ignore[attr-defined]
 
         # Act
         result = _get_inspect_target(wrapper)
@@ -115,7 +115,7 @@ class TestGetInspectTarget:
         def wrapper() -> None:
             pass  # pragma: no cover
 
-        wrapper._original_fn = "not_callable"  # type: ignore[attr-defined]
+        wrapper._original_function = "not_callable"  # type: ignore[attr-defined]
 
         # Act
         result = _get_inspect_target(wrapper)
@@ -184,7 +184,7 @@ class TestGetSignature:
         def wrapper(*args: Any, **kwargs: Any) -> None:
             pass  # pragma: no cover
 
-        wrapper._original_fn = original  # type: ignore[attr-defined]
+        wrapper._original_function = original  # type: ignore[attr-defined]
 
         # Act
         sig = _get_signature(wrapper)
@@ -344,7 +344,7 @@ class TestResolvedTypeHints:
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             ...  # pragma: no cover
 
-        wrapper._original_fn = original  # type: ignore[attr-defined]
+        wrapper._original_function = original  # type: ignore[attr-defined]
 
         # Act
         hints = _resolved_type_hints(wrapper)
@@ -696,7 +696,7 @@ class TestResolveSourceNodeOkType:
         mock_fn.task_ok_type = int
 
         node = MagicMock(spec=TaskNode)
-        node.fn = mock_fn
+        node.function = mock_fn
 
         # Act
         with patch(

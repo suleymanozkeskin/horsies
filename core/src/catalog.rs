@@ -245,7 +245,7 @@ mod tests {
                 "INVALID_COMMAND",
                 "INVALID_POLICY",
                 "CLASS_NOT_REGISTERED",
-                "CALLER_KEY_REFUSED",
+                "IDEMPOTENCY_KEY_REFUSED",
                 "ID_MINT_REFUSED",
                 "CLIENT_FAMILY_MISMATCH",
                 "UNKNOWN_STORED_FAMILY",

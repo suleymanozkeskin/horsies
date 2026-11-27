@@ -58,10 +58,10 @@ fn add<T: 'static, I: 'static>(
 /// A step node `id` that returns `completed_<id>`.
 fn step(suite: &Suite, id: &str) -> TaskNode<String, workflow::step::Input> {
     suite
-        .function(workflow::step::handle)
+        .function(workflow::step::function)
         .node()
         .node_id(id)
-        .set(workflow::step::params::step(), id.to_owned())
+        .set(workflow::step::fields::step(), id.to_owned())
         .expect("a step input")
 }
 
@@ -72,37 +72,37 @@ fn slow_step(
     delay_ms: u64,
 ) -> TaskNode<String, workflow::slow_step::Input> {
     suite
-        .function(workflow::slow_step::handle)
+        .function(workflow::slow_step::function)
         .node()
         .node_id(id)
-        .set(workflow::slow_step::params::step(), id.to_owned())
-        .and_then(|node| node.set(workflow::slow_step::params::delay_ms(), delay_ms))
+        .set(workflow::slow_step::fields::step(), id.to_owned())
+        .and_then(|node| node.set(workflow::slow_step::fields::delay_ms(), delay_ms))
         .expect("a slow step input")
 }
 
 /// A node `id` that returns `value`.
 fn mark(suite: &Suite, id: &str, value: &str) -> TaskNode<String, workflow::mark::Input> {
     suite
-        .function(workflow::mark::handle)
+        .function(workflow::mark::function)
         .node()
         .node_id(id)
-        .set(workflow::mark::params::value(), value.to_owned())
+        .set(workflow::mark::fields::value(), value.to_owned())
         .expect("a mark input")
 }
 
 /// A node `id` that returns `value`.
 fn produce(suite: &Suite, id: &str, value: i64) -> TaskNode<i64, workflow::produce_int::Input> {
     suite
-        .function(workflow::produce_int::handle)
+        .function(workflow::produce_int::function)
         .node()
         .node_id(id)
-        .set(workflow::produce_int::params::value(), value)
+        .set(workflow::produce_int::fields::value(), value)
         .expect("a produce input")
 }
 
 /// A node `id` that fails with `DELIBERATE_FAILURE`.
 fn fail(suite: &Suite, id: &str) -> TaskNode<i64, ()> {
-    suite.function(workflow::fail::handle).node().node_id(id)
+    suite.function(workflow::fail::function).node().node_id(id)
 }
 
 /// A node `id` that fails with the code named `error_code`.
@@ -112,11 +112,11 @@ fn fail_with(
     error_code: &str,
 ) -> TaskNode<i64, workflow::fail_with::Input> {
     suite
-        .function(workflow::fail_with::handle)
+        .function(workflow::fail_with::function)
         .node()
         .node_id(id)
         .set(
-            workflow::fail_with::params::error_code(),
+            workflow::fail_with::fields::error_code(),
             error_code.to_owned(),
         )
         .expect("a fail input")
@@ -130,13 +130,13 @@ fn retry_then_ok(
     succeed_on_attempt: u32,
 ) -> TaskNode<String, workflow::retry_then_ok::Input> {
     suite
-        .function(workflow::retry_then_ok::handle)
+        .function(workflow::retry_then_ok::function)
         .node()
         .node_id(id)
-        .set(workflow::retry_then_ok::params::token(), token.to_owned())
+        .set(workflow::retry_then_ok::fields::token(), token.to_owned())
         .and_then(|node| {
             node.set(
-                workflow::retry_then_ok::params::succeed_on_attempt(),
+                workflow::retry_then_ok::fields::succeed_on_attempt(),
                 succeed_on_attempt,
             )
         })
@@ -150,11 +150,11 @@ fn recovery_step(
     delay_ms: u64,
 ) -> TaskNode<String, recovery::recovery_wf_step::Input> {
     suite
-        .function(recovery::recovery_wf_step::handle)
+        .function(recovery::recovery_wf_step::function)
         .node()
         .node_id(id)
-        .set(recovery::recovery_wf_step::params::step(), id.to_owned())
-        .and_then(|node| node.set(recovery::recovery_wf_step::params::delay_ms(), delay_ms))
+        .set(recovery::recovery_wf_step::fields::step(), id.to_owned())
+        .and_then(|node| node.set(recovery::recovery_wf_step::fields::delay_ms(), delay_ms))
         .expect("a recovery step input")
 }
 
@@ -217,7 +217,7 @@ async fn failed_code<T: DeserializeOwned + Clone + std::fmt::Debug + 'static>(
         .await
         .expect("read the workflow")
     {
-        TaskOutcome::Failed(error) => error.code().text(),
+        TaskOutcome::Failed(error) => error.code().as_str().to_owned(),
         TaskOutcome::Succeeded(value) => panic!("the workflow succeeded with {value:?}"),
     }
 }
@@ -332,10 +332,10 @@ async fn test_quorum_ctx_gating() {
     let _d = add(
         &mut spec,
         suite
-            .function(workflow::ctx_reader_str::handle)
+            .function(workflow::ctx_reader_str::function)
             .node()
             .node_id("d")
-            .set(workflow::ctx_reader_str::params::source(), "c".to_owned())
+            .set(workflow::ctx_reader_str::fields::source(), "c".to_owned())
             .expect("a reader input")
             .waits_for_all([a, b, c])
             .workflow_context_from([c])
@@ -778,7 +778,7 @@ async fn test_workflow_recovers_after_worker_crash() {
             .unwrap_or_else(|error| panic!("read node {node_id}: {error}"));
         match read {
             TaskOutcome::Failed(error) => {
-                assert_eq!(error.code().text(), "WORKER_CRASHED", "node {node_id}");
+                assert_eq!(error.code().as_str(), "WORKER_CRASHED", "node {node_id}");
             }
             TaskOutcome::Succeeded(value) => panic!("node {node_id} succeeded with {value}"),
         }

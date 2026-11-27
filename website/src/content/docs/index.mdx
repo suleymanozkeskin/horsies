@@ -116,7 +116,7 @@ match add_numbers.send(a=5, b=3):
             case Ok(Succeeded(total)):
                 print(total)  # 8
             case Ok(Failed(task_error)):
-                print(f"Task failed: {task_error.error_code}")
+                print(f"Task failed: {task_error.code}")
             case Err(read_error):
                 print(f"Read failed: {read_error.code}")
     case Err(send_err):

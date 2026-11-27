@@ -96,19 +96,19 @@ def set_child_tracer_provider() -> None:
     set_tracer_provider()
 
 
-@app.task(task_name='e2e_worker_ended_spans_healthcheck')
+@app.task(name='e2e_worker_ended_spans_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='e2e_worker_ended_spans_sleeper', timeout_ms=SLEEPER_TIMEOUT_MS)
+@app.task(name='e2e_worker_ended_spans_sleeper', timeout_ms=SLEEPER_TIMEOUT_MS)
 def sleeper() -> Result[str, TaskError]:
     time.sleep(60)
     return Ok('woke')
 
 
 @app.task(
-    task_name='e2e_worker_ended_spans_shared_sleeper',
+    name='e2e_worker_ended_spans_shared_sleeper',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SLEEPER_TIMEOUT_MS,
 )
@@ -121,7 +121,7 @@ async def shared_sleeper() -> Result[str, TaskError]:
 
 # One node of the sleeper: the worker kills it at its timeout, and the
 # handler child reads its node for the span.
-node_sleeper = TaskNode(fn=sleeper)
+node_sleeper = TaskNode(function=sleeper)
 
 spec_sleeper = app.workflow(
     name='e2e_worker_ended_spans_flow',

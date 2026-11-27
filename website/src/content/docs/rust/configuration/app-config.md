@@ -142,7 +142,7 @@ A task registration follows the queue rules of the Python client:
 
 | Method | Does |
 |--------|------|
-| `register(name, task)` | Registers a task built with `async_task_fn!` or `blocking_task_fn!`, on the queue that its options name. The `#[horsies::task]` attribute generates a `register` function that calls it. Refuses an empty or repeated name, a definition-time `good_until`, and a queue that the queue mode does not admit; after a refusal nothing is registered |
+| `register(name, task)` | Registers a task built with `async_task_fn!` or `blocking_task_fn!`, on the queue that its options name. The `#[horsies::task]` attribute generates a `register` function that calls it. Refuses an empty or repeated name, a definition-time `good_until`, a `cancel_grace_ms` outside 100 to 10,000 ms (`HRS-111`), and a queue that the queue mode does not admit; after a refusal nothing is registered |
 | `register_with_queue(name, task, queue)` | Registers on `queue` in place of the queue of the options |
 | `provide(value)` | Provides a value of type `T` to task bodies, which read it with `TaskRuntime::state::<T>()`. Refuses a second value of one type (wrap it in a newtype) and a value provided after a body read the state |
 | `discover(registrars)` | Runs each registrar function on the app in order and stops at the first refusal |

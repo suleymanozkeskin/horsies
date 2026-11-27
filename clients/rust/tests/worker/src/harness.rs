@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use horsies::{
-    Horsies, TaskFunction, TaskFunctionNotFound, TaskHandle, TaskOutcome, TaskRuntime,
-    UserErrorCode, WaitLimit,
+    CustomErrorCode, Horsies, TaskFunction, TaskFunctionNotFound, TaskHandle, TaskOutcome,
+    TaskRuntime, WaitLimit,
 };
 use horsies_test_support::database::{TestDatabase, Topology};
 use horsies_test_support::process::TestProcess;
@@ -48,7 +48,7 @@ pub fn within(duration: Duration) -> WaitLimit {
     WaitLimit::Within(duration)
 }
 
-/// The `handle` function that the task attribute generates for a task: the
+/// The `function` associated function that the task attribute generates: the
 /// typed function of the task in a runtime, or why it is not there.
 pub type GeneratedHandle<A, T, E> =
     fn(&TaskRuntime) -> Result<TaskFunction<A, T, E>, TaskFunctionNotFound>;
@@ -115,7 +115,7 @@ impl Suite {
     }
 
     /// The typed function of a task of the app, through its generated
-    /// `handle`: `suite.function(basic::simple::handle)`.
+    /// `function`: `suite.function(basic::simple::function)`.
     pub fn function<A, T, E>(&self, handle: GeneratedHandle<A, T, E>) -> TaskFunction<A, T, E> {
         handle(&self.runtime).unwrap_or_else(|missing| panic!("{missing}"))
     }
@@ -190,20 +190,20 @@ impl Suite {
     fn ready_function(&self, class: ReadyClass) -> TaskFunction<(), String, Infallible> {
         match (self.instance, class) {
             (Instance::CustomQueues, ReadyClass::Isolated) => {
-                self.function(custom::custom_healthcheck::handle)
+                self.function(custom::custom_healthcheck::function)
             }
             (Instance::CustomQueues, ReadyClass::SharedAsync | ReadyClass::SharedThread) => {
                 panic!("the custom queue instance has no shared readiness task")
             }
             (Instance::RecoveryQueues, ReadyClass::Isolated) => {
-                self.function(recovery::recovery_healthcheck::handle)
+                self.function(recovery::recovery_healthcheck::function)
             }
             (Instance::RecoveryQueues, ReadyClass::SharedAsync | ReadyClass::SharedThread) => {
                 panic!("the recovery queue instance has no shared readiness task")
             }
-            (_, ReadyClass::Isolated) => self.function(basic::healthcheck::handle),
-            (_, ReadyClass::SharedAsync) => self.function(classes::shared_healthcheck::handle),
-            (_, ReadyClass::SharedThread) => self.function(classes::thread_healthcheck::handle),
+            (_, ReadyClass::Isolated) => self.function(basic::healthcheck::function),
+            (_, ReadyClass::SharedAsync) => self.function(classes::shared_healthcheck::function),
+            (_, ReadyClass::SharedThread) => self.function(classes::thread_healthcheck::function),
         }
     }
 
@@ -229,7 +229,7 @@ impl Suite {
 pub async fn outcome<T, E>(handle: &TaskHandle<T, E>, limit: Duration) -> TaskOutcome<T, E>
 where
     T: DeserializeOwned + Clone,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     handle
         .get(within(limit))
@@ -242,7 +242,7 @@ where
 pub async fn succeeded<T, E>(handle: &TaskHandle<T, E>, limit: Duration) -> T
 where
     T: DeserializeOwned + Clone,
-    E: UserErrorCode + std::fmt::Debug,
+    E: CustomErrorCode + std::fmt::Debug,
 {
     match outcome(handle, limit).await {
         TaskOutcome::Succeeded(value) => value,
@@ -257,10 +257,10 @@ where
 pub async fn failed_code<T, E>(handle: &TaskHandle<T, E>, limit: Duration) -> String
 where
     T: DeserializeOwned + Clone + std::fmt::Debug,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     match outcome(handle, limit).await {
-        TaskOutcome::Failed(error) => error.code().text(),
+        TaskOutcome::Failed(error) => error.code().as_str().to_owned(),
         TaskOutcome::Succeeded(value) => {
             panic!("task {} succeeded with {value:?}", handle.task_id())
         }

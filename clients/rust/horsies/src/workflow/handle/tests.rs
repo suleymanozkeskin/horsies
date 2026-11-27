@@ -17,9 +17,9 @@ fn completed(result: Option<serde_json::Value>) -> WorkflowEnd {
     }
 }
 
-fn library_code<E: UserErrorCode>(outcome: &TaskOutcome<impl std::fmt::Debug, E>) -> String {
+fn code_text<E: CustomErrorCode>(outcome: &TaskOutcome<impl std::fmt::Debug, E>) -> String {
     match outcome {
-        TaskOutcome::Failed(error) => error.code().text(),
+        TaskOutcome::Failed(error) => error.code().as_str().to_owned(),
         TaskOutcome::Succeeded(value) => panic!("expected a failed outcome, got {value:?}"),
     }
 }
@@ -52,14 +52,14 @@ fn a_completed_result_above_u64_reads_as_u128() {
 }
 
 #[test]
-fn a_completed_error_keeps_its_user_code_as_text() {
+fn a_completed_error_keeps_its_custom_code_as_text() {
     let end = completed(Some(json!({
         "__h_task_result__": true,
         "ok": null,
         "err": {"error_code": "DECLINED", "message": "no"},
     })));
     let outcome = end_outcome::<u32>(workflow(), end).unwrap();
-    assert_eq!(library_code(&outcome), "DECLINED");
+    assert_eq!(code_text(&outcome), "DECLINED");
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn a_completed_workflow_without_a_result_is_unreadable() {
     ] {
         assert!(matches!(
             end_outcome::<u32>(workflow(), end),
-            Err(WorkflowReadError::StoredResultUnreadable { .. })
+            Err(WorkflowReadError::ResultDeserializationError { .. })
         ));
     }
 }
@@ -101,7 +101,7 @@ fn an_ended_workflow_without_a_stored_error_has_the_code_of_its_status() {
             error: None,
         };
         let outcome = end_outcome::<u32>(workflow(), end).unwrap();
-        assert_eq!(library_code(&outcome), code);
+        assert_eq!(code_text(&outcome), code);
     }
 }
 
@@ -112,7 +112,7 @@ fn an_ended_workflow_reads_its_stored_error() {
         error: Some(json!({"error_code": {"__builtin_task_code__": "TASK_TIMEOUT"}}).to_string()),
     };
     let outcome = end_outcome::<u32>(workflow(), end).unwrap();
-    assert_eq!(library_code(&outcome), "TASK_TIMEOUT");
+    assert_eq!(code_text(&outcome), "TASK_TIMEOUT");
 }
 
 #[test]
@@ -125,7 +125,7 @@ fn a_stored_error_that_does_not_read_is_unreadable() {
         assert!(
             matches!(
                 end_outcome::<u32>(workflow(), end),
-                Err(WorkflowReadError::StoredResultUnreadable { .. })
+                Err(WorkflowReadError::ResultDeserializationError { .. })
             ),
             "{error:?}"
         );
@@ -135,7 +135,7 @@ fn a_stored_error_that_does_not_read_is_unreadable() {
 #[test]
 fn a_paused_workflow_is_the_paused_outcome() {
     let outcome = end_outcome::<u32>(workflow(), WorkflowEnd::Paused).unwrap();
-    assert_eq!(library_code(&outcome), "WORKFLOW_PAUSED");
+    assert_eq!(code_text(&outcome), "WORKFLOW_PAUSED");
 }
 
 fn outputless() -> serde_json::Value {
@@ -167,7 +167,7 @@ fn an_outputless_result_reads_each_node() {
         Some(&TaskOutcome::Succeeded(JsonText::parse("3").unwrap()))
     );
     assert_eq!(
-        library_code(results.get("lost").unwrap()),
+        code_text(results.get("lost").unwrap()),
         "RESULT_DESERIALIZATION_ERROR"
     );
 }
@@ -207,14 +207,14 @@ fn an_untyped_value_keeps_its_stored_text() {
 fn an_outputless_result_read_as_a_type_and_the_reverse_are_unreadable() {
     assert!(matches!(
         end_outcome::<u32>(workflow(), completed(Some(outputless()))),
-        Err(WorkflowReadError::StoredResultUnreadable { .. })
+        Err(WorkflowReadError::ResultDeserializationError { .. })
     ));
     let typed = completed(Some(
         json!({"__h_task_result__": true, "ok": 1, "err": null}),
     ));
     assert!(matches!(
         end_outcome::<OutputlessResults>(workflow(), typed),
-        Err(WorkflowReadError::StoredResultUnreadable { .. })
+        Err(WorkflowReadError::ResultDeserializationError { .. })
     ));
 }
 
@@ -233,14 +233,14 @@ fn a_node_result_reads_with_the_node_types() {
     .to_string();
     assert!(matches!(
         envelope_outcome::<u32, Infallible>(workflow(), &declined),
-        Err(WorkflowReadError::UnknownUserCode { .. })
+        Err(WorkflowReadError::UnknownCustomCode { .. })
     ));
     let TaskOutcome::Failed(error) =
-        envelope_outcome::<u32, UserCode>(workflow(), &declined).unwrap()
+        envelope_outcome::<u32, CustomCode>(workflow(), &declined).unwrap()
     else {
         panic!("a stored error reads as Failed");
     };
-    assert!(matches!(error.code(), TaskErrorCode::User(code) if code.as_str() == "DECLINED"));
+    assert!(matches!(error.code(), TaskErrorCode::Custom(code) if code.as_str() == "DECLINED"));
 }
 
 #[test]
@@ -256,7 +256,7 @@ fn an_untyped_node_result_keeps_what_does_not_read() {
 fn each_read_failure_has_python_s_code() {
     let cases = [
         (
-            WorkflowReadError::WaitTimedOut {
+            WorkflowReadError::WaitTimeout {
                 workflow_id: workflow(),
             },
             BuiltInTaskCode::from(RetrievalCode::WaitTimeout),
@@ -273,6 +273,23 @@ fn each_read_failure_has_python_s_code() {
                 node_id: "n".to_owned(),
             },
             RetrievalCode::ResultNotReady.into(),
+        ),
+        (
+            WorkflowReadError::ResultDeserializationError {
+                workflow_id: workflow(),
+                cause: "x".to_owned(),
+            },
+            OperationalCode::ResultDeserializationError.into(),
+        ),
+        (
+            WorkflowReadError::UnknownCustomCode {
+                workflow_id: workflow(),
+                cause: UnknownCustomCode {
+                    stored_code: "X".to_owned(),
+                    code_type: "T",
+                },
+            },
+            RetrievalCode::UnknownCustomCode.into(),
         ),
         (
             WorkflowReadError::InvalidInput {
@@ -294,8 +311,8 @@ fn each_read_failure_has_python_s_code() {
             RetrievalCode::AsyncContext.into(),
         ),
         (
-            WorkflowReadError::Database {
-                code: WorkflowHandleErrorCode::DatabaseOperationFailed,
+            WorkflowReadError::DatabaseError {
+                database_code: WorkflowHandleErrorCode::DatabaseOperationFailed,
                 message: "m".to_owned(),
                 retryable: true,
             },
@@ -308,7 +325,7 @@ fn each_read_failure_has_python_s_code() {
 }
 
 /// The limit is the first check of `get`, before any statement: the app's
-/// address has no database, so a wait that ran would fail as `Database`.
+/// address has no database, so a wait that ran would fail as `DatabaseError`.
 /// The limit at the bound passes the check.
 #[tokio::test]
 async fn a_get_above_the_bound_is_invalid_input_before_any_statement() {
@@ -326,7 +343,7 @@ async fn a_get_above_the_bound_is_invalid_input_before_any_statement() {
             cause: WaitLimitRefused,
         },
     );
-    assert_eq!(refused.code().value(), "INVALID_INPUT");
+    assert_eq!(refused.code().as_str(), "INVALID_INPUT");
     assert_eq!(
         refused.to_string(),
         format!(
@@ -359,7 +376,7 @@ fn a_handle_error_maps_to_its_read_failure() {
             workflow_id: workflow(),
             cause: cause(),
         }),
-        WorkflowReadError::StoredResultUnreadable { .. }
+        WorkflowReadError::ResultDeserializationError { .. }
     ));
     assert!(matches!(
         WorkflowReadError::of_handle_error(WorkflowHandleError::DatabaseOperationFailed {
@@ -368,7 +385,7 @@ fn a_handle_error_maps_to_its_read_failure() {
             workflow_id: workflow(),
             cause: cause(),
         }),
-        WorkflowReadError::Database { .. }
+        WorkflowReadError::DatabaseError { .. }
     ));
     assert!(matches!(
         WorkflowReadError::of_handle_error(WorkflowHandleError::ResumeRecoveryFailed {
@@ -376,7 +393,7 @@ fn a_handle_error_maps_to_its_read_failure() {
             workflow_id: workflow(),
             cause: cause(),
         }),
-        WorkflowReadError::Database { .. }
+        WorkflowReadError::DatabaseError { .. }
     ));
     assert!(matches!(
         WorkflowReadError::of_handle_error(WorkflowHandleError::AsyncContext {
@@ -426,7 +443,7 @@ fn an_outputless_entry_without_a_payload_a_task_name_or_an_envelope_names_its_no
             panic!("entry {node} reads as Failed");
         };
         assert_eq!(
-            error.code().text(),
+            error.code().as_str(),
             "RESULT_DESERIALIZATION_ERROR",
             "{node}"
         );
@@ -462,7 +479,10 @@ fn a_malformed_outputless_envelope_is_unreadable_and_a_missing_map_is_empty() {
         let read =
             end_outcome::<OutputlessResults>(workflow(), completed(Some(envelope(ok.clone()))));
         assert!(
-            matches!(read, Err(WorkflowReadError::StoredResultUnreadable { .. })),
+            matches!(
+                read,
+                Err(WorkflowReadError::ResultDeserializationError { .. })
+            ),
             "{ok}"
         );
     }
@@ -482,7 +502,7 @@ fn a_completed_result_that_is_not_json_is_unreadable() {
     };
     assert!(matches!(
         end_outcome::<u32>(workflow(), end),
-        Err(WorkflowReadError::StoredResultUnreadable { .. })
+        Err(WorkflowReadError::ResultDeserializationError { .. })
     ));
 }
 
@@ -501,7 +521,7 @@ fn every_ended_status_reads_its_stored_error_and_refuses_an_empty_one() {
             error: Some(stored.clone()),
         };
         let outcome = end_outcome::<u32>(workflow(), end).unwrap();
-        assert_eq!(library_code(&outcome), "STOPPED_BY_OPERATOR", "{status:?}");
+        assert_eq!(code_text(&outcome), "STOPPED_BY_OPERATOR", "{status:?}");
         let empty = WorkflowEnd::Ended {
             status,
             error: Some(String::new()),
@@ -509,7 +529,7 @@ fn every_ended_status_reads_its_stored_error_and_refuses_an_empty_one() {
         assert!(
             matches!(
                 end_outcome::<u32>(workflow(), empty),
-                Err(WorkflowReadError::StoredResultUnreadable { .. })
+                Err(WorkflowReadError::ResultDeserializationError { .. })
             ),
             "{status:?}"
         );

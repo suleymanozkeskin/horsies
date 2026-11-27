@@ -248,7 +248,7 @@ Registers a sync function with no arguments. Hooks run in registration order, ea
 
 ### `app.get_event_handlers() -> tuple[EventHandler, ...]`
 
-The registered handlers in registration order. Each record (`horsies.core.event_handlers.EventHandler`) holds the `name`, the `event_type` (its `event_class` and its `name`), the `kind` (`HandlerKind.DEF` or `HandlerKind.ASYNC_DEF`) and the `function`.
+The registered handlers in registration order. Each record (`horsies.core.event_handlers.EventHandler`) holds the `name`, the `event_type` (its `event_class` and its `name`), the `handler_kind` (`HandlerKind.DEF` or `HandlerKind.ASYNC_DEF`) and the `function`.
 
 ### `app.get_handler_child_start_hooks() -> list[HandlerChildStartHook]`
 

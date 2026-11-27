@@ -61,12 +61,12 @@ def record_attempt_end(event: AttemptEnded) -> None:
     _write_line(f'{event.task_id} {event.attempt} {type(event.end).__name__}')
 
 
-@app.task(task_name='e2e_event_handlers_healthcheck')
+@app.task(name='e2e_event_handlers_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='e2e_event_handlers_add')
+@app.task(name='e2e_event_handlers_add')
 def add(*, left: int, right: int) -> Result[int, TaskError]:
     return Ok(left + right)
 

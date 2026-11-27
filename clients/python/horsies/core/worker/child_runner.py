@@ -264,9 +264,9 @@ def result_outcome_of(out: Result[Any, TaskError]) -> ResultOutcome:
         case Err(err_value=error):
             match error.exception:
                 case BaseException() as exception:
-                    return ResultFailed(error_code_text(error.error_code), RaisedInRun(exception))
+                    return ResultFailed(error_code_text(error.code), RaisedInRun(exception))
                 case _:
-                    return ResultFailed(error_code_text(error.error_code), NothingRaised())
+                    return ResultFailed(error_code_text(error.code), NothingRaised())
 
 
 def _encoded_error(error: TaskError) -> EncodedResult:
@@ -284,7 +284,7 @@ def _serialization_error_response(
     """Build a WORKER_SERIALIZATION_ERROR response for a serde failure."""
     logger.error(f'Serialization error for task {task_name}: {error}')
     task_error = TaskError(
-        error_code=OperationalCode.WORKER_SERIALIZATION_ERROR,
+        code=OperationalCode.WORKER_SERIALIZATION_ERROR,
         message=str(error),
         data={'task_name': task_name},
     )
@@ -322,7 +322,7 @@ def _stored_timeout_refusal_response(
             assert_never(unreachable)
     logger.error(f'Stored timeout refused for task {task_name}: {reason}')
     task_error = TaskError(
-        error_code=OperationalCode.WORKER_SERIALIZATION_ERROR,
+        code=OperationalCode.WORKER_SERIALIZATION_ERROR,
         message=reason,
         data=data,
     )
@@ -1159,7 +1159,7 @@ def async_task_presence(app: Horsies) -> AsyncTaskPresence:
 def _resolution_failure(task_name: str, message: str) -> EncodedResult:
     """The result of a task the worker cannot resolve: WORKER_RESOLUTION_ERROR."""
     task_error = TaskError(
-        error_code=OperationalCode.WORKER_RESOLUTION_ERROR,
+        code=OperationalCode.WORKER_RESOLUTION_ERROR,
         message=message,
         data={'task_name': task_name},
     )
@@ -1447,7 +1447,7 @@ def _prepare_task_call(
             case _ as unreachable:
                 assert_never(unreachable)
 
-    # Handle workflow injection payloads (workflow_ctx / workflow_meta).
+    # Handle workflow injection payloads (workflow_context / workflow_meta).
     workflow_ctx_data = kwargs.pop(_ENGINE_KEY_WORKFLOW_CTX, None)
     workflow_meta_data = kwargs.pop(_ENGINE_KEY_WORKFLOW_META, None)
     if workflow_ctx_data is not None or workflow_meta_data is not None:
@@ -1455,7 +1455,7 @@ def _prepare_task_call(
 
         underlying_fn = underlying_task_fn(task)
         sig = inspect.signature(underlying_fn)
-        if workflow_ctx_data is not None and 'workflow_ctx' in sig.parameters:
+        if workflow_ctx_data is not None and 'workflow_context' in sig.parameters:
             from horsies.core.models.workflow import (
                 WorkflowContext,
                 SubWorkflowSummary,
@@ -1475,9 +1475,9 @@ def _prepare_task_call(
                     # typed value.
                     results_by_id[node_id] = Failed(
                         TaskError(
-                            error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
+                            code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
-                                f'workflow_ctx result for node '
+                                f'workflow_context result for node '
                                 f'{node_id!r} unavailable (source '
                                 f'task not registered at encode '
                                 f'time)'
@@ -1490,9 +1490,9 @@ def _prepare_task_call(
                 if not isinstance(source_task_name, str):
                     results_by_id[node_id] = Failed(
                         TaskError(
-                            error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
+                            code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
-                                f'workflow_ctx missing task_name for '
+                                f'workflow_context missing task_name for '
                                 f'node {node_id!r}; cannot decode'
                             ),
                             data={'node_id': node_id},
@@ -1516,9 +1516,9 @@ def _prepare_task_call(
                 if source_ok_type is None:
                     results_by_id[node_id] = Failed(
                         TaskError(
-                            error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
+                            code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
-                                f'workflow_ctx source '
+                                f'workflow_context source '
                                 f'{source_task_name!r} not '
                                 f'registered in this process (no task '
                                 f'or workflow definition with this name)'
@@ -1546,10 +1546,10 @@ def _prepare_task_call(
                 except (StrictJsonError, ValueValidationError) as exc:
                     results_by_id[node_id] = Failed(
                         TaskError(
-                            error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
+                            code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'decode_task_result failed for '
-                                f'workflow_ctx node {node_id!r}: '
+                                f'workflow_context node {node_id!r}: '
                                 f'{exc}'
                             ),
                             data={
@@ -1577,14 +1577,14 @@ def _prepare_task_call(
                             task_name, SerializationError(str(summary_exc))
                         )
 
-            kwargs['workflow_ctx'] = WorkflowContext.from_serialized(
+            kwargs['workflow_context'] = WorkflowContext.from_serialized(
                 workflow_id=workflow_ctx_data.get('workflow_id', ''),
                 task_index=workflow_ctx_data.get('task_index', 0),
                 task_name=workflow_ctx_data.get('task_name', ''),
                 results_by_id=results_by_id,
                 summaries_by_id=summaries_by_id,
             )
-        # If task doesn't declare workflow_ctx, silently skip injection.
+        # If task doesn't declare workflow_context, silently skip injection.
 
         if workflow_meta_data is not None and 'workflow_meta' in sig.parameters:
             from horsies.core.models.workflow import WorkflowMeta
@@ -1641,8 +1641,8 @@ def _context_entry(
             return typed
         case Err(err_value=unknown):
             return Failed(TaskError(
-                error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
-                message=f'workflow_ctx node {node_id!r}: {unknown.message}',
+                code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
+                message=f'workflow_context node {node_id!r}: {unknown.message}',
                 data={'node_id': node_id, 'custom_code': unknown.custom_code},
             ))
 
@@ -1652,7 +1652,7 @@ def _task_exception_response(task_name: str, e: BaseException) -> EncodedResult:
     logger.error(f'Task exception: {task_name}: {exception_text(e)}')
     # If the task raised an exception, we wrap it in a TaskError
     task_error = TaskError(
-        error_code=OperationalCode.TASK_EXCEPTION,
+        code=OperationalCode.TASK_EXCEPTION,
         message=f'{type(e).__name__}: {exception_text(e)}',
         data={'task_name': task_name},
         exception=e,  # pydantic will accept and we flatten on serialization if needed elsewhere

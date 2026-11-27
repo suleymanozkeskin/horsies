@@ -46,7 +46,7 @@ def _make_ready_check(task_func: _HealthcheckTask):
             if is_err(r):
                 return False
             handle = r.ok_value
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
@@ -103,7 +103,7 @@ async def test_timeout_fails_task_and_worker_survives(
         # The SIGKILL broke the process pool; the worker restarts it and
         # must still execute new work.
         follow_up = unwrap_send(await basic_tasks.simple_task.send_async(x=21))
-        result = await asyncio.to_thread(follow_up.get, timeout_ms=30_000)
+        result = await asyncio.to_thread(follow_up.get, wait_ms=30_000)
         assert succeeded_value(result) == 42
 
 
@@ -175,7 +175,7 @@ async def test_timeout_backlog_drains_without_killing_worker(
 
         # The load-bearing assertion: the worker survived the drain.
         follow_up = unwrap_send(await basic_tasks.simple_task.send_async(x=21))
-        result = await asyncio.to_thread(follow_up.get, timeout_ms=30_000)
+        result = await asyncio.to_thread(follow_up.get, wait_ms=30_000)
         assert succeeded_value(result) == 42
 
 
@@ -233,5 +233,5 @@ async def test_pool_breaker_storm_does_not_kill_worker(
             }
 
         follow_up = unwrap_send(await basic_tasks.simple_task.send_async(x=21))
-        result = await asyncio.to_thread(follow_up.get, timeout_ms=30_000)
+        result = await asyncio.to_thread(follow_up.get, wait_ms=30_000)
         assert succeeded_value(result) == 42

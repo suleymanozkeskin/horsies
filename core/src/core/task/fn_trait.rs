@@ -62,12 +62,12 @@ pub trait BlockingTaskFn: Send + Sync + 'static {
 #[derive(Debug, Clone, Default)]
 pub struct TaskMeta {
     /// Whether this task opts into workflow context injection.
-    pub accepts_workflow_ctx: bool,
+    pub accepts_workflow_context: bool,
     /// Definition-time task options, if the task was registered through
     /// a producer/builder path that carries them.
     pub task_options: Option<TaskOptions>,
     /// Resolved queue name from task registration.
-    pub queue_name: Option<String>,
+    pub queue: Option<String>,
     /// Resolved priority from task registration.
     pub priority: Option<u32>,
     /// Whether this task expects non-unit input (i.e. `A` is not `()`).
@@ -77,7 +77,7 @@ pub struct TaskMeta {
     /// The module that defines the task: the `module` of the exception
     /// record of a panic of its body.
     pub module: TaskModule,
-    /// The user error codes that the task declares: the `CODES` of its code
+    /// The custom error codes that the task declares: the `CODES` of its code
     /// type, which the Rust client's task macros fill. Empty for a task that
     /// declares none, such as a hand-built [`RegisteredTask`]. The client
     /// checks them when it registers the task
@@ -107,8 +107,8 @@ impl TaskMeta {
         }
     }
 
-    /// The same metadata, for a task that declares the user error codes
-    /// `codes`. The task macros pass `UserErrorCode::CODES` of the task's
+    /// The same metadata, for a task that declares the custom error codes
+    /// `codes`. The task macros pass `CustomErrorCode::CODES` of the task's
     /// code type.
     pub fn with_error_codes(self, codes: &'static [&'static str]) -> Self {
         Self {
@@ -177,9 +177,9 @@ impl RegisteredTask {
     }
 
     /// Returns true if this task accepts workflow context injection.
-    pub fn accepts_workflow_ctx(&self) -> bool {
+    pub fn accepts_workflow_context(&self) -> bool {
         match self {
-            Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.accepts_workflow_ctx,
+            Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.accepts_workflow_context,
         }
     }
 
@@ -195,14 +195,14 @@ impl RegisteredTask {
     }
 
     /// Mark this task as accepting workflow context injection.
-    pub fn with_workflow_ctx(self) -> Self {
+    pub fn with_workflow_context(self) -> Self {
         match self {
             Self::Async { task, mut meta } => {
-                meta.accepts_workflow_ctx = true;
+                meta.accepts_workflow_context = true;
                 Self::Async { task, meta }
             }
             Self::Blocking { task, mut meta } => {
-                meta.accepts_workflow_ctx = true;
+                meta.accepts_workflow_context = true;
                 Self::Blocking { task, meta }
             }
         }
@@ -222,7 +222,7 @@ impl RegisteredTask {
         }
     }
 
-    /// The user error codes that the task declares ([`TaskMeta::error_codes`]).
+    /// The custom error codes that the task declares ([`TaskMeta::error_codes`]).
     pub fn error_codes(&self) -> &'static [&'static str] {
         match self {
             Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.error_codes,
@@ -237,10 +237,10 @@ impl RegisteredTask {
     }
 
     /// Set the resolved queue name on this task's metadata.
-    pub fn set_queue_name(&mut self, queue: String) {
+    pub fn set_queue(&mut self, queue: String) {
         match self {
             Self::Async { meta, .. } | Self::Blocking { meta, .. } => {
-                meta.queue_name = Some(queue);
+                meta.queue = Some(queue);
             }
         }
     }
@@ -273,9 +273,9 @@ impl RegisteredTask {
     }
 
     /// The resolved queue name, if set during registration.
-    pub fn queue_name(&self) -> Option<&str> {
+    pub fn queue(&self) -> Option<&str> {
         match self {
-            Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.queue_name.as_deref(),
+            Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.queue.as_deref(),
         }
     }
 
@@ -385,7 +385,7 @@ mod tests {
         struct FailingTask;
         impl BlockingTaskFn for FailingTask {
             fn execute(&self, _args: &[u8]) -> RawTaskResult {
-                TaskResult::Err(TaskError::builtin(
+                TaskResult::Err(TaskError::built_in(
                     OperationalCode::TaskException,
                     "something broke",
                 ))

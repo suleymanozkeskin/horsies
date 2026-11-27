@@ -1382,7 +1382,7 @@ DECLARE
     v_form record;
     v_row horsies_workflows;
 BEGIN
-    -- Node 0 COMPLETED, node 1 FAILED with the user code SECOND. Each accepted form reads as no policy or as its
+    -- Node 0 COMPLETED, node 1 FAILED with the custom code SECOND. Each accepted form reads as no policy or as its
     -- cases; the completion writes the expected status and error code.
     PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1}]');
     UPDATE horsies_workflow_tasks SET status = 'COMPLETED', result = wft_ok('1'), completed_at = now()

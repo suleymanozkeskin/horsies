@@ -170,7 +170,7 @@ things follow, and they are not optional in a real deployment:
   in this showcase does, and the `replayed` field on its result says whether
   this run did the work or found it already done.
 - **Retry the crash, not the cause.** `WORKER_CRASHED` belongs in
-  `auto_retry_for`; the error that caused the kill does not. `generate_invoice`
+  `retry_for`; the error that caused the kill does not. `generate_invoice`
   omits `TASK_TIMEOUT` on purpose — its stall is a stable property of the order,
   so a retry would stall again and cost another child.
 
@@ -188,7 +188,7 @@ state. The same run on the shared process pool lost 37 tasks to 7 pool restarts.
 
 `store.py` contains every psycopg exception at the one call that performs I/O
 and converts it into a `StoreError` carrying the operation name. Tasks turn that
-into `TaskError(error_code='STORE_UNAVAILABLE')` with the failing operation in
+into `TaskError(code='STORE_UNAVAILABLE')` with the failing operation in
 `data`.
 
 This was demonstrated by accident. During development the host volume filled

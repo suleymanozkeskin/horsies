@@ -17,7 +17,7 @@ from ..store import StoreError
 def store_failure(error: StoreError) -> TaskError:
     """Convert a database failure into a task error the dashboard can read."""
     return TaskError(
-        error_code=STORE_UNAVAILABLE,
+        code=STORE_UNAVAILABLE,
         message=f'{error.operation} failed: {error.message}',
         data={'operation': error.operation},
     )

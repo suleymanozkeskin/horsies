@@ -80,8 +80,8 @@ def resolve_schedule_queue(app: Horsies, schedule: TaskSchedule) -> str:
             (`Horsies.validate_queue`).
     """
     task = app.tasks.get(schedule.task_name)
-    task_queue = task.task_queue_name if task is not None else None
-    queue_name = schedule.queue_name if schedule.queue_name is not None else task_queue
+    task_queue = task.queue if task is not None else None
+    queue_name = schedule.queue if schedule.queue is not None else task_queue
     return app.validate_queue(queue_name)
 
 
@@ -143,7 +143,7 @@ def _send_manifest(
     queue_name = resolve_schedule_queue(app, schedule)
     return ScheduleSendManifest(
         task_name=schedule.task_name,
-        queue_name=queue_name,
+        queue=queue_name,
         priority=effective_priority(app, queue_name),
         input_json=_input_json(prepared_schedule.input_json),
         task_options=_task_options(prepared_schedule.task_options_json),

@@ -46,8 +46,8 @@ const MAX_NODE_ID_LENGTH: usize = 128;
 const PRIORITY_RANGE: std::ops::RangeInclusive<u32> = 1..=100;
 
 /// The input member that takes the workflow context (the task attribute's
-/// `workflow_ctx`).
-const WORKFLOW_CTX_FIELD: &str = "workflow_ctx";
+/// `workflow_context`).
+const WORKFLOW_CONTEXT_FIELD: &str = "workflow_context";
 
 // ---------------------------------------------------------------------------
 // Success policy
@@ -263,7 +263,7 @@ enum BuilderBody {
         queue: String,
         priority: NodePriority,
         task_options: Option<String>,
-        accepts_workflow_ctx: bool,
+        accepts_workflow_context: bool,
         deadline: NodeDeadline,
         input_check: InputCheck,
     },
@@ -289,7 +289,7 @@ struct BuilderNode {
 /// let mut builder = app.workflow_builder("checkout");
 /// builder.definition_key("shop.checkout.v1");
 /// let charge = builder.task(charge::node().set_input(order)?)?;
-/// let notify = builder.task(notify::node().arg_from(notify::params::charged(), charge))?;
+/// let notify = builder.task(notify::node().arg_from(notify::fields::charged(), charge))?;
 /// builder.output(notify);
 /// let spec = builder.build()?;
 /// ```
@@ -361,7 +361,7 @@ impl WorkflowSpecBuilder {
         registration: NodeRegistration,
     ) -> TypedNodeRef<T> {
         let queue = match node.queue {
-            NodeQueue::OfTask => registration.queue_name,
+            NodeQueue::OfTask => registration.queue,
             NodeQueue::Given(queue) => queue,
         };
         self.push(BuilderNode {
@@ -372,7 +372,7 @@ impl WorkflowSpecBuilder {
                 queue,
                 priority: node.priority,
                 task_options: registration.task_options,
-                accepts_workflow_ctx: registration.accepts_workflow_ctx,
+                accepts_workflow_context: registration.accepts_workflow_context,
                 deadline: node.deadline,
                 input_check: node.input_check,
             },
@@ -583,11 +583,11 @@ impl WorkflowSpecBuilder {
             BuilderBody::Task {
                 input,
                 priority,
-                accepts_workflow_ctx,
+                accepts_workflow_context,
                 input_check,
                 ..
             } => {
-                if !node.links.workflow_context_from.is_empty() && !accepts_workflow_ctx {
+                if !node.links.workflow_context_from.is_empty() && !accepts_workflow_context {
                     report.add(
                         HorsiesError::new(
                             "workflow_context_from declared but the task takes no workflow context",
@@ -595,7 +595,7 @@ impl WorkflowSpecBuilder {
                         .with_code(HorsiesErrorCode::WorkflowContextParameterMissing)
                         .with_note(format!("node {owner} declares workflow_context_from"))
                         .with_help(
-                            "add `workflow_ctx` to the task attribute and a `workflow_ctx: \
+                            "add `workflow_context` to the task attribute and a `workflow_context: \
                              WorkflowContext` parameter, or remove workflow_context_from",
                         ),
                     );
@@ -611,7 +611,7 @@ impl WorkflowSpecBuilder {
                     }
                 }
                 let takes_context =
-                    *accepts_workflow_ctx && !node.links.workflow_context_from.is_empty();
+                    *accepts_workflow_context && !node.links.workflow_context_from.is_empty();
                 check_input(
                     &owner,
                     input,
@@ -818,7 +818,7 @@ fn check_input(
         .map(|member| (member.as_str(), result.as_str()))
         .collect();
     if takes_context {
-        members.push((WORKFLOW_CTX_FIELD, context.as_str()));
+        members.push((WORKFLOW_CONTEXT_FIELD, context.as_str()));
     }
     let static_members: Vec<&str> = input.names().collect();
     if let Err(failure) = input_check(input.text_with(&members).as_bytes(), &static_members) {
