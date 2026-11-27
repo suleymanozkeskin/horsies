@@ -5,8 +5,12 @@
 //   bun tests/typecheck-speed/cli.ts check   exit 1 when the median of the session ratios is
 //                                            above the baseline median plus the baseline noise
 //   bun tests/typecheck-speed/cli.ts record  writes the baseline of this platform, architecture and Bun binary
-// Exit 2: no verdict (no baseline for this platform, architecture, Bun binary and these projects, a failed run, a file
-// error, a wrong argument).
+// Exit 2: no verdict (no baseline for this platform, architecture and Bun binary, a failed run, a file error, a wrong
+// argument).
+// The baseline key is the platform, the architecture, the Bun binary, the run count and the session count. The projects
+// are not in the key: a renamed public type changes them, and a slower type-check of the changed projects is what the
+// check finds. The SHA-256 of both projects is stored with the baseline; `check` prints whether the projects are those
+// that recorded the baseline and never refuses a verdict for it.
 // The control project is written to a new folder in the temporary directory. The app project is written to a new
 // folder next to this file, because its tsconfig refers to the package by a relative path. Both folders are removed
 // after the runs.
@@ -17,6 +21,8 @@ import { appProjectFiles } from "./app-project.ts";
 import storedFile from "./baseline.json" with { type: "json" };
 import {
   type BaselineKey,
+  compareProjects,
+  type ProjectFingerprints,
   currentBun,
   currentMachine,
   describeBaseline,
@@ -171,12 +177,17 @@ function recordedBaselines(): string {
     : recordedFile.entries.map((entry) => `bun ${entry.bun}, recorded on ${describeMachine(entry.recordedOn)}`).join("; ");
 }
 
-function check(key: BaselineKey, controlFiles: ReadonlyMap<string, string>, appFiles: ReadonlyMap<string, string>): number {
+function check(
+  key: BaselineKey,
+  projects: ProjectFingerprints,
+  controlFiles: ReadonlyMap<string, string>,
+  appFiles: ReadonlyMap<string, string>,
+): number {
   const lookup = findBaseline(recordedFile, key);
 
   if (lookup.kind === "noMatch") {
     console.error(
-      `no baseline for ${key.platform} ${key.arch}, this Bun binary and these projects; record one with \`bun run typecheck-speed:record\``,
+      `no baseline for ${key.platform} ${key.arch}, and this Bun binary; record one with \`bun run typecheck-speed:record\``,
     );
     console.error(`recorded baselines: ${recordedBaselines()}`);
 
@@ -200,6 +211,9 @@ function check(key: BaselineKey, controlFiles: ReadonlyMap<string, string>, appF
   }
 
   console.log(`baseline: ${describeBaseline(parsed.baseline)}`);
+  console.log(`projects of the baseline: ${compareProjects(lookup.stored, projects)}`);
+  console.log(`baseline control project sha256 ${lookup.stored.controlSha256}`);
+  console.log(`baseline app project sha256 ${lookup.stored.appSha256}`);
   const verdict = judge(parsed.baseline, medianOfRatios(measurement.sessionRatios));
 
   switch (verdict.kind) {
@@ -218,6 +232,7 @@ function check(key: BaselineKey, controlFiles: ReadonlyMap<string, string>, appF
 
 function record(
   key: BaselineKey,
+  projects: ProjectFingerprints,
   machine: MachineIdentity,
   controlFiles: ReadonlyMap<string, string>,
   appFiles: ReadonlyMap<string, string>,
@@ -230,7 +245,7 @@ function record(
     return exitCodes.noVerdict;
   }
 
-  const entry = storedBaselineOf(key, machine, measurement.sessionRatios);
+  const entry = storedBaselineOf(key, projects, machine, measurement.sessionRatios);
   const write = writeBaselineFile(baselinePath, withRecordedBaseline(recordedFile, entry));
 
   if (write.kind === "notWritten") {
@@ -261,28 +276,33 @@ function main(argument: string | undefined): number {
     platform: process.platform,
     arch: process.arch,
     bun: currentBun(),
-    controlSha256: projectSha256(controlFiles),
-    appSha256: projectSha256(appFiles),
     runsPerSession,
     sessions: sessionsPerMeasurement,
   };
 
-  console.log(`control project: ${controlFiles.size} files, sha256 ${key.controlSha256}`);
-  console.log(`app project: ${appFiles.size} files, sha256 ${key.appSha256}`);
+  const projects: ProjectFingerprints = { controlSha256: projectSha256(controlFiles), appSha256: projectSha256(appFiles) };
+
+  console.log(`control project: ${controlFiles.size} files, sha256 ${projects.controlSha256}`);
+  console.log(`app project: ${appFiles.size} files, sha256 ${projects.appSha256}`);
   console.log(`bun: ${key.bun}, platform: ${key.platform} ${key.arch}`);
 
   switch (parsedCommand.command) {
     case "check":
-      return check(key, controlFiles, appFiles);
+      return check(key, projects, controlFiles, appFiles);
     case "record":
-      return recordOnThisMachine(key, controlFiles, appFiles);
+      return recordOnThisMachine(key, projects, controlFiles, appFiles);
     default:
       return assertNever(parsedCommand.command);
   }
 }
 
 /** Records on this machine. Refused when the system reports no CPU model: the entry names the machine. */
-function recordOnThisMachine(key: BaselineKey, controlFiles: ReadonlyMap<string, string>, appFiles: ReadonlyMap<string, string>): number {
+function recordOnThisMachine(
+  key: BaselineKey,
+  projects: ProjectFingerprints,
+  controlFiles: ReadonlyMap<string, string>,
+  appFiles: ReadonlyMap<string, string>,
+): number {
   const machine = currentMachine();
 
   if (machine.kind === "cpuModelNotReported") {
@@ -293,7 +313,7 @@ function recordOnThisMachine(key: BaselineKey, controlFiles: ReadonlyMap<string,
 
   console.log(`machine: ${describeMachine(machine.machine)}`);
 
-  return record(key, machine.machine, controlFiles, appFiles);
+  return record(key, projects, machine.machine, controlFiles, appFiles);
 }
 
 process.exitCode = main(process.argv[2]);
