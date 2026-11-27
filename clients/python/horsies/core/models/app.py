@@ -7,6 +7,7 @@ from horsies._catalog.worker_manifest import (
     QUEUE_CONCURRENCY_MAX,
     TASK_LIMIT_MAX,
 )
+from horsies._catalog.queue_defaults import DEFAULT_QUEUE_NAME
 from horsies.core.models.queues import QueueMode, CustomQueueConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.cluster_cap import ClusterCap, ClusterCapSetting, NoClusterCap
@@ -395,7 +396,7 @@ class AppConfig(BaseModel):
         configured_queues = (
             {queue.name for queue in self.custom_queues}
             if self.queue_mode == QueueMode.CUSTOM and self.custom_queues
-            else {'default'}
+            else {DEFAULT_QUEUE_NAME}
         )
         for mapped_queue in sorted(self.retention.queue_retention):
             if mapped_queue in configured_queues:

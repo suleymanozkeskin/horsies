@@ -15,6 +15,12 @@ from typing import (
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 from typing_extensions import Self
 from enum import Enum
+from horsies._catalog.schedule_defaults import (
+    DEFAULT_MAX_CATCH_UP_RUNS,
+    DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS,
+    DEFAULT_SCHEDULE_ENABLED,
+    DEFAULT_SCHEDULE_TIMEZONE,
+)
 from horsies.core.errors import (
     ConfigurationError,
     HorsiesErrorCode,
@@ -879,13 +885,17 @@ class TaskSchedule(BaseModel):
         default_factory=dict, description='Task keyword arguments (kwargs-only)'
     )
     queue: Optional[str] = Field(default=None, description='Target queue name')
-    enabled: bool = Field(default=True, description='Whether schedule is active')
-    timezone: str = Field(default='UTC', description='Timezone for schedule evaluation')
+    enabled: bool = Field(
+        default=DEFAULT_SCHEDULE_ENABLED, description='Whether schedule is active'
+    )
+    timezone: str = Field(
+        default=DEFAULT_SCHEDULE_TIMEZONE, description='Timezone for schedule evaluation'
+    )
     catch_up_missed: bool = Field(
         default=False, description='Execute missed runs if scheduler was down'
     )
     max_catch_up_runs: int = Field(
-        default=100,
+        default=DEFAULT_MAX_CATCH_UP_RUNS,
         ge=1,
         le=10000,
         description='Maximum runs to enqueue per scheduler tick when catch_up_missed=True',
@@ -909,7 +919,10 @@ class ScheduleConfig(BaseModel):
         default_factory=list, description='List of scheduled tasks'
     )
     check_interval_seconds: int = Field(
-        default=1, ge=1, le=60, description='Scheduler check interval (1-60 seconds)'
+        default=DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS,
+        ge=1,
+        le=60,
+        description='Scheduler check interval (1-60 seconds)',
     )
 
     @model_validator(mode='after')

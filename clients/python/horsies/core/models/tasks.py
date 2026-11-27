@@ -34,6 +34,10 @@ if TYPE_CHECKING:
     from horsies.core.models.outcome import TaskOutcome
     from horsies.core.models.workflow import SubWorkflowSummary
 
+from horsies._catalog.task_bounds import (
+    MAX_TASK_TIMEOUT_MS as MAX_TASK_TIMEOUT_MS,
+    MIN_TASK_TIMEOUT_MS as MIN_TASK_TIMEOUT_MS,
+)
 from horsies._catalog.task_codes import ContractCode as ContractCode
 from horsies._catalog.task_codes import OperationalCode as OperationalCode
 from horsies._catalog.task_codes import OutcomeCode as OutcomeCode
@@ -462,16 +466,6 @@ class TaskInfo:
 
 MAX_RETRY_ATTEMPTS: Final = 20
 """The largest `RetryPolicy.max_retries`."""
-
-MIN_TASK_TIMEOUT_MS: Final = 1000
-"""The smallest `TaskOptions.timeout_ms`."""
-
-MAX_TASK_TIMEOUT_MS: Final = 2**32 - 1
-"""The largest `TaskOptions.timeout_ms`, and the largest wait of a result get.
-
-About 49.7 days. It is the limit of the Rust port's `u32` field, so both
-libraries accept the same declarations.
-"""
 
 MIN_CANCEL_GRACE_MS: Final = 100
 """The smallest `cancel_grace_ms` of a `SHARED_ASYNC` or an `ISOLATED` task.

@@ -19,7 +19,8 @@ import type { EnqueueRequest, OptionalText, RetentionRecord, SendKind, SendPrior
 import type { TraceArgument } from "../native/values/records.ts";
 import { readFormOfCompiled, type TaskHandle, taskHandleOf } from "../read/handle.ts";
 import { err, ok, type Result } from "../wire/result.ts";
-import { DEFAULT_QUEUE_PRIORITY, RESEND_COUNT, RESEND_FIRST_WAIT_MS, RESEND_LONGEST_WAIT_MS } from "./bounds.ts";
+import { DEFAULT_QUEUE_PRIORITY } from "../_catalog/send_bounds.ts";
+import { RESEND_COUNT, RESEND_FIRST_WAIT_MS, RESEND_LONGEST_WAIT_MS } from "./bounds.ts";
 import { enqueue, prepareSend } from "./core-calls.ts";
 import {
   preconditionFailed,
