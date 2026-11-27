@@ -111,7 +111,7 @@ class TestIntervalSchedule:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             IntervalSchedule(every=timedelta(microseconds=500))
 
-        messages = sorted(error.message for error in exc_info.value.report.errors)
+        messages = sorted(error.message for error in exc_info.value.report.refusals)
         assert messages == [
             'IntervalSchedule every has microseconds',
             'IntervalSchedule every is outside 1 second to 365 days',

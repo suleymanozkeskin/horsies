@@ -336,8 +336,8 @@ $$;
 -- history_total = 0), or 'ESTIMATE_HISTORY_PLAN' (live_total, history_estimate_plan). A TASK row has location
 -- 'LIVE' (error_code and terminal_at NULL; worker columns from the current claim) or 'HISTORY' (worker columns from
 -- the last claim). status is the stored text; the caller decodes it.
--- Replaces: horsies/monitoring/queries.py:1279-1401 (list_tasks), :1190-1221 (list_rows_statement), :1229-1276 (the
--- totals) and horsies/core/history/reads/pages.py (history_page_statement): one session of 6 (filtered) or 7
+-- Replaces: clients/python/horsies/monitoring/queries.py:1279-1401 (list_tasks), :1190-1221 (list_rows_statement), :1229-1276 (the
+-- totals) and clients/python/horsies/core/history/reads/pages.py (history_page_statement): one session of 6 (filtered) or 7
 -- (unfiltered) round trips, four snapshots, and a merge in client code-point order.
 CREATE OR REPLACE FUNCTION horsies_monitoring_task_list(
     p_window_lower timestamp with time zone,
@@ -603,7 +603,7 @@ $$;
 -- Lock order: none (a plain read).
 -- Returns: one row per facet value: facet ('worker', 'task_name', 'queue_name', 'error_code'), facet_value,
 -- facet_count; category and category_total are set on error_code rows only. Ordered by facet, then rank.
--- Replaces: horsies/monitoring/queries.py:725-849 (facets_statement) and :942-1007 (task_facets): the same
+-- Replaces: clients/python/horsies/monitoring/queries.py:725-849 (facets_statement) and :942-1007 (task_facets): the same
 -- statement inside a session (BEGIN, SELECT, ROLLBACK), with the taxonomy written into the text.
 CREATE OR REPLACE FUNCTION horsies_monitoring_task_facets(
     p_window_lower timestamp with time zone,

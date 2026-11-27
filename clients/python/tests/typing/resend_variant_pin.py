@@ -51,7 +51,7 @@ async def async_resends(
 ) -> None:
     _ = await task.resend_async(enqueue_failed)
     _ = await task.resend_async(async_context)
-    _ = await task.resend_async(key_conflict)
+    _ = await task.resend_async(key_conflict)  # pyright: ignore[reportArgumentType]
     _ = await task.resend_async(payload_mismatch)  # pyright: ignore[reportArgumentType]
 
 

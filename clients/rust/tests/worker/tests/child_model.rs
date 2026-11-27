@@ -37,7 +37,7 @@ const ALL_PARTS: TaskInfoParts = TaskInfoParts {
 /// The process id of the isolated child of a split profile.
 async fn isolated_pid(suite: &Suite) -> u32 {
     let handle = suite
-        .function(basic::pid::handle)
+        .function(basic::pid::function)
         .send(basic::pid::Input { sleep_ms: 0 })
         .await
         .expect("send e2e_pid");
@@ -90,11 +90,11 @@ async fn shared_tasks_run_at_once_and_a_timeout_leaves_neighbours_finished() {
     let _worker = suite.worker(Profile::SplitShared1x4).await;
     let isolated = isolated_pid(&suite).await.to_string();
     let hang = suite
-        .function(classes::shared_hang::handle)
+        .function(classes::shared_hang::function)
         .send(())
         .await
         .expect("send e2e_shared_hang");
-    let sleep = suite.function(classes::shared_sleep::handle);
+    let sleep = suite.function(classes::shared_sleep::function);
     let mut sleepers = Vec::new();
     for _sleeper in 0..3 {
         sleepers.push(
@@ -143,7 +143,7 @@ async fn a_shared_timeout_that_returns_at_the_signal_records_returned_after_sign
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::SharedOnly1x4).await;
     let handle = suite
-        .function(classes::shared_cooperative::handle)
+        .function(classes::shared_cooperative::function)
         .send(())
         .await
         .expect("send e2e_shared_cooperative");
@@ -164,14 +164,14 @@ async fn a_stuck_task_is_dropped_after_its_grace_then_retries() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::SplitShared1x4).await;
     let neighbour = suite
-        .function(classes::shared_sleep::handle)
+        .function(classes::shared_sleep::function)
         .send(classes::shared_sleep::Input {
             milliseconds: 8_000,
         })
         .await
         .expect("send the neighbour");
     let stuck = suite
-        .function(classes::shared_stuck_once::handle)
+        .function(classes::shared_stuck_once::function)
         .send(classes::shared_stuck_once::Input {
             token: Uuid::new_v4().simple().to_string(),
         })
@@ -207,7 +207,7 @@ async fn a_blocked_runtime_kills_its_child_and_the_worker_runs_on() {
     let _worker = suite.worker(Profile::SplitShared1x4).await;
     let client = suite.client().await;
     let neighbour = suite
-        .function(classes::shared_sleep::handle)
+        .function(classes::shared_sleep::function)
         .send(classes::shared_sleep::Input {
             milliseconds: 20_000,
         })
@@ -215,7 +215,7 @@ async fn a_blocked_runtime_kills_its_child_and_the_worker_runs_on() {
         .expect("send the neighbour");
     rows::wait_for_task_status(&client, neighbour.task_id(), "RUNNING", RESULT_WAIT).await;
     let culprit = suite
-        .function(classes::shared_blocks_once::handle)
+        .function(classes::shared_blocks_once::function)
         .send(classes::shared_blocks_once::Input {
             token: Uuid::new_v4().simple().to_string(),
         })
@@ -224,7 +224,7 @@ async fn a_blocked_runtime_kills_its_child_and_the_worker_runs_on() {
     rows::wait_for_task_status(&client, culprit.task_id(), "RUNNING", RESULT_WAIT).await;
     let sent = Instant::now();
     let during = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send(basic::simple::Input { x: 3 })
         .await
         .expect("send during the block");
@@ -263,11 +263,11 @@ async fn thread_tasks_run_at_once_and_a_timeout_leaves_neighbours_finished() {
     let _worker = suite.worker(Profile::SplitThread1x4).await;
     let isolated = isolated_pid(&suite).await.to_string();
     let hang = suite
-        .function(classes::thread_hang::handle)
+        .function(classes::thread_hang::function)
         .send(())
         .await
         .expect("send e2e_thread_hang");
-    let sleep = suite.function(classes::thread_sleep::handle);
+    let sleep = suite.function(classes::thread_sleep::function);
     let mut sleepers = Vec::new();
     for _sleeper in 0..3 {
         sleepers.push(
@@ -317,7 +317,7 @@ async fn a_timed_out_thread_does_not_overlap_its_retry() {
     let _worker = suite.worker(Profile::SplitThread1x4).await;
     let token = Uuid::new_v4().simple().to_string();
     let handle = suite
-        .function(classes::thread_overrun::handle)
+        .function(classes::thread_overrun::function)
         .send(classes::thread_overrun::Input {
             token: token.clone(),
         })
@@ -372,7 +372,7 @@ async fn a_drain_past_its_timeout_ends_the_task_and_the_worker() {
     let mut worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
     let handle = suite
-        .function(classes::outlives_drain::handle)
+        .function(classes::outlives_drain::function)
         .send(classes::outlives_drain::Input { seconds: 60 })
         .await
         .expect("send e2e_outlives_drain");
@@ -412,13 +412,13 @@ async fn a_crash_in_task_code_ends_one_child_not_the_worker() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let mut worker = suite.worker(Profile::Isolated2).await;
     let healthy = suite
-        .function(basic::slow::handle)
+        .function(basic::slow::function)
         .send(basic::slow::Input { duration_ms: 3_000 })
         .await
         .expect("send the healthy task");
     let sent = Instant::now();
     let crashing = suite
-        .function(basic::abort::handle)
+        .function(basic::abort::function)
         .send(())
         .await
         .expect("send e2e_abort");
@@ -435,7 +435,7 @@ async fn a_crash_in_task_code_ends_one_child_not_the_worker() {
         worker.report()
     );
     let after = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send(basic::simple::Input { x: 4 })
         .await
         .expect("send after the crash");
@@ -450,7 +450,7 @@ async fn a_crash_in_task_code_ends_one_child_not_the_worker() {
 async fn an_isolated_child_is_replaced_after_its_task_limit() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::RecycleAfter2).await;
-    let pid = suite.function(basic::pid::handle);
+    let pid = suite.function(basic::pid::function);
     let mut pids = std::collections::BTreeSet::new();
     for _task in 0..6 {
         let handle = pid
@@ -473,7 +473,7 @@ async fn an_isolated_child_is_replaced_after_its_task_limit() {
 async fn shared_async_runs_read_their_own_fencing_tokens() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::SharedOnly1x4).await;
-    let fence = suite.function(fencing::fence_shared_async::handle);
+    let fence = suite.function(fencing::fence_shared_async::function);
     let first = fence.send(()).await.expect("send e2e_fence_shared_async");
     let second = fence.send(()).await.expect("send e2e_fence_shared_async");
     for handle in [&first, &second] {
@@ -494,7 +494,7 @@ async fn shared_async_runs_read_their_own_fencing_tokens() {
 async fn shared_thread_runs_read_their_own_fencing_tokens() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::ThreadOnly1x4).await;
-    let fence = suite.function(fencing::fence_shared_thread::handle);
+    let fence = suite.function(fencing::fence_shared_thread::function);
     let first = fence.send(()).await.expect("send e2e_fence_shared_thread");
     let second = fence.send(()).await.expect("send e2e_fence_shared_thread");
     for handle in [&first, &second] {

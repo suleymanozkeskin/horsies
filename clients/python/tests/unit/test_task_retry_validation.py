@@ -267,7 +267,7 @@ class TestRetryCodeMembers:
         stored = json.loads(options_json)['retry_policy']['retry_for']
         assert stored == ['WORKER_CRASHED', 'RATE_LIMITED']
         failure = TaskError(code=_TaskCode.RATE_LIMITED).model_dump(mode='json')
-        assert failure['error_code'] == stored[1]
+        assert failure['code'] == stored[1]
 
     def test_plain_text_entry_refused(self) -> None:
         """A plain `str` entry is TASK_INVALID_OPTIONS; the notes name the

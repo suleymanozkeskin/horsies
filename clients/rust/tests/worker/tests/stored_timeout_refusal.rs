@@ -111,7 +111,7 @@ async fn assert_refused_in_one_claim(suite: &Suite, client: &Client, task_id: Uu
 /// attempt.
 async fn assert_not_claimed_again(suite: &Suite, client: &Client, task_id: Uuid, ended: &TaskRow) {
     let later = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send(basic::simple::Input { x: 1 })
         .await
         .expect("send the later task");
@@ -156,7 +156,7 @@ fn add<T: 'static, I: 'static>(
 /// A step node `id` that returns `completed_<id>`.
 fn step(suite: &Suite, id: &str) -> TaskNode<String, workflow::step::Input> {
     suite
-        .function(workflow::step::handle)
+        .function(workflow::step::function)
         .node()
         .node_id(id)
         .set(workflow::step::fields::step(), id.to_owned())
@@ -173,7 +173,7 @@ async fn a_refused_timeout_fails_in_one_claim_and_is_not_claimed_again() {
     let client = suite.client().await;
     let token = Uuid::new_v4().simple().to_string();
     let handle = suite
-        .function(basic::idempotent::handle)
+        .function(basic::idempotent::function)
         .send(basic::idempotent::Input {
             token: token.clone(),
         })

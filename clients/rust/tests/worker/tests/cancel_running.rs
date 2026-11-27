@@ -131,7 +131,7 @@ where
 /// The pid of the isolated child that runs the next task.
 async fn isolated_pid(suite: &Suite) -> String {
     let handle = suite
-        .function(basic::pid::handle)
+        .function(basic::pid::function)
         .send(basic::pid::Input { sleep_ms: 0 })
         .await
         .expect("send e2e_pid");
@@ -147,7 +147,7 @@ async fn an_isolated_async_body_sees_the_cancel() {
     let _worker = suite.worker(Profile::Isolated1).await;
     let token = new_token();
     let handle = suite
-        .function(cancel::cancel_isolated_async::handle)
+        .function(cancel::cancel_isolated_async::function)
         .send(cancel::cancel_isolated_async::Input {
             token: token.clone(),
         })
@@ -170,7 +170,7 @@ async fn an_isolated_blocking_body_sees_the_cancel() {
     let _worker = suite.worker(Profile::Isolated1).await;
     let token = new_token();
     let handle = suite
-        .function(cancel::cancel_isolated_blocking::handle)
+        .function(cancel::cancel_isolated_blocking::function)
         .send(cancel::cancel_isolated_blocking::Input {
             token: token.clone(),
         })
@@ -193,7 +193,7 @@ async fn a_shared_async_body_sees_the_cancel() {
     let _worker = suite.worker(Profile::SharedOnly1x4).await;
     let token = new_token();
     let handle = suite
-        .function(cancel::cancel_shared_async::handle)
+        .function(cancel::cancel_shared_async::function)
         .send(cancel::cancel_shared_async::Input {
             token: token.clone(),
         })
@@ -216,7 +216,7 @@ async fn a_shared_thread_body_sees_the_cancel() {
     let _worker = suite.worker(Profile::ThreadOnly1x4).await;
     let token = new_token();
     let handle = suite
-        .function(cancel::cancel_shared_thread::handle)
+        .function(cancel::cancel_shared_thread::function)
         .send(cancel::cancel_shared_thread::Input {
             token: token.clone(),
         })
@@ -240,7 +240,7 @@ async fn an_isolated_task_that_ignores_the_cancel_is_killed_after_its_grace() {
     let _worker = suite.worker(Profile::Isolated1).await;
     let token = new_token();
     let handle = suite
-        .function(cancel::cancel_ignored_with_grace::handle)
+        .function(cancel::cancel_ignored_with_grace::function)
         .send(cancel::cancel_ignored_with_grace::Input {
             token: token.clone(),
         })
@@ -265,7 +265,7 @@ async fn an_isolated_task_with_no_grace_is_not_killed() {
     let _worker = suite.worker(Profile::Isolated1).await;
     let token = new_token();
     let handle = suite
-        .function(cancel::cancel_ignored_no_grace::handle)
+        .function(cancel::cancel_ignored_no_grace::function)
         .send(cancel::cancel_ignored_no_grace::Input {
             token: token.clone(),
         })

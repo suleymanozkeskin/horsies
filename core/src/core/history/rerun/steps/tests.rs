@@ -692,7 +692,7 @@ fn values_retrying_on(codes: &[&str]) -> Vec<StatementValue> {
         .collect::<Vec<String>>()
         .join(",");
     let options = format!(
-        "{{\"retry_policy\":{{\"max_retries\":1,\"intervals\":[1],\"backoff_strategy\":\"fixed\",\
+        "{{\"retry_policy\":{{\"max_retries\":1,\"intervals_seconds\":[1],\"backoff_strategy\":\"fixed\",\
          \"jitter\":true,\"retry_for\":[{list}]}}}}"
     );
     let payload = format!("{{\"input\":{INPUT},\"options\":{options}}}").into_bytes();

@@ -55,7 +55,7 @@ async fn simple_as_text(x: String) -> Result<i64, TaskError<Infallible>> {
 async fn test_simple_task_lifecycle() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let simple = suite.function(basic::simple::handle);
+    let simple = suite.function(basic::simple::function);
     let handle = simple
         .send(basic::simple::Input { x: 5 })
         .await
@@ -70,7 +70,7 @@ async fn test_status_transitions() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send(basic::simple::Input { x: 5 })
         .await
         .expect("send e2e_simple");
@@ -92,7 +92,7 @@ async fn test_status_transitions() {
 async fn test_kwargs_with_defaults() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let kwargs = suite.function(basic::kwargs::handle);
+    let kwargs = suite.function(basic::kwargs::function);
     let defaults = kwargs
         .send(basic::kwargs::Input {
             required: 5,
@@ -120,7 +120,7 @@ async fn test_explicit_error_result() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(basic::error::handle)
+        .function(basic::error::function)
         .send(())
         .await
         .expect("send e2e_error");
@@ -147,7 +147,7 @@ async fn test_no_retry_for_non_matching() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(retry::retry_other_code::handle)
+        .function(retry::retry_other_code::function)
         .send(())
         .await
         .expect("send");
@@ -166,7 +166,7 @@ async fn test_task_timeout_fails_with_task_timeout() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let blocking = suite
-        .function(basic::timeout_sleeper::handle)
+        .function(basic::timeout_sleeper::function)
         .send(basic::timeout_sleeper::Input {
             duration_ms: 30_000,
         })
@@ -174,7 +174,7 @@ async fn test_task_timeout_fails_with_task_timeout() {
         .expect("send e2e_timeout_sleeper");
     assert_eq!(failed_code(&blocking, RESULT_WAIT).await, "TASK_TIMEOUT");
     let async_body = suite
-        .function(basic::async_timeout_sleeper::handle)
+        .function(basic::async_timeout_sleeper::function)
         .send(basic::async_timeout_sleeper::Input {
             duration_ms: 30_000,
         })
@@ -197,7 +197,7 @@ async fn test_task_timeout_fails_with_task_timeout() {
         TaskOutcome::Succeeded(value) => panic!("the sleeper succeeded with {value}"),
     }
     let after = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send(basic::simple::Input { x: 1 })
         .await
         .expect("send after the timeouts");
@@ -213,7 +213,7 @@ async fn test_task_timeout_retry_opt_in() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(basic::timeout_retry_sleeper::handle)
+        .function(basic::timeout_retry_sleeper::function)
         .send(basic::timeout_retry_sleeper::Input {
             duration_ms: 30_000,
         })
@@ -241,7 +241,7 @@ async fn test_slow_task_completes() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(basic::slow::handle)
+        .function(basic::slow::function)
         .send(basic::slow::Input { duration_ms: 1_500 })
         .await
         .expect("send e2e_slow");
@@ -254,7 +254,7 @@ async fn test_slow_task_completes() {
 async fn test_multiple_tasks_concurrent() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated2).await;
-    let slow = suite.function(basic::slow::handle);
+    let slow = suite.function(basic::slow::function);
     let mut handles = Vec::new();
     for _task in 0..4 {
         handles.push(
@@ -294,7 +294,7 @@ async fn test_multiple_tasks_concurrent() {
 async fn test_multiple_tasks_concurrent_db_proof() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated4).await;
-    let stamp = suite.function(basic::stamp::handle);
+    let stamp = suite.function(basic::stamp::function);
     let mut handles = Vec::new();
     for _task in 0..4 {
         handles.push(
@@ -333,7 +333,7 @@ async fn test_healthcheck() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(basic::healthcheck::handle)
+        .function(basic::healthcheck::function)
         .send(())
         .await
         .expect("send e2e_healthcheck");
@@ -347,7 +347,7 @@ async fn test_retry_exhausted() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(retry::retry_exhausted::handle)
+        .function(retry::retry_exhausted::function)
         .send(())
         .await
         .expect("send");
@@ -363,7 +363,7 @@ async fn test_retry_eventual_success() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(retry::retry_success::handle)
+        .function(retry::retry_success::function)
         .send(retry::retry_success::Input {
             token: Uuid::new_v4().simple().to_string(),
         })
@@ -382,7 +382,7 @@ async fn test_good_until_already_past() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let past = Utc::now() - chrono::Duration::seconds(10);
     let handle = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send_with_options(
             TaskSendOptions::new().good_until(past),
             basic::simple::Input { x: 5 },
@@ -410,7 +410,7 @@ async fn test_good_until_future_completes() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send_with_options(
             TaskSendOptions::new().good_until(Utc::now() + chrono::Duration::seconds(60)),
             basic::simple::Input { x: 5 },
@@ -429,7 +429,7 @@ async fn test_retry_blocked_by_good_until_expiry() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(retry::retry_long_interval::handle)
+        .function(retry::retry_long_interval::function)
         .send_with_options(
             TaskSendOptions::new().good_until(Utc::now() + chrono::Duration::seconds(10)),
             (),
@@ -448,7 +448,7 @@ async fn test_retry_succeeds_within_good_until() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(retry::retry_success::handle)
+        .function(retry::retry_success::function)
         .send_with_options(
             TaskSendOptions::new().good_until(Utc::now() + chrono::Duration::seconds(60)),
             retry::retry_success::Input {
@@ -507,7 +507,7 @@ async fn test_argument_deserialization_error() {
 async fn test_task_cancelled() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let handle = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send(basic::simple::Input { x: 5 })
         .await
         .expect("send");
@@ -538,7 +538,7 @@ async fn test_task_cancelled() {
 async fn test_task_cancelled_get_result() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let handle = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send(basic::simple::Input { x: 5 })
         .await
         .expect("send");
@@ -564,7 +564,7 @@ async fn test_task_info_after_completion() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send(basic::simple::Input { x: 21 })
         .await
         .expect("send");
@@ -589,7 +589,7 @@ async fn test_exponential_backoff_state() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(retry::exponential::handle)
+        .function(retry::exponential::function)
         .send(())
         .await
         .expect("send");
@@ -608,7 +608,7 @@ async fn test_exponential_backoff_state() {
 async fn test_exponential_backoff_intervals() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let handle = suite
-        .function(retry::exponential::handle)
+        .function(retry::exponential::function)
         .send(())
         .await
         .expect("send");
@@ -643,7 +643,7 @@ async fn test_auto_retry_by_error_code() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(retry::retry_error_code::handle)
+        .function(retry::retry_error_code::function)
         .send(())
         .await
         .expect("send");
@@ -659,7 +659,7 @@ async fn test_task_expires_before_claim() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let expiry = Utc::now() + chrono::Duration::milliseconds(500);
     let handle = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send_with_options(
             TaskSendOptions::new().good_until(expiry),
             basic::simple::Input { x: 5 },
@@ -689,14 +689,14 @@ async fn test_good_until_expires_while_claimed_before_start() {
     let suite = Suite::start(BIN, Instance::SoftCap).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let blocker = suite
-        .function(basic::slow::handle)
+        .function(basic::slow::function)
         .send(basic::slow::Input { duration_ms: 4_000 })
         .await
         .expect("send the blocker");
     let client = suite.client().await;
     rows::wait_for_task_status(&client, blocker.task_id(), "RUNNING", RESULT_WAIT).await;
     let expiring = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send_with_options(
             TaskSendOptions::new().good_until(Utc::now() + chrono::Duration::seconds(1)),
             basic::simple::Input { x: 5 },
@@ -713,12 +713,12 @@ async fn test_good_until_expires_while_claimed_before_start() {
 async fn test_priority_ordering() {
     let suite = Suite::start(BIN, Instance::CustomQueues).await;
     let low = suite
-        .function(custom::low::handle)
+        .function(custom::low::function)
         .send(())
         .await
         .expect("send e2e_low");
     let high = suite
-        .function(custom::high::handle)
+        .function(custom::high::function)
         .send(())
         .await
         .expect("send e2e_high");
@@ -748,7 +748,7 @@ async fn test_skip_locked_prevents_double_claim() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _first = suite.worker(Profile::Isolated2).await;
     let _second = suite.worker(Profile::Isolated2).await;
-    let idempotent = suite.function(basic::idempotent::handle);
+    let idempotent = suite.function(basic::idempotent::function);
     let mut handles = Vec::new();
     for index in 0..20 {
         handles.push(
@@ -772,7 +772,7 @@ async fn test_skip_locked_prevents_double_claim() {
 async fn test_max_claim_batch() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::ClaimBatch1).await;
-    let slow = suite.function(basic::slow::handle);
+    let slow = suite.function(basic::slow::function);
     let mut handles = Vec::new();
     for _task in 0..6 {
         handles.push(
@@ -825,7 +825,7 @@ async fn test_task_not_found() {
 async fn test_wait_timeout() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let handle = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send(basic::simple::Input { x: 5 })
         .await
         .expect("send");
@@ -843,7 +843,7 @@ async fn test_library_error_code_in_user_task() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(basic::error_code::handle)
+        .function(basic::error_code::function)
         .send(())
         .await
         .expect("send");
@@ -864,7 +864,7 @@ async fn test_exception_becomes_error() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(basic::panics::handle)
+        .function(basic::panics::function)
         .send(())
         .await
         .expect("send");
@@ -890,7 +890,7 @@ async fn test_complex_result_serialization() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(basic::complex_result::handle)
+        .function(basic::complex_result::function)
         .send(())
         .await
         .expect("send");
@@ -907,17 +907,17 @@ async fn test_custom_mode_queue_routing() {
     let suite = Suite::start(BIN, Instance::CustomQueues).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let high = suite
-        .function(custom::high::handle)
+        .function(custom::high::function)
         .send(())
         .await
         .expect("send high");
     let normal = suite
-        .function(custom::normal::handle)
+        .function(custom::normal::function)
         .send(())
         .await
         .expect("send normal");
     let low = suite
-        .function(custom::low::handle)
+        .function(custom::low::function)
         .send(())
         .await
         .expect("send low");
@@ -932,17 +932,17 @@ async fn test_custom_mode_queue_routing() {
 async fn test_custom_mode_queue_names_stored() {
     let suite = Suite::start(BIN, Instance::CustomQueues).await;
     let high = suite
-        .function(custom::high::handle)
+        .function(custom::high::function)
         .send(())
         .await
         .expect("send high");
     let normal = suite
-        .function(custom::normal::handle)
+        .function(custom::normal::function)
         .send(())
         .await
         .expect("send normal");
     let low = suite
-        .function(custom::low::handle)
+        .function(custom::low::function)
         .send(())
         .await
         .expect("send low");
@@ -967,7 +967,7 @@ async fn test_attempt_recorded_on_success() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send(basic::simple::Input { x: 1 })
         .await
         .expect("send");
@@ -995,7 +995,7 @@ async fn test_attempt_recorded_on_failure() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(basic::error::handle)
+        .function(basic::error::function)
         .send(())
         .await
         .expect("send");
@@ -1022,7 +1022,7 @@ async fn test_attempt_recorded_on_retry_exhausted() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(retry::retry_exhausted::handle)
+        .function(retry::retry_exhausted::function)
         .send(())
         .await
         .expect("send");
@@ -1048,7 +1048,7 @@ async fn test_attempt_recorded_on_retry_exhausted() {
 #[serial]
 async fn test_idempotency_key_same_input_returns_the_first_task() {
     let suite = Suite::start(BIN, Instance::Default).await;
-    let simple = suite.function(basic::simple::handle);
+    let simple = suite.function(basic::simple::function);
     let options = TaskSendOptions::new().idempotency_key("order-7");
     let first = simple
         .send_with_options(options.clone(), basic::simple::Input { x: 7 })
@@ -1074,7 +1074,7 @@ async fn test_idempotency_key_same_input_returns_the_first_task() {
 #[serial]
 async fn test_idempotency_key_other_input_is_a_conflict() {
     let suite = Suite::start(BIN, Instance::Default).await;
-    let simple = suite.function(basic::simple::handle);
+    let simple = suite.function(basic::simple::function);
     let options = TaskSendOptions::new().idempotency_key("order-8");
     let _first = simple
         .send_with_options(options.clone(), basic::simple::Input { x: 8 })
@@ -1096,7 +1096,7 @@ async fn test_a_task_cannot_wait_for_another_task() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated2).await;
     let handle = suite
-        .function(basic::wait_inside_task::handle)
+        .function(basic::wait_inside_task::function)
         .send(())
         .await
         .expect("send");
@@ -1113,7 +1113,7 @@ async fn test_an_async_task_sends() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated2).await;
     let handle = suite
-        .function(basic::async_sends::handle)
+        .function(basic::async_sends::function)
         .send(basic::async_sends::Input { x: 4 })
         .await
         .expect("send");
@@ -1136,7 +1136,7 @@ async fn test_send_suppressed() {
     let suite = Suite::start(BIN, Instance::Default).await;
     suite.app.suppress_sends(true);
     let refused = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send(basic::simple::Input { x: 1 })
         .await;
     assert!(
@@ -1158,12 +1158,12 @@ async fn test_fencing_token_of_isolated_runs() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let async_run = suite
-        .function(fencing::fence_isolated_async::handle)
+        .function(fencing::fence_isolated_async::function)
         .send(())
         .await
         .expect("send e2e_fence_isolated_async");
     let blocking_run = suite
-        .function(fencing::fence_isolated_blocking::handle)
+        .function(fencing::fence_isolated_blocking::function)
         .send(())
         .await
         .expect("send e2e_fence_isolated_blocking");
@@ -1191,7 +1191,7 @@ async fn test_fencing_token_is_the_same_within_one_attempt() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(fencing::fence_reads_twice::handle)
+        .function(fencing::fence_reads_twice::function)
         .send(())
         .await
         .expect("send e2e_fence_reads_twice");
@@ -1213,7 +1213,7 @@ async fn test_fencing_token_rises_on_retry() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(fencing::fence_retry::handle)
+        .function(fencing::fence_retry::function)
         .send(fencing::fence_retry::Input {
             marker: Uuid::new_v4().simple().to_string(),
         })

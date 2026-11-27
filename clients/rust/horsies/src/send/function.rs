@@ -931,9 +931,13 @@ mod tests {
     /// Reverting the `IdempotencyKeyConflict` arm of
     /// `TaskSendError::resend_target` to `Some(..)` fails this test.
     #[test]
-    fn a_retry_refuses_a_key_conflict_before_any_write() {
+    fn a_resend_refuses_a_key_conflict_before_any_write() {
         let app = app_with(config());
-        let message = validation_message(function(&app).retry_target(&key_conflict()).unwrap_err());
+        let message = validation_message(
+            function(&app)
+                .checked_resend_target(&key_conflict())
+                .unwrap_err(),
+        );
         assert!(message.contains("IDEMPOTENCY_KEY_CONFLICT"), "{message}");
     }
 

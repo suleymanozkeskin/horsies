@@ -1200,8 +1200,8 @@ class Horsies:
                     _retry_codes_or_raise(
                         retry_policy,
                         code_enum,
-                        task_name=task_name,
-                        location=fn_location,
+                        task_name=name,
+                        location=function_location,
                     )
 
             # VALIDATION AT DEFINITION TIME

@@ -345,7 +345,7 @@ async fn test_successful_subworkflow_is_available_through_workflow_ctx() {
     let probe = add(
         &mut spec,
         suite
-            .function(subworkflow::sub_probe_success_ctx::handle)
+            .function(subworkflow::sub_probe_success_ctx::function)
             .node()
             .node_id("e2e_sub_success_ctx_probe")
             .waits_for(node)
@@ -380,7 +380,7 @@ async fn test_failed_subworkflow_flows_through_args_from_and_workflow_ctx() {
     let probe = add(
         &mut spec,
         suite
-            .function(subworkflow::sub_probe_failed_child::handle)
+            .function(subworkflow::sub_probe_failed_child::function)
             .node()
             .node_id("e2e_sub_failure_probe")
             .arg_from(
@@ -419,7 +419,7 @@ async fn test_outputless_success_policy_keeps_failed_subworkflow_result() {
     let required = add(
         &mut spec,
         suite
-            .function(workflow::mark::handle)
+            .function(workflow::mark::function)
             .node()
             .node_id("e2e_sub_outputless_ok")
             .set(workflow::mark::fields::value(), "required_ok".to_owned())
@@ -577,7 +577,7 @@ async fn test_subworkflow_build_with_args_from_receives_typed_task_result() {
     let source = add(
         &mut spec,
         suite
-            .function(workflow::produce_int::handle)
+            .function(workflow::produce_int::function)
             .node()
             .node_id("e2e_sub_param_source")
             .set(workflow::produce_int::fields::value(), 37)
@@ -605,7 +605,7 @@ async fn test_subworkflow_allow_failed_dependencies_passes_failed_task_result_to
     let source = add(
         &mut spec,
         suite
-            .function(workflow::fail_with::handle)
+            .function(workflow::fail_with::function)
             .node()
             .node_id("e2e_sub_failed_input_source")
             .set(

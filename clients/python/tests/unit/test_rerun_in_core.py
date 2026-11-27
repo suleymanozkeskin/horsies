@@ -124,7 +124,7 @@ def _history_row(retry_for: list[str]) -> tuple[object, ...]:
     options = {
         'retry_policy': {
             'max_retries': 1,
-            'intervals': [1],
+            'intervals_seconds': [1],
             'backoff_strategy': 'fixed',
             'jitter': True,
             'retry_for': retry_for,
@@ -169,7 +169,7 @@ async def _rerun_with(
     connection: AsyncMock,
     registered_task_codes: Mapping[str, tuple[str, ...]],
 ) -> object:
-    return await rerun_task(
+    return await rerun_task_in_async(
         connection,
         RerunCommand(source_task_id=SOURCE_ID, good_until=None),
         _policy(),
@@ -194,7 +194,7 @@ async def test_a_stored_custom_retry_code_that_the_task_does_not_declare_raises(
     with pytest.raises(CorePreconditionFailed) as raised:
         _ = await _rerun_with(connection, {TASK_NAME: ('RATE_LIMITED',)})
 
-    assert raised.value.subject == 'rerun_task'
+    assert raised.value.subject == 'rerun_task_in'
     assert raised.value.retryable is False
     assert "'charge'" in raised.value.message
     assert "'TRANSIENT'" in raised.value.message

@@ -83,7 +83,7 @@ async fn workers(suite: &Suite, count: usize, profile: Profile) -> Vec<TestProce
 async fn test_multi_worker_distribution() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _workers = workers(&suite, 2, Profile::Isolated1).await;
-    let slow = suite.function(basic::slow::handle);
+    let slow = suite.function(basic::slow::function);
     let mut handles = Vec::new();
     for _task in 0..10 {
         handles.push(
@@ -113,7 +113,7 @@ async fn test_multi_worker_distribution() {
 async fn test_multi_worker_no_double_execution() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _workers = workers(&suite, 2, Profile::Isolated2).await;
-    let idempotent = suite.function(basic::idempotent::handle);
+    let idempotent = suite.function(basic::idempotent::function);
     let mut handles = Vec::new();
     for index in 0..20 {
         handles.push(
@@ -139,7 +139,7 @@ async fn test_stale_running_marked_failed_on_crash() {
     let client = suite.client().await;
     let mut crashed = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(basic::slow::handle)
+        .function(basic::slow::function)
         .send(basic::slow::Input {
             duration_ms: 60_000,
         })
@@ -158,7 +158,7 @@ async fn test_stale_running_marked_failed_on_crash() {
 async fn test_cluster_cap_not_leaked_on_failure() {
     let suite = Suite::start(BIN, Instance::ClusterCap).await;
     let _workers = workers(&suite, 2, Profile::Isolated2).await;
-    let failing = suite.function(basic::no_retry::handle);
+    let failing = suite.function(basic::no_retry::function);
     let mut failed = Vec::new();
     for _task in 0..4 {
         failed.push(failing.send(()).await.expect("send a failing task"));
@@ -166,7 +166,7 @@ async fn test_cluster_cap_not_leaked_on_failure() {
     for handle in &failed {
         assert_eq!(failed_code(handle, RESULT_WAIT).await, "PERMANENT");
     }
-    let slow = suite.function(basic::slow::handle);
+    let slow = suite.function(basic::slow::function);
     let mut completed = Vec::new();
     for _task in 0..4 {
         completed.push(
@@ -186,7 +186,7 @@ async fn test_cluster_cap_not_leaked_on_failure() {
 async fn test_retry_works_across_multiple_workers() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _workers = workers(&suite, 2, Profile::Isolated2).await;
-    let exhausted = suite.function(retry::retry_exhausted::handle);
+    let exhausted = suite.function(retry::retry_exhausted::function);
     let mut handles = Vec::new();
     for _task in 0..10 {
         handles.push(exhausted.send(()).await.expect("send"));
@@ -211,7 +211,7 @@ async fn test_concurrent_enqueue_during_processing() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated2).await;
     let client = suite.client().await;
-    let slow = suite.function(basic::slow::handle);
+    let slow = suite.function(basic::slow::function);
     let mut handles = Vec::new();
     for _task in 0..10 {
         handles.push(
@@ -240,7 +240,7 @@ async fn test_cluster_wide_cap() {
     let suite = Suite::start(BIN, Instance::ClusterCap).await;
     let _workers = workers(&suite, 2, Profile::Isolated2).await;
     let client = suite.client().await;
-    let slow = suite.function(basic::slow::handle);
+    let slow = suite.function(basic::slow::function);
     let mut handles = Vec::new();
     for _task in 0..6 {
         handles.push(
@@ -270,7 +270,7 @@ async fn test_stale_claimed_requeued_and_completed() {
     let suite = Suite::start(BIN, Instance::Recovery).await;
     let client = suite.client().await;
     let handle = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send(basic::simple::Input { x: 5 })
         .await
         .expect("send");
@@ -290,7 +290,7 @@ async fn test_single_worker_crash_remaining_continue() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let client = suite.client().await;
     let started = workers(&suite, 3, Profile::Isolated2).await;
-    let slow = suite.function(basic::slow::handle);
+    let slow = suite.function(basic::slow::function);
     let mut handles = Vec::new();
     for _task in 0..20 {
         handles.push(
@@ -334,7 +334,7 @@ async fn test_per_queue_concurrency_cap() {
     let suite = Suite::start(BIN, Instance::CustomQueues).await;
     let _worker = suite.worker(Profile::Isolated8).await;
     let client = suite.client().await;
-    let slow = suite.function(custom::slow_high::handle);
+    let slow = suite.function(custom::slow_high::function);
     let mut handles = Vec::new();
     for _task in 0..10 {
         handles.push(
@@ -364,8 +364,8 @@ async fn test_per_queue_caps_independent() {
     let suite = Suite::start(BIN, Instance::CustomQueues).await;
     let _worker = suite.worker(Profile::Isolated8).await;
     let client = suite.client().await;
-    let high = suite.function(custom::slow_high::handle);
-    let normal = suite.function(custom::slow_normal::handle);
+    let high = suite.function(custom::slow_high::function);
+    let normal = suite.function(custom::slow_normal::function);
     let mut high_handles = Vec::new();
     let mut normal_handles = Vec::new();
     for _task in 0..10 {
@@ -401,8 +401,8 @@ async fn test_per_queue_caps_independent() {
 #[serial]
 async fn test_queue_priority_ordering() {
     let suite = Suite::start(BIN, Instance::CustomQueues).await;
-    let low = suite.function(custom::slow_low::handle);
-    let high = suite.function(custom::slow_high::handle);
+    let low = suite.function(custom::slow_low::function);
+    let high = suite.function(custom::slow_high::function);
     let mut ids = Vec::new();
     for _task in 0..5 {
         ids.push(
@@ -443,7 +443,7 @@ async fn test_queue_priority_ordering() {
 async fn test_softcap_lease_no_double_execution() {
     let suite = Suite::start(BIN, Instance::SoftCap).await;
     let _workers = workers(&suite, 2, Profile::Isolated1).await;
-    let task = suite.function(basic::slow_idempotent::handle);
+    let task = suite.function(basic::slow_idempotent::function);
     let mut handles = Vec::new();
     for index in 0..6 {
         handles.push(
@@ -469,7 +469,7 @@ async fn test_softcap_expired_claim_requeued() {
     let client = suite.client().await;
     let token = "softcap_expired_claim";
     let handle = suite
-        .function(basic::slow_idempotent::handle)
+        .function(basic::slow_idempotent::function)
         .send(basic::slow_idempotent::Input {
             token: token.to_owned(),
             duration_ms: 100,
@@ -497,7 +497,7 @@ async fn test_softcap_expired_claim_requeued() {
 async fn test_softcap_db_ledger_race_single_execution() {
     let suite = Suite::start(BIN, Instance::SoftCap).await;
     let _workers = workers(&suite, 2, Profile::Isolated1).await;
-    let task = suite.function(basic::slow_idempotent::handle);
+    let task = suite.function(basic::slow_idempotent::function);
     let mut handles = Vec::new();
     for index in 0..20 {
         handles.push(
@@ -523,14 +523,14 @@ async fn test_softcap_owner_transition_after_worker_crash() {
     let client = suite.client().await;
     let mut first = suite.worker(Profile::Isolated1).await;
     let blocker = suite
-        .function(basic::slow::handle)
+        .function(basic::slow::function)
         .send(basic::slow::Input { duration_ms: 6_000 })
         .await
         .expect("send the blocker");
     rows::wait_for_task_status(&client, blocker.task_id(), "RUNNING", RESULT_WAIT).await;
     let token = "softcap_owner_transition";
     let handle = suite
-        .function(basic::slow_idempotent::handle)
+        .function(basic::slow_idempotent::function)
         .send(basic::slow_idempotent::Input {
             token: token.to_owned(),
             duration_ms: 100,
