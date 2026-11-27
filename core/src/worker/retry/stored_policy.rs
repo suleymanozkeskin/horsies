@@ -56,11 +56,11 @@ const POLICY_FIELDS: [&str; 6] = [
 ];
 /// pydantic's location label of the enum member of a `retry_for` item
 /// (`Union[str, BuiltInTaskCode]`, Python `core/models/tasks.py:58-63`).
-const BUILT_IN_CODE_UNION_LABEL: &str = "union[str-enum[OperationalErrorCode],str-enum[ContractCode],str-enum[RetrievalCode],str-enum[OutcomeCode]]";
+const BUILT_IN_CODE_UNION_LABEL: &str = "union[str-enum[OperationalCode],str-enum[ContractCode],str-enum[RetrievalCode],str-enum[OutcomeCode]]";
 /// The Python classes of the built-in code families, in the order of
 /// `BuiltInTaskCode`.
 const BUILT_IN_CODE_FAMILIES: [&str; 4] = [
-    "OperationalErrorCode",
+    "OperationalCode",
     "ContractCode",
     "RetrievalCode",
     "OutcomeCode",
@@ -735,6 +735,16 @@ fn not_a_code_entries(position: usize) -> Vec<Entry> {
         )
     }));
     entries
+}
+
+impl RetryRule {
+    /// The codes that start a retry, as the stored policy holds them, in the
+    /// stored order: the values of built-in codes and the texts of custom
+    /// codes. A rerun checks them against the codes of the calling app
+    /// (`core::history::rerun::steps`).
+    pub fn retry_for(&self) -> &[String] {
+        &self.retry_for
+    }
 }
 
 // ---------------------------------------------------------------------------

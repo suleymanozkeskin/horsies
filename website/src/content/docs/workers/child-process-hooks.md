@@ -1,12 +1,12 @@
 ---
 title: Child-Process Hooks
 section: python
-summary: Per-child-process initialization with @app.on_child_process_start, for app-owned engine disposal and worker-specific pool policy.
+summary: Per-child-process initialization with @app.on_child_start, for app-owned engine disposal and worker-specific pool policy.
 related: [worker-architecture, ../configuration/app-config]
 tags: [workers, hooks, connections, pooling]
 ---
 
-`@app.on_child_process_start` registers a sync function that runs once in every worker child process: after task-module imports (so app engines exist) and before the child opens horsies' own connection pool. It is the supported seam for application-owned per-child setup — the equivalent of Celery's `worker_process_init` signal and Dramatiq's `after_process_boot` middleware.
+`@app.on_child_start` registers a sync function that runs once in every worker child process: after task-module imports (so app engines exist) and before the child opens horsies' own connection pool. It is the supported seam for application-owned per-child setup — the equivalent of Celery's `worker_process_init` signal and Dramatiq's `after_process_boot` middleware.
 
 ## Why and When
 
@@ -43,7 +43,7 @@ def get_engine() -> Engine:  # task code reads via this, never the global
 # app/configs/horsies.py
 from app.databases import postgres
 
-@app.on_child_process_start
+@app.on_child_start
 def reset_db_for_child() -> None:  # idempotent, sync
     if postgres._app_engine is not None:
         postgres._app_engine.dispose()  # close connections opened during import
@@ -106,7 +106,7 @@ client = firestore.Client()
 # Correct: this runs in every child, after the fork
 client = None
 
-@app.on_child_process_start
+@app.on_child_start
 def build_client() -> None:
     global client
     client = firestore.Client()
@@ -139,8 +139,8 @@ async def loop_check() -> Result[bool, TaskError]:
     return Ok(shared_state['loop'] is asyncio.get_running_loop())
 ```
 
-- The hooks run after the `on_child_process_start` hooks and after the child opens its async connection pool, in registration order.
-- Each hook runs for at most 10 seconds. A hook that raises or runs longer ends the child and stops the worker, as for `on_child_process_start`. A hook that blocks the loop is ended by the same bound.
+- The hooks run after the `on_child_start` hooks and after the child opens its async connection pool, in registration order.
+- Each hook runs for at most 10 seconds. A hook that raises or runs longer ends the child and stops the worker, as for `on_child_start`. A hook that blocks the loop is ended by the same bound.
 - They run in every shared async child, also in a replacement child, so bodies must be idempotent.
 - Work that a hook starts and leaves running, such as a background task of a client, belongs to no task.
 - Isolated children do not run these hooks.
@@ -167,17 +167,17 @@ async def get_status(*, url: str) -> Result[int, TaskError]:
 
 ## API Reference
 
-### `@app.on_child_process_start`
+### `@app.on_child_start`
 
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
-| `fn` | `ChildProcessStartHook` (`Callable[[], None]`) | Yes | Sync, zero-argument function. Registered once per identity; duplicate registrations are ignored. |
+| `fn` | `ChildStartHook` (`Callable[[], None]`) | Yes | Sync, zero-argument function. Registered once per identity; duplicate registrations are ignored. |
 
 **Returns:** the function unchanged (usable as a decorator).
 
 **Raises:** `ConfigurationError` (`HRS-214`) — `fn` is not callable or is an async function.
 
-### `app.get_child_process_start_hooks() -> list[ChildProcessStartHook]`
+### `app.get_child_start_hooks() -> list[ChildStartHook]`
 
 Snapshot of registered hooks in registration order.
 

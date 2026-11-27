@@ -25,7 +25,7 @@ from horsies.core.telemetry.send_telemetry import NO_SEND_TELEMETRY
 from horsies._core import (
     CoreCallTimedOut,
     CoreError,
-    CoreStartFailed,
+    RuntimeStartFailed,
     CoreStopped,
     ForkedAfterCoreStart,
     TooManyPendingCalls,
@@ -33,9 +33,9 @@ from horsies._core import (
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
-    BrokerEnqueueError,
-    BrokerEnqueueFailed,
-    BrokerSyncCallError,
+    DatabaseEnqueueError,
+    DatabaseEnqueueFailed,
+    DatabaseSyncCallError,
 )
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.payload import PayloadPolicy
@@ -78,11 +78,11 @@ def _app_with(broker: PostgresBroker) -> MagicMock:
     the send at its first enqueue all the same."""
     app = MagicMock()
     app.config.queue_mode.name = 'DEFAULT'
-    app.config.resend_on_transient_err = True
+    app.config.resend_on_transient_error = True
     app.config.payload = PayloadPolicy()
     app.are_sends_suppressed.return_value = False
     app.send_telemetry.return_value = NO_SEND_TELEMETRY
-    app.validate_queue_name.return_value = 'default'
+    app.validate_queue.return_value = 'default'
     app.get_broker.return_value = broker
     return app
 
@@ -110,7 +110,7 @@ def _failed_send(delay_seconds: int | None) -> TaskSendEnqueueFailed:
         ),
         message='Failed to enqueue task test.refused_fn: connection lost',
         retryable=True,
-        exception=NoCause(),
+        cause=NoCause(),
     )
 
 
@@ -155,7 +155,7 @@ def _enqueue_calls(handle: MagicMock, form: str) -> int:
             return handle.enqueue.call_count
 
 
-async def _broker_enqueue_async(broker: PostgresBroker) -> Result[UUID, BrokerEnqueueError]:
+async def _broker_enqueue_async(broker: PostgresBroker) -> Result[UUID, DatabaseEnqueueError]:
     return await broker.enqueue_async(
         _TASK_NAME,
         'default',
@@ -168,7 +168,7 @@ async def _broker_enqueue_async(broker: PostgresBroker) -> Result[UUID, BrokerEn
 
 def _broker_enqueue(
     broker: PostgresBroker,
-) -> Result[UUID, BrokerEnqueueError | BrokerSyncCallError]:
+) -> Result[UUID, DatabaseEnqueueError | DatabaseSyncCallError]:
     return broker.enqueue(
         _TASK_NAME,
         'default',
@@ -213,7 +213,7 @@ class TestBrokerEnqueue:
                 id='call-timed-out',
             ),
             pytest.param(
-                CoreStartFailed('the OS refused the runtime threads'), False,
+                RuntimeStartFailed('the OS refused the runtime threads'), False,
                 id='start-failed',
             ),
         ],
@@ -223,7 +223,7 @@ class TestBrokerEnqueue:
     ) -> None:
         broker, _handle = _broker_raising(error)
 
-        result: Result[UUID, BrokerEnqueueError | BrokerSyncCallError]
+        result: Result[UUID, DatabaseEnqueueError | DatabaseSyncCallError]
         match form:
             case 'enqueue':
                 result = _broker_enqueue(broker)
@@ -234,8 +234,8 @@ class TestBrokerEnqueue:
 
         assert is_err(result)
         failed = result.err_value
-        assert isinstance(failed, BrokerEnqueueFailed)
-        assert failed.exception is error
+        assert isinstance(failed, DatabaseEnqueueFailed)
+        assert failed.cause is error
         assert failed.retryable is retryable
 
 

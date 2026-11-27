@@ -168,7 +168,7 @@ fn helpers_and_error_taxonomy_are_exact() {
 
     assert_eq!(categorize_error_code(None), None);
     assert_eq!(categorize_error_code(Some("")), None);
-    for code in crate::OperationalErrorCode::ALL {
+    for code in crate::OperationalCode::ALL {
         assert_eq!(
             categorize_error_code(Some(&code.to_string())),
             Some(ErrorCategory::Operational)
@@ -699,7 +699,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 stale: false,
                 worker_started_at: now,
                 uptime_s: Some(Duration::zero()),
-                processes: 1,
+                child_count: 1,
                 queues: vec![],
                 queue_max_concurrency: BTreeMap::new(),
                 tasks_running: 0,
@@ -708,15 +708,8 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 memory_usage_mb: None,
                 memory_percent: None,
                 cpu_percent: None,
-                slot_health: SlotHealthKind::SlotsDown,
-                down_slots: vec![DownSlotInfo {
-                    slot: 1,
-                    cause: "the OS ran short of a resource (EMFILE)".to_owned(),
-                    detail: "d".to_owned(),
-                    down_since: now,
-                    failed_boots: 2,
-                }],
-                profile: SnapshotProfileInfo::NotRecorded,
+                slot_health: SlotHealth::AllServing,
+                profile: SnapshotProfile::NotRecorded,
             }),
             vec![
                 "worker_id",
@@ -727,7 +720,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 "stale",
                 "worker_started_at",
                 "uptime_s",
-                "processes",
+                "child_count",
                 "queues",
                 "queue_max_concurrency",
                 "tasks_running",
@@ -737,22 +730,21 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 "memory_percent",
                 "cpu_percent",
                 "slot_health",
-                "down_slots",
                 "profile",
             ],
         ),
         (
-            keys(DownSlotInfo {
+            keys(DownSlot {
                 slot: 1,
-                cause: "c".to_owned(),
+                cause: crate::broker::ClearableBootCause::ThreadStartRefused,
                 detail: "d".to_owned(),
                 down_since: now,
-                failed_boots: 1,
+                failed_boots: std::num::NonZeroU64::MIN,
             }),
             vec!["slot", "cause", "detail", "down_since", "failed_boots"],
         ),
         (
-            keys(WorkerPingInfo {
+            keys(WorkerPong {
                 worker_id: "w".to_owned(),
                 hostname: "h".to_owned(),
                 pid: 1,
@@ -762,11 +754,10 @@ fn every_w2_model_serializes_the_contract_field_set() {
         ),
         (
             keys(LivenessReport {
-                db_latency_ms: Some(1.0),
-                db_reachable: true,
+                database: DatabaseLiveness::Ping { latency_ms: 1.0 },
                 workers: vec![],
             }),
-            vec!["db_latency_ms", "db_reachable", "workers"],
+            vec!["database", "workers"],
         ),
         (
             keys(WorkerHistoryPoint {
@@ -1945,7 +1936,10 @@ async fn database_failure_is_typed_and_retryable() {
     let error = list_tasks(&broker, &TaskListQuery::new(test_window()))
         .await
         .expect_err("unreachable monitoring database");
-    assert_eq!(error.code(), MonitoringQueryErrorCode::DbOperationFailed);
+    assert_eq!(
+        error.code(),
+        MonitoringQueryErrorCode::DatabaseOperationFailed
+    );
     assert!(error.retryable(), "{error:?}");
     assert!(error.message().contains("task list query failed"));
 }
@@ -1977,7 +1971,10 @@ async fn a_dropped_staged_reader_fails_the_detail_until_it_is_published_again() 
     let error = get_task_detail(&broker, task.id)
         .await
         .expect_err("a dropped reader is an error, not an absence");
-    assert_eq!(error.code(), MonitoringQueryErrorCode::DbOperationFailed);
+    assert_eq!(
+        error.code(),
+        MonitoringQueryErrorCode::DatabaseOperationFailed
+    );
     assert!(
         error
             .message()

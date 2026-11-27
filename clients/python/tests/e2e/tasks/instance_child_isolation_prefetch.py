@@ -22,12 +22,12 @@ config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
     prefetch_buffer=3,
     claim_lease_ms=60_000,
-    broker=PostgresConfig(database_url=DB_URL, pool_size=5, max_overflow=5),
+    database=PostgresConfig(database_url=DB_URL, pool_size=5, max_overflow=5),
     worker_profiles={**E2E_WORKER_PROFILES, **preload_profiles()},
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 

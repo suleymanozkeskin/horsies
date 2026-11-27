@@ -21,7 +21,7 @@ from typing import Final, Literal, TypedDict
 import pytest
 from pydantic import TypeAdapter
 
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.models.schedule import SchedulePattern, TaskSchedule
 from horsies.core.scheduler.manifest import pattern_json
 
@@ -87,5 +87,5 @@ def test_each_vector_with_a_fraction_of_a_second_is_refused_by_the_config(
     with pytest.raises(ConfigurationError) as refused:
         _PATTERNS.validate_json(vector['pattern_json'])
 
-    assert refused.value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+    assert refused.value.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
     assert refused.value.message.endswith(' time has microseconds')

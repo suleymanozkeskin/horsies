@@ -45,7 +45,7 @@ const fetchPage = defineTask({
 });
 
 const created = Horsies.create({
-  broker: { databaseUrl: DATABASE_URL },
+  database: { databaseUrl: DATABASE_URL },
   workerProfiles: {
     [PROFILE]: {
       isolated: { kind: "isolatedChildren", count: 1 },

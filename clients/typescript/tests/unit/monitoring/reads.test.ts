@@ -164,20 +164,20 @@ describe("found and not found", () => {
 });
 
 describe("expected failures are values", () => {
-  test("a refusal of the core is QUERY_REFUSED with its field and reason", async () => {
+  test("a refusal of the core is invalidInput with its field and reason", async () => {
     const outcome: MonitoringReadOutcome = { kind: "refused", field: "window", reason: "the window exceeds the 30-day maximum" };
     const read = await listTasks(fakeTarget(outcome).target, {});
 
     assert.deepEqual(read, {
       ok: false,
-      error: { code: "QUERY_REFUSED", retryable: false, field: "window", reason: "the window exceeds the 30-day maximum" },
+      error: { kind: "invalidInput", code: "INVALID_INPUT", retryable: false, field: "window", reason: "the window exceeds the 30-day maximum" },
     });
   });
 
-  test("a failed read is DB_OPERATION_FAILED with the retry rule of its cause", async () => {
+  test("a failed read is DATABASE_OPERATION_FAILED with the retry rule of its cause", async () => {
     const read = await listTasks(fakeTarget({ kind: "failed", error: monitoringDbFailed("task list query", true) }).target, {});
 
-    assert.ok(!read.ok && read.error.code === "DB_OPERATION_FAILED");
+    assert.ok(!read.ok && read.error.code === "DATABASE_OPERATION_FAILED");
     assert.equal(read.error.retryable, true);
     assert.equal(read.error.message, "task list query failed: connection refused");
   });
@@ -188,7 +188,7 @@ describe("expected failures are values", () => {
       slots: [
         textSlot("message", "history contract violation: status DONE"),
         {
-          name: "exception",
+          name: "cause",
           value: { kind: "exception", exception: { kind: "generated", class: "HistoryContractError", text: "status DONE" } },
         },
       ],
@@ -198,7 +198,7 @@ describe("expected failures are values", () => {
 
     assert.ok(!read.ok && read.error.code === "HISTORY_CONTRACT_VIOLATION");
     assert.equal(read.error.retryable, false);
-    assert.deepEqual(read.error.exception, { kind: "historyContract", message: "status DONE" });
+    assert.deepEqual(read.error.cause, { kind: "historyContract", message: "status DONE" });
   });
 
   test("a read with no query to refuse makes a refusal of the bridge a defect", async () => {
@@ -211,26 +211,26 @@ describe("expected failures are values", () => {
     const failed: TaskDetailOutcome = { kind: "failed", error: monitoringDbFailed("task detail query", false) };
     const read = await taskDetail(fakeTarget(jsonOutcome(null), failed).target, TASK_ID);
 
-    assert.ok(!read.ok && read.error.code === "DB_OPERATION_FAILED" && !read.error.retryable);
+    assert.ok(!read.ok && read.error.code === "DATABASE_OPERATION_FAILED" && !read.error.retryable);
   });
 });
 
 describe("refusals before the call", () => {
-  test("a task index outside 32 bits or with a fraction is QUERY_REFUSED", async () => {
+  test("a task index outside 32 bits or with a fraction is invalidInput", async () => {
     for (const index of [2 ** 31, -(2 ** 31) - 1, 1.5]) {
       const { target, calls } = fakeTarget(jsonOutcome(null));
       const read = await workflowNode(target, WORKFLOW_ID, index);
 
-      assert.ok(!read.ok && read.error.code === "QUERY_REFUSED" && read.error.field === "nodeIndex", `${index}`);
+      assert.ok(!read.ok && read.error.kind === "invalidInput" && "field" in read.error && read.error.field === "nodeIndex", `${index}`);
       assert.equal(calls.size, 0);
     }
   });
 
-  test("a page that is not a whole number is QUERY_REFUSED and the addon is not called", async () => {
+  test("a page that is not a whole number is invalidInput and the addon is not called", async () => {
     const { target, calls } = fakeTarget(jsonOutcome(null));
     const read = await listTasks(target, { offset: -0.5 });
 
-    assert.ok(!read.ok && read.error.code === "QUERY_REFUSED" && read.error.field === "page");
+    assert.ok(!read.ok && read.error.kind === "invalidInput" && "field" in read.error && read.error.field === "page");
     assert.equal(calls.size, 0);
   });
 });

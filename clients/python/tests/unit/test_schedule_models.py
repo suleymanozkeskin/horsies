@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     MultipleValidationErrors,
 )
 from horsies.core.models.schedule import (
@@ -88,7 +88,7 @@ class TestIntervalSchedule:
             IntervalSchedule(every=every)
 
         exc = exc_info.value
-        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert exc.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert exc.message == 'IntervalSchedule every is outside 1 second to 365 days'
         assert exc.notes == [note]
         assert exc.help_text == 'give every from 1 second to 365 days'
@@ -99,7 +99,7 @@ class TestIntervalSchedule:
             IntervalSchedule(every=timedelta(seconds=1, microseconds=500))
 
         exc = exc_info.value
-        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert exc.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert exc.message == 'IntervalSchedule every has microseconds'
         assert exc.notes == ['every: 0:00:01.000500']
         assert exc.help_text == (
@@ -256,7 +256,7 @@ class TestWeeklySchedule:
             )
 
         exc = exc_info.value
-        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert exc.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert exc.message == 'WeeklySchedule has duplicate weekdays'
         assert exc.notes == ["weekdays: ['monday', 'monday']"]
         assert exc.help_text == 'each weekday should appear only once in the list'
@@ -364,7 +364,7 @@ class TestTimeOfDay:
             build(datetime_time(9, 0, 0, tzinfo=offset))
 
         exc = exc_info.value
-        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert exc.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert exc.message == f'{pattern_name} time has a time zone'
         assert exc.notes == ['time: 09:00:00+02:00']
         assert exc.help_text == (
@@ -379,7 +379,7 @@ class TestTimeOfDay:
             build(datetime_time(9, 0, 0, 500))
 
         exc = exc_info.value
-        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert exc.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert exc.message == f'{pattern_name} time has microseconds'
         assert exc.notes == ['time: 09:00:00.000500']
         assert exc.help_text == (
@@ -392,7 +392,7 @@ class TestTimeOfDay:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             build(datetime_time(9, 0, 0, 500, tzinfo=timezone.utc))
 
-        messages = [error.message for error in exc_info.value.report.errors]
+        messages = [error.message for error in exc_info.value.report.refusals]
         assert messages == [
             f'{pattern_name} time has a time zone',
             f'{pattern_name} time has microseconds',
@@ -542,7 +542,7 @@ class TestScheduleConfig:
             )
 
         exc = exc_info.value
-        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert exc.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'duplicate schedule names' in exc.message
         assert exc.help_text is not None
 

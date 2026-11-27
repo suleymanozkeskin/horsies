@@ -1140,7 +1140,7 @@ async fn test_send_suppressed() {
         .send(basic::simple::Input { x: 1 })
         .await;
     assert!(
-        matches!(refused, Err(TaskSendError::SendSuppressed { .. })),
+        matches!(refused, Err(TaskSendError::Suppressed { .. })),
         "{refused:?}"
     );
     let client = suite.client().await;

@@ -46,7 +46,7 @@ ACT_HEADERS: Final = {INTENT_HEADER: INTENT_VALUE}
 
 def make_horsies_app() -> Horsies:
     """A horsies app whose broker can never connect."""
-    return Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))))
+    return Horsies(AppConfig(database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))))
 
 
 @dataclass
@@ -473,7 +473,7 @@ class TestFleetMetricLabels:
     def test_a_queue_name_that_is_the_fallback_text_is_not_refused(self) -> None:
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
+                database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
                 queue_mode=QueueMode.CUSTOM,
                 custom_queues=[CustomQueueConfig(name='(unknown)')],
             )

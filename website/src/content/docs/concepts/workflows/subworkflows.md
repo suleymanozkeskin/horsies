@@ -31,7 +31,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, WorkflowDefinition, WorkflowDefinitionConfig, TaskNode, Err, Failed, Ok, Result, Succeeded, TaskError, TaskOutcome, JsonValue
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
 ))
 
 @app.task(name="fetch_data")
@@ -262,7 +262,7 @@ class AggregationWorkflow(WorkflowDefinition[Summary]):
 - Every node in `workflow_context_from` must also be in `waits_for`
 - The task function must have `workflow_context: WorkflowContext | None` parameter
 - Context is built fresh per task; it does not propagate downstream
-- `result_for()` and `summary_for()` raise `WorkflowContextMissingIdError` if the node has no `node_id`. Always assign `node_id` to nodes used with context
+- `result_for()` and `summary_for()` raise `WorkflowContextMissingId` if the node has no `node_id`. Always assign `node_id` to nodes used with context
 
 ---
 
@@ -321,7 +321,7 @@ class ParentWorkflow(WorkflowDefinition[int]):
 - Child RUNNING → Parent node RUNNING
 - Child COMPLETED with an ok output → Parent node COMPLETED (result = child output)
 - Child COMPLETED with an err output → Parent node FAILED (result = that err): see [Output Node Under a Success Policy](/horsies/concepts/workflows/workflow-semantics/#output-node-under-a-success-policy)
-- Child FAILED → Parent node FAILED (result = SubWorkflowError)
+- Child FAILED → Parent node FAILED (result = SubWorkflowFailure)
 
 ### 6.3 Parameterized Subworkflows with `build_with()`
 
@@ -542,7 +542,7 @@ Rules for this pattern:
 - The child start also encodes and serializes the kwargs of each child node. Spec construction in `build_with()` already encoded and decoded them, and refuses a value that does not fit with `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (the node fails with `WORKFLOW_ENQUEUE_FAILED`). So a refusal at the child start is a defect: the child start raises `SerializationError` and its transaction rolls back.
 - `horsies check` does not expand a `SubWorkflowNode` that has `args_from`. See the note above on `@app.workflow_builder`.
 - A raise in the child start stops in the reaper's recovery, and the [recovery limit](/horsies/concepts/workflows/workflow-semantics/#recovery-limit) bounds it. At the limit, the `SubWorkflowNode` goes `FAILED` with `WORKFLOW_RECOVERY_LIMIT_REACHED`.
-- A child workflow that reaches the recovery limit goes `FAILED`. Its parent node then goes `FAILED` with `SUBWORKFLOW_FAILED`, and `sub_workflow_summary.error_summary` holds the message of the child.
+- A child workflow that reaches the recovery limit goes `FAILED`. Its parent node then goes `FAILED` with `SUB_WORKFLOW_FAILED`, and `sub_workflow_summary.error_summary` holds the message of the child.
 
 ### 6.4 Accessing Subworkflow Health: SubWorkflowSummary
 
@@ -614,7 +614,7 @@ def process_child_result(
 ) -> Result[ParentOutput, TaskError]:
     match child_result:
         case Failed(error):
-            # Child workflow failed - error is SubWorkflowError
+            # Child workflow failed - error is SubWorkflowFailure
             return Err(error)
         case Succeeded(child_output):
             # Child succeeded - access the output value
@@ -897,8 +897,8 @@ At `WorkflowSpec` creation, these are validated:
 | No root tasks (all have dependencies) | `WORKFLOW_NO_ROOT_TASKS` |
 | Cycle detected | `WORKFLOW_CYCLE_DETECTED` |
 | `args_from` references task not in `waits_for` | `WORKFLOW_INVALID_ARGS_FROM` |
-| `workflow_context_from` references task not in `waits_for` | `WORKFLOW_INVALID_CTX_FROM` |
-| `workflow_context_from` set but function lacks param | `WORKFLOW_CTX_PARAM_MISSING` |
+| `workflow_context_from` references task not in `waits_for` | `WORKFLOW_INVALID_CONTEXT_FROM` |
+| `workflow_context_from` set but function lacks param | `WORKFLOW_CONTEXT_PARAMETER_MISSING` |
 | Workflow spec or definition missing `definition_key` | `WORKFLOW_NO_DEFINITION_KEY` |
 | Two workflow definitions share the same `definition_key` | `WORKFLOW_DUPLICATE_DEFINITION_KEY` |
 
@@ -978,7 +978,7 @@ subworkflow enqueue and `broker.app` is `None`), Horsies does not re-raise `Work
 Instead, it marks the `SubWorkflowNode` as `FAILED` with `TaskError.code = WORKFLOW_ENQUEUE_FAILED` so the
 workflow can continue deterministic failure propagation without leaving the node stranded in `ENQUEUED`.
 
-### Error: `WORKFLOW_CTX_PARAM_MISSING`
+### Error: `WORKFLOW_CONTEXT_PARAMETER_MISSING`
 
 **Cause**: `workflow_context_from` is set but task function lacks the parameter.
 
@@ -1071,7 +1071,7 @@ from horsies import (
 )
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
 ))
 
 

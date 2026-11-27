@@ -24,10 +24,10 @@ from horsies.core import process_role as process_role_module
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
-    BrokerErrorCode,
-    BrokerInvalidInput,
-    BrokerResult,
-    BrokerWaitInsideTask,
+    DatabaseErrorCode,
+    DatabaseInvalidInput,
+    DatabaseResult,
+    DatabaseWaitInsideTask,
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
@@ -68,7 +68,7 @@ def app() -> Generator[Horsies, None, None]:
     """An app whose broker cannot connect, and whose core handle records each
     call it forwards."""
     app = Horsies(
-        AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)))
+        AppConfig(database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)))
     )
     broker = app.get_broker()
     broker._core_handle = MagicMock(wraps=broker._core_handle)
@@ -140,27 +140,27 @@ WAITS: dict[str, Callable[[Horsies, int | None], ReadResult[Any, TaskError]]] = 
 SYNC_WAITS = ('TaskHandle.get', 'app.get_result', 'WorkflowHandle.get')
 
 
-def _app_get_raw_result(app: Horsies, wait_ms: int | None) -> BrokerResult[Any]:
+def _app_get_raw_result(app: Horsies, wait_ms: int | None) -> DatabaseResult[Any]:
     return app.get_raw_result(TASK_ID, wait_ms)
 
 
 def _app_get_raw_result_async(
     app: Horsies, wait_ms: int | None,
-) -> BrokerResult[Any]:
+) -> DatabaseResult[Any]:
     return asyncio.run(app.get_raw_result_async(TASK_ID, wait_ms))
 
 
-def _broker_raw_record(app: Horsies, wait_ms: int | None) -> BrokerResult[Any]:
+def _broker_raw_record(app: Horsies, wait_ms: int | None) -> DatabaseResult[Any]:
     return app.get_broker().get_raw_result_record(TASK_ID, wait_ms)
 
 
 def _broker_raw_record_async(
     app: Horsies, wait_ms: int | None,
-) -> BrokerResult[Any]:
+) -> DatabaseResult[Any]:
     return asyncio.run(app.get_broker().get_raw_result_record_async(TASK_ID, wait_ms))
 
 
-RAW_WAITS: dict[str, Callable[[Horsies, int | None], BrokerResult[Any]]] = {
+RAW_WAITS: dict[str, Callable[[Horsies, int | None], DatabaseResult[Any]]] = {
     'app.get_raw_result': _app_get_raw_result,
     'app.get_raw_result_async': _app_get_raw_result_async,
     'PostgresBroker.get_raw_result_record': _broker_raw_record,
@@ -170,11 +170,11 @@ RAW_WAITS: dict[str, Callable[[Horsies, int | None], BrokerResult[Any]]] = {
 SYNC_RAW_WAITS = ('app.get_raw_result', 'PostgresBroker.get_raw_result_record')
 
 
-def _assert_broker_refusal(result: BrokerResult[Any], operation: str) -> None:
+def _assert_broker_refusal(result: DatabaseResult[Any], operation: str) -> None:
     assert isinstance(result, Err)
     error = result.err_value
-    assert isinstance(error, BrokerWaitInsideTask)
-    assert error.code is BrokerErrorCode.WAIT_INSIDE_TASK
+    assert isinstance(error, DatabaseWaitInsideTask)
+    assert error.code is DatabaseErrorCode.WAIT_INSIDE_TASK
     assert f'{operation}() for task {TASK_ID}' in error.message
     assert 'workflow' in error.message
 
@@ -242,8 +242,8 @@ def test_a_refused_timeout_of_a_raw_wait_in_a_task_process_returns_invalid_input
     result = RAW_WAITS[name](app, REFUSED_TIMEOUT_MS)
 
     assert isinstance(result, Err)
-    assert isinstance(result.err_value, BrokerInvalidInput)
-    assert result.err_value.code is BrokerErrorCode.INVALID_INPUT
+    assert isinstance(result.err_value, DatabaseInvalidInput)
+    assert result.err_value.code is DatabaseErrorCode.INVALID_INPUT
     _assert_nothing_ran(app.get_broker())
 
 
@@ -267,7 +267,7 @@ def test_a_sync_raw_wait_inside_a_running_loop_of_a_task_process_is_refused(
     app: Horsies,
     name: str,
 ) -> None:
-    async def inside() -> BrokerResult[Any]:
+    async def inside() -> DatabaseResult[Any]:
         return RAW_WAITS[name](app, VALID_TIMEOUT_MS)
 
     result = asyncio.run(inside())

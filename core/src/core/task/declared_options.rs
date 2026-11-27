@@ -25,7 +25,7 @@ use super::execution::{Execution, GraceUse, TimeoutUse};
 use super::options::{
     check_cancel_grace_ms, RetryPolicy, RetryPolicyError, TaskOptions, DEFAULT_CANCEL_GRACE_MS,
 };
-use crate::core::error::ErrorCode;
+use crate::core::error::HorsiesErrorCode;
 use crate::worker::retry::MIN_TASK_TIMEOUT_MS;
 
 /// A duration in milliseconds that a task declares, or none.
@@ -119,17 +119,19 @@ pub enum DeclaredOptionRefusal {
 
 impl DeclaredOptionRefusal {
     /// The catalog code of the refusal.
-    pub fn error_code(&self) -> ErrorCode {
+    pub fn error_code(&self) -> HorsiesErrorCode {
         match self {
             Self::RetryPolicy(_)
             | Self::NoRetryCode
             | Self::RetryCodeText { .. }
             | Self::RetryCodeNotCustomCode { .. }
             | Self::RetryCodeNotDeclared { .. }
-            | Self::TimeoutBelowMinimum => ErrorCode::TaskInvalidOptions,
-            Self::SharedClassWithoutTimeout { .. } => ErrorCode::TaskSharedExecutionRequiresTimeout,
-            Self::GraceNotTaken { .. } => ErrorCode::TaskCancelGraceRequiresSharedAsync,
-            Self::GraceOutOfRange { .. } => ErrorCode::TaskCancelGraceOutOfRange,
+            | Self::TimeoutBelowMinimum => HorsiesErrorCode::TaskInvalidOptions,
+            Self::SharedClassWithoutTimeout { .. } => {
+                HorsiesErrorCode::TaskSharedExecutionRequiresTimeout
+            }
+            Self::GraceNotTaken { .. } => HorsiesErrorCode::TaskCancelGraceRequiresSharedAsync,
+            Self::GraceOutOfRange { .. } => HorsiesErrorCode::TaskCancelGraceOutOfRange,
         }
     }
 }
@@ -454,7 +456,10 @@ mod tests {
                 RetryPolicyError::MaxRetriesOutOfRange(21)
             )]
         ));
-        assert_eq!(refusals[0].error_code(), ErrorCode::TaskInvalidOptions);
+        assert_eq!(
+            refusals[0].error_code(),
+            HorsiesErrorCode::TaskInvalidOptions
+        );
     }
 
     #[test]

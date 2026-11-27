@@ -21,7 +21,7 @@ import pytest
 from sqlalchemy import text
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode
+from horsies.core.models.tasks import OperationalCode, OutcomeCode
 from horsies.core.task_decorator import TaskHandle
 
 from tests.broker_resources_support import current_resources
@@ -231,6 +231,6 @@ async def test_a_thread_row_with_no_stored_timeout_fails_once(
             result = json.loads(text_value)
         case decoded:
             result = decoded
-    assert row.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value
+    assert row.error_code == OperationalCode.WORKER_SERIALIZATION_ERROR.value
     assert row.retry_count == 0
     assert '"field": "timeout_ms"' in json.dumps(result)

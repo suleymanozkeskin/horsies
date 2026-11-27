@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import pytest
 
-from horsies.core.models.tasks import MAX_RETRY_ATTEMPTS, RetryPolicy
+from horsies.core.models.tasks import (
+    MAX_RETRY_ATTEMPTS,
+    OperationalCode,
+    RetryPolicy,
+)
 
 pytestmark = [pytest.mark.unit]
 
@@ -20,14 +24,14 @@ class TestStoredMaxRetries:
         policy = RetryPolicy.exponential(
             base_seconds=1,
             max_retries=MAX_RETRY_ATTEMPTS,
-            retry_for=['TRANSIENT'],
+            retry_for=[OperationalCode.WORKER_CRASHED],
         )
         assert policy.max_retries == MAX_RETRY_ATTEMPTS
         with pytest.raises(ValueError, match='less than or equal to 20'):
             RetryPolicy.exponential(
                 base_seconds=1,
                 max_retries=MAX_RETRY_ATTEMPTS + 1,
-                retry_for=['TRANSIENT'],
+                retry_for=[OperationalCode.WORKER_CRASHED],
             )
 
 

@@ -16,7 +16,7 @@ use crate::broker::ClearableBootCause;
 use crate::core::boot_failure::ShortageErrno;
 use crate::core::config::bounded::BoundedU32;
 use crate::core::task::Execution;
-use crate::core::{BuiltInTaskCode, CustomCode, OperationalErrorCode, OutcomeCode, TaskErrorCode};
+use crate::core::{BuiltInTaskCode, CustomCode, OperationalCode, OutcomeCode, TaskErrorCode};
 use crate::worker::executor::protocol::{BoundedText, ProcessId, StopReason};
 use crate::worker::executor::slots::dispatch::NotRunCause;
 
@@ -657,15 +657,15 @@ fn a_worker_decision_names_the_code_of_its_attempt_row() {
         ),
         (
             WorkerDecision::TaskBlockedLoop,
-            OperationalErrorCode::TaskBlockedLoop.into(),
+            OperationalCode::TaskBlockedLoop.into(),
         ),
         (
             WorkerDecision::NeighbourBlockedLoop,
-            OperationalErrorCode::NeighbourBlockedLoop.into(),
+            OperationalCode::NeighbourBlockedLoop.into(),
         ),
         (
             WorkerDecision::ChildLost,
-            OperationalErrorCode::WorkerCrashed.into(),
+            OperationalCode::WorkerCrashed.into(),
         ),
         (
             WorkerDecision::KilledAfterCancel,
@@ -857,7 +857,7 @@ fn vector_events() -> Vec<(&'static str, AnyEvent)> {
                 AttemptEnd::ReportedByChild {
                     result: ChildResult::Failed {
                         error_code: AttemptErrorCode::BuiltIn {
-                            code: OperationalErrorCode::TaskException.into(),
+                            code: OperationalCode::TaskException.into(),
                         },
                     },
                     start: AttemptStart::NotReported,
@@ -921,7 +921,7 @@ fn vector_events() -> Vec<(&'static str, AnyEvent)> {
                 1,
                 AttemptEnd::DecidedByWorker {
                     reason: WorkerDecision::NeighbourBlockedLoop,
-                    error_code: OperationalErrorCode::NeighbourBlockedLoop.into(),
+                    error_code: OperationalCode::NeighbourBlockedLoop.into(),
                     trace: RunTrace::NoCarrier,
                     placed_at: time(1_700_000_000_000_000_000),
                     child_execution: Execution::SharedAsync,
@@ -939,7 +939,7 @@ fn vector_events() -> Vec<(&'static str, AnyEvent)> {
                 2,
                 AttemptEnd::DecidedByWorker {
                     reason: WorkerDecision::ChildLost,
-                    error_code: OperationalErrorCode::WorkerCrashed.into(),
+                    error_code: OperationalCode::WorkerCrashed.into(),
                     trace: RunTrace::Carrier {
                         text: text(VECTOR_CARRIER),
                     },

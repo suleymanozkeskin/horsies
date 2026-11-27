@@ -8,5 +8,6 @@
  "datetimes": 2000,
  "times": 1000,
  "decimal_fuzz": 4000,
- "decimal_fuzz_refused": 2378
+ "decimal_fuzz_refused": 2378,
+ "structures": 8
 }

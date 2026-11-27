@@ -132,7 +132,7 @@ export default defineConfig({
 						{
 							label: 'Configuration',
 							items: [
-								{ label: 'Broker Config', slug: 'configuration/broker-config' },
+								{ label: 'Database Config', slug: 'configuration/broker-config' },
 								{ label: 'Remote PostgreSQL', slug: 'configuration/remote-postgres' },
 								{ label: 'Recovery Config', slug: 'configuration/recovery-config' },
 								{ label: 'Retention Config', slug: 'configuration/retention-config' },

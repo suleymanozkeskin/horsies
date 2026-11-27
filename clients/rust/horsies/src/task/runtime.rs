@@ -272,7 +272,7 @@ mod tests {
     struct Settings(u32);
 
     fn app() -> Horsies {
-        Horsies::new(AppConfig::for_database_url(
+        Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap()

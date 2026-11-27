@@ -21,7 +21,7 @@ Each worker holds, under load:
 
 ```text
 pool max_size                                           # pool of the worker process
-+ pool max_size                                         # session pool, when session_database_url differs from database_url
++ pool max_size                                         # session pool, when the session database URL differs from database_url
 + 1                                                     # listener: every LISTEN of the worker process
 + 1                                                     # runner heartbeat connection
 + 1                                                     # liveness lock connection, on the session URL
@@ -35,8 +35,8 @@ Each `max_size` is the resolved value: a `PoolSize`, or the size that
 pool of the worker process, of the profile (see
 [Sizes Derived from the Seats](/horsies/workers/worker-profiles/#sizes-derived-from-the-seats)).
 At defaults (a pool of the worker process of 5 for 8 seats, an isolated pool
-`max_size` of 1) with a profile of 8 isolated children and no
-`session_database_url`:
+`max_size` of 1) with a profile of 8 isolated children and no separate
+`session_database`:
 
 ```text
 5 + 1 + 1 + 1 + 8 × 1 = 16 connections per worker
@@ -56,8 +56,8 @@ A producer holds one core pool of `pool_size + max_overflow` connections
 (default 5 + 10). It serves the sends, the reads, the workflow starts and the
 workflow actions of every thread and event loop of the process. A producer
 can open 15 at the defaults, and 1 listener connection when it waits for a
-result. The pool has a twin of `pool_size + max_overflow` on
-`session_database_url` when that URL differs
+result. The pool has a twin of `pool_size + max_overflow` on the URL of a
+separate `session_database` when that URL differs
 (see
 [Connection Ceiling](/horsies/configuration/broker-connections/#connection-ceiling)).
 
@@ -84,14 +84,14 @@ direct consumers.
 
 Run multiple workers against a slot-capped server through a transaction-mode
 pooler (PgBouncer or the provider's built-in equivalent). Point
-`database_url` at the pooled endpoint and `session_database_url` at a direct
+`database_url` at the pooled endpoint and a separate `session_database` at a direct
 endpoint — `LISTEN` requires a real session and does not survive transaction
 pooling — and set `pgbouncer_transaction_mode` to true. The API is on the client
 pages: [PgBouncer / Transaction Pooling](/horsies/configuration/broker-connections/#pgbouncer--transaction-pooling)
 (Python) and [PostgresConfig](/horsies/rust/configuration/app-config/#postgresconfig) (Rust).
 
 Direct slots per worker drop to the listener connection and the session
-pool (schema work and partition maintenance) on `session_database_url`: at
+pool (schema work and partition maintenance) on the session database URL: at
 most `1 + pool max_size`. Everything else multiplexes over the pooler's
 server pool. See
 [PgBouncer pool size](/horsies/troubleshooting/pgbouncer/#pool-size) for
@@ -128,14 +128,14 @@ Soft-cap semantics and fairness trade-offs are covered in
 Three settings can check a pooled connection at checkout, at one round trip
 each. The two pre-ping settings check a connection only when it waited in the
 pool for more than 1 s. A connection checked in more recently is used with no
-check, so a burst of statements pays no checks. The `check` of a child pool
+check, so a burst of statements pays no checks. The `pre_ping` of a child pool
 runs at every checkout.
 
 | Setting | Default | Scope |
 |---------|---------|-------|
 | `worker_pool_pre_ping` | `False` | the engine of the worker process |
 | `pool_pre_ping` | `True` | every other engine: producers, the web UI, task sends from a child |
-| `check` of `IsolatedPool` and `SharedPool` | `False` | the pool of each child, per child kind in the worker profile |
+| `pre_ping` of `IsolatedPool` and `SharedPool` | `False` | the pool of each child, per child kind in the worker profile |
 
 The worker and its children send most writes as one statement in
 autocommit, so a check doubles their round trips. At the defaults:
@@ -169,13 +169,13 @@ statement instead of a transparent reconnect:
 
 Turn the checks on for workers that sit idle for long stretches behind
 NAT or load balancers that kill idle connections, where stale connections
-occur: `worker_pool_pre_ping` for the worker process, and the `check` of the
+occur: `worker_pool_pre_ping` for the worker process, and the `pre_ping` of the
 pool of each child kind. The Python example is in
 [Check Connections at Checkout](/horsies/configuration/broker-connections/#check-connections-at-checkout).
 
 ## TCP Keepalives for Idle Pooled Connections
 
-`pool_pre_ping`, `worker_pool_pre_ping` and the `check` of each child pool are
+`pool_pre_ping`, `worker_pool_pre_ping` and the `pre_ping` of each child pool are
 checkout-time guards: they detect a dead connection *before* a query runs, not
 one that dies in-flight. The pre-ping settings check only a connection that
 waited in the pool for more than 1 s, so a connection that dies within 1 s of
@@ -186,7 +186,7 @@ worker's retry loop, but logged as noise.
 
 `tcp_keepalives` (default on) closes this gap at the socket layer. The OS
 default idle interval (often 7200s) is longer than a pooler's idle-reap
-window. Horsies sets `tcp_keepalives_idle=30`, so a dropped socket is detected
+window. Horsies sets an idle time of 30 s (`idle_seconds` of the keepalives), so a dropped socket is detected
 within ~30s and recycled before the next query lands on it. The keepalives
 apply to every connection of the core: the broker pools, each child-process
 pool, and the LISTEN/NOTIFY listener.
@@ -194,7 +194,7 @@ pool, and the LISTEN/NOTIFY listener.
 PlanetScale's PgBouncer pooler (`:6432`) reaps idle connections within ~1–2h;
 the defaults keep those sockets warm with no configuration. Lower the idle
 window only for poolers that reap faster than 30s, for example
-`tcp_keepalives_idle` at 15 and `tcp_keepalives_interval` at 5. The Python
+`idle_seconds` at 15 and `interval_seconds` at 5. The Python
 example is in
 [Shorter Keepalive Idle](/horsies/configuration/broker-connections/#shorter-keepalive-idle).
 
@@ -208,7 +208,7 @@ decides: about 15 minutes on Linux with the default `tcp_retries2=15`. The
 worker process is blocked for that time, and the pool's 30-second checkout
 timeout applies only after the write fails.
 
-`tcp_user_timeout_ms` (default `30000`) sets `TCP_USER_TIMEOUT` on each
+`tcp_user_timeout` (default 30000 ms) sets `TCP_USER_TIMEOUT` on each
 socket. Data that stays unacknowledged for that time closes the connection, so
 the write fails within 30 seconds and the pool opens a new connection. The
 setting applies to the broker pools, each child-process pool, and the
@@ -220,7 +220,8 @@ LISTEN/NOTIFY listener. It has an effect only on systems that support
 - With keepalives on, an idle dead connection is closed after about 40
   seconds instead of 60, because the user timeout also bounds unanswered
   keepalive probes.
-- Set `0` to use the operating system default.
+- Set the system default variant (Python `TcpUserTimeoutSystemDefault()`, Rust
+  `TcpUserTimeoutConfig::SystemDefault`) to use the operating system default.
 
 ## Things to Avoid
 
@@ -232,7 +233,7 @@ instance exhaust it and stall both. Use the pooled setup above.
 `prefetch_buffer > 0` requires `claim_lease_ms`; prefetched claims without
 a lease have no expiry for other workers to reclaim.
 
-**Don't point `session_database_url` at the pooled endpoint.**
+**Don't point the session database at the pooled endpoint.**
 `LISTEN` registrations vanish when the pooler reassigns the server
 connection; workers stop receiving wake notifications and fall back to
 polling intervals.

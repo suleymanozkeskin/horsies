@@ -10,7 +10,7 @@ use super::support::{
     start_claimed_task, task_node, workflow, workflow_error_code, workflow_status,
     IsolatedDatabase, LiveStatus, NodeSeed, ParentLink, WorkflowSeed,
 };
-use crate::core::{OperationalErrorCode, TaskError, TaskResult, WorkflowSpec};
+use crate::core::{OperationalCode, TaskError, TaskResult, WorkflowSpec};
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::phase2_recovery::drive_phase2_recovery_with;
@@ -522,7 +522,7 @@ async fn crash_the_task_of_node_0(pool: &TestPool, workflow_id: Uuid) {
         .task_id
         .expect("node 0 has a task");
     let crashed: TaskResult<serde_json::Value> = TaskResult::Err(TaskError::built_in(
-        OperationalErrorCode::WorkerCrashed,
+        OperationalCode::WorkerCrashed,
         "Worker died",
     ));
     let _stored = finish_phase1(pool, task_id, &crashed).await;

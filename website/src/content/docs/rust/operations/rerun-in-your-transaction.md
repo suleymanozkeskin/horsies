@@ -12,7 +12,14 @@ A rerun reads a terminal source task and, for an eligible source with a retained
 | Call | Transaction |
 |------|-------------|
 | `app.rerun_task(command, policy)` | A transaction of the app's handle, which the call commits |
-| `horsies::rerun::rerun_task_in(transaction, &command, &policy, sent_at)` | A transaction that the caller owns. The rerun commits or rolls back with the caller's own writes |
+| `horsies::rerun::rerun_task_in(transaction, &command, &policy, &codes, sent_at)` | A transaction that the caller owns. The rerun commits or rolls back with the caller's own writes |
+
+Both check the stored retry list of the source before the write. A built-in code passes. A custom code passes when the app registers the task and the task declares the code (its code type). The app's own rerun reads the codes of its registry; `rerun_task_in` takes them as `&app.registered_task_codes()`. Otherwise the rerun is refused and writes nothing:
+
+- `RetryCodeNotDeclared { task_name, retry_code }` (`RETRY_CODE_NOT_DECLARED`): the stored list names the custom code `retry_code`, and the task does not declare it. The new task would not retry on that code.
+- `TaskNotRegistered { task_name }` (`TASK_NOT_REGISTERED`): the stored list names a custom code, and the app does not register the task, so the code cannot be checked.
+
+Both are not retryable: the same call meets them again until the app declares the code or registers the task. A stored list of built-in codes only, or no retry policy, needs no registered task.
 
 ## Rerun in a Transaction of the App
 
@@ -45,7 +52,7 @@ The handle checks the client family of the database before the transaction, and 
 | Variant | When |
 |---------|------|
 | `ConnectFailed(BrokerError)` | The handle could not connect or install the schema. Nothing ran. The retry rule is the cause's |
-| `Rerun(RerunError)` | The rerun failed. Nothing committed, except after a failure at `COMMIT` whose outcome is unknown: then the same keyed rerun sent again answers `KeyReplay` |
+| `Rerun(RerunError)` | The rerun failed. Nothing committed, except after a failure at `COMMIT` whose outcome is unknown: then the same keyed rerun sent again answers `KeyReplay`. `RerunError::RetryCodeNotDeclared` and `RerunError::TaskNotRegistered` are the refusals of the stored retry list |
 
 ## Rerun in the Caller's Transaction
 
@@ -59,10 +66,12 @@ The handle checks the client family of the database before the transaction, and 
 ```rust
 use chrono::Utc;
 use horsies::rerun::{rerun_task_in, RerunCommand, RerunEnqueuePolicy, RerunOutcome, SqlxCaller};
+use horsies::Horsies;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 async fn rerun_with_audit(
+    app: &Horsies,
     pool: &PgPool,
     source_task_id: Uuid,
 ) -> Result<RerunOutcome, Box<dyn std::error::Error>> {
@@ -75,6 +84,7 @@ async fn rerun_with_audit(
         &mut SqlxCaller::new(&mut transaction),
         &RerunCommand::new(source_task_id, None, None),
         &RerunEnqueuePolicy::standard(true),
+        &app.registered_task_codes(),
         Utc::now(),
     )
     .await?;
@@ -99,6 +109,8 @@ async fn rerun_with_audit(
 | `ClientFamilyMismatch { stored }` | Another client installed the database, or it records none. Nothing is written. Not retryable |
 | `UnknownStoredFamily(UnknownStoredFamily)` | The family row of the database holds a value that is not a client family (`stored`): corrupt stored data. Nothing is written. Not retryable |
 | `IdempotencyKeyRefused(IdempotencyKeyError)` | The idempotency key is not valid. Nothing is written |
+| `RetryCodeNotDeclared { task_name, retry_code }` | The stored retry list of the source names a custom code that the task does not declare. Nothing is written. Not retryable |
+| `TaskNotRegistered { task_name }` | The stored retry list of the source names a custom code, and the app does not register the task. Nothing is written. Not retryable |
 | `IdMintRefused(Uuid7Error)` | The id of the new task could not be minted. Nothing is written |
 | `Row(RerunRowError)` | A row did not fit its statement. Not retryable |
 

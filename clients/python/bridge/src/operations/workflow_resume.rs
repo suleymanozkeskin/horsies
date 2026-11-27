@@ -5,9 +5,9 @@
 //!
 //! The outcome is one class per answer: `WorkflowResumed`,
 //! `WorkflowNotPaused`, `WorkflowAbsent`, or a failure as the generated
-//! class of the core's `HandleOperationError`
-//! (`horsies._catalog.workflow_handle_errors`: `HandleDbOperationFailed`,
-//! `HandleStoredDataInvalid` or `HandleResumeRecoveryFailed`), built in Rust
+//! class of the core's `WorkflowHandleError`
+//! (`horsies._catalog.workflow_handle_errors`: `WorkflowHandleDatabaseOperationFailed`,
+//! `WorkflowHandleStoredDataInvalid` or `WorkflowHandleResumeRecoveryFailed`), built in Rust
 //! (`catalog_errors`) with the core's message. The Python client maps the
 //! records to the `HandleResult` of `resume_workflow`, and returns a failure
 //! as it is. A child build that raised `KeyboardInterrupt` or
@@ -20,7 +20,7 @@
 //! function's contract raises `PanicException`, as Python raises
 //! `OutcomeDecodeError`.
 
-use horsies_core::{HandleOperation, HandleOperationError, HandleResult};
+use horsies_core::{HandleOperation, HandleResult, WorkflowHandleError};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -48,7 +48,7 @@ pub enum WorkflowResumeOutcome {
     Resumed(WorkflowResumed),
     NotPaused(WorkflowNotPaused),
     Absent(WorkflowAbsent),
-    /// `DB_OPERATION_FAILED`, `STORED_DATA_INVALID` or
+    /// `DATABASE_OPERATION_FAILED`, `STORED_DATA_INVALID` or
     /// `RESUME_RECOVERY_FAILED` (the resume committed; the parent advance or
     /// the recovery pass of the tree after it failed, and the workflow is
     /// RUNNING).
@@ -78,20 +78,20 @@ impl<'py> IntoPyObject<'py> for WorkflowResumeOutcome {
 ///
 /// Panics: `ASYNC_CONTEXT`, which only a sync or blocking form gives: a
 /// defect of the core.
-fn failed_record(workflow_id: Uuid, error: HandleOperationError) -> WorkflowResumeOutcome {
+fn failed_record(workflow_id: Uuid, error: WorkflowHandleError) -> WorkflowResumeOutcome {
     match error {
-        HandleOperationError::WorkflowNotFound { .. } => {
+        WorkflowHandleError::NotFound { .. } => {
             WorkflowResumeOutcome::Absent(WorkflowAbsent { workflow_id })
         }
-        HandleOperationError::DbOperationFailed { .. }
-        | HandleOperationError::StoredDataInvalid { .. }
-        | HandleOperationError::ResumeRecoveryFailed { .. } => {
+        WorkflowHandleError::DatabaseOperationFailed { .. }
+        | WorkflowHandleError::StoredDataInvalid { .. }
+        | WorkflowHandleError::ResumeRecoveryFailed { .. } => {
             WorkflowResumeOutcome::Failed(HandleFailure {
                 operation: HandleOperation::Resume,
                 error,
             })
         }
-        HandleOperationError::AsyncContext { .. } => panic!(
+        WorkflowHandleError::AsyncContext { .. } => panic!(
             "a resume of workflow {workflow_id} answered {} (a defect): {}",
             error.code(),
             error.message()
@@ -150,9 +150,9 @@ pub async fn resume_workflow_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horsies_core::HandleErrorCode;
+    use horsies_core::WorkflowHandleErrorCode;
 
-    fn handle_error(code: HandleErrorCode, retryable: bool) -> HandleOperationError {
+    fn handle_error(code: WorkflowHandleErrorCode, retryable: bool) -> WorkflowHandleError {
         let message = "planned".to_owned();
         let workflow_id = Uuid::nil();
         let cause = || {
@@ -161,30 +161,37 @@ mod tests {
             ))
         };
         match code {
-            HandleErrorCode::WorkflowNotFound => HandleOperationError::WorkflowNotFound {
+            WorkflowHandleErrorCode::WorkflowNotFound => WorkflowHandleError::NotFound {
                 message,
                 workflow_id,
             },
-            HandleErrorCode::DbOperationFailed => HandleOperationError::DbOperationFailed {
-                message,
-                retryable,
-                workflow_id,
-                cause: cause(),
-            },
-            HandleErrorCode::StoredDataInvalid => HandleOperationError::StoredDataInvalid {
+            WorkflowHandleErrorCode::DatabaseOperationFailed => {
+                WorkflowHandleError::DatabaseOperationFailed {
+                    message,
+                    retryable,
+                    workflow_id,
+                    cause: cause(),
+                }
+            }
+            WorkflowHandleErrorCode::StoredDataInvalid => WorkflowHandleError::StoredDataInvalid {
                 message,
                 workflow_id,
                 cause: horsies_core::WorkflowError::InvalidStatus("BOGUS".to_owned()),
             },
-            HandleErrorCode::ResumeRecoveryFailed => HandleOperationError::ResumeRecoveryFailed {
+            WorkflowHandleErrorCode::ResumeRecoveryFailed => {
+                WorkflowHandleError::ResumeRecoveryFailed {
+                    message,
+                    workflow_id,
+                    cause: cause(),
+                }
+            }
+            WorkflowHandleErrorCode::AsyncContext => WorkflowHandleError::AsyncContext {
                 message,
                 workflow_id,
-                cause: cause(),
             },
-            HandleErrorCode::AsyncContext => HandleOperationError::AsyncContext {
-                message,
-                workflow_id,
-            },
+            WorkflowHandleErrorCode::InvalidWorkflowId => {
+                panic!("no handle operation gives {code}")
+            }
         }
     }
 
@@ -202,7 +209,10 @@ mod tests {
         assert!(matches!(
             resume_outcome(
                 id,
-                Err(handle_error(HandleErrorCode::WorkflowNotFound, false)),
+                Err(handle_error(
+                    WorkflowHandleErrorCode::WorkflowNotFound,
+                    false
+                )),
                 None,
                 None
             ),
@@ -210,26 +220,38 @@ mod tests {
         ));
         match resume_outcome(
             id,
-            Err(handle_error(HandleErrorCode::DbOperationFailed, true)),
+            Err(handle_error(
+                WorkflowHandleErrorCode::DatabaseOperationFailed,
+                true,
+            )),
             None,
             None,
         ) {
             WorkflowResumeOutcome::Failed(failed) => {
                 assert_eq!(failed.operation, HandleOperation::Resume);
-                assert_eq!(failed.error.code(), HandleErrorCode::DbOperationFailed);
+                assert_eq!(
+                    failed.error.code(),
+                    WorkflowHandleErrorCode::DatabaseOperationFailed
+                );
                 assert!(failed.error.retryable());
             }
             _ => panic!("a database failure is a failure"),
         }
         match resume_outcome(
             id,
-            Err(handle_error(HandleErrorCode::ResumeRecoveryFailed, false)),
+            Err(handle_error(
+                WorkflowHandleErrorCode::ResumeRecoveryFailed,
+                false,
+            )),
             None,
             None,
         ) {
             WorkflowResumeOutcome::Failed(failed) => {
                 assert_eq!(failed.operation, HandleOperation::Resume);
-                assert_eq!(failed.error.code(), HandleErrorCode::ResumeRecoveryFailed);
+                assert_eq!(
+                    failed.error.code(),
+                    WorkflowHandleErrorCode::ResumeRecoveryFailed
+                );
                 assert_eq!(failed.error.message(), "planned");
             }
             _ => panic!("a failed recovery pass is a failure"),
@@ -242,7 +264,10 @@ mod tests {
         let interrupt = Some(pyo3::exceptions::PyKeyboardInterrupt::new_err(()));
         let outcome = resume_outcome(
             Uuid::nil(),
-            Err(handle_error(HandleErrorCode::DbOperationFailed, false)),
+            Err(handle_error(
+                WorkflowHandleErrorCode::DatabaseOperationFailed,
+                false,
+            )),
             interrupt,
             None,
         );
@@ -259,7 +284,10 @@ mod tests {
         ));
         let outcome = resume_outcome(
             Uuid::nil(),
-            Err(handle_error(HandleErrorCode::DbOperationFailed, false)),
+            Err(handle_error(
+                WorkflowHandleErrorCode::DatabaseOperationFailed,
+                false,
+            )),
             None,
             exception,
         );
@@ -283,7 +311,7 @@ mod tests {
     fn a_python_only_code_panics() {
         let _outcome = resume_outcome(
             Uuid::nil(),
-            Err(handle_error(HandleErrorCode::AsyncContext, false)),
+            Err(handle_error(WorkflowHandleErrorCode::AsyncContext, false)),
             None,
             None,
         );

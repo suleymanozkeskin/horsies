@@ -16,7 +16,7 @@ from sqlalchemy import text
 
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerResult
+from horsies.core.brokers.result_types import DatabaseErrorCode, DatabaseResult
 from tests.task_ids import mint_task_id
 from horsies.core.types.result import Err, Ok
 from tests.broker_resources_support import current_resources
@@ -33,7 +33,7 @@ async def send(
     task_id: UUID,
     sent_at: datetime,
     idempotency_key: str | None = None,
-) -> BrokerResult[UUID]:
+) -> DatabaseResult[UUID]:
     """Send ``TASK_NAME`` with ``KWARGS_JSON`` as the task decorator does."""
     return await broker.enqueue_async(
         TASK_NAME,
@@ -96,7 +96,7 @@ async def test_exact_id_resend_with_another_sent_at_is_payload_mismatch(
     assert first == Ok(task_id)
     match resend:
         case Err(err_value=error):
-            assert error.code is BrokerErrorCode.PAYLOAD_MISMATCH
+            assert error.code is DatabaseErrorCode.PAYLOAD_MISMATCH
         case Ok(ok_value=resend_id):
             raise AssertionError(f'resend with another sent_at returned {resend_id}')
     assert await stored_rows(broker, task_id) == [(task_id, first_sent_at)]
@@ -121,7 +121,7 @@ async def test_keyed_send_onto_a_task_id_with_another_sent_at_is_payload_mismatc
     assert first == Ok(task_id)
     match keyed:
         case Err(err_value=error):
-            assert error.code is BrokerErrorCode.PAYLOAD_MISMATCH
+            assert error.code is DatabaseErrorCode.PAYLOAD_MISMATCH
         case Ok(ok_value=keyed_id):
             raise AssertionError(f'keyed send with another sent_at returned {keyed_id}')
     async with current_resources(broker).session_factory() as session:

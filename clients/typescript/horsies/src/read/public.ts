@@ -2,9 +2,9 @@
 
 export { TaskAttemptOutcome, TaskStatus } from "../_catalog/status.ts";
 
-export type { BrokerErrorCode } from "../_catalog/broker.ts";
+export type { DatabaseErrorCode } from "../_catalog/broker.ts";
 
-export type { FinishedStatus, ReadError, UnfinishedStatus } from "./errors.ts";
+export type { FinishedStatus, ReadError, ReadErrorCodes, ReadErrorTag, UnfinishedStatus } from "./errors.ts";
 
 export type { GetOptions, TaskHandle } from "./handle.ts";
 

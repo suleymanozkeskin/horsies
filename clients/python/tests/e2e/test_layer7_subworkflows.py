@@ -19,7 +19,7 @@ from horsies.core.codec.typed import (
 from horsies.core.models.outcome import Succeeded, TaskOutcome
 from horsies.core.models.tasks import (
     OutcomeCode,
-    SubWorkflowError,
+    SubWorkflowFailure,
     TaskError,
 )
 from horsies.core.models.workflow import (
@@ -130,10 +130,10 @@ def _assert_subworkflow_error(
     outcome: TaskOutcome[Any, TaskError] | None,
     *,
     child_id: str | None = None,
-) -> SubWorkflowError:
+) -> SubWorkflowFailure:
     err = outcome_error(outcome)
-    assert isinstance(err, SubWorkflowError), f'expected SubWorkflowError, got {err}'
-    assert err.code == OutcomeCode.SUBWORKFLOW_FAILED
+    assert isinstance(err, SubWorkflowFailure), f'expected SubWorkflowFailure, got {err}'
+    assert err.code == OutcomeCode.SUB_WORKFLOW_FAILED
     if child_id is not None:
         assert err.sub_workflow_id == child_id
     assert err.sub_workflow_summary.status == WorkflowStatus.FAILED
@@ -433,7 +433,7 @@ async def test_subworkflow_failure_fail_policy_preserves_error_everywhere(
 
         workflow = await _workflow_row(broker, str(handle.workflow_id))
         workflow_error = _decode_error_column(workflow['error'])
-        assert isinstance(workflow_error, SubWorkflowError)
+        assert isinstance(workflow_error, SubWorkflowFailure)
         assert workflow_error.sub_workflow_id == child_id
 
         handle_result = await asyncio.to_thread(handle.get, wait_ms=2000)
@@ -487,7 +487,7 @@ async def test_subworkflow_failure_pause_policy_preserves_error_after_resume(
 
         workflow = await _workflow_row(broker, str(handle.workflow_id))
         paused_error = _decode_error_column(workflow['error'])
-        assert isinstance(paused_error, SubWorkflowError)
+        assert isinstance(paused_error, SubWorkflowFailure)
         assert paused_error.sub_workflow_id == child_id
 
         resume_result = await asyncio.to_thread(handle.resume)
@@ -694,7 +694,7 @@ async def test_nested_subworkflow_failure_surfaces_each_child_error(
 
         middle = await _workflow_row(broker, middle_id)
         middle_error = _decode_error_column(middle['error'])
-        assert isinstance(middle_error, SubWorkflowError)
+        assert isinstance(middle_error, SubWorkflowFailure)
         assert middle_error.sub_workflow_summary.failed_tasks == 1
 
         middle_tasks = await _workflow_task_rows(broker, middle_id)
@@ -2155,7 +2155,7 @@ async def test_subworkflow_deep_outputless_all_failed_required(
             )
         assert isinstance(
             failed_error(await asyncio.to_thread(handle.get, wait_ms=2000)),
-            SubWorkflowError,
+            SubWorkflowFailure,
         )
 
 

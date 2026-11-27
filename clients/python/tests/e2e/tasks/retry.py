@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import os
+from enum import Enum
 from pathlib import Path
 
 from horsies.core.models.tasks import TaskError, RetryPolicy
 from horsies.core.types.result import Err, Ok, Result
 
 from tests.e2e.tasks.instance import app
+
+
+class RetryCode(str, Enum):
+    """The codes that the retry tasks retry on."""
+
+    TRANSIENT = 'TRANSIENT'
+    RETRYABLE_ERROR = 'RETRYABLE_ERROR'
+    MAPPED_VALUE_ERROR = 'MAPPED_VALUE_ERROR'
 
 
 def _get_state_path(env_key: str) -> Path:
@@ -20,7 +29,8 @@ def _get_state_path(env_key: str) -> Path:
 
 @app.task(
     name='e2e_retry_exhausted',
-    retry_policy=RetryPolicy.fixed([1, 1, 1], retry_for=['TRANSIENT']),
+    error_codes=RetryCode,
+    retry_policy=RetryPolicy.fixed([1, 1, 1], retry_for=[RetryCode.TRANSIENT]),
 )
 def retry_exhausted_task() -> Result[str, TaskError]:
     return Err(TaskError(code='TRANSIENT', message='always fails'))
@@ -28,7 +38,8 @@ def retry_exhausted_task() -> Result[str, TaskError]:
 
 @app.task(
     name='e2e_retry_success',
-    retry_policy=RetryPolicy.fixed([1, 1, 1], retry_for=['TRANSIENT']),
+    error_codes=RetryCode,
+    retry_policy=RetryPolicy.fixed([1, 1, 1], retry_for=[RetryCode.TRANSIENT]),
 )
 def retry_success_task() -> Result[str, TaskError]:
     state_path = _get_state_path('E2E_RETRY_SUCCESS_PATH')
@@ -49,7 +60,10 @@ def retry_success_task() -> Result[str, TaskError]:
 
 @app.task(
     name='e2e_exponential',
-    retry_policy=RetryPolicy.exponential(base_seconds=1, max_retries=3, retry_for=['TRANSIENT']),
+    error_codes=RetryCode,
+    retry_policy=RetryPolicy.exponential(
+        base_seconds=1, max_retries=3, retry_for=[RetryCode.TRANSIENT],
+    ),
 )
 def exponential_task() -> Result[str, TaskError]:
     return Err(TaskError(code='TRANSIENT', message='fail'))
@@ -57,7 +71,8 @@ def exponential_task() -> Result[str, TaskError]:
 
 @app.task(
     name='e2e_retry_error_code',
-    retry_policy=RetryPolicy.fixed([1], retry_for=['RETRYABLE_ERROR']),
+    error_codes=RetryCode,
+    retry_policy=RetryPolicy.fixed([1], retry_for=[RetryCode.RETRYABLE_ERROR]),
 )
 def retry_error_code_task() -> Result[str, TaskError]:
     return Err(TaskError(code='RETRYABLE_ERROR', message='Retryable error'))
@@ -65,7 +80,8 @@ def retry_error_code_task() -> Result[str, TaskError]:
 
 @app.task(
     name='e2e_retry_mapped_exception',
-    retry_policy=RetryPolicy.fixed([1], retry_for=['MAPPED_VALUE_ERROR']),
+    error_codes=RetryCode,
+    retry_policy=RetryPolicy.fixed([1], retry_for=[RetryCode.MAPPED_VALUE_ERROR]),
     exception_mapper={ValueError: 'MAPPED_VALUE_ERROR'},
 )
 def retry_mapped_exception_task() -> Result[str, TaskError]:

@@ -6,7 +6,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use horsies::{
-    blocking_task, task, CustomErrorCode, OperationalErrorCode, ReadError, TaskError, TaskRuntime,
+    blocking_task, task, CustomErrorCode, OperationalCode, ReadError, TaskError, TaskRuntime,
     WaitLimit,
 };
 use serde::{Deserialize, Serialize};
@@ -75,10 +75,7 @@ pub async fn no_retry() -> Result<String, TaskError<BasicCode>> {
 /// Python `e2e_error_code`: a task body that returns a built-in code.
 #[task("e2e_error_code")]
 pub async fn error_code() -> Result<String, TaskError<Infallible>> {
-    Err(TaskError::built_in(
-        OperationalErrorCode::TaskException,
-        "boom",
-    ))
+    Err(TaskError::built_in(OperationalCode::TaskException, "boom"))
 }
 
 /// The output of `e2e_complex_result` (Python `OutputModel`).

@@ -39,17 +39,26 @@ Handle errors when:
 
 ### Configure Automatic Retries
 
-The library handles retries automatically when `retry_for` matches the error:
+The library handles retries automatically when `retry_for` matches the error. The entries are code members: built-in members, and members of the `Enum` class that the task declares with `error_codes=`:
 
 ```python
-from horsies import RetryPolicy, Result, TaskError, JsonValue
+from enum import Enum
+
+from horsies import OperationalCode, RetryPolicy, Result, TaskError, JsonValue
+
+
+class FetchCode(str, Enum):
+    RATE_LIMITED = "RATE_LIMITED"
+    TIMEOUT = "TIMEOUT"
+
 
 @app.task(
     "fetch_api_data",
+    error_codes=FetchCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=3,
-        retry_for=["UNHANDLED_EXCEPTION", "RATE_LIMITED"],
+        retry_for=[OperationalCode.UNHANDLED_EXCEPTION, FetchCode.RATE_LIMITED],
     ),
 )
 def fetch_api_data(*, url: str) -> Result[dict[str, JsonValue], TaskError]:
@@ -70,10 +79,11 @@ To avoid try/except boilerplate for mapping exceptions to error codes, use `exce
 ```python
 @app.task(
     "fetch_api_data",
+    error_codes=FetchCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=3,
-        retry_for=["RATE_LIMITED", "TIMEOUT"],
+        retry_for=[FetchCode.RATE_LIMITED, FetchCode.TIMEOUT],
     ),
     exception_mapper={
         RateLimitError: "RATE_LIMITED",
@@ -111,7 +121,7 @@ from horsies import (
 )
 
 config = AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr("postgresql://user:password@localhost:5432/mydb"),
     ),
 )
@@ -300,7 +310,8 @@ if error.code == "RATE_LIMITED":
 # Correct - configure retry_for on the retry policy
 @app.task(
     "my_task",
-    retry_policy=RetryPolicy.fixed([60, 120, 300], retry_for=["RATE_LIMITED"]),
+    error_codes=FetchCode,
+    retry_policy=RetryPolicy.fixed([60, 120, 300], retry_for=[FetchCode.RATE_LIMITED]),
 )
 def my_task() -> Result[str, TaskError]:
     ...

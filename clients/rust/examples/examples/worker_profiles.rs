@@ -73,7 +73,7 @@ fn mixed_profile() -> WorkerProfile {
 }
 
 fn build_app() -> Result<Horsies, HorsiesError> {
-    let mut config = AppConfig::for_database_url(database_url());
+    let mut config = AppConfig::from_database_url(database_url());
     config.worker_profiles = BTreeMap::from([(PROFILE.to_owned(), mixed_profile())]);
     let mut app = Horsies::new(config)?;
     let _checksum = checksum::register(&mut app)?;

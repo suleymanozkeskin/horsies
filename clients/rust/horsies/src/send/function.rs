@@ -8,7 +8,7 @@
 //! read-back of the input (encode, decode with `A`, encode again, compare),
 //! the payload size limit, a new task id and the sent instant, then one
 //! enqueue through the core with `SendKind::First`. With
-//! `AppConfig.resend_on_transient_err`, a retryable `ENQUEUE_FAILED` is
+//! `AppConfig.resend_on_transient_error`, a retryable `ENQUEUE_FAILED` is
 //! sent again up to 3 times with the same task id and payload as
 //! `SendKind::Repeat`, after 200 ms, 400 ms and 800 ms (at most 2,000 ms):
 //! a send whose commit reply was lost answers with its task id, and a task
@@ -34,7 +34,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use horsies_core::core::config::payload::{enforce_payload_policy, PayloadKind};
 use horsies_core::core::task::send_types::send_error_from_enqueue;
-use horsies_core::handle::CoreHandle;
+use horsies_core::handle::CoreConnection;
 use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
     child_producer, mint_task_id, CheckedSend, ChildProducer, Execution, FailureCause,
@@ -49,7 +49,7 @@ use crate::app::SendSuppression;
 use crate::process_state::refuse_in_a_fork;
 use crate::task::body::encode_send_input;
 use crate::telemetry::{CallEnd, TaskSendSpan, TaskSendSubject};
-use crate::{CustomErrorCode, ErrorCode, Horsies, HorsiesError, TaskHandle};
+use crate::{CustomErrorCode, Horsies, HorsiesError, HorsiesErrorCode, TaskHandle};
 
 /// Resends of a retryable `ENQUEUE_FAILED` after the first send (Python
 /// `_SEND_RETRY_COUNT`).
@@ -62,9 +62,9 @@ const RESEND_LONGEST_WAIT: Duration = Duration::from_millis(2_000);
 /// What every function of one app sends with: the app's handle, the
 /// suppression of the process and the config values of a send.
 pub(crate) struct SendContext {
-    handle: Arc<CoreHandle>,
+    handle: Arc<CoreConnection>,
     suppression: SendSuppression,
-    resend_on_transient_err: bool,
+    resend_on_transient_error: bool,
     payload: PayloadPolicy,
     retention: RetentionConfig,
 }
@@ -75,7 +75,7 @@ impl SendContext {
         Self {
             handle: Arc::clone(app.handle()),
             suppression: app.send_suppression(),
-            resend_on_transient_err: app.config().resend_on_transient_err,
+            resend_on_transient_error: app.config().resend_on_transient_error,
             payload: app.config().payload.clone(),
             retention: app.config().retention.clone(),
         }
@@ -83,7 +83,7 @@ impl SendContext {
 
     /// The handle a send goes through: the child's producer handle in a
     /// worker child, else the app's.
-    fn send_handle(&self) -> Arc<CoreHandle> {
+    fn send_handle(&self) -> Arc<CoreConnection> {
         match child_producer() {
             ChildProducer::InChild(handle) => handle,
             ChildProducer::NotInAChild => Arc::clone(&self.handle),
@@ -165,7 +165,7 @@ where
             return Err(HorsiesError::new(format!(
                 "task '{task_name}' has no resolved queue; register it with Horsies::register"
             ))
-            .with_code(ErrorCode::TaskInvalidQueue));
+            .with_code(HorsiesErrorCode::TaskInvalidQueue));
         };
         let function = Self {
             task_name: task_name.to_owned(),
@@ -260,7 +260,7 @@ where
     ) -> Result<(Uuid, TaskSendPayload), TaskSendError> {
         let context = &self.context;
         if context.suppression.is_active() {
-            return Err(TaskSendError::SendSuppressed {
+            return Err(TaskSendError::Suppressed {
                 message: format!(
                     "Task send suppressed for {} (import/check phase or \
                      HORSIES_SUPPRESS_SENDS=1)",
@@ -362,8 +362,8 @@ where
     ) -> Result<(Uuid, TaskSendPayload), TaskSendError> {
         let Some(target) = error.resend_target() else {
             return Err(self.validation_failed(&format!(
-                "cannot resend a send that failed with {}: only ASYNC_CONTEXT, \
-                 ENQUEUE_FAILED and IDEMPOTENCY_KEY_CONFLICT carry a payload to send again",
+                "cannot resend a send that failed with {}: only ASYNC_CONTEXT and \
+                 ENQUEUE_FAILED are sent again",
                 error.code()
             )));
         };
@@ -393,7 +393,7 @@ where
         first: SendKind,
     ) -> Result<TaskHandle<T, E>, TaskSendError> {
         refuse_in_a_fork(format_args!("send of task '{}'", self.task_name));
-        let resends = match self.context.resend_on_transient_err {
+        let resends = match self.context.resend_on_transient_error {
             true => RESEND_COUNT,
             false => 0,
         };
@@ -404,7 +404,7 @@ where
             queue_name: &payload.queue_name,
         });
         let trace = span.trace();
-        let handle_ref: &CoreHandle = &handle;
+        let handle_ref: &CoreConnection = &handle;
         let payload_ref = &payload;
         let trace_ref = &trace;
         let sent = send_with_resends(resends, first, move |kind| {
@@ -471,7 +471,7 @@ fn resend_wait(resend: u32) -> Duration {
 /// error, maps to the send catalog by the core's one rule. A carrier that
 /// breaks a bound of the core is not stored and never refuses the send.
 async fn enqueue_once(
-    handle: &CoreHandle,
+    handle: &CoreConnection,
     task_id: Uuid,
     payload: &TaskSendPayload,
     trace: &SendTrace,
@@ -601,13 +601,13 @@ mod tests {
     }
 
     fn config() -> AppConfig {
-        AppConfig::for_database_url("postgresql://localhost/horsies")
+        AppConfig::from_database_url("postgresql://localhost/horsies")
     }
 
     /// A config whose address has no database: a send that a defect lets
     /// past its checks fails to connect, and writes to no local database.
     fn config_without_database() -> AppConfig {
-        AppConfig::for_database_url("postgresql://127.0.0.1:1/nothing")
+        AppConfig::from_database_url("postgresql://127.0.0.1:1/nothing")
     }
 
     fn function(app: &Horsies) -> TaskFunction<Invoice, u32, Infallible> {
@@ -706,11 +706,14 @@ mod tests {
         let without = Horsies::new(config()).unwrap();
         let mut builder = without.workflow_builder("invoices");
         let refused = builder.task(node_of()).unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::WorkflowUnregisteredTask));
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::WorkflowUnregisteredTask)
+        );
         assert!(refused.message.contains("task 'send_invoice'"), "{refused}");
         assert_eq!(
             builder.build().unwrap_err().code,
-            Some(ErrorCode::WorkflowNoNodes)
+            Some(HorsiesErrorCode::WorkflowNoNodes)
         );
     }
 
@@ -724,7 +727,10 @@ mod tests {
         let refused = builder
             .task(crate::__private::task_node::<u32, String>("send_invoice"))
             .unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::WorkflowUnregisteredTask));
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::WorkflowUnregisteredTask)
+        );
         assert!(refused.message.contains("Invoice"), "{refused}");
         assert!(refused.message.contains("String"), "{refused}");
     }
@@ -734,7 +740,7 @@ mod tests {
         let app = app_with(config());
         let refused =
             TaskFunction::<Invoice, u32, Infallible>::__registered(&app, "missing").unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::TaskNotRegistered));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::TaskNotRegistered));
     }
 
     #[test]
@@ -795,7 +801,7 @@ mod tests {
             .prepare(&TaskSendOptions::new(), &invoice())
             .unwrap_err();
         match refused {
-            TaskSendError::SendSuppressed { message } => {
+            TaskSendError::Suppressed { message } => {
                 assert!(message.contains("Task send suppressed for send_invoice"));
             }
             other => panic!("expected SEND_SUPPRESSED, got {other}"),
@@ -907,6 +913,28 @@ mod tests {
         let (resent_id, resent) = function(&app).checked_resend_target(&error).unwrap();
         assert_eq!(resent_id, task_id);
         assert_eq!(resent.input_json, r#"{"id":7,"amount":12.5}"#);
+    }
+
+    fn key_conflict() -> TaskSendError {
+        let app = app_with(config());
+        let (task_id, payload) = function(&app)
+            .prepare(&TaskSendOptions::new(), &invoice())
+            .unwrap();
+        TaskSendError::IdempotencyKeyConflict {
+            task_id,
+            payload: Box::new(payload),
+            message: "the key is held".to_owned(),
+            owner_task_id: Uuid::from_u128(2),
+        }
+    }
+
+    /// Reverting the `IdempotencyKeyConflict` arm of
+    /// `TaskSendError::resend_target` to `Some(..)` fails this test.
+    #[test]
+    fn a_retry_refuses_a_key_conflict_before_any_write() {
+        let app = app_with(config());
+        let message = validation_message(function(&app).retry_target(&key_conflict()).unwrap_err());
+        assert!(message.contains("IDEMPOTENCY_KEY_CONFLICT"), "{message}");
     }
 
     #[test]
@@ -1026,6 +1054,7 @@ mod tests {
     async fn a_failure_that_is_not_retryable_is_not_resent() {
         for refusal in [
             failed_enqueue(false),
+            key_conflict(),
             TaskSendError::ValidationFailed {
                 message: "bad input".to_owned(),
                 cause: FailureCause::PreconditionFailed,
@@ -1100,7 +1129,7 @@ mod tests {
         let second = app_with_generated_send(limited);
         let refused = generated_send::send(&first, 7).await.unwrap_err();
         assert!(
-            matches!(refused, TaskSendError::SendSuppressed { .. }),
+            matches!(refused, TaskSendError::Suppressed { .. }),
             "{refused}"
         );
         let refused = generated_send::send(&second, 7).await.unwrap_err();
@@ -1122,7 +1151,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(refused, TaskSendError::SendSuppressed { .. }),
+            matches!(refused, TaskSendError::Suppressed { .. }),
             "{refused}"
         );
     }

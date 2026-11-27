@@ -333,12 +333,12 @@ src/core/config/recovery.rs	core::config::recovery::tests::field_at_exactly_mini
 src/core/config/recovery.rs	core::config::recovery::tests::field_at_exactly_maximum_passes	KEPT	horsies-core core::config::recovery::tests::field_at_exactly_maximum_passes
 src/core/config/resilience.rs	core::config::resilience::tests::default_validates	KEPT	horsies-core core::config::resilience::tests::default_validates
 src/core/config/resilience.rs	core::config::resilience::tests::default_field_values	KEPT	horsies-core core::config::resilience::tests::default_field_values
-src/core/config/resilience.rs	core::config::resilience::tests::db_retry_initial_below_minimum	KEPT	horsies-core core::config::resilience::tests::db_retry_initial_below_minimum
-src/core/config/resilience.rs	core::config::resilience::tests::db_retry_max_below_minimum	KEPT	horsies-core core::config::resilience::tests::db_retry_max_below_minimum
+src/core/config/resilience.rs	core::config::resilience::tests::db_retry_initial_below_minimum	CHANGED	horsies-core core::config::resilience::tests::database_retry_initial_below_minimum
+src/core/config/resilience.rs	core::config::resilience::tests::db_retry_max_below_minimum	CHANGED	horsies-core core::config::resilience::tests::database_retry_max_below_minimum
 src/core/config/resilience.rs	core::config::resilience::tests::notify_poll_below_minimum	KEPT	horsies-core core::config::resilience::tests::notify_poll_below_minimum
-src/core/config/resilience.rs	core::config::resilience::tests::db_retry_initial_above_maximum	KEPT	horsies-core core::config::resilience::tests::db_retry_initial_above_maximum
-src/core/config/resilience.rs	core::config::resilience::tests::db_retry_max_above_maximum	KEPT	horsies-core core::config::resilience::tests::db_retry_max_above_maximum
-src/core/config/resilience.rs	core::config::resilience::tests::db_retry_max_attempts_above_maximum	KEPT	horsies-core core::config::resilience::tests::db_retry_max_attempts_above_maximum
+src/core/config/resilience.rs	core::config::resilience::tests::db_retry_initial_above_maximum	CHANGED	horsies-core core::config::resilience::tests::database_retry_initial_above_maximum
+src/core/config/resilience.rs	core::config::resilience::tests::db_retry_max_above_maximum	CHANGED	horsies-core core::config::resilience::tests::database_retry_max_above_maximum
+src/core/config/resilience.rs	core::config::resilience::tests::db_retry_max_attempts_above_maximum	CHANGED	horsies-core core::config::resilience::tests::database_retry_max_attempts_above_maximum
 src/core/config/resilience.rs	core::config::resilience::tests::notify_poll_above_maximum	KEPT	horsies-core core::config::resilience::tests::notify_poll_above_maximum
 src/core/config/resilience.rs	core::config::resilience::tests::max_below_initial_rejected	KEPT	horsies-core core::config::resilience::tests::max_below_initial_rejected
 src/core/config/resilience.rs	core::config::resilience::tests::max_equal_to_initial_passes	KEPT	horsies-core core::config::resilience::tests::max_equal_to_initial_passes

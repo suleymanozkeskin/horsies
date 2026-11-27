@@ -432,7 +432,7 @@ PARENT_B: Final = '0191aaaa-bbbb-7ccc-8ddd-eeeeffff0002'
 def _parent_and_child(parent: str, child: str, named: str) -> list[RawRow]:
     error = json.dumps(
         {
-            'error_code': 'SUBWORKFLOW_FAILED',
+            'error_code': 'SUB_WORKFLOW_FAILED',
             'message': f'Subworkflow {named} failed',
             'sub_workflow_id': child,
         }
@@ -442,7 +442,7 @@ def _parent_and_child(parent: str, child: str, named: str) -> list[RawRow]:
             '__h_task_result__': True,
             'ok': None,
             'err': {
-                'error_code': 'SUBWORKFLOW_FAILED',
+                'error_code': 'SUB_WORKFLOW_FAILED',
                 'message': f'Subworkflow {named} failed with status FAILED',
                 'sub_workflow_id': child,
             },
@@ -589,7 +589,7 @@ def _skipped_error(named: str) -> dict[str, object]:
 
 def _child_failed_error(named: str) -> dict[str, object]:
     return {
-        'error_code': 'SUBWORKFLOW_FAILED',
+        'error_code': 'SUB_WORKFLOW_FAILED',
         'message': f'Subworkflow {named} failed with status FAILED',
         'sub_workflow_id': named,
         'sub_workflow_summary': {

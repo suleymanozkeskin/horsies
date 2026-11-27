@@ -18,7 +18,7 @@ import { catalogRefusal, DATABASE_URL, fakeChecks, fakeEnvironment, type FakeEnv
 const ping = defineTask({ name: "ping", input: {}, output: h.string() });
 
 function config(tasks: HorsiesConfig["tasks"]): HorsiesConfig {
-  return { broker: { databaseUrl: DATABASE_URL }, tasks };
+  return { database: { databaseUrl: DATABASE_URL }, tasks };
 }
 
 /** The codes and paths of a refused create. Throws when the create gives an app. */
@@ -40,7 +40,7 @@ function messagesOf(input: HorsiesConfig): string {
 describe("Horsies.create: the config", () => {
   test("an unset environment variable of a secret is HRS-203, and the core checks do not run", () => {
     const environment = fakeEnvironment();
-    const input: HorsiesConfig = { broker: { databaseUrl: { kind: "fromEnv", name: "HORSIES_TEST_UNSET_URL" } }, tasks: [ping] };
+    const input: HorsiesConfig = { database: { databaseUrl: { kind: "fromEnv", name: "HORSIES_TEST_UNSET_URL" } }, tasks: [ping] };
     const created = createHorsies(input, environment);
 
     assert.equal(created.ok, false);
@@ -51,7 +51,7 @@ describe("Horsies.create: the config", () => {
 
   test("a variable that is set gives the secret", () => {
     const environment = fakeEnvironment({ variables: { HORSIES_TEST_URL: "postgresql://127.0.0.1:55432/horsies" } });
-    const input: HorsiesConfig = { broker: { databaseUrl: { kind: "fromEnv", name: "HORSIES_TEST_URL" } }, tasks: [ping] };
+    const input: HorsiesConfig = { database: { databaseUrl: { kind: "fromEnv", name: "HORSIES_TEST_URL" } }, tasks: [ping] };
 
     assert.equal(createHorsies(input, environment).ok, true);
   });
@@ -111,7 +111,7 @@ describe("Horsies.create: the contract list", () => {
     const queued = defineTask({ name: "queued", queue: "urgent", input: {}, output: h.null() });
 
     const input: HorsiesConfig = {
-      broker: { databaseUrl: { kind: "fromEnv", name: "UNSET_VARIABLE" } },
+      database: { databaseUrl: { kind: "fromEnv", name: "UNSET_VARIABLE" } },
       queueMode: "custom",
       customQueues: [{ name: "urgent", priority: 1 }],
       tasks: [queued],
@@ -125,7 +125,7 @@ describe("Horsies.create: the contract list", () => {
 
   test("no queue in the custom queue mode is HRS-200", () => {
     const input: HorsiesConfig = {
-      broker: { databaseUrl: DATABASE_URL },
+      database: { databaseUrl: DATABASE_URL },
       queueMode: "custom",
       customQueues: [{ name: "standard", priority: 10 }],
       tasks: [ping],
@@ -139,7 +139,7 @@ describe("Horsies.create: the contract list", () => {
     const billing = defineTask({ name: "charge", queue: "billing", input: {}, output: h.null() });
 
     const input: HorsiesConfig = {
-      broker: { databaseUrl: DATABASE_URL },
+      database: { databaseUrl: DATABASE_URL },
       queueMode: "custom",
       customQueues: [{ name: "standard", priority: 10 }],
       tasks: [billing],

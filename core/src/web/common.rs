@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 
-use crate::broker::BrokerOperationError;
+use crate::broker::DatabaseOperationError;
 use crate::db::Transience;
 use crate::monitoring::{
     database_failure_status, ErrorCategory, MonitoringQueryError, PaginationRefused, SortDirection,
@@ -429,7 +429,7 @@ pub(crate) fn parse_group_by(value: &str) -> Result<TaskGroupBy, ApiError> {
 pub(crate) fn query_failed(surface: &str, error: &MonitoringQueryError) -> ApiError {
     let detail = format!("{surface} query failed: {}", error.message());
     match error {
-        MonitoringQueryError::DbOperationFailed { retryable, .. } => {
+        MonitoringQueryError::DatabaseOperationFailed { retryable, .. } => {
             ApiError::database_failed(Transience::of_retryable(*retryable), detail)
         }
         MonitoringQueryError::HistoryContractViolation { .. } => {
@@ -440,10 +440,10 @@ pub(crate) fn query_failed(surface: &str, error: &MonitoringQueryError) -> ApiEr
 
 /// Map a failed worker read of the broker (`subject`, for example `Worker
 /// state query`) to its response: `<subject> failed: <message>`, with the
-/// status of the error's retry rule ([`BrokerOperationError::retryable`],
+/// status of the error's retry rule ([`DatabaseOperationError::retryable`],
 /// [`database_failure_status`]). A stored row that does not read, a refused
 /// argument and a broker with no listener stay, so they are 500.
-pub(crate) fn broker_read_failed(subject: &str, error: &BrokerOperationError) -> ApiError {
+pub(crate) fn broker_read_failed(subject: &str, error: &DatabaseOperationError) -> ApiError {
     ApiError::database_failed(
         Transience::of_retryable(error.retryable()),
         format!("{subject} failed: {}", error.message()),
@@ -637,25 +637,25 @@ mod tests {
             }
         };
         assert_eq!(
-            status(MonitoringQueryError::DbOperationFailed {
+            status(MonitoringQueryError::DatabaseOperationFailed {
                 message: "read failed".to_owned(),
                 retryable: true,
-                source: read_source(),
+                cause: read_source(),
             }),
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(
-            status(MonitoringQueryError::DbOperationFailed {
+            status(MonitoringQueryError::DatabaseOperationFailed {
                 message: "read failed".to_owned(),
                 retryable: false,
-                source: read_source(),
+                cause: read_source(),
             }),
             StatusCode::INTERNAL_SERVER_ERROR
         );
         assert_eq!(
             status(MonitoringQueryError::HistoryContractViolation {
                 message: "read failed".to_owned(),
-                source: crate::monitoring::HistoryContractSource(read_source()),
+                cause: crate::monitoring::HistoryContractSource(read_source()),
             }),
             StatusCode::INTERNAL_SERVER_ERROR
         );
@@ -666,15 +666,17 @@ mod tests {
     /// is 500. The detail names the read.
     #[test]
     fn a_broker_read_failure_answers_by_the_retry_rule_of_its_error() {
-        let answer =
-            |error: BrokerOperationError| match broker_read_failed("Worker state query", &error) {
-                ApiError::Detail(status, detail) => (status, detail),
-                ApiError::InvalidInput(_) | ApiError::Validation(_) => {
-                    panic!("a broker read failure is always a detail body")
-                }
-            };
+        let answer = |error: DatabaseOperationError| match broker_read_failed(
+            "Worker state query",
+            &error,
+        ) {
+            ApiError::Detail(status, detail) => (status, detail),
+            ApiError::InvalidInput(_) | ApiError::Validation(_) => {
+                panic!("a broker read failure is always a detail body")
+            }
+        };
 
-        let (status, detail) = answer(BrokerOperationError::monitoring_query_failed(
+        let (status, detail) = answer(DatabaseOperationError::monitoring_query_failed(
             "list_worker_states",
             crate::broker::BrokerOperationSource::Broker(crate::broker::BrokerError::Statement(
                 crate::db::StatementFailure::NotSent {
@@ -689,7 +691,7 @@ mod tests {
             "{detail}"
         );
 
-        let (status, _detail) = answer(BrokerOperationError::monitoring_query_failed(
+        let (status, _detail) = answer(DatabaseOperationError::monitoring_query_failed(
             "list_worker_states",
             crate::broker::BrokerOperationSource::Broker(
                 crate::broker::BrokerError::ClaimContract("row".to_owned()),
@@ -697,7 +699,7 @@ mod tests {
         ));
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 
-        let (status, detail) = answer(BrokerOperationError::ListenerDisabled {
+        let (status, detail) = answer(DatabaseOperationError::ListenerDisabled {
             message: "ping_workers needs a listener".to_owned(),
         });
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);

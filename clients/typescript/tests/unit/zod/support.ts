@@ -6,7 +6,7 @@ import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
 import { type DecodeForm, decodeValue } from "../../../horsies/src/codec/reader.ts";
 import type { DecodeRefused, EncodeRefused, ValueRefused } from "../../../horsies/src/codec/refusal.ts";
 import { encodeValue } from "../../../horsies/src/codec/writer.ts";
-import type { Kind } from "../../../horsies/src/wire/kinds.ts";
+import type { Kind, MemberPresence } from "../../../horsies/src/wire/kinds.ts";
 import type { Result } from "../../../horsies/src/wire/result.ts";
 import { compileMember, compileValue, type ZodMemberKind } from "../../../horsies/src/zod/adapter.ts";
 import { readDefinition, type ZodSchema } from "../../../horsies/src/zod/definition.ts";
@@ -91,4 +91,13 @@ export function runsOfCodec(schema: ZodSchema): CodecRuns {
   return definition.form === "codec"
     ? codecRuns(definition.output, definition.decode, definition.encode)
     : { decode: () => assert.fail("not a codec"), encode: () => assert.fail("not a codec") };
+}
+
+/** The text of one read of a computed default: its stored text, or the refusal kind; another presence fails the test. */
+export function computedDefaultText(presence: MemberPresence): string {
+  assert.ok(presence.mode === "defaulted" && presence.fallback.state === "computed", "expected a computed default");
+
+  const text = presence.fallback.compute();
+
+  return text.ok ? text.value : text.error.refusal;
 }

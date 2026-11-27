@@ -47,6 +47,7 @@ from horsies.core.manifest_database import (
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.cluster_cap import ClusterCap, NoClusterCap
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.core.models.recovery import RecoveryConfig
@@ -142,9 +143,9 @@ def to_worker_manifest(
     """
     return wire.WorkerManifest(
         manifest_version=wire.MANIFEST_VERSION,
-        database=worker_database_manifest(config.broker),
+        database=worker_database_manifest(config.database),
         send=wire.SendManifest(
-            retain_rerun_input_default=config.broker.retain_rerun_input_default,
+            retain_rerun_input_default=config.database.retain_rerun_input_default,
             idempotency_reservation_window=reservation_window_micros(
                 idempotency_reservation_window,
             ),
@@ -482,14 +483,14 @@ def recovery_manifest(config: RecoveryConfig) -> wire.RecoveryManifest:
     value it holds. Pure; Pydantic bounds every field.
     """
     return wire.RecoveryManifest(
-        auto_requeue_stale_claimed=config.auto_requeue_stale_claimed,
+        requeue_stale_claimed=config.requeue_stale_claimed,
         claimed_stale_threshold_ms=config.claimed_stale_threshold_ms,
-        auto_terminate_orphaned_workflow_tasks=config.auto_terminate_orphaned_workflow_tasks,
-        auto_fail_stale_running=config.auto_fail_stale_running,
+        terminate_orphaned_workflow_tasks=config.terminate_orphaned_workflow_tasks,
+        fail_stale_running=config.fail_stale_running,
         running_stale_threshold_ms=config.running_stale_threshold_ms,
         finalizing_stale_threshold_ms=config.finalizing_stale_threshold_ms,
         crashed_worker_recovery_grace_ms=config.crashed_worker_recovery_grace_ms,
-        phase2_quarantine_after_attempts=config.phase2_quarantine_after_attempts,
+        finalization_quarantine_after_attempts=config.finalization_quarantine_after_attempts,
         workflow_recovery_failure_limit=config.workflow_recovery_failure_limit,
         check_interval_ms=config.check_interval_ms,
         orphan_task_audit_interval_ms=config.orphan_task_audit_interval_ms,
@@ -512,8 +513,8 @@ def retention_manifest(config: RetentionConfig) -> wire.RetentionManifest:
         terminal_record_retention=_terminal_record_retention(
             config.terminal_record_retention_hours,
         ),
-        paused_workflow_auto_cancel_after=_paused_expiry(
-            config.paused_workflow_auto_cancel_after,
+        paused_workflow_cancel_after=_paused_expiry(
+            config.paused_workflow_cancel_after,
         ),
         history_leaf_horizon_days=config.history_leaf_horizon_days,
         heartbeat_leaf_horizon_hours=config.heartbeat_leaf_horizon_hours,
@@ -524,20 +525,20 @@ def retention_manifest(config: RetentionConfig) -> wire.RetentionManifest:
             queue: _queue_retention(period)
             for queue, period in config.queue_retention.items()
         },
-        partition_maintenance_interval_s=config.partition_maintenance_interval_s,
-        retention_sweep_interval_s=config.retention_sweep_interval_s,
+        partition_maintenance_interval_seconds=config.partition_maintenance_interval_seconds,
+        retention_sweep_interval_seconds=config.retention_sweep_interval_seconds,
         retention_delete_batch_size=config.retention_delete_batch_size,
     )
 
 
 def resilience_manifest(config: WorkerResilienceConfig) -> wire.ResilienceManifest:
-    """The resilience section of `config`; `db_retry_max_attempts=0` (no
+    """The resilience section of `config`; `database_retry_max_attempts=0` (no
     limit) is its own variant. Pure.
     """
     return wire.ResilienceManifest(
-        db_retry_initial_ms=config.db_retry_initial_ms,
-        db_retry_max_ms=config.db_retry_max_ms,
-        db_retry_max_attempts=_retry_attempt_limit(config.db_retry_max_attempts),
+        database_retry_initial_ms=config.database_retry_initial_ms,
+        database_retry_max_ms=config.database_retry_max_ms,
+        database_retry_max_attempts=_retry_attempt_limit(config.database_retry_max_attempts),
         notify_poll_interval_ms=config.notify_poll_interval_ms,
     )
 
@@ -566,11 +567,11 @@ def worker_database_manifest(config: PostgresConfig) -> wire.WorkerDatabaseManif
         pgbouncer_transaction_mode=config.pgbouncer_transaction_mode,
         pool_pre_ping=config.pool_pre_ping,
         worker_pool_pre_ping=config.worker_pool_pre_ping,
-        pool_timeout=config.pool_timeout,
-        pool_recycle=_pool_recycle(config.pool_recycle),
+        pool_timeout_seconds=config.pool_timeout_seconds,
+        pool_recycle=_pool_recycle(config),
         echo=config.echo,
         tcp_keepalives=tcp_keepalives_of(config),
-        tcp_user_timeout=tcp_user_timeout_of(config.tcp_user_timeout_ms),
+        tcp_user_timeout=tcp_user_timeout_of(config),
     )
 
 
@@ -662,7 +663,7 @@ def execution_of(execution: Execution) -> wire.Execution:
 
 
 def log_level_of(level: str) -> wire.WorkerLogLevel:
-    """The manifest value of a `--loglevel` choice, in any case.
+    """The manifest value of a `--log-level` choice, in any case.
 
     The command line admits only the five levels, so another text is a defect
     and raises `AssertionError`.
@@ -679,7 +680,7 @@ def log_level_of(level: str) -> wire.WorkerLogLevel:
         case 'CRITICAL':
             return 'CRITICAL'
         case other:
-            raise AssertionError(f'--loglevel admits five levels, not {other!r}')
+            raise AssertionError(f'--log-level admits five levels, not {other!r}')
 
 
 def _at_most(path: str, value: int, maximum: int) -> int:
@@ -704,13 +705,15 @@ def _claim_lease(claim_lease_ms: int | None) -> wire.ClaimLease:
             )
 
 
-def _cluster_wide_cap(cluster_wide_cap: int | None) -> wire.ClusterWideCap:
+def _cluster_wide_cap(cluster_wide_cap: ClusterCap | NoClusterCap) -> wire.ClusterWideCap:
+    """The manifest form of the cluster cap. The manifest keeps its own tags
+    (`TASKS`, `NO_LIMIT`) for `ClusterCap` and `NoClusterCap`."""
     match cluster_wide_cap:
-        case None:
+        case NoClusterCap():
             return wire.ClusterWideCapNoLimit()
-        case cap:
+        case ClusterCap(tasks=tasks):
             return wire.ClusterWideCapTasks(
-                tasks=_at_most('cluster_wide_cap', cap, wire.TASK_LIMIT_MAX),
+                tasks=_at_most('cluster_wide_cap.tasks', tasks, wire.TASK_LIMIT_MAX),
             )
 
 
@@ -840,16 +843,16 @@ def _payload_limit(path: str, threshold: int | None) -> wire.PayloadLimit:
 
 def _session_database(config: PostgresConfig) -> wire.SessionDatabase:
     return session_database_with(
-        config,
+        config.session_database,
         same_as_database_url=wire.SessionDatabaseSameAsDatabaseUrl,
         separate=wire.SessionDatabaseSeparate,
     )
 
 
-def _pool_recycle(value: int) -> wire.PoolRecycle:
+def _pool_recycle(config: PostgresConfig) -> wire.PoolRecycle:
     """`pool_recycle_with` with the classes of the worker manifest."""
     return pool_recycle_with(
-        value,
+        config.pool_recycle,
         never=wire.PoolRecycleNever,
         after_seconds=wire.PoolRecycleAfterSeconds,
     )
@@ -858,16 +861,16 @@ def _pool_recycle(value: int) -> wire.PoolRecycle:
 def tcp_keepalives_of(config: PostgresConfig) -> wire.TcpKeepalivesConfig:
     """`tcp_keepalives_with` with the classes of the worker manifest."""
     return tcp_keepalives_with(
-        config,
+        config.tcp_keepalives,
         off=wire.TcpKeepalivesConfigOff,
         on=wire.TcpKeepalivesConfigOn,
     )
 
 
-def tcp_user_timeout_of(milliseconds: int) -> wire.TcpUserTimeoutConfig:
+def tcp_user_timeout_of(config: PostgresConfig) -> wire.TcpUserTimeoutConfig:
     """`tcp_user_timeout_with` with the classes of the worker manifest."""
     return tcp_user_timeout_with(
-        milliseconds,
+        config.tcp_user_timeout,
         system_default=wire.TcpUserTimeoutConfigSystemDefault,
         after=wire.TcpUserTimeoutConfigAfter,
     )
@@ -926,7 +929,7 @@ def _shared_pool(pool: SharedPool) -> wire.SharedPoolManifest:
     return wire.SharedPoolManifest(
         min_size=pool.min_size,
         max_size=_pool_max_size(pool.max_size),
-        check=pool.check,
+        pre_ping=pool.pre_ping,
     )
 
 
@@ -942,7 +945,7 @@ def _isolated(setting: IsolatedChildren | NoIsolatedChildren) -> wire.Isolated:
                 pool=wire.IsolatedPoolManifest(
                     min_size=children.pool.min_size,
                     max_size=children.pool.max_size.connections,
-                    check=children.pool.check,
+                    pre_ping=children.pool.pre_ping,
                 ),
                 task_send_pool=children.task_send_pool.connections,
             )
@@ -995,7 +998,7 @@ def _preload(preload: ChildPreload) -> wire.Preload:
             return 'LIBRARY'
         case ChildPreload.APP:
             return 'APP'
-        case ChildPreload.NONE:
+        case ChildPreload.NO_PRELOAD:
             return 'NO_PRELOAD'
         case _ as unreachable:
             assert_never(unreachable)

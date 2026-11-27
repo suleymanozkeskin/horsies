@@ -24,7 +24,7 @@ const greet = defineTask({ name: "greet", input: { name: h.string() }, output: h
 
 // Every process builds the same app: the demo, the worker and each child.
 const created = Horsies.create({
-  broker: { databaseUrl: DATABASE_URL },
+  database: { databaseUrl: DATABASE_URL },
   workerProfiles: { [DEFAULT_PROFILE]: ISOLATED_PROFILE },
   tasks: [greet],
 });

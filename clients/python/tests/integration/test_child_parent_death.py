@@ -49,7 +49,7 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError
 from horsies.core.types.result import Ok, Result
 
-app = Horsies(AppConfig(broker=PostgresConfig(database_url='postgresql://u:p@localhost/none')))
+app = Horsies(AppConfig(database=PostgresConfig(database_url='postgresql://u:p@localhost/none')))
 
 
 @app.task(name='hang')

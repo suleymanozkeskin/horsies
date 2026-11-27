@@ -92,7 +92,7 @@ fn unreachable_context() -> (HostContext, UnixStream) {
 /// The broker of a child whose core pool holds one connection, on the
 /// database of this test.
 async fn one_connection_child_broker() -> PostgresBroker {
-    let mut config = PostgresConfig::from_url(migrated_database_url().await);
+    let mut config = PostgresConfig::from_database_url(migrated_database_url().await);
     config.pool_size = 1;
     config.max_overflow = 0;
     PostgresBroker::connect_child(

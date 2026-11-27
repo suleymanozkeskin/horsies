@@ -106,16 +106,16 @@ from horsies.core.models.outcome import (
 from horsies.core.task_read import is_final_read, read_of_record
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.result_types import (
-    BrokerAsyncContext,
-    BrokerEnqueueError,
-    BrokerEnqueueFailed,
-    BrokerIdempotencyKeyConflict,
-    BrokerInvalidInput,
-    BrokerInvalidTaskOptions,
-    BrokerNotAttached,
-    BrokerPayloadMismatch,
-    BrokerResult,
-    BrokerSyncCallError,
+    DatabaseAsyncContext,
+    DatabaseEnqueueError,
+    DatabaseEnqueueFailed,
+    DatabaseIdempotencyKeyConflict,
+    DatabaseInvalidInput,
+    DatabaseInvalidTaskOptions,
+    DatabaseNotAttached,
+    DatabasePayloadMismatch,
+    DatabaseResult,
+    DatabaseSyncCallError,
 )
 from horsies.core.models.task_send_types import (
     TaskSendAsyncContext,
@@ -156,7 +156,7 @@ from horsies.core.models.tasks import (
     ContractCode,
     custom_code_type_of,
 )
-from horsies.core.models.workflow import WorkflowContextMissingIdError
+from horsies.core.models.workflow import WorkflowContextMissingId
 from horsies.core.telemetry.send_telemetry import (
     NO_TRACE_CARRIER,
     NoSendTelemetry,
@@ -175,7 +175,7 @@ from horsies.core.errors import (
     TaskDefinitionError,
     ConfigurationError,
     WorkflowValidationError,
-    ErrorCode,
+    HorsiesErrorCode,
     SourceLocation,
 )
 
@@ -228,7 +228,7 @@ class _ExplicitClass:
 
 type _RetentionStamp = _FromQueueMapping | _ExplicitClass
 
-# Internal retry constants for resend_on_transient_err.
+# Internal retry constants for resend_on_transient_error.
 # 1 initial attempt + _SEND_RETRY_COUNT retries = 4 total broker calls.
 _SEND_RETRY_COUNT: Final[int] = 3
 _SEND_RETRY_INITIAL_MS: Final[int] = 200
@@ -320,7 +320,7 @@ def from_node(upstream: 'TaskNode[Any, Any] | SubWorkflowNode[Any]') -> Any:
     if not isinstance(upstream, (TaskNode, SubWorkflowNode)):
         raise WorkflowValidationError(
             message='from_node() expects a TaskNode or SubWorkflowNode',
-            code=ErrorCode.WORKFLOW_INVALID_ARGS_FROM,
+            code=HorsiesErrorCode.WORKFLOW_INVALID_ARGS_FROM,
             notes=[f'got {type(upstream).__name__}'],
             help_text='pass a node instance created by TaskNode(...) / SubWorkflowNode(...) or .node()()',
         )
@@ -350,7 +350,7 @@ def effective_priority(
         valid = [q.name for q in (app.config.custom_queues or [])]
         raise ConfigurationError(
             message=f"queue '{queue_name}' not found in custom_queues",
-            code=ErrorCode.TASK_INVALID_QUEUE,
+            code=HorsiesErrorCode.TASK_INVALID_QUEUE,
             notes=[f'valid queues: {valid}'],
             help_text='use one of the configured queue names',
         )
@@ -396,7 +396,7 @@ def resolve_node_queue_and_priority(
         if queue not in valid_queues:
             raise ConfigurationError(
                 message='TaskNode queue not in app config',
-                code=ErrorCode.TASK_INVALID_QUEUE,
+                code=HorsiesErrorCode.TASK_INVALID_QUEUE,
                 notes=[
                     f"TaskNode '{node.name}' has queue '{queue}'",
                     f'valid queues: {valid_queues}',
@@ -406,7 +406,7 @@ def resolve_node_queue_and_priority(
     elif queue != 'default':
         raise ConfigurationError(
             message='TaskNode has non-default queue in DEFAULT mode',
-            code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+            code=HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE,
             notes=[
                 f"TaskNode '{node.name}' has queue '{queue}'",
                 "app is in DEFAULT mode (only 'default' queue allowed)",
@@ -623,22 +623,22 @@ class TaskHandle(Generic[T, C]):
         include_result: bool = False,
         include_failed_reason: bool = False,
         include_attempts: bool = False,
-    ) -> 'BrokerResult[TaskInfo | None]':
+    ) -> 'DatabaseResult[TaskInfo | None]':
         """Fetch metadata for this task from the broker.
 
         Returns Ok(TaskInfo) if found, Ok(None) if not found,
-        Err(BrokerOperationError) on infrastructure or precondition failure,
+        Err(DatabaseOperationError) on infrastructure or precondition failure,
         and Err(ASYNC_CONTEXT) on a thread that runs an event loop.
         """
         if not self._broker_mode or not self._app:
-            return Err(BrokerNotAttached(
+            return Err(DatabaseNotAttached(
                 message=(
                     'TaskHandle.info() requires a broker-backed task handle '
                     '(use .send() or .send_async())'
                 ),
             ))
         if in_running_event_loop():
-            return Err(BrokerAsyncContext(
+            return Err(DatabaseAsyncContext(
                 message=async_context_message(
                     f'TaskHandle.info() for task {self.task_id}',
                     'handle.info_async(...)',
@@ -663,14 +663,14 @@ class TaskHandle(Generic[T, C]):
         include_result: bool = False,
         include_failed_reason: bool = False,
         include_attempts: bool = False,
-    ) -> 'BrokerResult[TaskInfo | None]':
+    ) -> 'DatabaseResult[TaskInfo | None]':
         """Async version of info().
 
         Returns Ok(TaskInfo) if found, Ok(None) if not found,
-        Err(BrokerOperationError) on infrastructure or precondition failure.
+        Err(DatabaseOperationError) on infrastructure or precondition failure.
         """
         if not self._broker_mode or not self._app:
-            return Err(BrokerNotAttached(
+            return Err(DatabaseNotAttached(
                 message=(
                     'TaskHandle.info_async() requires a broker-backed task handle '
                     '(use .send() or .send_async())'
@@ -755,7 +755,7 @@ class NodeFactory(Generic[P, T, C]):
         if args:
             raise WorkflowValidationError(
                 message='positional arguments not allowed in .node()() calls',
-                code=ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED,
+                code=HorsiesErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED,
                 notes=[
                     f"task '{self._function.task_name}' received {len(args)} positional arg(s)",
                     'workflow nodes use kwargs-only; pass all arguments by keyword',
@@ -781,7 +781,7 @@ class NodeFactory(Generic[P, T, C]):
         if marker_explicit_overlap:
             raise WorkflowValidationError(
                 message='from_node() marker conflicts with explicit args_from',
-                code=ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP,
+                code=HorsiesErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP,
                 notes=[
                     f"task '{self._function.task_name}' has key(s) in both from_node() "
                     f"and args_from: {sorted(marker_explicit_overlap)}",
@@ -1088,19 +1088,19 @@ class TaskFunctionWithOptions(Protocol[P, T, C]):
 # ---- Broker-to-TaskSendError mapping ----
 
 def _map_broker_err(
-    broker_err: BrokerEnqueueError | BrokerSyncCallError,
+    broker_err: DatabaseEnqueueError | DatabaseSyncCallError,
     task_id: UUID,
     payload: TaskSendPayload,
 ) -> _BrokerSendError:
     """Map a broker error variant to its send variant."""
     match broker_err:
-        case BrokerPayloadMismatch(message=message):
+        case DatabasePayloadMismatch(message=message):
             return TaskSendPayloadMismatch(
                 task_id=task_id,
                 payload=payload,
                 message=message,
             )
-        case BrokerIdempotencyKeyConflict(
+        case DatabaseIdempotencyKeyConflict(
             message=message,
             owner_task_id=owner_task_id,
         ):
@@ -1110,33 +1110,33 @@ def _map_broker_err(
                 message=message,
                 owner_task_id=owner_task_id,
             )
-        case BrokerAsyncContext(message=message):
+        case DatabaseAsyncContext(message=message):
             return TaskSendAsyncContext(
                 task_id=task_id,
                 payload=payload,
                 message=message,
             )
         case (
-            BrokerInvalidTaskOptions(message=message, exception=exception)
-            | BrokerInvalidInput(message=message, exception=exception)
+            DatabaseInvalidTaskOptions(message=message, cause=exception)
+            | DatabaseInvalidInput(message=message, cause=exception)
         ):
             # Refused before the write: resending the same payload is
             # refused again, so the resend methods must not accept it.
             return TaskSendValidationFailed(
                 message=message,
-                exception=exception,
+                cause=exception,
             )
-        case BrokerEnqueueFailed(
+        case DatabaseEnqueueFailed(
             message=message,
             retryable=retryable,
-            exception=exception,
+            cause=exception,
         ):
             return TaskSendEnqueueFailed(
                 task_id=task_id,
                 payload=payload,
                 message=message,
                 retryable=retryable,
-                exception=exception,
+                cause=exception,
             )
         case _ as unreachable:
             assert_never(unreachable)
@@ -1323,7 +1323,7 @@ def _check_cancel_grace(
 class _RuleText:
     """The code and the text of one execution rule error."""
 
-    code: ErrorCode
+    code: HorsiesErrorCode
     message: str
     notes: tuple[str, ...]
     help_text: str
@@ -1363,7 +1363,7 @@ def _function_rule_text(
     match violation:
         case SharedAsyncOnDef():
             return _RuleText(
-                code=ErrorCode.TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF,
+                code=HorsiesErrorCode.TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF,
                 message='execution=SHARED_ASYNC requires an `async def` function',
                 notes=(
                     'the function is defined with `def`',
@@ -1376,7 +1376,7 @@ def _function_rule_text(
             )
         case SharedThreadOnAsyncDef():
             return _RuleText(
-                code=ErrorCode.TASK_SHARED_THREAD_REQUIRES_DEF,
+                code=HorsiesErrorCode.TASK_SHARED_THREAD_REQUIRES_DEF,
                 message='execution=SHARED_THREAD requires a `def` function',
                 notes=(
                     'the function is defined with `async def`',
@@ -1389,7 +1389,7 @@ def _function_rule_text(
             )
         case SharedWithoutTimeout(execution=execution):
             return _RuleText(
-                code=ErrorCode.TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT,
+                code=HorsiesErrorCode.TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT,
                 message=f'execution={execution.value} requires timeout_ms',
                 notes=('a shared task runs in one child process with other tasks',),
                 help_text=(
@@ -1408,7 +1408,7 @@ def _grace_rule_text(
     match violation:
         case CancelGraceOnSharedThread():
             return _RuleText(
-                code=ErrorCode.TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC,
+                code=HorsiesErrorCode.TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC,
                 message='cancel_grace_ms is not valid with execution=SHARED_THREAD',
                 notes=(
                     'execution is SHARED_THREAD',
@@ -1422,7 +1422,7 @@ def _grace_rule_text(
             )
         case CancelGraceOutOfRange(execution=execution):
             return _RuleText(
-                code=ErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE,
+                code=HorsiesErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE,
                 message='cancel_grace_ms is out of range',
                 notes=(
                     f'cancel_grace_ms must be from {MIN_CANCEL_GRACE_MS} to '
@@ -1579,7 +1579,7 @@ def _declared_code_type(
     if code_enum is not enum_class:
         raise TaskDefinitionError(
             message=f'TaskError[{enum_class.__name__}] needs error_codes={enum_class.__name__}',
-            code=ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION,
+            code=HorsiesErrorCode.TASK_STRICT_SIGNATURE_VIOLATION,
             location=location,
             notes=[
                 f"task '{task_name}' returns Result[..., TaskError[{enum_class.__name__}]]",
@@ -1592,7 +1592,7 @@ def _declared_code_type(
     if outside:
         raise TaskDefinitionError(
             message=f'an exception mapper code is not a member of {enum_class.__name__}',
-            code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+            code=HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
             location=location,
             notes=[
                 f"task '{task_name}' returns Result[..., TaskError[{enum_class.__name__}]]",
@@ -1766,7 +1766,7 @@ def create_task_wrapper(
     if unwrapped is not function:
         raise TaskDefinitionError(
             message='task function must not be pre-decorated',
-            code=ErrorCode.TASK_PREDECORATED_NOT_SUPPORTED,
+            code=HorsiesErrorCode.TASK_PREDECORATED_NOT_SUPPORTED,
             location=function_location,
             notes=[
                 f"task '{task_name}' received a callable with __wrapped__ chain",
@@ -1780,7 +1780,7 @@ def create_task_wrapper(
     if inspect.isasyncgenfunction(function):
         raise TaskDefinitionError(
             message='task function must not be an async generator',
-            code=ErrorCode.TASK_INVALID_RETURN_TYPE,
+            code=HorsiesErrorCode.TASK_INVALID_RETURN_TYPE,
             location=function_location,
             notes=[
                 f"function '{function.__name__}' is defined with `async def` and uses `yield`",
@@ -1794,7 +1794,7 @@ def create_task_wrapper(
     if inspect.isgeneratorfunction(function):
         raise TaskDefinitionError(
             message='task function must not be a generator',
-            code=ErrorCode.TASK_INVALID_RETURN_TYPE,
+            code=HorsiesErrorCode.TASK_INVALID_RETURN_TYPE,
             location=function_location,
             notes=[
                 f"function '{function.__name__}' uses `yield`",
@@ -1824,7 +1824,7 @@ def create_task_wrapper(
     if return_hint is None:
         raise TaskDefinitionError(
             message='task function must declare an explicit return type',
-            code=ErrorCode.TASK_NO_RETURN_TYPE,
+            code=HorsiesErrorCode.TASK_NO_RETURN_TYPE,
             location=function_location,
             notes=[f"function '{function.__name__}' has no return type annotation"],
             help_text='add return type annotation: `-> Result[YourType, TaskError]`',
@@ -1836,7 +1836,7 @@ def create_task_wrapper(
         case NotAResultAnnotation():
             raise TaskDefinitionError(
                 message='task function must return Result',
-                code=ErrorCode.TASK_INVALID_RETURN_TYPE,
+                code=HorsiesErrorCode.TASK_INVALID_RETURN_TYPE,
                 location=function_location,
                 notes=[
                     f"function '{function.__name__}' returns `{return_hint}`",
@@ -1861,7 +1861,7 @@ def create_task_wrapper(
     except SignatureValidationError as exc:
         raise TaskDefinitionError(
             message=exc.detail.headline,
-            code=ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION,
+            code=HorsiesErrorCode.TASK_STRICT_SIGNATURE_VIOLATION,
             location=function_location,
             notes=[exc.detail.reason],
             help_text=exc.detail.help_text,
@@ -2027,10 +2027,10 @@ def create_task_wrapper(
         states.
         """
         match exc:
-            case WorkflowContextMissingIdError():
+            case WorkflowContextMissingId():
                 return Err(TaskError(
                     exception=exc,
-                    code=ContractCode.WORKFLOW_CTX_MISSING_ID,
+                    code=ContractCode.WORKFLOW_CONTEXT_MISSING_ID,
                     message=str(exc),
                     data={'task_name': task_name},
                 ))
@@ -2099,7 +2099,7 @@ def create_task_wrapper(
             cause = without_validation_input(exc)
             return Err(TaskSendValidationFailed(
                 message=f'Invalid send options for {task_name}: {cause}',
-                exception=cause,
+                cause=cause,
             ))
 
         opts_result = serialize_task_options(send_options)
@@ -2107,7 +2107,7 @@ def create_task_wrapper(
             err = opts_result.err_value
             return Err(TaskSendValidationFailed(
                 message=f'Failed to serialize send options for {task_name}: {err}',
-                exception=err,
+                cause=err,
             ))
         return Ok((good_until, opts_result.ok_value))
 
@@ -2120,7 +2120,7 @@ def create_task_wrapper(
         trace: TraceArgument,
     ) -> TaskSendResult[TaskHandle[T, C]]:
         """The broker calls of one sync send: the first, and the resends of a
-        transient failure when ``resend_on_transient_err`` is on. Each call
+        transient failure when ``resend_on_transient_error`` is on. Each call
         passes ``trace``.
 
         ``first_kind`` is the send kind of the first broker call
@@ -2140,7 +2140,7 @@ def create_task_wrapper(
         broker = app.get_broker()
 
         last_err: TaskSendEnqueueFailed | None = None
-        max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_err else 0)
+        max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_error else 0)
 
         for attempt in range(max_attempts):
             if attempt > 0 and last_err is not None:
@@ -2159,7 +2159,7 @@ def create_task_wrapper(
                 priority=payload.priority,
                 good_until=payload.good_until,
                 sent_at=payload.sent_at,
-                enqueue_delay_seconds=payload.enqueue_delay_seconds,
+                delay_seconds=payload.enqueue_delay_seconds,
                 task_options=payload.task_options,
                 idempotency_key=payload.idempotency_key,
                 retention_class_key=payload.retention_class_key,
@@ -2201,7 +2201,7 @@ def create_task_wrapper(
         broker = app.get_broker()
 
         last_err: TaskSendEnqueueFailed | None = None
-        max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_err else 0)
+        max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_error else 0)
 
         for attempt in range(max_attempts):
             if attempt > 0 and last_err is not None:
@@ -2220,7 +2220,7 @@ def create_task_wrapper(
                 priority=payload.priority,
                 good_until=payload.good_until,
                 sent_at=payload.sent_at,
-                enqueue_delay_seconds=payload.enqueue_delay_seconds,
+                delay_seconds=payload.enqueue_delay_seconds,
                 task_options=payload.task_options,
                 idempotency_key=payload.idempotency_key,
                 retention_class_key=payload.retention_class_key,
@@ -2309,7 +2309,7 @@ def create_task_wrapper(
         """
         queue_name = task_options.queue if task_options else None
         try:
-            validated_queue_name = app.validate_queue_name(queue_name)
+            validated_queue_name = app.validate_queue(queue_name)
             priority = effective_priority(app, validated_queue_name)
         except Exception as exc:
             # Exception, not BaseException: a KeyboardInterrupt/SystemExit
@@ -2317,7 +2317,7 @@ def create_task_wrapper(
             # swallowed into Err(VALIDATION_FAILED).
             return Err(TaskSendValidationFailed(
                 message=f'Queue validation failed for {task_name}: {exc}',
-                exception=exc,
+                cause=exc,
             ))
 
         # Process-monotonic UUIDv7 from the core: the embedded birth time
@@ -2342,7 +2342,7 @@ def create_task_wrapper(
                     f"arg(s); strict-serde rejects positional args. "
                     f"Pass every argument by keyword."
                 ),
-                exception=NoCause(),
+                cause=NoCause(),
             ))
         missing = missing_required_kwargs(function, kwargs_dict)
         if missing.workflow_only:
@@ -2352,7 +2352,7 @@ def create_task_wrapper(
                     f'which only a workflow can fill. Run it as a workflow node, '
                     f'or give these parameters a default.'
                 ),
-                exception=NoCause(),
+                cause=NoCause(),
             ))
         if missing.producer:
             return Err(TaskSendValidationFailed(
@@ -2360,14 +2360,14 @@ def create_task_wrapper(
                     f'Task {task_name!r} is missing required kwargs '
                     f'{list(missing.producer)}; nothing was enqueued.'
                 ),
-                exception=NoCause(),
+                cause=NoCause(),
             ))
         try:
             _ = fill_omitted_defaults(function, kwargs_dict)
         except (StrictJsonError, ValueValidationError) as exc:
             return Err(TaskSendValidationFailed(
                 message=f'A default of {task_name!r} does not fit its type: {exc}',
-                exception=exc,
+                cause=exc,
             ))
 
         # Serialize kwargs against the receiver's declared parameter types.
@@ -2378,13 +2378,13 @@ def create_task_wrapper(
             except (StrictJsonError, ValueValidationError) as exc:
                 return Err(TaskSendValidationFailed(
                     message=f'Failed to encode kwargs for {task_name}: {exc}',
-                    exception=exc,
+                    cause=exc,
                 ))
             kwargs_r = dumps_json(encoded_kwargs)
             if is_err(kwargs_r):
                 return Err(TaskSendValidationFailed(
                     message=f'Failed to serialize encoded kwargs for {task_name}: {kwargs_r.err_value}',
-                    exception=kwargs_r.err_value,
+                    cause=kwargs_r.err_value,
                 ))
             input_json = kwargs_r.ok_value
 
@@ -2591,7 +2591,7 @@ def create_task_wrapper(
                         f'were removed: pass the period, for example '
                         f'timedelta(days=7).'
                     ),
-                    exception=NoCause(),
+                    cause=NoCause(),
                 ))
 
     def _parse_explicit_period(
@@ -2602,7 +2602,7 @@ def create_task_wrapper(
             case Err(err_value=refused):
                 return Err(TaskSendValidationFailed(
                     message=f'Invalid retention for {task_name}: {refused.reason}.',
-                    exception=NoCause(),
+                    cause=NoCause(),
                 ))
             case Ok(ok_value=days):
                 pass
@@ -2623,7 +2623,7 @@ def create_task_wrapper(
                         f'of: {listed}. Add the period to '
                         f'AppConfig.retention.retention_periods to send with it.'
                     ),
-                    exception=NoCause(),
+                    cause=NoCause(),
                 ))
 
     def _sendable_periods() -> frozenset[RetentionDays]:
@@ -2663,7 +2663,7 @@ def create_task_wrapper(
                         f'delay_seconds must not be negative, got {delay}; '
                         f'use delay_seconds=0, or omit it, to send {task_name} now'
                     ),
-                    exception=NoCause(),
+                    cause=NoCause(),
                 ))
             case refused:
                 return Err(_delay_type_refused(refused))
@@ -2675,7 +2675,7 @@ def create_task_wrapper(
                 f'delay_seconds must be an int number of seconds or None, '
                 f'got {type(refused).__name__}'
             ),
-            exception=NoCause(),
+            cause=NoCause(),
         )
 
     def send(
@@ -2763,19 +2763,14 @@ def create_task_wrapper(
     ) -> Result[tuple[UUID, TaskSendPayload], TaskSendValidationFailed]:
         """Check that a resendable error's payload belongs to this task.
 
-        The parameter type admits ``TaskSendEnqueueFailed``,
-        ``TaskSendAsyncContext`` and ``TaskSendIdempotencyKeyConflict``; each
-        carries its task id and payload. Another variant, passed by a caller
+        The parameter type admits ``TaskSendEnqueueFailed`` and
+        ``TaskSendAsyncContext``; each carries its task id and payload. Another variant, passed by a caller
         without a type checker, fails an assertion that names it. Refused: a
         payload of another task. A payload with a delay is sent again with
         its delay. Returns ``Ok((task_id, payload))``.
         """
         match error:
-            case (
-                TaskSendEnqueueFailed()
-                | TaskSendAsyncContext()
-                | TaskSendIdempotencyKeyConflict()
-            ):
+            case TaskSendEnqueueFailed() | TaskSendAsyncContext():
                 pass
             case _ as refused:
                 assert_never(refused)
@@ -2785,7 +2780,7 @@ def create_task_wrapper(
                     f'cross-task resend: error is for {error.payload.task_name!r} '
                     f'but this task is {task_name!r}'
                 ),
-                exception=NoCause(),
+                cause=NoCause(),
             ))
         return Ok((error.task_id, error.payload))
 

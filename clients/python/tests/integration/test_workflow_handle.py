@@ -20,7 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 import horsies._core as core
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.broker import PostgresConfig, SessionDatabaseSeparate
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.models.outcome import (
     Failed,
     ReadDatabaseError,
@@ -37,9 +38,9 @@ from horsies.core.models.workflow import (
     WorkflowStatus,
     WorkflowTaskStatus,
     OnError,
-    HandleDbOperationFailed,
-    HandleErrorCode,
-    HandleStoredDataInvalid,
+    WorkflowHandleDatabaseOperationFailed,
+    WorkflowHandleErrorCode,
+    WorkflowHandleStoredDataInvalid,
 )
 from horsies.core.codec.json_io import SerializationError, dumps_json
 from horsies.core.codec.typed import encode_task_error
@@ -66,7 +67,7 @@ async def unreachable_broker() -> AsyncGenerator[PostgresBroker, None]:
     the core's retryable database failure for each call."""
     broken = PostgresBroker(
         PostgresConfig(database_url=SecretStr(UNREACHABLE_DATABASE_URL)),
-        assume_initialized=True,
+        schema_mode=SchemaMode.ASSUME_INITIALIZED,
     )
     yield broken
     _ = await broken.close_async()
@@ -80,16 +81,16 @@ async def listener_refused_broker() -> AsyncGenerator[PostgresBroker, None]:
     the workflow row. The session URL names a database of its own, so the
     listener of the process for it is new.
 
-    The broker runs no schema install (``run_schema_migrations=False``):
+    The broker runs no schema install (``SchemaMode.OBSERVE_ONLY``):
     the install runs on the session URL."""
     reader = PostgresBroker(
         PostgresConfig(
             database_url=SecretStr(DB_URL),
-            session_database_url=SecretStr(
+            session_database=SessionDatabaseSeparate(url=SecretStr(
                 f'postgresql://postgres:none@127.0.0.1:1/listener_refused_{uuid.uuid4().hex}',
-            ),
+            )),
         ),
-        run_schema_migrations=False,
+        schema_mode=SchemaMode.OBSERVE_ONLY,
     )
     yield reader
     _ = await reader.close_async()
@@ -157,7 +158,7 @@ class TestWorkflowHandleStatus:
 
         status_r = await handle.status_async()
         assert is_err(status_r)
-        assert status_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert status_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
         assert status_r.err_value.retryable is False
 
 
@@ -333,7 +334,7 @@ class TestWorkflowHandleResults:
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """result_for_async() returns WORKFLOW_CTX_MISSING_ID when node_id is None."""
+        """result_for_async() returns WORKFLOW_CONTEXT_MISSING_ID when node_id is None."""
         task_a = make_simple_task(app, 'result_for_no_id_a')
 
         node_a = TaskNode(function=task_a, kwargs={'value': 1})
@@ -621,7 +622,7 @@ class TestWorkflowHandleSubWorkflowFields:
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """Corrupt sub_workflow_summary JSON is Err(HandleStoredDataInvalid) with the cause."""
+        """Corrupt sub_workflow_summary JSON is Err(WorkflowHandleStoredDataInvalid) with the cause."""
         task_a = make_simple_task(app, 'subwf_corrupt_a')
         node_a = TaskNode(function=task_a, kwargs={'value': 1})
 
@@ -664,9 +665,9 @@ class TestWorkflowHandleSubWorkflowFields:
         tasks_r = await handle.tasks_async()
         assert is_err(tasks_r)
         err = tasks_r.err_value
-        assert isinstance(err, HandleStoredDataInvalid)
-        assert err.code == HandleErrorCode.STORED_DATA_INVALID
-        assert isinstance(err.exception, SerializationError)
+        assert isinstance(err, WorkflowHandleStoredDataInvalid)
+        assert err.code == WorkflowHandleErrorCode.STORED_DATA_INVALID
+        assert isinstance(err.cause, SerializationError)
         assert 'sub_workflow_summary JSON corrupt' in err.message
 
     async def test_subworkflow_node_with_bad_status_summary_returns_err(
@@ -680,7 +681,7 @@ class TestWorkflowHandleSubWorkflowFields:
 
         Regression: an invalid persisted status used to be silently coerced to
         WorkflowStatus.FAILED, masquerading as a genuine child failure. It must
-        now surface as Err(HandleStoredDataInvalid) with the ValueError.
+        now surface as Err(WorkflowHandleStoredDataInvalid) with the ValueError.
         """
         task_a = make_simple_task(app, 'subwf_badstatus_a')
         node_a = TaskNode(function=task_a, kwargs={'value': 1})
@@ -724,9 +725,9 @@ class TestWorkflowHandleSubWorkflowFields:
         tasks_r = await handle.tasks_async()
         assert is_err(tasks_r)
         err = tasks_r.err_value
-        assert isinstance(err, HandleStoredDataInvalid)
-        assert err.code == HandleErrorCode.STORED_DATA_INVALID
-        assert isinstance(err.exception, ValueError)
+        assert isinstance(err, WorkflowHandleStoredDataInvalid)
+        assert err.code == WorkflowHandleErrorCode.STORED_DATA_INVALID
+        assert isinstance(err.cause, ValueError)
         assert 'sub_workflow_summary invalid for node' in err.message
 
 
@@ -1226,7 +1227,7 @@ class TestWorkflowHandleCancel:
 
         cancel_r = await handle.cancel_async()
         assert is_err(cancel_r)
-        assert cancel_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert cancel_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
         assert cancel_r.err_value.retryable is False
 
 
@@ -1352,7 +1353,7 @@ class TestWorkflowHandlePauseResume:
 
         pause_r = await handle.pause_async()
         assert is_err(pause_r)
-        assert pause_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert pause_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
         assert pause_r.err_value.retryable is False
 
     async def test_resume_nonexistent_returns_not_found(
@@ -1368,7 +1369,7 @@ class TestWorkflowHandlePauseResume:
 
         resume_r = await handle.resume_async()
         assert is_err(resume_r)
-        assert resume_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert resume_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
         assert resume_r.err_value.retryable is False
 
 
@@ -1421,22 +1422,22 @@ def _assert_failed_connect(
     """A handle operation whose server refuses the connection, as the core
     builds it. The core pool opens its connection at the first statement, so
     the statement fails and its workflow error wraps the broker error:
-    ``HandleDbOperationFailed`` with Python's message (the operation's label,
+    ``WorkflowHandleDatabaseOperationFailed`` with Python's message (the operation's label,
     the workflow id and the workflow error's text, ``broker error: ...``),
     retryable, and the core's class of the cause with the operation as its
     subject and the broker error's own text."""
-    assert type(error) is HandleDbOperationFailed
+    assert type(error) is WorkflowHandleDatabaseOperationFailed
     assert error.workflow_id == workflow_id
     assert error.retryable is True
     prefix = f'{label} failed for workflow {workflow_id}: '
     assert error.message.startswith(prefix)
     cause_text = error.message.removeprefix(prefix)
-    assert type(error.exception) is CoreConnectionError
-    assert error.exception.subject == subject
-    assert error.exception.message != ''
-    assert cause_text == f'broker error: {error.exception.message}'
-    assert error.exception.retryable is True
-    assert str(error.exception) == f'{subject}: {error.exception.message}'
+    assert type(error.cause) is CoreConnectionError
+    assert error.cause.subject == subject
+    assert error.cause.message != ''
+    assert cause_text == f'broker error: {error.cause.message}'
+    assert error.cause.retryable is True
+    assert str(error.cause) == f'{subject}: {error.cause.message}'
 
 
 @pytest.mark.integration
@@ -1468,7 +1469,7 @@ class TestWorkflowHandleInfraErrors:
         unreachable_broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """status_async() returns Err(DB_OPERATION_FAILED) on DB failure."""
+        """status_async() returns Err(DATABASE_OPERATION_FAILED) on DB failure."""
         handle = await self._started_on_an_unreachable_database(
             broker, unreachable_broker, app, 'status_db_err',
         )
@@ -1476,7 +1477,7 @@ class TestWorkflowHandleInfraErrors:
         status_r = await handle.status_async()
 
         assert is_err(status_r)
-        assert status_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert status_r.err_value.code == WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED
         assert status_r.err_value.workflow_id == str(handle.workflow_id)
         assert status_r.err_value.retryable is True
         _assert_failed_connect(
@@ -1548,7 +1549,7 @@ class TestWorkflowHandleInfraErrors:
         unreachable_broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """cancel_async() returns Err(DB_OPERATION_FAILED) on DB failure, and
+        """cancel_async() returns Err(DATABASE_OPERATION_FAILED) on DB failure, and
         the workflow is not cancelled."""
         handle = await self._started_on_an_unreachable_database(
             broker, unreachable_broker, app, 'cancel_db_err',
@@ -1557,7 +1558,7 @@ class TestWorkflowHandleInfraErrors:
         cancel_r = await handle.cancel_async()
 
         assert is_err(cancel_r)
-        assert cancel_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert cancel_r.err_value.code == WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED
         assert cancel_r.err_value.retryable is True
         _assert_failed_connect(
             cancel_r.err_value, 'Cancel', 'cancel_workflow', str(handle.workflow_id),
@@ -1577,7 +1578,7 @@ class TestWorkflowHandleInfraErrors:
         unreachable_broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """results_async() returns Err(DB_OPERATION_FAILED) on DB failure."""
+        """results_async() returns Err(DATABASE_OPERATION_FAILED) on DB failure."""
         handle = await self._started_on_an_unreachable_database(
             broker, unreachable_broker, app, 'results_db_err',
         )
@@ -1585,7 +1586,7 @@ class TestWorkflowHandleInfraErrors:
         results_r = await handle.results_async()
 
         assert is_err(results_r)
-        assert results_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert results_r.err_value.code == WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED
         assert results_r.err_value.workflow_id == str(handle.workflow_id)
         _assert_failed_connect(
             results_r.err_value, 'Results', 'workflow_node_results', str(handle.workflow_id),
@@ -1605,27 +1606,27 @@ class TestWorkflowHandleInfraErrors:
         # All wrap-strategy methods return HandleResult (not raise)
         status_r = await handle.status_async()
         assert is_err(status_r)
-        assert status_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert status_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
 
         cancel_r = await handle.cancel_async()
         assert is_err(cancel_r)
-        assert cancel_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert cancel_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
 
         pause_r = await handle.pause_async()
         assert is_err(pause_r)
-        assert pause_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert pause_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
 
         resume_r = await handle.resume_async()
         assert is_err(resume_r)
-        assert resume_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert resume_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
 
         results_r = await handle.results_async()
         assert is_err(results_r)
-        assert results_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert results_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
 
         tasks_r = await handle.tasks_async()
         assert is_err(tasks_r)
-        assert tasks_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert tasks_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
 
         # Fold-strategy: get returns typed error
         get_r = await handle.get_async(wait_ms=500)
@@ -1781,7 +1782,7 @@ def _expiry_error_json(older_than: timedelta) -> str:
         encode_task_error(
             TaskError(
                 code=OutcomeCode.WORKFLOW_EXPIRED,
-                message=f'paused_workflow_auto_cancel_after elapsed: {older_than}',
+                message=f'paused_workflow_cancel_after elapsed: {older_than}',
             ),
         ),
     ):

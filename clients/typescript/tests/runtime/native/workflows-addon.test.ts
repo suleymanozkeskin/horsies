@@ -97,7 +97,7 @@ describe("the spec data parse of the addon", () => {
 /** The send rules of the accepted config of `queues` with a database URL. */
 function sendRulesOf(queues: QueueConfigInput): NativeSendRules {
   const broker = { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } } as const;
-  const config = parseAppConfig({ ...queues, broker }, () => undefined);
+  const config = parseAppConfig({ ...queues, database: broker }, () => undefined);
 
   if (!config.ok) {
     assert.fail(`the config is refused: ${JSON.stringify(config.error)}`);
@@ -154,11 +154,11 @@ describe("the child spec source registration", () => {
 });
 
 describe("the workflow reads of a workflow that does not exist, with a database", () => {
-  test("the status is the class HandleWorkflowNotFound", async () => {
+  test("the status is the class WorkflowHandleNotFound", async () => {
     const handle = testHandle();
     const read = envelopeValue(await workflowsAddon().workflowStatus(handle.native, randomUUID()));
 
-    assert.equal(read.kind === "failed" ? read.error.class : read.kind, "HandleWorkflowNotFound");
+    assert.equal(read.kind === "failed" ? read.error.class : read.kind, "WorkflowHandleNotFound");
     await handle.close();
   });
 

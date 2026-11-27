@@ -25,12 +25,11 @@ use horsies_core::core::task::result::{
     read_task_result_text, TaskResultText, TaskResultTextRefused,
 };
 use horsies_core::core::task::StoredErrorRefused;
-use horsies_core::handle::CoreHandle;
+use horsies_core::handle::CoreConnection;
 use horsies_core::{
-    process_role, wait_inside_task_message, BoundedWait, BrokerError, BrokerErrorCode,
-    BrokerOperationError, BuiltInTaskCode, JsonText, OperationalErrorCode, OutcomeCode,
-    ProcessRole, RawResultRead, RawResultRecord, RetrievalCode, StoredEnvelopeText, TaskInfoRead,
-    TaskResult,
+    process_role, wait_inside_task_message, BoundedWait, BrokerError, BuiltInTaskCode,
+    DatabaseErrorCode, DatabaseOperationError, JsonText, OperationalCode, OutcomeCode, ProcessRole,
+    RawResultRead, RawResultRecord, RetrievalCode, StoredEnvelopeText, TaskInfoRead, TaskResult,
 };
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
@@ -125,12 +124,12 @@ pub enum ReadError {
     /// async form reads.
     #[error("{message}")]
     AsyncContext { message: String },
-    /// `BROKER_ERROR`: the database or the connection failed.
+    /// `DATABASE_ERROR`: the database or the connection failed.
     /// `database_code` is the code of the failed database operation;
     /// `retryable` is the classification of the cause.
     #[error("the read failed ({database_code}): {message}")]
     DatabaseError {
-        database_code: BrokerErrorCode,
+        database_code: DatabaseErrorCode,
         message: String,
         retryable: bool,
     },
@@ -138,20 +137,21 @@ pub enum ReadError {
 
 impl ReadError {
     /// The built-in code of this failure, as Python's `TaskHandle.get`
-    /// stores it.
+    /// stores it. A custom code that `E` does not name is
+    /// `UNKNOWN_CUSTOM_CODE`.
     pub fn code(&self) -> BuiltInTaskCode {
         match self {
             Self::WaitTimeout { .. } => RetrievalCode::WaitTimeout.into(),
             Self::TaskNotFound { .. } => RetrievalCode::TaskNotFound.into(),
             Self::ResultNotAvailable { .. } => RetrievalCode::ResultNotAvailable.into(),
             Self::ResultDeserializationError { .. } => {
-                OperationalErrorCode::ResultDeserializationError.into()
+                OperationalCode::ResultDeserializationError.into()
             }
             Self::UnknownCustomCode { .. } => RetrievalCode::UnknownCustomCode.into(),
             Self::InvalidInput { .. } => RetrievalCode::InvalidInput.into(),
             Self::WaitInsideTask { .. } => RetrievalCode::WaitInsideTask.into(),
             Self::AsyncContext { .. } => RetrievalCode::AsyncContext.into(),
-            Self::DatabaseError { .. } => OperationalErrorCode::BrokerError.into(),
+            Self::DatabaseError { .. } => OperationalCode::DatabaseError.into(),
         }
     }
 
@@ -174,7 +174,7 @@ impl ReadError {
     /// The failure of a connect or a schema install before the read.
     pub(crate) fn of_broker(error: &BrokerError) -> Self {
         Self::DatabaseError {
-            database_code: BrokerErrorCode::TaskInfoQueryFailed,
+            database_code: DatabaseErrorCode::TaskInfoQueryFailed,
             message: error.to_string(),
             retryable: error.is_retryable(),
         }
@@ -182,9 +182,9 @@ impl ReadError {
 
     /// The failure of a read. A stored payload that does not read keeps its
     /// own variant.
-    pub(crate) fn of_operation(task_id: Uuid, error: BrokerOperationError) -> Self {
+    pub(crate) fn of_operation(task_id: Uuid, error: DatabaseOperationError) -> Self {
         match error {
-            BrokerOperationError::InvalidJsonPayload { message, .. } => {
+            DatabaseOperationError::InvalidJsonPayload { message, .. } => {
                 Self::ResultDeserializationError {
                     task_id,
                     cause: message,
@@ -228,7 +228,7 @@ pub struct TaskInfoParts {
 /// value of a call. Nothing ran.
 pub struct TaskHandle<T, E> {
     task_id: Uuid,
-    reads: Arc<CoreHandle>,
+    reads: Arc<CoreConnection>,
     kept: Arc<OnceLock<Result<TaskOutcome<T, E>, ReadError>>>,
     types: PhantomData<fn() -> (T, E)>,
 }
@@ -236,7 +236,7 @@ pub struct TaskHandle<T, E> {
 impl<T, E> TaskHandle<T, E> {
     /// The handle of `task_id`, read through `reads`: the handle that sent
     /// the task, or the app's handle for a read by id.
-    pub(crate) fn new(task_id: Uuid, reads: Arc<CoreHandle>) -> Self {
+    pub(crate) fn new(task_id: Uuid, reads: Arc<CoreConnection>) -> Self {
         Self {
             task_id,
             reads,
@@ -349,7 +349,7 @@ where
 /// In a fork, without `exec`, of the process that started the core's
 /// process runtime. Nothing ran.
 pub(crate) async fn read_task_info(
-    reads: &CoreHandle,
+    reads: &CoreConnection,
     task_id: Uuid,
     parts: TaskInfoParts,
 ) -> Result<TaskInfo, ReadError> {
@@ -880,7 +880,7 @@ mod tests {
                 message: "blocking get on a runtime thread".to_owned(),
             },
             ReadError::DatabaseError {
-                database_code: BrokerErrorCode::TaskInfoQueryFailed,
+                database_code: DatabaseErrorCode::TaskInfoQueryFailed,
                 message: "down".to_owned(),
                 retryable: true,
             },
@@ -975,7 +975,7 @@ mod tests {
     fn an_invalid_payload_read_is_unreadable_and_another_failure_is_database() {
         let unreadable = ReadError::of_operation(
             task(),
-            BrokerOperationError::InvalidJsonPayload {
+            DatabaseOperationError::InvalidJsonPayload {
                 message: "digest mismatch".to_owned(),
                 cause: Box::new(horsies_core::BrokerCheckCause::Check),
             },
@@ -986,7 +986,7 @@ mod tests {
         ));
         let database = ReadError::of_operation(
             task(),
-            BrokerOperationError::task_info_query_failed(
+            DatabaseOperationError::task_info_query_failed(
                 task(),
                 horsies_core::BrokerOperationSource::Broker(
                     horsies_core::BrokerError::ListenerClosed,
@@ -1144,7 +1144,7 @@ mod tests {
     /// is kept.
     #[tokio::test]
     async fn a_get_above_the_bound_is_invalid_input_before_any_statement() {
-        let app = Horsies::new(AppConfig::for_database_url(
+        let app = Horsies::new(AppConfig::from_database_url(
             "postgresql://127.0.0.1:1/nothing",
         ))
         .unwrap();
@@ -1165,7 +1165,7 @@ mod tests {
     /// TypeScript; a later read within the bound returns the kept read.
     #[tokio::test]
     async fn a_kept_read_does_not_hide_a_limit_above_the_bound() {
-        let app = Horsies::new(AppConfig::for_database_url(
+        let app = Horsies::new(AppConfig::from_database_url(
             "postgresql://127.0.0.1:1/nothing",
         ))
         .unwrap();
@@ -1187,7 +1187,7 @@ mod tests {
     /// first, as `TaskHandle::get`.
     #[tokio::test]
     async fn the_reads_by_task_id_above_the_bound_are_invalid_input_before_any_statement() {
-        let app = Horsies::new(AppConfig::for_database_url(
+        let app = Horsies::new(AppConfig::from_database_url(
             "postgresql://127.0.0.1:1/nothing",
         ))
         .unwrap();
@@ -1217,7 +1217,7 @@ mod tests {
     /// connects to the address, which has no database.
     #[tokio::test]
     async fn a_kept_outcome_is_returned_again_and_clones_share_it() {
-        let app = Horsies::new(AppConfig::for_database_url(
+        let app = Horsies::new(AppConfig::from_database_url(
             "postgresql://127.0.0.1:1/nothing",
         ))
         .unwrap();

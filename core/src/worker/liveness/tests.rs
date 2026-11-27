@@ -167,7 +167,7 @@ fn the_watch_fails_closed_only_past_the_bound_with_a_task_at_risk() {
 fn the_rule_of_the_config_follows_stale_running_recovery() {
     let on = RecoveryConfig::default();
     let off = RecoveryConfig {
-        auto_fail_stale_running: false,
+        fail_stale_running: false,
         ..RecoveryConfig::default()
     };
 

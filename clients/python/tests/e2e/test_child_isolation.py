@@ -44,7 +44,7 @@ GIL_HOLD_S = 8
 
 @dataclass(slots=True)
 class _StartPath:
-    mode: ChildPreload = ChildPreload.NONE
+    mode: ChildPreload = ChildPreload.NO_PRELOAD
 
 
 _start_path = _StartPath()
@@ -52,16 +52,16 @@ _start_path = _StartPath()
 
 @pytest.fixture(
     autouse=True,
-    params=[ChildPreload.NONE, ChildPreload.LIBRARY, ChildPreload.APP],
+    params=[ChildPreload.NO_PRELOAD, ChildPreload.LIBRARY, ChildPreload.APP],
     ids=['exec', 'library', 'app'],
 )
 def start_path(request: pytest.FixtureRequest) -> Iterator[None]:
     """Run every test here on each way a child can start. Preload needs Linux."""
-    if request.param is not ChildPreload.NONE and sys.platform != 'linux':
+    if request.param is not ChildPreload.NO_PRELOAD and sys.platform != 'linux':
         pytest.skip('preload is Linux only')
     _start_path.mode = request.param
     yield
-    _start_path.mode = ChildPreload.NONE
+    _start_path.mode = ChildPreload.NO_PRELOAD
 
 
 def _worker(instance_path: str, *, children: int, **options: Any) -> Any:

@@ -31,7 +31,7 @@ from horsies.core.types.result import Err, Ok
 pytestmark = [pytest.mark.unit]
 
 WORKFLOW_ID = '0b6f3c1e-9d2a-4e7b-8c5f-1a2b3c4d5e6f'
-LEGACY_EXPIRY_TEXT = 'paused_workflow_auto_cancel_after: 1 day, 0:00:00'
+LEGACY_EXPIRY_TEXT = 'paused_workflow_cancel_after: 1 day, 0:00:00'
 
 TERMINAL_ERROR_STATUSES = [
     WorkflowStatus.FAILED,

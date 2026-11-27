@@ -24,13 +24,13 @@ from horsies.core.codec.json_value import JsonValue, StrictJsonError
 from horsies.core.codec.typed import encode_task_error
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.brokers.result_types import (
-    BrokerEnqueueFailed,
-    BrokerErrorCode,
-    BrokerIdempotencyKeyConflict,
-    BrokerPayloadMismatch,
+    DatabaseEnqueueFailed,
+    DatabaseErrorCode,
+    DatabaseIdempotencyKeyConflict,
+    DatabasePayloadMismatch,
 )
 from horsies.core.types.error_detail import NoCause
-from horsies.core.errors import ConfigurationError, ErrorCode, TaskDefinitionError
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode, TaskDefinitionError
 from horsies.core.exception_mapper import ExceptionMapper
 from horsies.core.models.outcome import (
     Failed,
@@ -43,11 +43,11 @@ from horsies.core.models.outcome import (
 )
 from horsies.core.models.tasks import (
     ContractCode,
-    OperationalErrorCode,
+    OperationalCode,
     TaskError,
     TaskOptions,
 )
-from horsies.core.models.workflow import WorkflowContextMissingIdError
+from horsies.core.models.workflow import WorkflowContextMissingId
 from horsies.core.task_decorator import (
     BoundTaskNode,
     FromNodeMarker,
@@ -145,7 +145,7 @@ def _make_app(
     suppress_sends: bool = False,
     exception_mapper: ExceptionMapper | None = None,
     default_unhandled_error_code: str = 'UNHANDLED_EXCEPTION',
-    resend_on_transient_err: bool = False,
+    resend_on_transient_error: bool = False,
     payload_policy: PayloadPolicy | None = None,
 ) -> MagicMock:
     """Build a minimal mock Horsies app for unit tests.
@@ -158,11 +158,11 @@ def _make_app(
     app.config.custom_queues = custom_queues
     app.config.exception_mapper = exception_mapper or {}
     app.config.default_unhandled_error_code = default_unhandled_error_code
-    app.config.resend_on_transient_err = resend_on_transient_err
+    app.config.resend_on_transient_error = resend_on_transient_error
     app.config.payload = payload_policy or PayloadPolicy()
     app.are_sends_suppressed.return_value = suppress_sends
     app.send_telemetry.return_value = NO_SEND_TELEMETRY
-    app.validate_queue_name.return_value = 'default'
+    app.validate_queue.return_value = 'default'
     return app
 
 
@@ -208,7 +208,7 @@ class TestEffectivePriority:
         with pytest.raises(ConfigurationError) as exc_info:
             effective_priority(app, 'missing')
 
-        assert exc_info.value.code == ErrorCode.TASK_INVALID_QUEUE
+        assert exc_info.value.code == HorsiesErrorCode.TASK_INVALID_QUEUE
 
     def test_custom_mode_none_custom_queues_raises(self) -> None:
         """CUSTOM mode with custom_queues=None raises ConfigurationError."""
@@ -217,7 +217,7 @@ class TestEffectivePriority:
         with pytest.raises(ConfigurationError) as exc_info:
             effective_priority(app, 'anything')
 
-        assert exc_info.value.code == ErrorCode.TASK_INVALID_QUEUE
+        assert exc_info.value.code == HorsiesErrorCode.TASK_INVALID_QUEUE
 
 
 # =============================================================================
@@ -292,7 +292,7 @@ class TestResolveNodeQueueAndPriority:
         with pytest.raises(ConfigurationError) as exc_info:
             resolve_node_queue_and_priority(app, node)
 
-        assert exc_info.value.code == ErrorCode.TASK_INVALID_QUEUE
+        assert exc_info.value.code == HorsiesErrorCode.TASK_INVALID_QUEUE
 
     def test_default_mode_non_default_queue_raises(self) -> None:
         """DEFAULT mode + non-'default' queue → CONFIG_INVALID_QUEUE_MODE."""
@@ -302,7 +302,7 @@ class TestResolveNodeQueueAndPriority:
         with pytest.raises(ConfigurationError) as exc_info:
             resolve_node_queue_and_priority(app, node)
 
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE
 
 
 @pytest.mark.unit
@@ -353,7 +353,7 @@ class TestBindTaskNode:
         with pytest.raises(ConfigurationError) as exc_info:
             bind_task_node(app, node)
 
-        assert exc_info.value.code == ErrorCode.TASK_INVALID_QUEUE
+        assert exc_info.value.code == HorsiesErrorCode.TASK_INVALID_QUEUE
 
 
 # =============================================================================
@@ -623,7 +623,7 @@ class TestTaskHandleGetAsync:
 
     @pytest.mark.asyncio
     async def test_cancelled_error_propagates(self) -> None:
-        """CancelledError is re-raised, not caught as BROKER_ERROR."""
+        """CancelledError is re-raised, not caught as DATABASE_ERROR."""
         app = _make_app()
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(
@@ -695,7 +695,7 @@ class TestTaskHandleGetAsync:
 @pytest.mark.unit
 class TestReadOfRecord:
     """Direct unit tests for ``read_of_record``, the envelope decode of
-    ``TaskHandle.get``. Constructs ``BrokerResult[StoredResult]`` fixtures
+    ``TaskHandle.get``. Constructs ``DatabaseResult[StoredResult]`` fixtures
     rather than mocking the broker, so the envelope-shape contract is
     exercised independently of the broker layer.
 
@@ -792,7 +792,7 @@ class TestReadOfRecord:
         malformed = {
             '__h_task_result__': True,
             'err': {
-                'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+                'error_code': {'__builtin_task_code__': 'DATABASE_ERROR'},
                 'message': 'sneak',
                 'data': None,
                 'exception': None,
@@ -817,7 +817,7 @@ class TestReadOfRecord:
             '__h_task_result__': True,
             'ok': 42,
             'err': {
-                'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+                'error_code': {'__builtin_task_code__': 'DATABASE_ERROR'},
                 'message': 'both',
                 'data': None,
                 'exception': None,
@@ -917,19 +917,19 @@ class TestReadOfRecord:
 
     def test_err_fast_path_polymorphic_sub_workflow_error(self) -> None:
         """End-to-end: a parent task's err slot carrying a
-        ``SubWorkflowError`` shape (the engine's emit) round-trips
-        through ``read_of_record`` as a ``SubWorkflowError``,
+        ``SubWorkflowFailure`` shape (the engine's emit) round-trips
+        through ``read_of_record`` as a ``SubWorkflowFailure``,
         not a plain ``TaskError``."""
         from horsies.core.models.tasks import (
-            OperationalErrorCode as _OpCode,
-            SubWorkflowError,
+            OperationalCode as _OpCode,
+            SubWorkflowFailure,
         )
         from horsies.core.models.workflow.context import SubWorkflowSummary
         from horsies.core.models.workflow.enums import WorkflowStatus
         from horsies.core.types.result import Ok
         from horsies.core.types.status import TaskStatus
 
-        original = SubWorkflowError(
+        original = SubWorkflowFailure(
             code=_OpCode.UNHANDLED_EXCEPTION,
             message='child failed',
             sub_workflow_id='wf-1',
@@ -955,11 +955,11 @@ class TestReadOfRecord:
         result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
 
         match result:
-            case Ok(ok_value=Failed(error=SubWorkflowError() as sub)):
+            case Ok(ok_value=Failed(error=SubWorkflowFailure() as sub)):
                 assert sub.sub_workflow_id == 'wf-1'
                 assert sub.sub_workflow_summary.error_summary == 'downstream'
             case _:
-                pytest.fail(f'expected a failed outcome with a SubWorkflowError, got {result!r}')
+                pytest.fail(f'expected a failed outcome with a SubWorkflowFailure, got {result!r}')
 
 
 # =============================================================================
@@ -972,27 +972,27 @@ class TestTaskHandleInfo:
     """Tests for TaskHandle.info and info_async."""
 
     def test_info_without_broker_mode_returns_no_broker_error(self) -> None:
-        """info() without broker mode returns Err(NO_BROKER)."""
+        """info() without broker mode returns Err(NO_DATABASE)."""
         handle: TaskHandle[int] = TaskHandle('t-1', broker_mode=False)
 
         result = handle.info()
 
         assert result.is_err()
         err = result.err_value
-        assert err.code == BrokerErrorCode.NO_BROKER
+        assert err.code == DatabaseErrorCode.NO_DATABASE
         assert 'requires a broker-backed' in err.message
         assert err.retryable is False
 
     @pytest.mark.asyncio
     async def test_info_async_without_broker_mode_returns_no_broker_error(self) -> None:
-        """info_async() without broker mode returns Err(NO_BROKER)."""
+        """info_async() without broker mode returns Err(NO_DATABASE)."""
         handle: TaskHandle[int] = TaskHandle('t-2', broker_mode=False)
 
         result = await handle.info_async()
 
         assert result.is_err()
         err = result.err_value
-        assert err.code == BrokerErrorCode.NO_BROKER
+        assert err.code == DatabaseErrorCode.NO_DATABASE
         assert 'requires a broker-backed' in err.message
         assert err.retryable is False
 
@@ -1084,7 +1084,7 @@ class TestCreateTaskWrapperValidation:
         with pytest.raises(TaskDefinitionError) as exc_info:
             create_task_wrapper(bad_fn, app, 'test.bad_fn')  # type: ignore[arg-type]
 
-        assert exc_info.value.code == ErrorCode.TASK_NO_RETURN_TYPE
+        assert exc_info.value.code == HorsiesErrorCode.TASK_NO_RETURN_TYPE
 
     def test_wrong_return_type_raises(self) -> None:
         """Function returning non-Result raises TASK_INVALID_RETURN_TYPE."""
@@ -1095,7 +1095,7 @@ class TestCreateTaskWrapperValidation:
         with pytest.raises(TaskDefinitionError) as exc_info:
             create_task_wrapper(bad_fn, app, 'test.bad_fn')  # type: ignore[arg-type]
 
-        assert exc_info.value.code == ErrorCode.TASK_INVALID_RETURN_TYPE
+        assert exc_info.value.code == HorsiesErrorCode.TASK_INVALID_RETURN_TYPE
 
     def test_wrong_type_args_count_raises(self) -> None:
         """A bare Ok annotation raises TASK_INVALID_RETURN_TYPE."""
@@ -1107,7 +1107,7 @@ class TestCreateTaskWrapperValidation:
         with pytest.raises(TaskDefinitionError) as exc_info:
             create_task_wrapper(bad_fn, app, 'test.bad_fn')  # type: ignore[arg-type]
 
-        assert exc_info.value.code == ErrorCode.TASK_INVALID_RETURN_TYPE
+        assert exc_info.value.code == HorsiesErrorCode.TASK_INVALID_RETURN_TYPE
 
     def test_bare_result_annotation_raises_invalid_return_type(self) -> None:
         """A bare Result annotation raises TASK_INVALID_RETURN_TYPE: its
@@ -1119,7 +1119,7 @@ class TestCreateTaskWrapperValidation:
         with pytest.raises(TaskDefinitionError) as exc_info:
             create_task_wrapper(bad_fn, app, 'test.bad_fn')  # type: ignore[arg-type]
 
-        assert exc_info.value.code == ErrorCode.TASK_INVALID_RETURN_TYPE
+        assert exc_info.value.code == HorsiesErrorCode.TASK_INVALID_RETURN_TYPE
 
     def test_valid_function_creates_callable_wrapper(self) -> None:
         """Valid function produces a wrapper with correct task_name."""
@@ -1207,7 +1207,7 @@ class TestCreateTaskWrapperValidation:
         with pytest.raises(TaskDefinitionError) as exc_info:
             create_task_wrapper(bad_fn, app, 'test.bad_fn')
 
-        assert exc_info.value.code == ErrorCode.TASK_PREDECORATED_NOT_SUPPORTED
+        assert exc_info.value.code == HorsiesErrorCode.TASK_PREDECORATED_NOT_SUPPORTED
 
     def test_decorator_without_wraps_missing_return_type_rejected(self) -> None:
         """A no-wraps wrapper is rejected if it no longer satisfies the task contract."""
@@ -1226,7 +1226,7 @@ class TestCreateTaskWrapperValidation:
         with pytest.raises(TaskDefinitionError) as exc_info:
             create_task_wrapper(bad_fn, app, 'test.bad_fn')  # type: ignore[arg-type]
 
-        assert exc_info.value.code == ErrorCode.TASK_NO_RETURN_TYPE
+        assert exc_info.value.code == HorsiesErrorCode.TASK_NO_RETURN_TYPE
 
     def test_async_function_is_accepted(self) -> None:
         """An `async def` task function registers with its declared types."""
@@ -1250,7 +1250,7 @@ class TestCreateTaskWrapperValidation:
         with pytest.raises(TaskDefinitionError) as exc_info:
             create_task_wrapper(async_gen_fn, app, 'test.async_gen_fn')  # type: ignore[arg-type]
 
-        assert exc_info.value.code == ErrorCode.TASK_INVALID_RETURN_TYPE
+        assert exc_info.value.code == HorsiesErrorCode.TASK_INVALID_RETURN_TYPE
         assert exc_info.value.message == 'task function must not be an async generator'
         assert any("'async_gen_fn'" in note for note in exc_info.value.notes)
 
@@ -1276,7 +1276,7 @@ class TestCreateTaskWrapperValidation:
         with pytest.raises(TaskDefinitionError) as exc_info:
             create_task_wrapper(async_fn, app, 'test.async_fn')  # type: ignore[arg-type]
 
-        assert exc_info.value.code == ErrorCode.TASK_NO_RETURN_TYPE
+        assert exc_info.value.code == HorsiesErrorCode.TASK_NO_RETURN_TYPE
 
     def test_async_function_with_wrong_return_type_rejected(self) -> None:
         """The declared result of an `async def` must be a Result: HRS-101."""
@@ -1288,7 +1288,7 @@ class TestCreateTaskWrapperValidation:
         with pytest.raises(TaskDefinitionError) as exc_info:
             create_task_wrapper(async_fn, app, 'test.async_fn')  # type: ignore[arg-type]
 
-        assert exc_info.value.code == ErrorCode.TASK_INVALID_RETURN_TYPE
+        assert exc_info.value.code == HorsiesErrorCode.TASK_INVALID_RETURN_TYPE
 
     def test_async_function_signature_is_strictly_checked(self) -> None:
         """A positional parameter on an `async def` gets HRS-105, as on a `def`."""
@@ -1300,7 +1300,7 @@ class TestCreateTaskWrapperValidation:
         with pytest.raises(TaskDefinitionError) as exc_info:
             create_task_wrapper(async_fn, app, 'test.async_fn')
 
-        assert exc_info.value.code == ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
+        assert exc_info.value.code == HorsiesErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
 
 
 # =============================================================================
@@ -1372,9 +1372,9 @@ class TestCreateTaskWrapperExecution:
             wrapper(x=1)
 
     def test_workflow_context_missing_id_error(self) -> None:
-        """WorkflowContextMissingIdError produces WORKFLOW_CTX_MISSING_ID."""
+        """WorkflowContextMissingId produces WORKFLOW_CONTEXT_MISSING_ID."""
         def ctx_fn(*, x: int) -> Result[int, TaskError]:
-            raise WorkflowContextMissingIdError('missing node id')
+            raise WorkflowContextMissingId('missing node id')
 
         app = _make_app()
         wrapper = create_task_wrapper(ctx_fn, app, 'test.ctx_fn')
@@ -1382,7 +1382,7 @@ class TestCreateTaskWrapperExecution:
         result = wrapper(x=1)
 
         assert isinstance(result, Err)
-        assert result.err_value.code == ContractCode.WORKFLOW_CTX_MISSING_ID
+        assert result.err_value.code == ContractCode.WORKFLOW_CONTEXT_MISSING_ID
 
     def test_generic_exception_uses_exception_mapper(self) -> None:
         """Unhandled exception resolved via exception_mapper chain."""
@@ -1486,7 +1486,7 @@ class TestCreateTaskWrapperAsyncExecution:
         result = asyncio.run(wrapper(x=1))
         assert isinstance(result, Err)
         err = result.err_value
-        assert err.code == OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert err.code == OperationalCode.UNHANDLED_EXCEPTION
         assert err.message == 'Unhandled exception in task failing_fn: ValueError: oops'
 
     def test_keyboard_interrupt_propagates(self) -> None:
@@ -1539,7 +1539,7 @@ class TestCreateTaskWrapperAsyncExecution:
         result = asyncio.run(wrapper(x=1))
         assert isinstance(result, Err)
         err = result.err_value
-        assert err.code == OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert err.code == OperationalCode.UNHANDLED_EXCEPTION
         assert 'CancelledError' in (err.message or '')
 
     def test_a_cancel_request_for_the_caller_propagates(self) -> None:
@@ -1724,7 +1724,7 @@ class TestReturnedValueWithALoneSurrogateInTheValidatorText:
         result = wrapper()
 
         assert isinstance(result, Err)
-        assert result.err_value.code == OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert result.err_value.code == OperationalCode.UNHANDLED_EXCEPTION
 
 
 @pytest.mark.unit
@@ -1750,9 +1750,9 @@ class TestCreateTaskWrapperSend:
             return Ok(x)
 
         app = _make_app()
-        app.validate_queue_name.side_effect = ConfigurationError(
+        app.validate_queue.side_effect = ConfigurationError(
             message='bad queue',
-            code=ErrorCode.TASK_INVALID_QUEUE,
+            code=HorsiesErrorCode.TASK_INVALID_QUEUE,
         )
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
@@ -1760,7 +1760,7 @@ class TestCreateTaskWrapperSend:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert isinstance(result.err_value.exception, ConfigurationError)
+        assert isinstance(result.err_value.cause, ConfigurationError)
 
     @pytest.mark.parametrize(
         ('value', 'subject'),
@@ -1786,7 +1786,7 @@ class TestCreateTaskWrapperSend:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert isinstance(result.err_value.exception, StrictJsonError)
+        assert isinstance(result.err_value.cause, StrictJsonError)
         assert result.err_value.message == (
             f'Failed to encode kwargs for test.good_fn: x: {subject} holds a '
             'lone surrogate, which UTF-8 cannot encode'
@@ -1813,7 +1813,7 @@ class TestCreateTaskWrapperSend:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert isinstance(result.err_value.exception, StrictJsonError)
+        assert isinstance(result.err_value.cause, StrictJsonError)
         assert 'nested deeper than 300 levels' in result.err_value.message
         app.get_broker.assert_not_called()
 
@@ -1834,7 +1834,7 @@ class TestCreateTaskWrapperSend:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert isinstance(result.err_value.exception, StrictJsonError)
+        assert isinstance(result.err_value.cause, StrictJsonError)
         assert result.err_value.message == (
             'Failed to encode kwargs for test.good_fn: x: a validation error '
             'holds a lone surrogate, which UTF-8 cannot encode'
@@ -1856,7 +1856,7 @@ class TestCreateTaskWrapperSend:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert isinstance(result.err_value.exception, ValueValidationError)
+        assert isinstance(result.err_value.cause, ValueValidationError)
         assert result.err_value.message == (
             'Failed to encode kwargs for test.good_fn: x: serialization failed: '
             'Circular reference detected (id repeated)'
@@ -1879,7 +1879,7 @@ class TestCreateTaskWrapperSend:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert isinstance(result.err_value.exception, ValueValidationError)
+        assert isinstance(result.err_value.cause, ValueValidationError)
         assert result.err_value.message == (
             'Failed to encode kwargs for test.good_fn: x: serialization failed: '
             'Circular reference detected (depth exceeded)'
@@ -1977,10 +1977,10 @@ class TestCreateTaskWrapperSend:
 
         app = _make_app()
         broker = MagicMock()
-        broker.enqueue.return_value = Err(BrokerEnqueueFailed(
+        broker.enqueue.return_value = Err(DatabaseEnqueueFailed(
             message='db gone',
             retryable=True,
-            exception=ConnectionError('db gone'),
+            cause=ConnectionError('db gone'),
         ))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
@@ -2257,10 +2257,10 @@ class TestCreateTaskWrapperSendAsync:
 
         app = _make_app()
         broker = MagicMock()
-        broker.enqueue_async = AsyncMock(return_value=Err(BrokerEnqueueFailed(
+        broker.enqueue_async = AsyncMock(return_value=Err(DatabaseEnqueueFailed(
             message='fail',
             retryable=False,
-            exception=RuntimeError('fail'),
+            cause=RuntimeError('fail'),
         )))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
@@ -2277,7 +2277,7 @@ class TestCreateTaskWrapperSendAsync:
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
-        app = _make_app(resend_on_transient_err=True)
+        app = _make_app(resend_on_transient_error=True)
         broker = MagicMock()
         defect = TypeError('missing required argument')
         broker.enqueue_async = AsyncMock(side_effect=defect)
@@ -2296,7 +2296,7 @@ class TestCreateTaskWrapperSendAsync:
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
-        app = _make_app(resend_on_transient_err=True)
+        app = _make_app(resend_on_transient_error=True)
         broker = MagicMock()
         defect = TypeError('missing required argument')
         broker.enqueue_async = AsyncMock(side_effect=defect)
@@ -2316,9 +2316,9 @@ class TestCreateTaskWrapperSendAsync:
             return Ok(x)
 
         app = _make_app()
-        app.validate_queue_name.side_effect = ConfigurationError(
+        app.validate_queue.side_effect = ConfigurationError(
             message='bad queue',
-            code=ErrorCode.TASK_INVALID_QUEUE,
+            code=HorsiesErrorCode.TASK_INVALID_QUEUE,
         )
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
@@ -2367,11 +2367,11 @@ class TestCreateTaskWrapperDelayedSend:
         handle = result.ok_value
         assert handle.task_id == 'sched-1'
         assert handle._broker_mode is True
-        # Verify enqueue was called with sent_at and enqueue_delay_seconds
+        # Verify enqueue was called with sent_at and delay_seconds
         call_kwargs = broker.enqueue.call_args
         assert call_kwargs.kwargs.get('sent_at') is not None
         assert call_kwargs.kwargs['send_kind'] is SendKind.FIRST
-        assert call_kwargs.kwargs.get('enqueue_delay_seconds') == 60
+        assert call_kwargs.kwargs.get('delay_seconds') == 60
 
     def test_with_options_delay_and_good_until(self) -> None:
         """with_options(good_until=..., delay_seconds=...) sends both."""
@@ -2395,7 +2395,7 @@ class TestCreateTaskWrapperDelayedSend:
         assert is_ok(result)
         call_kwargs = broker.enqueue.call_args.kwargs
         assert call_kwargs['good_until'] == deadline
-        assert call_kwargs['enqueue_delay_seconds'] == 60
+        assert call_kwargs['delay_seconds'] == 60
         assert json.loads(call_kwargs['task_options'])['good_until'] == deadline.isoformat()
 
     def test_delayed_send_broker_exception_returns_enqueue_failed(self) -> None:
@@ -2405,10 +2405,10 @@ class TestCreateTaskWrapperDelayedSend:
 
         app = _make_app()
         broker = MagicMock()
-        broker.enqueue.return_value = Err(BrokerEnqueueFailed(
+        broker.enqueue.return_value = Err(DatabaseEnqueueFailed(
             message='gone',
             retryable=True,
-            exception=ConnectionError('gone'),
+            cause=ConnectionError('gone'),
         ))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
@@ -2424,9 +2424,9 @@ class TestCreateTaskWrapperDelayedSend:
             return Ok(x)
 
         app = _make_app()
-        app.validate_queue_name.side_effect = ConfigurationError(
+        app.validate_queue.side_effect = ConfigurationError(
             message='bad',
-            code=ErrorCode.TASK_INVALID_QUEUE,
+            code=HorsiesErrorCode.TASK_INVALID_QUEUE,
         )
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
@@ -2467,7 +2467,7 @@ class TestCreateTaskWrapperDelayedSend:
         result = wrapper.with_options(delay_seconds=0).send(x=1)
 
         assert is_ok(result)
-        assert broker.enqueue.call_args.kwargs.get('enqueue_delay_seconds') == 0
+        assert broker.enqueue.call_args.kwargs.get('delay_seconds') == 0
 
     def test_none_delay_sends_now(self) -> None:
         """delay_seconds=None, the default, sends with no delay."""
@@ -2483,9 +2483,9 @@ class TestCreateTaskWrapperDelayedSend:
         for options in (wrapper.with_options(delay_seconds=None), wrapper.with_options()):
             result = options.send(x=1)
             assert is_ok(result)
-            assert broker.enqueue.call_args.kwargs['enqueue_delay_seconds'] is None
+            assert broker.enqueue.call_args.kwargs['delay_seconds'] is None
         assert is_ok(wrapper.send(x=1))
-        assert broker.enqueue.call_args.kwargs['enqueue_delay_seconds'] is None
+        assert broker.enqueue.call_args.kwargs['delay_seconds'] is None
 
     def test_string_delay_rejected(self) -> None:
         """A str delay returns Err(VALIDATION_FAILED), not a raw TypeError."""
@@ -2568,7 +2568,7 @@ def _make_enqueue_failed_error(
         payload=payload,
         message='db gone',
         retryable=True,
-        exception=ConnectionError('db gone'),
+        cause=ConnectionError('db gone'),
     )
 
 
@@ -2594,7 +2594,7 @@ class TestResend:
         call_kwargs = broker.enqueue.call_args.kwargs
         assert call_kwargs['task_id'] == 'retry-id-1'
         assert call_kwargs['input_json'] == '{"x":1}'
-        assert call_kwargs['enqueue_delay_seconds'] is None
+        assert call_kwargs['delay_seconds'] is None
         assert call_kwargs['send_kind'] is SendKind.REPEAT
 
     @pytest.mark.asyncio
@@ -2634,7 +2634,7 @@ class TestResend:
         assert 'cross-task resend' in result.err_value.message
 
     def test_resend_of_a_delayed_send_keeps_task_id_and_delay(self) -> None:
-        """resend of a delayed send passes the same task_id and enqueue_delay_seconds."""
+        """resend of a delayed send passes the same task_id and delay_seconds."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -2650,12 +2650,12 @@ class TestResend:
         assert is_ok(result)
         call_kwargs = broker.enqueue.call_args.kwargs
         assert call_kwargs['task_id'] == 'retry-id-1'
-        assert call_kwargs['enqueue_delay_seconds'] == 60
+        assert call_kwargs['delay_seconds'] == 60
         assert call_kwargs['send_kind'] is SendKind.REPEAT
 
     @pytest.mark.asyncio
     async def test_resend_async_of_a_delayed_send_keeps_the_delay(self) -> None:
-        """resend_async of a delayed send passes its enqueue_delay_seconds."""
+        """resend_async of a delayed send passes its delay_seconds."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -2671,30 +2671,30 @@ class TestResend:
         assert is_ok(result)
         call_kwargs = broker.enqueue_async.call_args.kwargs
         assert call_kwargs['task_id'] == 'retry-id-1'
-        assert call_kwargs['enqueue_delay_seconds'] == 60
+        assert call_kwargs['delay_seconds'] == 60
         assert call_kwargs['send_kind'] is SendKind.REPEAT
 
 
 # =============================================================================
-# create_task_wrapper — auto-retry (resend_on_transient_err)
+# create_task_wrapper — auto-retry (resend_on_transient_error)
 # =============================================================================
 
 
 @pytest.mark.unit
 class TestAutoRetry:
-    """Tests for auto-retry behavior when resend_on_transient_err=True."""
+    """Tests for auto-retry behavior when resend_on_transient_error=True."""
 
-    def test_send_with_resend_on_transient_err_retries_transient_failure(self) -> None:
+    def test_send_with_resend_on_transient_error_retries_transient_failure(self) -> None:
         """Broker returns retryable Err twice then Ok on 3rd — total 3 calls."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
-        app = _make_app(resend_on_transient_err=True)
+        app = _make_app(resend_on_transient_error=True)
         broker = MagicMock()
-        transient_err = Err(BrokerEnqueueFailed(
+        transient_err = Err(DatabaseEnqueueFailed(
             message='db gone',
             retryable=True,
-            exception=ConnectionError('db gone'),
+            cause=ConnectionError('db gone'),
         ))
         broker.enqueue.side_effect = [transient_err, transient_err, Ok('task-ok')]
         app.get_broker.return_value = broker
@@ -2712,17 +2712,17 @@ class TestAutoRetry:
             SendKind.REPEAT,
         ]
 
-    def test_send_with_resend_on_transient_err_gives_up_after_max_retries(self) -> None:
+    def test_send_with_resend_on_transient_error_gives_up_after_max_retries(self) -> None:
         """Broker always returns retryable Err — gives up after 4 total calls."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
-        app = _make_app(resend_on_transient_err=True)
+        app = _make_app(resend_on_transient_error=True)
         broker = MagicMock()
-        transient_err = Err(BrokerEnqueueFailed(
+        transient_err = Err(DatabaseEnqueueFailed(
             message='db gone',
             retryable=True,
-            exception=ConnectionError('db gone'),
+            cause=ConnectionError('db gone'),
         ))
         broker.enqueue.return_value = transient_err
         app.get_broker.return_value = broker
@@ -2734,17 +2734,17 @@ class TestAutoRetry:
         assert isinstance(result.err_value, TaskSendEnqueueFailed)
         assert broker.enqueue.call_count == 4  # 1 initial + 3 retries
 
-    def test_send_with_resend_on_transient_err_false_no_retry(self) -> None:
+    def test_send_with_resend_on_transient_error_false_no_retry(self) -> None:
         """With flag off, broker retryable Err is returned immediately (1 call)."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
-        app = _make_app(resend_on_transient_err=False)
+        app = _make_app(resend_on_transient_error=False)
         broker = MagicMock()
-        broker.enqueue.return_value = Err(BrokerEnqueueFailed(
+        broker.enqueue.return_value = Err(DatabaseEnqueueFailed(
             message='db gone',
             retryable=True,
-            exception=ConnectionError('db gone'),
+            cause=ConnectionError('db gone'),
         ))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
@@ -2754,14 +2754,14 @@ class TestAutoRetry:
         assert is_err(result)
         assert broker.enqueue.call_count == 1
 
-    def test_send_with_resend_on_transient_err_non_retryable_no_retry(self) -> None:
+    def test_send_with_resend_on_transient_error_non_retryable_no_retry(self) -> None:
         """Non-retryable Err is never retried, even with flag on."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
-        app = _make_app(resend_on_transient_err=True)
+        app = _make_app(resend_on_transient_error=True)
         broker = MagicMock()
-        broker.enqueue.return_value = Err(BrokerPayloadMismatch(
+        broker.enqueue.return_value = Err(DatabasePayloadMismatch(
             message='different payload',
         ))
         app.get_broker.return_value = broker
@@ -2778,7 +2778,7 @@ class TestAutoRetry:
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
-        app = _make_app(resend_on_transient_err=True)
+        app = _make_app(resend_on_transient_error=True)
         broker = MagicMock()
         defect = TypeError('missing required argument')
         broker.enqueue.side_effect = defect
@@ -2796,7 +2796,7 @@ class TestAutoRetry:
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
-        app = _make_app(resend_on_transient_err=True)
+        app = _make_app(resend_on_transient_error=True)
         broker = MagicMock()
         defect = TypeError('missing required argument')
         broker.enqueue.side_effect = defect
@@ -2817,7 +2817,7 @@ class TestAutoRetry:
 
 @pytest.mark.unit
 class TestPayloadMismatchClassification:
-    """Ensure PAYLOAD_MISMATCH is classified by BrokerErrorCode, not message text."""
+    """Ensure PAYLOAD_MISMATCH is classified by DatabaseErrorCode, not message text."""
 
     def test_mismatch_classified_by_code_not_message(self) -> None:
         """Broker PAYLOAD_MISMATCH code maps to TaskSendPayloadMismatch
@@ -2828,7 +2828,7 @@ class TestPayloadMismatchClassification:
         app = _make_app()
         broker = MagicMock()
         # Message intentionally omits 'sha mismatch' — old string-matching would miss it.
-        broker.enqueue.return_value = Err(BrokerPayloadMismatch(
+        broker.enqueue.return_value = Err(DatabasePayloadMismatch(
             message='duplicate task_id with conflicting payload',
         ))
         app.get_broker.return_value = broker
@@ -2849,10 +2849,10 @@ class TestPayloadMismatchClassification:
         broker = MagicMock()
         # Message contains 'sha mismatch' but code is ENQUEUE_FAILED — must NOT
         # be promoted to PAYLOAD_MISMATCH.
-        broker.enqueue.return_value = Err(BrokerEnqueueFailed(
+        broker.enqueue.return_value = Err(DatabaseEnqueueFailed(
             message='unexpected sha mismatch in log',
             retryable=True,
-            exception=NoCause(),
+            cause=NoCause(),
         ))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
@@ -2874,7 +2874,7 @@ class TestIdempotencyKeyConflictClassification:
 
         app = _make_app()
         broker = MagicMock()
-        broker.enqueue.return_value = Err(BrokerIdempotencyKeyConflict(
+        broker.enqueue.return_value = Err(DatabaseIdempotencyKeyConflict(
             message='idempotency key is reserved by task owner-task-1',
             owner_task_id='owner-task-1',
         ))
@@ -2888,13 +2888,14 @@ class TestIdempotencyKeyConflictClassification:
         assert result.err_value.owner_task_id == 'owner-task-1'
         assert result.err_value.payload.task_name == 'test.good_fn'
 
-    def test_resend_accepts_the_conflict(self) -> None:
+    def test_resend_refuses_the_conflict_and_writes_nothing(self) -> None:
+        # Reverting the removal of `TaskSendIdempotencyKeyConflict` from the
+        # accepted case in `_validate_retry` fails this test.
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
         app = _make_app()
         broker = MagicMock()
-        broker.enqueue.return_value = Ok('retry-id-1')
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
         enqueue_failed = _make_enqueue_failed_error()
@@ -2905,7 +2906,47 @@ class TestIdempotencyKeyConflictClassification:
             owner_task_id='owner-task-1',
         )
 
-        result = wrapper.resend(conflict)
+        with pytest.raises(AssertionError, match='TaskSendIdempotencyKeyConflict'):
+            wrapper.resend(conflict)  # pyright: ignore[reportArgumentType]
+
+        broker.enqueue.assert_not_called()
+
+    def test_the_send_loop_does_not_resend_a_conflict(self) -> None:
+        # With the resend loop on, the conflict gets one broker call.
+        def good_fn(*, x: int) -> Result[int, TaskError]:
+            return Ok(x)
+
+        app = _make_app()
+        app.config.resend_on_transient_error = True
+        broker = MagicMock()
+        broker.enqueue.return_value = Err(DatabaseIdempotencyKeyConflict(
+            message='idempotency key is reserved by task owner-task-1',
+            owner_task_id='owner-task-1',
+        ))
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.send(x=1)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, TaskSendIdempotencyKeyConflict)
+        assert broker.enqueue.call_count == 1
+
+    def test_the_conflict_is_not_retryable(self) -> None:
+        # Reverting `retryable` of the generated class to `True` fails this test.
+        assert TaskSendIdempotencyKeyConflict.retryable is False
+
+    def test_retry_send_still_accepts_a_retryable_enqueue_failure(self) -> None:
+        def good_fn(*, x: int) -> Result[int, TaskError]:
+            return Ok(x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('retry-id-1')
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.resend(_make_enqueue_failed_error())
 
         assert is_ok(result)
         assert broker.enqueue.call_args.kwargs['task_id'] == 'retry-id-1'
@@ -2958,7 +2999,7 @@ class TestDefinitionLevelGoodUntil:
             )
             decorator(bad_deadline)
 
-        assert exc_info.value.code == ErrorCode.TASK_INVALID_OPTIONS
+        assert exc_info.value.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
         assert 'good_until must be set when sending a task' in exc_info.value.message
 
 
@@ -2969,7 +3010,7 @@ def _real_app() -> Any:
     from horsies.core.models.app import AppConfig
     from horsies.core.models.broker import PostgresConfig
 
-    return Horsies(AppConfig(broker=PostgresConfig(
+    return Horsies(AppConfig(database=PostgresConfig(
         database_url=SecretStr('postgresql://u:p@localhost:5432/db'),
     )))
 
@@ -2987,7 +3028,7 @@ class TestEmptyTaskName:
         with pytest.raises(TaskDefinitionError) as exc_info:
             app.task('')(nameless)
 
-        assert exc_info.value.code == ErrorCode.TASK_INVALID_OPTIONS
+        assert exc_info.value.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
         assert exc_info.value.message == 'task name is empty'
         assert '' not in app.tasks
 
@@ -3039,7 +3080,7 @@ class TestFromNodeMarker:
         with pytest.raises(WorkflowValidationError) as exc_info:
             from_node('not_a_node')  # type: ignore[arg-type]
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_ARGS_FROM
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_ARGS_FROM
 
 
 # =============================================================================
@@ -3071,7 +3112,7 @@ class TestNodeFactoryPositionalRejection:
         with pytest.raises(WorkflowValidationError) as exc_info:
             factory(42)  # positional — forbidden
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
         assert 'positional' in exc_info.value.message
 
     def test_kwargs_only_succeeds(self) -> None:
@@ -3263,7 +3304,7 @@ class TestNodeFactoryFromNodeConflicts:
         with pytest.raises(WorkflowValidationError) as exc_info:
             factory(data=from_node(producer_node))
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
         assert 'data' in str(exc_info.value)
 
     def test_disjoint_marker_and_explicit_args_from_merges(self) -> None:
@@ -3369,10 +3410,10 @@ def _failed_send_error(
 ) -> TaskSendEnqueueFailed:
     """Produce a real ENQUEUE_FAILED error (with payload) outside any loop."""
     ok_return = broker.enqueue.return_value
-    broker.enqueue.return_value = Err(BrokerEnqueueFailed(
+    broker.enqueue.return_value = Err(DatabaseEnqueueFailed(
         message='boom',
         retryable=False,
-        exception=NoCause(),
+        cause=NoCause(),
     ))
     res = task.with_options(delay_seconds=delay_seconds).send(value=1)
     broker.enqueue.return_value = ok_return
@@ -3498,7 +3539,7 @@ class TestAsyncContextGuard:
             broker.enqueue_async.call_args.kwargs['task_id']
             == guarded.err_value.task_id
         )
-        assert broker.enqueue_async.call_args.kwargs['enqueue_delay_seconds'] == 7
+        assert broker.enqueue_async.call_args.kwargs['delay_seconds'] == 7
 
     def test_sync_send_outside_loop_unaffected(self) -> None:
         broker = _ok_broker()
@@ -3515,7 +3556,7 @@ class TestAsyncContextGuard:
         res = task.with_options(delay_seconds=5).send(value=1)
         assert is_ok(res)
         broker.enqueue.assert_called_once()
-        assert broker.enqueue.call_args.kwargs['enqueue_delay_seconds'] == 5
+        assert broker.enqueue.call_args.kwargs['delay_seconds'] == 5
 
     def test_send_async_inside_loop_unaffected(self) -> None:
         broker = _ok_broker()
@@ -3537,7 +3578,7 @@ class TestDelayedSendAsync:
         res = asyncio.run(task.with_options(delay_seconds=9).send_async(value=1))
         assert is_ok(res)
         broker.enqueue_async.assert_awaited_once()
-        assert broker.enqueue_async.call_args.kwargs['enqueue_delay_seconds'] == 9
+        assert broker.enqueue_async.call_args.kwargs['delay_seconds'] == 9
 
     def test_delayed_send_async_rejects_negative_delay(self) -> None:
         broker = _ok_broker()
@@ -3572,7 +3613,7 @@ class TestDelayedSendAsync:
             task.with_options(good_until=None, delay_seconds=3).send_async(value=1)
         )
         assert is_ok(res)
-        assert broker.enqueue_async.call_args.kwargs['enqueue_delay_seconds'] == 3
+        assert broker.enqueue_async.call_args.kwargs['delay_seconds'] == 3
 
     def test_resend_async_of_a_delayed_send_reuses_payload(self) -> None:
         broker = _ok_broker()
@@ -3582,7 +3623,7 @@ class TestDelayedSendAsync:
         res = asyncio.run(task.resend_async(failed))
         assert is_ok(res)
         broker.enqueue_async.assert_awaited_once()
-        assert broker.enqueue_async.call_args.kwargs['enqueue_delay_seconds'] == 7
+        assert broker.enqueue_async.call_args.kwargs['delay_seconds'] == 7
         assert broker.enqueue_async.call_args.kwargs['task_id'] == failed.task_id
 
     def test_resend_async_of_a_send_now_sends_no_delay(self) -> None:
@@ -3592,5 +3633,5 @@ class TestDelayedSendAsync:
 
         res = asyncio.run(task.resend_async(failed))
         assert is_ok(res)
-        assert broker.enqueue_async.call_args.kwargs['enqueue_delay_seconds'] is None
+        assert broker.enqueue_async.call_args.kwargs['delay_seconds'] is None
         assert broker.enqueue_async.call_args.kwargs['task_id'] == failed.task_id

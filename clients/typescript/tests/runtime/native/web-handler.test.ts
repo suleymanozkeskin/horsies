@@ -83,7 +83,7 @@ async function framesUntil(response: Response, wanted: string): Promise<string[]
 
 /** An app of the test database with no task, or the failed test with every refusal. */
 function appOfTestDatabase(): Horsies {
-  const created = Horsies.create({ broker: { databaseUrl: { kind: "value", value: testDatabaseUrl() } }, tasks: [] });
+  const created = Horsies.create({ database: { databaseUrl: { kind: "value", value: testDatabaseUrl() } }, tasks: [] });
 
   if (!created.ok) {
     assert.fail(`Horsies.create refused: ${created.error.refusals.map((refusal) => refusal.message).join("; ")}`);

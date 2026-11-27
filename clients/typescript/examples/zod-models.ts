@@ -61,7 +61,7 @@ const PricedOrder = z.object({
 const priceOrder = defineTask({ name: "price_order", input: { order: Order }, output: PricedOrder });
 
 const created = Horsies.create({
-  broker: { databaseUrl: DATABASE_URL },
+  database: { databaseUrl: DATABASE_URL },
   workerProfiles: { [DEFAULT_PROFILE]: ISOLATED_PROFILE },
   tasks: [priceOrder],
 });

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import pytest
 
 from horsies.core.codec.json_value import JsonValue
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.outcome import TaskOutcome
 from horsies.core.models.tasks import TaskError
 from horsies.core.models.task_send_types import TaskSendError, TaskSendResult
@@ -468,7 +468,7 @@ class TestKwargsSnapshotAndFreeze:
         )
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='wf_bad', tasks=[a])
-        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
     def test_nan_kwargs_value_fails_construction(self) -> None:
         """NaN is not RFC 8259; JsonValue's wire scan rejects it."""
@@ -478,7 +478,7 @@ class TestKwargsSnapshotAndFreeze:
         )
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='wf_nan', tasks=[a])
-        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
     def test_colliding_mapping_keys_fail_construction(self) -> None:
         """Non-string mapping keys violate the JsonValue dict[str, ...] shape."""
@@ -488,7 +488,7 @@ class TestKwargsSnapshotAndFreeze:
         )
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='wf_key_collision', tasks=[a])
-        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
 
 # ===========================================================================

@@ -120,18 +120,18 @@ pub struct TaskAttemptRow {
 /// Represents a RUNNING task whose worker has not sent a heartbeat within
 /// the configured threshold, indicating the worker may have crashed.
 /// `started_at` is set: the query selects only rows that started before the
-/// threshold. `last_heartbeat` is the latest runner beat sent at or after
+/// threshold. `last_heartbeat_at` is the latest runner beat sent at or after
 /// `started_at`, and `None` for a task with no such beat: the start writes
 /// no beat, and a beat of an earlier attempt does not count.
 #[derive(Debug, Clone, Serialize)]
 pub struct StaleTaskRow {
-    pub id: Uuid,
+    pub task_id: Uuid,
     pub task_name: String,
     pub worker_hostname: Option<String>,
     pub worker_pid: Option<i32>,
     pub worker_process_name: Option<String>,
     pub started_at: DateTime<Utc>,
-    pub last_heartbeat: Option<DateTime<Utc>>,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
 }
 
 /// Row returned by the expired-tasks monitoring query.
@@ -140,16 +140,16 @@ pub struct StaleTaskRow {
 /// meaning it will never be claimed by a worker.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExpiredTaskRow {
-    pub id: Uuid,
+    pub task_id: Uuid,
     pub task_name: String,
     pub queue_name: String,
     pub priority: i32,
     pub sent_at: DateTime<Utc>,
     pub enqueued_at: DateTime<Utc>,
     pub good_until: DateTime<Utc>,
-    /// How long ago `good_until` passed, in microseconds, on the database
-    /// clock: the exact length of Python's `expired_for` interval.
-    pub expired_for_us: i64,
+    /// How long ago `good_until` passed, on the database clock, exact to the
+    /// microsecond.
+    pub expired_for: std::time::Duration,
 }
 
 #[cfg(test)]

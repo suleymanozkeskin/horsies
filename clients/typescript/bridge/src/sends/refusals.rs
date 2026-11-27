@@ -4,7 +4,7 @@
 //! A check of `Horsies.create` gives every refusal as a value. Every refusal
 //! carries a code of the core's catalog (`HRS-nnn`).
 
-use horsies_core::{AppConfigError, ErrorCode};
+use horsies_core::{AppConfigError, HorsiesErrorCode};
 use napi_derive::napi;
 
 /// How to fix a refused value: no line, or one line, as the core's error
@@ -64,7 +64,12 @@ impl CoreRefusal {
 
     /// A refusal with the catalog code `code`, its notes and its help.
     /// Pure.
-    pub fn coded(code: ErrorCode, message: String, notes: Vec<String>, help: RefusalHelp) -> Self {
+    pub fn coded(
+        code: HorsiesErrorCode,
+        message: String,
+        notes: Vec<String>,
+        help: RefusalHelp,
+    ) -> Self {
         Self {
             code: code.as_code_str().to_owned(),
             message,
@@ -83,7 +88,7 @@ mod tests {
     fn a_config_error_keeps_its_code_notes_and_help() {
         let error = AppConfigError::WorkerProfile(
             HorsiesError::new("worker_profiles['empty']: the profile starts no children")
-                .with_code(ErrorCode::ConfigInvalidWorkerProfile)
+                .with_code(HorsiesErrorCode::ConfigInvalidWorkerProfile)
                 .with_note("a worker of the profile runs no task")
                 .with_help("give the profile at least one child kind"),
         );

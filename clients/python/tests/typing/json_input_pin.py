@@ -22,7 +22,7 @@ from horsies import (
     JsonValue,
     Ok,
     Result,
-    SubWorkflowError,
+    SubWorkflowFailure,
     TaskError,
 )
 from horsies.core.models.workflow import SubWorkflowSummary
@@ -100,15 +100,15 @@ def writes_that_are_flagged(mapping: Mapping[str, int]) -> list[TaskError]:
     ]
 
 
-def a_subclass_has_both_types(summary: SubWorkflowSummary[int]) -> list[SubWorkflowError]:
+def a_subclass_has_both_types(summary: SubWorkflowSummary[int]) -> list[SubWorkflowFailure]:
     return [
-        SubWorkflowError(
+        SubWorkflowFailure(
             code='X',
             sub_workflow_id='s',
             sub_workflow_summary=summary,
             data=_ids,
         ),
-        SubWorkflowError(
+        SubWorkflowFailure(
             code='X',
             sub_workflow_id='s',
             sub_workflow_summary=summary,
@@ -137,7 +137,7 @@ def a_read_is_exact_and_exhaustive(err: TaskError) -> int:
             assert_never(unreachable)
 
 
-def a_read_of_a_subclass_is_exact(err: SubWorkflowError) -> JsonValue:
+def a_read_of_a_subclass_is_exact(err: SubWorkflowFailure) -> JsonValue:
     if isinstance(err.data, dict):
         return err.data['a']
     return err.data

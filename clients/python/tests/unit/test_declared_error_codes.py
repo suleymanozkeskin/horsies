@@ -24,17 +24,21 @@ from horsies.core.declared_error_codes import (
     CodeTextRefused,
     RepeatedCodeRefused,
     ReservedNameRefused,
+    RetryEntriesRefused,
+    RetryEntryNotAMember,
+    RetryMemberNotDeclared,
+    check_retry_codes,
     parse_declared_error_codes,
     with_mapper_codes,
 )
 from horsies.core.errors import (
-    ErrorCode,
+    HorsiesErrorCode,
     MultipleValidationErrors,
     TaskDefinitionError,
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskError
+from horsies.core.models.tasks import OperationalCode, OutcomeCode, TaskError
 from horsies.core.types.result import Err, Ok, Result
 
 pytestmark = [pytest.mark.unit]
@@ -54,12 +58,16 @@ class LowerCaseCodes(Enum):
     DECLINED = 'declined'
 
 
+class OtherCode(Enum):
+    RATE_LIMITED = 'RATE_LIMITED'
+
+
 def _app(
     exception_mapper: Mapping[type[BaseException], str] | None = None,
 ) -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr('postgresql://user:pass@127.0.0.1:1/none'),
             ),
             exception_mapper=dict(exception_mapper or {}),
@@ -131,12 +139,12 @@ class TestParse:
         assert "'declined'" in refusals[0].detail
 
     def test_a_built_in_name_is_refused(self) -> None:
-        refusals = _refusals(('BROKER_ERROR',))
+        refusals = _refusals(('DATABASE_ERROR',))
         assert len(refusals) == 1
         refusal = refusals[0]
         assert isinstance(refusal, ReservedNameRefused)
-        assert refusal.code == 'BROKER_ERROR'
-        assert 'OperationalErrorCode.BROKER_ERROR' in refusal.detail
+        assert refusal.code == 'DATABASE_ERROR'
+        assert 'OperationalCode.DATABASE_ERROR' in refusal.detail
 
     def test_a_reserved_name_is_refused(self) -> None:
         refusals = _refusals(('WORKFLOW_STOPPED',))
@@ -152,7 +160,7 @@ class TestParse:
         )
 
     def test_every_refused_entry_is_named_in_input_order(self) -> None:
-        refusals = _refusals(('bad', 'BROKER_ERROR', 'bad', 'GOOD', 'GOOD'))
+        refusals = _refusals(('bad', 'DATABASE_ERROR', 'bad', 'GOOD', 'GOOD'))
         assert [type(refusal) for refusal in refusals] == [
             CodeTextRefused,
             ReservedNameRefused,
@@ -209,6 +217,61 @@ class TestWithMapperCodes:
         assert parse_declared_error_codes(codes) == Ok(codes)
 
 
+
+class TestCheckRetryCodes:
+    def test_built_in_members_and_members_of_the_declared_enum_are_accepted(
+        self,
+    ) -> None:
+        entries = [
+            OperationalCode.WORKER_CRASHED,
+            OutcomeCode.TASK_TIMEOUT,
+            ChargeCode.RATE_LIMITED,
+        ]
+        assert check_retry_codes(entries, ChargeCode) == Ok(None)
+        assert check_retry_codes([OutcomeCode.TASK_TIMEOUT], None) == Ok(None)
+
+    def test_a_plain_text_is_not_a_member(self) -> None:
+        assert check_retry_codes(['WORKER_CRASHED'], ChargeCode) == Err(
+            RetryEntriesRefused(
+                refusals=(
+                    RetryEntryNotAMember(index=0, entry="'WORKER_CRASHED'", given='str'),
+                ),
+            ),
+        )
+
+    def test_a_member_of_another_enum_is_not_declared(self) -> None:
+        assert check_retry_codes([OtherCode.RATE_LIMITED], ChargeCode) == Err(
+            RetryEntriesRefused(
+                refusals=(
+                    RetryMemberNotDeclared(index=0, member='OtherCode.RATE_LIMITED'),
+                ),
+            ),
+        )
+
+    def test_with_no_declared_enum_a_custom_member_is_not_declared(self) -> None:
+        assert check_retry_codes([ChargeCode.CARD_DECLINED], None) == Err(
+            RetryEntriesRefused(
+                refusals=(
+                    RetryMemberNotDeclared(index=0, member='ChargeCode.CARD_DECLINED'),
+                ),
+            ),
+        )
+
+    def test_every_refused_entry_is_named_in_list_order(self) -> None:
+        entries: list[object] = [
+            7,
+            OperationalCode.DATABASE_ERROR,
+            OtherCode.RATE_LIMITED,
+        ]
+        assert check_retry_codes(entries, ChargeCode) == Err(
+            RetryEntriesRefused(
+                refusals=(
+                    RetryEntryNotAMember(index=0, entry='7', given='int'),
+                    RetryMemberNotDeclared(index=2, member='OtherCode.RATE_LIMITED'),
+                ),
+            ),
+        )
+
 class TestDecorator:
     def test_a_task_declares_no_code_by_default(self) -> None:
         app = _app()
@@ -241,13 +304,13 @@ class TestDecorator:
     def test_a_value_of_another_form_is_hrs_102(self) -> None:
         with pytest.raises(TaskDefinitionError) as raised:
             _declare(_app(), ['RATE_LIMITED'])
-        assert raised.value.code is ErrorCode.TASK_INVALID_OPTIONS
+        assert raised.value.code is HorsiesErrorCode.TASK_INVALID_OPTIONS
         assert any('list' in note for note in raised.value.notes)
 
     def test_a_code_outside_the_code_text_rule_is_hrs_112(self) -> None:
         with pytest.raises(TaskDefinitionError) as raised:
             _declare(_app(), ('rate_limited',))
-        assert raised.value.code is ErrorCode.TASK_INVALID_ERROR_CODE
+        assert raised.value.code is HorsiesErrorCode.TASK_INVALID_ERROR_CODE
         assert raised.value.code.value == 'HRS-112'
         assert "'rate_limited'" in raised.value.message
         assert "task 'charge'" in raised.value.notes
@@ -256,23 +319,23 @@ class TestDecorator:
     def test_a_built_in_or_reserved_name_is_hrs_212(self, code: str) -> None:
         with pytest.raises(TaskDefinitionError) as raised:
             _declare(_app(), (code,))
-        assert raised.value.code is ErrorCode.CHECK_RESERVED_CODE_COLLISION
+        assert raised.value.code is HorsiesErrorCode.CHECK_RESERVED_CODE_COLLISION
         assert code in raised.value.message
 
     def test_a_repeated_code_is_hrs_113(self) -> None:
         with pytest.raises(TaskDefinitionError) as raised:
             _declare(_app(), ('RATE_LIMITED', 'RATE_LIMITED'))
-        assert raised.value.code is ErrorCode.TASK_DUPLICATE_ERROR_CODE
+        assert raised.value.code is HorsiesErrorCode.TASK_DUPLICATE_ERROR_CODE
         assert raised.value.code.value == 'HRS-113'
 
     def test_several_refused_codes_come_in_one_report(self) -> None:
         with pytest.raises(MultipleValidationErrors) as raised:
-            _declare(_app(), ('bad', 'BROKER_ERROR', 'OK', 'OK'))
-        codes = [error.code for error in raised.value.report.errors]
+            _declare(_app(), ('bad', 'DATABASE_ERROR', 'OK', 'OK'))
+        codes = [error.code for error in raised.value.report.refusals]
         assert codes == [
-            ErrorCode.TASK_INVALID_ERROR_CODE,
-            ErrorCode.CHECK_RESERVED_CODE_COLLISION,
-            ErrorCode.TASK_DUPLICATE_ERROR_CODE,
+            HorsiesErrorCode.TASK_INVALID_ERROR_CODE,
+            HorsiesErrorCode.CHECK_RESERVED_CODE_COLLISION,
+            HorsiesErrorCode.TASK_DUPLICATE_ERROR_CODE,
         ]
 
     def test_a_refused_set_registers_nothing(self) -> None:

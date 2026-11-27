@@ -3,7 +3,7 @@
 The core resends a start after a transient failure when the caller asks for
 it (``PostgresBroker::start_client_workflow``, tested in
 ``core/src/broker/workflow_start.rs``). The client passes the
-``resend_on_transient_err`` choice into the ``WorkflowStartRequest``
+``resend_on_transient_error`` choice into the ``WorkflowStartRequest``
 unchanged, and maps the core's answer: a failure record keeps its retry rule
 and its cause, an exception of the core call that is not a ``CoreError``
 propagates, and a refused prevalidation makes no core call. The core handle
@@ -63,7 +63,7 @@ def _failure_record(cause: BaseException, *, retryable: bool) -> WorkflowStartEn
         retryable=retryable,
         workflow_name='test-wf',
         workflow_id=WORKFLOW_ID,
-        exception=cause,
+        cause=cause,
     )
 
 
@@ -102,7 +102,7 @@ class TestTransactionCatch:
 
         assert is_err(result)
         assert isinstance(result.err_value, WorkflowStartEnqueueFailed)
-        assert result.err_value.exception is cause
+        assert result.err_value.cause is cause
         assert result.err_value.retryable is True
 
     @pytest.mark.asyncio
@@ -116,7 +116,7 @@ class TestTransactionCatch:
 
         assert is_err(result)
         assert isinstance(result.err_value, WorkflowStartEnqueueFailed)
-        assert result.err_value.exception is cause
+        assert result.err_value.cause is cause
         assert result.err_value.retryable is False
 
     @pytest.mark.asyncio
@@ -125,7 +125,7 @@ class TestTransactionCatch:
         broker = _broker(raises=defect)
 
         with pytest.raises(TypeError) as exc_info:
-            await _start_with_spec_data(broker, resend_on_transient_err=True)
+            await _start_with_spec_data(broker, resend_on_transient_error=True)
 
         assert exc_info.value is defect
 
@@ -142,7 +142,7 @@ class TestTransactionCatch:
         broker = _broker()
 
         result = await start_workflow_async(
-            spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
+            spec, broker, WORKFLOW_ID, resend_on_transient_error=True,
         )
 
         assert is_err(result)
@@ -159,7 +159,7 @@ class TestTransactionCatch:
 
 @pytest.mark.unit
 class TestAsyncForwarding:
-    """start_workflow_async passes resend_on_transient_err into the start
+    """start_workflow_async passes resend_on_transient_error into the start
     request of its core call (``CoreHandle.start_workflow_async``)."""
 
     @pytest.mark.asyncio
@@ -176,11 +176,11 @@ class TestAsyncForwarding:
             patch('horsies._core.WorkflowStartRequest') as request_class,
         ):
             result = await start_workflow_async(
-                _make_spec(), broker, WORKFLOW_ID, resend_on_transient_err=resend,
+                _make_spec(), broker, WORKFLOW_ID, resend_on_transient_error=resend,
             )
 
         assert is_ok(result)
-        assert request_class.call_args.kwargs['resend_on_transient_err'] is resend
+        assert request_class.call_args.kwargs['resend_on_transient_error'] is resend
         broker._core_handle.start_workflow_async.assert_awaited_once_with(
             request_class.return_value,
         )
@@ -188,12 +188,12 @@ class TestAsyncForwarding:
 
 @pytest.mark.unit
 class TestSyncWrapperForwarding:
-    """start_workflow forwards resend_on_transient_err to the start request of
+    """start_workflow forwards resend_on_transient_error to the start request of
     its blocking core call (``CoreHandle.start_workflow``)."""
 
     @pytest.mark.parametrize('resend', [True, False])
     def test_sync_forwards_flag_to_the_start_request(self, resend: bool) -> None:
-        """start_workflow passes resend_on_transient_err into the request."""
+        """start_workflow passes resend_on_transient_error into the request."""
         spec = _make_spec()
         broker = MagicMock()
         broker.app = None
@@ -208,11 +208,11 @@ class TestSyncWrapperForwarding:
             patch('horsies._core.WorkflowStartRequest') as request_class,
         ):
             result = start_workflow(
-                spec, broker, WORKFLOW_ID, resend_on_transient_err=resend,
+                spec, broker, WORKFLOW_ID, resend_on_transient_error=resend,
             )
 
         assert is_ok(result)
-        assert request_class.call_args.kwargs['resend_on_transient_err'] is resend
+        assert request_class.call_args.kwargs['resend_on_transient_error'] is resend
         broker._core_handle.start_workflow.assert_called_once_with(
             request_class.return_value,
         )

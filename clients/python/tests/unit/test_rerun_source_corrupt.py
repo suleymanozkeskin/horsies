@@ -89,6 +89,7 @@ class TestSourceRowDoesNotDecode:
             connection,
             RerunCommand(source_task_id=SOURCE_TASK_ID, good_until=None),
             _policy(),
+            registered_task_codes={},
         )
 
         assert _cause_of(outcome) == (
@@ -110,6 +111,7 @@ class TestUnknownLocation:
             connection,
             RerunCommand(source_task_id=SOURCE_TASK_ID, good_until=None),
             _policy(),
+            registered_task_codes={},
         )
 
         assert _cause_of(outcome) == "staged detail returned unknown location 'ELSEWHERE'"

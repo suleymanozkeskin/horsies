@@ -11,7 +11,13 @@ import os
 import threading
 import time
 
-from horsies.core.models.tasks import Execution, RetryPolicy, TaskError
+from horsies.core.models.tasks import (
+    Execution,
+    OperationalCode,
+    OutcomeCode,
+    RetryPolicy,
+    TaskError,
+)
 from horsies.core.types.result import Err, Ok, Result
 
 from tests.e2e.tasks.basic import simple_task
@@ -117,7 +123,7 @@ def _first_attempt(marker: str) -> bool:
     execution=Execution.SHARED_ASYNC,
     timeout_ms=STOP_TIMEOUT_MS,
     cancel_grace_ms=100,
-    retry_policy=RetryPolicy.fixed([1], retry_for=['TASK_TIMEOUT']),
+    retry_policy=RetryPolicy.fixed([1], retry_for=[OutcomeCode.TASK_TIMEOUT]),
 )
 async def shared_stuck_once(*, marker: str) -> Result[str, TaskError]:
     """The first attempt ignores every cancel; the retry returns its pid."""
@@ -134,7 +140,7 @@ async def shared_stuck_once(*, marker: str) -> Result[str, TaskError]:
     name='e2e_shared_blocks_once',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=30_000,
-    retry_policy=RetryPolicy.fixed([1], retry_for=['TASK_BLOCKED_LOOP']),
+    retry_policy=RetryPolicy.fixed([1], retry_for=[OperationalCode.TASK_BLOCKED_LOOP]),
 )
 async def shared_blocks_once(*, marker: str) -> Result[str, TaskError]:
     """The first attempt blocks the event loop past the block limit; the

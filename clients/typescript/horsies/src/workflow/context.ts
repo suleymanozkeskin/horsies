@@ -14,6 +14,8 @@ import type { Execution } from "../_catalog/monitoring_models.ts";
 import type { ContextUse, TaskContract } from "../contract/define-task.ts";
 import type { WorkflowId } from "../contract/ids.ts";
 import type { OutputSchema, ParameterSchemas, SchemaValue } from "../contract/schema.ts";
+import { RetrievalCode } from "../_catalog/task_codes.ts";
+import type { ReadErrorTag } from "../read/errors.ts";
 import { type ReadForm, readFormOf } from "../read/handle.ts";
 import type { Recorded } from "../read/info.ts";
 import { readSubWorkflowSummary } from "../codec/sub-workflow.ts";
@@ -22,7 +24,7 @@ import { err, ok, type Result } from "../wire/result.ts";
 import type { SubWorkflowSummary, TaskOutcome } from "../wire/task-error.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import type { WorkflowContract } from "./define.ts";
-import type { BuildReturn, WorkflowOutput } from "./node.ts";
+import type { BuildReturn, SubWorkflowOutput } from "./node.ts";
 import { declaredOutputForm } from "./registry.ts";
 
 /** Why a context read gave no value. */
@@ -34,8 +36,8 @@ export type ContextReadError =
   | { readonly kind: "notInContext"; readonly nodeId: string }
   /** The stored value does not read with the contract's types. `cause` holds no value. */
   | { readonly kind: "unreadable"; readonly nodeId: string; readonly cause: string }
-  /** The stored error has a custom code that the contract does not list. */
-  | { readonly kind: "unknownCustomCode"; readonly nodeId: string; readonly code: string };
+  /** The stored error has a custom code that the contract does not list; `storedCode` holds it. */
+  | (ReadErrorTag<"unknownCustomCode"> & { readonly nodeId: string; readonly storedCode: string });
 
 /** The workflow context of one task run. */
 export interface WorkflowContext {
@@ -61,12 +63,12 @@ export interface WorkflowContext {
   summaryFor(nodeId: string): Result<SubWorkflowSummary, ContextReadError>;
   /**
    * The output of the context sub-workflow node `nodeId`, read with the declared output of `workflow`, its child:
-   * `notRecorded` when the child stored no output (it did not complete with an ok value).
+   * `notRecorded` when the child stored no output (it did not complete with an ok value, or it has no output node).
    */
   outputFor<P extends ParameterSchemas, R extends BuildReturn>(
     nodeId: string,
     workflow: WorkflowContract<P, R>,
-  ): Result<Recorded<WorkflowOutput<R>>, ContextReadError>;
+  ): Result<Recorded<SubWorkflowOutput<R>>, ContextReadError>;
   /** Whether the context holds the summary of the node `nodeId`. */
   hasSummary(nodeId: string): boolean;
 }
@@ -195,7 +197,7 @@ function contextValue(
     resultFor: resultFor as WorkflowContext["resultFor"],
     hasResult: (nodeId: string) => Object.hasOwn(results, nodeId),
     summaryFor,
-    // SAFETY: the reader decodes with the declared output of `workflow`, whose value type is `WorkflowOutput<R>`.
+    // SAFETY: the reader decodes with the declared output of `workflow`, whose value type is `SubWorkflowOutput<R>`.
     outputFor: outputFor as WorkflowContext["outputFor"],
     hasSummary: (nodeId: string) => summaries.has(nodeId),
   });
@@ -256,7 +258,14 @@ function contextOutcome(
 
       return form.codes.codes.includes(outcome.error.code)
         ? ok(outcome)
-        : err(Object.freeze({ kind: "unknownCustomCode", nodeId, code: outcome.error.code }));
+        : err(
+            Object.freeze({
+              kind: "unknownCustomCode",
+              code: RetrievalCode.UNKNOWN_CUSTOM_CODE,
+              nodeId,
+              storedCode: outcome.error.code,
+            }),
+          );
     }
 
     default:

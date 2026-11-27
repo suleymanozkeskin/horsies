@@ -31,7 +31,7 @@ from horsies.core.models.tasks import (
     MAX_TASK_TIMEOUT_MS,
     MIN_TASK_TIMEOUT_MS,
     Execution,
-    OperationalErrorCode,
+    OperationalCode,
     TaskError,
 )
 from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
@@ -77,7 +77,7 @@ TASK_ID: Final = uuid.UUID('0190f2d8-7c1e-7a3b-9f00-000000000041')
 
 APP = Horsies(
     AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://u:p@localhost/unused'),
         ),
     ),
@@ -243,7 +243,7 @@ def test_an_async_def_task_is_refused_before_it_runs(steps: _Steps) -> None:
     envelope = _set_running(_run(_frame('thread_async')))
 
     error = _failed(_result(envelope, int))
-    assert error.code == OperationalErrorCode.WORKER_RESOLUTION_ERROR
+    assert error.code == OperationalCode.WORKER_RESOLUTION_ERROR
     assert error.message == (
         'Failed to resolve thread_async: the task is async def, and a shared '
         'thread child runs only def tasks'
@@ -268,7 +268,7 @@ def test_a_refusal_fails_the_task_after_running_and_before_resolve(
         TimeoutValueInvalid(reason=reason),
     ).envelope
     error = _failed(_result(envelope, int))
-    assert error.code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+    assert error.code == OperationalCode.WORKER_SERIALIZATION_ERROR
     assert error.data == {
         'task_name': 'thread_double',
         'field': 'timeout_ms',
@@ -293,7 +293,7 @@ def test_a_task_that_raises_is_mapped(steps: _Steps) -> None:
     envelope = _set_running(_run(_frame('thread_raises')))
 
     error = _failed(_result(envelope, int))
-    assert error.code == OperationalErrorCode.UNHANDLED_EXCEPTION
+    assert error.code == OperationalCode.UNHANDLED_EXCEPTION
 
 
 class _Exited(BaseException):
@@ -336,7 +336,7 @@ def test_an_unknown_task_is_a_resolution_error(steps: _Steps) -> None:
     envelope = _set_running(_run(_frame('not_registered')))
 
     error = _failed(_result(envelope, int))
-    assert error.code == OperationalErrorCode.WORKER_RESOLUTION_ERROR
+    assert error.code == OperationalCode.WORKER_RESOLUTION_ERROR
 
 
 class TestTheMarkerOfAThreadSeat:

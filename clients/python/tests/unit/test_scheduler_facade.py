@@ -37,9 +37,9 @@ from horsies._core import (
     SchedulerStopped,
 )
 from horsies.core.app import Horsies
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
+from horsies.core.brokers.result_types import DatabaseErrorCode, DatabaseOperationFailed
 from horsies.core.codec.json_io import SerializationError
-from horsies.core.errors import ConfigurationError, ErrorCode, RegistryError
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode, RegistryError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
@@ -50,7 +50,7 @@ from horsies.core.models.schedule import (
     ScheduleConfig,
     TaskSchedule,
 )
-from horsies.core.models.tasks import RetryPolicy, TaskError
+from horsies.core.models.tasks import OperationalCode, RetryPolicy, TaskError
 from horsies.core.scheduler.manifest import to_scheduler_manifest
 from horsies.core.scheduler.service import Scheduler
 from horsies.core.scheduler.validation import PreparedSchedule, prepare_schedules
@@ -70,7 +70,7 @@ def _app(
     app = Horsies(
         AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr(_DATABASE_URL),
                 retain_rerun_input_default=retain_rerun_input,
             ),
@@ -82,7 +82,7 @@ def _app(
     @app.task(
         _REPORT_TASK,
         timeout_ms=30_000,
-        retry_policy=RetryPolicy.fixed([1, 2], retry_for=['TASK_EXCEPTION']),
+        retry_policy=RetryPolicy.fixed([1, 2], retry_for=[OperationalCode.TASK_EXCEPTION]),
     )
     def nightly(*, day: str, limit: int) -> Result[int, TaskError]:
         return Ok(limit)
@@ -281,7 +281,7 @@ class TestOptionsThatDoNotEncode:
         app = Horsies(
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=PostgresConfig(database_url=SecretStr(_DATABASE_URL)),
+                database=PostgresConfig(database_url=SecretStr(_DATABASE_URL)),
                 schedule=schedule_config,
             ),
         )
@@ -302,7 +302,7 @@ class TestOptionsThatDoNotEncode:
         assert isinstance(prepared, Err)
         start_error = prepared.err_value[0]
         assert isinstance(start_error, RegistryError)
-        assert start_error.code == ErrorCode.TASK_NOT_REGISTERED
+        assert start_error.code == HorsiesErrorCode.TASK_NOT_REGISTERED
         assert _OPTIONS_TASK in start_error.message
         assert any('every_minute' in note for note in start_error.notes)
 
@@ -359,7 +359,7 @@ class TestInit:
         app = Horsies(
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=PostgresConfig(database_url=SecretStr(_DATABASE_URL)),
+                database=PostgresConfig(database_url=SecretStr(_DATABASE_URL)),
             ),
         )
 
@@ -367,7 +367,7 @@ class TestInit:
             Scheduler(app)
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'schedule configuration' in error.message
         assert error.help_text is not None
 
@@ -416,7 +416,7 @@ class TestStart:
             await scheduler.start()
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert error.message == "schedule 'nightly' cannot start"
         assert error.notes == ["schedule 'nightly': unknown timezone 'Mars/Olympus'"]
 
@@ -565,11 +565,11 @@ class TestRunForeverAndStop:
         scheduler, broker = _scheduler(_nightly())
         broker.close_async = AsyncMock(
             return_value=Err(
-                BrokerOperationFailed(
-                    code=BrokerErrorCode.CLOSE_FAILED,
+                DatabaseOperationFailed(
+                    code=DatabaseErrorCode.CLOSE_FAILED,
                     message='close failed',
                     retryable=False,
-                    exception=ConnectionError('close failed'),
+                    cause=ConnectionError('close failed'),
                 ),
             ),
         )

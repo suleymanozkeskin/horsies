@@ -6,7 +6,9 @@ import {
   budgetFreeText,
   budgetsOf,
   coverageText,
+  downSlotsOf,
   fleetWarningText,
+  freeCapacity,
   uncoveredStreams,
   waitText,
 } from '@/components/monitoring/class-coverage';
@@ -15,32 +17,32 @@ import {
   ClassCoveragePanel,
   DownSlotList,
 } from '@/components/monitoring/class-coverage-panel';
-import type { ClassReport, PendingStream } from '@/types/workers';
+import type { ExecutionClassReport, PendingStream } from '@/types/workers';
 
 const served: PendingStream = {
-  queue_name: 'default',
+  queue: 'default',
   execution: 'SHARED_ASYNC',
   coverage: { kind: 'served', workers: 2, capacity: 80 },
-  wait: { kind: 'waiting', oldest_due_at: '2026-11-10T12:00:00Z', wait_s: 95 },
+  wait: { kind: 'due', oldest_due_at: '2026-11-10T12:00:00Z', wait_seconds: 95 },
 };
 
 const unservedRetry: PendingStream = {
-  queue_name: 'default',
+  queue: 'default',
   execution: 'ISOLATED',
   coverage: { kind: 'unserved' },
-  wait: { kind: 'waiting', oldest_due_at: '2026-11-10T11:00:00Z', wait_s: 3700 },
+  wait: { kind: 'due', oldest_due_at: '2026-11-10T11:00:00Z', wait_seconds: 3700 },
 };
 
 const withoutCapacity: PendingStream = {
-  queue_name: 'emails',
+  queue: 'emails',
   execution: 'SHARED_THREAD',
   coverage: { kind: 'no_capacity', workers: 1 },
   wait: { kind: 'none_due', next_due_at: '2999-01-01T00:00:00Z' },
 };
 
-const report: ClassReport = {
+const report: ExecutionClassReport = {
   checked_at: '2026-11-10T12:01:35Z',
-  live_window_s: 120,
+  live_window_seconds: 120,
   streams: [unservedRetry, served, withoutCapacity],
   workers: [
     {
@@ -52,7 +54,6 @@ const report: ClassReport = {
           capacity: 40,
           serves: ['SHARED_ASYNC'],
           in_flight: 37,
-          free: 3,
         },
       ],
     },
@@ -103,6 +104,29 @@ describe('class report helpers', () => {
     const budget = report.workers[0]?.budgets[0];
     expect(budget).toBeDefined();
     expect(budgetFreeText(budget!)).toBe('3/40 free');
+  });
+
+  it('never gives a free capacity below 0', () => {
+    expect(
+      freeCapacity({
+        budget: 'ISOLATED',
+        capacity: 2,
+        serves: ['ISOLATED'],
+        in_flight: 5,
+      })
+    ).toBe(0);
+  });
+
+  it('gives the down slots of a degraded worker and none for a serving one', () => {
+    const slot = {
+      slot: 1,
+      cause: 'the OS ran short of a resource (EMFILE)',
+      detail: 'OSError: [Errno 24] Too many open files',
+      down_since: '2026-11-10T12:00:00Z',
+      failed_boots: 2,
+    };
+    expect(downSlotsOf({ kind: 'slots_down', slots: [slot] })).toEqual([slot]);
+    expect(downSlotsOf({ kind: 'all_serving' })).toEqual([]);
   });
 });
 

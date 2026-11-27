@@ -255,7 +255,7 @@ async def test_orphan_cursor_lock_refuses_without_waiting(
         )
         assert result.is_err()
         error = result.unwrap_err()
-        original = getattr(error.exception, 'orig', error.exception)
+        original = getattr(error.cause, 'orig', error.cause)
         assert getattr(original, 'sqlstate', None) == '55P03'
         await transaction.rollback()
 
@@ -264,7 +264,7 @@ async def test_terminate_cancels_the_orphans_of_one_page_on_demand(
     bounded_recovery_database: tuple[PostgresBroker, AsyncEngine],
 ) -> None:
     """No worker runs here, so no reaper runs the orphan pass, as with
-    ``auto_terminate_orphaned_workflow_tasks=False``: the call runs one page
+    ``terminate_orphaned_workflow_tasks=False``: the call runs one page
     on demand. Of three PENDING workflow tasks, the one that no node links
     moves to history as CANCELLED; the two linked tasks stay live."""
     broker, engine = bounded_recovery_database

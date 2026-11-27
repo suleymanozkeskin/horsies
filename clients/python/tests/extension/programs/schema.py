@@ -9,7 +9,7 @@ def install() -> Report:
     """Install this build's schema in the case's database: the outcome class
     and its facts."""
     import horsies._core as core
-    from horsies._catalog.broker_errors import BrokerOperationFailed
+    from horsies._catalog.broker_errors import DatabaseOperationFailed
     from tests.extension.programs.support import database_url, manifest_json
 
     handle = core.CoreHandle(
@@ -21,8 +21,8 @@ def install() -> Report:
             return {'outcome': 'SchemaInstalled', 'version': version}
         case core.SchemaInstallNotRun():
             return {'outcome': 'SchemaInstallNotRun'}
-        case BrokerOperationFailed(code=code, message=message):
-            return {'outcome': 'BrokerOperationFailed', 'code': code.value, 'message': message}
+        case DatabaseOperationFailed(code=code, message=message):
+            return {'outcome': 'DatabaseOperationFailed', 'code': code.value, 'message': message}
 
 
 if __name__ == '__main__':

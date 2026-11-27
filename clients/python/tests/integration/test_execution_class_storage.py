@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.result_types import BrokerInvalidTaskOptions
+from horsies.core.brokers.result_types import DatabaseInvalidTaskOptions
 from horsies.core.models.tasks import (
     DEFAULT_CANCEL_GRACE_MS,
     Execution,
@@ -173,7 +173,7 @@ class TestSendPaths:
         )
 
         assert isinstance(outcome, Err)
-        assert isinstance(outcome.err_value, BrokerInvalidTaskOptions)
+        assert isinstance(outcome.err_value, DatabaseInvalidTaskOptions)
         count = (
             await session.execute(
                 text('SELECT count(*) FROM horsies_tasks WHERE id = CAST(:id AS uuid)'),

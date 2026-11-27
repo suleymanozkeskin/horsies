@@ -56,7 +56,7 @@ pytestmark = [pytest.mark.unit]
 APP = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(database_url=SecretStr('postgresql://u@127.0.0.1:1/unused')),
+        database=PostgresConfig(database_url=SecretStr('postgresql://u@127.0.0.1:1/unused')),
     ),
 )
 
@@ -165,7 +165,7 @@ class TestSpecData:
             spec_json=_spec_json(spec),
             workflow_id=uuid.UUID(WORKFLOW_ID),
             sent_at=SENT_AT,
-            resend_on_transient_err=False,
+            resend_on_transient_error=False,
             trace=core.NoTraceCarrier(),
         )
         assert isinstance(request, core.WorkflowStartRequest)
@@ -179,7 +179,7 @@ class TestSpecData:
                 spec_json='{"data_version": 1}',
                 workflow_id=uuid.UUID(WORKFLOW_ID),
                 sent_at=SENT_AT,
-                resend_on_transient_err=False,
+                resend_on_transient_error=False,
                 trace=core.NoTraceCarrier(),
             )
 
@@ -194,7 +194,7 @@ class TestSpecData:
                 spec_json='{"data_version": 1, "nodes": "one"}',
                 workflow_id=uuid.UUID(WORKFLOW_ID),
                 sent_at=SENT_AT,
-                resend_on_transient_err=False,
+                resend_on_transient_error=False,
                 trace=core.NoTraceCarrier(),
             )
 
@@ -210,7 +210,7 @@ class TestStartAnswers:
         broker = _broker(_record(core.WorkflowStarted))
         with patch('horsies._core.WorkflowStartRequest') as request_class:
             result = await start_workflow_async(
-                _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_err=True,
+                _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_error=True,
             )
 
         assert is_ok(result)
@@ -218,7 +218,7 @@ class TestStartAnswers:
         arguments = request_class.call_args.kwargs
         assert arguments['workflow_id'] == uuid.UUID(WORKFLOW_ID)
         assert arguments['sent_at'] == SENT_AT
-        assert arguments['resend_on_transient_err'] is True
+        assert arguments['resend_on_transient_error'] is True
         assert json.loads(arguments['spec_json'])['name'] == 'start_core.flow'
         broker._core_handle.start_workflow_async.assert_awaited_once_with(  # pyright: ignore[reportPrivateUsage]
             request_class.return_value,
@@ -286,7 +286,7 @@ class TestStartAnswers:
             retryable=True,
             workflow_name='start_core.flow',
             workflow_id=WORKFLOW_ID,
-            exception=cause,
+            cause=cause,
         )
         broker = _broker(failed)
         result = await start_workflow_async(_spec(), broker, WORKFLOW_ID, SENT_AT)
@@ -297,7 +297,7 @@ class TestStartAnswers:
         assert isinstance(error, WorkflowStartEnqueueFailed)
         assert error.retryable is True
         assert error.message == 'connection refused'
-        assert error.exception is cause
+        assert error.cause is cause
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_a_core_boundary_error_is_the_enqueue_failure(self) -> None:
@@ -308,7 +308,7 @@ class TestStartAnswers:
         error = result.err_value
         assert isinstance(error, WorkflowStartEnqueueFailed)
         assert error.retryable is True
-        assert isinstance(error.exception, core.TooManyPendingCalls)
+        assert isinstance(error.cause, core.TooManyPendingCalls)
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_spec_data_that_does_not_encode_is_refused_with_no_core_call(self) -> None:
@@ -322,7 +322,7 @@ class TestStartAnswers:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, WorkflowStartValidationFailed)
-        assert isinstance(error.exception, SerializationError)
+        assert isinstance(error.cause, SerializationError)
         broker._core_handle.start_workflow_async.assert_not_awaited()  # pyright: ignore[reportPrivateUsage]
 
     @pytest.mark.asyncio(loop_scope='function')

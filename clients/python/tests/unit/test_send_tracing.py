@@ -48,7 +48,7 @@ from horsies._catalog.producer_metrics import (
     TASK_SEND_DURATION_NAME,
     TASK_SENT_NAME,
 )
-from horsies.core.brokers.result_types import BrokerEnqueueFailed
+from horsies.core.brokers.result_types import DatabaseEnqueueFailed
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendEnqueueFailed
 from horsies.core.models.tasks import TaskError
@@ -128,15 +128,15 @@ def _app(
     telemetry: SendTelemetry,
     broker: MagicMock,
     *,
-    resend_on_transient_err: bool = False,
+    resend_on_transient_error: bool = False,
 ) -> MagicMock:
     app = MagicMock()
     app.config.queue_mode.name = 'DEFAULT'
-    app.config.resend_on_transient_err = resend_on_transient_err
+    app.config.resend_on_transient_error = resend_on_transient_error
     app.config.payload = PayloadPolicy()
     app.are_sends_suppressed.return_value = False
     app.send_telemetry.return_value = telemetry
-    app.validate_queue_name.return_value = 'default'
+    app.validate_queue.return_value = 'default'
     app.get_broker.return_value = broker
     return app
 
@@ -173,11 +173,11 @@ def _traceparent(span: ReadableSpan) -> str:
     return f'00-{context.trace_id:032x}-{context.span_id:016x}-{context.trace_flags:02x}'
 
 
-def _enqueue_failed(*, retryable: bool) -> Err[BrokerEnqueueFailed]:
-    return Err(BrokerEnqueueFailed(
+def _enqueue_failed(*, retryable: bool) -> Err[DatabaseEnqueueFailed]:
+    return Err(DatabaseEnqueueFailed(
         message='db gone',
         retryable=retryable,
-        exception=ConnectionError('db gone'),
+        cause=ConnectionError('db gone'),
     ))
 
 
@@ -270,7 +270,7 @@ class TestTaskSendSpan:
     def test_a_resend_of_a_transient_failure_stays_in_one_span(self, otel: Otel) -> None:
         broker = MagicMock()
         broker.enqueue.side_effect = [_enqueue_failed(retryable=True), Ok(uuid.uuid4())]
-        app = _app(otel.telemetry, broker, resend_on_transient_err=True)
+        app = _app(otel.telemetry, broker, resend_on_transient_error=True)
         with patch('horsies.core.task_decorator.time.sleep'):
             result = _wrapper(app).send(amount=5)
 

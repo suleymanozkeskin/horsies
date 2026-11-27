@@ -230,17 +230,17 @@ mod tests {
     fn the_model_s_built_in_code_is_the_union_of_its_four_catalogs() {
         assert_eq!(
             built_in_code_type(&BUILT_IN_TASK_CODES),
-            "export type BuiltInTaskCode =\n  | OperationalErrorCode\n  | ContractCode\n  \
+            "export type BuiltInTaskCode =\n  | OperationalCode\n  | ContractCode\n  \
              | RetrievalCode\n  | OutcomeCode;"
         );
         assert_eq!(
             catalog_imports(&BUILT_IN_TASK_CODES),
-            "import { ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode } from \
+            "import { ContractCode, OperationalCode, OutcomeCode, RetrievalCode } from \
              \"./task_codes.ts\";"
         );
     }
 
-    /// 36 members, `RetrievalCode.ASYNC_CONTEXT` included: the blocking-form
+    /// 37 members, `RetrievalCode.ASYNC_CONTEXT` included: the blocking-form
     /// mark does not remove a built-in code.
     #[test]
     fn the_model_s_built_in_code_values_hold_every_member() {
@@ -250,7 +250,7 @@ mod tests {
             .iter()
             .map(|catalog| catalog.members.len())
             .sum();
-        assert_eq!(members, 36);
+        assert_eq!(members, 37);
         assert_eq!(text.lines().count(), members + 2);
         assert!(text.contains("\n  RetrievalCode.ASYNC_CONTEXT,\n"));
         assert!(

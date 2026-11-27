@@ -18,7 +18,7 @@ use std::pin::Pin;
 use std::sync::Once;
 use std::task::{Context, Poll};
 
-use crate::core::task::error::{ExceptionRecord, OperationalErrorCode, TaskError};
+use crate::core::task::error::{ExceptionRecord, OperationalCode, TaskError};
 use crate::core::task::fn_trait::TaskModule;
 
 /// The `type` of the exception record of a panic, and its
@@ -174,7 +174,7 @@ impl<F: Future> Future for CatchPanic<F> {
 /// or an empty traceback. Pure.
 pub(super) fn panic_error(task_name: &str, module: TaskModule, record: PanicRecord) -> TaskError {
     let mut error = TaskError::built_in(
-        OperationalErrorCode::UnhandledException,
+        OperationalCode::UnhandledException,
         format!(
             "Unhandled exception in task {task_name}: {PANIC_TYPE_NAME}: {}",
             record.text
@@ -246,7 +246,7 @@ mod tests {
         assert_eq!(
             error.error_code,
             crate::core::task::error::TaskErrorCode::BuiltIn(
-                OperationalErrorCode::UnhandledException.into()
+                OperationalCode::UnhandledException.into()
             )
         );
         assert_eq!(

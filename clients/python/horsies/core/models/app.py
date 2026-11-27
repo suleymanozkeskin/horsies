@@ -9,6 +9,7 @@ from horsies._catalog.worker_manifest import (
 )
 from horsies.core.models.queues import QueueMode, CustomQueueConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.cluster_cap import ClusterCap, ClusterCapSetting, NoClusterCap
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.retention import RetentionConfig
@@ -19,7 +20,7 @@ from horsies.core.models.tracing import (
     tracing_errors,
     tracing_label,
 )
-from horsies.core.models.log_format import LogFormatSetting, TextLogs
+from horsies.core.models.log_format import LogFormat, TextLogs
 from horsies.core.models.schedule import (
     ScheduleConfig,
     SchedulePattern,
@@ -38,7 +39,7 @@ from horsies.core.exception_mapper import (
 )
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     ValidationReport,
     raise_collected,
 )
@@ -52,7 +53,7 @@ def above_worker_bound(
     path: str,
     value: int,
     maximum: int,
-    code: ErrorCode,
+    code: HorsiesErrorCode,
 ) -> ConfigurationError:
     """The refusal of a config value above the bound that a worker takes
     (the bound of its field in the worker manifest,
@@ -77,22 +78,22 @@ def worker_bound_errors(
 ) -> list[ConfigurationError]:
     """The refusals of the claim values above their worker manifest bounds,
     in field order: `prefetch_buffer`, `claim_lease_ms` and
-    `max_claim_renew_age_ms` (`CONFIG_INVALID_PREFETCH`), `cluster_wide_cap`
-    (`CONFIG_INVALID_CLUSTER_CAP`), then each queue's `max_concurrency`
+    `max_claim_renew_age_ms` (`CONFIG_INVALID_PREFETCH`), the tasks of a
+    `ClusterCap` (`CONFIG_INVALID_CLUSTER_CAP`), then each queue's `max_concurrency`
     (`CONFIG_INVALID_QUEUE_MODE`). The core's claim takes each count as a
     PostgreSQL `integer` and each time as an unsigned 32-bit number of
     milliseconds, so a larger value never reaches a worker. A `None` value
     has no bound. Pure."""
-    prefetch = ErrorCode.CONFIG_INVALID_PREFETCH
-    checks: list[tuple[str, int | None, int, ErrorCode]] = [
+    prefetch = HorsiesErrorCode.CONFIG_INVALID_PREFETCH
+    checks: list[tuple[str, int | None, int, HorsiesErrorCode]] = [
         ('prefetch_buffer', prefetch_buffer, CLAIM_COUNT_MAX, prefetch),
         ('claim_lease_ms', claim_lease_ms, MILLISECONDS_MAX, prefetch),
         ('max_claim_renew_age_ms', max_claim_renew_age_ms, MILLISECONDS_MAX, prefetch),
         (
-            'cluster_wide_cap',
+            'cluster_wide_cap.tasks',
             cluster_wide_cap,
             TASK_LIMIT_MAX,
-            ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
+            HorsiesErrorCode.CONFIG_INVALID_CLUSTER_CAP,
         ),
     ]
     checks.extend(
@@ -100,7 +101,7 @@ def worker_bound_errors(
             f'custom_queues[{position}].max_concurrency',
             queue.max_concurrency,
             QUEUE_CONCURRENCY_MAX,
-            ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+            HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE,
         )
         for position, queue in enumerate(custom_queues)
     )
@@ -109,6 +110,16 @@ def worker_bound_errors(
         for path, value, maximum, code in checks
         if value is not None and value > maximum
     ]
+
+
+def cluster_cap_tasks(setting: ClusterCap | NoClusterCap) -> int | None:
+    """The task count of a cluster cap, for a bound check that takes no
+    value for no cap: `None` for `NoClusterCap`. Pure."""
+    match setting:
+        case ClusterCap(tasks=tasks):
+            return tasks
+        case NoClusterCap():
+            return None
 
 
 class AppConfig(BaseModel):
@@ -120,9 +131,10 @@ class AppConfig(BaseModel):
 
     queue_mode: QueueMode = QueueMode.DEFAULT
     custom_queues: Optional[List[CustomQueueConfig]] = None
-    broker: PostgresConfig
-    # Cluster-wide cap on concurrently RUNNING tasks across all queues. None = unlimited.
-    cluster_wide_cap: Optional[int] = None
+    database: PostgresConfig
+    # Cluster-wide cap on concurrently RUNNING tasks across all queues:
+    # ClusterCap(tasks=N), or NoClusterCap() (the default).
+    cluster_wide_cap: ClusterCapSetting = Field(default_factory=NoClusterCap)
     # Prefetch buffer: 0 = hard cap mode (count RUNNING + CLAIMED), >0 = soft cap with lease
     prefetch_buffer: int = 0
     # Claim lease duration in ms. Required when prefetch_buffer > 0.
@@ -148,13 +160,13 @@ class AppConfig(BaseModel):
         default_factory=lambda: ExceptionMapper(),
     )
     default_unhandled_error_code: str = 'UNHANDLED_EXCEPTION'
-    resend_on_transient_err: bool = False
+    resend_on_transient_error: bool = False
     # Spans and producer metrics through the OpenTelemetry API
     # (`OtelTracing`, needs `horsies[otel]`), or none (`NoTracing`).
     tracing: TracingSetting = Field(default_factory=NoTracing)
     # The format of the horsies log records in the processes that load the
     # app: one line of text (`TextLogs`) or one JSON object (`JsonLogs`).
-    log_format: LogFormatSetting = Field(default_factory=TextLogs)
+    log_format: LogFormat = Field(default_factory=TextLogs)
 
     @model_validator(mode='after')
     def validate_queue_configuration(self):
@@ -169,7 +181,7 @@ class AppConfig(BaseModel):
                 report.add(
                     ConfigurationError(
                         message='custom_queues must be None in DEFAULT mode',
-                        code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                        code=HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE,
                         notes=['queue_mode=DEFAULT but custom_queues was provided'],
                         help_text='either remove custom_queues or set queue_mode=CUSTOM',
                     )
@@ -179,7 +191,7 @@ class AppConfig(BaseModel):
                 report.add(
                     ConfigurationError(
                         message='custom_queues required in CUSTOM mode',
-                        code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                        code=HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE,
                         notes=['queue_mode=CUSTOM but custom_queues is empty or None'],
                         help_text='provide at least one CustomQueueConfig in custom_queues',
                     )
@@ -191,7 +203,7 @@ class AppConfig(BaseModel):
                     report.add(
                         ConfigurationError(
                             message='duplicate queue names in custom_queues',
-                            code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                            code=HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE,
                             notes=[f'queue names: {queue_names}'],
                             help_text='each queue name must be unique',
                         )
@@ -199,23 +211,29 @@ class AppConfig(BaseModel):
 
 
 
-        # Validate cluster_wide_cap if provided
-        if self.cluster_wide_cap is not None and self.cluster_wide_cap <= 0:
-            report.add(
-                ConfigurationError(
-                    message='cluster_wide_cap must be positive',
-                    code=ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
-                    notes=[f'got cluster_wide_cap={self.cluster_wide_cap}'],
-                    help_text='use a positive integer or None for unlimited',
+        # Validate the tasks of a cluster cap
+        match self.cluster_wide_cap:
+            case ClusterCap(tasks=tasks) if tasks <= 0:
+                report.add(
+                    ConfigurationError(
+                        message='cluster_wide_cap.tasks must be positive',
+                        code=HorsiesErrorCode.CONFIG_INVALID_CLUSTER_CAP,
+                        notes=[f'got cluster_wide_cap=ClusterCap(tasks={tasks})'],
+                        help_text=(
+                            'use ClusterCap(tasks=N) with N >= 1, or '
+                            'NoClusterCap() for no cap'
+                        ),
+                    )
                 )
-            )
+            case ClusterCap() | NoClusterCap():
+                pass
 
         # Validate prefetch_buffer
         if self.prefetch_buffer < 0:
             report.add(
                 ConfigurationError(
                     message='prefetch_buffer must be non-negative',
-                    code=ErrorCode.CONFIG_INVALID_PREFETCH,
+                    code=HorsiesErrorCode.CONFIG_INVALID_PREFETCH,
                     notes=[f'got prefetch_buffer={self.prefetch_buffer}'],
                     help_text='use 0 for hard cap mode or positive integer for soft cap',
                 )
@@ -226,7 +244,7 @@ class AppConfig(BaseModel):
             report.add(
                 ConfigurationError(
                     message='claim_lease_ms required when prefetch_buffer > 0',
-                    code=ErrorCode.CONFIG_INVALID_PREFETCH,
+                    code=HorsiesErrorCode.CONFIG_INVALID_PREFETCH,
                     notes=[
                         f'prefetch_buffer={self.prefetch_buffer} but claim_lease_ms is None',
                     ],
@@ -237,7 +255,7 @@ class AppConfig(BaseModel):
             report.add(
                 ConfigurationError(
                     message='claim_lease_ms must be positive',
-                    code=ErrorCode.CONFIG_INVALID_PREFETCH,
+                    code=HorsiesErrorCode.CONFIG_INVALID_PREFETCH,
                     notes=[f'got claim_lease_ms={self.claim_lease_ms}'],
                     help_text='use a positive integer in milliseconds',
                 )
@@ -268,7 +286,7 @@ class AppConfig(BaseModel):
             report.add(
                 ConfigurationError(
                     message='claim lease too short relative to claimer heartbeat',
-                    code=ErrorCode.CONFIG_INVALID_PREFETCH,
+                    code=HorsiesErrorCode.CONFIG_INVALID_PREFETCH,
                     notes=[
                         f'effective lease: {effective_lease_ms}ms ({source})',
                         f'claimer_heartbeat_interval_ms: {self.recovery.claimer_heartbeat_interval_ms}ms',
@@ -283,7 +301,7 @@ class AppConfig(BaseModel):
             report.add(
                 ConfigurationError(
                     message='max_claim_renew_age_ms must be positive',
-                    code=ErrorCode.CONFIG_INVALID_PREFETCH,
+                    code=HorsiesErrorCode.CONFIG_INVALID_PREFETCH,
                     notes=[f'got max_claim_renew_age_ms={self.max_claim_renew_age_ms}'],
                     help_text='use a positive integer in milliseconds (e.g., 180000 for 3 minutes)',
                 )
@@ -292,7 +310,7 @@ class AppConfig(BaseModel):
             report.add(
                 ConfigurationError(
                     message='max_claim_renew_age_ms must be >= effective claim lease',
-                    code=ErrorCode.CONFIG_INVALID_PREFETCH,
+                    code=HorsiesErrorCode.CONFIG_INVALID_PREFETCH,
                     notes=[
                         f'max_claim_renew_age_ms={self.max_claim_renew_age_ms}ms',
                         f'effective lease={effective_lease_ms}ms',
@@ -308,25 +326,28 @@ class AppConfig(BaseModel):
             prefetch_buffer=self.prefetch_buffer,
             claim_lease_ms=self.claim_lease_ms,
             max_claim_renew_age_ms=self.max_claim_renew_age_ms,
-            cluster_wide_cap=self.cluster_wide_cap,
+            cluster_wide_cap=cluster_cap_tasks(self.cluster_wide_cap),
             custom_queues=self.custom_queues or [],
         ):
             report.add(bound_error)
 
         # Validate prefetch_buffer vs cluster_wide_cap conflict
-        if self.cluster_wide_cap is not None and self.prefetch_buffer > 0:
-            report.add(
-                ConfigurationError(
-                    message='cluster_wide_cap incompatible with prefetch mode',
-                    code=ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
-                    notes=[
-                        f'cluster_wide_cap={self.cluster_wide_cap}',
-                        f'prefetch_buffer={self.prefetch_buffer}',
-                        'cluster_wide_cap requires hard cap mode (prefetch_buffer=0)',
-                    ],
-                    help_text='set prefetch_buffer=0 when using cluster_wide_cap',
+        match self.cluster_wide_cap:
+            case ClusterCap(tasks=tasks) if self.prefetch_buffer > 0:
+                report.add(
+                    ConfigurationError(
+                        message='cluster_wide_cap incompatible with prefetch mode',
+                        code=HorsiesErrorCode.CONFIG_INVALID_CLUSTER_CAP,
+                        notes=[
+                            f'cluster_wide_cap=ClusterCap(tasks={tasks})',
+                            f'prefetch_buffer={self.prefetch_buffer}',
+                            'cluster_wide_cap requires hard cap mode (prefetch_buffer=0)',
+                        ],
+                        help_text='set prefetch_buffer=0 when using ClusterCap',
+                    )
                 )
-            )
+            case ClusterCap() | NoClusterCap():
+                pass
 
         # Validate exception_mapper entries
         mapper_errors = validate_exception_mapper(
@@ -336,7 +357,7 @@ class AppConfig(BaseModel):
             report.add(
                 ConfigurationError(
                     message=msg,
-                    code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+                    code=HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
                     notes=['check exception_mapper keys and values'],
                     help_text='keys must be BaseException subclasses, values must be UPPER_SNAKE_CASE error codes',
                 )
@@ -350,7 +371,7 @@ class AppConfig(BaseModel):
             report.add(
                 ConfigurationError(
                     message=default_code_error,
-                    code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+                    code=HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
                     notes=['invalid default_unhandled_error_code in AppConfig'],
                     help_text='use UPPER_SNAKE_CASE error codes',
                 )
@@ -370,7 +391,7 @@ class AppConfig(BaseModel):
         # never routed into — while the queue the adopter meant keeps
         # the 30-day default. Neither the policy nor an error.
         # 'default' is the only queue a DEFAULT-mode app has; it is what
-        # Horsies.validate_queue_name returns for that mode.
+        # Horsies.validate_queue returns for that mode.
         configured_queues = (
             {queue.name for queue in self.custom_queues}
             if self.queue_mode == QueueMode.CUSTOM and self.custom_queues
@@ -385,7 +406,7 @@ class AppConfig(BaseModel):
                         f'queue_retention maps {mapped_queue!r}, which is '
                         'not a queue this deployment has'
                     ),
-                    code=ErrorCode.CONFIG_INVALID_RETENTION,
+                    code=HorsiesErrorCode.CONFIG_INVALID_RETENTION,
                     notes=[
                         f'configured queues: {sorted(configured_queues)}',
                         'an unmatched mapping registers a retention class '
@@ -449,39 +470,39 @@ class AppConfig(BaseModel):
                 )
 
         # Cluster-wide cap and prefetch settings
-        if self.cluster_wide_cap is not None:
-            lines.append(f'  cluster_wide_cap: {self.cluster_wide_cap}')
+        match self.cluster_wide_cap:
+            case ClusterCap(tasks=tasks):
+                lines.append(f'  cluster_wide_cap: {tasks}')
+            case NoClusterCap():
+                pass
         lines.append(f'  prefetch_buffer: {self.prefetch_buffer}')
         if self.claim_lease_ms is not None:
             lines.append(f'  claim_lease_ms: {self.claim_lease_ms}ms')
 
-        # Broker config with masked password
-        masked_url = mask_database_url(self.broker.database_url.get_secret_value())
-        lines.append(f'  broker:')
+        # Database config with masked password
+        masked_url = mask_database_url(self.database.database_url.get_secret_value())
+        lines.append('  database:')
         lines.append(f'    database_url: {masked_url}')
-        if (
-            self.broker.session_database_url is not None
-            and self.broker.session_database_url != self.broker.database_url
-        ) or self.broker.pgbouncer_transaction_mode:
+        if self.database.session_url_differs() or self.database.pgbouncer_transaction_mode:
             lines.append(
-                f'    session_database_url: {mask_database_url(self.broker.effective_session_database_url)}'
+                f'    session_database: {mask_database_url(self.database.effective_session_database_url)}'
             )
         lines.append(
-            f'    pgbouncer_transaction_mode: {self.broker.pgbouncer_transaction_mode}'
+            f'    pgbouncer_transaction_mode: {self.database.pgbouncer_transaction_mode}'
         )
-        lines.append(f'    pool_size: {self.broker.pool_size}')
-        lines.append(f'    max_overflow: {self.broker.max_overflow}')
+        lines.append(f'    pool_size: {self.database.pool_size}')
+        lines.append(f'    max_overflow: {self.database.max_overflow}')
 
         # Recovery config
         lines.append('  recovery:')
         lines.append(
-            f'    auto_requeue_stale_claimed: {self.recovery.auto_requeue_stale_claimed}'
+            f'    requeue_stale_claimed: {self.recovery.requeue_stale_claimed}'
         )
         lines.append(
             f'    claimed_stale_threshold: {self.recovery.claimed_stale_threshold_ms}ms'
         )
         lines.append(
-            f'    auto_fail_stale_running: {self.recovery.auto_fail_stale_running}'
+            f'    fail_stale_running: {self.recovery.fail_stale_running}'
         )
         lines.append(
             f'    running_stale_threshold: {self.recovery.running_stale_threshold_ms}ms'
@@ -506,17 +527,17 @@ class AppConfig(BaseModel):
         )
         lines.append(
             f'    period_classes: '
-            f'{[key for key, _ in self.retention.registrable_classes()]}'
+            f'{[key for key, _ in self.retention.registrable_periods()]}'
         )
 
         # Resilience config
         lines.append('  resilience:')
         lines.append(
-            f'    db_retry_initial_ms: {self.resilience.db_retry_initial_ms}ms'
+            f'    database_retry_initial_ms: {self.resilience.database_retry_initial_ms}ms'
         )
-        lines.append(f'    db_retry_max_ms: {self.resilience.db_retry_max_ms}ms')
+        lines.append(f'    database_retry_max_ms: {self.resilience.database_retry_max_ms}ms')
         lines.append(
-            f'    db_retry_max_attempts: {self.resilience.db_retry_max_attempts}'
+            f'    database_retry_max_attempts: {self.resilience.database_retry_max_attempts}'
         )
         lines.append(
             f'    notify_poll_interval_ms: {self.resilience.notify_poll_interval_ms}ms'
@@ -530,7 +551,7 @@ class AppConfig(BaseModel):
                 lines.append(f'    {name}: {description}')
 
         # Send retry
-        lines.append(f'  resend_on_transient_err: {self.resend_on_transient_err}')
+        lines.append(f'  resend_on_transient_error: {self.resend_on_transient_error}')
 
         # Tracing
         lines.append(f'  tracing: {tracing_label(self.tracing)}')

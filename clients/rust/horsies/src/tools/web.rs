@@ -19,7 +19,7 @@ use std::process::ExitCode;
 use clap::{Args, ValueEnum};
 
 use crate::cli::LogLevel;
-use crate::{AppConfig, HorsiesError};
+use crate::{AppConfig, SessionDatabase, ValidationReport};
 
 /// The largest TOML config file that `web` reads.
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -32,7 +32,7 @@ client-supplied header makes this mode trivially spoofable, and horsies cannot d
 /// The arguments of `horsies web`.
 #[derive(Debug, Clone, Args)]
 pub(super) struct WebArgs {
-    /// A TOML file of AppConfig; its broker section names the database. Omit
+    /// A TOML file of AppConfig; its database section names the database. Omit
     /// it when using --database-url.
     #[arg(
         value_name = "CONFIG",
@@ -73,7 +73,7 @@ pub(super) struct WebArgs {
     #[arg(long, value_name = "TEMPLATE")]
     trace_link: Option<String>,
     #[arg(long, value_enum, ignore_case = true, default_value = "INFO")]
-    loglevel: LogLevel,
+    log_level: LogLevel,
 }
 
 /// The `--auth` values.
@@ -134,9 +134,9 @@ enum WebError {
         cause: toml::de::Error,
     },
     #[error("invalid application configuration: {0}")]
-    ConfigInvalid(HorsiesError),
-    #[error("the core runtime is not available: {0}")]
-    RuntimeUnavailable(String),
+    ConfigInvalid(ValidationReport),
+    #[error("the core runtime could not start: {0}")]
+    RuntimeStartFailed(String),
     #[error("could not bind the monitoring server to {host}:{port}: {cause}")]
     Bind {
         host: String,
@@ -162,7 +162,7 @@ impl WebError {
             | Self::ConfigTooLarge { .. }
             | Self::ConfigParse { .. }
             | Self::ConfigInvalid(_)
-            | Self::RuntimeUnavailable(_)
+            | Self::RuntimeStartFailed(_)
             | Self::Bind { .. }
             | Self::Serve(_) => 1,
         }
@@ -213,7 +213,10 @@ fn serve(args: &WebArgs) -> Result<(), WebError> {
             TRUSTED_HEADER_WARNING.replace("{header}", &args.trusted_header)
         );
     }
-    crate::cli::logging::install_logs(args.loglevel.child_level(), crate::cli::LogFormat::Text);
+    crate::cli::logging::install_logs(
+        args.log_level.child_level(),
+        crate::cli::LogFormat::TextLogs,
+    );
     let config = resolve_config(&config_source(args))?;
     let app = Horsies::with_schema_mode(config, SchemaMode::ObserveOnly)
         .map_err(WebError::ConfigInvalid)?;
@@ -233,7 +236,7 @@ fn serve(args: &WebArgs) -> Result<(), WebError> {
         BuiltPolicy::TrustedHeader(policy) => crate::web::router(&app, monitoring, policy),
     };
     let runtime = runtime_for(format_args!("horsies web"))
-        .map_err(|failed| WebError::RuntimeUnavailable(failed.to_string()))?;
+        .map_err(|failed| WebError::RuntimeStartFailed(failed.to_string()))?;
     runtime
         .runtime()
         .block_on(serve_router(router, &args.host, args.port))
@@ -373,9 +376,14 @@ fn resolve_config(source: &ConfigSource<'_>) -> Result<AppConfig, WebError> {
             session_url,
             pgbouncer_transaction_mode,
         } => {
-            let mut config = AppConfig::for_database_url(*url);
-            config.broker.session_database_url = session_url.map(str::to_owned);
-            config.broker.pgbouncer_transaction_mode = *pgbouncer_transaction_mode;
+            let mut config = AppConfig::from_database_url(*url);
+            config.database.session_database = match session_url {
+                None => SessionDatabase::SameAsDatabaseUrl,
+                Some(url) => SessionDatabase::Separate {
+                    url: (*url).to_owned(),
+                },
+            };
+            config.database.pgbouncer_transaction_mode = *pgbouncer_transaction_mode;
             Ok(config)
         }
     }
@@ -472,16 +480,17 @@ mod tests {
     fn a_toml_config_keeps_its_broker_section() {
         let config = parse_config(
             Path::new("horsies.toml"),
-            "[broker]\ndatabase_url = \"postgresql://pool/horsies\"\nsession_database_url = \
-             \"postgresql://direct/horsies\"\npgbouncer_transaction_mode = true\n",
+            "[database]\ndatabase_url = \"postgresql://pool/horsies\"\npgbouncer_transaction_mode = \
+             true\n[database.session_database]\nkind = \"SEPARATE\"\nurl = \
+             \"postgresql://direct/horsies\"\n",
         )
         .unwrap();
-        assert_eq!(config.broker.database_url, "postgresql://pool/horsies");
+        assert_eq!(config.database.database_url, "postgresql://pool/horsies");
         assert_eq!(
-            config.broker.session_database_url.as_deref(),
-            Some("postgresql://direct/horsies")
+            config.database.effective_session_database_url(),
+            "postgresql://direct/horsies"
         );
-        assert!(config.broker.pgbouncer_transaction_mode);
+        assert!(config.database.pgbouncer_transaction_mode);
     }
 
     /// #553: a key that no config section has is refused by name.
@@ -489,11 +498,11 @@ mod tests {
     fn an_unknown_toml_key_is_refused_by_name() {
         for (text, key) in [
             (
-                "databse_url = \"x\"\n[broker]\ndatabase_url = \"postgresql://h/d\"\n",
+                "databse_url = \"x\"\n[database]\ndatabase_url = \"postgresql://h/d\"\n",
                 "databse_url",
             ),
             (
-                "[broker]\ndatabase_url = \"postgresql://h/d\"\npool_sise = 3\n",
+                "[database]\ndatabase_url = \"postgresql://h/d\"\npool_sise = 3\n",
                 "pool_sise",
             ),
         ] {
@@ -512,12 +521,12 @@ mod tests {
             pgbouncer_transaction_mode: true,
         })
         .unwrap();
-        assert_eq!(config.broker.database_url, "postgresql://pool/horsies");
+        assert_eq!(config.database.database_url, "postgresql://pool/horsies");
         assert_eq!(
-            config.broker.session_database_url.as_deref(),
-            Some("postgresql://direct/horsies")
+            config.database.effective_session_database_url(),
+            "postgresql://direct/horsies"
         );
-        assert!(config.broker.pgbouncer_transaction_mode);
+        assert!(config.database.pgbouncer_transaction_mode);
     }
 
     #[test]

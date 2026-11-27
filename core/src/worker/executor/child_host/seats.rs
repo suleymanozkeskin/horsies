@@ -83,7 +83,7 @@ use super::run_work::{
     left_report, millis_since, stuck_report, Alive, CancelCause, Fire, PollsNow, RoundsEnd,
     RunCancelSignal, RunPolls, RunScope, SignalState, WorkWait, ISOLATED_LEFTOVER_GRACE,
 };
-use crate::core::task::error::{OperationalErrorCode, TaskError};
+use crate::core::task::error::{OperationalCode, TaskError};
 use crate::core::task::fencing::FencingToken;
 use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskModule};
 use crate::core::task::result::TaskResult;
@@ -396,7 +396,7 @@ pub(super) async fn isolated_body(
             match thread.await {
                 Ok(result) => result,
                 Err(error) => TaskResult::Err(TaskError::built_in(
-                    OperationalErrorCode::UnhandledException,
+                    OperationalCode::UnhandledException,
                     format!(
                         "the thread of blocking task '{task_name}' ended with no result: {error}"
                     ),
@@ -832,7 +832,7 @@ fn joined_result(
         Ok(Ok(result)) => result,
         Ok(Err(record)) => TaskResult::Err(super::panic::panic_error(task_name, module, record)),
         Err(error) => TaskResult::Err(TaskError::built_in(
-            OperationalErrorCode::UnhandledException,
+            OperationalCode::UnhandledException,
             format!("the async body of task '{task_name}' ended with no result: {error}"),
         )),
     }

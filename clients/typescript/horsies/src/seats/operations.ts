@@ -18,7 +18,7 @@ import type { NativeCoreHandle } from "../native/handle/addon.ts";
 import {
   ClientDefect,
   CoreError,
-  type CoreStartFailed,
+  type RuntimeStartFailed,
   type CoreStopped,
   type ForkedAfterCoreStart,
   type TooManyPendingCalls,
@@ -145,9 +145,9 @@ export function relayedRefusal(error: CoreError): RelayedRefusal {
       return { code: error.code, subject: stopped.subject, cause: stopped.cause, stateAfter: stopped.stateAfter };
     }
 
-    case "CORE_START_FAILED":
-      // SAFETY: CORE_START_FAILED is the code of `CoreStartFailed` only.
-      return { code: error.code, cause: (error as CoreStartFailed).cause };
+    case "RUNTIME_START_FAILED":
+      // SAFETY: RUNTIME_START_FAILED is the code of `RuntimeStartFailed` only.
+      return { code: error.code, cause: (error as RuntimeStartFailed).cause };
     case "TOO_MANY_PENDING_CALLS": {
       // SAFETY: TOO_MANY_PENDING_CALLS is the code of `TooManyPendingCalls` only.
       const pending = error as TooManyPendingCalls;

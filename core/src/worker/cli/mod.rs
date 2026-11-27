@@ -3,7 +3,7 @@ pub mod banner;
 use std::fmt;
 use std::str::FromStr;
 
-/// Log level accepted by the `--loglevel` flag.
+/// Log level accepted by the `--log-level` flag.
 ///
 /// Mirrors the Python CLI choices (DEBUG, INFO, WARNING, ERROR)
 /// mapped to the corresponding `tracing` levels.

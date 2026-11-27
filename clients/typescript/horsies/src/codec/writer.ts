@@ -19,7 +19,9 @@ import type {
   Member,
   ObjectKind,
   TaggedUnionKind,
+  TupleKind,
 } from "../wire/kinds.ts";
+import { lazyTarget } from "../wire/lazy.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { MAX_VALUE_JSON_DEPTH } from "./bounds.ts";
@@ -30,6 +32,7 @@ import { type JsonText, writtenJsonText } from "./json-text.ts";
 import { jsonValueText } from "./json-value.ts";
 import { bigintText, floatText, type ScalarRefused, stringText } from "./scalar-text.ts";
 import { isLiteralType, literalText, unionRefusal } from "./union.ts";
+import { tupleItem, tupleLength } from "./tuple-items.ts";
 import {
   encodeRefused,
   type EncodeRefusalKind,
@@ -150,7 +153,7 @@ function writeValue(kind: Kind, value: unknown, path: string, depth: number, sin
     case "array":
       return writeArray(kind.item, value, path, depth, sink);
     case "tuple":
-      return writeTuple(kind.items, value, path, depth, sink);
+      return writeTuple(kind, value, path, depth, sink);
     case "record":
       return writeRecord(kind.value, value, path, depth, sink);
     case "object":
@@ -163,6 +166,8 @@ function writeValue(kind: Kind, value: unknown, path: string, depth: number, sin
       return writeConverted(kind, value, path, depth, sink);
     case "checked":
       return writeChecked(kind, value, path, depth, sink);
+    case "lazy":
+      return writeValue(lazyTarget(kind, `writeValue at ${path}`), value, path, depth, sink);
     default:
       return unreachable(kind, "writeValue");
   }
@@ -226,13 +231,24 @@ function writeTimeKind(kind: TimeKind, value: unknown, path: string, sink: Sink)
   }
 }
 
+/** The detail of a number under the integer kind that is not a whole number (a fraction, `NaN` or an infinity). */
+const NOT_WHOLE_NUMBER_DETAIL = "the integer kind takes a whole number";
+
+/** The detail of a whole number under the integer kind that is outside the safe range. */
+const OUTSIDE_SAFE_RANGE_DETAIL = "the integer kind takes a whole number from -(2^53 - 1) to 2^53 - 1; the bigint kind takes a larger one";
+
+/** The refusal text of a number that is not a safe integer, one text for each case. Pure. */
+function notSafeIntegerDetail(value: number): string {
+  return Number.isInteger(value) ? OUTSIDE_SAFE_RANGE_DETAIL : NOT_WHOLE_NUMBER_DETAIL;
+}
+
 function writeInt(value: unknown, path: string, sink: Sink): Written {
   if (!isNumber(value)) {
     return refuse("WrongType", path, "expected a number");
   }
 
   if (!Number.isSafeInteger(value)) {
-    return refuse("NotSafeInteger", path, "h.int() takes a safe integer; use h.bigint() for a larger one");
+    return refuse("NotSafeInteger", path, notSafeIntegerDetail(value));
   }
 
   return append(sink, String(value));
@@ -390,29 +406,20 @@ function writeArray(item: Kind, value: unknown, path: string, depth: number, sin
   return level.ok ? writeItems(() => item, value, path, level.value, sink) : level;
 }
 
-function writeTuple(items: readonly Kind[], value: unknown, path: string, depth: number, sink: Sink): Written {
+function writeTuple(kind: TupleKind, value: unknown, path: string, depth: number, sink: Sink): Written {
   if (!isArray(value)) {
     return notContainer(value, path, "an array");
   }
 
-  if (value.length !== items.length) {
-    return refuse("WrongType", path, `expected an array of ${items.length} items`);
+  const length = tupleLength(kind, value.length);
+
+  if (length.state === "wrongLength") {
+    return refuse("WrongType", path, length.detail);
   }
 
   const level = enter(depth, path);
 
-  return level.ok ? writeItems((index) => tupleItem(items, index), value, path, level.value, sink) : level;
-}
-
-/** The kind of a tuple item. The caller checked the length, so a missing kind is a defect. */
-export function tupleItem(items: readonly Kind[], index: number): Kind {
-  const kind = items[index];
-
-  if (kind === undefined) {
-    throw new TypeError(`tupleItem: the tuple has no item ${index}`);
-  }
-
-  return kind;
+  return level.ok ? writeItems((index) => tupleItem(kind, index), value, path, level.value, sink) : level;
 }
 
 /** A record key: a well-formed string that no engine writes. */

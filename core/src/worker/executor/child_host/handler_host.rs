@@ -20,7 +20,7 @@
 //! node), then the event goes to the queue of each handler of its type. The
 //! dispatch never waits for a handler or for the database. An event that
 //! does not decode is logged and reaches no handler. A `handler_stats`
-//! frame goes out every [`HANDLER_STATS_INTERVAL`]. A run frame or a second
+//! frame goes out every [`HANDLER_STATISTICS_INTERVAL`]. A run frame or a second
 //! init frame ends the child with the bad-frame code.
 //!
 //! Stop frame: the queues close; the handlers and the reader task get
@@ -42,7 +42,7 @@ use tokio::sync::mpsc;
 use super::ended_spans::{EndedSpans, SpanReadFailures, StartedSpans, NODE_READ_QUEUE_SPANS};
 use super::handlers::{
     HandlerChildApp, HandlerTallies, RunningHandlers, HANDLER_DRAIN, HANDLER_ERROR_LOG_EVERY,
-    HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS, HANDLER_STATS_INTERVAL,
+    HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS, HANDLER_STATISTICS_INTERVAL,
 };
 use super::host::{
     boot_failed, run_start_hook, shortage_or, start_child_runtime, AfterHookFailure, ChildHostExit,
@@ -92,7 +92,7 @@ pub(super) struct HandlerChildTimes {
 impl HandlerChildTimes {
     /// The times of a handler child.
     pub(super) const CHILD: Self = Self {
-        stats_every: HANDLER_STATS_INTERVAL,
+        stats_every: HANDLER_STATISTICS_INTERVAL,
         drain: HANDLER_DRAIN,
         last_stats: HANDLER_LAST_STATS_BOUND,
     };

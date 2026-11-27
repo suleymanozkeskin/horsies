@@ -19,7 +19,7 @@ import pytest
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.result_types import (
-    BrokerErrorCode,
+    DatabaseErrorCode,
     StoredResult,
 )
 from horsies.core.codec.typed import encode_task_error
@@ -32,9 +32,9 @@ from horsies.core.models.outcome import (
     ReadWaitTimeout,
 )
 from horsies.core.models.tasks import (
-    OperationalErrorCode,
+    OperationalCode,
     OutcomeCode,
-    SubWorkflowError,
+    SubWorkflowFailure,
 )
 from horsies.core.task_read import is_final_read
 from horsies.core.types.result import Err, Ok, is_err, is_ok
@@ -45,7 +45,7 @@ def _make_app() -> Horsies:
     """Build a minimal Horsies (no real broker connection used in tests)."""
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://u:p@localhost/db',
             ),
         ),
@@ -83,7 +83,7 @@ class TestHorsiesGetResultEnvelopeGuards:
             '__h_task_result__': True,
             # ``ok`` key missing
             'err': {
-                'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+                'error_code': {'__builtin_task_code__': 'DATABASE_ERROR'},
                 'message': 'smuggled',
                 'data': None,
                 'exception': None,
@@ -114,7 +114,7 @@ class TestHorsiesGetResultEnvelopeGuards:
             '__h_task_result__': True,
             'ok': 1,
             'err': {
-                'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+                'error_code': {'__builtin_task_code__': 'DATABASE_ERROR'},
                 'message': 'm',
                 'data': None,
                 'exception': None,
@@ -254,15 +254,15 @@ class TestHorsiesGetResultEnvelopeGuards:
 
     @pytest.mark.asyncio
     async def test_err_fast_path_polymorphic_sub_workflow_error(self) -> None:
-        """End-to-end: a valid envelope carrying a SubWorkflowError dump
+        """End-to-end: a valid envelope carrying a SubWorkflowFailure dump
         in the err slot round-trips through `Horsies.get_result_async`
         as the concrete subclass — not a downgraded TaskError."""
         app = _make_app()
         from horsies.core.models.workflow.context import SubWorkflowSummary
         from horsies.core.models.workflow.enums import WorkflowStatus
 
-        original = SubWorkflowError(
-            code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+        original = SubWorkflowFailure(
+            code=OperationalCode.UNHANDLED_EXCEPTION,
             message='child died',
             sub_workflow_id='wf-abc',
             sub_workflow_summary=SubWorkflowSummary(
@@ -291,11 +291,11 @@ class TestHorsiesGetResultEnvelopeGuards:
         result = await app.get_result_async('parent-task')
 
         match result:
-            case Ok(Failed(SubWorkflowError() as sub)):
+            case Ok(Failed(SubWorkflowFailure() as sub)):
                 assert sub.sub_workflow_id == 'wf-abc'
                 assert sub.sub_workflow_summary.failed_tasks == 2
             case _:
-                pytest.fail(f'expected Ok(Failed(SubWorkflowError)), got {result!r}')
+                pytest.fail(f'expected Ok(Failed(SubWorkflowFailure)), got {result!r}')
 
 
 def _patch_broker_task_info(app: Horsies, task_info_result: Any) -> MagicMock:
@@ -384,14 +384,14 @@ class TestHorsiesGetTaskInfoErrFastPath:
 
     @pytest.mark.asyncio
     async def test_err_only_preserves_sub_workflow_error_subclass(self) -> None:
-        """Polymorphic decode path: SubWorkflowError survives via
+        """Polymorphic decode path: SubWorkflowFailure survives via
         ``decode_task_error``, even for an unregistered task."""
         app = _make_app()
         from horsies.core.models.workflow.context import SubWorkflowSummary
         from horsies.core.models.workflow.enums import WorkflowStatus
 
-        original = SubWorkflowError(
-            code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+        original = SubWorkflowFailure(
+            code=OperationalCode.UNHANDLED_EXCEPTION,
             message='child died',
             sub_workflow_id='wf-xyz',
             sub_workflow_summary=SubWorkflowSummary(
@@ -421,10 +421,10 @@ class TestHorsiesGetTaskInfoErrFastPath:
         assert decoded_info is not None
         assert decoded_info.result_decoded is True
         match decoded_info.decoded_result:
-            case Failed(SubWorkflowError() as sub):
+            case Failed(SubWorkflowFailure() as sub):
                 assert sub.sub_workflow_id == 'wf-xyz'
             case other:
-                pytest.fail(f'expected Failed(SubWorkflowError), got {other!r}')
+                pytest.fail(f'expected Failed(SubWorkflowFailure), got {other!r}')
 
     @pytest.mark.asyncio
     async def test_ok_only_unregistered_task_leaves_decoded_result_none(
@@ -477,5 +477,5 @@ class TestHorsiesGetTaskInfoErrFastPath:
 
         assert is_err(result)
         err = result.unwrap_err()
-        assert err.code == BrokerErrorCode.INVALID_JSON_PAYLOAD
+        assert err.code == DatabaseErrorCode.INVALID_JSON_PAYLOAD
         assert err.retryable is False

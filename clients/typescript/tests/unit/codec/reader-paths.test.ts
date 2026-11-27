@@ -44,7 +44,7 @@ const READER_PATHS: readonly ReaderPath[] = [
     checkedBy: "nodeResult",
     proof: {
       file: "unit/workflow/handle.test.ts",
-      test: "a stored text that the core's strict check refuses ends as resultDeserializationError and never reaches the reader",
+      test: "a stored text that the core's strict check refuses ends as storedResultUnreadable and never reaches the reader",
     },
   },
   {

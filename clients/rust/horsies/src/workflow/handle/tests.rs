@@ -85,7 +85,7 @@ fn a_result_of_another_type_is_unreadable() {
     let refused = end_outcome::<u32>(workflow(), end).unwrap_err();
     assert_eq!(
         refused.code(),
-        BuiltInTaskCode::from(OperationalErrorCode::ResultDeserializationError)
+        BuiltInTaskCode::from(OperationalCode::ResultDeserializationError)
     );
 }
 
@@ -279,7 +279,7 @@ fn each_read_failure_has_python_s_code() {
                 workflow_id: workflow(),
                 cause: "x".to_owned(),
             },
-            OperationalErrorCode::ResultDeserializationError.into(),
+            OperationalCode::ResultDeserializationError.into(),
         ),
         (
             WorkflowReadError::UnknownCustomCode {
@@ -312,11 +312,11 @@ fn each_read_failure_has_python_s_code() {
         ),
         (
             WorkflowReadError::DatabaseError {
-                database_code: HandleErrorCode::DbOperationFailed,
+                database_code: WorkflowHandleErrorCode::DatabaseOperationFailed,
                 message: "m".to_owned(),
                 retryable: true,
             },
-            OperationalErrorCode::BrokerError.into(),
+            OperationalCode::DatabaseError.into(),
         ),
     ];
     for (error, code) in cases {
@@ -329,7 +329,7 @@ fn each_read_failure_has_python_s_code() {
 /// The limit at the bound passes the check.
 #[tokio::test]
 async fn a_get_above_the_bound_is_invalid_input_before_any_statement() {
-    let app = Horsies::new(AppConfig::for_database_url(
+    let app = Horsies::new(AppConfig::from_database_url(
         "postgresql://127.0.0.1:1/nothing",
     ))
     .unwrap();
@@ -364,14 +364,14 @@ fn a_handle_error_maps_to_its_read_failure() {
     let message = || "m".to_owned();
     let cause = || horsies_core::WorkflowError::InvalidStatus("BOGUS".to_owned());
     assert!(matches!(
-        WorkflowReadError::of_handle_error(HandleOperationError::WorkflowNotFound {
+        WorkflowReadError::of_handle_error(WorkflowHandleError::NotFound {
             message: message(),
             workflow_id: workflow(),
         }),
         WorkflowReadError::WorkflowNotFound { .. }
     ));
     assert!(matches!(
-        WorkflowReadError::of_handle_error(HandleOperationError::StoredDataInvalid {
+        WorkflowReadError::of_handle_error(WorkflowHandleError::StoredDataInvalid {
             message: message(),
             workflow_id: workflow(),
             cause: cause(),
@@ -379,7 +379,7 @@ fn a_handle_error_maps_to_its_read_failure() {
         WorkflowReadError::ResultDeserializationError { .. }
     ));
     assert!(matches!(
-        WorkflowReadError::of_handle_error(HandleOperationError::DbOperationFailed {
+        WorkflowReadError::of_handle_error(WorkflowHandleError::DatabaseOperationFailed {
             message: message(),
             retryable: false,
             workflow_id: workflow(),
@@ -388,7 +388,7 @@ fn a_handle_error_maps_to_its_read_failure() {
         WorkflowReadError::DatabaseError { .. }
     ));
     assert!(matches!(
-        WorkflowReadError::of_handle_error(HandleOperationError::ResumeRecoveryFailed {
+        WorkflowReadError::of_handle_error(WorkflowHandleError::ResumeRecoveryFailed {
             message: message(),
             workflow_id: workflow(),
             cause: cause(),
@@ -396,7 +396,7 @@ fn a_handle_error_maps_to_its_read_failure() {
         WorkflowReadError::DatabaseError { .. }
     ));
     assert!(matches!(
-        WorkflowReadError::of_handle_error(HandleOperationError::AsyncContext {
+        WorkflowReadError::of_handle_error(WorkflowHandleError::AsyncContext {
             message: message(),
             workflow_id: workflow(),
         }),
@@ -619,7 +619,7 @@ fn a_stored_summary_output_keeps_its_stored_text() {
 #[test]
 fn a_node_status_outside_the_enum_is_stored_data_invalid() {
     let refused = node_info(workflow(), stored_node("BOGUS", None)).unwrap_err();
-    assert_eq!(refused.code(), HandleErrorCode::StoredDataInvalid);
+    assert_eq!(refused.code(), WorkflowHandleErrorCode::StoredDataInvalid);
     assert!(!refused.retryable());
     assert_eq!(refused.workflow_id(), workflow());
     assert_eq!(
@@ -628,7 +628,7 @@ fn a_node_status_outside_the_enum_is_stored_data_invalid() {
     );
     assert!(matches!(
         refused,
-        HandleOperationError::StoredDataInvalid {
+        WorkflowHandleError::StoredDataInvalid {
             cause: horsies_core::WorkflowError::InvalidStatus(ref status),
             ..
         } if status == "BOGUS"
@@ -660,7 +660,7 @@ fn a_stored_null_is_no_summary() {
 fn an_empty_stored_summary_is_stored_data_invalid() {
     let refused = node_info(workflow(), stored_node("COMPLETED", Some("")))
         .expect_err("an empty summary does not read");
-    assert_eq!(refused.code(), HandleErrorCode::StoredDataInvalid);
+    assert_eq!(refused.code(), WorkflowHandleErrorCode::StoredDataInvalid);
     assert!(!refused.retryable());
     assert_eq!(refused.workflow_id(), workflow());
     assert!(
@@ -684,7 +684,7 @@ fn a_summary_that_does_not_read_is_stored_data_invalid() {
         deep.as_str(),
     ] {
         let refused = node_info(workflow(), stored_node("COMPLETED", Some(summary))).unwrap_err();
-        assert_eq!(refused.code(), HandleErrorCode::StoredDataInvalid);
+        assert_eq!(refused.code(), WorkflowHandleErrorCode::StoredDataInvalid);
         assert!(!refused.retryable());
         // The cause is the refused deserialize of the stored value: a
         // contract violation.
@@ -694,7 +694,7 @@ fn a_summary_that_does_not_read_is_stored_data_invalid() {
         );
         assert!(matches!(
             refused,
-            HandleOperationError::StoredDataInvalid {
+            WorkflowHandleError::StoredDataInvalid {
                 cause: horsies_core::WorkflowError::Serialization(_),
                 ..
             }

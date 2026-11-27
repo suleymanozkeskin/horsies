@@ -110,7 +110,7 @@ impl WorkflowDefinition for OrderSummary {
 }
 
 fn build_app() -> Result<Horsies, HorsiesError> {
-    let mut config = AppConfig::for_database_url(database_url());
+    let mut config = AppConfig::from_database_url(database_url());
     config.worker_profiles = BTreeMap::from([(DEFAULT_PROFILE.to_owned(), isolated_profile())]);
     let mut app = Horsies::new(config)?;
     let _load_prices = load_prices::register(&mut app)?;

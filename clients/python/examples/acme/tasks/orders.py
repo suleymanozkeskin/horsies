@@ -12,7 +12,7 @@ from __future__ import annotations
 from horsies import (
     Err,
     Ok,
-    OperationalErrorCode,
+    OperationalCode,
     Result,
     RetryPolicy,
     TaskError,
@@ -37,7 +37,7 @@ from . import store_failure
     queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def validate_order(*, order_id: str) -> Result[OrderValidation, TaskError]:
@@ -76,7 +76,7 @@ def validate_order(*, order_id: str) -> Result[OrderValidation, TaskError]:
     queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def pick_pack(
@@ -137,7 +137,7 @@ def pick_pack(
     queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def allocate_warehouse(
@@ -182,7 +182,7 @@ def allocate_warehouse(
     timeout_ms=tuning.INVOICE_TIMEOUT_MS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def generate_invoice(*, order_id: str) -> Result[Invoice, TaskError]:

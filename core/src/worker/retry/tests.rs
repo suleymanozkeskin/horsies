@@ -578,7 +578,7 @@ fn a_built_in_code_is_compared_by_its_value() {
         "jitter": false, "retry_for": ["WORKER_CRASHED", "TASK_TIMEOUT"]}"#;
     let retry = retry_of(&options_with_policy(policy));
     let crashed = crate::core::task::error::TaskErrorCode::from(
-        crate::core::task::error::OperationalErrorCode::WorkerCrashed,
+        crate::core::task::error::OperationalCode::WorkerCrashed,
     )
     .to_string();
     assert_eq!(crashed, "WORKER_CRASHED");

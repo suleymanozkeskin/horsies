@@ -53,7 +53,7 @@ def to_scheduler_manifest(
 
     Raises:
         ConfigurationError: a schedule's queue is not valid for the app
-            (`Horsies.validate_queue_name`); `prepare_schedules` already
+            (`Horsies.validate_queue`); `prepare_schedules` already
             checked it, so this repeats its refusal.
         AssertionError: an enabled schedule has no prepared text (a defect
             of the caller).
@@ -77,12 +77,12 @@ def resolve_schedule_queue(app: Horsies, schedule: TaskSchedule) -> str:
 
     Raises:
         ConfigurationError: the queue is not valid for the app
-            (`Horsies.validate_queue_name`).
+            (`Horsies.validate_queue`).
     """
     task = app.tasks.get(schedule.task_name)
     task_queue = task.queue if task is not None else None
     queue_name = schedule.queue if schedule.queue is not None else task_queue
-    return app.validate_queue_name(queue_name)
+    return app.validate_queue(queue_name)
 
 
 def pattern_json(schedule: TaskSchedule) -> str:
@@ -150,7 +150,7 @@ def _send_manifest(
         retention_class_key=resolve_retention_class_key(
             resolve_queue_retention_class(app.config.retention, queue_name),
         ),
-        retain_rerun_input=app.config.broker.retain_rerun_input_default,
+        retain_rerun_input=app.config.database.retain_rerun_input_default,
     )
 
 

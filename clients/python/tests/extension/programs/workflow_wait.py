@@ -62,7 +62,7 @@ def ctrl_c_ends_a_blocking_get() -> Report:
     app = Horsies(
         AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=PostgresConfig(database_url=SecretStr(url)),
+            database=PostgresConfig(database_url=SecretStr(url)),
         ),
     )
 

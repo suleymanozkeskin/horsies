@@ -11,7 +11,7 @@ import pytest
 
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.broker import PostgresConfig, SessionDatabaseSeparate
 from horsies.core.types.result import is_ok
 from horsies.core.utils.url import to_psycopg_url
 from tests.pgbouncer_utils import (
@@ -65,7 +65,7 @@ async def test_horsies_transaction_mode_disables_psycopg_prepared_statements(
     broker = PostgresBroker(
         PostgresConfig(
             database_url=pgbouncer_urls.transaction,
-            session_database_url=pgbouncer_urls.direct,
+            session_database=SessionDatabaseSeparate(url=pgbouncer_urls.direct),
             pgbouncer_transaction_mode=True,
             pool_size=2,
             max_overflow=0,

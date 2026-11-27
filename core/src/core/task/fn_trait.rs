@@ -313,7 +313,7 @@ impl std::fmt::Debug for RegisteredTask {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::task::error::{OperationalErrorCode, TaskError};
+    use crate::core::task::error::{OperationalCode, TaskError};
 
     struct DummyAsync;
 
@@ -386,7 +386,7 @@ mod tests {
         impl BlockingTaskFn for FailingTask {
             fn execute(&self, _args: &[u8]) -> RawTaskResult {
                 TaskResult::Err(TaskError::built_in(
-                    OperationalErrorCode::TaskException,
+                    OperationalCode::TaskException,
                     "something broke",
                 ))
             }

@@ -13,7 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from horsies.core.brokers.result_types import BrokerWaitInsideTask
+from horsies.core.brokers.result_types import DatabaseWaitInsideTask
 from horsies.core.models.outcome import (
     Failed,
     ReadResult,
@@ -125,7 +125,7 @@ async def async_wait_inside_task() -> Result[AsyncWaitProbe, TaskError]:
             ),
             app_get_result_async_refused=_refused(read),
             raw_async_refused=is_err(raw)
-            and isinstance(raw.err_value, BrokerWaitInsideTask),
+            and isinstance(raw.err_value, DatabaseWaitInsideTask),
             workflow_started=is_ok(started),
             workflow_get_async_refused=is_ok(started)
             and _refused(

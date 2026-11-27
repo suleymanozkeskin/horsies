@@ -22,7 +22,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.tasks import (
-    OperationalErrorCode,
+    OperationalCode,
 )
 from horsies.core.types.result import Ok, is_err, is_ok
 from tests.integration.terminal_writes import complete_plain_task
@@ -136,7 +136,7 @@ async def _insert_retried_attempts(
             {
                 'task_id': task_id,
                 'attempt': attempt,
-                'error_code': OperationalErrorCode.TASK_EXCEPTION.value,
+                'error_code': OperationalCode.TASK_EXCEPTION.value,
                 'worker_id': worker_id,
                 'worker_hostname': worker_hostname,
                 'worker_pid': worker_pid,
@@ -214,7 +214,7 @@ async def test_stale_cleanup_writes_failed_attempt_worker_crashed(
     """mark_stale_tasks_as_failed writes one FAILED attempt with WORKER_CRASHED.
 
     No worker runs here, so no reaper runs the stale RUNNING pass, as with
-    ``auto_fail_stale_running=False``: the call runs the pass on demand.
+    ``fail_stale_running=False``: the call runs the pass on demand.
     """
     task_id = str(uuid.uuid4())
     sent_at, fingerprint = compute_test_command_fingerprint(task_name='stale_attempt_test')
@@ -288,7 +288,7 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
     """mark_stale_tasks_as_failed retries when WORKER_CRASHED is in retry_for.
 
     No worker runs here, so no reaper runs the stale RUNNING pass, as with
-    ``auto_fail_stale_running=False``: the call runs the pass on demand.
+    ``fail_stale_running=False``: the call runs the pass on demand.
     """
     task_id = str(uuid.uuid4())
     sent_at, fingerprint = compute_test_command_fingerprint(task_name='stale_retry_test')

@@ -505,9 +505,9 @@ async function ping(app: Horsies, expected: number): Promise<Result<string, stri
   return ok(pingLineText(answered.value.length, targeted.value.length));
 }
 
-/** The text of a refused worker ping: its code, and its message or the refused field and the reason. Pure. */
+/** The text of a refused worker ping: its code, and its message or the refused read and the cause. Pure. */
 function pingWorkersErrorText(error: PingWorkersError): string {
-  return "reason" in error ? `${error.code}: ${error.field}: ${error.reason}` : failureText(error);
+  return error.kind === "invalidInput" ? `${error.code}: ${error.subject}: ${error.cause}` : failureText(error);
 }
 
 /** The answers to a ping of every worker, once `expected` workers answered one ping, at most `PING_ATTEMPTS` pings. */

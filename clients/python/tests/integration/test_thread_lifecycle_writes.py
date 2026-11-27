@@ -33,7 +33,7 @@ from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.tasks import (
     MIN_TASK_TIMEOUT_MS,
     Execution,
-    OperationalErrorCode,
+    OperationalCode,
     TaskError,
 )
 from horsies.core.models.outcome import Failed, Succeeded
@@ -322,7 +322,7 @@ async def test_a_refusal_sets_the_row_running_and_fails_before_resolve(
     [end] = _run_on_seats([(task_id, claimed_at, REFUSAL)])
 
     error = _failed_error(_envelope(end).text)
-    assert error.code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+    assert error.code == OperationalCode.WORKER_SERIALIZATION_ERROR
     row = await _row(session, task_id)
     assert row.status == 'RUNNING'
     assert row.finalizing_at is not None
@@ -438,7 +438,7 @@ async def test_a_seat_that_gets_its_connection_after_the_deadline_leaves_the_row
     deadlines = threading.Thread(target=table.serve_deadlines, daemon=True)
     deadlines.start()
     seats = ThreadSeats(2, table, PostgresThreadSeats(), lambda: RssMb(1.0))
-    one_connection = ResolvedPool(min_size=0, max_size=1, check=False)
+    one_connection = ResolvedPool(min_size=0, max_size=1, pre_ping=False)
     with child_core_handle_for(broker.config.effective_session_database_url, one_connection):
         assert seats.start().is_ok()
         try:

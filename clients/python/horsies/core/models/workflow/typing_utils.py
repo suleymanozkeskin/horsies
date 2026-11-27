@@ -20,7 +20,7 @@ from typing import (
 )
 
 from horsies.core.errors import (
-    ErrorCode,
+    HorsiesErrorCode,
     WorkflowValidationError,
 )
 
@@ -345,7 +345,7 @@ def validate_workflow_generic_output_match(
         if declared_ok is type(None):
             return
         raise WorkflowValidationError(
-            code=ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
+            code=HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
             message=(
                 f"workflow '{spec.name}' declares WorkflowDefinition"
                 f'[{_format_type_name(declared_ok)}] but has no '
@@ -369,7 +369,7 @@ def validate_workflow_generic_output_match(
 
     if not _is_ok_type_compatible(actual_ok, declared_ok):
         raise WorkflowValidationError(
-            code=ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
+            code=HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
             message=(
                 f"workflow '{spec.name}' declares WorkflowDefinition"
                 f'[{_format_type_name(declared_ok)}] but config.output produces '

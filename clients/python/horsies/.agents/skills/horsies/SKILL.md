@@ -49,7 +49,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, Ok, Result, TaskError
 
 app = Horsies(config=AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://...")),
 ))
 
 @app.task("add_numbers")
@@ -97,7 +97,7 @@ Deadline: `add_numbers.with_options(good_until=deadline).send(a=5, b=3)` expires
 
 ### Resend a Failed Send
 
-`TaskSendError` is a union with one variant per code; match on the variant. `TaskSendEnqueueFailed` has the field `retryable` (`True` for a transient cause); `TaskSendIdempotencyKeyConflict` has the class value `retryable = True` (the conflict clears when the reservation ends). The resend methods take a `TaskSendResendable` (`TaskSendEnqueueFailed`, `TaskSendAsyncContext`, `TaskSendIdempotencyKeyConflict`); another variant is a type error and fails an assertion at run time. For a key conflict, `owner_task_id` names the task that holds the key; a resend is accepted after the reservation ends:
+`TaskSendError` is a union with one variant per code; match on the variant. `TaskSendEnqueueFailed` has the field `retryable` (`True` for a transient cause); `TaskSendIdempotencyKeyConflict` has the class value `retryable = False` (a repeat of the same send does not complete it). The resend methods take a `TaskSendResendable` (`TaskSendEnqueueFailed`, `TaskSendAsyncContext`); another variant, the key conflict included, is a type error and fails an assertion at run time. For a key conflict, `owner_task_id` names the task that holds the key; send the same command, or use another key:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -218,7 +218,7 @@ A start with an existing `workflow_id` compares its start command with the store
 
 ### Auto-retry ( this is not execution retry, only for sending tasks / starting workflows, for task execution retry see `RetryPolicy` )
 
-Set `resend_on_transient_err=True` on `AppConfig` to auto-retry transient
+Set `resend_on_transient_error=True` on `AppConfig` to auto-retry transient
 `ENQUEUE_FAILED` errors (up to 3 times, exponential backoff) for both
 task sends and workflow starts.
 
@@ -240,7 +240,7 @@ All methods have `_async()` variants.
 ### Reconnect to an Existing Workflow
 
 `WorkflowHandle.for_id(text, broker)` parses a workflow id text once, at the
-boundary: `Ok(handle)`, or `Err(HandleInvalidWorkflowId)` for text that is not
+boundary: `Ok(handle)`, or `Err(WorkflowHandleInvalidWorkflowId)` for text that is not
 a UUID (no handle is built).
 
 ```python
@@ -316,6 +316,9 @@ outcome = await rerun_task_in_async(
         retain_rerun_input=True,
         reservation_window=timedelta(hours=24),
     ),
+    # The declared codes of the app's tasks: the stored retry list of the
+    # source is checked against them before the write.
+    registered_task_codes=app.registered_task_codes(),
 )
 match outcome:
     case RerunEnqueued(new_task_id=new_id):
@@ -337,6 +340,16 @@ was not retained cannot be rerun. A `COMPLETED` source is not eligible.
 `RerunSourceAbsent.reason` is a `TaskAbsenceReason`: it says whether
 retention can explain that no record has the id (see `monitoring.md`).
 
+Before the write, the rerun checks the stored `retry_for` of the source
+against `registered_task_codes` (`app.registered_task_codes()`: each
+registered task by name, with its `error_codes`). A built-in code
+passes for every task; a custom code passes when the app registers the task
+and the task declares the code. Otherwise `CorePreconditionFailed` (subject
+`rerun_task`, not retryable, nothing written): `RETRY_CODE_NOT_DECLARED`
+for a code that the task does not declare, `TASK_NOT_REGISTERED` for a task
+that the app does not register. `app.rerun_task_in_async` and `app.rerun_task_in`
+pass the app's codes themselves.
+
 `app.rerun_task_in_async(connection, command, policy)` is the same rerun with
 the tracing setting of the app (blocking: `app.rerun_task_in` on a SQLAlchemy
 `Connection`). With `OtelTracing()` the new task stores the trace carrier of
@@ -351,8 +364,8 @@ The free `rerun_task_in_async` stores no carrier.
 | `get()` / `get_result()` / `result_for()` | `ReadResult[T, TaskError]` | `Succeeded(value)` or `Failed(task_error)` | `ReadError` |
 | `send()` / `resend()` | `TaskSendResult[TaskHandle[T]]` | `TaskHandle` | `TaskSendError` |
 | `start()` | `WorkflowStartResult[WorkflowHandle[T]]` | `WorkflowHandle` | `WorkflowStartError` |
-| Broker infra | `BrokerResult[T]` | value `T` | `BrokerOperationError` |
-| Handle ops | `HandleResult[T]` | value `T` | `HandleOperationError` |
+| Broker infra | `DatabaseResult[T]` | value `T` | `DatabaseOperationError` |
+| Handle ops | `HandleResult[T]` | value `T` | `WorkflowHandleError` |
 
 Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`. Read a `ReadResult` with one `match`: `case Ok(Succeeded(value))`, `case Ok(Failed(task_error))`, `case Err(read_error)`. A workflow node input (`args_from`) and `WorkflowContext.result_for()` give a `TaskOutcome[T, TaskError]`: `Succeeded(value)` or `Failed(task_error)`.
 
@@ -360,16 +373,16 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`. Read a 
 
 - `TaskSendErrorCode`: `SEND_SUPPRESSED`, `ASYNC_CONTEXT`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`, `PAYLOAD_TOO_LARGE`
 - `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `WORKFLOW_ID_CONFLICT`, `WORKFLOW_COMMAND_CONFLICT`, `ENQUEUE_FAILED`, `ASYNC_CONTEXT`
-- `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `STORED_DATA_INVALID`, `RESUME_RECOVERY_FAILED`, `ASYNC_CONTEXT`
-- `ReadError` (a union, one class per read failure; each has `code` and `message`): `ReadWaitTimeout`, `ReadTaskNotFound`, `ReadWorkflowNotFound`, `ReadResultNotAvailable`, `ReadResultNotReady`, `ReadWaitInsideTask`, `ReadAsyncContext`, `ReadInvalidInput`, `ReadResultDeserializationError`, `ReadUnknownCustomCode` (a stored custom code that the declared `Enum` does not name; adds `custom_code`), `ReadDatabaseError` (adds `retryable` and `exception`), `ReadNoTypeAvailable`, `ReadWorkflowContextMissingId`
+- `WorkflowHandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DATABASE_OPERATION_FAILED`, `STORED_DATA_INVALID`, `RESUME_RECOVERY_FAILED`, `ASYNC_CONTEXT`, `INVALID_WORKFLOW_ID`
+- `ReadError` (a union, one class per read failure; each has `code` and `message`): `ReadWaitTimeout`, `ReadTaskNotFound`, `ReadWorkflowNotFound`, `ReadResultNotAvailable`, `ReadResultNotReady`, `ReadWaitInsideTask`, `ReadAsyncContext`, `ReadInvalidInput`, `ReadResultDeserializationError`, `ReadUnknownCustomCode` (a stored custom code that the declared `Enum` does not name; adds `custom_code`), `ReadDatabaseError` (adds `retryable` and `cause`), `ReadNoTypeAvailable`, `ReadWorkflowContextMissingId`
 
-`retryable=True` means transient (DB connection blip). `retryable=False` means permanent. On send errors, `TaskSendEnqueueFailed` has the field `retryable` and `TaskSendIdempotencyKeyConflict` the class value `retryable = True`; the other send errors have no `retryable`.
+`retryable=True` means transient (DB connection blip). `retryable=False` means permanent. On send errors, `TaskSendEnqueueFailed` has the field `retryable` and `TaskSendIdempotencyKeyConflict` the class value `retryable = False`; the other send errors have no `retryable`.
 
-`HandleOperationError` is a union with one variant per `HandleErrorCode` member (`HandleWorkflowNotFound`, `HandleDbOperationFailed`, `HandleStoredDataInvalid`, `HandleResumeRecoveryFailed`, `HandleAsyncContext`); match on the variant. `HandleResumeRecoveryFailed` means `resume()` committed and only its recovery pass failed: the workflow is `RUNNING`.
+`WorkflowHandleError` is a union with one variant per `WorkflowHandleErrorCode` member (`WorkflowHandleNotFound`, `WorkflowHandleDatabaseOperationFailed`, `WorkflowHandleStoredDataInvalid`, `WorkflowHandleResumeRecoveryFailed`, `WorkflowHandleAsyncContext`); match on the variant. `WorkflowHandleResumeRecoveryFailed` means `resume()` committed and only its recovery pass failed: the workflow is `RUNNING`.
 
 Every call runs on the core of the process: one pool for every thread and event loop, so no call has an event loop limit.
 
-`ASYNC_CONTEXT` (every catalog above, `BrokerErrorCode`, and the read error `ReadAsyncContext`): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell). Its wait would stall that loop, so nothing ran. Call the `*_async` form. `retryable=False` where the error has the field; a handle does not keep an `ReadAsyncContext` read error; `await spec.retry_start_async(err)` completes a start that returned it. `app.check(live=True)` there reports `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`).
+`ASYNC_CONTEXT` (every catalog above, `DatabaseErrorCode`, and the read error `ReadAsyncContext`): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell). Its wait would stall that loop, so nothing ran. Call the `*_async` form. `retryable=False` where the error has the field; a handle does not keep an `ReadAsyncContext` read error; `await spec.retry_start_async(err)` completes a start that returned it. `app.check(live=True)` there reports `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`).
 
 ### Raised, never returned: `ForkedAfterCoreStart`, `CoreStopped`
 
@@ -391,7 +404,7 @@ horsies scheduler myapp.config:app       # start scheduler
 horsies check myapp.config:app [--live]  # validate before deploy
 horsies web myapp.config:app             # serve the monitoring web UI (needs horsies[web])
 horsies web --database-url URL           # monitor a database without an app module
-horsies metrics myapp.config:app --listen 0.0.0.0:9465  # serve the fleet metrics at GET /metrics
+horsies metrics myapp.config:app --metrics-listen 0.0.0.0:9465  # serve the fleet metrics at GET /metrics
 horsies get-docs                         # download the docs of the installed version
 horsies get-docs --ref main              # download the main branch docs (needed for a development version)
 horsies skills install --target DIR      # copy this skill folder to DIR/horsies/ (--force replaces a changed copy)

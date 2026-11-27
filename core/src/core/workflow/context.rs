@@ -73,7 +73,7 @@ impl WorkflowContext {
     ) -> Result<TaskResult<T>, TaskError> {
         let value = self.results_by_id.get(key.node_id()).ok_or_else(|| {
             TaskError::built_in(
-                crate::core::task::error::ContractCode::WorkflowCtxMissingId,
+                crate::core::task::error::ContractCode::WorkflowContextMissingId,
                 format!(
                     "no result found for node_id '{}' in workflow context",
                     key.node_id(),
@@ -85,7 +85,7 @@ impl WorkflowContext {
             TaskResult::Ok(ok_value) => {
                 let parsed = ok_value.decode::<T>().map_err(|e| {
                     TaskError::built_in(
-                        crate::core::task::error::OperationalErrorCode::ResultDeserializationError,
+                        crate::core::task::error::OperationalCode::ResultDeserializationError,
                         format!(
                             "failed to deserialize result for node_id '{}': {}",
                             key.node_id(),
@@ -108,7 +108,7 @@ impl WorkflowContext {
     pub fn summary_for<T>(&self, key: &NodeKey<T>) -> Result<SubWorkflowSummary, TaskError> {
         let summary = self.summaries_by_id.get(key.node_id()).ok_or_else(|| {
             TaskError::built_in(
-                crate::core::task::error::ContractCode::WorkflowCtxMissingId,
+                crate::core::task::error::ContractCode::WorkflowContextMissingId,
                 format!(
                     "no summary found for node_id '{}' in workflow context",
                     key.node_id(),
@@ -123,7 +123,7 @@ impl WorkflowContext {
     /// Mirrors [`Self::result_for`]: uses `T` from the `NodeKey` to decode the
     /// child workflow's stored `output` slot. Returns `Ok(None)` when the
     /// summary has no output (no `output_index` was set on the child), a
-    /// `WorkflowCtxMissingId` error when the node_id is absent, or a
+    /// `WorkflowContextMissingId` error when the node_id is absent, or a
     /// `ResultDeserializationError` when the stored output fails to decode
     /// into `T`.
     pub fn output_for<T: DeserializeOwned>(
@@ -132,7 +132,7 @@ impl WorkflowContext {
     ) -> Result<Option<T>, TaskError> {
         let summary = self.summaries_by_id.get(key.node_id()).ok_or_else(|| {
             TaskError::built_in(
-                crate::core::task::error::ContractCode::WorkflowCtxMissingId,
+                crate::core::task::error::ContractCode::WorkflowContextMissingId,
                 format!(
                     "no summary found for node_id '{}' in workflow context",
                     key.node_id(),
@@ -145,7 +145,7 @@ impl WorkflowContext {
             Some(output) => {
                 let parsed = output.decode::<T>().map_err(|e| {
                     TaskError::built_in(
-                        crate::core::task::error::OperationalErrorCode::ResultDeserializationError,
+                        crate::core::task::error::OperationalCode::ResultDeserializationError,
                         format!(
                             "failed to deserialize sub-workflow output for node_id '{}': {}",
                             key.node_id(),

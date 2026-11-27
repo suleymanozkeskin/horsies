@@ -63,7 +63,7 @@ def demand_factor(now_epoch: float) -> float:
 def start_fulfillment(order: Order) -> None:
     """Start the flagship workflow for one order and print its deep link.
 
-    `resend_on_transient_err` is on, so a transient enqueue failure has
+    `resend_on_transient_error` is on, so a transient enqueue failure has
     already been retried by the time an `Err` arrives here.
     """
     match build_order_fulfillment(order=order).start():

@@ -26,7 +26,7 @@ fn the_log_line_states_the_resolved_sizes_of_each_kind() {
             "kind": "shared_thread_children",
             "count": 1,
             "seats": 8,
-            "pool": {"max_size": {"kind": "pool_size", "connections": 5}, "check": true},
+            "pool": {"max_size": {"kind": "pool_size", "connections": 5}, "pre_ping": true},
         },
     }));
     let async_seats = NonZeroU32::new(25).expect("25 seats");
@@ -34,11 +34,11 @@ fn the_log_line_states_the_resolved_sizes_of_each_kind() {
 
     assert!(line.starts_with("isolated=2 ("), "{line}");
     assert!(
-        line.contains("pool 0 to 1 connections, check off; task_send_pool 2 connections)"),
+        line.contains("pool 0 to 1 connections, pre_ping off; task_send_pool 2 connections)"),
         "{line}"
     );
     let shared_async = format!(
-        "pool 0 to {} connections, derived from seats, check off; executor {} threads, \
+        "pool 0 to {} connections, derived from seats, pre_ping off; executor {} threads, \
          derived from seats; task_send_pool 2 connections)",
         shared_async_pool_connections(async_seats).get(),
         shared_async_executor_threads(async_seats).get(),
@@ -46,7 +46,7 @@ fn the_log_line_states_the_resolved_sizes_of_each_kind() {
     assert!(line.contains(&shared_async), "{line}");
     assert!(line.contains("shared_thread=1x8 seats"), "{line}");
     assert!(
-        line.contains("pool 0 to 5 connections, check on; task_send_pool 2 connections)"),
+        line.contains("pool 0 to 5 connections, pre_ping on; task_send_pool 2 connections)"),
         "{line}"
     );
     assert!(

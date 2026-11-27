@@ -60,14 +60,14 @@ from horsies.core.codec.typed import (
     reportable_error,
 )
 from horsies.core.codec.validation_errors import ValueValidationError
-from horsies.core.errors import ErrorCode
+from horsies.core.errors import HorsiesErrorCode
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.schedule import IntervalSchedule, TaskSchedule
 from horsies.core.models.task_send_types import TaskSendValidationFailed
 from horsies.core.models.tasks import (
     ContractCode,
-    OperationalErrorCode,
-    SubWorkflowError,
+    OperationalCode,
+    SubWorkflowFailure,
 )
 from horsies.core.models.workflow import WorkflowStatus
 from horsies.core.models.workflow.context import SubWorkflowSummary
@@ -487,12 +487,12 @@ class TestLostFields:
 def _mock_app() -> MagicMock:
     app = MagicMock()
     app.config.queue_mode.name = 'DEFAULT'
-    app.config.resend_on_transient_err = False
+    app.config.resend_on_transient_error = False
     app.config.payload = PayloadPolicy()
     app.config.exception_mapper = {}
     app.config.default_unhandled_error_code = 'UNHANDLED_EXCEPTION'
     app.are_sends_suppressed.return_value = False
-    app.validate_queue_name.return_value = 'default'
+    app.validate_queue.return_value = 'default'
     return app
 
 
@@ -549,7 +549,7 @@ class TestEntryPoints:
     def test_a_schedule_refuses_a_value_the_worker_cannot_read(self) -> None:
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://user:password@localhost/unused',
                 ),
             ),
@@ -571,7 +571,7 @@ class TestEntryPoints:
         result = _encode_schedule_kwargs(app, schedule)
 
         assert is_err(result)
-        assert result.err_value.code is ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert result.err_value.code is HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
 
     def test_the_checked_entry_keeps_the_wire_form(self) -> None:
         def task(*, order: Note) -> Result[int, TaskError]:
@@ -742,10 +742,10 @@ class TestReportableError:
 
     def test_a_built_in_code_keeps_its_type(self) -> None:
         read = _stored(
-            TaskError(code=OperationalErrorCode.BROKER_ERROR, data=_Opaque()),
+            TaskError(code=OperationalCode.DATABASE_ERROR, data=_Opaque()),
         )
 
-        assert read.code is OperationalErrorCode.BROKER_ERROR
+        assert read.code is OperationalCode.DATABASE_ERROR
 
     @pytest.mark.parametrize(
         'summary',
@@ -761,32 +761,32 @@ class TestReportableError:
         summary: SubWorkflowSummary[Any],
     ) -> None:
         read = _stored(
-            SubWorkflowError(
+            SubWorkflowFailure(
                 code='X',
                 sub_workflow_id='wf-1',
                 sub_workflow_summary=summary,
             ),
         )
 
-        assert isinstance(read, SubWorkflowError)
+        assert isinstance(read, SubWorkflowFailure)
         assert read.sub_workflow_id == 'wf-1'
         assert read.sub_workflow_summary.failed_tasks == 1
 
     def test_a_surrogate_in_the_id_keeps_the_class(self) -> None:
         read = _stored(
-            SubWorkflowError(
+            SubWorkflowFailure(
                 code='X',
                 sub_workflow_id='wf-\ud800',
                 sub_workflow_summary=_summary(),
             ),
         )
 
-        assert isinstance(read, SubWorkflowError)
+        assert isinstance(read, SubWorkflowFailure)
         assert read.sub_workflow_id == 'wf-\\ud800'
 
     def test_bad_data_keeps_a_good_output(self) -> None:
         read = _stored(
-            SubWorkflowError(
+            SubWorkflowFailure(
                 code='X',
                 data=_Opaque(),
                 sub_workflow_id='wf-1',
@@ -794,11 +794,11 @@ class TestReportableError:
             ),
         )
 
-        assert isinstance(read, SubWorkflowError)
+        assert isinstance(read, SubWorkflowFailure)
         assert read.sub_workflow_summary.output == {'a': 1}
 
     def test_a_good_sub_workflow_error_stays(self) -> None:
-        err = SubWorkflowError(
+        err = SubWorkflowFailure(
             code='X',
             sub_workflow_id='wf-1',
             sub_workflow_summary=_summary(output={'a': 1}),
@@ -806,11 +806,11 @@ class TestReportableError:
 
         read = _stored(err)
 
-        assert isinstance(read, SubWorkflowError)
+        assert isinstance(read, SubWorkflowFailure)
         assert read.data is None
 
     def test_damaged_counts_fall_back_to_a_plain_error(self) -> None:
-        err = SubWorkflowError(
+        err = SubWorkflowFailure(
             code='X',
             sub_workflow_id='wf-1',
             sub_workflow_summary=_summary(failed_tasks='many'),
@@ -822,7 +822,7 @@ class TestReportableError:
         assert read.code == 'X'
 
     def test_a_constructed_error_keeps_its_code(self) -> None:
-        err = SubWorkflowError.model_construct(code='X')
+        err = SubWorkflowFailure.model_construct(code='X')
 
         read = _stored(err)
 
@@ -950,10 +950,10 @@ class TestReportableError:
         assert kept.message is None
 
     def test_a_built_in_code_stays_when_a_field_is_bad(self) -> None:
-        err = TaskError(code=OperationalErrorCode.BROKER_ERROR)
+        err = TaskError(code=OperationalCode.DATABASE_ERROR)
         err.message = 5  # pyright: ignore[reportAttributeAccessIssue]
 
-        assert _stored(reportable_error(err, 'task')).code is OperationalErrorCode.BROKER_ERROR
+        assert _stored(reportable_error(err, 'task')).code is OperationalCode.DATABASE_ERROR
 
     def test_a_lone_surrogate_with_a_damaged_exception_keeps_the_code(self) -> None:
         err = TaskError(code='RATE_LIMITED', message='bad \ud800')
@@ -964,7 +964,7 @@ class TestReportableError:
         assert kept.code == 'RATE_LIMITED'
         assert kept.message is None
 
-    @pytest.mark.parametrize('code', [5, True, None, 'BROKER_ERROR'])
+    @pytest.mark.parametrize('code', [5, True, None, 'DATABASE_ERROR'])
     def test_a_code_that_cannot_be_kept_is_a_catalog_error(self, code: object) -> None:
         err = TaskError(code='RATE_LIMITED')
         err.code = cast('Any', code)
@@ -1010,7 +1010,7 @@ class TestJsonInput:
 
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(database_url='postgresql://u:p@localhost/x'),
+                database=PostgresConfig(database_url='postgresql://u:p@localhost/x'),
             ),
         )
         _ = app.task(name='json_input_parameter')(pass_on)

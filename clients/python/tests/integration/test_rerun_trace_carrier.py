@@ -133,7 +133,7 @@ def inside_caller_span() -> Generator[None]:
 def app_with(tracing: OtelTracing | NoTracing) -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_BROKER_URL)),
+            database=PostgresConfig(database_url=SecretStr(UNREACHABLE_BROKER_URL)),
             tracing=tracing,
         ),
     )
@@ -256,7 +256,12 @@ class TestAppRerunCarrier:
         async with terminalization_schema.engine.begin() as connection:
             source = await seeded_source(connection)
             with inside_caller_span():
-                outcome = await rerun_task_in_async(connection, command(source), policy())
+                outcome = await rerun_task_in_async(
+                    connection,
+                    command(source),
+                    policy(),
+                    registered_task_codes={},
+                )
 
             new_task_id = enqueued(outcome, source)
             assert await stored_trace(connection, new_task_id) == NO_STORED_TRACE
@@ -294,7 +299,7 @@ _NO_TRACING_RERUN = textwrap.dedent(
 
     app = Horsies(
         AppConfig(
-            broker=PostgresConfig(database_url=SecretStr(os.environ['RERUN_BROKER_URL'])),
+            database=PostgresConfig(database_url=SecretStr(os.environ['RERUN_BROKER_URL'])),
         ),
     )
     engine = create_engine(

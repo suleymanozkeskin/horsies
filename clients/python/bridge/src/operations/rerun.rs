@@ -17,12 +17,14 @@
 //! The functions do no I/O and start no runtime; the fork and stop rules
 //! apply, as for `mint_task_id`.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Duration, Utc};
 use horsies_core::{
     decode_rerun_write, named_bind, prepare_rerun_write, rerun_read, CallerRow, CallerStatement,
-    CallerType, ClientFamily, EnqueueRetention, FailureCause, NotEligibleReason, RecordedFamily,
-    RerunCommand, RerunEnqueuePolicy, RerunPreparation, RerunRefusal, RerunWrite,
-    RerunWriteOutcome, StatementValue,
+    CallerType, ClientFamily, DeclaredErrorCodes, EnqueueRetention, FailureCause,
+    NotEligibleReason, RecordedFamily, RegisteredTaskCodes, RerunCommand, RerunEnqueuePolicy,
+    RerunError, RerunPreparation, RerunRefusal, RerunWrite, RerunWriteOutcome, StatementValue,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -373,6 +375,32 @@ pub struct RerunIdempotencyKeyRefused {
     pub cause: String,
 }
 
+/// The stored retry list of the source names the custom code `code`, and
+/// the task `task_name` of the calling app does not declare it
+/// (`RETRY_CODE_NOT_DECLARED`). Nothing written. `message` names both.
+/// `exception` is the refusal, a `CorePreconditionFailed` with the subject
+/// `rerun_task`, not retryable.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+#[derive(Clone, Debug)]
+pub struct RerunRetryCodeNotDeclared {
+    pub task_name: String,
+    pub retry_code: String,
+    pub message: String,
+    pub exception: FailureException,
+}
+
+/// The stored retry list of the source names a custom code, and the calling
+/// app does not register the task `task_name` (`TASK_NOT_REGISTERED`).
+/// Nothing written. `message` names the task. `exception` is the refusal, a
+/// `CorePreconditionFailed` with the subject `rerun_task`, not retryable.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+#[derive(Clone, Debug)]
+pub struct RerunTaskNotRegistered {
+    pub task_name: String,
+    pub message: String,
+    pub exception: FailureException,
+}
+
 /// The new task exists: this write, or this write already run in the
 /// caller's transaction.
 #[pyclass(module = "horsies._core", frozen, get_all)]
@@ -412,6 +440,8 @@ pub enum PreparationRecord {
     ClientFamilyMismatch(RerunClientFamilyMismatch),
     UnknownStoredFamily(RerunUnknownStoredFamily),
     IdempotencyKeyRefused(RerunIdempotencyKeyRefused),
+    RetryCodeNotDeclared(RerunRetryCodeNotDeclared),
+    TaskNotRegistered(RerunTaskNotRegistered),
     IdMintRefused(IdMintRefused),
 }
 
@@ -433,6 +463,8 @@ impl<'py> IntoPyObject<'py> for PreparationRecord {
             Self::ClientFamilyMismatch(record) => record.into_bound_py_any(py),
             Self::UnknownStoredFamily(record) => record.into_bound_py_any(py),
             Self::IdempotencyKeyRefused(record) => record.into_bound_py_any(py),
+            Self::RetryCodeNotDeclared(record) => record.into_bound_py_any(py),
+            Self::TaskNotRegistered(record) => record.into_bound_py_any(py),
             Self::IdMintRefused(record) => record.into_bound_py_any(py),
         }
     }
@@ -546,12 +578,70 @@ fn preparation_record(preparation: RerunPreparation) -> PreparationRecord {
                 cause: refused.to_string(),
             })
         }
+        RerunPreparation::RetryCodeNotDeclared {
+            task_name,
+            retry_code,
+        } => {
+            let message = RerunError::RetryCodeNotDeclared {
+                task_name: task_name.clone(),
+                retry_code: retry_code.clone(),
+            }
+            .to_string();
+            PreparationRecord::RetryCodeNotDeclared(RerunRetryCodeNotDeclared {
+                task_name,
+                retry_code,
+                exception: precondition_failed(&message),
+                message,
+            })
+        }
+        RerunPreparation::TaskNotRegistered { task_name } => {
+            let message = RerunError::TaskNotRegistered {
+                task_name: task_name.clone(),
+            }
+            .to_string();
+            PreparationRecord::TaskNotRegistered(RerunTaskNotRegistered {
+                task_name,
+                exception: precondition_failed(&message),
+                message,
+            })
+        }
         RerunPreparation::IdMintRefused(refused) => {
             PreparationRecord::IdMintRefused(IdMintRefused {
                 cause: refused.to_string(),
             })
         }
     }
+}
+
+/// The `CorePreconditionFailed` of a refused rerun with `message`, not
+/// retryable: the call meets it again until the caller changes its app.
+/// Pure.
+fn precondition_failed(message: &str) -> FailureException {
+    FailureException::new(
+        RERUN_SUBJECT,
+        message.to_owned(),
+        false,
+        FailureCause::PreconditionFailed,
+    )
+}
+
+/// The declared custom codes of the calling app's tasks, from the map
+/// `tasks` of task name to code texts. Pure.
+///
+/// Errors: `ValueError` naming the task and the refused codes, for a code
+/// set that the core refuses (`DeclaredErrorCodes::parse`): a text outside
+/// the code-text rule, the name of a built-in code, or a repeated code.
+fn registered_task_codes(tasks: BTreeMap<String, Vec<String>>) -> PyResult<RegisteredTaskCodes> {
+    let mut parsed: BTreeMap<String, DeclaredErrorCodes> = BTreeMap::new();
+    for (task_name, codes) in tasks {
+        let declared = DeclaredErrorCodes::parse(&codes).map_err(|refused| {
+            PyValueError::new_err(format!(
+                "registered_task_codes of task '{task_name}': {refused}"
+            ))
+        })?;
+        let _absent = parsed.insert(task_name, declared);
+    }
+    Ok(RegisteredTaskCodes::new(parsed))
 }
 
 /// The record of a write outcome. Pure.
@@ -603,21 +693,27 @@ pub fn rerun_read_function(
 /// Decide the rerun from the row of `read` (a tuple in column order):
 /// `RerunWriteRecord`, a refusal record, `RerunClassNotRegistered`,
 /// `RerunClientFamilyMismatch`, `RerunUnknownStoredFamily`,
-/// `RerunIdempotencyKeyRefused` or `IdMintRefused`.
-/// `sent_at` is the send instant of the new task (aware). Pure apart from
-/// the id mint. A row that does not fit the read's columns raises
-/// `CoreDefect`.
+/// `RerunIdempotencyKeyRefused`, `RerunRetryCodeNotDeclared`,
+/// `RerunTaskNotRegistered` or `IdMintRefused`.
+/// `registered_task_codes` maps the name of each task that the calling app
+/// registers to the custom codes that it declares; the stored retry list of
+/// the source is checked against it. `sent_at` is the send instant of the
+/// new task (aware). Pure apart from the id mint. A row that does not fit
+/// the read's columns raises `CoreDefect`; a code set that the core refuses
+/// raises `ValueError`.
 #[pyfunction(name = "prepare_rerun_write")]
-#[pyo3(signature = (read, row, command, policy, *, sent_at))]
+#[pyo3(signature = (read, row, command, policy, *, registered_task_codes, sent_at))]
 pub fn prepare_rerun_write_function(
     read: &Bound<'_, PreparedStatementRecord>,
     row: &Bound<'_, PyTuple>,
     command: &Bound<'_, RerunCommandArgument>,
     policy: &Bound<'_, RerunPolicyArgument>,
+    registered_task_codes: BTreeMap<String, Vec<String>>,
     sent_at: &Bound<'_, PyAny>,
 ) -> PyResult<PreparationRecord> {
     pure_call_allowed()?;
     let sent_at: DateTime<Utc> = utc_instant(sent_at)?;
+    let codes = self::registered_task_codes(registered_task_codes)?;
     let read = &read.get().statement;
     let caller_row = caller_row(read, row)?;
     let preparation = prepare_rerun_write(
@@ -625,6 +721,7 @@ pub fn prepare_rerun_write_function(
         &caller_row,
         &command.get().command,
         &policy.get().policy,
+        &codes,
         OWN_FAMILY,
         sent_at,
     )
@@ -806,6 +903,60 @@ mod tests {
             PreparationRecord::ClassNotRegistered(RerunClassNotRegistered { ref class_key })
                 if class_key == "standard_8d"
         ));
+    }
+
+    #[test]
+    fn the_retry_code_refusals_have_their_records() {
+        match preparation_record(RerunPreparation::RetryCodeNotDeclared {
+            task_name: "charge".to_owned(),
+            retry_code: "TRANSIENT".to_owned(),
+        }) {
+            PreparationRecord::RetryCodeNotDeclared(record) => {
+                assert_eq!(record.task_name, "charge");
+                assert_eq!(record.retry_code, "TRANSIENT");
+                assert!(
+                    record.message.contains("'charge'") && record.message.contains("'TRANSIENT'"),
+                    "{}",
+                    record.message
+                );
+                assert_eq!(record.exception, precondition_failed(&record.message));
+            }
+            _ => panic!("an undeclared retry code has its own record"),
+        }
+        match preparation_record(RerunPreparation::TaskNotRegistered {
+            task_name: "charge".to_owned(),
+        }) {
+            PreparationRecord::TaskNotRegistered(record) => {
+                assert_eq!(record.task_name, "charge");
+                assert!(record.message.contains("'charge'"), "{}", record.message);
+                assert_eq!(record.exception, precondition_failed(&record.message));
+            }
+            _ => panic!("an unregistered task has its own record"),
+        }
+    }
+
+    #[test]
+    fn a_registered_code_set_that_the_core_refuses_is_a_value_error() {
+        Python::initialize();
+        Python::attach(|py| {
+            let accepted = registered_task_codes(BTreeMap::from([(
+                "charge".to_owned(),
+                vec!["TRANSIENT".to_owned()],
+            )]))
+            .expect("a valid code set");
+            assert!(matches!(
+                accepted.of("charge"),
+                horsies_core::DeclaredCodes::Registered { custom }
+                    if custom.get("TRANSIENT").is_some()
+            ));
+            let refused = registered_task_codes(BTreeMap::from([(
+                "charge".to_owned(),
+                vec!["DATABASE_ERROR".to_owned()],
+            )]))
+            .expect_err("a built-in name is not a custom code");
+            assert!(refused.is_instance_of::<PyValueError>(py));
+            assert!(refused.to_string().contains("task 'charge'"), "{refused}");
+        });
     }
 
     #[test]

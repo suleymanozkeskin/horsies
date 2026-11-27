@@ -1048,7 +1048,7 @@ async fn a_transient_error_at_the_consume_is_a_retryable_phase_two_error() {
     );
     let database_url = crate::test_support::migrated_database_url().await;
     let timeout_broker = PostgresBroker::connect_with(
-        &PostgresConfig::from_url(with_query_parameter(
+        &PostgresConfig::from_database_url(with_query_parameter(
             &database_url,
             CONSUME_LOCK_TIMEOUT_PARAMETER,
         )),

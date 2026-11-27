@@ -14,7 +14,7 @@ import pytest
 from pydantic import SecretStr
 
 from horsies.core.app import Horsies
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError
@@ -45,7 +45,7 @@ def _key(label: str) -> str:
 
 def _app_with_tasks() -> tuple[Horsies, TaskFunction[..., int]]:
     app = Horsies(AppConfig(
-        broker=PostgresConfig(database_url=SecretStr(DATABASE_URL)),
+        database=PostgresConfig(database_url=SecretStr(DATABASE_URL)),
     ))
 
     @app.task('success_policy_sub.work')
@@ -99,7 +99,7 @@ class TestSpecValidation:
                 definition_key=_key('refuse'),
             )
 
-        assert raised.value.code == ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
+        assert raised.value.code == HorsiesErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
 
 
 class TestSpecCopy:

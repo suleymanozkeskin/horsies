@@ -1,6 +1,6 @@
 // The rules of README.md (`horsies/no-dropped-result`, `@typescript-eslint/switch-exhaustiveness-check`) on the
-// client's own code: every file of the projects `horsies/tsconfig.json` (the package source) and `tests/tsconfig.json`
-// (the tests), with one change for the boundary parsers (`BOUNDARY_PARSERS`). Run on Node from any folder, after
+// client's own code: every file of the projects `horsies/tsconfig.json` (the package source), `tests/tsconfig.json`
+// (the tests), `examples/tsconfig.json` and `examples/showcase/tsconfig.json` (the examples), with one change for the boundary parsers (`BOUNDARY_PARSERS`). Run on Node from any folder, after
 // `bun install --frozen-lockfile` in `clients/typescript/` (ci/unit.sh):
 //
 //   node eslint-plugin/lint-client.ts
@@ -18,7 +18,12 @@ import { lintConfig } from "./lint-config.ts";
 const WORKSPACE_DIR = fileURLToPath(new URL("../", import.meta.url));
 
 /** The projects of the client's own code, relative to the workspace folder. */
-const CLIENT_PROJECTS: readonly string[] = ["horsies/tsconfig.json", "tests/tsconfig.json"];
+const CLIENT_PROJECTS: readonly string[] = [
+  "horsies/tsconfig.json",
+  "tests/tsconfig.json",
+  "examples/tsconfig.json",
+  "examples/showcase/tsconfig.json",
+];
 
 /**
  * The boundary parsers of the client. Each one switches on a value of a set that the client does not own (a JSON

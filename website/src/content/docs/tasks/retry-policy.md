@@ -52,10 +52,12 @@ A failure starts a retry only when its error code is in `retry_for` and retries 
 
 `retry_for` accepts:
 
-- Codes of the task's own errors, for example `RATE_LIMITED` and `SERVICE_UNAVAILABLE`.
+- Codes that the task declares, for example `RATE_LIMITED` and `SERVICE_UNAVAILABLE`. In Python, these are members of the `Enum` class of `error_codes=`. In Rust, these are the codes of the task's code type.
 - Built-in codes, for example `UNHANDLED_EXCEPTION`, `WORKER_CRASHED` and `TASK_TIMEOUT`. The built-in codes are on the [Errors Reference](/horsies/tasks/errors/).
 
-A code is `UPPER_SNAKE_CASE`. `WORKFLOW_STOPPED` is reserved and is not a task code, so `retry_for` refuses it.
+A client refuses any other entry when the task is defined: the Python client at registration, with `TASK_INVALID_OPTIONS`, and the Rust client at compile time. A misspelled code never registers. The stored policy holds the text of each code.
+
+`WORKFLOW_STOPPED` is reserved and is not a task code, so no task declares it and `retry_for` cannot name it.
 
 ## How Retries Work
 

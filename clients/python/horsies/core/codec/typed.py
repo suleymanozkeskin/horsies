@@ -40,7 +40,7 @@ from horsies.core.codec.validation_errors import (
 )
 from horsies.core.logging import get_logger
 from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
-from horsies.core.models.tasks import SubWorkflowError, TaskError
+from horsies.core.models.tasks import SubWorkflowFailure, TaskError
 from horsies.core.types.result import Err, Ok, Result
 
 logger = get_logger('codec')
@@ -795,11 +795,11 @@ def encode_task_result(
     `code`; smuggle attempts in `data` rejected).
 
     ``TaskError.exception`` is declared as ``BaseException |
-    FlattenedException | None``: the in-memory form lets producers
+    ExceptionRecord | None``: the in-memory form lets producers
     (task_decorator's catch blocks, library error builders) attach a
     live exception for local diagnostics. Pydantic can't serialize a
     raw ``BaseException``, so the err branch flattens it to the
-    structured ``FlattenedException`` shape via ``model_copy`` before
+    structured ``ExceptionRecord`` shape via ``model_copy`` before
     invoking ``encode_value``. This is the single source of truth for
     the live-exception → flattened invariant; every wire emit
     (worker finalize, engine args_from envelope, broker reaper /
@@ -870,8 +870,8 @@ def reportable_error(
     read its code. So this function is total: a bad `data` or a bad subclass field
     never costs the code.
 
-    Order: the error as it is; with `data` replaced; for a `SubWorkflowError`,
-    with its summary repaired, so that `case SubWorkflowError()` still matches;
+    Order: the error as it is; with `data` replaced; for a `SubWorkflowFailure`,
+    with its summary repaired, so that `case SubWorkflowFailure()` still matches;
     and last a plain `TaskError`.
 
     A refusal logs at ERROR with subject and cause. A value from a library path
@@ -905,7 +905,7 @@ def reportable_error(
     without_data = escaped.model_copy(update={'data': {'data_refused': cause}})
     if _report_refusal(without_data) is None:
         return without_data
-    if isinstance(without_data, SubWorkflowError):
+    if isinstance(without_data, SubWorkflowFailure):
         repaired = _repaired_subworkflow_error(without_data)
         if repaired is not None:
             return repaired
@@ -1006,8 +1006,8 @@ def _report_refusal(err: TaskError) -> str | None:
     return None
 
 
-def _repaired_subworkflow_error(err: SubWorkflowError) -> TaskError | None:
-    """Keep the class of a `SubWorkflowError`, and drop only what cannot cross.
+def _repaired_subworkflow_error(err: SubWorkflowFailure) -> TaskError | None:
+    """Keep the class of a `SubWorkflowFailure`, and drop only what cannot cross.
 
     It runs under a guard: a dataclass does not check its fields, so task code can
     put anything in the summary.
@@ -1090,7 +1090,7 @@ def encode_task_error(err: TaskError) -> Json:
 
     Symmetric counterpart to ``decode_task_error``. Routes the encode
     through ``TypeAdapter(type(err))`` so subclass-only fields (notably
-    ``SubWorkflowError.sub_workflow_id`` / ``sub_workflow_summary``)
+    ``SubWorkflowFailure.sub_workflow_id`` / ``sub_workflow_summary``)
     survive the wire round-trip. ``encode_value(err, TaskError)`` would
     silently strip them.
 
@@ -1099,7 +1099,7 @@ def encode_task_error(err: TaskError) -> Json:
 
     Args:
         err: A ``TaskError`` instance — may be the base class or any
-            library-known subclass such as ``SubWorkflowError``.
+            library-known subclass such as ``SubWorkflowFailure``.
 
     Returns:
         The encoded JSON payload carrying every field present on the
@@ -1122,9 +1122,9 @@ def decode_task_error(err_slot: Json) -> TaskError:
     rules can never drift between callers.
 
     The strict codec uses ``TypeAdapter(TaskError)`` which drops fields
-    declared only on subclasses (notably ``SubWorkflowError``'s
+    declared only on subclasses (notably ``SubWorkflowFailure``'s
     ``sub_workflow_id`` / ``sub_workflow_summary``). The core engine
-    writes the stored form of a sub-workflow failure into the parent
+    writes the stored ``SubWorkflowFailure.model_dump(...)`` of a sub-workflow failure into the parent
     node; without polymorphic decode those subclass fields would be
     silently lost when downstream consumers read the parent node's
     outcome.
@@ -1133,7 +1133,7 @@ def decode_task_error(err_slot: Json) -> TaskError:
     object with the key ``code`` is refused: the read takes the code only
     from ``error_code``.
 
-    Discriminator: inspect the payload's keys. SubWorkflowError-specific
+    Discriminator: inspect the payload's keys. SubWorkflowFailure-specific
     fields (``sub_workflow_id``) identify the subclass; everything else
     decodes as plain ``TaskError``. The reserved-key scan
     (``_scan_task_error_user_fields``) still applies in both branches
@@ -1143,7 +1143,7 @@ def decode_task_error(err_slot: Json) -> TaskError:
         err_slot: The raw err-slot value from a stored task result envelope.
 
     Returns:
-        A ``TaskError`` (or ``SubWorkflowError``) instance.
+        A ``TaskError`` (or ``SubWorkflowFailure``) instance.
 
     Raises:
         StrictJsonError: on reserved-key smuggling inside the err
@@ -1156,12 +1156,12 @@ def decode_task_error(err_slot: Json) -> TaskError:
         isinstance(model_form, dict)
         and 'sub_workflow_id' in cast('dict[str, Json]', model_form)
     ):
-        decoded = decode_value(model_form, SubWorkflowError)
-        if not isinstance(decoded, SubWorkflowError):
+        decoded = decode_value(model_form, SubWorkflowFailure)
+        if not isinstance(decoded, SubWorkflowFailure):
             # Defensive: TypeAdapter should always return the concrete
             # class. If it ever doesn't, refuse to silently downgrade.
             raise StrictJsonError(
-                f'SubWorkflowError decode returned '
+                f'SubWorkflowFailure decode returned '
                 f'{type(decoded).__name__!r}',
             )
         return decoded
@@ -1259,7 +1259,7 @@ def decode_task_result(
     ok_slot = envelope.get('ok')
     err_slot = envelope.get('err')
     if err_slot is not None:
-        # Polymorphic decode preserves SubWorkflowError subclass fields
+        # Polymorphic decode preserves SubWorkflowFailure subclass fields
         # (``sub_workflow_id`` / ``sub_workflow_summary``). The core
         # engine stores these in the parent node; without subclass
         # routing TypeAdapter(TaskError) would drop them.

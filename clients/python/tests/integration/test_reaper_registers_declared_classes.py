@@ -38,7 +38,7 @@ class TestReaperRegistersDeclaredClasses:
         retention section of the worker manifest, which the core's pass
         reads to register the declared classes."""
         config = AppConfig(
-            broker=PostgresConfig(database_url=SecretStr('postgresql://unused:unused@localhost/unused')),
+            database=PostgresConfig(database_url=SecretStr('postgresql://unused:unused@localhost/unused')),
             retention=RetentionConfig(retention_periods=(DECLARED_DURATION,)),
         )
         launch = python_child_launch(

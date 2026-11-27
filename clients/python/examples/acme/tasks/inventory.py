@@ -18,7 +18,7 @@ from horsies import (
     Err,
     Failed,
     Ok,
-    OperationalErrorCode,
+    OperationalCode,
     Result,
     RetryPolicy,
     Succeeded,
@@ -49,7 +49,7 @@ from . import store_failure
     queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def reserve_stock(
@@ -106,7 +106,7 @@ def reserve_stock(
     queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def release_stock(
@@ -139,7 +139,7 @@ def release_stock(
     queue=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def replenish_catalog(*, target_units: int) -> Result[StocktakeSummary, TaskError]:
@@ -185,7 +185,7 @@ def _feed_window() -> str:
     queue=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.SUPPLIER_RETRY_INTERVALS_SECONDS,
-        retry_for=[SUPPLIER_TIMEOUT, OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[SUPPLIER_TIMEOUT, OperationalCode.WORKER_CRASHED],
     ),
     exception_mapper={TimeoutError: SUPPLIER_TIMEOUT},
 )
@@ -230,7 +230,7 @@ def _feed_node(node_id: str) -> TaskNode[SupplierFeed]:
     queue=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def update_stock_levels(

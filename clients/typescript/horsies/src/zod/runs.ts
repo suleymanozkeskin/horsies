@@ -16,6 +16,7 @@ import type {
   CheckIssue,
   DecodeConversion,
   EncodeConversion,
+  HorsiesIssueCode,
   ValueCheck,
 } from "../codec/conversion.ts";
 import { entryPath, itemPath, memberPath, ROOT_PATH } from "../codec/refusal.ts";
@@ -24,13 +25,13 @@ import { err, ok, type Result } from "../wire/result.ts";
 import type { ZodCheck, ZodCodecFunction, ZodPayload, ZodRunContext, ZodSchema } from "./internals.ts";
 
 /** The issue code of a check or a conversion that returned a promise: the codec runs them synchronously. */
-export const ASYNC_ISSUE_CODE = "async_check";
+export const ASYNC_ISSUE_CODE: Extract<HorsiesIssueCode, "async_check"> = "async_check";
 
 /** The issue code of a one-way transform that zod met in the encode direction. */
-export const ONE_WAY_ISSUE_CODE = "one_way_transform";
+export const ONE_WAY_ISSUE_CODE: Extract<HorsiesIssueCode, "one_way_transform"> = "one_way_transform";
 
 /** The issue code of a key of a record that its enum key does not hold. */
-export const MISSING_KEY_ISSUE_CODE = "missing_key";
+export const MISSING_KEY_ISSUE_CODE: Extract<HorsiesIssueCode, "missing_key"> = "missing_key";
 
 /**
  * The message of the error that zod 4.1.13 to 4.6.x throw when a synchronous run meets a promise (`$ZodAsyncError`).
@@ -184,7 +185,7 @@ export function recordKeysRun(keySchema: ZodSchema, requiredKeys: readonly strin
 
     const missing = requiredKeys
       .filter((key) => !keys.includes(key))
-      .map((key) => ({ path: memberPath(ROOT_PATH, key), code: MISSING_KEY_ISSUE_CODE }));
+      .map((key): CheckIssue => ({ kind: "horsiesIssue", path: memberPath(ROOT_PATH, key), code: MISSING_KEY_ISSUE_CODE }));
 
     const refusedKeys = keys.flatMap((key) => keyIssues(keyCheck(key)));
     const issues = [...missing, ...refusedKeys];
@@ -194,7 +195,7 @@ export function recordKeysRun(keySchema: ZodSchema, requiredKeys: readonly strin
 }
 
 function keyIssues(checked: Result<true, CheckFailure>): readonly CheckIssue[] {
-  return checked.ok ? [] : checked.error.issues.map((issue) => ({ path: entryPath(ROOT_PATH), code: issue.code }));
+  return checked.ok ? [] : checked.error.issues.map((issue): CheckIssue => ({ ...issue, path: entryPath(ROOT_PATH) }));
 }
 
 /**
@@ -220,7 +221,7 @@ function payloadOutcome(payload: Payload): Result<unknown, CheckFailure> {
   }
 
   const issues = payload.issues.map((issue) =>
-    Object.freeze({ path: pathText(issue.path ?? []), code: issue.code }),
+    Object.freeze({ kind: "zodIssue" as const, path: pathText(issue.path ?? []), code: issue.code }),
   );
 
   return err(Object.freeze({ issues: Object.freeze(issues) }));
@@ -261,8 +262,10 @@ function isZodEncodeError(cause: unknown): boolean {
   return cause instanceof Error && cause.name === ZOD_ENCODE_ERROR_NAME;
 }
 
-function oneIssue(code: string): CheckFailure {
-  return Object.freeze({ issues: Object.freeze([Object.freeze({ path: ROOT_PATH, code })]) });
+function oneIssue(code: HorsiesIssueCode): CheckFailure {
+  return Object.freeze({
+    issues: Object.freeze([Object.freeze({ kind: "horsiesIssue" as const, path: ROOT_PATH, code })]),
+  });
 }
 
 /**

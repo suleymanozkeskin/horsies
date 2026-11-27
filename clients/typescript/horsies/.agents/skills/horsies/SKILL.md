@@ -88,7 +88,7 @@ process to `cli.run`:
 import { cli, Horsies } from "horsies";
 
 const created = Horsies.create({
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
   workerProfiles: { default: { isolated: { kind: "isolatedChildren", count: 4 } } },
   tasks: [addNumbers],
 });
@@ -247,7 +247,7 @@ them from `horsies`.
 | Class | Cause |
 |---|---|
 | `CoreStopped` | A background task of the core panicked, so the core is stopped in this process. `stateAfter` is `noChange` for a read and `outcomeUnknown` for a write. Restart the process |
-| `CoreStartFailed` | The core could not start in this process: its runtime, its log forwarder or its native addon |
+| `RuntimeStartFailed` | The core could not start in this process: its runtime, its log forwarder or its native addon |
 | `TooManyPendingCalls` | The process has `bound` core calls in flight, the most it may have |
 | `AddonOutsideMainThread` | A `worker_threads` isolate called the native addon, which runs on the main thread only |
 | `ClientDefect` | The package met a value or a call that it must refuse first: a defect of the package or a misuse (a state key of another app) |

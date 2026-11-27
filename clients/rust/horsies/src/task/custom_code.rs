@@ -8,7 +8,7 @@
 
 use horsies_core::catalog::{CatalogMember, CodeEnum};
 use horsies_core::core::task::error::RESERVED_NON_TASK_CODES;
-use horsies_core::{ContractCode, CustomCode, OperationalErrorCode, OutcomeCode, RetrievalCode};
+use horsies_core::{ContractCode, CustomCode, OperationalCode, OutcomeCode, RetrievalCode};
 
 /// The error codes that a task's own failures carry.
 ///
@@ -68,7 +68,7 @@ impl CustomErrorCode for CustomCode {
 /// The members of the four built-in code families (Python
 /// `BuiltInTaskCode`), from the core's catalogs.
 const BUILT_IN_FAMILIES: [&[CatalogMember]; 4] = [
-    <OperationalErrorCode as CodeEnum>::CATALOG.members,
+    <OperationalCode as CodeEnum>::CATALOG.members,
     <ContractCode as CodeEnum>::CATALOG.members,
     <RetrievalCode as CodeEnum>::CATALOG.members,
     <OutcomeCode as CodeEnum>::CATALOG.members,
@@ -194,19 +194,19 @@ mod tests {
     }
 
     impl CustomErrorCode for HandWritten {
-        const CODES: &'static [&'static str] = &["FINE", "BROKER_ERROR"];
+        const CODES: &'static [&'static str] = &["FINE", "DATABASE_ERROR"];
 
         fn as_str(&self) -> &'static str {
             match self {
                 Self::Fine => "FINE",
-                Self::Collides => "BROKER_ERROR",
+                Self::Collides => "DATABASE_ERROR",
             }
         }
 
         fn from_code(text: &str) -> Option<Self> {
             match text {
                 "FINE" => Some(Self::Fine),
-                "BROKER_ERROR" => Some(Self::Collides),
+                "DATABASE_ERROR" => Some(Self::Collides),
                 _ => None,
             }
         }
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn every_built_in_code_is_not_a_free_custom_code() {
-        let built_in: Vec<BuiltInTaskCode> = OperationalErrorCode::ALL
+        let built_in: Vec<BuiltInTaskCode> = OperationalCode::ALL
             .into_iter()
             .map(BuiltInTaskCode::from)
             .chain(ContractCode::ALL.into_iter().map(BuiltInTaskCode::from))

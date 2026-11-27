@@ -6,7 +6,7 @@
 import type { AnyTaskContract, contractTypes } from "../contract/define-task.ts";
 import type { SchemaValue } from "../contract/schema.ts";
 import type { AnyWorkflowContract, workflowTypes } from "../workflow/define.ts";
-import type { WorkflowOutput } from "../workflow/node.ts";
+import type { SubWorkflowOutput } from "../workflow/node.ts";
 import type { Kind, TaskOutcomeKind, UpstreamOutput } from "./kinds.ts";
 import { unreachable } from "./unreachable.ts";
 import type { TaskOutcome } from "./task-error.ts";
@@ -14,15 +14,15 @@ import type { Wire } from "./wire-type.ts";
 
 /**
  * The wire type of the outcome of the upstream `C`: for a task contract, its output value and its codes; for a
- * workflow contract, its output value and any code (a workflow holds the codes of many tasks), as `WorkflowHandle.get`
- * reads them. A sender never gives it (its sent type is `never`). The input decode does not check a stored custom code
+ * workflow contract, the success value of a sub-workflow node of it (its output value, or `NoWorkflowOutput` for a
+ * workflow with no `outputType`) and any code (a workflow holds the codes of many tasks). A sender never gives it (its sent type is `never`). The input decode does not check a stored custom code
  * against the contract's codes (#2557).
  */
 export type TaskOutcomeWire<C extends AnyTaskContract | AnyWorkflowContract> = Wire<
   C extends AnyTaskContract
     ? TaskOutcome<SchemaValue<C[typeof contractTypes]["output"]>, C[typeof contractTypes]["code"]>
     : C extends AnyWorkflowContract
-      ? TaskOutcome<WorkflowOutput<C[typeof workflowTypes]["build"]>, string>
+      ? TaskOutcome<SubWorkflowOutput<C[typeof workflowTypes]["build"]>, string>
       : never,
   never,
   "required",
@@ -86,6 +86,7 @@ export function upstreamValueKind(kind: Kind, place: string): Kind {
     case "json":
     case "conversion":
     case "checked":
+    case "lazy":
       throw new TypeError(`horsies: the kind ${kind.node} of ${place} is not an upstream outcome`);
     default:
       return unreachable(kind, "upstreamValueKind");
@@ -122,6 +123,7 @@ export function isTaskOutcomeKind(kind: Kind): boolean {
     case "json":
     case "conversion":
     case "checked":
+    case "lazy":
       return false;
     default:
       return unreachable(kind, "isTaskOutcomeKind");

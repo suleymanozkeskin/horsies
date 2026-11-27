@@ -1,5 +1,8 @@
 //! The slot health of a worker state snapshot: the `slots_down` column.
 //!
+//! The slot health is also the JSON of the field `slot_health` of a worker
+//! state of the monitoring routes (`Serialize`).
+//!
 //! Python reference: `DownSlot`, `AllSlotsServing`, `SlotsDown` and
 //! `parse_slot_health` (`clients/python/horsies/core/models/health.py:100-259`), and the
 //! boot failure causes that can clear (`clients/python/horsies/core/models/boot_failure.py`).
@@ -10,6 +13,7 @@ use std::fmt;
 use std::num::NonZeroU64;
 
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Utc};
+use serde::{Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use crate::broker::health::{stored_value_text, stored_whole_number, STORED_COUNT_LIMIT};
@@ -45,22 +49,33 @@ impl fmt::Display for ClearableBootCause {
 /// A worker slot whose last child boot failed for a cause that can clear.
 ///
 /// The slot takes no task, and the worker's claim budget leaves it out.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// JSON: `cause` is its text ([`ClearableBootCause`]'s `Display`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct DownSlot {
-    /// The slot number, below the worker's `processes`.
+    /// The slot number, below the worker's child count.
     pub slot: u32,
+    #[serde(serialize_with = "cause_text")]
+    #[cfg_attr(test, schemars(with = "String"))]
     pub cause: ClearableBootCause,
     /// The error text of the last failed boot, at most
     /// [`MAX_BOOT_FAILURE_DETAIL_CHARS`] characters.
     pub detail: String,
+    #[serde(serialize_with = "crate::monitoring::time_text::utc")]
     pub down_since: DateTime<Utc>,
     /// The failed boots since the slot went down.
     pub failed_boots: NonZeroU64,
 }
 
+/// Serialize `cause` as its text.
+fn cause_text<S: Serializer>(cause: &ClearableBootCause, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(cause)
+}
+
 /// The down slots of a degraded worker: never empty, each slot once, in slot
-/// order. Only [`parse_slot_health`] builds it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// order. Only [`parse_slot_health`] builds it. JSON: an array.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
 pub struct DownSlots(Vec<DownSlot>);
 
 impl DownSlots {
@@ -71,12 +86,19 @@ impl DownSlots {
 }
 
 /// Whether any slot of the worker was down when it wrote the snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// JSON: tagged by `kind`: `all_serving`, or `slots_down` with `slots`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SlotHealth {
     /// No slot of the worker was down.
-    AllSlotsServing,
+    AllServing,
     /// The worker is degraded: these slots were down.
-    SlotsDown(DownSlots),
+    SlotsDown {
+        #[cfg_attr(test, schemars(with = "Vec<DownSlot>"))]
+        slots: DownSlots,
+    },
 }
 
 /// A stored `slots_down` value does not have the shape that the worker
@@ -96,7 +118,7 @@ fn unreadable(reason: impl Into<String>) -> SlotHealthUnreadable {
 /// The slot health of a stored `slots_down` value (Python
 /// `parse_slot_health`, `clients/python/horsies/core/models/health.py:159-187`).
 ///
-/// An empty array is [`SlotHealth::AllSlotsServing`]. Each entry must name a
+/// An empty array is [`SlotHealth::AllServing`]. Each entry must name a
 /// distinct slot below `processes`, a cause that can clear, a detail of at
 /// most [`MAX_BOOT_FAILURE_DETAIL_CHARS`] characters, a `down_since` with an
 /// offset and `failed_boots` of at least 1. Any other value is
@@ -109,7 +131,7 @@ pub fn parse_slot_health(
         return Err(unreadable("slots_down is not a JSON array"));
     };
     if entries.is_empty() {
-        return Ok(SlotHealth::AllSlotsServing);
+        return Ok(SlotHealth::AllServing);
     }
     if more_entries_than_processes(entries.len(), processes) {
         return Err(unreadable("slots_down lists more slots than processes"));
@@ -122,7 +144,9 @@ pub fn parse_slot_health(
     if slots.windows(2).any(|pair| pair[0].slot == pair[1].slot) {
         return Err(unreadable("slots_down names one slot twice"));
     }
-    Ok(SlotHealth::SlotsDown(DownSlots(slots)))
+    Ok(SlotHealth::SlotsDown {
+        slots: DownSlots(slots),
+    })
 }
 
 fn more_entries_than_processes(entries: usize, processes: i32) -> bool {
@@ -271,10 +295,7 @@ mod tests {
 
     #[test]
     fn an_empty_array_is_all_slots_serving() {
-        assert_eq!(
-            parse_slot_health(&json!([]), 2),
-            Ok(SlotHealth::AllSlotsServing)
-        );
+        assert_eq!(parse_slot_health(&json!([]), 2), Ok(SlotHealth::AllServing));
     }
 
     #[test]
@@ -284,7 +305,7 @@ mod tests {
         thread["down_since"] = json!("2026-01-01T02:00:00+02:00");
         let stored = json!([entry(&json!(3)), thread]);
 
-        let Ok(SlotHealth::SlotsDown(slots)) = parse_slot_health(&stored, 4) else {
+        let Ok(SlotHealth::SlotsDown { slots }) = parse_slot_health(&stored, 4) else {
             panic!("two down slots");
         };
 

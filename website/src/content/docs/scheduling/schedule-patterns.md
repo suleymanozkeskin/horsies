@@ -430,7 +430,7 @@ from horsies.core.models.schedule import (
 )
 
 config = AppConfig(
-    broker=PostgresConfig(...),
+    database=PostgresConfig(...),
     schedule=ScheduleConfig(
         enabled=True,
         schedules=[

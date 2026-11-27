@@ -376,7 +376,7 @@ async fn run_checkout(
   an app that does not register `D` in that form return `VALIDATION_FAILED`
   with the cause `PreconditionFailed`. Nothing is written. A registration
   on another app of the process does not count.
-- With `AppConfig.resend_on_transient_err`, the core runs a retryable start
+- With `AppConfig.resend_on_transient_error`, the core runs a retryable start
   failure again with the same workflow id, up to 3 times.
 - In a worker child a start goes through the child's producer handle. A
   task that starts a workflow does not wait for it: a wait in a worker
@@ -452,16 +452,16 @@ with the error's id.
 | `InvalidInput { workflow_id, cause }` | `INVALID_INPUT` | `get`: the `Within` limit is above `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms); `cause` is `WaitLimitRefused`. The first check, before any statement |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A wait in a worker child. Nothing was read |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking `get` or `result_for` on a thread that runs a tokio runtime. Nothing was read |
-| `DatabaseError { database_code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed; `database_code` is the handle code of the failed operation. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
+| `DatabaseError { database_code, message, retryable }` | `DATABASE_ERROR` | The database or the connection failed; `database_code` is the handle code of the failed operation. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
 
-`HandleOperationError` (from `status`, `results`, `tasks`, `cancel`,
+`WorkflowHandleError` (from `status`, `results`, `tasks`, `cancel`,
 `pause`, `resume`) is an enum with one variant per state; every variant
-has `message` and `workflow_id`, and `DbOperationFailed` has `retryable`.
-`DbOperationFailed`, `StoredDataInvalid` and `ResumeRecoveryFailed` carry
+has `message` and `workflow_id`, and `DatabaseOperationFailed` has `retryable`.
+`DatabaseOperationFailed`, `StoredDataInvalid` and `ResumeRecoveryFailed` carry
 their `cause`, the `WorkflowError`. A failure's message starts with the
 operation's label: `Status failed for workflow <id>: <cause>`.
 The methods `code()`, `message()`, `retryable()`, `workflow_id()` and
-`failure_cause()` read every variant. The operations document these codes: `WorkflowNotFound`, `DbOperationFailed`,
+`failure_cause()` read every variant. The operations document these codes: `WorkflowNotFound`, `DatabaseOperationFailed`,
 `StoredDataInvalid` (`status`, `tasks`, `resume`), and
 `ResumeRecoveryFailed` (`resume` committed and the work after it failed:
 the workflow is RUNNING). A blocking form (`handle.blocking()`) on a thread
@@ -599,7 +599,7 @@ use horsies::{
     WorkflowStartError, WorkflowStartErrorCode,
     // Handle
     WorkflowHandle, WorkflowReadError, NodeResult, WorkflowNodeInfo, WorkflowStatus,
-    WorkflowTaskStatus, HandleOperationError, HandleErrorCode, HandleResult,
+    WorkflowTaskStatus, WorkflowHandleError, WorkflowHandleErrorCode, HandleResult,
     TaskOutcome, CustomCode, WaitLimit,
 };
 ```

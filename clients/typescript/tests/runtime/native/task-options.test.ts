@@ -79,7 +79,7 @@ function retryOf(policy: RetryNotation): object {
         kind: "fixed",
         intervalsSeconds: policy.intervals,
         jitter: policy.jitter,
-        autoRetryFor: policy.auto_retry_for,
+        retryFor: policy.auto_retry_for,
       };
     case "exponential":
       return {
@@ -88,7 +88,7 @@ function retryOf(policy: RetryNotation): object {
         maxRetries: policy.max_retries,
         jitter: policy.jitter,
         ...(policy.max_delay_seconds === null ? {} : { maxDelaySeconds: policy.max_delay_seconds }),
-        autoRetryFor: policy.auto_retry_for,
+        retryFor: policy.auto_retry_for,
       };
     default: {
       const unexpected: never = policy.backoff_strategy;
@@ -126,7 +126,7 @@ function checkedOptions(vector: OptionsVector): NativeTaskOptions {
 
 /** The send rules of a config with only a database URL. */
 function sendRules(): NativeSendRules {
-  const config = parseAppConfig({ broker: { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } } }, () => undefined);
+  const config = parseAppConfig({ database: { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } } }, () => undefined);
 
   if (!config.ok) {
     assert.fail(`the minimal config is refused: ${JSON.stringify(config.error)}`);

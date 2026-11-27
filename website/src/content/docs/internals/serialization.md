@@ -95,4 +95,4 @@ An error is the report of a failure, and `retry_for` and outcome routing read it
 - A lone surrogate in the code, the message or the exception text is escaped.
 - The `data` of an error must be JSON-native. A value that is not, or that a reader cannot read, is replaced with `{'data_refused': <cause>}`. The cause names a type, never the value.
 
-The Python rules of `TaskError` subclasses and `SubWorkflowError` are in [The Error Path](/horsies/tasks/task-types/#the-error-path) of Task Types.
+The Python rules of `TaskError` subclasses and `SubWorkflowFailure` are in [The Error Path](/horsies/tasks/task-types/#the-error-path) of Task Types.

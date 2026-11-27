@@ -223,8 +223,8 @@ fn the_oldest_due_head_of_each_stream_is_its_wait() {
             StreamOldest {
                 queue_name: "a".to_owned(),
                 execution: ISOLATED,
-                wait: StreamWait::OldestWaiting {
-                    enqueued_at: oldest,
+                wait: StreamWait::Due {
+                    oldest_due_at: oldest,
                     wait: TimeDelta::seconds(300),
                 },
             },

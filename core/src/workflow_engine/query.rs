@@ -513,8 +513,8 @@ impl WorkflowWaitMode {
                     %workflow_id,
                     error = %error,
                     "LISTEN unavailable; falling back to polling for workflow_done. If using \
-                     PgBouncer transaction pooling, configure PostgresConfig.session_database_url \
-                     with a direct/session-capable Postgres URL. Original error: {error}",
+                     PgBouncer transaction pooling, set PostgresConfig.session_database \
+                     to a separate direct/session-capable Postgres URL. Original error: {error}",
                 );
                 WorkflowWaitMode::Polling
             }
@@ -816,11 +816,11 @@ mod wait_tests {
         let workflow_id = Uuid::new_v4();
         let persisted = TaskError {
             error_code: OutcomeCode::WorkflowExpired.into(),
-            message: Some("paused_workflow_auto_cancel_after elapsed: 3600 seconds".to_owned()),
+            message: Some("paused_workflow_cancel_after elapsed: 3600 seconds".to_owned()),
             exception: None,
             data: Some(crate::core::codec::JsonText::of_engine_value(
                 &serde_json::json!({
-                    "policy": "paused_workflow_auto_cancel_after",
+                    "policy": "paused_workflow_cancel_after",
                     "older_than_seconds": 3600.0,
                 }),
             )),

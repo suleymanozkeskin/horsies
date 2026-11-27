@@ -1409,7 +1409,7 @@ def _start_requeue_guard_worker(database_url: str, output: Path) -> subprocess.P
                 'uv', 'run', 'horsies', 'worker',
                 REQUEUE_GUARD_INSTANCE,
                 '--profile=isolated-1',
-                '--loglevel=warning',
+                '--log-level=warning',
             ],
             env=env,
             stdout=output_file,

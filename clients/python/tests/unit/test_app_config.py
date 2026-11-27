@@ -22,7 +22,7 @@ from horsies._catalog.worker_manifest import (
 )
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     HorsiesError,
     MultipleValidationErrors,
 )
@@ -32,15 +32,25 @@ from datetime import timedelta
 from horsies.core.models.broker import (
     MOVED_TO_PARENT_POOL,
     MOVED_TO_WORKER_PROFILE,
+    PoolRecycleAfterSeconds,
+    PoolRecycleNever,
     PostgresConfig,
+    SessionDatabaseSameAsDatabaseUrl,
+    SessionDatabaseSeparate,
+    TcpKeepalivesOff,
+    TcpKeepalivesOn,
+    TcpUserTimeoutAfter,
+    TcpUserTimeoutSystemDefault,
 )
+from horsies.core.models.cluster_cap import ClusterCap, NoClusterCap
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
-from horsies.core.models.health import WORKER_STATE_LIVE_WINDOW_S
+from horsies.core.models.health import WORKER_STATE_LIVE_WINDOW_SECONDS
 from horsies.core.models.recovery import (
     WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS,
     RecoveryConfig,
 )
 from horsies.core.models.retention import RetentionConfig
+from horsies.core.models.schema_mode import AppRole
 from horsies.core.models.schedule import (
     DailySchedule,
     HourlySchedule,
@@ -176,7 +186,7 @@ class TestPostgresConfigPgBouncer:
             )
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_DATABASE_POOL
         assert error.message == f'{field} was removed in 0.7.0'
         assert error.notes[0] == note
         assert error.notes[1] == (
@@ -201,7 +211,7 @@ class TestPostgresConfigPgBouncer:
                 },
             )
 
-        messages = [error.message for error in exc_info.value.report.errors]
+        messages = [error.message for error in exc_info.value.report.refusals]
         assert messages == [
             'worker_child_pool_max_size was removed in 0.7.0',
             'worker_pool_size was removed in 0.7.0',
@@ -225,7 +235,7 @@ class TestPostgresConfigPgBouncer:
                 4,
                 'max_size=PoolSize(connections=N)',
             ),
-            ('worker_child_pool_check', False, 'check=False'),
+            ('worker_child_pool_check', False, 'pre_ping=False'),
         ],
     )
     def test_a_removed_child_pool_field_is_refused(
@@ -245,7 +255,7 @@ class TestPostgresConfigPgBouncer:
             )
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_DATABASE_POOL
         assert error.message == f'{field} was removed in 0.7.0'
         assert f'IsolatedChildren(pool=IsolatedPool({pool_argument}))' in (
             error.help_text or ''
@@ -268,7 +278,7 @@ class TestPostgresConfigPgBouncer:
                 },
             )
 
-        messages = [error.message for error in exc_info.value.report.errors]
+        messages = [error.message for error in exc_info.value.report.refusals]
         assert messages == [
             'worker_child_pool_min_size was removed in 0.7.0',
             'worker_child_pool_max_size was removed in 0.7.0',
@@ -291,6 +301,7 @@ class TestPostgresConfigPgBouncer:
         )
 
         # database_url is SecretStr (0.1.7); the effective property unwraps.
+        assert config.session_database == SessionDatabaseSameAsDatabaseUrl()
         assert (
             config.effective_session_database_url
             == config.database_url.get_secret_value()
@@ -299,13 +310,16 @@ class TestPostgresConfigPgBouncer:
     def test_split_database_urls_are_valid(self) -> None:
         config = PostgresConfig(
             database_url='postgresql://user:pass@pooler:6432/db',
-            session_database_url='postgresql://user:pass@direct:5432/db',
+            session_database=SessionDatabaseSeparate(
+                url=SecretStr('postgresql://user:pass@direct:5432/db'),
+            ),
             pgbouncer_transaction_mode=True,
         )
 
         assert config.effective_session_database_url == (
             'postgresql://user:pass@direct:5432/db'
         )
+        assert config.session_url_differs()
         # Keepalives default on; PgBouncer mode also disables prepared statements.
         assert config.pooled_connect_args == {
             'keepalives': 1,
@@ -326,8 +340,8 @@ class TestPostgresConfigPgBouncer:
         password = 'sup3r-secret-pw'
         config = PostgresConfig(
             database_url=f'postgresql://user:{password}@pooler/db',
-            session_database_url=(
-                f'postgresql://user:{password}@direct/db'
+            session_database=SessionDatabaseSeparate(
+                url=SecretStr(f'postgresql://user:{password}@direct/db'),
             ),
         )
 
@@ -338,9 +352,20 @@ class TestPostgresConfigPgBouncer:
         assert password in config.database_url.get_secret_value()
         assert password in config.effective_session_database_url
 
+    def test_the_flat_session_url_field_is_refused(self) -> None:
+        """The flat field of 0.8.1 is no field: the config names its key."""
+        with pytest.raises(ValidationError, match='session_database_url'):
+            PostgresConfig.model_validate(
+                {
+                    'database_url': 'postgresql://user:pass@localhost/db',
+                    'session_database_url': 'postgresql://user:pass@direct/db',
+                },
+            )
 
     def test_pgbouncer_mode_requires_session_database_url(self) -> None:
-        with pytest.raises(ConfigurationError, match='session_database_url required'):
+        with pytest.raises(
+            ConfigurationError, match='a separate session_database is required',
+        ):
             PostgresConfig(
                 database_url='postgresql://user:pass@pooler:6432/db',
                 pgbouncer_transaction_mode=True,
@@ -350,11 +375,11 @@ class TestPostgresConfigPgBouncer:
         url = 'postgresql://user:pass@pooler:6432/db'
         with pytest.raises(
             ConfigurationError,
-            match='session_database_url must not use the transaction-pool URL',
+            match='session_database must not use the transaction-pool URL',
         ):
             PostgresConfig(
                 database_url=url,
-                session_database_url=url,
+                session_database=SessionDatabaseSeparate(url=SecretStr(url)),
                 pgbouncer_transaction_mode=True,
             )
 
@@ -369,10 +394,12 @@ class TestPostgresConfigPgBouncer:
         self, url: str,
     ) -> None:
         config = PostgresConfig(
-            database_url=SecretStr(url), session_database_url=SecretStr(url),
+            database_url=SecretStr(url),
+            session_database=SessionDatabaseSeparate(url=SecretStr(url)),
         )
         assert config.database_url.get_secret_value() == url
         assert config.effective_session_database_url == url
+        assert not config.session_url_differs()
 
     @pytest.mark.parametrize(
         'scheme',
@@ -386,7 +413,7 @@ class TestPostgresConfigPgBouncer:
                 database_url=SecretStr(f'{scheme}://user:secret@localhost/db'),
             )
         error = refused.value
-        assert error.code == ErrorCode.BROKER_INVALID_URL
+        assert error.code == HorsiesErrorCode.DATABASE_INVALID_URL
         assert error.message == f'invalid database_url scheme {scheme!r}'
         assert error.help_text == (
             f"replace '{scheme}://' with 'postgresql://' "
@@ -398,26 +425,23 @@ class TestPostgresConfigPgBouncer:
     def test_database_url_with_another_scheme_is_refused(self) -> None:
         with pytest.raises(ConfigurationError) as refused:
             PostgresConfig(database_url=SecretStr('mysql://user:pass@localhost/db'))
-        assert refused.value.code == ErrorCode.BROKER_INVALID_URL
+        assert refused.value.code == HorsiesErrorCode.DATABASE_INVALID_URL
         assert refused.value.message == "invalid database_url scheme 'mysql'"
 
     def test_database_url_without_a_scheme_is_refused(self) -> None:
         with pytest.raises(ConfigurationError) as refused:
             PostgresConfig(database_url=SecretStr('user:pass@localhost/db'))
-        assert refused.value.code == ErrorCode.BROKER_INVALID_URL
+        assert refused.value.code == HorsiesErrorCode.DATABASE_INVALID_URL
         assert refused.value.message == 'invalid database_url: the URL has no scheme'
 
     def test_session_database_url_that_names_a_driver_is_refused(self) -> None:
         with pytest.raises(ConfigurationError) as refused:
-            PostgresConfig(
-                database_url=SecretStr('postgresql://user:pass@localhost/db'),
-                session_database_url=SecretStr(
-                    'postgresql+psycopg://user:pass@localhost/db',
-                ),
+            SessionDatabaseSeparate(
+                url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
             )
-        assert refused.value.code == ErrorCode.BROKER_INVALID_URL
+        assert refused.value.code == HorsiesErrorCode.DATABASE_INVALID_URL
         assert refused.value.message == (
-            "invalid session_database_url scheme 'postgresql+psycopg'"
+            "invalid session_database.url scheme 'postgresql+psycopg'"
         )
 
 
@@ -435,30 +459,32 @@ class TestPostgresConfigTcpUserTimeout:
     def test_default_is_30_seconds_in_every_connect_args(self) -> None:
         config = PostgresConfig(database_url=SecretStr(self._LOCAL_URL))
 
-        assert config.tcp_user_timeout_ms == 30_000
+        assert config.tcp_user_timeout == TcpUserTimeoutAfter(milliseconds=30_000)
         assert config.tcp_connect_args()['tcp_user_timeout'] == 30_000
         assert config.pooled_connect_args['tcp_user_timeout'] == 30_000
 
-    def test_zero_passes_through_as_the_system_default(self) -> None:
+    def test_the_system_default_is_libpq_zero(self) -> None:
         config = PostgresConfig(
-            database_url=SecretStr(self._LOCAL_URL), tcp_user_timeout_ms=0,
+            database_url=SecretStr(self._LOCAL_URL),
+            tcp_user_timeout=TcpUserTimeoutSystemDefault(),
         )
 
         assert config.pooled_connect_args['tcp_user_timeout'] == 0
 
-    def test_negative_value_is_refused(self) -> None:
+    def test_zero_milliseconds_are_refused(self) -> None:
         with pytest.raises(ConfigurationError) as refused:
             PostgresConfig(
-                database_url=SecretStr(self._LOCAL_URL), tcp_user_timeout_ms=-1,
+                database_url=SecretStr(self._LOCAL_URL),
+                tcp_user_timeout=TcpUserTimeoutAfter(milliseconds=0),
             )
 
-        assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
-        assert refused.value.message == 'invalid tcp_user_timeout_ms'
+        assert refused.value.code == HorsiesErrorCode.CONFIG_INVALID_KEEPALIVE
+        assert refused.value.message == 'invalid tcp_user_timeout.milliseconds'
 
     def test_the_core_bound_is_accepted(self) -> None:
         config = PostgresConfig(
             database_url=SecretStr(self._LOCAL_URL),
-            tcp_user_timeout_ms=TCP_USER_TIMEOUT_MS_MAX,
+            tcp_user_timeout=TcpUserTimeoutAfter(milliseconds=TCP_USER_TIMEOUT_MS_MAX),
         )
 
         assert config.pooled_connect_args['tcp_user_timeout'] == TCP_USER_TIMEOUT_MS_MAX
@@ -467,24 +493,32 @@ class TestPostgresConfigTcpUserTimeout:
         above = TCP_USER_TIMEOUT_MS_MAX + 1
         with pytest.raises(ConfigurationError) as refused:
             PostgresConfig(
-                database_url=SecretStr(self._LOCAL_URL), tcp_user_timeout_ms=above,
+                database_url=SecretStr(self._LOCAL_URL),
+                tcp_user_timeout=TcpUserTimeoutAfter(milliseconds=above),
             )
 
-        assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
-        assert refused.value.message == 'invalid tcp_user_timeout_ms'
+        assert refused.value.code == HorsiesErrorCode.CONFIG_INVALID_KEEPALIVE
+        assert refused.value.message == 'invalid tcp_user_timeout.milliseconds'
         assert refused.value.notes == [
-            f'got: tcp_user_timeout_ms={above}',
-            'tcp_user_timeout_ms is 0 (the operating system default) or '
-            f'1 to {TCP_USER_TIMEOUT_MS_MAX} milliseconds',
+            f'got: tcp_user_timeout.milliseconds={above}',
+            f'tcp_user_timeout.milliseconds is from 1 to {TCP_USER_TIMEOUT_MS_MAX}',
         ]
         assert refused.value.help_text == (
-            f'give 0 or a number of milliseconds from 1 to {TCP_USER_TIMEOUT_MS_MAX}'
+            f'give a number of milliseconds from 1 to {TCP_USER_TIMEOUT_MS_MAX}, '
+            'or TcpUserTimeoutSystemDefault() for the operating system default'
         )
+
+    def test_the_flat_milliseconds_field_is_refused(self) -> None:
+        """The flat field of 0.8.1 is no field: the config names its key."""
+        with pytest.raises(ValidationError, match='tcp_user_timeout_ms'):
+            PostgresConfig.model_validate(
+                {'database_url': self._LOCAL_URL, 'tcp_user_timeout_ms': 0},
+            )
 
     def test_not_passed_to_the_sqlalchemy_engine(self) -> None:
         config = PostgresConfig(database_url=SecretStr(self._LOCAL_URL))
 
-        assert 'tcp_user_timeout_ms' not in config.sqlalchemy_engine_kwargs()
+        assert 'tcp_user_timeout' not in config.sqlalchemy_engine_kwargs()
 
 
 @pytest.mark.unit
@@ -501,7 +535,9 @@ class TestPostgresConfigKeepalives:
     def test_keepalives_default_on(self) -> None:
         config = PostgresConfig(database_url=self._LOCAL_URL)
 
-        assert config.tcp_keepalives is True
+        assert config.tcp_keepalives == TcpKeepalivesOn(
+            idle_seconds=30, interval_seconds=10, probes=3,
+        )
         assert config.keepalive_connect_args() == {
             'keepalives': 1,
             'keepalives_idle': 30,
@@ -524,10 +560,10 @@ class TestPostgresConfigKeepalives:
             'tcp_user_timeout': 30_000,
         }
 
-    def test_keepalives_disabled_yields_empty_connect_args(self) -> None:
+    def test_keepalives_off_yields_empty_connect_args(self) -> None:
         config = PostgresConfig(
             database_url=self._LOCAL_URL,
-            tcp_keepalives=False,
+            tcp_keepalives=TcpKeepalivesOff(),
         )
 
         assert config.keepalive_connect_args() == {}
@@ -536,9 +572,9 @@ class TestPostgresConfigKeepalives:
     def test_custom_keepalive_values_flow_through(self) -> None:
         config = PostgresConfig(
             database_url=self._LOCAL_URL,
-            tcp_keepalives_idle=15,
-            tcp_keepalives_interval=5,
-            tcp_keepalives_count=2,
+            tcp_keepalives=TcpKeepalivesOn(
+                idle_seconds=15, interval_seconds=5, probes=2,
+            ),
         )
 
         assert config.pooled_connect_args == {
@@ -551,104 +587,138 @@ class TestPostgresConfigKeepalives:
 
     @pytest.mark.parametrize(
         'field_name',
-        [
-            'tcp_keepalives_idle',
-            'tcp_keepalives_interval',
-            'tcp_keepalives_count',
-        ],
+        ['idle_seconds', 'interval_seconds', 'probes'],
     )
-    def test_non_positive_keepalive_values_rejected_when_enabled(
-        self, field_name: str
-    ) -> None:
+    def test_non_positive_keepalive_values_rejected(self, field_name: str) -> None:
         with pytest.raises(ConfigurationError) as exc_info:
             PostgresConfig(
                 database_url=self._LOCAL_URL,
-                **{field_name: 0},
+                tcp_keepalives=TcpKeepalivesOn.model_validate({field_name: 0}),
             )
 
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
-
-    def test_non_positive_values_allowed_when_keepalives_disabled(self) -> None:
-        # Disabled keepalives ignore the interval/idle/count values entirely.
-        config = PostgresConfig(
-            database_url=self._LOCAL_URL,
-            tcp_keepalives=False,
-            tcp_keepalives_idle=0,
-        )
-
-        # tcp_user_timeout does not depend on keepalives.
-        assert config.pooled_connect_args == {'tcp_user_timeout': 30_000}
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_KEEPALIVE
+        assert exc_info.value.message == f'invalid tcp_keepalives.{field_name}'
 
     @pytest.mark.parametrize(
-        ('field_name', 'bound'),
+        ('field_name', 'connect_arg', 'bound'),
         [
-            ('tcp_keepalives_idle', KEEPALIVE_SECONDS_MAX),
-            ('tcp_keepalives_interval', KEEPALIVE_SECONDS_MAX),
-            ('tcp_keepalives_count', KEEPALIVE_PROBES_MAX),
+            ('idle_seconds', 'keepalives_idle', KEEPALIVE_SECONDS_MAX),
+            ('interval_seconds', 'keepalives_interval', KEEPALIVE_SECONDS_MAX),
+            ('probes', 'keepalives_count', KEEPALIVE_PROBES_MAX),
         ],
     )
     def test_keepalive_value_at_the_core_bound_is_accepted(
-        self, field_name: str, bound: int,
+        self, field_name: str, connect_arg: str, bound: int,
     ) -> None:
-        config = PostgresConfig.model_validate(
-            {'database_url': self._LOCAL_URL, field_name: bound},
+        config = PostgresConfig(
+            database_url=self._LOCAL_URL,
+            tcp_keepalives=TcpKeepalivesOn.model_validate({field_name: bound}),
         )
 
-        connect_arg = field_name.removeprefix('tcp_')
         assert config.keepalive_connect_args()[connect_arg] == bound
 
     @pytest.mark.parametrize(
         ('field_name', 'bound'),
         [
-            ('tcp_keepalives_idle', KEEPALIVE_SECONDS_MAX),
-            ('tcp_keepalives_interval', KEEPALIVE_SECONDS_MAX),
-            ('tcp_keepalives_count', KEEPALIVE_PROBES_MAX),
+            ('idle_seconds', KEEPALIVE_SECONDS_MAX),
+            ('interval_seconds', KEEPALIVE_SECONDS_MAX),
+            ('probes', KEEPALIVE_PROBES_MAX),
         ],
     )
     def test_keepalive_value_above_the_core_bound_is_refused_with_the_bound(
         self, field_name: str, bound: int,
     ) -> None:
         with pytest.raises(ConfigurationError) as refused:
-            PostgresConfig.model_validate(
-                {'database_url': self._LOCAL_URL, field_name: bound + 1},
+            PostgresConfig(
+                database_url=self._LOCAL_URL,
+                tcp_keepalives=TcpKeepalivesOn.model_validate({field_name: bound + 1}),
             )
 
-        assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
-        assert refused.value.message == f'invalid {field_name}'
+        path = f'tcp_keepalives.{field_name}'
+        assert refused.value.code == HorsiesErrorCode.CONFIG_INVALID_KEEPALIVE
+        assert refused.value.message == f'invalid {path}'
         assert refused.value.notes == [
-            f'got: {field_name}={bound + 1}',
-            f'{field_name} is from 1 to {bound} when tcp_keepalives is True',
+            f'got: {path}={bound + 1}',
+            f'{path} is from 1 to {bound}',
         ]
         assert refused.value.help_text == (
-            f'give a number from 1 to {bound}, or set tcp_keepalives=False '
-            'to turn keepalives off'
+            f'give a number from 1 to {bound}, or set '
+            'tcp_keepalives=TcpKeepalivesOff() to turn keepalives off'
         )
 
-    def test_values_above_the_core_bounds_allowed_when_keepalives_disabled(
-        self,
-    ) -> None:
-        # Disabled keepalives ignore the interval/idle/count values entirely.
-        config = PostgresConfig(
-            database_url=SecretStr(self._LOCAL_URL),
-            tcp_keepalives=False,
-            tcp_keepalives_idle=KEEPALIVE_SECONDS_MAX + 1,
-            tcp_keepalives_interval=KEEPALIVE_SECONDS_MAX + 1,
-            tcp_keepalives_count=KEEPALIVE_PROBES_MAX + 1,
-        )
+    @pytest.mark.parametrize(
+        'field_name',
+        ['tcp_keepalives_idle', 'tcp_keepalives_interval', 'tcp_keepalives_count'],
+    )
+    def test_the_flat_keepalive_fields_are_refused(self, field_name: str) -> None:
+        """The flat fields of 0.8.1 are no fields: the config names the key."""
+        with pytest.raises(ValidationError, match=field_name):
+            PostgresConfig.model_validate(
+                {'database_url': self._LOCAL_URL, field_name: 30},
+            )
 
-        assert config.keepalive_connect_args() == {}
+    def test_a_keepalive_switch_is_refused(self) -> None:
+        """The bool of 0.8.1 is not a keepalive setting."""
+        with pytest.raises(ValidationError):
+            PostgresConfig.model_validate(
+                {'database_url': self._LOCAL_URL, 'tcp_keepalives': True},
+            )
 
     def test_keepalive_fields_excluded_from_engine_kwargs(self) -> None:
         config = PostgresConfig(database_url=self._LOCAL_URL)
         engine_kwargs = config.sqlalchemy_engine_kwargs()
 
-        for field_name in (
-            'tcp_keepalives',
-            'tcp_keepalives_idle',
-            'tcp_keepalives_interval',
-            'tcp_keepalives_count',
-        ):
-            assert field_name not in engine_kwargs
+        assert 'tcp_keepalives' not in engine_kwargs
+        assert set(engine_kwargs) == {
+            'pool_size',
+            'max_overflow',
+            'pool_timeout',
+            'pool_recycle',
+            'echo',
+            'hide_parameters',
+        }
+
+
+@pytest.mark.unit
+class TestPostgresConfigPoolRecycle:
+    """When the pool replaces a connection by its age."""
+
+    _LOCAL_URL = 'postgresql://user:pass@localhost/db'
+
+    def test_the_default_is_1800_seconds(self) -> None:
+        config = PostgresConfig(database_url=self._LOCAL_URL)
+
+        assert config.pool_recycle == PoolRecycleAfterSeconds(seconds=1800)
+        assert config.sqlalchemy_engine_kwargs()['pool_recycle'] == 1800
+
+    def test_never_is_sqlalchemy_minus_one(self) -> None:
+        config = PostgresConfig(
+            database_url=self._LOCAL_URL, pool_recycle=PoolRecycleNever(),
+        )
+
+        assert config.sqlalchemy_engine_kwargs()['pool_recycle'] == -1
+
+    def test_the_timeout_is_sqlalchemy_pool_timeout(self) -> None:
+        config = PostgresConfig(database_url=self._LOCAL_URL, pool_timeout_seconds=12)
+
+        assert config.sqlalchemy_engine_kwargs()['pool_timeout'] == 12
+
+    def test_negative_seconds_are_refused(self) -> None:
+        with pytest.raises(ConfigurationError) as refused:
+            PostgresConfig(
+                database_url=self._LOCAL_URL,
+                pool_recycle=PoolRecycleAfterSeconds(seconds=-1),
+            )
+
+        assert refused.value.code == HorsiesErrorCode.CONFIG_INVALID_DATABASE_POOL
+        assert refused.value.message == 'invalid pool_recycle.seconds'
+
+    def test_a_number_is_not_a_recycle_setting(self) -> None:
+        """The int of 0.8.1 (-1 for never) is not a recycle setting."""
+        with pytest.raises(ValidationError):
+            PostgresConfig.model_validate(
+                {'database_url': self._LOCAL_URL, 'pool_recycle': -1},
+            )
 
 
 @pytest.mark.unit
@@ -659,7 +729,7 @@ class TestPrefetchBufferValidation:
         """prefetch_buffer=0 (hard cap mode) should be valid."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             prefetch_buffer=0,
         )
         assert config.prefetch_buffer == 0
@@ -671,10 +741,10 @@ class TestPrefetchBufferValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 prefetch_buffer=-1,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
 
     def test_prefetch_buffer_positive_requires_claim_lease(self) -> None:
         """prefetch_buffer > 0 without claim_lease_ms should raise ConfigurationError."""
@@ -683,17 +753,17 @@ class TestPrefetchBufferValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 prefetch_buffer=4,
                 claim_lease_ms=None,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
 
     def test_prefetch_buffer_positive_with_claim_lease_is_valid(self) -> None:
         """prefetch_buffer > 0 with valid claim_lease_ms should be valid."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             prefetch_buffer=4,
             claim_lease_ms=5000,
             recovery=SHORT_HB_RECOVERY,
@@ -710,7 +780,7 @@ class TestClaimLeaseMsValidation:
         """claim_lease_ms=None is valid when prefetch_buffer=0."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             prefetch_buffer=0,
             claim_lease_ms=None,
         )
@@ -720,7 +790,7 @@ class TestClaimLeaseMsValidation:
         """claim_lease_ms is allowed in hard-cap mode (overrides default 60s lease)."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             prefetch_buffer=0,
             claim_lease_ms=5000,
             recovery=SHORT_HB_RECOVERY,
@@ -734,11 +804,11 @@ class TestClaimLeaseMsValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 prefetch_buffer=4,
                 claim_lease_ms=0,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
 
     def test_claim_lease_ms_negative_raises(self) -> None:
         """claim_lease_ms < 0 should raise ConfigurationError."""
@@ -747,17 +817,17 @@ class TestClaimLeaseMsValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 prefetch_buffer=4,
                 claim_lease_ms=-1000,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
 
     def test_claim_lease_ms_positive_is_valid(self) -> None:
         """claim_lease_ms > 0 should be valid."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             prefetch_buffer=4,
             claim_lease_ms=5000,
             recovery=SHORT_HB_RECOVERY,
@@ -773,7 +843,7 @@ class TestMaxClaimRenewAgeMsValidation:
         """Default max_claim_renew_age_ms (180_000) should be accepted."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
         )
         assert config.max_claim_renew_age_ms == 180_000
 
@@ -785,10 +855,10 @@ class TestMaxClaimRenewAgeMsValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 max_claim_renew_age_ms=0,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
 
     def test_negative_raises(self) -> None:
         """max_claim_renew_age_ms < 0 should raise ConfigurationError."""
@@ -798,10 +868,10 @@ class TestMaxClaimRenewAgeMsValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 max_claim_renew_age_ms=-1000,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
 
     def test_less_than_effective_lease_raises(self) -> None:
         """max_claim_renew_age_ms < effective lease should raise ConfigurationError."""
@@ -811,18 +881,18 @@ class TestMaxClaimRenewAgeMsValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 claim_lease_ms=10_000,
                 max_claim_renew_age_ms=5_000,
                 recovery=RecoveryConfig(claimer_heartbeat_interval_ms=2_000),
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
 
     def test_equal_to_effective_lease_is_valid(self) -> None:
         """max_claim_renew_age_ms == effective lease is the minimum valid value."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             claim_lease_ms=5_000,
             max_claim_renew_age_ms=5_000,
             recovery=SHORT_HB_RECOVERY,
@@ -833,7 +903,7 @@ class TestMaxClaimRenewAgeMsValidation:
         """max_claim_renew_age_ms > effective lease should be accepted."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             claim_lease_ms=5_000,
             max_claim_renew_age_ms=60_000,
             recovery=SHORT_HB_RECOVERY,
@@ -851,7 +921,7 @@ class TestMaxClaimRenewAgeMsValidation:
         ):
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 claim_lease_ms=None,
                 max_claim_renew_age_ms=30_000,
             )
@@ -865,11 +935,11 @@ class TestClusterWideCapPrefetchConflict:
         """cluster_wide_cap with prefetch_buffer=0 should be valid (hard cap mode)."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
-            cluster_wide_cap=50,
+            database=BROKER,
+            cluster_wide_cap=ClusterCap(tasks=50),
             prefetch_buffer=0,
         )
-        assert config.cluster_wide_cap == 50
+        assert config.cluster_wide_cap == ClusterCap(tasks=50)
         assert config.prefetch_buffer == 0
 
     def test_cluster_wide_cap_with_prefetch_raises(self) -> None:
@@ -879,25 +949,25 @@ class TestClusterWideCapPrefetchConflict:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
-                cluster_wide_cap=50,
+                database=BROKER,
+                cluster_wide_cap=ClusterCap(tasks=50),
                 prefetch_buffer=4,
                 claim_lease_ms=5000,
                 recovery=SHORT_HB_RECOVERY,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_CLUSTER_CAP
 
     def test_no_cluster_cap_with_prefetch_is_valid(self) -> None:
         """No cluster_wide_cap with prefetch_buffer > 0 should be valid (soft cap mode)."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
-            cluster_wide_cap=None,
+            database=BROKER,
+            cluster_wide_cap=NoClusterCap(),
             prefetch_buffer=4,
             claim_lease_ms=5000,
             recovery=SHORT_HB_RECOVERY,
         )
-        assert config.cluster_wide_cap is None
+        assert config.cluster_wide_cap == NoClusterCap()
         assert config.prefetch_buffer == 4
 
 
@@ -908,44 +978,44 @@ class TestClusterWideCapBoundaries:
     def test_cluster_wide_cap_zero_raises(self) -> None:
         """cluster_wide_cap=0 should raise ConfigurationError."""
         with pytest.raises(
-            ConfigurationError, match='cluster_wide_cap must be positive'
+            ConfigurationError, match='cluster_wide_cap.tasks must be positive'
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
-                cluster_wide_cap=0,
+                database=BROKER,
+                cluster_wide_cap=ClusterCap(tasks=0),
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_CLUSTER_CAP
 
     def test_cluster_wide_cap_negative_raises(self) -> None:
         """cluster_wide_cap=-1 should raise ConfigurationError."""
         with pytest.raises(
-            ConfigurationError, match='cluster_wide_cap must be positive'
+            ConfigurationError, match='cluster_wide_cap.tasks must be positive'
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
-                cluster_wide_cap=-1,
+                database=BROKER,
+                cluster_wide_cap=ClusterCap(tasks=-1),
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_CLUSTER_CAP
 
     def test_cluster_wide_cap_minimum_valid(self) -> None:
         """cluster_wide_cap=1 should be the minimum valid value."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
-            cluster_wide_cap=1,
+            database=BROKER,
+            cluster_wide_cap=ClusterCap(tasks=1),
         )
-        assert config.cluster_wide_cap == 1
+        assert config.cluster_wide_cap == ClusterCap(tasks=1)
 
 
 def _config_errors(**fields: object) -> list[HorsiesError]:
     """The errors that AppConfig validation raises for `fields`, one or
     collected; empty when the config is valid."""
     try:
-        AppConfig.model_validate({'broker': BROKER, **fields})
+        AppConfig.model_validate({'database': BROKER, **fields})
     except MultipleValidationErrors as collected:
-        return list(collected.report.errors)
+        return list(collected.report.refusals)
     except HorsiesError as error:
         return [error]
     return []
@@ -963,25 +1033,25 @@ class TestWorkerManifestBounds:
                 {'prefetch_buffer': CLAIM_COUNT_MAX + 1, 'claim_lease_ms': 60_000},
                 'prefetch_buffer',
                 CLAIM_COUNT_MAX,
-                ErrorCode.CONFIG_INVALID_PREFETCH,
+                HorsiesErrorCode.CONFIG_INVALID_PREFETCH,
             ),
             (
                 {'claim_lease_ms': MILLISECONDS_MAX + 1},
                 'claim_lease_ms',
                 MILLISECONDS_MAX,
-                ErrorCode.CONFIG_INVALID_PREFETCH,
+                HorsiesErrorCode.CONFIG_INVALID_PREFETCH,
             ),
             (
                 {'max_claim_renew_age_ms': MILLISECONDS_MAX + 1},
                 'max_claim_renew_age_ms',
                 MILLISECONDS_MAX,
-                ErrorCode.CONFIG_INVALID_PREFETCH,
+                HorsiesErrorCode.CONFIG_INVALID_PREFETCH,
             ),
             (
-                {'cluster_wide_cap': TASK_LIMIT_MAX + 1},
-                'cluster_wide_cap',
+                {'cluster_wide_cap': ClusterCap(tasks=TASK_LIMIT_MAX + 1)},
+                'cluster_wide_cap.tasks',
                 TASK_LIMIT_MAX,
-                ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
+                HorsiesErrorCode.CONFIG_INVALID_CLUSTER_CAP,
             ),
             (
                 {
@@ -995,7 +1065,7 @@ class TestWorkerManifestBounds:
                 },
                 'custom_queues[1].max_concurrency',
                 QUEUE_CONCURRENCY_MAX,
-                ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE,
             ),
         ],
     )
@@ -1004,7 +1074,7 @@ class TestWorkerManifestBounds:
         fields: dict[str, object],
         path: str,
         maximum: int,
-        code: ErrorCode,
+        code: HorsiesErrorCode,
     ) -> None:
         refusals = [
             error
@@ -1024,14 +1094,14 @@ class TestWorkerManifestBounds:
 
     def test_the_largest_values_that_fit_are_accepted(self) -> None:
         soft_cap = AppConfig(
-            broker=BROKER,
+            database=BROKER,
             prefetch_buffer=CLAIM_COUNT_MAX,
             claim_lease_ms=MILLISECONDS_MAX,
             max_claim_renew_age_ms=MILLISECONDS_MAX,
         )
         hard_cap = AppConfig(
-            broker=BROKER,
-            cluster_wide_cap=TASK_LIMIT_MAX,
+            database=BROKER,
+            cluster_wide_cap=ClusterCap(tasks=TASK_LIMIT_MAX),
             queue_mode=QueueMode.CUSTOM,
             custom_queues=[
                 CustomQueueConfig(name='a', max_concurrency=QUEUE_CONCURRENCY_MAX),
@@ -1041,7 +1111,7 @@ class TestWorkerManifestBounds:
         assert soft_cap.prefetch_buffer == CLAIM_COUNT_MAX
         assert soft_cap.claim_lease_ms == MILLISECONDS_MAX
         assert soft_cap.max_claim_renew_age_ms == MILLISECONDS_MAX
-        assert hard_cap.cluster_wide_cap == TASK_LIMIT_MAX
+        assert hard_cap.cluster_wide_cap == ClusterCap(tasks=TASK_LIMIT_MAX)
 
 
 @pytest.mark.unit
@@ -1055,10 +1125,10 @@ class TestQueueModeValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 custom_queues=[CustomQueueConfig(name='q1')],
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE
 
     def test_custom_mode_with_none_queues_raises(self) -> None:
         """CUSTOM mode with custom_queues=None should raise ConfigurationError."""
@@ -1067,10 +1137,10 @@ class TestQueueModeValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.CUSTOM,
-                broker=BROKER,
+                database=BROKER,
                 custom_queues=None,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE
 
     def test_custom_mode_with_empty_queues_raises(self) -> None:
         """CUSTOM mode with empty custom_queues should raise ConfigurationError."""
@@ -1079,10 +1149,10 @@ class TestQueueModeValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.CUSTOM,
-                broker=BROKER,
+                database=BROKER,
                 custom_queues=[],
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE
 
     def test_custom_mode_with_duplicate_names_raises(self) -> None:
         """CUSTOM mode with duplicate queue names should raise ConfigurationError."""
@@ -1091,13 +1161,13 @@ class TestQueueModeValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.CUSTOM,
-                broker=BROKER,
+                database=BROKER,
                 custom_queues=[
                     CustomQueueConfig(name='q1'),
                     CustomQueueConfig(name='q1'),
                 ],
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE
 
     def test_max_concurrency_none_means_uncapped(self) -> None:
         """max_concurrency=None is the explicit uncapped sentinel."""
@@ -1119,7 +1189,7 @@ class TestQueueModeValidation:
         """None renders as 'uncapped' in the startup banner, not 'None'."""
         config = AppConfig(
             queue_mode=QueueMode.CUSTOM,
-            broker=BROKER,
+            database=BROKER,
             custom_queues=[
                 CustomQueueConfig(name='bulk', max_concurrency=None),
             ],
@@ -1132,7 +1202,7 @@ class TestQueueModeValidation:
         """CUSTOM mode with valid unique queues should succeed."""
         config = AppConfig(
             queue_mode=QueueMode.CUSTOM,
-            broker=BROKER,
+            database=BROKER,
             custom_queues=[
                 CustomQueueConfig(name='high'),
                 CustomQueueConfig(name='low'),
@@ -1145,7 +1215,7 @@ class TestQueueModeValidation:
         """DEFAULT mode without custom_queues should succeed."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
         )
         assert config.queue_mode == QueueMode.DEFAULT
         assert config.custom_queues is None
@@ -1154,7 +1224,7 @@ class TestQueueModeValidation:
         """Queue names should be preserved exactly as provided."""
         config = AppConfig(
             queue_mode=QueueMode.CUSTOM,
-            broker=BROKER,
+            database=BROKER,
             custom_queues=[
                 CustomQueueConfig(name='priority'),
                 CustomQueueConfig(name='background'),
@@ -1173,32 +1243,32 @@ class TestDefaultBehavior:
         """Default config should use hard cap mode (prefetch_buffer=0)."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
         )
         assert config.prefetch_buffer == 0
         assert config.claim_lease_ms is None
 
     def test_cluster_wide_cap_defaults_to_none(self) -> None:
-        """cluster_wide_cap should default to None (unlimited)."""
+        """cluster_wide_cap should default to NoClusterCap() (no cap)."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
         )
-        assert config.cluster_wide_cap is None
+        assert config.cluster_wide_cap == NoClusterCap()
 
     def test_queue_mode_defaults_to_default(self) -> None:
         """queue_mode should default to DEFAULT."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         assert config.queue_mode == QueueMode.DEFAULT
 
     def test_custom_queues_defaults_to_none(self) -> None:
         """custom_queues should default to None."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         assert config.custom_queues is None
 
     def test_default_unhandled_error_code_default(self) -> None:
         """default_unhandled_error_code should default to 'UNHANDLED_EXCEPTION'."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         assert config.default_unhandled_error_code == 'UNHANDLED_EXCEPTION'
 
 
@@ -1211,35 +1281,35 @@ class TestMultiErrorCollection:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
-                cluster_wide_cap=-1,
+                database=BROKER,
+                cluster_wide_cap=ClusterCap(tasks=-1),
                 prefetch_buffer=-5,
             )
-        errors = exc_info.value.report.errors
+        errors = exc_info.value.report.refusals
         assert len(errors) == 2
         messages = [e.message for e in errors]
-        assert 'cluster_wide_cap must be positive' in messages
+        assert 'cluster_wide_cap.tasks must be positive' in messages
         assert 'prefetch_buffer must be non-negative' in messages
 
     def test_single_error_still_raises_original_type(self) -> None:
         """Single config error still raises ConfigurationError (backward compat)."""
         with pytest.raises(
-            ConfigurationError, match='cluster_wide_cap must be positive'
+            ConfigurationError, match='cluster_wide_cap.tasks must be positive'
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
-                cluster_wide_cap=-1,
+                database=BROKER,
+                cluster_wide_cap=ClusterCap(tasks=-1),
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_CLUSTER_CAP
 
     def test_multi_error_is_horsies_error(self) -> None:
         """MultipleValidationErrors is catchable as HorsiesError."""
         with pytest.raises(HorsiesError):
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
-                cluster_wide_cap=-1,
+                database=BROKER,
+                cluster_wide_cap=ClusterCap(tasks=-1),
                 prefetch_buffer=-5,
             )
 
@@ -1248,12 +1318,12 @@ class TestMultiErrorCollection:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
-                cluster_wide_cap=-1,
+                database=BROKER,
+                cluster_wide_cap=ClusterCap(tasks=-1),
                 prefetch_buffer=-5,
                 default_unhandled_error_code='TimeoutError',
             )
-        errors = exc_info.value.report.errors
+        errors = exc_info.value.report.refusals
         assert len(errors) == 3
 
     def test_multi_error_individual_codes(self) -> None:
@@ -1261,16 +1331,16 @@ class TestMultiErrorCollection:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
-                cluster_wide_cap=-1,
+                database=BROKER,
+                cluster_wide_cap=ClusterCap(tasks=-1),
                 prefetch_buffer=-5,
                 default_unhandled_error_code='TimeoutError',
             )
-        errors = exc_info.value.report.errors
+        errors = exc_info.value.report.refusals
         codes = {e.code for e in errors}
-        assert ErrorCode.CONFIG_INVALID_CLUSTER_CAP in codes
-        assert ErrorCode.CONFIG_INVALID_PREFETCH in codes
-        assert ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER in codes
+        assert HorsiesErrorCode.CONFIG_INVALID_CLUSTER_CAP in codes
+        assert HorsiesErrorCode.CONFIG_INVALID_PREFETCH in codes
+        assert HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER in codes
 
 
 @pytest.mark.unit
@@ -1285,10 +1355,10 @@ class TestRetryCodeValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 default_unhandled_error_code='TimeoutError',
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
 
     def test_invalid_mapper_value_format_raises(self) -> None:
         """Mapper values that look like exception names are rejected."""
@@ -1298,16 +1368,16 @@ class TestRetryCodeValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 exception_mapper={ValueError: 'TimeoutError'},
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
 
     def test_valid_default_unhandled_error_code(self) -> None:
         """UPPER_SNAKE_CASE error codes should be accepted."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             default_unhandled_error_code='CUSTOM_CODE',
         )
         assert config.default_unhandled_error_code == 'CUSTOM_CODE'
@@ -1320,10 +1390,10 @@ class TestRetryCodeValidation:
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 default_unhandled_error_code='lowercase_code',
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
 
     def test_non_base_exception_mapper_key_raises(self) -> None:
         """Mapper keys that are not BaseException subclasses should be rejected.
@@ -1334,7 +1404,7 @@ class TestRetryCodeValidation:
         with pytest.raises(ValidationError, match='is_subclass_of'):
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
+                database=BROKER,
                 exception_mapper={str: 'SOME_CODE'},  # type: ignore[dict-item]
             )
 
@@ -1342,7 +1412,7 @@ class TestRetryCodeValidation:
         """Valid exception mapper entries should be accepted."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
             exception_mapper={ValueError: 'VALUE_ERROR'},
         )
         assert ValueError in config.exception_mapper
@@ -1357,7 +1427,7 @@ class TestAppConfigImmutability:
         """AppConfig is frozen and should reject attribute assignment."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
         )
         with pytest.raises(ValidationError):
             config.prefetch_buffer = 1  # type: ignore[misc]
@@ -1394,7 +1464,7 @@ class TestLogConfig:
         """Formatted output should contain queue_mode."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
+            database=BROKER,
         )
         formatted = config._format_for_logging()
         assert 'queue_mode:' in formatted
@@ -1404,7 +1474,7 @@ class TestLogConfig:
         """CUSTOM mode should list queue names in formatted output."""
         config = AppConfig(
             queue_mode=QueueMode.CUSTOM,
-            broker=BROKER,
+            database=BROKER,
             custom_queues=[
                 CustomQueueConfig(name='fast', priority=1, max_concurrency=10),
                 CustomQueueConfig(name='slow', priority=2, max_concurrency=3),
@@ -1417,7 +1487,7 @@ class TestLogConfig:
 
     def test_log_config_skips_in_child_process(self) -> None:
         """log_config should not log when HORSIES_CHILD_PROCESS=1."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         logger = MagicMock()
         with patch.dict('os.environ', {'HORSIES_CHILD_PROCESS': '1'}):
             config.log_config(logger=logger)
@@ -1425,7 +1495,7 @@ class TestLogConfig:
 
     def test_log_config_uses_provided_logger(self) -> None:
         """log_config should call logger.info when provided."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         logger = MagicMock()
         with patch.dict('os.environ', {}, clear=False):
             # Ensure HORSIES_CHILD_PROCESS is not set
@@ -1442,7 +1512,7 @@ class TestLogConfig:
 
     def test_log_config_none_logger_uses_library_logger(self) -> None:
         """log_config with no logger should use the 'horsies' library logger."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         with patch.dict('os.environ', {}, clear=False):
             env = {
                 k: v
@@ -1464,20 +1534,20 @@ class TestFormatForLoggingExtended:
 
     def test_cluster_wide_cap_displayed(self) -> None:
         """cluster_wide_cap should appear in formatted output when set."""
-        config = AppConfig(broker=BROKER, cluster_wide_cap=50)
+        config = AppConfig(database=BROKER, cluster_wide_cap=ClusterCap(tasks=50))
         formatted = config._format_for_logging()
         assert 'cluster_wide_cap: 50' in formatted
 
     def test_cluster_wide_cap_omitted_when_none(self) -> None:
-        """cluster_wide_cap should not appear when None."""
-        config = AppConfig(broker=BROKER)
+        """cluster_wide_cap should not appear for NoClusterCap()."""
+        config = AppConfig(database=BROKER)
         formatted = config._format_for_logging()
         assert 'cluster_wide_cap' not in formatted
 
     def test_claim_lease_ms_displayed(self) -> None:
         """claim_lease_ms should appear in formatted output when set."""
         config = AppConfig(
-            broker=BROKER,
+            database=BROKER,
             prefetch_buffer=4,
             claim_lease_ms=30_000,
             recovery=RecoveryConfig(claimer_heartbeat_interval_ms=10_000),
@@ -1487,14 +1557,14 @@ class TestFormatForLoggingExtended:
 
     def test_claim_lease_ms_omitted_when_none(self) -> None:
         """claim_lease_ms should not appear when None."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         formatted = config._format_for_logging()
         assert 'claim_lease_ms' not in formatted
 
     def test_exception_mapper_displayed(self) -> None:
         """Non-empty exception mapper should show mapping count."""
         config = AppConfig(
-            broker=BROKER,
+            database=BROKER,
             exception_mapper={ValueError: 'VALUE_ERROR', TypeError: 'TYPE_ERROR'},
         )
         formatted = config._format_for_logging()
@@ -1503,7 +1573,7 @@ class TestFormatForLoggingExtended:
     def test_custom_default_error_code_displayed(self) -> None:
         """Non-default unhandled error code should appear in output."""
         config = AppConfig(
-            broker=BROKER,
+            database=BROKER,
             default_unhandled_error_code='MY_ERROR',
         )
         formatted = config._format_for_logging()
@@ -1511,13 +1581,13 @@ class TestFormatForLoggingExtended:
 
     def test_default_error_code_omitted_when_default(self) -> None:
         """Default unhandled error code should not appear in output."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         formatted = config._format_for_logging()
         assert 'default_unhandled_error_code' not in formatted
 
     def test_retention_hours_displayed(self) -> None:
         """Retention hours should appear in formatted output."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         formatted = config._format_for_logging()
         assert 'retention_hours:' in formatted
         assert 'heartbeats' not in formatted.split('retention_hours:')[1].split('\n')[0]
@@ -1527,7 +1597,7 @@ class TestFormatForLoggingExtended:
     def test_schedule_displayed(self) -> None:
         """Schedule config should appear when set."""
         config = AppConfig(
-            broker=BROKER,
+            database=BROKER,
             schedule=ScheduleConfig(
                 enabled=True,
                 schedules=[
@@ -1550,7 +1620,7 @@ class TestFormatForLoggingExtended:
 
     def test_schedule_omitted_when_none(self) -> None:
         """Schedule section should not appear when schedule is None."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         formatted = config._format_for_logging()
         assert 'schedule:' not in formatted
 
@@ -1629,14 +1699,14 @@ class TestExactPool:
         database_url=SecretStr('postgresql://user:pass@localhost/db'),
         pool_size=30,
         max_overflow=30,
-        pool_timeout=12,
+        pool_timeout_seconds=12,
     )
 
     def test_the_copy_has_the_pool_and_no_overflow(self) -> None:
         exact = self._CONFIG.with_exact_pool(7)
         assert (exact.pool_size, exact.max_overflow) == (7, 0)
         assert exact.database_url == self._CONFIG.database_url
-        assert exact.pool_timeout == 12
+        assert exact.pool_timeout_seconds == 12
         assert (self._CONFIG.pool_size, self._CONFIG.max_overflow) == (30, 30)
 
     @pytest.mark.parametrize('connections', [0, -1])
@@ -1659,8 +1729,8 @@ class TestGetBrokerErrorHandling:
             pool_size=30,
             max_overflow=30,
         )
-        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=config))
-        app.set_role('worker')
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, database=config))
+        app.set_role(AppRole.WORKER)
         app.set_task_send_pool(4)
 
         with patch('horsies.core.app.PostgresBroker') as mock_broker_cls:
@@ -1673,10 +1743,10 @@ class TestGetBrokerErrorHandling:
         assert (config.pool_pre_ping, config.worker_pool_pre_ping) == (True, False)
         assert broker_config.pool_pre_ping is True
 
-    @pytest.mark.parametrize('role', ['producer', 'scheduler', 'worker'])
+    @pytest.mark.parametrize('role', list(AppRole))
     def test_without_a_task_send_pool_the_broker_opens_the_config_pool(
         self,
-        role: str,
+        role: AppRole,
     ) -> None:
         """A producer, the scheduler, and the worker process itself keep the
         pool of PostgresConfig: the worker role alone does not resize it."""
@@ -1687,7 +1757,7 @@ class TestGetBrokerErrorHandling:
             pool_size=30,
             max_overflow=30,
         )
-        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=config))
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, database=config))
         app.set_role(role)
 
         with patch('horsies.core.app.PostgresBroker') as mock_broker_cls:
@@ -1700,15 +1770,15 @@ class TestGetBrokerErrorHandling:
     def test_a_task_send_pool_below_one_is_a_defect(self, connections: int) -> None:
         from horsies import Horsies
 
-        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER))
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, database=BROKER))
         with pytest.raises(AssertionError, match='connections must be >= 1'):
             app.set_task_send_pool(connections)
 
     def test_non_horsies_error_wrapped_as_broker_init_failed(self) -> None:
-        """Non-HorsiesError exceptions are wrapped with BROKER_INIT_FAILED."""
+        """Non-HorsiesError exceptions are wrapped with DATABASE_INIT_FAILED."""
         from horsies import Horsies
 
-        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER))
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, database=BROKER))
         app._broker = None  # ensure fresh init path
 
         with patch(
@@ -1718,7 +1788,7 @@ class TestGetBrokerErrorHandling:
             with pytest.raises(HorsiesError) as exc_info:
                 app.get_broker()
 
-            assert exc_info.value.code == ErrorCode.BROKER_INIT_FAILED
+            assert exc_info.value.code == HorsiesErrorCode.DATABASE_INIT_FAILED
             assert 'driver missing' in str(exc_info.value.message)
             assert exc_info.value.__cause__ is not None
 
@@ -1726,12 +1796,12 @@ class TestGetBrokerErrorHandling:
         """HorsiesError from broker init is re-raised, not double-wrapped."""
         from horsies import Horsies
 
-        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER))
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, database=BROKER))
         app._broker = None
 
         original = HorsiesError(
             message='bad config',
-            code=ErrorCode.BROKER_INVALID_URL,
+            code=HorsiesErrorCode.DATABASE_INVALID_URL,
         )
         with patch(
             'horsies.core.app.PostgresBroker',
@@ -1741,7 +1811,7 @@ class TestGetBrokerErrorHandling:
                 app.get_broker()
 
             assert exc_info.value is original
-            assert exc_info.value.code == ErrorCode.BROKER_INVALID_URL
+            assert exc_info.value.code == HorsiesErrorCode.DATABASE_INVALID_URL
 
 
 @pytest.mark.unit
@@ -1764,7 +1834,7 @@ class TestWorkerStateSnapshotInterval:
             RecoveryConfig(worker_state_snapshot_interval_ms=999)
 
     def test_cap_is_60_seconds_half_the_120_second_live_window(self) -> None:
-        assert WORKER_STATE_LIVE_WINDOW_S == 120
+        assert WORKER_STATE_LIVE_WINDOW_SECONDS == 120
         assert WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS == 60_000
 
     def test_cap_follows_the_live_window(
@@ -1779,7 +1849,7 @@ class TestWorkerStateSnapshotInterval:
         import horsies.core.defaults as defaults
         import horsies.core.models.recovery as recovery
 
-        monkeypatch.setattr(defaults, 'WORKER_STATE_LIVE_WINDOW_S', 200)
+        monkeypatch.setattr(defaults, 'WORKER_STATE_LIVE_WINDOW_SECONDS', 200)
         spec = importlib.util.spec_from_file_location(
             '_recovery_with_a_200_s_live_window',
             recovery.__file__,
@@ -1807,7 +1877,7 @@ class TestWorkerStateSnapshotInterval:
             RecoveryConfig(worker_state_snapshot_interval_ms=interval_ms)
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_RECOVERY
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_RECOVERY
         assert error.message == (
             'worker_state_snapshot_interval_ms has more than 20 digits, above '
             'the cap of 60000ms'
@@ -1823,14 +1893,14 @@ class TestWorkerStateSnapshotInterval:
 
         error = exc_info.value
         assert type(error) is ConfigurationError
-        assert error.code == ErrorCode.CONFIG_INVALID_RECOVERY
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_RECOVERY
         assert error.message == (
             f'worker_state_snapshot_interval_ms={interval_ms}ms '
             'is above the cap of 60000ms'
         )
         notes = ' '.join(error.notes)
         assert 'half the live window' in notes
-        assert 'WORKER_STATE_LIVE_WINDOW_S=120s' in notes
+        assert 'WORKER_STATE_LIVE_WINDOW_SECONDS=120s' in notes
         assert 'latest snapshot is inside the live window' in notes
         assert error.help_text == 'set worker_state_snapshot_interval_ms <= 60000ms'
 
@@ -1839,7 +1909,7 @@ class TestWorkerStateSnapshotInterval:
             AppConfig.model_validate(
                 {
                     'queue_mode': QueueMode.DEFAULT,
-                    'broker': BROKER,
+                    'database': BROKER,
                     'recovery': {'worker_state_snapshot_interval_ms': 120_000},
                 },
             )
@@ -1868,24 +1938,24 @@ class TestOrphanTaskAuditInterval:
 
 @pytest.mark.unit
 class TestRetentionSweepInterval:
-    """RetentionConfig.retention_sweep_interval_s bounds and default."""
+    """RetentionConfig.retention_sweep_interval_seconds bounds and default."""
 
     def test_default_is_5_minutes(self) -> None:
-        assert RetentionConfig().retention_sweep_interval_s == 300
+        assert RetentionConfig().retention_sweep_interval_seconds == 300
 
     def test_bounds_accept_valid_edges(self) -> None:
-        assert RetentionConfig(retention_sweep_interval_s=30,
-        ).retention_sweep_interval_s == 30
-        assert RetentionConfig(retention_sweep_interval_s=86_400,
-        ).retention_sweep_interval_s == 86_400
+        assert RetentionConfig(retention_sweep_interval_seconds=30,
+        ).retention_sweep_interval_seconds == 30
+        assert RetentionConfig(retention_sweep_interval_seconds=86_400,
+        ).retention_sweep_interval_seconds == 86_400
 
     def test_below_minimum_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            RetentionConfig(retention_sweep_interval_s=29)
+            RetentionConfig(retention_sweep_interval_seconds=29)
 
     def test_above_maximum_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            RetentionConfig(retention_sweep_interval_s=86_401)
+            RetentionConfig(retention_sweep_interval_seconds=86_401)
 
 
 @pytest.mark.unit
@@ -1933,7 +2003,7 @@ class TestPayloadPolicyWiring:
     """AppConfig carries a PayloadPolicy with warn-only defaults."""
 
     def test_default_policy(self) -> None:
-        config = AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER)
+        config = AppConfig(queue_mode=QueueMode.DEFAULT, database=BROKER)
         assert config.payload.warn_bytes == 1_048_576
         assert config.payload.reject_bytes is None
 
@@ -1959,7 +2029,7 @@ class TestQueueRetentionNamesARealQueue:
 
     def test_default_mode_accepts_the_default_queue(self) -> None:
         config = AppConfig(
-            broker=self._broker(),
+            database=self._broker(),
             queue_mode=QueueMode.DEFAULT,
             retention=RetentionConfig(
                 queue_retention={'default': timedelta(days=7)}
@@ -1971,7 +2041,7 @@ class TestQueueRetentionNamesARealQueue:
     def test_default_mode_refuses_any_other_queue(self) -> None:
         with pytest.raises(ConfigurationError) as caught:
             AppConfig(
-                broker=self._broker(),
+                database=self._broker(),
                 queue_mode=QueueMode.DEFAULT,
                 retention=RetentionConfig(
                     queue_retention={'emails': timedelta(days=7)}
@@ -1982,7 +2052,7 @@ class TestQueueRetentionNamesARealQueue:
 
     def test_custom_mode_accepts_a_configured_queue(self) -> None:
         config = AppConfig(
-            broker=self._broker(),
+            database=self._broker(),
             queue_mode=QueueMode.CUSTOM,
             custom_queues=[CustomQueueConfig(name='emails', priority=100)],
             retention=RetentionConfig(
@@ -1996,7 +2066,7 @@ class TestQueueRetentionNamesARealQueue:
         """The failure this guard exists for."""
         with pytest.raises(ConfigurationError) as caught:
             AppConfig(
-                broker=self._broker(),
+                database=self._broker(),
                 queue_mode=QueueMode.CUSTOM,
                 custom_queues=[CustomQueueConfig(name='emails', priority=100)],
                 retention=RetentionConfig(
@@ -2012,6 +2082,6 @@ class TestQueueRetentionNamesARealQueue:
         )
 
     def test_an_empty_mapping_is_unaffected(self) -> None:
-        config = AppConfig(broker=self._broker(), queue_mode=QueueMode.DEFAULT)
+        config = AppConfig(database=self._broker(), queue_mode=QueueMode.DEFAULT)
 
         assert config.retention.queue_retention == {}

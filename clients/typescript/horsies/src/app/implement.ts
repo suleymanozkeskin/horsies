@@ -1,7 +1,7 @@
 // `app.implement`: one implementation per listed contract. It never throws and calls no addon function: a refusal
 // goes to the refusal sink, which the `check` command and the worker start read.
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import { contractRecord } from "../contract/definition.ts";
 import { type ImplementationParts, implementationParts } from "../contract/implementation.ts";
 import type { AppContext } from "./context.ts";
@@ -18,7 +18,7 @@ export function registerImplementation(context: AppContext, implementation: obje
   if (!listed) {
     context.refusals.record(
       "contracts",
-      refusal(ErrorCode.TASK_NOT_REGISTERED, path, "the contract is not in the tasks list of this app", [
+      refusal(HorsiesErrorCode.TASK_NOT_REGISTERED, path, "the contract is not in the tasks list of this app", [
         "add the contract to Horsies.create({ tasks })",
       ]),
     );
@@ -29,7 +29,7 @@ export function registerImplementation(context: AppContext, implementation: obje
   if (context.implementations.has(name)) {
     context.refusals.record(
       "contracts",
-      refusal(ErrorCode.TASK_DUPLICATE_NAME, path, "the contract has a second implementation", ["implement each contract once"]),
+      refusal(HorsiesErrorCode.TASK_DUPLICATE_NAME, path, "the contract has a second implementation", ["implement each contract once"]),
     );
 
     return;

@@ -3,7 +3,7 @@
 // the plain parameters only, with a read-back; a member that a node fills is left out of the stored input, and the
 // core merges the node's result envelope into it at run time.
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import type { JsonText } from "../codec/json-text.ts";
 import { encodeParametersWithReadBack } from "../codec/read-back.ts";
 import { encodeParameters } from "../codec/writer.ts";
@@ -71,7 +71,7 @@ type InputParts = { readonly statics: Record<string, unknown>; readonly argsFrom
 export function checkNodeInput(facts: NodeInputFacts): Result<CheckedInput, NonEmpty<SpecFinding>> {
   if (!isPlainObject(facts.input)) {
     return err([
-      finding(ErrorCode.WORKFLOW_INVALID_KWARG_KEY, `${facts.place} input`, "the input is not a plain object", []),
+      finding(HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY, `${facts.place} input`, "the input is not a plain object", []),
     ]);
   }
 
@@ -93,7 +93,7 @@ export function checkNodeInput(facts: NodeInputFacts): Result<CheckedInput, NonE
 
   if (!encoded.ok) {
     return err([
-      finding(ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE, `${facts.place} input`, refusalText(encoded.error), [
+      finding(HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE, `${facts.place} input`, refusalText(encoded.error), [
         "give each parameter a value of its declared type",
       ]),
     ]);
@@ -107,7 +107,7 @@ function unknownMembers(facts: NodeInputFacts, input: Readonly<Record<string, un
     .filter((key) => !facts.parameters.byName.has(key))
     .map((key) =>
       finding(
-        ErrorCode.WORKFLOW_INVALID_KWARG_KEY,
+        HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY,
         `${facts.place} input`,
         `the member ${JSON.stringify(key)} is not a parameter`,
         ["give only the parameters that the task or the child workflow declares"],
@@ -128,7 +128,7 @@ function memberFindings(
     return member.presence.mode === "required"
       ? [
           finding(
-            ErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS,
+            HorsiesErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS,
             place,
             "a required parameter has no value and no node",
             [],
@@ -143,7 +143,7 @@ function memberFindings(
   if (!isTaskOutcomeKind(member.kind)) {
     if (slot.kind === "node") {
       return [
-        finding(ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH, place, "a plain parameter takes a value, not a node", [
+        finding(HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH, place, "a plain parameter takes a value, not a node", [
           "declare the parameter h.taskOutcome(contract) to take an upstream node",
         ]),
       ];
@@ -157,7 +157,7 @@ function memberFindings(
   if (slot.kind !== "node") {
     return [
       finding(
-        ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
+        HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
         place,
         "an h.taskOutcome parameter takes an upstream node, not a value",
         [],
@@ -185,7 +185,7 @@ function upstreamFindings(
       if (!storedFormFits(output.output, upstreamValueKind(member.kind, place))) {
         findings.push(
           finding(
-            ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
+            HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
             place,
             "the source node's output type is not the parameter's type",
             [],
@@ -202,7 +202,7 @@ function upstreamFindings(
 
   if (facts.join.kind !== "all" && member.presence.mode === "required") {
     findings.push(
-      finding(ErrorCode.WORKFLOW_INVALID_JOIN, place, `under a ${facts.join.kind} join the source may not have ended`, [
+      finding(HorsiesErrorCode.WORKFLOW_INVALID_JOIN, place, `under a ${facts.join.kind} join the source may not have ended`, [
         "declare the parameter .optional(), or join on all",
       ]),
     );

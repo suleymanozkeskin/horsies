@@ -1,6 +1,6 @@
 """Regression tests: TaskHandle must not cache transient retrieval errors.
 
-A handle previously cached BROKER_ERROR / TASK_NOT_FOUND permanently —
+A handle previously cached DATABASE_ERROR / TASK_NOT_FOUND permanently —
 one DB hiccup during get() poisoned the handle, and every later call
 replayed the stale error even after the task completed. WAIT_TIMEOUT
 already (correctly) bypassed the cache; these tests pin the same
@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed, StoredResult
+from horsies.core.brokers.result_types import DatabaseErrorCode, DatabaseOperationFailed, StoredResult
 from horsies.core.models.outcome import (
     Failed,
     ReadDatabaseError,
@@ -92,15 +92,15 @@ class TestTransientErrorsNotCached:
         assert broker.get_raw_result_record_async.await_count == 2
 
     async def test_broker_error_result_then_success(self) -> None:
-        """An Err(BrokerOperationError) must not poison the handle."""
+        """An Err(DatabaseOperationError) must not poison the handle."""
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(
             side_effect=[
-                Err(BrokerOperationFailed(
-                    code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+                Err(DatabaseOperationFailed(
+                    code=DatabaseErrorCode.TASK_INFO_QUERY_FAILED,
                     message='transient',
                     retryable=True,
-                    exception=ConnectionError('db gone'),
+                    cause=ConnectionError('db gone'),
                 )),
                 _ok_record(7),
             ],

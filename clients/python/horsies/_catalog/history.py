@@ -102,3 +102,14 @@ class RerunErrorCode(str, Enum):
     text, for example a `pg` client with `binary: true`. The statement
     ran: roll the caller's transaction back.
     """
+
+    RETRY_CODE_NOT_DECLARED = 'RETRY_CODE_NOT_DECLARED'
+    """The stored retry list of the source names a custom code that the
+    task does not declare in the calling app. Nothing was written.
+    """
+
+    TASK_NOT_REGISTERED = 'TASK_NOT_REGISTERED'
+    """The stored retry list of the source names a custom code, and the
+    calling app does not register the task, so the code cannot be
+    checked. Nothing was written.
+    """

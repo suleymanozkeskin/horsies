@@ -612,7 +612,7 @@ fn not_listed(request: &ChildSpecRequest) -> Result<ClientChildSpec, ChildSpecUn
 mod tests {
     use super::*;
 
-    const CONFIG: &str = r#"{"broker": {"database_url": "postgresql://127.0.0.1:55432/horsies"}, "worker_profiles": {"io": {"isolated": {"kind": "isolated_children", "count": 1}}}}"#;
+    const CONFIG: &str = r#"{"database": {"database_url": "postgresql://127.0.0.1:55432/horsies"}, "worker_profiles": {"io": {"isolated": {"kind": "isolated_children", "count": 1}}}}"#;
 
     /// The start members of a TypeScript worker of the profile `profile`.
     fn start(profile: &str) -> String {
@@ -648,13 +648,13 @@ mod tests {
     #[test]
     fn a_core_error_keeps_its_code_notes_and_help() {
         let error = HorsiesError::new("unknown worker profile 'absent'")
-            .with_code(horsies_core::ErrorCode::CliInvalidArgs)
+            .with_code(horsies_core::HorsiesErrorCode::CliInvalidArgs)
             .with_note("the app defines the profiles: io")
             .with_help("pass one of them to --profile");
         assert_eq!(
             coded_refusal(&error),
             CoreRefusal {
-                code: horsies_core::ErrorCode::CliInvalidArgs
+                code: horsies_core::HorsiesErrorCode::CliInvalidArgs
                     .as_code_str()
                     .to_owned(),
                 message: "unknown worker profile 'absent'".to_owned(),
@@ -684,13 +684,13 @@ mod tests {
     fn pgbouncer_transaction_mode_with_no_session_url_is_refused_by_the_config_check_first() {
         // `AppConfig::validate` runs the broker check that the plan's
         // connection step runs, so the config check refuses the text first.
-        let config = r#"{"broker": {"database_url": "postgresql://127.0.0.1:6432/horsies", "pgbouncer_transaction_mode": true}, "worker_profiles": {"io": {"isolated": {"kind": "isolated_children", "count": 1}}}}"#;
+        let config = r#"{"database": {"database_url": "postgresql://127.0.0.1:6432/horsies", "pgbouncer_transaction_mode": true}, "worker_profiles": {"io": {"isolated": {"kind": "isolated_children", "count": 1}}}}"#;
         match preparation(config, &start(NAMED_IO), SeatIsolateMemory::Capped) {
             Err(NativeThrown::ClientDefect { rule, .. }) => {
                 assert!(
                     rule.starts_with("the config check refuses the accepted config: ")
                         && rule.contains(
-                            "pgbouncer_transaction_mode=true requires session_database_url"
+                            "pgbouncer_transaction_mode=true requires a separate session_database"
                         ),
                     "{rule}"
                 );
@@ -705,7 +705,7 @@ mod tests {
         // The config check compares the texts as written; the producer
         // manifest writes `postgres://` as `postgresql://`, so the plan's
         // connection step sees one URL twice.
-        let config = r#"{"broker": {"database_url": "postgres://127.0.0.1:6432/horsies", "session_database_url": "postgresql://127.0.0.1:6432/horsies", "pgbouncer_transaction_mode": true}, "worker_profiles": {"io": {"isolated": {"kind": "isolated_children", "count": 1}}}}"#;
+        let config = r#"{"database": {"database_url": "postgres://127.0.0.1:6432/horsies", "session_database": {"kind": "SEPARATE", "url": "postgresql://127.0.0.1:6432/horsies"}, "pgbouncer_transaction_mode": true}, "worker_profiles": {"io": {"isolated": {"kind": "isolated_children", "count": 1}}}}"#;
         assert!(matches!(
             preparation(config, &start(NAMED_IO), SeatIsolateMemory::Capped),
             Ok(WorkerPreparation::ConnectionSettingsRefused { .. })
@@ -713,7 +713,7 @@ mod tests {
     }
 
     /// An app config with the profile `cpu` of `SHARED_THREAD` children.
-    const THREAD_CONFIG: &str = r#"{"broker": {"database_url": "postgresql://127.0.0.1:55432/horsies"}, "worker_profiles": {"cpu": {"isolated": {"kind": "isolated_children", "count": 1}, "shared_thread": {"kind": "shared_thread_children", "count": 1, "seats": 4}}}}"#;
+    const THREAD_CONFIG: &str = r#"{"database": {"database_url": "postgresql://127.0.0.1:55432/horsies"}, "worker_profiles": {"cpu": {"isolated": {"kind": "isolated_children", "count": 1}, "shared_thread": {"kind": "shared_thread_children", "count": 1, "seats": 4}}}}"#;
 
     const NAMED_CPU: &str = r#"{"kind": "NAMED", "name": "cpu"}"#;
 
@@ -774,7 +774,7 @@ mod tests {
     fn a_config_text_that_the_check_refuses_is_a_client_defect() {
         assert!(matches!(
             preparation(
-                r#"{"broker": {}}"#,
+                r#"{"database": {}}"#,
                 &start(NAMED_IO),
                 SeatIsolateMemory::Capped
             ),

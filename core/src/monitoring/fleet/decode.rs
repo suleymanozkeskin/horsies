@@ -16,7 +16,7 @@ use crate::broker::core_rows::{column, one_row, RowDecodeError};
 use crate::broker::slot_health::parse_slot_health;
 use crate::core::task::Execution;
 use crate::db::Row;
-use crate::{BudgetLoad, ClassCoverage, SlotHealth, PENDING_STREAM_LIMIT};
+use crate::{BudgetLoad, ExecutionClassCoverage, SlotHealth, PENDING_STREAM_LIMIT};
 
 use super::statements::{OLDEST_PENDING, WORKERS};
 use super::{
@@ -247,7 +247,9 @@ pub(super) fn fleet_workers(row: WorkersRow) -> Result<FleetWorkers, ReadRefused
 ///
 /// Errors: [`ReadRefused`] as the fleet check
 /// (`crate::broker::class_coverage_reads::coverage_from_row`).
-pub(super) fn fleet_class_coverage(row: CoverageRow) -> Result<ClassCoverage, ReadRefused> {
+pub(super) fn fleet_class_coverage(
+    row: CoverageRow,
+) -> Result<ExecutionClassCoverage, ReadRefused> {
     Ok(coverage_from_row(row)?)
 }
 
@@ -261,11 +263,11 @@ fn live_worker_counts(live: Value) -> Result<LiveWorkerCounts, ReadRefused> {
             degraded: 0,
         },
         |counts, entry| match slot_health(entry)? {
-            SlotHealth::AllSlotsServing => Ok(LiveWorkerCounts {
+            SlotHealth::AllServing => Ok(LiveWorkerCounts {
                 serving: counts.serving + 1,
                 ..counts
             }),
-            SlotHealth::SlotsDown(_) => Ok(LiveWorkerCounts {
+            SlotHealth::SlotsDown { .. } => Ok(LiveWorkerCounts {
                 degraded: counts.degraded + 1,
                 ..counts
             }),

@@ -319,7 +319,7 @@ def run_worker(
         'worker',
         instance_path,
         f'--profile={profile}',
-        '--loglevel=warning',
+        '--log-level=warning',
         *extra_arguments,
     ]
 
@@ -372,7 +372,7 @@ def run_workers(
         'worker',
         instance_path,
         f'--profile={profile}',
-        '--loglevel=warning',
+        '--log-level=warning',
     ]
 
     try:
@@ -422,7 +422,7 @@ def run_scheduler(
         'horsies',
         'scheduler',
         instance_path,
-        '--loglevel=warning',
+        '--log-level=warning',
     ]
 
     env = scheduler_env()

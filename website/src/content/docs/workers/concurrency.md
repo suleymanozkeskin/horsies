@@ -207,8 +207,8 @@ In CUSTOM mode, `max_concurrency` on a custom queue limits the concurrent tasks 
 
 `max_concurrency=None` declares the queue uncapped: no per-queue limit is
 enforced and the claim pass skips the in-flight count query for that queue
-(worker- and cluster-level limits still apply), mirroring
-`cluster_wide_cap=None`. `max_concurrency=0` is a valid edge that pauses
+(worker- and cluster-level limits still apply), as `NoClusterCap()` does
+for `cluster_wide_cap`. `max_concurrency=0` is a valid edge that pauses
 claiming from the queue.
 
 Use cases:

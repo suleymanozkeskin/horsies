@@ -35,11 +35,9 @@ type TaskSendError = TaskSendCoreError
 """Every failure of a send: one variant per ``TaskSendErrorCode``,
 each a class of the core's catalog."""
 
-type TaskSendResendable = (
-    TaskSendEnqueueFailed
-    | TaskSendAsyncContext
-    | TaskSendIdempotencyKeyConflict
-)
-"""The variants that the resend methods accept. Each carries its task id and payload."""
+type TaskSendResendable = TaskSendEnqueueFailed | TaskSendAsyncContext
+"""The variants that the resend methods accept. Each carries its task id and payload.
+``TaskSendIdempotencyKeyConflict`` is not one of them: a repeat of the same send
+does not complete it."""
 
 type TaskSendResult[T] = Result[T, TaskSendError]

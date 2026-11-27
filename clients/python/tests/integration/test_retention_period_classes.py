@@ -49,7 +49,7 @@ def _mapped_app(broker: PostgresBroker) -> tuple[Horsies, Any, Any]:
     app = Horsies(
         AppConfig(
             queue_mode=QueueMode.CUSTOM,
-            broker=broker.config,
+            database=broker.config,
             custom_queues=[
                 CustomQueueConfig(name='emails'),
                 CustomQueueConfig(name='alerts'),

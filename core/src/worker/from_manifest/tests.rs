@@ -35,7 +35,10 @@ fn the_plan_takes_the_queues_and_claim_settings_of_the_claim_section() {
             .collect::<Vec<_>>(),
         vec![("high", 1, Some(0)), ("low", 100, None)]
     );
-    assert_eq!(app.cluster_wide_cap, Some(20));
+    assert_eq!(
+        app.cluster_wide_cap,
+        crate::core::config::ClusterCapSetting::ClusterCap { tasks: 20 }
+    );
     assert_eq!(app.prefetch_buffer, 0);
     assert_eq!(app.claim_lease_ms, None);
     assert_eq!(app.max_claim_renew_age_ms, 180_000);
@@ -95,11 +98,11 @@ fn the_plan_takes_the_child_launch_and_the_registered_classes() {
 fn the_worker_process_and_the_app_broker_configs_differ_only_where_python_does() {
     let plan = batch_plan();
     assert!(!plan.broker_config.pool_pre_ping);
-    assert!(plan.app_config.broker.pool_pre_ping);
+    assert!(plan.app_config.database.pool_pre_ping);
     assert_eq!(plan.broker_config.max_overflow, 0);
     assert_eq!(
         plan.broker_config.database_url,
-        plan.app_config.broker.database_url
+        plan.app_config.database.database_url
     );
 }
 
@@ -161,10 +164,11 @@ async fn the_worker_broker_is_of_the_family_of_its_caller() {
 async fn the_install_of_the_worker_broker_records_the_family_of_its_caller() {
     for family in [ClientFamily::Python, ClientFamily::Rust] {
         let database = TestDatabase::create_empty().await;
-        let broker = match worker_broker(&PostgresConfig::from_url(database.url()), family).await {
-            Ok(broker) => broker,
-            Err(refused) => panic!("the config of a test database is valid: {refused}"),
-        };
+        let broker =
+            match worker_broker(&PostgresConfig::from_database_url(database.url()), family).await {
+                Ok(broker) => broker,
+                Err(refused) => panic!("the config of a test database is valid: {refused}"),
+            };
         if let Err(error) = broker.migrate().await {
             panic!("the install on an empty database: {error}");
         }

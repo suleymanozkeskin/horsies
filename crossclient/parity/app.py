@@ -28,6 +28,7 @@ import asyncio
 import os
 import time
 from datetime import timedelta
+from enum import Enum
 from typing import Final
 
 from pydantic import SecretStr
@@ -74,8 +75,19 @@ SHARED_TIMEOUT_MS: Final = 30_000
 
 DRAIN_TIMEOUT: Final = timedelta(seconds=5)
 
-RETRY_POLICY: Final = RetryPolicy.fixed([1, 1], retry_for=['TRANSIENT'])
-"""Two retries one second apart for the code `TRANSIENT`."""
+
+class ParityCode(str, Enum):
+    """The codes of the parity tasks' own errors (Rust `ParityCode`,
+    `clients/rust/tests/parity/src/lib.rs`)."""
+
+    REFUSED = 'REFUSED'
+    TRANSIENT = 'TRANSIENT'
+    UPSTREAM_FAILED = 'UPSTREAM_FAILED'
+
+
+RETRY_POLICY: Final = RetryPolicy.fixed([1, 1], retry_for=[ParityCode.TRANSIENT])
+"""Two retries one second apart for the code `TRANSIENT`. A task with this
+policy declares `error_codes=ParityCode`."""
 
 CHAIN_NAME: Final = 'parity_chain'
 CHAIN_DEFINITION_KEY: Final = 'crossclient.parity.chain.v1'
@@ -102,7 +114,7 @@ def _database_url() -> str:
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr(_database_url()),
         pool_size=5,
         max_overflow=5,
@@ -125,19 +137,19 @@ config = AppConfig(
     worker_profiles={
         ISOLATED: WorkerProfile(
             isolated=IsolatedChildren(count=1),
-            preload=ChildPreload.NONE,
+            preload=ChildPreload.NO_PRELOAD,
             drain_timeout=DRAIN_TIMEOUT,
         ),
         SHARED_ASYNC: WorkerProfile(
             isolated=NoIsolatedChildren(),
             shared_async=SharedAsyncChildren(count=1, seats=4),
-            preload=ChildPreload.NONE,
+            preload=ChildPreload.NO_PRELOAD,
             drain_timeout=DRAIN_TIMEOUT,
         ),
         SHARED_THREAD: WorkerProfile(
             isolated=NoIsolatedChildren(),
             shared_thread=SharedThreadChildren(count=1, seats=4),
-            preload=ChildPreload.NONE,
+            preload=ChildPreload.NO_PRELOAD,
             drain_timeout=DRAIN_TIMEOUT,
         ),
     },
@@ -161,7 +173,7 @@ def refuse(*, value: int) -> Result[int, TaskError]:
     return Err(TaskError(code='REFUSED', message=f'refused {value}'))
 
 
-@app.task(name='parity.transient', retry_policy=RETRY_POLICY)
+@app.task(name='parity.transient', error_codes=ParityCode, retry_policy=RETRY_POLICY)
 def transient(*, value: int) -> Result[int, TaskError]:
     """A task error that the policy retries until the retries run out."""
     return Err(TaskError(code='TRANSIENT', message=f'transient {value}'))
@@ -214,6 +226,7 @@ async def refuse_async(*, value: int) -> Result[int, TaskError]:
     name='parity.transient_async',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
+    error_codes=ParityCode,
     retry_policy=RETRY_POLICY,
 )
 async def transient_async(*, value: int) -> Result[int, TaskError]:
@@ -258,6 +271,7 @@ def refuse_thread(*, value: int) -> Result[int, TaskError]:
     name='parity.transient_thread',
     execution=Execution.SHARED_THREAD,
     timeout_ms=SHARED_TIMEOUT_MS,
+    error_codes=ParityCode,
     retry_policy=RETRY_POLICY,
 )
 def transient_thread(*, value: int) -> Result[int, TaskError]:

@@ -21,7 +21,7 @@ use crate::telemetry::catalog::MetricId;
 use crate::worker::executor::protocol::StopReason;
 use crate::worker::executor::slots::outcome::WriteStage;
 use crate::{
-    ContractCode, Execution, OperationalErrorCode, OutcomeCode, RetrievalCode, TaskAttemptOutcome,
+    ContractCode, Execution, OperationalCode, OutcomeCode, RetrievalCode, TaskAttemptOutcome,
     TaskSendErrorCode, UNDECLARED_LABEL,
 };
 
@@ -235,7 +235,7 @@ pub const NO_ERROR_CODE: &str = "";
 /// task code.
 pub const ERROR_CODE_FIXED: &[ValueGroup] = &[
     ValueGroup::Listed(&[NO_ERROR_CODE]),
-    ValueGroup::Codes(<OperationalErrorCode as CodeEnum>::CATALOG),
+    ValueGroup::Codes(<OperationalCode as CodeEnum>::CATALOG),
     ValueGroup::Codes(<ContractCode as CodeEnum>::CATALOG),
     ValueGroup::Codes(<RetrievalCode as CodeEnum>::CATALOG),
     ValueGroup::Codes(<OutcomeCode as CodeEnum>::CATALOG),
@@ -1018,7 +1018,7 @@ mod tests {
     fn error_code_values_hold_no_code_then_every_built_in_code_once() {
         let texts = group_texts(ERROR_CODE_FIXED);
         assert_eq!(texts.first(), Some(&NO_ERROR_CODE));
-        let built_in = OperationalErrorCode::ALL.len()
+        let built_in = OperationalCode::ALL.len()
             + ContractCode::ALL.len()
             + RetrievalCode::ALL.len()
             + OutcomeCode::ALL.len();

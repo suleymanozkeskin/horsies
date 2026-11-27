@@ -29,6 +29,11 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.health_reads import (
+    MinResponsesFullWindow,
+    PingTargetEveryWorker,
+    WorkerHistoryLimitAllRetained,
+)
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import NodeKey, TaskNode, WorkflowHandle, WorkflowSpec
@@ -72,7 +77,7 @@ _WINDOW: Final = MonitoringWindow(lower=_UPPER - timedelta(days=1), upper=_UPPER
 _APP: Final = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(database_url=SecretStr(_URL)),
+        database=PostgresConfig(database_url=SecretStr(_URL)),
     ),
 )
 
@@ -163,16 +168,18 @@ _HEALTH_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
         'worker_state_history_async',
         lambda b: asyncio.run(b.get_worker_state_history_async(_WORKER_ID)),
     ),
-    'get_class_coverage_async': (
-        'class_coverage_async', lambda b: asyncio.run(b.get_class_coverage_async()),
+    'get_execution_class_coverage_async': (
+        'execution_class_coverage_async', lambda b: asyncio.run(b.get_execution_class_coverage_async()),
     ),
-    'get_class_report_async': (
-        'class_report_async', lambda b: asyncio.run(b.get_class_report_async()),
+    'get_execution_class_report_async': (
+        'execution_class_report_async', lambda b: asyncio.run(b.get_execution_class_report_async()),
     ),
     'ping_workers_blocking': (
         'ping_workers',
         lambda b: b._ping_workers_blocking(
-            target_worker_id=None, timeout_seconds=2.0, min_responses=None,
+            target=PingTargetEveryWorker(),
+            wait_ms=2_000,
+            min_responses=MinResponsesFullWindow(),
         ),
     ),
     'list_worker_states_blocking': ('worker_states', lambda b: b._list_worker_states_blocking()),
@@ -181,15 +188,19 @@ _HEALTH_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
     ),
     'get_worker_state_history_blocking': (
         'worker_state_history',
-        lambda b: b._get_worker_state_history_blocking(_WORKER_ID, limit=None),
+        lambda b: b._get_worker_state_history_blocking(
+            _WORKER_ID, limit=WorkerHistoryLimitAllRetained(),
+        ),
     ),
-    'get_class_coverage_blocking': ('class_coverage', lambda b: b._get_class_coverage_blocking()),
-    'get_class_report_blocking': ('class_report', lambda b: b._get_class_report_blocking()),
+    'get_execution_class_coverage_blocking': ('execution_class_coverage', lambda b: b._get_execution_class_coverage_blocking()),
+    'get_execution_class_report_blocking': ('execution_class_report', lambda b: b._get_execution_class_report_blocking()),
 }
 
 _TASK_LISTS_AND_PASSES: Final[dict[str, tuple[str, BrokerCall]]] = {
     'get_stale_tasks': ('stale_tasks_async', lambda b: asyncio.run(b.get_stale_tasks())),
+    'get_stale_tasks_blocking': ('stale_tasks', lambda b: b._get_stale_tasks_blocking(2)),
     'get_expired_tasks': ('expired_tasks_async', lambda b: asyncio.run(b.get_expired_tasks())),
+    'get_expired_tasks_blocking': ('expired_tasks', lambda b: b._get_expired_tasks_blocking()),
     'mark_stale_tasks_as_failed': (
         'mark_stale_running_async', lambda b: asyncio.run(b.mark_stale_tasks_as_failed()),
     ),
@@ -332,11 +343,11 @@ class TestAppLiveCheck:
     )
     @pytest.mark.parametrize('refusal', _refusals())
     def test_a_live_step_raises_the_refusal(self, step: str, refusal: CoreError) -> None:
-        app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(_URL))))
+        app = Horsies(AppConfig(database=PostgresConfig(database_url=SecretStr(_URL))))
 
         with _live_check(step, refusal) as built:
             with pytest.raises(type(refusal)) as raised:
-                _ = app.check(live=True)
+                _ = app.check(live=True).refusals
 
         assert raised.value is refusal
         [handle] = built

@@ -6,12 +6,12 @@
 //!   client's reads do.
 //! - Each read installs the schema once per handle first, as the Python
 //!   bridge's reads do; a failed connect or install is
-//!   `TASK_INFO_QUERY_FAILED` (`BrokerOperationFailed`).
-//! - A failed read is a raw value of the broker catalog: `BrokerOperationFailed`
-//!   (`TASK_INFO_QUERY_FAILED`), `BrokerInvalidInput` or
-//!   `BrokerInvalidJsonPayload`, as the core gives it. A wait inside a task
+//!   `TASK_INFO_QUERY_FAILED` (`DatabaseOperationFailed`).
+//! - A failed read is a raw value of the broker catalog: `DatabaseOperationFailed`
+//!   (`TASK_INFO_QUERY_FAILED`), `DatabaseInvalidInput` or
+//!   `DatabaseInvalidJsonPayload`, as the core gives it. A wait inside a task
 //!   is refused by the package before the call (`processRole`), so the read
-//!   gives no `BrokerWaitInsideTask`.
+//!   gives no `DatabaseWaitInsideTask`.
 //! - A found task has its stored result by the stage of the task when the
 //!   read ended: a stored envelope, a wait that ended before the task
 //!   finished, or a finished task that stores no result (a cancel before a
@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use horsies_core::{
-    BrokerError, BrokerOperationError, BrokerOperationSource, Execution, ExecutionClass,
+    BrokerError, BrokerOperationSource, DatabaseOperationError, Execution, ExecutionClass,
     ProcessRole, RawResultRead, RawResultRecord, StoredEnvelopeText, TaskAbsenceReason,
     TaskAttemptInfo, TaskAttemptOutcome, TaskInfo, TaskInfoRead as CoreTaskInfoRead, TaskStatus,
 };
@@ -286,18 +286,18 @@ async fn result_operation(
 }
 
 /// The outcome of a result read whose connect or schema install failed:
-/// `BrokerOperationFailed` (`TASK_INFO_QUERY_FAILED`) with the cause. Pure.
+/// `DatabaseOperationFailed` (`TASK_INFO_QUERY_FAILED`) with the cause. Pure.
 fn result_install_failed(task_id: Uuid, error: BrokerError) -> ResultRead {
     ResultRead::Failed {
         error: RawCatalogError::of(
             RESULT_SUBJECT,
-            &BrokerOperationError::raw_result_query_failed(task_id, error),
+            &DatabaseOperationError::raw_result_query_failed(task_id, error),
         ),
     }
 }
 
 /// The outcome of a core result read. Pure.
-fn result_read_of(read: Result<RawResultRead, BrokerOperationError>) -> ResultRead {
+fn result_read_of(read: Result<RawResultRead, DatabaseOperationError>) -> ResultRead {
     match read {
         Ok(RawResultRead::Found(record)) => ResultRead::Found {
             record: ResultRecord::of(record),
@@ -589,12 +589,12 @@ async fn task_info_operation(producer: ProducerHandle, task_id: Uuid) -> TaskInf
 }
 
 /// The outcome of a task info read whose connect or schema install failed:
-/// `BrokerOperationFailed` (`TASK_INFO_QUERY_FAILED`) with the cause. Pure.
+/// `DatabaseOperationFailed` (`TASK_INFO_QUERY_FAILED`) with the cause. Pure.
 fn task_info_install_failed(task_id: Uuid, error: BrokerError) -> TaskInfoRead {
     TaskInfoRead::Failed {
         error: RawCatalogError::of(
             INFO_SUBJECT,
-            &BrokerOperationError::task_info_query_failed(
+            &DatabaseOperationError::task_info_query_failed(
                 task_id,
                 BrokerOperationSource::Broker(error),
             ),
@@ -603,7 +603,7 @@ fn task_info_install_failed(task_id: Uuid, error: BrokerError) -> TaskInfoRead {
 }
 
 /// The outcome of a core task info read. Pure.
-fn task_info_read_of(read: Result<CoreTaskInfoRead, BrokerOperationError>) -> TaskInfoRead {
+fn task_info_read_of(read: Result<CoreTaskInfoRead, DatabaseOperationError>) -> TaskInfoRead {
     match read {
         Ok(CoreTaskInfoRead::Found(info)) => TaskInfoRead::Found {
             record: TaskInfoRecord::of(*info),
@@ -719,7 +719,7 @@ mod tests {
         }
     }
 
-    /// The code member and the retry flag of a raw `BrokerOperationFailed`.
+    /// The code member and the retry flag of a raw `DatabaseOperationFailed`.
     fn operation_failed_slots(error: &RawCatalogError) -> (Option<String>, Option<bool>) {
         let code = error.slots.iter().find_map(|slot| match &slot.value {
             RawSlotValue::CodeMember { value, .. } => Some(value.clone()),
@@ -751,7 +751,7 @@ mod tests {
         else {
             panic!("a failed install is a catalog value");
         };
-        assert_eq!(error.class, "BrokerOperationFailed");
+        assert_eq!(error.class, "DatabaseOperationFailed");
         assert_eq!(
             operation_failed_slots(&error),
             (Some("TASK_INFO_QUERY_FAILED".to_owned()), Some(true))
@@ -761,7 +761,7 @@ mod tests {
         else {
             panic!("a failed install is a catalog value");
         };
-        assert_eq!(error.class, "BrokerOperationFailed");
+        assert_eq!(error.class, "DatabaseOperationFailed");
         assert_eq!(
             operation_failed_slots(&error),
             (Some("TASK_INFO_QUERY_FAILED".to_owned()), Some(true))
@@ -861,14 +861,14 @@ mod tests {
 
     #[test]
     fn a_failed_read_is_a_raw_value_of_the_broker_catalog() {
-        let read = result_read_of(Err(BrokerOperationError::InvalidJsonPayload {
+        let read = result_read_of(Err(DatabaseOperationError::InvalidJsonPayload {
             message: "digest mismatch".to_owned(),
             cause: Box::new(BrokerCheckCause::Check),
         }));
         let ResultRead::Failed { error } = read else {
             panic!("a failed read is a catalog value");
         };
-        assert_eq!(error.class, "BrokerInvalidJsonPayload");
+        assert_eq!(error.class, "DatabaseInvalidJsonPayload");
     }
 
     #[test]

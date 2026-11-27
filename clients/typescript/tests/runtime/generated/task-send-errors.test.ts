@@ -26,12 +26,12 @@ void describe("taskSendCoreErrorFromNative on this runtime", () => {
         },
         message: "connection refused",
         retryable: true,
-        exception: { kind: "noCause" },
+        cause: { kind: "noCause" },
       },
     });
 
     assert.equal(value.code, "ENQUEUE_FAILED");
-    assert.deepEqual(Object.keys(value), ["code", "taskId", "retryable"]);
+    assert.deepEqual(Object.keys(value), ["kind", "code", "taskId", "retryable"]);
     assert.equal(Object.isFrozen(value), true);
     assert.equal(value.message, "connection refused");
 
@@ -40,6 +40,7 @@ void describe("taskSendCoreErrorFromNative on this runtime", () => {
     assert.equal(payload?.sentAt.toString(), "2023-11-14T22:13:20.123456Z");
     assert.equal(payload?.goodUntil?.epochNanoseconds, 1_700_000_000_123_457_000n);
     assert.deepEqual(structuredClone(value), {
+      kind: "enqueueFailed",
       code: "ENQUEUE_FAILED",
       taskId: "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b",
       retryable: true,

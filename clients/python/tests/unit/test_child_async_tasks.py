@@ -26,7 +26,7 @@ from pydantic import SecretStr
 
 from horsies.core import process_role as process_role_module
 from horsies.core.app import Horsies
-from horsies.core.brokers.result_types import BrokerWaitInsideTask
+from horsies.core.brokers.result_types import DatabaseWaitInsideTask
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import decode_task_result, encode_task_result
 from horsies.core.models.app import AppConfig
@@ -34,7 +34,7 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.task_send_types import TaskSendAsyncContext
 from horsies.core.models.tasks import (
     ContractCode,
-    OperationalErrorCode,
+    OperationalCode,
     TaskError,
 )
 from horsies.core.models.outcome import Failed, ReadResult, Succeeded, TaskOutcome
@@ -71,7 +71,7 @@ class MappedError(Exception):
 def _app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr(
                     'postgresql://user:password@localhost/unused'
                 ),
@@ -393,7 +393,7 @@ class TestEntriesTheChildCannotRun:
         set_running.assert_called_once()
         assert (ok, reason) == (True, None)
         error = _failed(decode_task_result(loads_json(payload).unwrap(), int))
-        assert error.code is OperationalErrorCode.WORKER_RESOLUTION_ERROR
+        assert error.code is OperationalCode.WORKER_RESOLUTION_ERROR
 
     def test_an_async_task_in_a_child_with_no_task_loop_fails_resolution(
         self,
@@ -413,7 +413,7 @@ class TestEntriesTheChildCannotRun:
 
         assert (ok, reason) == (True, None)
         error = _failed(decode_task_result(loads_json(payload).unwrap(), int))
-        assert error.code is OperationalErrorCode.WORKER_RESOLUTION_ERROR
+        assert error.code is OperationalCode.WORKER_RESOLUTION_ERROR
         assert 'no task loop' in (error.message or '')
         assert ran == []
         assert isinstance(no_task_loop.state, LoopNotCreated)
@@ -443,7 +443,7 @@ class TestEntriesTheChildCannotRun:
         set_running.assert_called_once()
         assert (ok, reason) == (True, None)
         error = _failed(decode_task_result(loads_json(payload).unwrap(), int))
-        assert error.code is OperationalErrorCode.WORKER_RESOLUTION_ERROR
+        assert error.code is OperationalCode.WORKER_RESOLUTION_ERROR
         assert 'not_registered' in (error.message or '')
 
 
@@ -475,7 +475,7 @@ class TestResultWaitsInsideAnAsyncTask:
         is refused before it reads anything. ``send_async()`` still enqueues."""
         monkeypatch.setattr(process_role_module, '_role', ProcessRole.RUNS_NO_TASK_BODIES)
         app = Horsies(
-            AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))),
+            AppConfig(database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))),
         )
         broker = app.get_broker()
         enqueued: list[UUID] = []
@@ -501,7 +501,7 @@ class TestResultWaitsInsideAnAsyncTask:
             outcomes.append(_read_refusal(await handle.get_async()))
             outcomes.append(_read_refusal(await app.get_result_async(handle.task_id)))
             match await app.get_raw_result_async(handle.task_id):
-                case Err(BrokerWaitInsideTask(code=code, message=message)):
+                case Err(DatabaseWaitInsideTask(code=code, message=message)):
                     outcomes.append(_refusal_text(code, message))
                 case other:
                     outcomes.append(f'not refused: {other!r}')
@@ -539,7 +539,7 @@ class TestTheSendPathLeavesNoLoopTask:
         the send path of horsies must leave none. Up to ``enqueue_async``,
         which the test replaces, the send runs its real code."""
         app = Horsies(
-            AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))),
+            AppConfig(database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))),
         )
         broker = app.get_broker()
         enqueued: list[UUID] = []
@@ -578,7 +578,7 @@ class TestTheSameOutcomesAsASyncTask:
             (
                 'raises',
                 {
-                    '__builtin_task_code__': OperationalErrorCode.UNHANDLED_EXCEPTION.value
+                    '__builtin_task_code__': OperationalCode.UNHANDLED_EXCEPTION.value
                 },
             ),
             ('raises_mapped', 'MAPPED_BY_APP'),
@@ -614,7 +614,7 @@ class TestASelfCancel:
     def _cancelling_app(mapper: dict[type[BaseException], str]) -> Horsies:
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr(
                         'postgresql://user:password@localhost/unused'
                     ),
@@ -651,7 +651,7 @@ class TestASelfCancel:
         error = _failed(_result(_runner(app, task_loop)('async_cancels_itself'), int))
 
         assert error is not None
-        assert error.code == OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert error.code == OperationalCode.UNHANDLED_EXCEPTION
 
     def test_the_direct_call_still_lets_the_cancel_pass(self) -> None:
         app = self._cancelling_app({asyncio.CancelledError: 'CANCELLED_BY_BODY'})
@@ -680,7 +680,7 @@ class TestAGeneratorExitFromTheBody:
     def _raising_app(mapper: dict[type[BaseException], str]) -> Horsies:
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr(
                         'postgresql://user:password@localhost/unused'
                     ),
@@ -736,7 +736,7 @@ class TestAGeneratorExitFromTheBody:
         ))
 
         assert error is not None
-        assert error.code == OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert error.code == OperationalCode.UNHANDLED_EXCEPTION
 
     def test_a_keyboard_interrupt_still_skips_the_mappers(
         self,
@@ -751,8 +751,8 @@ class TestAGeneratorExitFromTheBody:
         async_error = _failed(_result(run('async_raises_keyboard_interrupt'), int))
 
         assert sync_error is not None and async_error is not None
-        assert sync_error.code == OperationalErrorCode.TASK_EXCEPTION
-        assert async_error.code == OperationalErrorCode.TASK_EXCEPTION
+        assert sync_error.code == OperationalCode.TASK_EXCEPTION
+        assert async_error.code == OperationalCode.TASK_EXCEPTION
 
     def test_the_direct_call_still_lets_it_pass(self) -> None:
         app = self._raising_app({GeneratorExit: 'BODY_GENERATOR_EXIT'})

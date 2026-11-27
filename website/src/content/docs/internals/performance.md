@@ -53,7 +53,7 @@ connection path taxes every round trip. Deployment guidance:
 
 Drain throughput in tasks/s from first progress, median of 3 alternating runs. Conditions: 10,000 no-op tasks, 8 children, a 6 vCPU Linux VM, Postgres 18 on tmpfs. 36 runs, 0 failed tasks. No disk write cost is included, so compare the columns, not the absolute values.
 
-| Claim mode | `IsolatedRecycle.after` | `preload=none` | `library` | `app` |
+| Claim mode | `IsolatedRecycle.after` | `preload=no_preload` | `library` | `app` |
 | ---------- | ----------------------- | -------------- | --------- | ----- |
 | Hard cap | `NoTaskLimit()` | 819 | 853 | 855 |
 | Hard cap | `TaskLimit(tasks=100)` (default) | 437 | 803 | 785 |

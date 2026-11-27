@@ -68,7 +68,7 @@ def public_call_app(dsn: str, app_telemetry: AppTelemetry) -> Horsies:
     ``app_telemetry``. No I/O."""
     match app_telemetry:
         case AppTelemetry.NONE:
-            return Horsies(AppConfig(broker=public_call_broker(dsn)))
+            return Horsies(AppConfig(database=public_call_broker(dsn)))
         case (
             AppTelemetry.TRACING
             | AppTelemetry.TRACING_AND_HANDLER

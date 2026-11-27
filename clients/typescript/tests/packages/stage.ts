@@ -11,7 +11,7 @@ import { CURRENT_COMPILER, PACKAGE_DIR, WORKSPACE_DIR } from "../public-api/tool
 import { commandFailedText, runCommand } from "./command.ts";
 import { binaryFileOf, SKILL_FOLDER } from "./content.ts";
 import type { SkillFolder } from "./content.ts";
-import { packedManifestOf } from "./manifest.ts";
+import { lintManifestOf, packedManifestOf, withoutPrivate } from "./manifest.ts";
 import type { HorsiesManifest, JsonObject } from "./manifest.ts";
 import type { ReleasePlatform } from "./platforms.ts";
 
@@ -24,12 +24,19 @@ const BRIDGE_DIR = `${WORKSPACE_DIR}bridge/`;
 /** The napi CLI of the bridge (`@napi-rs/cli` of `bridge/package.json`). */
 const NAPI_CLI = `${BRIDGE_DIR}node_modules/.bin/napi`;
 
+/** The lint package folder. */
+const LINT_DIR = `${WORKSPACE_DIR}eslint-plugin/`;
+
+/** The files that the lint package holds besides `dist/`, when they exist. */
+const LINT_OPTIONAL_FILES: readonly string[] = ["README.md"];
+
 /** The package files of `horsies/` that the package holds when they exist (the release adds them). */
 const OPTIONAL_PACKAGE_FILES: readonly string[] = ["README.md", "CHANGELOG.md"];
 
 /** A step of the staging that did not complete, and why. */
 export type StageFailed =
-  | { readonly kind: "BuildFailed"; readonly text: string }
+  | { readonly kind: "BuildFailed"; readonly packageName: string; readonly text: string }
+  | { readonly kind: "LintManifestNotAnObject" }
   | { readonly kind: "CreateNpmDirsFailed"; readonly text: string }
   | { readonly kind: "PlatformDirsDiffer"; readonly generated: readonly string[]; readonly listed: readonly string[] }
   | { readonly kind: "AddonMissing"; readonly file: string };
@@ -38,7 +45,9 @@ export type StageFailed =
 export function stageFailedText(failure: StageFailed): string {
   switch (failure.kind) {
     case "BuildFailed":
-      return `the build of horsies failed: ${failure.text}`;
+      return `the build of ${failure.packageName} failed: ${failure.text}`;
+    case "LintManifestNotAnObject":
+      return "eslint-plugin/package.json is not a JSON object";
     case "CreateNpmDirsFailed":
       return `napi create-npm-dirs failed: ${failure.text}`;
     case "PlatformDirsDiffer":
@@ -52,7 +61,7 @@ export function stageFailedText(failure: StageFailed): string {
 export function sourceSkillFolder(): SkillFolder {
   const folder = `${PACKAGE_DIR}${SKILL_FOLDER}`;
 
-  return existsSync(folder) ? { kind: "written", files: readdirSync(folder).toSorted() } : { kind: "notWritten" };
+  return existsSync(folder) ? { kind: "found", files: readdirSync(folder).toSorted() } : { kind: "missing" };
 }
 
 function writeJson(file: string, value: JsonObject): void {
@@ -61,7 +70,7 @@ function writeJson(file: string, value: JsonObject): void {
 
 /**
  * Stage `horsies` in `stageDir/horsies`: `dist/` from `tsconfig.build.json`, the packed manifest, the license, the
- * README and changelog when they exist, and the skill folder when it exists. Effects: writes the folder; runs the
+ * README and changelog when they exist, and the skill folder when it exists (the check of the tarball fails when it does not). Effects: writes the folder; runs the
  * compiler. Gives the folder.
  */
 export function stageHorsies(stageDir: string, manifest: HorsiesManifest, rows: readonly ReleasePlatform[]): Result<string, StageFailed> {
@@ -73,7 +82,7 @@ export function stageHorsies(stageDir: string, manifest: HorsiesManifest, rows: 
   const build = runCommand(CURRENT_COMPILER, args, WORKSPACE_DIR);
 
   if (!build.ok || build.value.code !== 0) {
-    return { ok: false, error: { kind: "BuildFailed", text: commandFailedText("tsc --project horsies/tsconfig.build.json", build) } };
+    return { ok: false, error: { kind: "BuildFailed", packageName: "horsies", text: commandFailedText("tsc --project horsies/tsconfig.build.json", build) } };
   }
 
   writeJson(join(folder, "package.json"), packedManifestOf(manifest, rows));
@@ -83,7 +92,7 @@ export function stageHorsies(stageDir: string, manifest: HorsiesManifest, rows: 
     copyFileSync(`${PACKAGE_DIR}${file}`, join(folder, file));
   }
 
-  if (sourceSkillFolder().kind === "written") {
+  if (sourceSkillFolder().kind === "found") {
     cpSync(`${PACKAGE_DIR}${SKILL_FOLDER}`, join(folder, SKILL_FOLDER), { recursive: true });
   }
 
@@ -163,4 +172,49 @@ export function stagePlatforms(
   }
 
   return { ok: true, value: folders };
+}
+
+/** The lint package of the repository: not there, or its folder staged for `npm pack`. */
+export type LintStaging = { readonly kind: "absent" } | { readonly kind: "staged"; readonly folder: string };
+
+/**
+ * Stage the lint package of `lintDir` (the `eslint-plugin` folder) in `stageDir/eslint-plugin` when its `package.json` exists: `dist/` from
+ * `tsconfig.build.json`, the manifest without `private`, the license and the README. Effects: writes the folder; runs
+ * the compiler.
+ */
+export function stageLint(stageDir: string, lintDir: string = LINT_DIR): Result<LintStaging, StageFailed> {
+  const manifestFile = `${lintDir}package.json`;
+
+  if (!existsSync(manifestFile)) {
+    return { ok: true, value: { kind: "absent" } };
+  }
+
+  // SAFETY: JSON.parse gives a parsed JSON document.
+  const manifest = lintManifestOf(JSON.parse(readFileSync(manifestFile, "utf8")) as ParsedJson);
+
+  if (manifest === undefined) {
+    return { ok: false, error: { kind: "LintManifestNotAnObject" } };
+  }
+
+  const folder = join(stageDir, "eslint-plugin");
+
+  mkdirSync(folder, { recursive: true });
+
+  const args = ["--project", `${lintDir}tsconfig.build.json`, "--outDir", join(folder, "dist"), "--pretty", "false"];
+  const build = runCommand(CURRENT_COMPILER, args, WORKSPACE_DIR);
+
+  if (!build.ok || build.value.code !== 0) {
+    const text = commandFailedText("tsc --project eslint-plugin/tsconfig.build.json", build);
+
+    return { ok: false, error: { kind: "BuildFailed", packageName: "@horsies/eslint-plugin", text } };
+  }
+
+  writeJson(join(folder, "package.json"), withoutPrivate(manifest));
+  copyFileSync(LICENSE_FILE, join(folder, "LICENSE"));
+
+  for (const file of LINT_OPTIONAL_FILES.filter((name) => existsSync(`${lintDir}${name}`))) {
+    copyFileSync(`${lintDir}${file}`, join(folder, file));
+  }
+
+  return { ok: true, value: { kind: "staged", folder } };
 }

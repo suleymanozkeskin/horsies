@@ -51,7 +51,7 @@ const HOME_TEXT = `Acme operations. The monitoring page is at ${MOUNT_PATH}/\n`;
 const ping = defineTask({ name: "ping", input: {}, output: h.string() });
 
 const created = Horsies.create({
-  broker: { databaseUrl: DATABASE_URL },
+  database: { databaseUrl: DATABASE_URL },
   workerProfiles: { [DEFAULT_PROFILE]: ISOLATED_PROFILE },
   tasks: [ping],
 });

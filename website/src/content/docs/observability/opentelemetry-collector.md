@@ -17,7 +17,7 @@ The spans and the producer metrics do not take this path: the client records the
 | Job | Process | Address in the file |
 |-----|---------|---------------------|
 | `horsies-worker` | Each worker: `horsies worker <app> --profile <name> --metrics-listen HOST:PORT` | `127.0.0.1:9464` |
-| `horsies-fleet` | The fleet collector: `horsies metrics <app> --listen HOST:PORT` | `127.0.0.1:9465` |
+| `horsies-fleet` | The fleet collector: `horsies metrics <app> --metrics-listen HOST:PORT` | `127.0.0.1:9465` |
 
 1. Replace the addresses with the addresses of your processes:
    - Static targets: the receiver `prometheus`. Edit its `targets` lists.

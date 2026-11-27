@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from typing import Any, ClassVar, Final, assert_never, cast
+from typing import Annotated, Any, ClassVar, Final, Literal, Union, assert_never, cast
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from horsies._catalog.broker_pool_defaults import (
@@ -31,7 +31,7 @@ from horsies.core.utils.url import (
 )
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     ValidationReport,
     raise_collected,
 )
@@ -40,18 +40,29 @@ SQLALCHEMY_UNLIMITED_OVERFLOW: Final = -1
 """SQLAlchemy's `max_overflow` for no overflow limit."""
 
 SQLALCHEMY_NEVER_RECYCLE: Final = -1
-"""SQLAlchemy's `pool_recycle` for a connection that is never replaced by age."""
+"""SQLAlchemy's `pool_recycle` for a connection that is never replaced by age.
+Only `sqlalchemy_engine_kwargs` writes it, for `PoolRecycleNever`."""
 
 SQLALCHEMY_UNLIMITED_POOL_SIZE: Final = 0
 """SQLAlchemy's `pool_size` for no size limit."""
 
 LIBPQ_SYSTEM_DEFAULT_TCP_USER_TIMEOUT: Final = 0
-"""libpq's `tcp_user_timeout` for the operating system's timeout."""
+"""libpq's `tcp_user_timeout` for the operating system's timeout. Only
+`tcp_connect_args` writes it, for `TcpUserTimeoutSystemDefault`."""
+
+DEFAULT_KEEPALIVE_IDLE_SECONDS: Final = 30
+"""The idle time of `TcpKeepalivesOn` when the config does not set one."""
+
+DEFAULT_KEEPALIVE_INTERVAL_SECONDS: Final = 10
+"""The probe interval of `TcpKeepalivesOn` when the config does not set one."""
+
+DEFAULT_KEEPALIVE_PROBES: Final = 3
+"""The probe count of `TcpKeepalivesOn` when the config does not set one."""
 
 MOVED_TO_WORKER_PROFILE: Final[Mapping[str, str]] = {
     'worker_child_pool_min_size': 'min_size=N',
     'worker_child_pool_max_size': 'max_size=PoolSize(connections=N)',
-    'worker_child_pool_check': 'check=False',
+    'worker_child_pool_check': 'pre_ping=False',
 }
 """The child pool fields that 0.7.0 removed from ``PostgresConfig``, and the
 argument of the pool of each child kind in a worker profile
@@ -77,7 +88,7 @@ def _pool_value_error(
     """The refusal of a pool value of `PostgresConfig`."""
     return ConfigurationError(
         message=f'invalid {field}',
-        code=ErrorCode.CONFIG_INVALID_BROKER_POOL,
+        code=HorsiesErrorCode.CONFIG_INVALID_DATABASE_POOL,
         notes=[f'got: {field}={value}', cause],
         help_text=help_text,
     )
@@ -89,37 +100,160 @@ def _tcp_value_error(
     """The refusal of a TCP keepalive or user timeout value of `PostgresConfig`."""
     return ConfigurationError(
         message=f'invalid {field}',
-        code=ErrorCode.CONFIG_INVALID_KEEPALIVE,
+        code=HorsiesErrorCode.CONFIG_INVALID_KEEPALIVE,
         notes=[f'got: {field}={value}', cause],
         help_text=help_text,
     )
 
 
+class SessionDatabaseSameAsDatabaseUrl(BaseModel):
+    """The session pool (schema DDL, partition maintenance, LISTEN/NOTIFY)
+    connects to ``database_url``. The default."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['session_database_same_as_database_url'] = (
+        'session_database_same_as_database_url'
+    )
+
+
+class SessionDatabaseSeparate(BaseModel):
+    """The session pool connects to its own direct or session-capable
+    PostgreSQL URL. A ``database_url`` that points at a PgBouncer
+    transaction pool needs it."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['session_database_separate'] = 'session_database_separate'
+    # SecretStr: the URL can hold a password, as database_url.
+    url: SecretStr = Field(
+        ...,
+        description=(
+            'Direct/session-capable PostgreSQL URL for schema DDL, partition '
+            'maintenance, and LISTEN/NOTIFY'
+        ),
+    )
+
+    @field_validator('url')
+    def validate_url(cls, value: SecretStr) -> SecretStr:
+        """Accept only a ``postgresql://`` or ``postgres://`` URL."""
+        _raise_for_url_scheme('session_database.url', value.get_secret_value())
+        return value
+
+
+SessionDatabase = Annotated[
+    Union[SessionDatabaseSameAsDatabaseUrl, SessionDatabaseSeparate],
+    Field(discriminator='kind'),
+]
+"""Where the session pool connects: ``database_url``, or its own URL."""
+
+
+class TcpKeepalivesOff(BaseModel):
+    """No TCP keepalives on the core's connections."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['tcp_keepalives_off'] = 'tcp_keepalives_off'
+
+
+class TcpKeepalivesOn(BaseModel):
+    """TCP keepalives on every core connection (libpq ``keepalives=1``).
+    The default: 30 s idle, 10 s between probes, 3 probes. Each value has
+    the core's bounds (``horsies._catalog.manifest``)."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['tcp_keepalives_on'] = 'tcp_keepalives_on'
+    idle_seconds: int = Field(
+        default=DEFAULT_KEEPALIVE_IDLE_SECONDS,
+        description='Idle seconds before the first keepalive probe (libpq keepalives_idle)',
+    )
+    interval_seconds: int = Field(
+        default=DEFAULT_KEEPALIVE_INTERVAL_SECONDS,
+        description='Seconds between keepalive probes (libpq keepalives_interval)',
+    )
+    probes: int = Field(
+        default=DEFAULT_KEEPALIVE_PROBES,
+        description='Unacknowledged probes before the connection is dropped (libpq keepalives_count)',
+    )
+
+
+TcpKeepalives = Annotated[
+    Union[TcpKeepalivesOff, TcpKeepalivesOn],
+    Field(discriminator='kind'),
+]
+"""The TCP keepalives of every core connection: off, or on with three values."""
+
+
+class TcpUserTimeoutSystemDefault(BaseModel):
+    """The operating system's TCP user timeout (libpq ``tcp_user_timeout=0``)."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['tcp_user_timeout_system_default'] = 'tcp_user_timeout_system_default'
+
+
+class TcpUserTimeoutAfter(BaseModel):
+    """Sent data may stay unacknowledged for ``milliseconds`` before the
+    kernel closes the connection (libpq ``tcp_user_timeout``), from
+    ``TCP_USER_TIMEOUT_MS_MIN`` to ``TCP_USER_TIMEOUT_MS_MAX``."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['tcp_user_timeout_after'] = 'tcp_user_timeout_after'
+    milliseconds: int = Field(
+        ...,
+        description='Milliseconds that sent data may stay unacknowledged',
+    )
+
+
+TcpUserTimeout = Annotated[
+    Union[TcpUserTimeoutSystemDefault, TcpUserTimeoutAfter],
+    Field(discriminator='kind'),
+]
+"""The TCP user timeout of every core connection: the operating system's,
+or a number of milliseconds."""
+
+
+class PoolRecycleNever(BaseModel):
+    """A pooled connection is never replaced by its age (SQLAlchemy's
+    ``pool_recycle=-1``)."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['pool_recycle_never'] = 'pool_recycle_never'
+
+
+class PoolRecycleAfterSeconds(BaseModel):
+    """A pooled connection older than ``seconds`` is replaced at its next
+    checkout; ``0`` replaces it at every checkout. From
+    ``WHOLE_SECONDS_MIN`` to ``WHOLE_SECONDS_MAX``."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['pool_recycle_after_seconds'] = 'pool_recycle_after_seconds'
+    seconds: int = Field(..., description='Age in seconds after which a connection is replaced')
+
+
+PoolRecycle = Annotated[
+    Union[PoolRecycleNever, PoolRecycleAfterSeconds],
+    Field(discriminator='kind'),
+]
+"""When the pool replaces a connection by its age: never, or after a number
+of seconds."""
+
+
 class PostgresConfig(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
-
-    _ENGINE_KWARG_EXCLUDES: ClassVar[set[str]] = {
-        'database_url',
-        'session_database_url',
-        'pgbouncer_transaction_mode',
-        'retain_rerun_input_default',
-        'pool_pre_ping',
-        'worker_pool_pre_ping',
-        'tcp_keepalives',
-        'tcp_keepalives_idle',
-        'tcp_keepalives_interval',
-        'tcp_keepalives_count',
-        'tcp_user_timeout_ms',
-    }
 
     # SecretStr: repr()/model_dump() of the config must never expose
     # credentials; internal consumers unwrap via get_secret_value().
     database_url: SecretStr = Field(..., description='The URL of the PostgreSQL database')
-    session_database_url: SecretStr | None = Field(
-        default=None,
+    session_database: SessionDatabase = Field(
+        default_factory=SessionDatabaseSameAsDatabaseUrl,
         description=(
-            'Direct/session-capable PostgreSQL URL for schema DDL, partition '
-            'maintenance, and LISTEN/NOTIFY'
+            'Where the session pool (schema DDL, partition maintenance, '
+            'LISTEN/NOTIFY) connects'
         ),
     )
     pgbouncer_transaction_mode: bool = Field(
@@ -145,7 +279,7 @@ class PostgresConfig(BaseModel):
     # a dead pooled connection shows at the first statement instead, as a
     # connection error: finalize retries its phase and classifies the
     # replay, the claim loop retries the pass. TCP keepalives and
-    # tcp_user_timeout_ms still apply.
+    # tcp_user_timeout still apply.
     worker_pool_pre_ping: bool = Field(
         default=False,
         description=(
@@ -157,7 +291,7 @@ class PostgresConfig(BaseModel):
     # (horsies._catalog.broker_pool_defaults): both clients have the same
     # general broker pool. A producer's broker holds one core pool of this
     # size on database_url for every thread and event loop that calls it,
-    # and one more on session_database_url when that URL differs. See
+    # and one more on the session database when it is separate. See
     # Connection Ceiling in the broker config docs. Raise them for producers
     # that send at a high rate. A worker process sizes its own pool in its
     # worker profile (WorkerProfile.pool), and task code in a worker child
@@ -181,12 +315,12 @@ class PostgresConfig(BaseModel):
             'snapshotted at enqueue'
         ),
     )
-    pool_timeout: int = Field(
+    pool_timeout_seconds: int = Field(
         default=30, description='The timeout for acquiring a connection from the pool'
     )
-    pool_recycle: int = Field(
-        default=DEFAULT_POOL_RECYCLE_S,
-        description='The number of seconds to recycle connections',
+    pool_recycle: PoolRecycle = Field(
+        default_factory=lambda: PoolRecycleAfterSeconds(seconds=DEFAULT_POOL_RECYCLE_S),
+        description='When a pooled connection is replaced by its age',
     )
     # TCP keepalives keep idle pooled sockets warm so a server-side or
     # middlebox idle-reap is detected and recycled at the socket layer
@@ -202,21 +336,9 @@ class PostgresConfig(BaseModel):
     # supported platform the core's bound is the lower one: a config that
     # Pydantic accepts is one that the core and the socket accept. See
     # validate_tcp_settings.
-    tcp_keepalives: bool = Field(
-        default=True,
-        description='Enable libpq TCP keepalives on broker and child-process connections',
-    )
-    tcp_keepalives_idle: int = Field(
-        default=30,
-        description='Idle seconds before the first keepalive probe (libpq keepalives_idle)',
-    )
-    tcp_keepalives_interval: int = Field(
-        default=10,
-        description='Seconds between keepalive probes (libpq keepalives_interval)',
-    )
-    tcp_keepalives_count: int = Field(
-        default=3,
-        description='Unacknowledged probes before the connection is dropped (libpq keepalives_count)',
+    tcp_keepalives: TcpKeepalives = Field(
+        default_factory=TcpKeepalivesOn,
+        description='libpq TCP keepalives on broker and child-process connections',
     )
     # Keepalives probe only an idle connection. While sent data waits for
     # an acknowledgement, the kernel retransmission limit decides instead,
@@ -224,12 +346,11 @@ class PostgresConfig(BaseModel):
     # blocks for about 15 minutes on Linux. tcp_user_timeout bounds that
     # wait. It does not affect a long query: the client's sent data is
     # acknowledged while it waits for the result.
-    tcp_user_timeout_ms: int = Field(
-        default=DEFAULT_TCP_USER_TIMEOUT_MS,
+    tcp_user_timeout: TcpUserTimeout = Field(
+        default_factory=lambda: TcpUserTimeoutAfter(milliseconds=DEFAULT_TCP_USER_TIMEOUT_MS),
         description=(
-            'Milliseconds that sent data may stay unacknowledged before the '
-            'connection is closed (libpq tcp_user_timeout); 0 uses the '
-            'operating system default'
+            'How long sent data may stay unacknowledged before the connection '
+            'is closed (libpq tcp_user_timeout), or the operating system default'
         ),
     )
     # With echo on, the core logs each statement it runs at INFO on the
@@ -261,7 +382,7 @@ class PostgresConfig(BaseModel):
         if not isinstance(data, dict):
             return data
         fields = cast('dict[str, object]', data)
-        report = ValidationReport('broker')
+        report = ValidationReport('database')
         for name, pool_argument in MOVED_TO_WORKER_PROFILE.items():
             if name in fields:
                 report.add(_moved_child_pool_field_error(name, pool_argument))
@@ -272,21 +393,21 @@ class PostgresConfig(BaseModel):
         return fields
 
     @field_validator('pool_size')
-    def validate_pool_size(cls, v: int) -> int:
+    def validate_pool_size(cls, value: int) -> int:
         """Accept a pool size from ``POOL_SIZE_MIN`` to ``POOL_SIZE_MAX``.
 
         Any other value raises ``ConfigurationError``
-        (``CONFIG_INVALID_BROKER_POOL``). ``0`` is refused with its own cause:
+        (``CONFIG_INVALID_DATABASE_POOL``). ``0`` is refused with its own cause:
         SQLAlchemy reads it as no size limit, and the core always bounds its
         connections.
         """
-        match v:
-            case _ if POOL_SIZE_MIN <= v <= POOL_SIZE_MAX:
-                return v
-            case _ if v == SQLALCHEMY_UNLIMITED_POOL_SIZE:
+        match value:
+            case _ if POOL_SIZE_MIN <= value <= POOL_SIZE_MAX:
+                return value
+            case _ if value == SQLALCHEMY_UNLIMITED_POOL_SIZE:
                 raise _pool_value_error(
                     'pool_size',
-                    v,
+                    value,
                     'pool_size=0 means no size limit in SQLAlchemy, and the core '
                     'always bounds its connections',
                     f'give a pool size from {POOL_SIZE_MIN} to {POOL_SIZE_MAX}',
@@ -294,27 +415,27 @@ class PostgresConfig(BaseModel):
             case _:
                 raise _pool_value_error(
                     'pool_size',
-                    v,
+                    value,
                     f'a pool size is from {POOL_SIZE_MIN} to {POOL_SIZE_MAX}',
                     f'give a pool size from {POOL_SIZE_MIN} to {POOL_SIZE_MAX}',
                 )
 
     @field_validator('max_overflow')
-    def validate_max_overflow(cls, v: int) -> int:
+    def validate_max_overflow(cls, value: int) -> int:
         """Accept an overflow from ``POOL_CONNECTIONS_MIN`` to ``POOL_CONNECTIONS_MAX``.
 
         Any other value raises ``ConfigurationError``
-        (``CONFIG_INVALID_BROKER_POOL``). ``-1`` is refused with its own cause:
+        (``CONFIG_INVALID_DATABASE_POOL``). ``-1`` is refused with its own cause:
         SQLAlchemy reads it as no overflow limit, and the core always bounds
         its connections.
         """
-        match v:
-            case _ if POOL_CONNECTIONS_MIN <= v <= POOL_CONNECTIONS_MAX:
-                return v
-            case _ if v == SQLALCHEMY_UNLIMITED_OVERFLOW:
+        match value:
+            case _ if POOL_CONNECTIONS_MIN <= value <= POOL_CONNECTIONS_MAX:
+                return value
+            case _ if value == SQLALCHEMY_UNLIMITED_OVERFLOW:
                 raise _pool_value_error(
                     'max_overflow',
-                    v,
+                    value,
                     'max_overflow=-1 means no overflow limit in SQLAlchemy, and the '
                     'core always bounds its connections',
                     f'give a number from {POOL_CONNECTIONS_MIN} to {POOL_CONNECTIONS_MAX}',
@@ -322,119 +443,136 @@ class PostgresConfig(BaseModel):
             case _:
                 raise _pool_value_error(
                     'max_overflow',
-                    v,
+                    value,
                     f'max_overflow is from {POOL_CONNECTIONS_MIN} to {POOL_CONNECTIONS_MAX}',
                     f'give a number from {POOL_CONNECTIONS_MIN} to {POOL_CONNECTIONS_MAX}',
                 )
 
-    @field_validator('pool_timeout')
-    def validate_pool_timeout(cls, v: int) -> int:
+    @field_validator('pool_timeout_seconds')
+    def validate_pool_timeout_seconds(cls, value: int) -> int:
         """Accept whole seconds from ``WHOLE_SECONDS_MIN`` to ``WHOLE_SECONDS_MAX``.
 
         ``0`` means that a checkout does not wait. Any other value raises
-        ``ConfigurationError`` (``CONFIG_INVALID_BROKER_POOL``).
+        ``ConfigurationError`` (``CONFIG_INVALID_DATABASE_POOL``).
         """
-        match v:
-            case _ if WHOLE_SECONDS_MIN <= v <= WHOLE_SECONDS_MAX:
-                return v
+        match value:
+            case _ if WHOLE_SECONDS_MIN <= value <= WHOLE_SECONDS_MAX:
+                return value
             case _:
                 raise _pool_value_error(
-                    'pool_timeout',
-                    v,
-                    f'pool_timeout is from {WHOLE_SECONDS_MIN} (a checkout does not wait) '
+                    'pool_timeout_seconds',
+                    value,
+                    f'pool_timeout_seconds is from {WHOLE_SECONDS_MIN} (a checkout does not wait) '
                     f'to {WHOLE_SECONDS_MAX} seconds',
                     f'give a number of seconds from {WHOLE_SECONDS_MIN} to {WHOLE_SECONDS_MAX}',
                 )
 
     @field_validator('pool_recycle')
-    def validate_pool_recycle(cls, v: int) -> int:
-        """Accept ``-1`` or whole seconds from ``WHOLE_SECONDS_MIN`` to ``WHOLE_SECONDS_MAX``.
+    def validate_pool_recycle(
+        cls, value: PoolRecycleNever | PoolRecycleAfterSeconds,
+    ) -> PoolRecycleNever | PoolRecycleAfterSeconds:
+        """Accept ``PoolRecycleNever``, or ``PoolRecycleAfterSeconds`` with
+        whole seconds from ``WHOLE_SECONDS_MIN`` to ``WHOLE_SECONDS_MAX``.
 
-        ``-1`` means that a connection is never replaced by age. Any other
-        value raises ``ConfigurationError`` (``CONFIG_INVALID_BROKER_POOL``).
+        Any other age raises ``ConfigurationError``
+        (``CONFIG_INVALID_DATABASE_POOL``).
         """
-        match v:
-            case _ if WHOLE_SECONDS_MIN <= v <= WHOLE_SECONDS_MAX:
-                return v
-            case _ if v == SQLALCHEMY_NEVER_RECYCLE:
-                return v
-            case _:
+        match value:
+            case PoolRecycleNever():
+                return value
+            case PoolRecycleAfterSeconds(seconds=seconds) if (
+                WHOLE_SECONDS_MIN <= seconds <= WHOLE_SECONDS_MAX
+            ):
+                return value
+            case PoolRecycleAfterSeconds(seconds=seconds):
                 raise _pool_value_error(
-                    'pool_recycle',
-                    v,
-                    'pool_recycle is -1 (never replace a connection by age) or '
-                    f'{WHOLE_SECONDS_MIN} to {WHOLE_SECONDS_MAX} seconds',
-                    'give -1 or a number of seconds',
+                    'pool_recycle.seconds',
+                    seconds,
+                    f'pool_recycle.seconds is from {WHOLE_SECONDS_MIN} to '
+                    f'{WHOLE_SECONDS_MAX} seconds',
+                    'give a number of seconds, or PoolRecycleNever() to never '
+                    'replace a connection by its age',
                 )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     @field_validator('database_url')
-    def validate_database_url(cls, v: SecretStr) -> SecretStr:
+    def validate_database_url(cls, value: SecretStr) -> SecretStr:
         """Accept only a ``postgresql://`` or ``postgres://`` URL."""
-        _raise_for_url_scheme('database_url', v.get_secret_value())
-        return v
-
-    @field_validator('session_database_url')
-    def validate_session_database_url(cls, v: SecretStr | None) -> SecretStr | None:
-        """Accept only a ``postgresql://`` or ``postgres://`` URL, or None."""
-        if v is None:
-            return v
-        _raise_for_url_scheme('session_database_url', v.get_secret_value())
-        return v
+        _raise_for_url_scheme('database_url', value.get_secret_value())
+        return value
 
     @model_validator(mode='after')
     def validate_pgbouncer_configuration(self) -> 'PostgresConfig':
-        if self.pgbouncer_transaction_mode and self.session_database_url is None:
-            raise ConfigurationError(
-                message='session_database_url required when pgbouncer_transaction_mode=True',
-                code=ErrorCode.BROKER_INVALID_URL,
-                notes=[
-                    'PgBouncer transaction pooling cannot support session locks or persistent LISTEN sessions',
-                ],
-                help_text='use a direct/session-capable Postgres URL for session_database_url',
-            )
-        if (
-            self.pgbouncer_transaction_mode
-            and self.session_database_url == self.database_url
-        ):
-            raise ConfigurationError(
-                message='session_database_url must not use the transaction-pool URL',
-                code=ErrorCode.BROKER_INVALID_URL,
-                notes=[
-                    'partition maintenance and LISTEN require PostgreSQL session affinity',
-                ],
-                help_text='use a direct/session-capable Postgres URL for session_database_url',
-            )
-        return self
+        """In PgBouncer transaction mode, require a separate session database
+        whose URL is not ``database_url``. Raises ``ConfigurationError``
+        (``DATABASE_INVALID_URL``)."""
+        match self.pgbouncer_transaction_mode:
+            case False:
+                return self
+            case True:
+                pass
+        match self.session_database:
+            case SessionDatabaseSameAsDatabaseUrl():
+                raise ConfigurationError(
+                    message=(
+                        'a separate session_database is required when '
+                        'pgbouncer_transaction_mode=True'
+                    ),
+                    code=HorsiesErrorCode.DATABASE_INVALID_URL,
+                    notes=[
+                        'PgBouncer transaction pooling cannot support session locks or persistent LISTEN sessions',
+                    ],
+                    help_text=(
+                        'set session_database=SessionDatabaseSeparate(url=...) '
+                        'to a direct/session-capable Postgres URL'
+                    ),
+                )
+            case SessionDatabaseSeparate(url=url) if url == self.database_url:
+                raise ConfigurationError(
+                    message='session_database must not use the transaction-pool URL',
+                    code=HorsiesErrorCode.DATABASE_INVALID_URL,
+                    notes=[
+                        'partition maintenance and LISTEN require PostgreSQL session affinity',
+                    ],
+                    help_text=(
+                        'set session_database=SessionDatabaseSeparate(url=...) '
+                        'to a direct/session-capable Postgres URL'
+                    ),
+                )
+            case SessionDatabaseSeparate():
+                return self
+            case _ as unreachable:
+                assert_never(unreachable)
 
     @model_validator(mode='after')
     def validate_tcp_settings(self) -> 'PostgresConfig':
         """Refuse a TCP value outside the core's bounds
         (`horsies._catalog.manifest`), with `CONFIG_INVALID_KEEPALIVE`.
 
-        The three keepalive values are checked only when `tcp_keepalives`
-        is True: when it is False, no connection and no manifest reads
-        them. `tcp_user_timeout_ms` is `0` (the operating system's
-        timeout) or a number of milliseconds within the core's bounds. The
-        first value out of bounds is refused, in field order.
+        The three keepalive values of `TcpKeepalivesOn`, then the
+        milliseconds of `TcpUserTimeoutAfter`, each within the core's
+        bounds. `TcpKeepalivesOff` and `TcpUserTimeoutSystemDefault` hold
+        no value. The first value out of bounds is refused, in field order.
         """
         match self.tcp_keepalives:
-            case True:
+            case TcpKeepalivesOn() as keepalives:
                 for name, value, low, high in (
                     (
-                        'tcp_keepalives_idle',
-                        self.tcp_keepalives_idle,
+                        'tcp_keepalives.idle_seconds',
+                        keepalives.idle_seconds,
                         KEEPALIVE_SECONDS_MIN,
                         KEEPALIVE_SECONDS_MAX,
                     ),
                     (
-                        'tcp_keepalives_interval',
-                        self.tcp_keepalives_interval,
+                        'tcp_keepalives.interval_seconds',
+                        keepalives.interval_seconds,
                         KEEPALIVE_SECONDS_MIN,
                         KEEPALIVE_SECONDS_MAX,
                     ),
                     (
-                        'tcp_keepalives_count',
-                        self.tcp_keepalives_count,
+                        'tcp_keepalives.probes',
+                        keepalives.probes,
                         KEEPALIVE_PROBES_MIN,
                         KEEPALIVE_PROBES_MAX,
                     ),
@@ -443,51 +581,85 @@ class PostgresConfig(BaseModel):
                         raise _tcp_value_error(
                             name,
                             value,
-                            f'{name} is from {low} to {high} when tcp_keepalives is True',
+                            f'{name} is from {low} to {high}',
                             f'give a number from {low} to {high}, or set '
-                            'tcp_keepalives=False to turn keepalives off',
+                            'tcp_keepalives=TcpKeepalivesOff() to turn keepalives off',
                         )
-            case False:
+            case TcpKeepalivesOff():
                 pass
-        timeout = self.tcp_user_timeout_ms
-        match timeout:
-            case _ if timeout == LIBPQ_SYSTEM_DEFAULT_TCP_USER_TIMEOUT:
+            case _ as unreachable:
+                assert_never(unreachable)
+        match self.tcp_user_timeout:
+            case TcpUserTimeoutSystemDefault():
                 return self
-            case _ if TCP_USER_TIMEOUT_MS_MIN <= timeout <= TCP_USER_TIMEOUT_MS_MAX:
+            case TcpUserTimeoutAfter(milliseconds=milliseconds) if (
+                TCP_USER_TIMEOUT_MS_MIN <= milliseconds <= TCP_USER_TIMEOUT_MS_MAX
+            ):
                 return self
-            case _:
+            case TcpUserTimeoutAfter(milliseconds=milliseconds):
                 raise _tcp_value_error(
-                    'tcp_user_timeout_ms',
-                    timeout,
-                    f'tcp_user_timeout_ms is {LIBPQ_SYSTEM_DEFAULT_TCP_USER_TIMEOUT} '
-                    '(the operating system default) or '
-                    f'{TCP_USER_TIMEOUT_MS_MIN} to {TCP_USER_TIMEOUT_MS_MAX} milliseconds',
-                    f'give {LIBPQ_SYSTEM_DEFAULT_TCP_USER_TIMEOUT} or a number of '
-                    f'milliseconds from {TCP_USER_TIMEOUT_MS_MIN} to {TCP_USER_TIMEOUT_MS_MAX}',
+                    'tcp_user_timeout.milliseconds',
+                    milliseconds,
+                    'tcp_user_timeout.milliseconds is from '
+                    f'{TCP_USER_TIMEOUT_MS_MIN} to {TCP_USER_TIMEOUT_MS_MAX}',
+                    f'give a number of milliseconds from {TCP_USER_TIMEOUT_MS_MIN} to '
+                    f'{TCP_USER_TIMEOUT_MS_MAX}, or TcpUserTimeoutSystemDefault() for '
+                    'the operating system default',
                 )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     @property
     def effective_session_database_url(self) -> str:
-        url = self.session_database_url or self.database_url
-        return url.get_secret_value()
+        """The URL of the session pool: the separate URL, or ``database_url``."""
+        match self.session_database:
+            case SessionDatabaseSameAsDatabaseUrl():
+                return self.database_url.get_secret_value()
+            case SessionDatabaseSeparate(url=url):
+                return url.get_secret_value()
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def session_url_differs(self) -> bool:
+        """Whether the session pool connects to a URL other than
+        ``database_url``: a ``SessionDatabaseSeparate`` with another URL."""
+        match self.session_database:
+            case SessionDatabaseSameAsDatabaseUrl():
+                return False
+            case SessionDatabaseSeparate(url=url):
+                return url != self.database_url
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def keepalive_connect_args(self) -> dict[str, int]:
-        """libpq keepalive params for psycopg connections, empty when disabled."""
-        if not self.tcp_keepalives:
-            return {}
-        return {
-            'keepalives': 1,
-            'keepalives_idle': self.tcp_keepalives_idle,
-            'keepalives_interval': self.tcp_keepalives_interval,
-            'keepalives_count': self.tcp_keepalives_count,
-        }
+        """libpq keepalive params for psycopg connections, empty when off."""
+        match self.tcp_keepalives:
+            case TcpKeepalivesOff():
+                return {}
+            case TcpKeepalivesOn() as keepalives:
+                return {
+                    'keepalives': 1,
+                    'keepalives_idle': keepalives.idle_seconds,
+                    'keepalives_interval': keepalives.interval_seconds,
+                    'keepalives_count': keepalives.probes,
+                }
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def tcp_connect_args(self) -> dict[str, int]:
         """libpq TCP params for psycopg connections: the keepalive params
-        and tcp_user_timeout."""
+        and tcp_user_timeout (libpq's ``0`` for the operating system
+        default)."""
+        match self.tcp_user_timeout:
+            case TcpUserTimeoutSystemDefault():
+                user_timeout = LIBPQ_SYSTEM_DEFAULT_TCP_USER_TIMEOUT
+            case TcpUserTimeoutAfter(milliseconds=milliseconds):
+                user_timeout = milliseconds
+            case _ as unreachable:
+                assert_never(unreachable)
         return {
             **self.keepalive_connect_args(),
-            'tcp_user_timeout': self.tcp_user_timeout_ms,
+            'tcp_user_timeout': user_timeout,
         }
 
     @property
@@ -504,7 +676,10 @@ class PostgresConfig(BaseModel):
         return args
 
     def sqlalchemy_engine_kwargs(self) -> dict[str, Any]:
-        """Return only kwargs accepted by SQLAlchemy's engine constructor.
+        """Return only kwargs accepted by SQLAlchemy's engine constructor,
+        in SQLAlchemy's names: ``pool_size``, ``max_overflow``,
+        ``pool_timeout`` (``pool_timeout_seconds``), ``pool_recycle`` (``-1``
+        for ``PoolRecycleNever``, else the seconds) and ``echo``.
 
         ``hide_parameters=True`` is fixed: bound values are task arguments
         and results, so statement error text and ``echo`` logs show the
@@ -514,11 +689,19 @@ class PostgresConfig(BaseModel):
         ``DETAIL: Failing row contains (...)`` shows column values, each cut
         to 64 bytes.
         """
+        match self.pool_recycle:
+            case PoolRecycleNever():
+                recycle = SQLALCHEMY_NEVER_RECYCLE
+            case PoolRecycleAfterSeconds(seconds=seconds):
+                recycle = seconds
+            case _ as unreachable:
+                assert_never(unreachable)
         return {
-            **self.model_dump(
-                exclude=self._ENGINE_KWARG_EXCLUDES,
-                exclude_none=True,
-            ),
+            'pool_size': self.pool_size,
+            'max_overflow': self.max_overflow,
+            'pool_timeout': self.pool_timeout_seconds,
+            'pool_recycle': recycle,
+            'echo': self.echo,
             'hide_parameters': True,
         }
 
@@ -553,7 +736,7 @@ def _moved_child_pool_field_error(name: str, pool_argument: str) -> Configuratio
     each child kind in a worker profile that replaces it."""
     return ConfigurationError(
         message=f'{name} was removed in 0.7.0',
-        code=ErrorCode.CONFIG_INVALID_BROKER_POOL,
+        code=HorsiesErrorCode.CONFIG_INVALID_DATABASE_POOL,
         notes=[
             'each child kind of a worker profile has its own connection pool',
         ],
@@ -571,7 +754,7 @@ def _moved_parent_pool_field_error(name: str, note: str) -> ConfigurationError:
     worker process in a worker profile that replaces it."""
     return ConfigurationError(
         message=f'{name} was removed in 0.7.0',
-        code=ErrorCode.CONFIG_INVALID_BROKER_POOL,
+        code=HorsiesErrorCode.CONFIG_INVALID_DATABASE_POOL,
         notes=[
             note,
             'task code in a worker child that sends opens the task_send_pool '
@@ -587,7 +770,7 @@ def _moved_parent_pool_field_error(name: str, note: str) -> ConfigurationError:
 
 
 def _raise_for_url_scheme(field_name: str, url: str) -> None:
-    """Raise ``ConfigurationError`` (``BROKER_INVALID_URL``) for a URL whose
+    """Raise ``ConfigurationError`` (``DATABASE_INVALID_URL``) for a URL whose
     scheme is not ``postgresql`` or ``postgres``."""
     match check_database_url_scheme(url):
         case Ok():
@@ -606,7 +789,7 @@ def _url_scheme_error(
         case DatabaseUrlNamesDriver(scheme=scheme):
             return ConfigurationError(
                 message=f'invalid {field_name} scheme {scheme!r}',
-                code=ErrorCode.BROKER_INVALID_URL,
+                code=HorsiesErrorCode.DATABASE_INVALID_URL,
                 notes=[
                     f'got: {scheme}://...',
                     'the URL names a driver; horsies opens the database '
@@ -620,7 +803,7 @@ def _url_scheme_error(
         case DatabaseUrlNotPostgres(scheme=scheme):
             return ConfigurationError(
                 message=f'invalid {field_name} scheme {scheme!r}',
-                code=ErrorCode.BROKER_INVALID_URL,
+                code=HorsiesErrorCode.DATABASE_INVALID_URL,
                 notes=[
                     f'got: {scheme}://...',
                     'horsies accepts the schemes postgresql:// and postgres://',
@@ -630,7 +813,7 @@ def _url_scheme_error(
         case DatabaseUrlWithoutScheme():
             return ConfigurationError(
                 message=f'invalid {field_name}: the URL has no scheme',
-                code=ErrorCode.BROKER_INVALID_URL,
+                code=HorsiesErrorCode.DATABASE_INVALID_URL,
                 notes=['horsies accepts the schemes postgresql:// and postgres://'],
                 help_text="use 'postgresql://user:pass@host/db'",
             )

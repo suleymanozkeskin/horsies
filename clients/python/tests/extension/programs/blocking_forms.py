@@ -26,15 +26,15 @@ from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode
 from horsies.core.brokers.result_types import (
-    BrokerInvalidInput,
-    BrokerInvalidJsonPayload,
-    BrokerListenerDisabled,
-    BrokerOperationFailed,
+    DatabaseInvalidInput,
+    DatabaseInvalidJsonPayload,
+    DatabaseListenerDisabled,
+    DatabaseOperationFailed,
 )
 from horsies.core.models.workflow.handle_types import (
-    HandleDbOperationFailed,
-    HandleResumeRecoveryFailed,
-    HandleStoredDataInvalid,
+    WorkflowHandleDatabaseOperationFailed,
+    WorkflowHandleResumeRecoveryFailed,
+    WorkflowHandleStoredDataInvalid,
 )
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.workflows.start_types import (
@@ -49,8 +49,12 @@ from tests.extension.programs.support import database_url, manifest_json
 UNREACHABLE_URL: Final = 'postgresql://extension@127.0.0.1:1/never_connected'
 """A database that refuses every connect at once."""
 
-PING_WINDOW_S: Final = 0.2
-"""The reply window of a ping; no worker runs, so no reply comes."""
+PING_WAIT_MS: Final = 200
+"""The reply window of a ping, in milliseconds; no worker runs, so no reply
+comes."""
+
+STALE_THRESHOLD_MINUTES: Final = 1
+"""The threshold of the stale list."""
 
 WORKFLOW_NAME: Final = 'tests.extension.blocking_forms'
 OTHER_WORKFLOW_NAME: Final = 'tests.extension.blocking_forms.other'
@@ -59,7 +63,7 @@ NODE_ID: Final = f'{WORKFLOW_NAME}:0'
 APP: Final = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
+        database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
     ),
 )
 
@@ -88,7 +92,7 @@ def _start_request(name: str, workflow_id: uuid.UUID) -> core.WorkflowStartReque
         spec_json=spec_json,
         workflow_id=workflow_id,
         sent_at=datetime.now(UTC),
-        resend_on_transient_err=False,
+        resend_on_transient_error=False,
         trace=core.NoTraceCarrier(),
     )
 
@@ -124,28 +128,38 @@ def describe(outcome: object) -> JsonValue:
         case core.WorkflowNodeResultsRead(nodes=nodes):
             return [name, [node.node_id for node in nodes]]
         case (
-            HandleDbOperationFailed()
-            | HandleStoredDataInvalid()
-            | HandleResumeRecoveryFailed()
+            WorkflowHandleDatabaseOperationFailed()
+            | WorkflowHandleStoredDataInvalid()
+            | WorkflowHandleResumeRecoveryFailed()
         ):
             return [name, outcome.code.value, outcome.retryable]
         case WorkflowStartEnqueueFailed(retryable=retryable):
             return [name, retryable]
         case (
-            BrokerOperationFailed()
-            | BrokerInvalidInput()
-            | BrokerInvalidJsonPayload()
-            | BrokerListenerDisabled()
+            DatabaseOperationFailed()
+            | DatabaseInvalidInput()
+            | DatabaseInvalidJsonPayload()
+            | DatabaseListenerDisabled()
         ):
             return [name, outcome.code.value, outcome.retryable]
         case core.WorkerStatesRecord(states=states):
             return [name, len(states)]
         case core.WorkerPongsRecord(pongs=pongs):
             return [name, len(pongs)]
-        case core.ClassCoverageRecord(live_workers=live_workers, streams=streams):
+        case core.ExecutionClassCoverageRecord(live_workers=live_workers, streams=streams):
             return [name, live_workers, len(streams)]
-        case core.ClassReportRecord(streams=streams, workers=workers):
+        case core.ExecutionClassReportRecord(streams=streams, workers=workers):
             return [name, len(streams), len(workers)]
+        case (
+            core.StaleTaskListComplete(rows=rows)
+            | core.StaleTaskListTruncated(rows=rows)
+        ):
+            return [name, len(rows)]
+        case (
+            core.ExpiredTaskListComplete(rows=rows)
+            | core.ExpiredTaskListTruncated(rows=rows)
+        ):
+            return [name, len(rows)]
         case _:
             return [name]
 
@@ -238,7 +252,8 @@ def _absent_steps(handle: core.CoreHandle, workflow_id: uuid.UUID) -> list[Step]
 
 
 def _monitoring_steps(handle: core.CoreHandle) -> list[Step]:
-    """The worker state reads, the class reads, and the worker ping."""
+    """The worker state reads, the class reads, the task lists, and the
+    worker ping."""
     return [
         ('worker_states', handle.worker_states, handle.worker_states_async),
         (
@@ -256,24 +271,35 @@ def _monitoring_steps(handle: core.CoreHandle) -> list[Step]:
             lambda: handle.worker_state_history('tests.extension.no_such_worker', limit=0),
             lambda: handle.worker_state_history_async('tests.extension.no_such_worker', limit=0),
         ),
-        ('class_coverage', handle.class_coverage, handle.class_coverage_async),
-        ('class_report', handle.class_report, handle.class_report_async),
+        ('execution_class_coverage', handle.execution_class_coverage, handle.execution_class_coverage_async),
+        ('execution_class_report', handle.execution_class_report, handle.execution_class_report_async),
+        (
+            'stale_tasks',
+            lambda: handle.stale_tasks(STALE_THRESHOLD_MINUTES),
+            lambda: handle.stale_tasks_async(STALE_THRESHOLD_MINUTES),
+        ),
+        (
+            'stale_tasks_refused',
+            lambda: handle.stale_tasks(-1),
+            lambda: handle.stale_tasks_async(-1),
+        ),
+        ('expired_tasks', handle.expired_tasks, handle.expired_tasks_async),
         (
             'ping',
             lambda: handle.ping_workers(
-                target_worker_id=None, timeout_seconds=PING_WINDOW_S, min_responses=None,
+                target_worker_id=None, wait_ms=PING_WAIT_MS, min_responses=None,
             ),
             lambda: handle.ping_workers_async(
-                target_worker_id=None, timeout_seconds=PING_WINDOW_S, min_responses=None,
+                target_worker_id=None, wait_ms=PING_WAIT_MS, min_responses=None,
             ),
         ),
         (
             'ping_refused',
             lambda: handle.ping_workers(
-                target_worker_id=None, timeout_seconds=0, min_responses=None,
+                target_worker_id=None, wait_ms=0, min_responses=None,
             ),
             lambda: handle.ping_workers_async(
-                target_worker_id=None, timeout_seconds=0, min_responses=None,
+                target_worker_id=None, wait_ms=0, min_responses=None,
             ),
         ),
     ]

@@ -17,7 +17,7 @@ const recordHeartbeat = defineTask({ name: "record_heartbeat", input: { source: 
 const compactLogs = defineTask({ name: "compact_logs", input: { keepDays: h.int() }, output: h.int() });
 
 const created = Horsies.create({
-  broker: { databaseUrl: DATABASE_URL },
+  database: { databaseUrl: DATABASE_URL },
   workerProfiles: { [DEFAULT_PROFILE]: ISOLATED_PROFILE },
   tasks: [recordHeartbeat, compactLogs],
 });

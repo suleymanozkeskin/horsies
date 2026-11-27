@@ -276,7 +276,7 @@ class TestStartWorker:
         self,
         tmp_path: Path,
     ) -> None:
-        """``horsies worker <locator> --profile <name> --loglevel <level>``
+        """``horsies worker <locator> --profile <name> --log-level <level>``
         and the extra arguments, with the added variables, in the working
         directory, to the log."""
         working_directory = tmp_path / 'checkout'
@@ -285,7 +285,7 @@ class TestStartWorker:
             script=_echo_script(tmp_path),
             app_locator='crossclient.perf.worker_drain_app:app',
             profile='perf-drain',
-            loglevel='WARNING',
+            log_level='WARNING',
             extra_arguments=('--metrics-listen=127.0.0.1:19464',),
             environment={'HORSIES_PERF_PROBE': 'probe-value'},
             working_directory=working_directory,
@@ -297,7 +297,7 @@ class TestStartWorker:
             assert started.started_ns == 42
             assert started.log_path.read_text(encoding='utf-8').splitlines() == [
                 'worker crossclient.perf.worker_drain_app:app --profile perf-drain '
-                '--loglevel WARNING --metrics-listen=127.0.0.1:19464',
+                '--log-level WARNING --metrics-listen=127.0.0.1:19464',
                 'probe-value',
                 str(working_directory.resolve()),
             ]
@@ -311,7 +311,7 @@ class TestStartWorker:
             script=missing,
             app_locator='crossclient.perf.worker_drain_app:app',
             profile='perf-drain',
-            loglevel='WARNING',
+            log_level='WARNING',
             extra_arguments=(),
             environment={},
             working_directory=tmp_path,

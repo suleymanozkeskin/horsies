@@ -10,7 +10,7 @@ import { configureLogging } from "../../../horsies/src/logging.ts";
 import type { LogRecord } from "../../../horsies/src/logging.ts";
 import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
-import { runChildCase } from "./child-process.ts";
+import { runAbortingChildCase, runChildCase } from "./child-process.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
 
 // The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
@@ -18,6 +18,9 @@ void requireDevAddon();
 
 /** The longest time a child case may take. */
 const CHILD_CASE_BOUND_MS = 30_000;
+
+/** The longest time a test that runs one child case may take: the child bound, and the time to read its end. */
+const CHILD_TEST_BOUND_MS = CHILD_CASE_BOUND_MS + 5_000;
 
 /** The longest time a process with an empty loop may take to exit. */
 const IDLE_EXIT_BOUND_MS = 10_000;
@@ -92,8 +95,8 @@ describe("the JavaScript log sink", () => {
     assert.equal(child.stdout, "probed answered");
   });
 
-  test("a defect in a worker process goes to stderr, then to the sink, then the process aborts", () => {
-    const child = runChildCase("logging-child.ts", "defect-record-to-sink", CHILD_CASE_BOUND_MS);
+  test("a defect in a worker process goes to stderr, then to the sink, then the process aborts", { timeout: CHILD_TEST_BOUND_MS }, () => {
+    const child = runAbortingChildCase("logging-child.ts", "defect-record-to-sink", CHILD_CASE_BOUND_MS);
 
     assert.equal(child.signal, "SIGABRT", child.stderr);
     assert.match(child.stderr, /horsies: worker process \d+ aborts: defect CLIENT_DEFECT of the horsies package/u);

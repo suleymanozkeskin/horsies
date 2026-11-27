@@ -20,7 +20,7 @@ use crate::telemetry::registry::{
 use crate::test_support::LogCapture;
 use crate::{
     error_code_label, BuiltInTaskCode, ContractCode, CustomCode, DeclaredErrorCodes,
-    ErrorCodeLabel, Execution, OperationalErrorCode, OutcomeCode, RetrievalCode, TaskErrorCode,
+    ErrorCodeLabel, Execution, OperationalCode, OutcomeCode, RetrievalCode, TaskErrorCode,
     UNDECLARED_LABEL,
 };
 
@@ -61,7 +61,7 @@ fn family(registry: &Registry, metric: MetricId) -> FamilySnapshot {
 }
 
 fn every_built_in_code() -> Vec<BuiltInTaskCode> {
-    OperationalErrorCode::ALL
+    OperationalCode::ALL
         .into_iter()
         .map(BuiltInTaskCode::from)
         .chain(ContractCode::ALL.into_iter().map(BuiltInTaskCode::from))

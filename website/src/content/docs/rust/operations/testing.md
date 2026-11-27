@@ -69,7 +69,7 @@ async fn welcome(rt: TaskRuntime, user: String) -> Result<String, TaskError<Welc
 
 #[tokio::test]
 async fn welcome_reads_the_greeter() {
-    let mut app = Horsies::new(AppConfig::for_database_url("postgresql://localhost/horsies_test"))
+    let mut app = Horsies::new(AppConfig::from_database_url("postgresql://localhost/horsies_test"))
         .unwrap();
     app.provide(Greeter { greeting: "welcome".to_owned() }).unwrap();
     let message = welcome(app.task_runtime(), "ada".to_owned()).await.unwrap();
@@ -173,7 +173,7 @@ fn the_app_passes_its_check() {
 }
 ```
 
-`build_app` is the function that `main` calls to build the app. `CheckReport` holds the refusals of the first phase that refused; `errors()` returns them with their `HRS-xxx` codes. See [CLI Reference](/horsies/rust/cli/#check).
+`build_app` is the function that `main` calls to build the app. `ValidationReport` holds the refusals of the first phase that refused; `refusals()` returns them with their `HRS-xxx` codes. See [CLI Reference](/horsies/rust/cli/#check).
 
 ## Suppress Sends
 
@@ -185,7 +185,7 @@ A test that runs code which sends can suppress the sends of the process:
 | `HORSIES_SUPPRESS_SENDS=1` (`horsies::SUPPRESS_SENDS_ENV`) | Suppresses the sends of every app in the process. The variable is read at each send |
 | `app.are_sends_suppressed()` | `true` when either is set |
 
-A suppressed send returns `TaskSendError::SendSuppressed` and writes nothing. The check runs before any I/O of the send, so the test needs no database. A generated send (`task_name::send(&app, ...)`) is suppressed by the app that it names.
+A suppressed send returns `TaskSendError::Suppressed` and writes nothing. The check runs before any I/O of the send, so the test needs no database. A generated send (`task_name::send(&app, ...)`) is suppressed by the app that it names.
 
 ## Things to Avoid
 

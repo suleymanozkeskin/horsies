@@ -16,9 +16,9 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import dumps_json, loads_json
 from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
-from horsies.core.models.tasks import OperationalErrorCode, TaskError
+from horsies.core.models.tasks import OperationalCode, TaskError
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.errors import ErrorCode
+from horsies.core.errors import HorsiesErrorCode
 from horsies.core.models.workflow import (
     NodeKey,
     TaskNode,
@@ -150,7 +150,7 @@ class TestWorkflowCtx:
                 if envelope is None:
                     results_by_id[node_id] = Failed(
                         TaskError(
-                            code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'workflow_context result for node {node_id!r} unavailable '
                                 f'(engine could not encode at emit time)'
@@ -465,7 +465,7 @@ class TestWorkflowCtx:
             make_workflow_spec(
                 broker=broker, name='no_ctx_param', tasks=[node_a, node_b]
             )
-        assert exc_info.value.code == ErrorCode.WORKFLOW_CTX_PARAM_MISSING
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_CONTEXT_PARAMETER_MISSING
 
     async def test_worker_deserializes_workflow_ctx(
         self,
@@ -694,7 +694,7 @@ class TestWorkflowCtx:
 
         match decode_task_result(loads_json(result_json).unwrap(), Any):
             case Failed(error=error):
-                assert error.code == 'WORKFLOW_CTX_MISSING_ID'
+                assert error.code == 'WORKFLOW_CONTEXT_MISSING_ID'
             case outcome:
                 pytest.fail(f'expected a failed outcome, got {outcome!r}')
 
@@ -726,7 +726,7 @@ class TestWorkflowCtx:
             make_workflow_spec(
                 broker=broker, name='e009', tasks=[node_a, node_b],
             )
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_CTX_FROM
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_CONTEXT_FROM
 
     async def test_ctx_result_for_unknown_node_raises_key_error(
         self,

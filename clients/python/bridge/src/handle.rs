@@ -6,16 +6,16 @@
 //! connection. The first operation starts the core of the process and
 //! connects the handle's broker; a failed connect is not kept, so the next
 //! operation connects again. The lazy handle is the core's
-//! ([`horsies_core::handle::CoreHandle`]), with the client family
+//! ([`horsies_core::handle::CoreConnection`]), with the client family
 //! `PYTHON`.
 
 use std::sync::{Arc, OnceLock};
 
-use horsies_core::handle::{CoreHandle as LazyHandle, HandleConnection};
+use horsies_core::handle::{CoreConnection as LazyHandle, HandleConnection};
 use horsies_core::manifest::{parse_producer_manifest, ProducerManifest, SchemaMode};
 use horsies_core::worker_manifest::parse_worker_profiles;
 use horsies_core::{
-    BrokerError, BrokerOperationError, ClientFamily, CoverageRequest, PoolProfile, PostgresBroker,
+    BrokerError, ClientFamily, CoverageRequest, DatabaseOperationError, PoolProfile, PostgresBroker,
 };
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -67,7 +67,7 @@ use crate::operations::task_workflow_node::task_workflow_node_operation;
 use crate::operations::worker_connections::check_worker_connections_operation;
 use crate::operations::worker_ping::{ping_request, ping_wait_bound, ping_workers_operation};
 use crate::operations::worker_reads::{
-    class_coverage_operation, class_report_operation, history_limit,
+    execution_class_coverage_operation, execution_class_report_operation, history_limit,
     worker_state_history_operation, worker_state_operation, worker_states_operation,
 };
 use crate::operations::workflow_lifecycle::{cancel_workflow_operation, pause_workflow_operation};
@@ -112,7 +112,7 @@ impl BrokerConnection {
             handle: Arc::new(
                 LazyHandle::new(
                     self.handle.manifest().clone(),
-                    self.handle.profile(),
+                    self.handle.pool_profile(),
                     ClientFamily::Python,
                 )
                 .with_install_coverage(request),
@@ -319,7 +319,7 @@ impl CoreHandle {
     }
 
     /// Ping the database: `DatabasePingRecord` or the generated broker error class with
-    /// `DB_PING_FAILED`.
+    /// `DATABASE_PING_FAILED`.
     fn ping_database(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
         call_blocking(
@@ -436,7 +436,7 @@ impl CoreHandle {
     }
 
     /// Enqueue one task: `Enqueued`, or the generated broker error class of
-    /// the failure (`BrokerCoreEnqueueError`). Writes.
+    /// the failure (`DatabaseCoreEnqueueError`). Writes.
     fn enqueue(&self, py: Python<'_>, request: &Bound<'_, EnqueueRequest>) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
         call_blocking(
@@ -701,7 +701,7 @@ impl CoreHandle {
     /// Cancel one plain task (`horsies_cancel_task`): `TaskCancelledRecord`,
     /// or a generated `TaskActionCoreError` class (`TaskActionNotFound`,
     /// `TaskActionNotCancellable`, `TaskActionWorkflowTask`,
-    /// `TaskActionDbOperationFailed` or `TaskActionStoredDataInvalid`). A
+    /// `TaskActionDatabaseOperationFailed` or `TaskActionStoredDataInvalid`). A
     /// RUNNING task is cancelled only with `include_running`. Writes, in one
     /// statement.
     /// Awaitable only: its caller, `horsies.monitoring.task_actions.cancel_task`,
@@ -761,7 +761,7 @@ impl CoreHandle {
 
     /// Pause one workflow tree (`horsies_workflow_pause`): `WorkflowPaused`,
     /// `WorkflowNotRunning`, `WorkflowAbsent`, or a generated handle error
-    /// class (`HandleDbOperationFailed`, `HandleStoredDataInvalid`). Writes, in
+    /// class (`WorkflowHandleDatabaseOperationFailed`, `WorkflowHandleStoredDataInvalid`). Writes, in
     /// one statement; a caller that leaves does not stop it. A row outside
     /// the function's contract raises `PanicException`.
     fn pause_workflow(&self, py: Python<'_>, workflow_id: Uuid) -> PyResult<Py<PyAny>> {
@@ -836,8 +836,8 @@ impl CoreHandle {
 
     /// Resume one workflow tree (`horsies_workflow_resume`): `WorkflowResumed`,
     /// `WorkflowNotPaused`, `WorkflowAbsent`, or a generated handle error
-    /// class (`HandleDbOperationFailed`, `HandleStoredDataInvalid`,
-    /// `HandleResumeRecoveryFailed`). Writes; a caller that leaves does not
+    /// class (`WorkflowHandleDatabaseOperationFailed`, `WorkflowHandleStoredDataInvalid`,
+    /// `WorkflowHandleResumeRecoveryFailed`). Writes; a caller that leaves does not
     /// stop it. The
     /// child starts it owes build their children through the child spec
     /// source, which runs on the callback thread while this thread waits
@@ -1007,8 +1007,8 @@ impl CoreHandle {
 
     /// Cancel one workflow tree (`horsies_workflow_cancel`):
     /// `WorkflowCancelled`, `WorkflowNotCancellable`, `WorkflowAbsent`, or a
-    /// generated handle error class (`HandleDbOperationFailed`,
-    /// `HandleStoredDataInvalid`). Writes, in one statement; a caller that leaves does
+    /// generated handle error class (`WorkflowHandleDatabaseOperationFailed`,
+    /// `WorkflowHandleStoredDataInvalid`). Writes, in one statement; a caller that leaves does
     /// not stop it. A row outside the function's contract raises
     /// `PanicException`.
     fn cancel_workflow(&self, py: Python<'_>, workflow_id: Uuid) -> PyResult<Py<PyAny>> {
@@ -1574,14 +1574,36 @@ impl CoreHandle {
 
     /// The RUNNING tasks whose latest runner beat, or their start when they
     /// have no beat, is older than `threshold_minutes`
-    /// (`horsies_list_stale_tasks`): `TaskListComplete`,
-    /// `TaskListTruncated`, or the generated broker error class with `INVALID_INPUT` or
-    /// `MONITORING_QUERY_FAILED`. The threshold follows Python's rule: a
-    /// `bool`, a value that is not an `int`, or one outside 0 to 525,600
-    /// minutes is `INVALID_INPUT` in a future that is already done, before
-    /// any core call. Reads only, in one statement. Awaitable only: its
-    /// caller, `PostgresBroker.get_stale_tasks`, is a coroutine. A cancelled
-    /// await drops the read.
+    /// (`horsies_list_stale_tasks`): `StaleTaskListComplete`,
+    /// `StaleTaskListTruncated`, or the generated broker error class with
+    /// `INVALID_INPUT` or `MONITORING_QUERY_FAILED`. The threshold follows
+    /// Python's rule: a `bool`, a value that is not an `int`, or one outside 0
+    /// to 525,600 minutes is `INVALID_INPUT` at once, before any core call.
+    /// Reads only, in one statement; a caller that leaves drops the read.
+    fn stale_tasks(
+        &self,
+        py: Python<'_>,
+        threshold_minutes: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let threshold = match stale_threshold(threshold_minutes)? {
+            Ok(threshold) => threshold,
+            Err(refused) => {
+                return BrokerFailure::of_operation_error("get_stale_tasks", refused.error())
+                    .into_py_any(py)
+            }
+        };
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.stale_tasks",
+            CallKind::Read,
+            stale_tasks_operation(self.connection(), threshold),
+        )
+    }
+
+    /// The awaitable form of `stale_tasks`: a refused threshold answers in a
+    /// future that is already done. A cancelled await drops the read.
     fn stale_tasks_async<'py>(
         &self,
         py: Python<'py>,
@@ -1607,11 +1629,23 @@ impl CoreHandle {
     }
 
     /// The PENDING tasks whose `good_until` passed before a worker took them
-    /// (`horsies_list_expired_tasks`): `TaskListComplete`,
-    /// `TaskListTruncated`, or the generated broker error class with
-    /// `MONITORING_QUERY_FAILED`. Reads only, in one statement. Awaitable
-    /// only: its caller, `PostgresBroker.get_expired_tasks`, is a coroutine.
-    /// A cancelled await drops the read.
+    /// (`horsies_list_expired_tasks`): `ExpiredTaskListComplete`,
+    /// `ExpiredTaskListTruncated`, or the generated broker error class with
+    /// `MONITORING_QUERY_FAILED`. Reads only, in one statement; a caller that
+    /// leaves drops the read.
+    fn expired_tasks(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.expired_tasks",
+            CallKind::Read,
+            expired_tasks_operation(self.connection()),
+        )
+    }
+
+    /// The awaitable form of `expired_tasks`. A cancelled await drops the
+    /// read.
     fn expired_tasks_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;
         call_async(
@@ -1632,22 +1666,21 @@ impl CoreHandle {
     /// no listener, answers at once, before any core call or connect. Sends
     /// one NOTIFY; writes no row. A caller that leaves drops the wait and the
     /// reply subscription. The call is bounded by the window plus the bound
-    /// of a blocking call, and not bounded for an infinite window
-    /// (`ping_wait_bound`); signals are checked every 100 ms.
-    #[pyo3(signature = (*, target_worker_id, timeout_seconds, min_responses))]
+    /// of a blocking call (`ping_wait_bound`); signals are checked every
+    /// 100 ms.
+    #[pyo3(signature = (*, target_worker_id, wait_ms, min_responses))]
     fn ping_workers(
         &self,
         py: Python<'_>,
         target_worker_id: &Bound<'_, PyAny>,
-        timeout_seconds: &Bound<'_, PyAny>,
+        wait_ms: &Bound<'_, PyAny>,
         min_responses: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyAny>> {
         let listener = self.connection().lazy_handle().listener();
-        let request =
-            match ping_request(target_worker_id, timeout_seconds, min_responses, listener)? {
-                Ok(request) => request,
-                Err(refused) => return refused.into_py_any(py),
-            };
+        let request = match ping_request(target_worker_id, wait_ms, min_responses, listener)? {
+            Ok(request) => request,
+            Err(refused) => return refused.into_py_any(py),
+        };
         let core = checked_core(py)?;
         let bound = ping_wait_bound(request.window);
         call_blocking_within(
@@ -1663,20 +1696,19 @@ impl CoreHandle {
     /// The awaitable form of `ping_workers`: a refused argument, or a handle
     /// with no listener, answers in a future that is already done. A
     /// cancelled await drops the wait and the reply subscription.
-    #[pyo3(signature = (*, target_worker_id, timeout_seconds, min_responses))]
+    #[pyo3(signature = (*, target_worker_id, wait_ms, min_responses))]
     fn ping_workers_async<'py>(
         &self,
         py: Python<'py>,
         target_worker_id: &Bound<'_, PyAny>,
-        timeout_seconds: &Bound<'_, PyAny>,
+        wait_ms: &Bound<'_, PyAny>,
         min_responses: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let listener = self.connection().lazy_handle().listener();
-        let request =
-            match ping_request(target_worker_id, timeout_seconds, min_responses, listener)? {
-                Ok(request) => request,
-                Err(refused) => return done_future(py, refused),
-            };
+        let request = match ping_request(target_worker_id, wait_ms, min_responses, listener)? {
+            Ok(request) => request,
+            Err(refused) => return done_future(py, refused),
+        };
         let core = checked_core(py)?;
         call_async(
             py,
@@ -1800,58 +1832,58 @@ impl CoreHandle {
     }
 
     /// The fleet check: for each (queue, class) with PENDING rows, whether a
-    /// live worker serves it. `ClassCoverageRecord` or the generated broker error class with
+    /// live worker serves it. `ExecutionClassCoverageRecord` or the generated broker error class with
     /// `MONITORING_QUERY_FAILED`. Reads only, in one statement; a caller
     /// that leaves drops the read.
-    fn class_coverage(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn execution_class_coverage(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
         call_blocking(
             py,
             core,
-            "CoreHandle.class_coverage",
+            "CoreHandle.execution_class_coverage",
             CallKind::Read,
-            class_coverage_operation(self.connection()),
+            execution_class_coverage_operation(self.connection()),
         )
     }
 
-    /// The awaitable form of `class_coverage`. A cancelled await drops the
+    /// The awaitable form of `execution_class_coverage`. A cancelled await drops the
     /// read.
-    fn class_coverage_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn execution_class_coverage_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;
         call_async(
             py,
             core,
-            "CoreHandle.class_coverage_async",
+            "CoreHandle.execution_class_coverage_async",
             CallKind::Read,
-            class_coverage_operation(self.connection()),
+            execution_class_coverage_operation(self.connection()),
         )
     }
 
-    /// The pending streams with their oldest wait and coverage, and the
-    /// budget load of each live worker. `ClassReportRecord` or
+    /// The execution class report: the pending streams with their oldest
+    /// wait and coverage, and the budget load of each live worker. `ExecutionClassReportRecord` or
     /// the generated broker error class with `MONITORING_QUERY_FAILED`. Reads only, in one
     /// statement; a caller that leaves drops the read.
-    fn class_report(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn execution_class_report(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
         call_blocking(
             py,
             core,
-            "CoreHandle.class_report",
+            "CoreHandle.execution_class_report",
             CallKind::Read,
-            class_report_operation(self.connection()),
+            execution_class_report_operation(self.connection()),
         )
     }
 
-    /// The awaitable form of `class_report`. A cancelled await drops the
+    /// The awaitable form of `execution_class_report`. A cancelled await drops the
     /// read.
-    fn class_report_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn execution_class_report_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;
         call_async(
             py,
             core,
-            "CoreHandle.class_report_async",
+            "CoreHandle.execution_class_report_async",
             CallKind::Read,
-            class_report_operation(self.connection()),
+            execution_class_report_operation(self.connection()),
         )
     }
 }
@@ -1875,7 +1907,7 @@ async fn ping_database_operation(connection: BrokerConnection) -> Outcome<Databa
         Err(error) => {
             return Outcome::Failed(BrokerFailure::of_operation_error(
                 "ping_database",
-                BrokerOperationError::db_ping_failed(error),
+                DatabaseOperationError::database_ping_failed(error),
             ))
         }
     };
@@ -1900,7 +1932,7 @@ mod tests {
             "pool_pre_ping": true,
             "pool_size": 5,
             "max_overflow": 0,
-            "pool_timeout": 30,
+            "pool_timeout_seconds": 30,
             "pool_recycle": {"kind": "AFTER_SECONDS", "seconds": 1800},
             "echo": false,
             "tcp_keepalives": {
@@ -1929,7 +1961,7 @@ mod tests {
     #[test]
     fn a_worker_process_handle_keeps_its_profile_and_starts_nothing() {
         let handle = CoreHandle::new(MANIFEST, "WORKER").expect("the manifest is complete");
-        assert_eq!(handle.connection.handle.profile(), PoolProfile::Worker);
+        assert_eq!(handle.connection.handle.pool_profile(), PoolProfile::Worker);
         assert_eq!(handle.connection.handle.family(), ClientFamily::Python);
         assert!(matches!(
             handle.connection.connect_state(),
@@ -1953,7 +1985,7 @@ mod tests {
             covered.handle.install_coverage(),
             handle.connection.handle.install_coverage()
         );
-        assert_eq!(covered.handle.profile(), PoolProfile::Worker);
+        assert_eq!(covered.handle.pool_profile(), PoolProfile::Worker);
         assert_eq!(covered.handle.family(), ClientFamily::Python);
         assert_eq!(
             covered.handle.manifest(),

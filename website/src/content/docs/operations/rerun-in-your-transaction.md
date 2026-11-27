@@ -48,6 +48,7 @@ async def rerun_failed_task(source_task_id: UUID) -> RerunOutcome:
                 retain_rerun_input=True,
                 reservation_window=timedelta(hours=24),
             ),
+            registered_task_codes=app.registered_task_codes(),
         )
 
 
@@ -77,6 +78,17 @@ def describe(outcome: RerunOutcome) -> str:
 
 `engine.begin()` commits when the block ends without an error. Add the writes of your application to the same block to commit them with the rerun.
 
+## Check of the Stored Retry List
+
+Before the write, the rerun checks the `retry_for` list that the source stores against the codes of your app. `registered_task_codes` maps the name of each task that the app registers to the codes that it declares (`error_codes`); `app.registered_task_codes()` gives it, and `app.rerun_task_in_async` and `app.rerun_task_in` pass it themselves.
+
+- A built-in code passes for every task.
+- A custom code passes when the app registers the task and the task declares the code.
+- A custom code that the task does not declare raises `CorePreconditionFailed` (`RerunErrorCode.RETRY_CODE_NOT_DECLARED`): the new task would not retry on the code that the stored list names.
+- A custom code of a task that the app does not register raises `CorePreconditionFailed` (`RerunErrorCode.TASK_NOT_REGISTERED`): the code cannot be checked.
+
+Each refusal writes nothing and is not retryable. The message names the task and the code. A stored list of built-in codes only, or no retry policy, needs no registered task.
+
 ## Rerun with the Trace of the Caller
 
 `app.rerun_task_in_async` is `rerun_task_in_async` with the tracing setting of the app. With `AppConfig(tracing=OtelTracing())`, the new task stores the trace carrier of the caller's current OpenTelemetry context, with its trace id. Each attempt of the new task is then a child of the caller's span. The rerun opens no span of its own.
@@ -89,7 +101,7 @@ from horsies import AppConfig, Horsies, OtelTracing, PostgresConfig
 
 app = Horsies(
     AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
         ),
         tracing=OtelTracing(),
@@ -121,13 +133,14 @@ async def rerun_from_support_request(source_task_id: UUID) -> RerunOutcome:
 
 ## API Reference
 
-### `async rerun_task_in_async(connection: AsyncConnection, command: RerunCommand, policy: RerunEnqueuePolicy) -> RerunOutcome`
+### `async rerun_task_in_async(connection: AsyncConnection, command: RerunCommand, policy: RerunEnqueuePolicy, *, registered_task_codes: Mapping[str, tuple[str, ...]]) -> RerunOutcome`
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `connection` | `sqlalchemy.ext.asyncio.AsyncConnection` | The connection of the caller. Two statements run in its transaction: the read of the source, then, for a source that can be rerun, the enqueue of the new task |
 | `command` | `RerunCommand` | The source task and the choices of the new task |
 | `policy` | `RerunEnqueuePolicy` | The enqueue policy of the new task |
+| `registered_task_codes` | `Mapping[str, tuple[str, ...]]` | The codes that each task of the app declares, by task name: `app.registered_task_codes()`. See [Check of the Stored Retry List](#check-of-the-stored-retry-list) |
 
 **Returns:** `RerunOutcome`. Each outcome other than `RerunEnqueued` writes nothing. The new task stores no trace carrier.
 
@@ -135,14 +148,14 @@ async def rerun_from_support_request(source_task_id: UUID) -> RerunOutcome:
 
 | Error | When |
 |-------|------|
-| `ValueError` | The retention class of `policy.retention` is not registered: add the period to `queue_retention` or `retention_periods` of the maintenance owner, and rerun after its next pass. Also: `idempotency_key` breaks the key rules, or the id of the new task could not be minted |
-| `CorePreconditionFailed` (`horsies`) | The database was installed by the Rust client, or records no client. `subject` is `rerun_task_in`; `retryable` is `False` |
+| `ValueError` | The retention class of `policy.retention` is not registered: add the period to `queue_retention` or `retention_periods` of the maintenance owner, and rerun after its next pass. Also: `idempotency_key` breaks the key rules, the id of the new task could not be minted, or a code set of `registered_task_codes` is not a declared code set |
+| `CorePreconditionFailed` (`horsies`) | The database was installed by the Rust client, or records no client. Or the stored retry list of the source names a custom code that the task does not declare, or of a task that the app does not register. `subject` is `rerun_task_in`; `retryable` is `False` |
 | `ForkedAfterCoreStart`, `CoreStopped` (`horsies`) | The core of this process cannot run: see [Process-State Refusals](/horsies/tasks/error-types/#process-state-refusals) |
 | A database error | A statement failed. It raises from the driver of `connection` |
 
 ### `async app.rerun_task_in_async(connection: AsyncConnection, command: RerunCommand, policy: RerunEnqueuePolicy) -> RerunOutcome`
 
-`rerun_task_in_async` with the tracing setting of the app: the same parameters, statements, outcomes and errors. With `OtelTracing()` the new task stores the trace carrier of the caller's current context; see [Rerun with the Trace of the Caller](#rerun-with-the-trace-of-the-caller). It does not commit.
+`rerun_task_in_async` with the tracing setting of the app and its own `registered_task_codes()`: the same statements, outcomes and errors. With `OtelTracing()` the new task stores the trace carrier of the caller's current context; see [Rerun with the Trace of the Caller](#rerun-with-the-trace-of-the-caller). It does not commit.
 
 ### `app.rerun_task_in(connection: Connection, command: RerunCommand, policy: RerunEnqueuePolicy) -> RerunOutcome`
 
@@ -186,4 +199,4 @@ The constructor raises `ValueError` for a period that is not whole days or is ou
 | `RerunInputUnavailable` | `task_id`, `disposition: str`, the stored reason, for example `DECLINED_BY_POLICY` or `OVER_BOUND` | Input unavailable |
 | `RerunInputCorrupt` | `task_id`, `detail: str` | Input corrupt |
 
-`rerun_task_in_async`, `RerunCommand`, `RerunEnqueuePolicy`, `RerunOutcome`, its variants, `TaskAbsenceReason` and `NotEligibleReason` are exported from `horsies`. `rerun_task_in_async` and `rerun_task_in` are also methods of `Horsies`.
+`rerun_task_in_async`, `RerunCommand`, `RerunEnqueuePolicy`, `RerunOutcome`, its variants, `TaskAbsenceReason` and `NotEligibleReason` are exported from `horsies`. `rerun_task_in_async`, `rerun_task_in` and `registered_task_codes` are also methods of `Horsies`.

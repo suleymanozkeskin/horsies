@@ -35,7 +35,7 @@ def _make_spec(name: str = 'test-wf') -> WorkflowSpec[Any]:
     object.__setattr__(spec, 'name', name)
     object.__setattr__(spec, 'broker', MagicMock())
     object.__setattr__(spec, 'tasks', [])
-    object.__setattr__(spec, 'resend_on_transient_err', False)
+    object.__setattr__(spec, 'resend_on_transient_error', False)
     return spec
 
 
@@ -47,7 +47,7 @@ def _enqueue_failed(
         retryable=True,
         workflow_name=workflow_name,
         workflow_id=workflow_id,
-        exception=ConnectionError('lost'),
+        cause=ConnectionError('lost'),
     )
 
 
@@ -71,7 +71,7 @@ def _refused_variants() -> list[WorkflowStartError]:
             message='Bad DAG',
             workflow_name='test-wf',
             workflow_id='wf-123',
-            exception=NoCause(),
+            cause=NoCause(),
         ),
         WorkflowStartIdConflict(
             message='id taken',
@@ -128,7 +128,7 @@ class TestValidateStartRetry:
         assert is_err(result)
         assert isinstance(result.err_value, WorkflowStartValidationFailed)
         assert 'cross-workflow' in result.err_value.message
-        assert result.err_value.exception == NoCause()
+        assert result.err_value.cause == NoCause()
         assert result.err_value.workflow_id == 'wf-123'
 
 

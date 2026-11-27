@@ -3,8 +3,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::operations::{
-    rerun_task_in_transaction, NotEligibleReason, RerunCommand, RerunEnqueuePolicy, RerunError,
-    RerunOutcome,
+    rerun_task_in_transaction, NotEligibleReason, RegisteredTaskCodes, RerunCommand,
+    RerunEnqueuePolicy, RerunError, RerunOutcome,
 };
 use super::provenance::RERUN_FIELD_PROVENANCE;
 use crate::broker::client_family::ClientFamily;
@@ -20,7 +20,7 @@ use crate::core::history::periods::RetentionDays;
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome, WorkerOwned};
-use crate::core::{OperationalErrorCode, TaskError, TaskResult, TaskStatus};
+use crate::core::{OperationalCode, TaskError, TaskResult, TaskStatus};
 use crate::db::{
     CheckoutClass, IsolationLevel, ParameterType, RollbackOutcome, SqlScript, StatementBound,
     StatementFailure, TypedStatement,
@@ -135,7 +135,7 @@ fn terminal_result(kind: TerminalSource) -> String {
         }
         TerminalSource::Failed | TerminalSource::Expired | TerminalSource::Cancelled => {
             serde_json::to_string(&TaskResult::<serde_json::Value>::Err(TaskError::built_in(
-                OperationalErrorCode::TaskException,
+                OperationalCode::TaskException,
                 "p8 terminal source",
             )))
             .unwrap()
@@ -390,6 +390,7 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
             .rerun_task(
                 RerunCommand::new(source, Some(deadline), None),
                 policy(target_class, retain_rerun_input),
+                &RegisteredTaskCodes::NONE,
             )
             .await
             .unwrap();
@@ -497,6 +498,7 @@ async fn root_lineage_is_preserved_across_multiple_reruns() {
         .rerun_task(
             RerunCommand::new(source, None, None),
             policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
         )
         .await
         .unwrap();
@@ -537,6 +539,7 @@ async fn python_float_exponent_bytes_drive_rerun_input_and_fingerprint() {
         .rerun_task(
             RerunCommand::new(source, None, None),
             policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
         )
         .await
         .unwrap();
@@ -613,6 +616,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
             StatementLog::Off,
             &RerunCommand::new(completed, None, None),
             &policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
             ClientFamily::Rust,
         )
         .await
@@ -628,6 +632,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
             StatementLog::Off,
             &RerunCommand::new(workflow_task, None, None),
             &policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
             ClientFamily::Rust,
         )
         .await
@@ -659,7 +664,8 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         broker
             .rerun_task(
                 RerunCommand::new(live, None, None),
-                policy(SOURCE_CLASS, true)
+                policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE,
             )
             .await
             .unwrap(),
@@ -727,14 +733,15 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         .unwrap_err();
     assert_eq!(
         history_error.code(),
-        crate::BrokerErrorCode::InvalidJsonPayload
+        crate::DatabaseErrorCode::InvalidJsonPayload
     );
     let absent = Uuid::new_v4();
     assert!(matches!(
         broker
             .rerun_task(
                 RerunCommand::new(absent, None, None),
-                policy(SOURCE_CLASS, true)
+                policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE,
             )
             .await
             .unwrap(),
@@ -763,6 +770,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         StatementLog::Off,
         &RerunCommand::new(old_absent, None, None),
         &policy(SOURCE_CLASS, true),
+        &RegisteredTaskCodes::NONE,
         ClientFamily::Rust,
     )
     .await
@@ -809,7 +817,8 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
             broker
                 .rerun_task(
                     RerunCommand::new(source, None, None),
-                    policy(SOURCE_CLASS, true)
+                    policy(SOURCE_CLASS, true),
+                    &RegisteredTaskCodes::NONE,
                 )
                 .await
                 .unwrap(),
@@ -852,6 +861,7 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
             StatementLog::Off,
             &RerunCommand::new(source, None, None),
             &policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
             ClientFamily::Rust,
         )
         .await
@@ -879,7 +889,8 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
         broker
             .rerun_task(
                 RerunCommand::new(source, None, None),
-                policy(SOURCE_CLASS, true)
+                policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE,
             )
             .await
             .unwrap(),
@@ -905,7 +916,8 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
             broker
                 .rerun_task(
                     RerunCommand::new(source, None, None),
-                    policy(SOURCE_CLASS, true)
+                    policy(SOURCE_CLASS, true),
+                    &RegisteredTaskCodes::NONE,
                 )
                 .await
                 .unwrap(),
@@ -924,7 +936,8 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
         broker
             .rerun_task(
                 RerunCommand::new(source, None, None),
-                policy(SOURCE_CLASS, true)
+                policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE,
             )
             .await
             .unwrap(),
@@ -982,7 +995,8 @@ async fn an_unknown_stored_status_is_source_corrupt() {
         broker
             .rerun_task(
                 RerunCommand::new(source, None, None),
-                policy(SOURCE_CLASS, true)
+                policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE,
             )
             .await
             .unwrap(),
@@ -1003,6 +1017,7 @@ async fn a_rerun_keeps_the_execution_class_of_the_request() {
         .rerun_task(
             RerunCommand::new(source, None, None),
             policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
         )
         .await
         .unwrap()
@@ -1028,7 +1043,8 @@ async fn an_invalid_stored_execution_is_input_corrupt() {
         broker
             .rerun_task(
                 RerunCommand::new(source, None, None),
-                policy(SOURCE_CLASS, true)
+                policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE,
             )
             .await
             .unwrap(),
@@ -1037,6 +1053,59 @@ async fn an_invalid_stored_execution_is_input_corrupt() {
     ));
     assert_eq!(rerun_count(&pool, source).await, 0);
     cleanup(&pool, &[source], &[]).await;
+}
+
+/// The stored retry list of the source is checked against the codes of the
+/// calling app through the broker's own transaction: a custom code of a
+/// task that the app does not register is `TaskNotRegistered`, a custom code
+/// that the task does not declare is `RetryCodeNotDeclared`, and neither
+/// writes a task; a declared code reruns.
+#[tokio::test]
+async fn a_stored_custom_retry_code_is_checked_against_the_calling_app() {
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
+    let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
+    let stored_options = "{\"retry_policy\":{\"max_retries\":1,\"intervals\":[1],\
+                          \"backoff_strategy\":\"fixed\",\"jitter\":true,\
+                          \"retry_for\":[\"WORKER_CRASHED\",\"TRANSIENT\"]}}";
+    store_inline_input(&pool, source, stored_options).await;
+    let codes_declaring = |custom: &[&str]| {
+        let declared = crate::core::task::DeclaredErrorCodes::parse(custom).unwrap();
+        RegisteredTaskCodes::new(std::collections::BTreeMap::from([(
+            "p8.rerun".to_owned(),
+            declared,
+        )]))
+    };
+    let rerun = |codes: RegisteredTaskCodes| {
+        let broker = &broker;
+        async move {
+            broker
+                .rerun_task(
+                    RerunCommand::new(source, None, None),
+                    policy(SOURCE_CLASS, true),
+                    &codes,
+                )
+                .await
+        }
+    };
+
+    assert!(matches!(
+        rerun(RegisteredTaskCodes::NONE).await,
+        Err(RerunError::TaskNotRegistered { ref task_name }) if task_name == "p8.rerun"
+    ));
+    assert!(matches!(
+        rerun(codes_declaring(&["RATE_LIMITED"])).await,
+        Err(RerunError::RetryCodeNotDeclared { ref task_name, ref retry_code })
+            if task_name == "p8.rerun" && retry_code == "TRANSIENT"
+    ));
+    assert_eq!(rerun_count(&pool, source).await, 0);
+
+    let RerunOutcome::Enqueued { new_task_id, .. } =
+        rerun(codes_declaring(&["TRANSIENT"])).await.unwrap()
+    else {
+        panic!("a declared custom retry code must rerun");
+    };
+    cleanup(&pool, &[source, new_task_id], &[]).await;
 }
 
 /// A rerun of a stored request of a shared class with no `timeout_ms`
@@ -1053,6 +1122,7 @@ async fn a_rerun_of_a_stored_shared_request_without_a_timeout_is_enqueued() {
         .rerun_task(
             RerunCommand::new(source, None, None),
             policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
         )
         .await
         .unwrap()
@@ -1077,7 +1147,11 @@ async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     let command = || RerunCommand::new(source, None, Some("p8-replay".to_owned()));
     let first = broker
-        .rerun_task(command(), policy(SOURCE_CLASS, true))
+        .rerun_task(
+            command(),
+            policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
+        )
         .await
         .unwrap();
     let RerunOutcome::Enqueued { new_task_id, .. } = first else {
@@ -1085,7 +1159,11 @@ async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
     };
     assert_eq!(
         broker
-            .rerun_task(command(), policy(SOURCE_CLASS, true))
+            .rerun_task(
+                command(),
+                policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE
+            )
             .await
             .unwrap(),
         RerunOutcome::KeyReplay {
@@ -1137,6 +1215,7 @@ async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
             .rerun_task(
                 RerunCommand::new(conflict_source, None, Some("p8-source-key".to_owned())),
                 policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE,
             )
             .await
             .unwrap(),
@@ -1185,6 +1264,7 @@ async fn broker_rolls_back_an_applied_reservation_when_the_live_insert_fails() {
         .rerun_task(
             RerunCommand::new(source, None, Some(idempotency_key.to_owned())),
             policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
         )
         .await
         .unwrap_err();
@@ -1239,6 +1319,7 @@ async fn unregistered_class_refuses_before_source_or_reservation_writes() {
         .rerun_task(
             RerunCommand::new(source, None, Some("must-not-claim".to_owned())),
             policy(UNREGISTERED_CLASS, true),
+            &RegisteredTaskCodes::NONE,
         )
         .await
         .unwrap_err();
@@ -1271,6 +1352,7 @@ async fn unregistered_class_refuses_before_source_or_reservation_writes() {
         StatementLog::Off,
         &RerunCommand::new(source, None, None),
         &policy(UNREGISTERED_CLASS, true),
+        &RegisteredTaskCodes::NONE,
         ClientFamily::Rust,
     )
     .await
@@ -1329,8 +1411,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .unwrap()
         .expect_found();
     assert_eq!(failed_raw.status, TaskStatus::Failed);
-    let expected_error =
-        TaskError::built_in(OperationalErrorCode::TaskException, "p8 terminal source");
+    let expected_error = TaskError::built_in(OperationalCode::TaskException, "p8 terminal source");
     let expected_error_envelope =
         serde_json::to_value(TaskResult::<serde_json::Value>::Err(expected_error.clone())).unwrap();
     assert_eq!(
@@ -1375,13 +1456,16 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .unwrap_err();
     assert_eq!(
         history_info_error.code(),
-        crate::BrokerErrorCode::InvalidJsonPayload
+        crate::DatabaseErrorCode::InvalidJsonPayload
     );
     let raw_error = broker
         .get_raw_result_record(completed, None)
         .await
         .unwrap_err();
-    assert_eq!(raw_error.code(), crate::BrokerErrorCode::InvalidJsonPayload);
+    assert_eq!(
+        raw_error.code(),
+        crate::DatabaseErrorCode::InvalidJsonPayload
+    );
 
     let non_object = b"[]".to_vec();
     sql::query(
@@ -1400,7 +1484,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .unwrap_err();
     assert_eq!(
         shape_error.code(),
-        crate::BrokerErrorCode::InvalidJsonPayload
+        crate::DatabaseErrorCode::InvalidJsonPayload
     );
 
     // The baseline stores no result content type: format version 1 implies
@@ -1435,7 +1519,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     // TASK_INFO_QUERY_FAILED, not retryable.
     assert_eq!(
         attempt_error.code(),
-        crate::BrokerErrorCode::TaskInfoQueryFailed
+        crate::DatabaseErrorCode::TaskInfoQueryFailed
     );
     assert!(!attempt_error.retryable());
 
@@ -1452,7 +1536,10 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_raw_result_record(Uuid::new_v4(), None)
         .await
         .expect_err("a removed detail reader refuses the history read");
-    assert_eq!(refused.code(), crate::BrokerErrorCode::TaskInfoQueryFailed);
+    assert_eq!(
+        refused.code(),
+        crate::DatabaseErrorCode::TaskInfoQueryFailed
+    );
     assert!(!refused.retryable());
     assert!(refused.message().contains("42883"), "{}", refused.message());
     let mut publication = pool.begin().await.unwrap();
@@ -1540,6 +1627,7 @@ async fn a_handle_of_another_client_family_reruns_nothing() {
         .rerun_task(
             RerunCommand::new(source, None, Some("family-refused".to_owned())),
             policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
         )
         .await
         .expect_err("a handle of another family must not rerun");
@@ -1572,7 +1660,16 @@ async fn prepared_write(
 
     let read = rerun_read(command, policy);
     let row = transaction.query_one(&read).await.unwrap();
-    match prepare_rerun_write(&read, &row, command, policy, ClientFamily::Rust, Utc::now()).unwrap()
+    match prepare_rerun_write(
+        &read,
+        &row,
+        command,
+        policy,
+        &RegisteredTaskCodes::NONE,
+        ClientFamily::Rust,
+        Utc::now(),
+    )
+    .unwrap()
     {
         RerunPreparation::Write(write) => write,
         other => panic!("expected a write, got {other:?}"),

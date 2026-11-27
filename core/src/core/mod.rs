@@ -15,21 +15,22 @@ pub mod workflow;
 
 // Re-exports for convenience.
 pub use config::{
-    mask_database_url, AppConfig, AppConfigError, CronEnumTerm, CronNumericTerm, CronOrdinal,
-    CronSchedule, CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector,
-    EnqueueRetention, HourlySchedule, IntervalSchedule, Month, MonthlySchedule, PausedAgeRefused,
-    PausedWorkflowAge, PayloadPolicy, PostgresConfig, PostgresConfigError, QueueMode,
-    RecoveryConfig, RecoveryConfigError, ResilienceConfigError, RetentionChoice,
+    mask_database_url, AppConfig, AppConfigError, ClusterCapSetting, CronEnumTerm, CronNumericTerm,
+    CronOrdinal, CronSchedule, CustomQueueConfig, CustomQueueConfigError, DailySchedule,
+    DaySelector, EnqueueRetention, HourlySchedule, IntervalSchedule, Month, MonthlySchedule,
+    PausedAgeRefused, PausedWorkflowAge, PayloadPolicy, PostgresConfig, PostgresConfigError,
+    QueueMode, RecoveryConfig, RecoveryConfigError, ResilienceConfigError, RetentionChoice,
     RetentionClassKeyRefused, RetentionConfig, RetentionConfigError, ScheduleConfig,
-    SchedulePattern, TaskSchedule, Weekday, WeeklySchedule, WorkerResilienceConfig,
+    SchedulePattern, SessionDatabase, TaskSchedule, Weekday, WeeklySchedule,
+    WorkerResilienceConfig,
 };
-pub use error::{ErrorCategory, ErrorCode, HorsiesError, ValidationReport};
+pub use error::{HorsiesError, HorsiesErrorCategory, HorsiesErrorCode, ValidationReport};
 pub use registry::TaskRegistry;
 pub use task::{
     check_cancel_grace_ms, error_code_label, AsyncTaskFn, BackoffStrategy, BlockingTaskFn,
     BuiltInTaskCode, CancelGraceOutOfRange, ContractCode, CustomCode, CustomCodeRefused,
     DeclaredCodeRefusal, DeclaredCodesRefused, DeclaredErrorCode, DeclaredErrorCodes,
-    ErrorCodeLabel, ExceptionRecord, Execution, ExecutionClass, OperationalErrorCode, OutcomeCode,
+    ErrorCodeLabel, ExceptionRecord, Execution, ExecutionClass, OperationalCode, OutcomeCode,
     RegisteredTask, RetrievalCode, RetryPolicy, RetryPolicyError, StoredErrorRefused,
     SubWorkflowFailure, TaskAttemptInfo, TaskError, TaskErrorCode, TaskErrorKind, TaskInfo,
     TaskOptions, TaskResult, TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult,
@@ -37,9 +38,9 @@ pub use task::{
 };
 pub use types::{TaskAttemptOutcome, TaskStatus, TASK_TERMINAL_STATES, TASK_TERMINAL_VALUES};
 pub use workflow::{
-    AnyNode, HandleErrorCode, HandleOperation, HandleOperationError, HandleResult, JoinType,
-    NodeKey, OnError, StartRefusalCause, SubWorkflowParams, SubWorkflowSummary, SuccessCase,
-    SuccessPolicy, WorkflowContext, WorkflowMeta, WorkflowSpec, WorkflowStartError,
+    AnyNode, HandleOperation, HandleResult, JoinType, NodeKey, OnError, StartRefusalCause,
+    SubWorkflowParams, SubWorkflowSummary, SuccessCase, SuccessPolicy, WorkflowContext,
+    WorkflowHandleError, WorkflowHandleErrorCode, WorkflowMeta, WorkflowSpec, WorkflowStartError,
     WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus,
     WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };

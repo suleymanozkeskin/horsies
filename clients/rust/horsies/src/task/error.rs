@@ -240,7 +240,7 @@ fn data_refused(cause: &'static str) -> JsonText {
 mod tests {
     use std::collections::BTreeMap;
 
-    use horsies_core::{CustomCode, OperationalErrorCode, OutcomeCode, SubWorkflowSummary};
+    use horsies_core::{CustomCode, OperationalCode, OutcomeCode, SubWorkflowSummary};
     use serde_json::json;
 
     use super::*;
@@ -395,13 +395,13 @@ mod tests {
     #[test]
     fn a_built_in_error_reads_with_any_code_type() {
         let stored = horsies_core::TaskError::built_in(
-            OperationalErrorCode::WorkerCrashed,
+            OperationalCode::WorkerCrashed,
             "child exited with signal 9",
         );
         let read = TaskError::<std::convert::Infallible>::from_stored(stored).unwrap();
         assert_eq!(
             read.code(),
-            &TaskErrorCode::BuiltIn(OperationalErrorCode::WorkerCrashed.into())
+            &TaskErrorCode::BuiltIn(OperationalCode::WorkerCrashed.into())
         );
     }
 
@@ -429,7 +429,7 @@ mod tests {
         };
         let stored = horsies_core::TaskError {
             kind: TaskErrorKind::SubWorkflow(Box::new(failure.clone())),
-            ..horsies_core::TaskError::built_in(OutcomeCode::SubworkflowFailed, "child failed")
+            ..horsies_core::TaskError::built_in(OutcomeCode::SubWorkflowFailed, "child failed")
         };
         let read = TaskError::<ChargeCode>::from_stored(stored).unwrap();
         assert_eq!(read.sub_workflow(), Some(&failure));

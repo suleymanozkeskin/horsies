@@ -70,7 +70,9 @@ async function idleExitWithSink(): Promise<string> {
   configureLogging({ levels: { default: "WARNING" }, sink: { kind: "function", sink: () => undefined } });
 
   const probe = envelopeValue(
-    await probeAddon().probeCallback(settlingCallback((argument: string) => argument, addonSettlement), "ping"),
+    await probeAddon().probeCallback(settlingCallback((argument: string) => argument, addonSettlement), "ping", {
+      kind: "noBound",
+    }),
   );
 
   return `probed ${probe.kind}`;
@@ -165,7 +167,7 @@ async function firstPayloadWarning(): Promise<string> {
 function warningRules(): NativeSendRules {
   const config = parseAppConfig(
     {
-      broker: { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } },
+      database: { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } },
       payload: { warnBytes: { kind: "bytes", bytes: WARN_BYTES } },
     },
     () => undefined,

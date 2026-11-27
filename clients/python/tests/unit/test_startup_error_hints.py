@@ -34,7 +34,7 @@ from horsies import (
     WorkflowSpec,
 )
 from horsies.core.errors import (
-    ErrorCode,
+    HorsiesErrorCode,
     HorsiesError,
     TaskDefinitionError,
     WorkflowValidationError,
@@ -124,7 +124,7 @@ def _library_sites() -> list[_Site]:
 class TestEverySiteGivesACodeAndHelp:
     def test_the_scan_finds_a_site_with_no_help(self) -> None:
         sites = _sites_in(
-            "raise WorkflowValidationError('positional', code=ErrorCode.X)",
+            "raise WorkflowValidationError('positional', code=HorsiesErrorCode.X)",
             where='known',
         )
 
@@ -196,7 +196,7 @@ class TestEverySiteGivesACodeAndHelp:
 def _new_app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr(
                     'postgresql://user:password@localhost/unused',
                 ),
@@ -370,64 +370,64 @@ def _broker_that_fails() -> None:
 @pytest.mark.parametrize(
     ('trigger', 'code', 'hint'),
     [
-        (_no_tasks, ErrorCode.WORKFLOW_NO_NODES, 'add at least one TaskNode'),
-        (_blank_node_id, ErrorCode.WORKFLOW_INVALID_NODE_ID, 'non-empty string'),
-        (_index_not_set, ErrorCode.WORKFLOW_INVALID_NODE_ID, 'report this bug'),
+        (_no_tasks, HorsiesErrorCode.WORKFLOW_NO_NODES, 'add at least one TaskNode'),
+        (_blank_node_id, HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID, 'non-empty string'),
+        (_index_not_set, HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID, 'report this bug'),
         (
             lambda: _quorum(min_success=None),
-            ErrorCode.WORKFLOW_INVALID_JOIN,
+            HorsiesErrorCode.WORKFLOW_INVALID_JOIN,
             'number of dependencies that must succeed',
         ),
         (
             lambda: _quorum(min_success=0),
-            ErrorCode.WORKFLOW_INVALID_JOIN,
+            HorsiesErrorCode.WORKFLOW_INVALID_JOIN,
             '1 or more',
         ),
         (
             lambda: _quorum(min_success=5),
-            ErrorCode.WORKFLOW_INVALID_JOIN,
+            HorsiesErrorCode.WORKFLOW_INVALID_JOIN,
             'at most their number',
         ),
         (
             lambda: _quorum_with_no_dependencies(min_success=1),
-            ErrorCode.WORKFLOW_INVALID_JOIN,
+            HorsiesErrorCode.WORKFLOW_INVALID_JOIN,
             'add nodes to waits_for',
         ),
         (
             lambda: _quorum(min_success=1, join='all'),
-            ErrorCode.WORKFLOW_INVALID_JOIN,
+            HorsiesErrorCode.WORKFLOW_INVALID_JOIN,
             "use join='quorum'",
         ),
-        (_task_key, ErrorCode.WORKFLOW_INVALID_NODE_ID, 'set node_id on the node'),
+        (_task_key, HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID, 'set node_id on the node'),
         (
             _subworkflow_key,
-            ErrorCode.WORKFLOW_INVALID_NODE_ID,
+            HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID,
             'set node_id on the node',
         ),
-        (_no_name, ErrorCode.WORKFLOW_NO_NAME, "name = 'my_workflow'"),
-        (_no_nodes, ErrorCode.WORKFLOW_NO_NODES, 'in place of build()'),
-        (_no_definition_key, ErrorCode.WORKFLOW_NO_DEFINITION_KEY, 'definition_key ='),
+        (_no_name, HorsiesErrorCode.WORKFLOW_NO_NAME, "name = 'my_workflow'"),
+        (_no_nodes, HorsiesErrorCode.WORKFLOW_NO_NODES, 'in place of build()'),
+        (_no_definition_key, HorsiesErrorCode.WORKFLOW_NO_DEFINITION_KEY, 'definition_key ='),
         (
             _duplicate_definition_key,
-            ErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY,
+            HorsiesErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY,
             'its own definition_key',
         ),
         (
             _cached_spec,
-            ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
+            HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
             'new WorkflowSpec inside build_with()',
         ),
         (
             _value_built_past_validation,
-            ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+            HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
             'decodes back to its declared type',
         ),
         (
             _value_with_a_field_the_type_lacks,
-            ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+            HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
             'declare the field on that type',
         ),
-        (_broker_that_fails, ErrorCode.BROKER_INIT_FAILED, 'check database_url'),
+        (_broker_that_fails, HorsiesErrorCode.DATABASE_INIT_FAILED, 'check database_url'),
     ],
     ids=[
         'no_tasks',
@@ -452,7 +452,7 @@ def _broker_that_fails() -> None:
 )
 def test_the_report_names_the_fix(
     trigger: Callable[[], None],
-    code: ErrorCode,
+    code: HorsiesErrorCode,
     hint: str,
 ) -> None:
     with pytest.raises(HorsiesError) as refused:
@@ -490,7 +490,7 @@ class TestARefusedSignatureSplitsItsReport:
             def banned(*, value: Any) -> Result[int, TaskError]:
                 return Ok(1)
 
-        assert refused.value.code is ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
+        assert refused.value.code is HorsiesErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
         assert 'Fix:' not in refused.value.message
         assert "parameter 'value'" in refused.value.message
         self._assert_parts(refused.value)
@@ -502,7 +502,7 @@ class TestARefusedSignatureSplitsItsReport:
                 tasks=[SubWorkflowNode(workflow_def=_RefusedChild)],
             )
 
-        assert refused.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert refused.value.code is HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
         self._assert_parts(refused.value)
 
     def test_at_the_boot_check(self) -> None:
@@ -526,6 +526,6 @@ class TestARefusedSignatureSplitsItsReport:
             errors = _app._check_workflow_definitions()
 
         assert [error.code for error in errors] == [
-            ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+            HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
         ]
         self._assert_parts(errors[0])

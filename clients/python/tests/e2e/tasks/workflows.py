@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from horsies.core.codec.json_value import JsonValue
 from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
-from horsies.core.models.tasks import SubWorkflowError, TaskError
+from horsies.core.models.tasks import SubWorkflowFailure, TaskError
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.models.workflow import TaskNode, SuccessPolicy, SuccessCase
 
@@ -802,8 +802,15 @@ spec_dual_injection = _workflow(
 # =============================================================================
 
 import os
+from enum import Enum
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
 from horsies.core.models.tasks import RetryPolicy
+
+
+class WorkflowRetryCode(str, Enum):
+    """The code that ``e2e_wf_retry_then_ok`` retries on."""
+
+    RETRY_NEEDED = 'RETRY_NEEDED'
 
 
 @app.task(name='e2e_wf_mark')
@@ -826,7 +833,10 @@ def slow_mark_task(*, value: str, delay_ms: int = 200) -> Result[str, TaskError]
 
 @app.task(
     name='e2e_wf_retry_then_ok',
-    retry_policy=RetryPolicy.exponential(base_seconds=1, max_retries=3, retry_for=['RETRY_NEEDED']),
+    error_codes=WorkflowRetryCode,
+    retry_policy=RetryPolicy.exponential(
+        base_seconds=1, max_retries=3, retry_for=[WorkflowRetryCode.RETRY_NEEDED],
+    ),
 )
 def retry_then_ok_task(
     *, counter_file: str, succeed_on_attempt: int = 2
@@ -1135,18 +1145,18 @@ def e2e_sub_probe_failed_child_task(
 
     return Ok({
         'args_lookup_ok': True,
-        'args_is_subworkflow_error': isinstance(args_err, SubWorkflowError),
+        'args_is_subworkflow_error': isinstance(args_err, SubWorkflowFailure),
         'args_sub_workflow_id': (
-            args_err.sub_workflow_id if isinstance(args_err, SubWorkflowError) else None
+            args_err.sub_workflow_id if isinstance(args_err, SubWorkflowFailure) else None
         ),
         'ctx_lookup_ok': ctx_lookup_ok,
-        'ctx_is_subworkflow_error': isinstance(ctx_err, SubWorkflowError),
+        'ctx_is_subworkflow_error': isinstance(ctx_err, SubWorkflowFailure),
         'ctx_sub_workflow_id': (
-            ctx_err.sub_workflow_id if isinstance(ctx_err, SubWorkflowError) else None
+            ctx_err.sub_workflow_id if isinstance(ctx_err, SubWorkflowFailure) else None
         ),
         'ids_match': (
-            isinstance(args_err, SubWorkflowError)
-            and isinstance(ctx_err, SubWorkflowError)
+            isinstance(args_err, SubWorkflowFailure)
+            and isinstance(ctx_err, SubWorkflowFailure)
             and args_err.sub_workflow_id == ctx_err.sub_workflow_id
         ),
         'summary_lookup_ok': summary_lookup_ok,

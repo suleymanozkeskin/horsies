@@ -95,7 +95,7 @@ app. Two apps in one process share no registration.
   `PreconditionFailed`. The message names the task. Nothing is written.
 - `builder.task(node)` on a builder of an app that does not register the
   task returns a `HorsiesError` with `HRS-302`
-  (`ErrorCode::WorkflowUnregisteredTask`). The node is not added.
+  (`HorsiesErrorCode::WorkflowUnregisteredTask`). The node is not added.
 - `register` checks the codes of the code type (`CustomErrorCode::CODES`):
   a built-in or reserved name is `HRS-212`; a code that is empty, not
   `UPPER_SNAKE_CASE` or an exception class name is `HRS-112`; a code given
@@ -113,7 +113,7 @@ app. Two apps in one process share no registration.
 ## `TaskError<E>`
 
 ```rust
-use horsies::{task, CustomErrorCode, OperationalErrorCode, TaskError};
+use horsies::{task, CustomErrorCode, TaskError, OperationalCode};
 
 #[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum ChargeCode {
@@ -124,7 +124,7 @@ enum ChargeCode {
 #[task("charge_card")]
 async fn charge_card(amount_cents: u64) -> Result<String, TaskError<ChargeCode>> {
     if amount_cents == 0 {
-        return Err(TaskError::built_in(OperationalErrorCode::TaskException, "nothing to charge"));
+        return Err(TaskError::built_in(OperationalCode::TaskException, "nothing to charge"));
     }
     Err(TaskError::custom(ChargeCode::CardDeclined, "the issuer declined the card")
         .with_data(serde_json::json!({ "amount_cents": amount_cents })))
@@ -139,7 +139,7 @@ name of a built-in code or of the reserved code `WORKFLOW_STOPPED`.
 | Item | Returns |
 |---|---|
 | `TaskError::custom(code, message)` | An error with a custom code: a code of `E` |
-| `TaskError::built_in(code, message)` | An error with a built-in code: `BuiltInTaskCode` or a family (`OperationalErrorCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`) |
+| `TaskError::built_in(code, message)` | An error with a built-in code: `BuiltInTaskCode` or a family (`OperationalCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`) |
 | `.with_data(value)` | This error with `data`. Never fails |
 | `.code()` | `&TaskErrorCode<E>`: `BuiltIn(BuiltInTaskCode)` or `Custom(E)` |
 | `.code().as_str()` | The stored code text |
@@ -445,7 +445,7 @@ A send runs these steps in order and stops at the first refusal:
 
 1. A generated send finds the task in the app that it names. An app that
    does not register the task refuses with `ValidationFailed`.
-2. Send suppression: a suppressed send returns `SendSuppressed`.
+2. Send suppression: a suppressed send returns `Suppressed`.
 3. The retention of the send.
 4. The read-back of the input: encode it, decode the text with `A`, encode
    that value again. Two different texts refuse the send with
@@ -490,13 +490,13 @@ fn invoice_options(invoice_id: u64) -> TaskSendOptions {
 
 | Variant | Code | Fields | `resend` |
 |---|---|---|---|
-| `SendSuppressed` | `SEND_SUPPRESSED` | `message` | Refused |
+| `Suppressed` | `SEND_SUPPRESSED` | `message` | Refused |
 | `AsyncContext` | `ASYNC_CONTEXT` | `task_id`, `payload`, `message` | Accepted |
 | `ValidationFailed` | `VALIDATION_FAILED` | `message`, `cause` | Refused |
 | `EnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable`, `cause` | Accepted |
 | `PayloadMismatch` | `PAYLOAD_MISMATCH` | `task_id`, `payload`, `message` | Refused |
 | `PayloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `size_bytes`, `limit_bytes` | Refused |
-| `IdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` | Accepted |
+| `IdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` | Refused |
 
 - `ValidationFailed` with the cause `PreconditionFailed` is also the answer
   of a generated send through an app that does not register the task.
@@ -510,7 +510,10 @@ fn invoice_options(invoice_id: u64) -> TaskSendOptions {
 - `PayloadMismatch`: the task id exists with another command or key.
   Nothing was written.
 - `IdempotencyKeyConflict`: another task (`owner_task_id`) holds the key
-  with another command. Nothing was written.
+  with another command. Nothing was written. A repeat of the same send does
+  not complete it: send the same command as the owner task, or use another
+  key. The reservation ends `reservation_window` after the owner task
+  finishes; a send with the key after that time starts a new task.
 - `error.code()` returns the `TaskSendErrorCode`.
 - A send in a fork panics, as every call that runs on the core: see
   `SKILL.md`, Result Types.
@@ -543,7 +546,7 @@ wrote answers with its id, also after it finished, and does not run again.
 It refuses with `ValidationFailed` an error with no payload and the error of
 another task.
 
-With `AppConfig.resend_on_transient_err`, a retryable `EnqueueFailed` is
+With `AppConfig.resend_on_transient_error`, a retryable `EnqueueFailed` is
 sent again up to 3 times, after 200, 400 and 800 ms, as a repeat.
 
 ## `TaskHandle<T, E>` — Reads
@@ -589,7 +592,7 @@ async fn print_outcome(
 | `InvalidInput { task_id, cause }` | `INVALID_INPUT` | The `Within` limit is above `MAX_WAIT_LIMIT_MS`; `cause` is `WaitLimitRefused`. Nothing was read | No |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A result wait in a worker child. Nothing was read | No |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking read on a thread that runs a tokio runtime. Nothing was read | No |
-| `DatabaseError { database_code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed; `database_code` is the code of the failed operation | No |
+| `DatabaseError { database_code, message, retryable }` | `DATABASE_ERROR` | The database or the connection failed; `database_code` is the code of the failed operation | No |
 
 - `ReadError::code()` returns the built-in code of the failure.
 - `reason` is a `TaskAbsenceReason`: `PredatesRetainedHistory` (retention
@@ -625,7 +628,7 @@ calling thread.
 |---|---|---|
 | `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `with_options(..).send`, `resend` |
 | `TaskHandleView` | `handle.blocking()` | `get`, `info` |
-| `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_class_coverage`, `get_class_report`, `check_live`, `start`, `start_with_id`, `start_workflow`, `start_workflow_with` |
+| `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_execution_class_coverage`, `get_execution_class_report`, `check_live`, `start`, `start_with_id`, `start_workflow`, `start_workflow_with` |
 | `WorkflowFunctionView` | `workflow_function.blocking()` | `start`, `start_with_id`, `retry_start` |
 | `WorkflowTemplateView` | `workflow_template.blocking()` | `start`, `start_with_id` |
 | `WorkflowHandleView` | `workflow_handle.blocking()` | `get`, `result_for`, `status`, `results`, `tasks`, `cancel`, `pause`, `resume` |
@@ -638,17 +641,17 @@ The starts of a definition by its type are methods of the app view:
   returns the `ASYNC_CONTEXT` member of its catalog:
   `TaskSendError::AsyncContext` (with the prepared task id and payload, so
   `resend(&error).await` completes the same send),
-  `ReadError::AsyncContext`, `BrokerOperationError::AsyncContext`, a
-  `CheckReport` with `HRS-217`,
+  `ReadError::AsyncContext`, `DatabaseOperationError::AsyncContext`, a
+  `ValidationReport` with `HRS-217`,
   `WorkflowStartError::AsyncContext` (with the `workflow_id` of the
   start; `retry_start(&error).await` completes the same start from async
-  code), `HandleOperationError::AsyncContext`, or
+  code), `WorkflowHandleError::AsyncContext`, or
   `WorkflowReadError::AsyncContext`.
 - The thread of a `#[blocking_task]` body in a worker child drives no async
   task, so a blocking send or workflow start works there. A result wait in
   a worker child is still `WaitInsideTask`.
 - A refused input is refused before the thread check: a suppressed send is
-  `SendSuppressed` on any thread, and a read with a `Within` limit above
+  `Suppressed` on any thread, and a read with a `Within` limit above
   `MAX_WAIT_LIMIT_MS` is `InvalidInput` on any thread. A workflow start
   checks the thread first, as Python's `WorkflowSpec.start`: on a runtime
   thread a template's build does not run. `retry_start` checks its error
@@ -691,10 +694,12 @@ In a transaction that the caller owns (feature `sqlx`; feature
 ```rust
 use chrono::Utc;
 use horsies::rerun::{rerun_task_in, RerunCommand, RerunEnqueuePolicy, RerunOutcome, SqlxCaller};
+use horsies::Horsies;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 async fn rerun_with_audit(
+    app: &Horsies,
     pool: &PgPool,
     source_task_id: Uuid,
 ) -> Result<RerunOutcome, Box<dyn std::error::Error>> {
@@ -707,6 +712,7 @@ async fn rerun_with_audit(
         &mut SqlxCaller::new(&mut transaction),
         &RerunCommand::new(source_task_id, None, None),
         &RerunEnqueuePolicy::standard(true),
+        &app.registered_task_codes(),
         Utc::now(),
     )
     .await?;
@@ -733,8 +739,18 @@ async fn rerun_with_audit(
   `Rerun(RerunError)`.
 - `CallerRerunError<E>`: `DriverFailed(E)`, `ClassNotRegistered { key }`,
   `ClientFamilyMismatch { stored }`, `UnknownStoredFamily` (a family row
-  that holds no client family), `IdempotencyKeyRefused`, `IdMintRefused`,
-  `Row`.
+  that holds no client family), `IdempotencyKeyRefused`,
+  `RetryCodeNotDeclared { task_name, retry_code }`, `TaskNotRegistered
+  { task_name }`, `IdMintRefused`, `Row`.
+- The stored retry list of the source is checked before the write: a
+  built-in code passes; a custom code passes when the app registers the
+  task and the task declares the code. `app.rerun_task` reads the app's
+  registry; `rerun_task_in` takes `&app.registered_task_codes()`. A custom
+  code that the task does not declare is `RetryCodeNotDeclared`
+  (`RerunErrorCode::RetryCodeNotDeclared`); a custom code of a task that
+  the app does not register is `TaskNotRegistered`
+  (`RerunErrorCode::TaskNotRegistered`). Nothing is written; not
+  retryable. `RerunError` has the same two variants.
 
 | `RerunOutcome` | Meaning |
 |---|---|
@@ -817,7 +833,7 @@ use horsies::{
     StoredDateTime, RetryPolicy, RetryPolicyError, Execution, TaskOptions,
     RegisteredTask, async_task_fn, blocking_task_fn,
     // Built-in codes
-    BuiltInTaskCode, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode,
+    BuiltInTaskCode, OperationalCode, ContractCode, RetrievalCode, OutcomeCode,
     ExceptionRecord, SubWorkflowFailure, CustomCode, CustomCodeRefused, UnknownCustomCode,
     // Sends
     TaskFunction, TaskFunctionWithOptions, TaskFunctionNotFound, TaskSendOptions,

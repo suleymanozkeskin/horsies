@@ -45,7 +45,7 @@ def _custom_app(broker: PostgresBroker) -> Horsies:
     app = Horsies(
         AppConfig(
             queue_mode=QueueMode.CUSTOM,
-            broker=broker.config,
+            database=broker.config,
             custom_queues=[
                 CustomQueueConfig(
                     name='scraping', priority=SCRAPING_PRIORITY, max_concurrency=1,

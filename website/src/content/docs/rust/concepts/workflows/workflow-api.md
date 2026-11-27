@@ -172,7 +172,7 @@ Steps 1 to 3 refuse with `ValidationFailed` before any I/O.
   - Another workflow name: `WORKFLOW_ID_CONFLICT`.
   - A run started before this release has no stored start command: the handle of that workflow, with no compare.
 - A start names its app, as a send does. `app.start_workflow::<D>()` and `app.start_workflow_with::<D>(params)` on an app that does not register `D` in that form are `VALIDATION_FAILED` with the cause `PreconditionFailed`. Nothing is written, and the build does not run. A registration on another app of the process does not count.
-- With `AppConfig.resend_on_transient_err`, the core runs a retryable start failure again with the same workflow id and start time, up to 3 times.
+- With `AppConfig.resend_on_transient_error`, the core runs a retryable start failure again with the same workflow id and start time, up to 3 times.
 - In a worker child a start goes through the child's producer handle, as a send does.
 
 ### Start from a Task
@@ -273,7 +273,7 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 | `pause()` | `HandleResult<bool>`: `true` when a RUNNING workflow paused, `false` when it is not RUNNING |
 | `resume()` | `HandleResult<bool>`: `true` when a PAUSED workflow resumed, `false` when it is not PAUSED. The children that the resume owes build from the app's registered definitions |
 
-`HandleResult<T>` is `Result<T, HandleOperationError>`. Clones of a handle share one workflow.
+`HandleResult<T>` is `Result<T, WorkflowHandleError>`. Clones of a handle share one workflow.
 
 `get`:
 
@@ -312,18 +312,18 @@ A workflow with no output node is read as `OutputlessResults`: the outcome of ea
 | `InvalidInput { workflow_id, cause }` | `INVALID_INPUT` | `get`: the `Within` limit is above `MAX_WAIT_LIMIT_MS`; `cause` is `WaitLimitRefused`. Nothing was read |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A wait in a worker child. Nothing was read |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking `get` or `result_for` (`handle.blocking()`) on a thread that runs a tokio runtime. Nothing was read |
-| `DatabaseError { database_code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed; `database_code` is the `HandleErrorCode` of the failed operation. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
+| `DatabaseError { database_code, message, retryable }` | `DATABASE_ERROR` | The database or the connection failed; `database_code` is the `WorkflowHandleErrorCode` of the failed operation. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
 
 `WorkflowReadError::code()` returns the built-in code of the failure.
 
-### HandleOperationError
+### WorkflowHandleError
 
-`status`, `results`, `tasks`, `cancel`, `pause` and `resume` return `HandleOperationError`, an enum with one variant per state: `WorkflowNotFound`, `DbOperationFailed` (with `retryable` and `cause`), `StoredDataInvalid` and `ResumeRecoveryFailed` (with `cause`), and `AsyncContext`. Every variant has `message` and `workflow_id`; the methods `code()`, `message()`, `retryable()`, `workflow_id()` and `failure_cause()` read them. The `cause` is the `WorkflowError` that failed the operation; a failed connect is `WorkflowError::Broker`. The message of a failure starts with the operation's label, as Python's handle: `Status failed for workflow <id>: <cause>`; `WorkflowNotFound` has `Workflow <id> not found`. `retryable()` is `false` for every variant but `DbOperationFailed`:
+`status`, `results`, `tasks`, `cancel`, `pause` and `resume` return `WorkflowHandleError`, an enum with one variant per state: `NotFound`, `DatabaseOperationFailed` (with `retryable` and `cause`), `StoredDataInvalid` and `ResumeRecoveryFailed` (with `cause`), and `AsyncContext`. Every variant has `message` and `workflow_id`; the methods `code()`, `message()`, `retryable()`, `workflow_id()` and `failure_cause()` read them. The `cause` is the `WorkflowError` that failed the operation; a failed connect is `WorkflowError::Broker`. The message of a failure starts with the operation's label, as Python's handle: `Status failed for workflow <id>: <cause>`; `NotFound` has `Workflow <id> not found`. `retryable()` is `false` for every variant but `DatabaseOperationFailed`:
 
-| `HandleErrorCode` | Returned by |
+| `WorkflowHandleErrorCode` | Returned by |
 |-------------------|-------------|
 | `WorkflowNotFound` | Each operation |
-| `DbOperationFailed` | Each operation: the connect, a statement or the commit failed |
+| `DatabaseOperationFailed` | Each operation: the connect, a statement or the commit failed |
 | `StoredDataInvalid` | `status`, `tasks`, `resume`: a stored value does not parse. Nothing changed. Not retryable |
 | `ResumeRecoveryFailed` | `resume`: the resume committed and the recovery pass after it failed. The workflow is RUNNING. Not retryable |
 | `AsyncContext` | Each blocking form (`handle.blocking()`) on a thread that runs a tokio runtime. Nothing ran. Not retryable |

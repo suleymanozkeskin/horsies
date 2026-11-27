@@ -44,7 +44,7 @@ Horsies is a distributed task queue library and comes with DAG like workflow sup
   .> role:          worker
   .> queue_mode:    CUSTOM
   .> queues:        high, normal, low
-  .> broker:        postgresql://postgres:****@localhost:5432/horsies
+  .> database:      postgresql://postgres:****@localhost:5432/horsies
   .> pgbouncer_tx:  no
   .> cluster_cap:   50 (cluster-wide)
 

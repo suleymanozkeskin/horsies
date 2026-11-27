@@ -1,9 +1,9 @@
-"""`ErrorCode` is the catalog that `horsies-codegen` renders from the core.
+"""`HorsiesErrorCode` is the catalog that `horsies-codegen` renders from the core.
 
-The core `ErrorCode` (`core/src/core/error/mod.rs`) is the one list of the
+The core `HorsiesErrorCode` (`core/src/core/error/mod.rs`) is the one list of the
 `HRS-nnn` codes. `horsies-codegen check` fails when
 `horsies._catalog.error_codes` differs from it. `test_docs_enum_lists.py`
-compares each docs list of the codes with `horsies.ErrorCode`, which is this
+compares each docs list of the codes with `horsies.HorsiesErrorCode`, which is this
 class.
 """
 
@@ -22,16 +22,16 @@ pytestmark = [pytest.mark.unit]
 
 
 def test_the_public_error_code_is_the_generated_catalog() -> None:
-    assert errors.ErrorCode is error_codes.ErrorCode
-    assert horsies.ErrorCode is error_codes.ErrorCode
-    assert error_codes.ErrorCode.__module__ == 'horsies._catalog.error_codes'
+    assert errors.HorsiesErrorCode is error_codes.HorsiesErrorCode
+    assert horsies.HorsiesErrorCode is error_codes.HorsiesErrorCode
+    assert error_codes.HorsiesErrorCode.__module__ == 'horsies._catalog.error_codes'
 
 
 def test_a_config_refusal_raises_with_the_generated_member() -> None:
     with pytest.raises(ConfigurationError) as raised:
         CustomQueueConfig(name='')
 
-    assert raised.value.code is error_codes.ErrorCode.CONFIG_INVALID_QUEUE_MODE
+    assert raised.value.code is error_codes.HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE
     assert 'error[HRS-200]:' in str(raised.value)
 
 
@@ -41,5 +41,5 @@ def test_a_registry_refusal_raises_with_the_generated_member() -> None:
     with pytest.raises(NotRegistered) as raised:
         _ = registry['missing']
 
-    assert raised.value.code is error_codes.ErrorCode.TASK_NOT_REGISTERED
+    assert raised.value.code is error_codes.HorsiesErrorCode.TASK_NOT_REGISTERED
     assert 'error[HRS-300]:' in str(raised.value)

@@ -19,7 +19,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, Err, Ok, Result, TaskError, JsonValue
 
 config = AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
 app = Horsies(config)
 
@@ -248,23 +248,31 @@ Unhandled exceptions are wrapped automatically:
 def might_crash() -> Result[str, TaskError]:
     raise ValueError("Something went wrong")
     # Becomes Err(TaskError(
-    #     code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+    #     code=OperationalCode.UNHANDLED_EXCEPTION,
     #     message="Unhandled exception in task might_crash: ...",
     # ))
 ```
 
 ### Configure Retries
 
-`retry_policy` takes a `RetryPolicy`. A failure retries when its error code is in `retry_for` and retries remain. The policy fields, the delay steps and the retry rules are on [Retry Policy](/horsies/tasks/retry-policy/).
+`retry_policy` takes a `RetryPolicy`. A failure retries when its error code is in `retry_for` and retries remain. The entries of `auto_retry_for` are code members: members of the built-in code enums, or members of the `Enum` class that the task declares with `error_codes=` ([Declare Error Codes](#declare-error-codes)). The policy fields, the delay steps and the retry rules are on [Retry Policy](/horsies/tasks/retry-policy/).
 
 ```python
+from enum import Enum
+
 from horsies import RetryPolicy, Err, Ok, Result, TaskError, JsonValue
+
+
+class SyncCode(str, Enum):
+    TRANSIENT_ERROR = "TRANSIENT_ERROR"
+
 
 @app.task(
     "flaky_task",
-    retry_policy=RetryPolicy.fixed([60, 300, 900], retry_for=["TRANSIENT_ERROR"]),
+    error_codes=SyncCode,
+    retry_policy=RetryPolicy.fixed([60, 300, 900], retry_for=[SyncCode.TRANSIENT_ERROR]),
 )
-def flaky_task() -> Result[str, TaskError]:
+def flaky_task() -> Result[str, TaskError[SyncCode]]:
     # Retries up to 3 times, after 1 min, 5 min and 15 min
     ...
 ```
@@ -279,35 +287,35 @@ def flaky_task() -> Result[str, TaskError]:
 
 ```python
 # Fixed: wait 1 min, then 5 min, then 15 min
-RetryPolicy.fixed([60, 300, 900], retry_for=["TRANSIENT_ERROR"])
+RetryPolicy.fixed([60, 300, 900], retry_for=[SyncCode.TRANSIENT_ERROR])
 
 # Equivalent to:
 RetryPolicy(
     max_retries=3,
     intervals_seconds=[60, 300, 900],
     backoff_strategy='fixed',
-    retry_for=["TRANSIENT_ERROR"],
+    retry_for=[SyncCode.TRANSIENT_ERROR],
 )
 
 # Exponential with base 30 s: retry after 30 s, 60 s, 120 s, 240 s, 480 s
-RetryPolicy.exponential(base_seconds=30, max_retries=5, retry_for=["TRANSIENT_ERROR"])
+RetryPolicy.exponential(base_seconds=30, max_retries=5, retry_for=[SyncCode.TRANSIENT_ERROR])
 
 # Equivalent to:
 RetryPolicy(
     max_retries=5,
     intervals_seconds=[30],  # one base interval
     backoff_strategy='exponential',
-    retry_for=["TRANSIENT_ERROR"],
+    retry_for=[SyncCode.TRANSIENT_ERROR],
 )
 
 # No jitter, for delays that are the same on each run
-RetryPolicy.fixed([60, 300, 900], retry_for=["TRANSIENT_ERROR"], jitter=False)
+RetryPolicy.fixed([60, 300, 900], retry_for=[SyncCode.TRANSIENT_ERROR], jitter=False)
 
 # Exponential, but never wait longer than 10 minutes between retries
 RetryPolicy.exponential(
     base_seconds=30,
     max_retries=10,
-    retry_for=["TRANSIENT_ERROR"],
+    retry_for=[SyncCode.TRANSIENT_ERROR],
     max_delay_seconds=600,
 )
 
@@ -317,7 +325,7 @@ RetryPolicy(
     intervals_seconds=[30],
     backoff_strategy='exponential',
     max_delay_seconds=600,
-    retry_for=["TRANSIENT_ERROR"],
+    retry_for=[SyncCode.TRANSIENT_ERROR],
 )
 ```
 
@@ -325,14 +333,14 @@ RetryPolicy(
 
 | Field | Type | Default |
 | ----- | ---- | ------- |
-| `retry_for` | `list[str \| BuiltInTaskCode]` | (required) |
+| `retry_for` | `list[BuiltInTaskCode \| Enum]` | (required) |
 | `max_retries` | `int` | `3` |
 | `intervals_seconds` | `list[int]` | `[60, 300, 900]` |
 | `backoff_strategy` | `Literal['fixed', 'exponential']` | `'fixed'` |
 | `jitter` | `bool` | `True` |
 | `max_delay_seconds` | `int \| None` | `None` (no cap) |
 
-A `retry_for` entry is a code string or a `BuiltInTaskCode` member. A name in the form of an exception class, such as `"TimeoutError"`, is refused: retries match error codes only.
+A `retry_for` entry is a code member: a `BuiltInTaskCode` member, or a member of the `Enum` class of the task's `error_codes=`. Pyright refuses a plain `str`. The constructor does not check the entries: `@app.task` checks them against the codes of the task. It refuses a plain `str` (also a misspelled code such as `"BROKR_ERROR"`), a member of another `Enum` class, and a custom member of a task that declares a tuple or no `error_codes`, with `TaskDefinitionError` `TASK_INVALID_OPTIONS` (`HRS-102`). The notes name the task and the entry, and the task is not registered. A task that retries on a code of its own declares the code in an `Enum` class. The stored policy holds the text of each code.
 
 A policy that breaks a rule of [Policy Fields](/horsies/tasks/retry-policy/#policy-fields) raises `ValueError` when it is built:
 
@@ -342,7 +350,7 @@ RetryPolicy(
     max_retries=3,
     intervals_seconds=[60, 300],  # Only 2 intervals for 3 retries
     backoff_strategy='fixed',
-    retry_for=["TRANSIENT_ERROR"],
+    retry_for=[SyncCode.TRANSIENT_ERROR],
 )
 
 # This also raises ValueError:
@@ -350,7 +358,7 @@ RetryPolicy(
     max_retries=3,
     intervals_seconds=[60, 300, 900],  # Multiple intervals
     backoff_strategy='exponential',  # Exponential needs exactly 1 interval
-    retry_for=["TRANSIENT_ERROR"],
+    retry_for=[SyncCode.TRANSIENT_ERROR],
 )
 ```
 
@@ -359,40 +367,53 @@ RetryPolicy(
 Return a `TaskError` with a code that `retry_for` lists:
 
 ```python
+class ApiCode(str, Enum):
+    RATE_LIMITED = "RATE_LIMITED"
+    SERVICE_UNAVAILABLE = "SERVICE_UNAVAILABLE"
+    TIMEOUT = "TIMEOUT"
+
+
 @app.task(
     "call_external_api",
+    error_codes=ApiCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=60,
         max_retries=5,
-        retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"],
+        retry_for=[ApiCode.RATE_LIMITED, ApiCode.SERVICE_UNAVAILABLE],
     ),
 )
-def call_external_api() -> Result[dict[str, JsonValue], TaskError]:
+def call_external_api() -> Result[dict[str, JsonValue], TaskError[ApiCode]]:
     try:
         response = requests.get("https://api.example.com")
         if response.status_code == 429:
             return Err(TaskError(
-                code="RATE_LIMITED",
+                code=ApiCode.RATE_LIMITED,
                 message="the API answered 429",
             ))
         return Ok(response.json())
     except requests.Timeout:
         return Err(TaskError(
-            code="TIMEOUT",
+            code=ApiCode.TIMEOUT,
             message="the API did not answer in time",
         ))
 ```
 
-`retry_for` reads `code` only. `message` is optional: `TaskError(code="RATE_LIMITED")` retries in the same way.
+`retry_for` reads `code` only. `message` is optional: `TaskError(code=ApiCode.RATE_LIMITED)` retries in the same way.
 
 #### Map Exceptions to Codes
 
 `exception_mapper` maps an exception that the task raises to an error code, so the task needs no try/except. The mapper matches the exact exception class (`type(exc)`).
 
 ```python
+class CallCode(str, Enum):
+    TIMEOUT = "TIMEOUT"
+    CONNECTION_ERROR = "CONNECTION_ERROR"
+
+
 @app.task(
     "call_api",
-    retry_policy=RetryPolicy.fixed([30, 60, 120], retry_for=["TIMEOUT", "CONNECTION_ERROR"]),
+    error_codes=CallCode,
+    retry_policy=RetryPolicy.fixed([30, 60, 120], retry_for=[CallCode.TIMEOUT, CallCode.CONNECTION_ERROR]),
     exception_mapper={
         TimeoutError: "TIMEOUT",
         ConnectionError: "CONNECTION_ERROR",
@@ -410,7 +431,7 @@ A mapper on `AppConfig` applies to all tasks:
 from pydantic import SecretStr
 
 config = AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://...")),
     exception_mapper={
         TimeoutError: "TIMEOUT",
         ConnectionError: "CONNECTION_ERROR",
@@ -463,12 +484,12 @@ def register(app: Horsies) -> None:
 - The body passes members of `E` (`ChargeCode.CARD_DECLINED`). A `str` code is a `RETURN_TYPE_MISMATCH`.
 - The stored text is the value of the member. It does not change.
 - These reads give members of `E` back: `TaskHandle.get()`; `WorkflowHandle.result_for(node)` and `WorkflowContext.result_for(node)` for a node of the task (`task.node()(...)` gives a `TaskNode[T, E]`); an `args_from` parameter annotated `TaskOutcome[T, TaskError[E]]`; the entries of `results()`, `tasks()` and the map of an outputless workflow's `get()`; and `app.get_result()`, typed `TaskError[Any]`.
-- A stored code that `E` does not name (a row of another version of the task) is the read failure `ReadUnknownCustomCode`. In a map of node outcomes and in a workflow context, it is a failed entry with `RESULT_DESERIALIZATION_ERROR`; for an `args_from` input, the node fails with `WORKER_SERIALIZATION_ERROR`.
+- A stored code that `E` does not name (a row of another version of the task) is the read failure `ReadUnknownCustomCode` (`UNKNOWN_CUSTOM_CODE`). In a map of node outcomes and in a workflow context, it is a failed entry with `RESULT_DESERIALIZATION_ERROR`; for an `args_from` input, the node fails with `WORKER_SERIALIZATION_ERROR`.
 - The error of a workflow that `WorkflowHandle.get()` gives keeps its custom code as text. That error is the error of the failed node, which can be any node of the workflow, with the codes of its own task, so no one `Enum` names it.
 - A `SubWorkflowNode` gives custom codes as text: a child workflow holds the codes of many tasks.
 - A `match` on `task_error.code` that leaves out a member of `E` fails pyright's exhaustiveness check.
 
-A task that returns `TaskError` keeps `str` codes with any declaration. Declaring is optional, and the default is `()`. A custom code that the task does not declare still works everywhere; its metric label is `undeclared`.
+A task that returns `TaskError` keeps `str` codes with any declaration. Declaring is optional, and the default is `()`. A custom code that the task does not declare still works everywhere; its metric label is `undeclared`. An `auto_retry_for` entry of a code of the task's own is a member of the declared `Enum` class, so a task that retries on its own code declares an `Enum` class ([Configure Retries](#configure-retries)).
 
 The codes that the exception mappers can produce are declared with no second declaration: the values of the task's `exception_mapper` and of `AppConfig.exception_mapper` (as the app config holds it when the task is defined). A code that a task body returns directly needs `error_codes=`. For a task with `TaskError[E]`, a mapped exception gives the member of `E`, so each custom code of both mappers and both `default_unhandled_error_code` values must be the value of a member of `E`.
 
@@ -479,7 +500,8 @@ The decorator refuses:
 - a built-in code or `WORKFLOW_STOPPED`: `HRS-212`;
 - a code given twice: `HRS-113`;
 - `TaskError[E]` in the return annotation without `error_codes=E`: `HRS-105`;
-- for a task with `TaskError[E]`, a mapper code or a default code that `E` does not name: `HRS-209`.
+- for a task with `TaskError[E]`, a mapper code or a default code that `E` does not name: `HRS-209`;
+- a `retry_for` entry that is not a built-in member or a member of the declared `Enum` class: `HRS-102`.
 
 The task function keeps the codes in `error_codes`: the declared codes in the order of the declaration, then each mapper code that is not in the list yet, first the task's mapper, then the app's. `horsies check` lists them.
 
@@ -501,13 +523,13 @@ def resize_video(*, video_id: str) -> Result[str, TaskError]:
     ...
 ```
 
-On expiry, the worker kills the child process, waits for it to exit, and then fails the task with `TASK_TIMEOUT`. A result that reaches the worker after the deadline does not change this. An `async def` body that returned before the deadline is not timed out while the child waits for the asyncio tasks that it left (see [Async Tasks](#async-tasks)). If the deadline elapses before user code starts, the task is requeued instead. Timeouts are terminal by default; opt into retries by adding `"TASK_TIMEOUT"` to `retry_for`:
+On expiry, the worker kills the child process, waits for it to exit, and then fails the task with `TASK_TIMEOUT`. A result that reaches the worker after the deadline does not change this. An `async def` body that returned before the deadline is not timed out while the child waits for the asyncio tasks that it left (see [Async Tasks](#async-tasks)). If the deadline elapses before user code starts, the task is requeued instead. Timeouts are terminal by default; opt into retries by adding `OutcomeCode.TASK_TIMEOUT` to `retry_for`:
 
 ```python
 @app.task(
     "resize_video",
     timeout_ms=120_000,
-    retry_policy=RetryPolicy.fixed([60, 300], retry_for=["TASK_TIMEOUT"]),
+    retry_policy=RetryPolicy.fixed([60, 300], retry_for=[OutcomeCode.TASK_TIMEOUT]),
 )
 def resize_video(*, video_id: str) -> Result[str, TaskError]:
     ...
@@ -515,7 +537,7 @@ def resize_video(*, video_id: str) -> Result[str, TaskError]:
 
 The kill goes to the child and to the subprocesses in its session. Other tasks on the same worker continue. A subprocess that calls `setsid` itself leaves the session, and the kill does not reach it. The worker starts a new child in that slot, so size `timeout_ms` as a hang backstop well above normal runtime, not as routine control flow.
 
-The worker writes the timeout only after the child has exited. So a retry never runs next to the attempt that it replaces, and a workflow node that runs after a failure does not start while that attempt runs. If the child does not exit within 30 seconds of the kill, the worker writes nothing and logs at critical level. Then [stale-task recovery](/horsies/workers/heartbeats-recovery/) handles the task: a started task as a crashed worker's task, and a task that had not started when its claim lease ends. With stale RUNNING recovery off (no `RecoveryConfig`, or `auto_fail_stale_running=False`), nothing else would move the row, so the worker waits for the exit and writes the row once it sees it; a stop of the worker ends that wait.
+The worker writes the timeout only after the child has exited. So a retry never runs next to the attempt that it replaces, and a workflow node that runs after a failure does not start while that attempt runs. If the child does not exit within 30 seconds of the kill, the worker writes nothing and logs at critical level. Then [stale-task recovery](/horsies/workers/heartbeats-recovery/) handles the task: a started task as a crashed worker's task, and a task that had not started when its claim lease ends. With stale RUNNING recovery off (no `RecoveryConfig`, or `fail_stale_running=False`), nothing else would move the row, so the worker waits for the exit and writes the row once it sees it; a stop of the worker ends that wait.
 
 A task with `Execution.SHARED_ASYNC` on a shared async child is different. On expiry its child cancels it: the task gets `asyncio.CancelledError` at its next `await`. The task fails with `TASK_TIMEOUT` when it has stopped, with the work that it started, also when it returns a value after the cancel. If it has not stopped `cancel_grace_ms` after the cancel (default 1 second), the child cancels it a second time, and takes no new task. A task that still has not stopped is stuck: the worker kills the child when every task left in it is stuck, so no other task in that child loses time that it still had. Each of those tasks then fails with `TASK_TIMEOUT`. A task that blocks the event loop of its child for 5 seconds makes the worker kill the child at once: that task fails with `TASK_BLOCKED_LOOP`, each other task before its deadline with `NEIGHBOUR_BLOCKED_LOOP`. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/#the-timeout).
 
@@ -661,7 +683,7 @@ The stored options of the task hold the value in effect when the task is sent, s
 
 `@app.task` refuses a declaration that breaks a rule with a `TaskDefinitionError`, one code per rule:
 
-<!-- members: ErrorCode subset -->
+<!-- members: HorsiesErrorCode subset -->
 | Code | Name | Rule |
 | ---- | ---- | ---- |
 | HRS-107 | `TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF` | `SHARED_ASYNC` needs an `async def` function |

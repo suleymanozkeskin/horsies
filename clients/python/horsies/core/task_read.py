@@ -12,22 +12,21 @@ from typing import Any, assert_never
 from uuid import UUID
 
 from horsies.core.brokers.result_types import (
-    BrokerAsyncContext,
-    BrokerEnqueueFailed,
-    BrokerIdempotencyKeyConflict,
-    BrokerInvalidInput,
-    BrokerInvalidJsonPayload,
-    BrokerInvalidTaskOptions,
-    BrokerListenerDisabled,
-    BrokerNoTypeAvailable,
-    BrokerNotAttached,
-    BrokerOperationError,
-    BrokerOperationFailed,
-    BrokerPayloadMismatch,
-    BrokerResult,
-    BrokerWaitInsideTask,
+    DatabaseAsyncContext,
+    DatabaseEnqueueFailed,
+    DatabaseIdempotencyKeyConflict,
+    DatabaseInvalidInput,
+    DatabaseInvalidJsonPayload,
+    DatabaseInvalidTaskOptions,
+    DatabaseListenerDisabled,
+    DatabaseNoTypeAvailable,
+    DatabaseNotAttached,
+    DatabaseOperationError,
+    DatabaseOperationFailed,
+    DatabasePayloadMismatch,
+    DatabaseResult,
+    DatabaseWaitInsideTask,
     StoredResult,
-    broker_error_cause,
 )
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.typed import (
@@ -126,7 +125,7 @@ def _is_final_error(error: ReadError) -> bool:
             assert_never(unreachable)
 
 
-def _read_error_of_broker(task_id: UUID, error: BrokerOperationError) -> ReadError:
+def _read_error_of_broker(task_id: UUID, error: DatabaseOperationError) -> ReadError:
     """The read failure of a failed broker result read. Pure.
 
     A stored payload that does not read and a missing type are facts of the
@@ -135,26 +134,26 @@ def _read_error_of_broker(task_id: UUID, error: BrokerOperationError) -> ReadErr
     broker call does not return it.
     """
     match error:
-        case BrokerNoTypeAvailable(message=message):
+        case DatabaseNoTypeAvailable(message=message):
             return ReadNoTypeAvailable(message=message)
-        case BrokerInvalidJsonPayload(message=message):
+        case DatabaseInvalidJsonPayload(message=message):
             return ReadResultDeserializationError(message=message)
-        case BrokerWaitInsideTask(message=message):
+        case DatabaseWaitInsideTask(message=message):
             return ReadWaitInsideTask(message=message)
-        case BrokerAsyncContext():
+        case DatabaseAsyncContext():
             raise AssertionError(
                 f'the result read of task {task_id} got ASYNC_CONTEXT; the '
                 'reader refuses a running event loop before a sync broker call',
             )
         case (
-            BrokerOperationFailed()
-            | BrokerEnqueueFailed()
-            | BrokerPayloadMismatch()
-            | BrokerIdempotencyKeyConflict()
-            | BrokerNotAttached()
-            | BrokerInvalidTaskOptions()
-            | BrokerInvalidInput()
-            | BrokerListenerDisabled()
+            DatabaseOperationFailed()
+            | DatabaseEnqueueFailed()
+            | DatabasePayloadMismatch()
+            | DatabaseIdempotencyKeyConflict()
+            | DatabaseNotAttached()
+            | DatabaseInvalidTaskOptions()
+            | DatabaseInvalidInput()
+            | DatabaseListenerDisabled()
         ):
             return ReadDatabaseError(
                 message=(
@@ -162,7 +161,7 @@ def _read_error_of_broker(task_id: UUID, error: BrokerOperationError) -> ReadErr
                     f'({error.code.value}): {error.message}'
                 ),
                 retryable=error.retryable,
-                exception=broker_error_cause(error),
+                cause=error.failure_cause(),
             )
         case _ as unreachable:
             assert_never(unreachable)
@@ -170,7 +169,7 @@ def _read_error_of_broker(task_id: UUID, error: BrokerOperationError) -> ReadErr
 
 def read_of_record(
     task_id: UUID,
-    broker_result: BrokerResult[StoredResult | None],
+    broker_result: DatabaseResult[StoredResult | None],
     ok_type: TypeAnnotation | None,
     wait_ms: int | None,
     code_type: CustomCodeType,

@@ -32,7 +32,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::ended_spans::{EndedSpanScope, NODE_READER_STOP_BOUND};
 use super::host::ChildStartHook;
 use super::panic::{catch_body_panic, CatchPanic, PanicRecord};
-use crate::core::error::ErrorCode;
+use crate::core::error::HorsiesErrorCode;
 use crate::events::{AnyEvent, EventTypeName, UnionEvent};
 use crate::worker::executor::protocol::{
     HandlerCounts, HandlerCountsList, HandlerName, MAX_EVENT_HANDLERS,
@@ -56,7 +56,7 @@ pub const HANDLER_ERROR_LOG_EVERY: u64 = 1_000;
 /// The interval of the `handler_stats` frames of a handler child. Each frame
 /// holds the totals since the child started, so a lost frame loses no
 /// count.
-pub const HANDLER_STATS_INTERVAL: Duration = Duration::from_secs(5);
+pub const HANDLER_STATISTICS_INTERVAL: Duration = Duration::from_secs(5);
 
 /// After the stop frame, the handlers get this long, together, to take the
 /// events of their queues. The events still in a queue then are not
@@ -138,11 +138,11 @@ pub enum EventHandlerRefused {
 impl EventHandlerRefused {
     /// The code of this refusal: the code of the same refusal of the Python
     /// registration (`@app.on_event`), one code per refusal kind. Pure.
-    pub fn code(&self) -> ErrorCode {
+    pub fn code(&self) -> HorsiesErrorCode {
         match self {
-            Self::InvalidName { .. } => ErrorCode::EventHandlerInvalidName,
-            Self::RepeatedName { .. } => ErrorCode::EventHandlerDuplicateName,
-            Self::TooMany { .. } => ErrorCode::EventHandlerLimit,
+            Self::InvalidName { .. } => HorsiesErrorCode::EventHandlerInvalidName,
+            Self::RepeatedName { .. } => HorsiesErrorCode::EventHandlerDuplicateName,
+            Self::TooMany { .. } => HorsiesErrorCode::EventHandlerLimit,
         }
     }
 }

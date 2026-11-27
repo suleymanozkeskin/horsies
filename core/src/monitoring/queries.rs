@@ -439,7 +439,7 @@ fn is_data_corrupted(error: &BrokerError) -> bool {
     }
 }
 
-/// Rows of a monitoring function that do not decode: `DB_OPERATION_FAILED`,
+/// Rows of a monitoring function that do not decode: `DATABASE_OPERATION_FAILED`,
 /// not retryable.
 fn row_failure(operation: &str, error: RowDecodeError) -> MonitoringQueryError {
     MonitoringQueryError::broker(operation, BrokerError::RowDecode(error))
@@ -781,7 +781,7 @@ pub async fn list_tasks(
 /// - A history row that does not decode, or a published reader that reports
 ///   the task live after the live miss of the same snapshot, is
 ///   `HISTORY_CONTRACT_VIOLATION`; any other failure, a missing reader too,
-///   is `DB_OPERATION_FAILED`.
+///   is `DATABASE_OPERATION_FAILED`.
 pub async fn get_task_detail(
     broker: &PostgresBroker,
     task_id: Uuid,
@@ -864,7 +864,7 @@ pub async fn list_workflow_runs(
 /// each task of a node, live or in history at the locator of its
 /// `TASK_MOVED` event. No statement runs per node or per task.
 ///
-/// Errors: `DB_OPERATION_FAILED`; `HISTORY_CONTRACT_VIOLATION` for an
+/// Errors: `DATABASE_OPERATION_FAILED`; `HISTORY_CONTRACT_VIOLATION` for an
 /// attempt archive that does not decode, a run of more than 10,000 nodes, or
 /// a database with no bookkeeping row of migration 1001.
 pub async fn get_workflow_run(

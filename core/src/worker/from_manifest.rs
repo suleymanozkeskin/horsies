@@ -461,8 +461,8 @@ async fn worker_broker(
 
 /// The app config of the worker: the queue mode and the claim settings of
 /// the claim section, the four config sections, every profile, and the
-/// broker config of the app's connection settings. Pure.
-fn app_config_of(manifest: &WorkerManifest, broker: PostgresConfig) -> AppConfig {
+/// database config of the app's connection settings. Pure.
+fn app_config_of(manifest: &WorkerManifest, database: PostgresConfig) -> AppConfig {
     let claim = &manifest.claim;
     let (queue_mode, custom_queues) = match &claim.queues {
         Queues::Default => (QueueMode::Default, None),
@@ -486,10 +486,14 @@ fn app_config_of(manifest: &WorkerManifest, broker: PostgresConfig) -> AppConfig
     AppConfig {
         queue_mode,
         custom_queues,
-        broker,
+        database,
+        // The manifest keeps its own tags (`TASKS`, `NO_LIMIT`) for the two
+        // config states.
         cluster_wide_cap: match claim.cluster_wide_cap {
-            ClusterWideCap::Tasks { tasks } => Some(tasks.0.get()),
-            ClusterWideCap::NoLimit => None,
+            ClusterWideCap::Tasks { tasks } => crate::core::config::ClusterCapSetting::ClusterCap {
+                tasks: tasks.0.get(),
+            },
+            ClusterWideCap::NoLimit => crate::core::config::ClusterCapSetting::NoClusterCap,
         },
         prefetch_buffer: claim.prefetch_buffer.0.get(),
         claim_lease_ms: match claim.claim_lease {
@@ -503,7 +507,7 @@ fn app_config_of(manifest: &WorkerManifest, broker: PostgresConfig) -> AppConfig
         resilience: manifest.resilience.to_config(),
         worker_profiles: manifest.config_profiles(),
         schedule: None,
-        resend_on_transient_err: false,
+        resend_on_transient_error: false,
     }
 }
 
@@ -517,7 +521,7 @@ fn worker_config_of(manifest: &WorkerManifest, app_config: &AppConfig) -> Worker
     };
     let mut config = WorkerConfig {
         queues,
-        loglevel: worker_log_level(manifest.child_launch.log_level),
+        log_level: worker_log_level(manifest.child_launch.log_level),
         ..WorkerConfig::default()
     };
     config.apply_queue_config(app_config);

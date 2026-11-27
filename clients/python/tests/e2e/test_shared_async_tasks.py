@@ -27,7 +27,7 @@ from sqlalchemy import text
 from horsies import TaskAttemptInfo
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode
+from horsies.core.models.tasks import OperationalCode, OutcomeCode
 from horsies.core.task_decorator import TaskHandle
 
 from tests.broker_resources_support import current_resources
@@ -260,7 +260,7 @@ async def test_a_shared_row_with_unusable_options_fails_once(
             result = json.loads(text_value)
         case decoded:
             result = decoded
-    assert row.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value
+    assert row.error_code == OperationalCode.WORKER_SERIALIZATION_ERROR.value
     assert row.retry_count == 0
     assert f'"field": "{field}"' in json.dumps(result)
 
@@ -366,8 +366,8 @@ async def test_a_blocked_loop_kills_the_child_and_names_the_culprit(
     assert retry_pid == isolated_pid
     assert (culprit_row.status, culprit_row.retry_count) == ('COMPLETED', 1)
     first_attempt = culprit_attempts[0]
-    assert first_attempt.error_code == OperationalErrorCode.TASK_BLOCKED_LOOP.value
-    assert neighbour_row.error_code == OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP.value
+    assert first_attempt.error_code == OperationalCode.TASK_BLOCKED_LOOP.value
+    assert neighbour_row.error_code == OperationalCode.NEIGHBOUR_BLOCKED_LOOP.value
     assert neighbour_row.retry_count == 0
 
 

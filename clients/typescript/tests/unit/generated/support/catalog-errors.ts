@@ -1,6 +1,6 @@
 import { expect } from "bun:test";
 
-import type { BrokerCoreError } from "../../../../horsies/src/_catalog/broker_errors.ts";
+import type { DatabaseCoreError } from "../../../../horsies/src/_catalog/broker_errors.ts";
 import type { CoreCause, NoCause } from "../../../../horsies/src/_catalog/error_detail.ts";
 import type {
   MonitoringQueryCoreError,
@@ -12,7 +12,7 @@ import type { WorkflowStartCoreError } from "../../../../horsies/src/_catalog/wo
 
 /** A value of any generated catalog error union. */
 export type CatalogError =
-  | BrokerCoreError
+  | DatabaseCoreError
   | MonitoringQueryCoreError
   | TaskActionCoreError
   | TaskSendCoreError
@@ -53,7 +53,7 @@ export function hiddenNames(value: CatalogError): ReadonlyArray<string> {
 
 /** The cause of `value`, or `null` for a class without one. */
 export function causeOf(value: CatalogError): CoreCause | NoCause | null {
-  return "exception" in value ? value.exception : null;
+  return "cause" in value ? value.cause : null;
 }
 
 export const TASK_ID = "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b";

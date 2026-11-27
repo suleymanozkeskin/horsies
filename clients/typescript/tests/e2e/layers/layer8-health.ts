@@ -233,8 +233,8 @@ describe("layer 8: health", () => {
       },
     );
     assert.deepEqual(
-      report.value.streams.map((stream) => ({ queueName: stream.queueName, execution: stream.execution, state: stream.state })),
-      [{ queueName: "default", execution: "SHARED_ASYNC", state: { kind: "served", workers: 1n, capacity: SHARED_SEATS } }],
+      report.value.streams.map((stream) => ({ queue: stream.queue, execution: stream.execution, coverage: stream.coverage })),
+      [{ queue: "default", execution: "SHARED_ASYNC", coverage: { kind: "served", workers: 1n, capacity: SHARED_SEATS } }],
     );
   });
 
@@ -250,8 +250,8 @@ describe("layer 8: health", () => {
     assert.ok(coverage.ok, `read the class coverage: ${coverage.ok ? "" : coverage.error.code}`);
     assert.equal(await suite.rows.taskStatus(unserved.taskId), "PENDING");
     assert.deepEqual(coverage.value.streams, [
-      { queueName: "default", execution: "ISOLATED", state: { kind: "unserved" } },
-      { queueName: "default", execution: "SHARED_ASYNC", state: { kind: "served", workers: 1n, capacity: SHARED_SEATS } },
+      { queue: "default", execution: "ISOLATED", coverage: { kind: "unserved" } },
+      { queue: "default", execution: "SHARED_ASYNC", coverage: { kind: "served", workers: 1n, capacity: SHARED_SEATS } },
     ]);
   });
 });

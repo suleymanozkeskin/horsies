@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from horsies.core.codec.json_io import Json, SerializationError, dumps_json
-from horsies.core.errors import ErrorCode
+from horsies.core.errors import HorsiesErrorCode
 from horsies.core.models.schedule import (
     IntervalSchedule,
     ScheduleConfig,
@@ -55,8 +55,8 @@ def _make_app(
     app.config.schedule = schedule_config
     app.config.payload = PayloadPolicy()
     app.tasks = tasks or {}
-    # Default validate_queue_name returns 'default'
-    app.validate_queue_name = MagicMock(return_value='default')
+    # Default validate_queue returns 'default'
+    app.validate_queue = MagicMock(return_value='default')
     # Default queue mode so effective_priority returns 100
     app.config.queue_mode.name = 'DEFAULT'
     return app
@@ -129,7 +129,7 @@ class TestSignatureError:
 
         error = _signature_error(app, schedule)
         assert error is not None
-        assert error.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'kwargs do not match' in error.message
 
     def test_unexpected_kwarg_returns_configuration_error(self) -> None:
@@ -148,7 +148,7 @@ class TestSignatureError:
 
         error = _signature_error(app, schedule)
         assert error is not None
-        assert error.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'kwargs do not match' in error.message
 
     def test_satisfied_by_kwargs(self) -> None:
@@ -242,7 +242,7 @@ class TestEncodeScheduleKwargs:
         app = self._make_app_with_task(_make_task_mock(f))
         result = _encode_schedule_kwargs(app, self._schedule({'x': 1, 'workflow_context': None}))
         assert is_err(result)
-        assert result.err_value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert result.err_value.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'not encodable' in result.err_value.message
 
     def test_outcome_typed_kwarg_rejected(self) -> None:
@@ -252,7 +252,7 @@ class TestEncodeScheduleKwargs:
         app = self._make_app_with_task(_make_task_mock(f))
         result = _encode_schedule_kwargs(app, self._schedule({'dep': Succeeded(1)}))
         assert is_err(result)
-        assert result.err_value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert result.err_value.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'not encodable' in result.err_value.message
 
     def test_serialize_failure_rejected_with_the_cause(self) -> None:
@@ -267,7 +267,7 @@ class TestEncodeScheduleKwargs:
             result = _encode_schedule_kwargs(app, self._schedule({'value': 5}))
 
         assert is_err(result)
-        assert result.err_value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert result.err_value.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'not JSON-serializable' in result.err_value.message
         assert result.err_value.notes == ['serialization error: bad kwargs']
 
@@ -278,7 +278,7 @@ class TestEncodeScheduleKwargs:
         result = _encode_schedule_kwargs(app, self._schedule({'blob': 'x' * 2048}))
 
         assert is_err(result)
-        assert result.err_value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert result.err_value.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert result.err_value.message == "schedule 's' kwargs exceed payload.reject_bytes"
         assert result.err_value.notes == [
             f'kwargs payload size: {len(wire_text)} bytes',

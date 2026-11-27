@@ -35,7 +35,7 @@ def sync_resends(
 ) -> None:
     _ = task.resend(enqueue_failed)
     _ = task.resend(async_context)
-    _ = task.resend(key_conflict)
+    _ = task.resend(key_conflict)  # pyright: ignore[reportArgumentType]
     _ = task.resend(suppressed)  # pyright: ignore[reportArgumentType]
     _ = task.resend(validation_failed)  # pyright: ignore[reportArgumentType]
     _ = task.resend(payload_mismatch)  # pyright: ignore[reportArgumentType]
@@ -56,11 +56,11 @@ async def async_resends(
 
 
 def chain_the_cause(enqueue_failed: TaskSendEnqueueFailed) -> None:
-    raise RuntimeError('send failed') from enqueue_failed.exception  # pyright: ignore[reportGeneralTypeIssues]
+    raise RuntimeError('send failed') from enqueue_failed.cause  # pyright: ignore[reportGeneralTypeIssues]
 
 
 def chain_the_matched_cause(enqueue_failed: TaskSendEnqueueFailed) -> None:
-    match enqueue_failed.exception:
+    match enqueue_failed.cause:
         case NoCause():
             raise RuntimeError('send failed')
         case cause:

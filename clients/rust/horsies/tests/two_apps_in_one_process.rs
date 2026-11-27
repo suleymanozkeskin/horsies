@@ -15,9 +15,9 @@
 use std::convert::Infallible;
 
 use horsies::{
-    task, AppConfig, ErrorCode, Horsies, HorsiesError, TaskError, TaskSendError, TaskSendOptions,
-    WholeSeconds, WorkflowDefConfig, WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder,
-    WorkflowStartError,
+    task, AppConfig, Horsies, HorsiesError, HorsiesErrorCode, TaskError, TaskSendError,
+    TaskSendOptions, WholeSeconds, WorkflowDefConfig, WorkflowDefinition, WorkflowSpec,
+    WorkflowSpecBuilder, WorkflowStartError,
 };
 use horsies_core::{
     CoverageOutcome, CoverageRequest, CoverageSerialization, FailureCause, PostgresBroker,
@@ -140,7 +140,7 @@ async fn covered_database() -> (TestDatabase, PostgresBroker) {
 /// An app on the database of `url` that registers `echo` and `answer`,
 /// then [`Nightly`] and [`Regional`]. No I/O.
 fn app_on(url: &str) -> Horsies {
-    let mut app = Horsies::new(AppConfig::for_database_url(url)).expect("the app");
+    let mut app = Horsies::new(AppConfig::from_database_url(url)).expect("the app");
     let _echo = echo::register(&mut app).expect("register echo");
     let _answer = answer::register(&mut app).expect("register answer");
     let _nightly = app
@@ -322,7 +322,7 @@ async fn each_send_and_each_start_goes_to_the_database_of_its_app() {
 async fn a_send_and_a_node_of_a_task_that_the_app_does_not_register_write_nothing() {
     let (database, worker) = covered_database().await;
     let _registered = app_on(database.url());
-    let app = Horsies::new(AppConfig::for_database_url(database.url())).expect("the app");
+    let app = Horsies::new(AppConfig::from_database_url(database.url())).expect("the app");
 
     let refused = match echo::send(&app, 1).await {
         Err(refused) => refused,
@@ -341,7 +341,7 @@ async fn a_send_and_a_node_of_a_task_that_the_app_does_not_register_write_nothin
     };
     assert_eq!(
         refused.code,
-        Some(ErrorCode::WorkflowUnregisteredTask),
+        Some(HorsiesErrorCode::WorkflowUnregisteredTask),
         "{refused}"
     );
     let refused = match app.start_workflow::<Nightly>().await {

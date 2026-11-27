@@ -65,7 +65,7 @@ from horsies.core.models.boot_failure import (
     ThreadStartRefusedError,
     shortage_or,
 )
-from horsies.core.models.tasks import OperationalErrorCode, TaskError
+from horsies.core.models.tasks import OperationalCode, TaskError
 from horsies.core.telemetry.attempt_span import flush_attempt_spans_at_stop
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_frames import (
@@ -487,7 +487,7 @@ def bounded_envelope(task_name: str, result: ResultEnvelope) -> ResultEnvelope:
     )
     logger.error(message)
     failure = TaskError(
-        code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+        code=OperationalCode.WORKER_SERIALIZATION_ERROR,
         message=message,
         data={'task_name': task_name, 'result_bytes': size},
     )

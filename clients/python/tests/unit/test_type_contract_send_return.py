@@ -35,10 +35,10 @@ from horsies.core.codec.kwargs import (
 from horsies.core.codec.signature_check import _DOCS_URL
 from horsies.core.codec.typed import conform_to_target, encode_task_result
 from horsies.core.codec.validation_errors import ValueValidationError
-from horsies.core.errors import ErrorCode, TaskDefinitionError
+from horsies.core.errors import HorsiesErrorCode, TaskDefinitionError
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendValidationFailed
-from horsies.core.models.tasks import ContractCode, OperationalErrorCode
+from horsies.core.models.tasks import ContractCode, OperationalCode
 from horsies.core.models.workflow import TaskNode, WorkflowContext, WorkflowSpec
 from horsies.core.models.workflow.typing_utils import _is_ok_type_compatible
 from horsies.core.task_decorator import create_task_wrapper
@@ -60,19 +60,19 @@ Upper = Annotated[str, AfterValidator(str.upper)]
 def _mock_app() -> MagicMock:
     app = MagicMock()
     app.config.queue_mode.name = 'DEFAULT'
-    app.config.resend_on_transient_err = False
+    app.config.resend_on_transient_error = False
     app.config.payload = PayloadPolicy()
     app.config.exception_mapper = {}
     app.config.default_unhandled_error_code = 'UNHANDLED_EXCEPTION'
     app.are_sends_suppressed.return_value = False
-    app.validate_queue_name.return_value = 'default'
+    app.validate_queue.return_value = 'default'
     return app
 
 
 def _real_app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://user:password@localhost/unused',
             ),
         ),
@@ -90,7 +90,7 @@ class TestMissingRequiredKwargs:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert result.err_value.exception == NoCause()
+        assert result.err_value.cause == NoCause()
         assert 'amount' in result.err_value.message
         app.get_broker.assert_not_called()
 
@@ -260,7 +260,7 @@ class TestReturnThatIsNotAResult:
         with pytest.raises(TaskDefinitionError) as refused:
             create_task_wrapper(task, _mock_app(), 'test.task')
 
-        assert refused.value.code == ErrorCode.TASK_INVALID_RETURN_TYPE
+        assert refused.value.code == HorsiesErrorCode.TASK_INVALID_RETURN_TYPE
 
 
 class _KindA(BaseModel):
@@ -312,7 +312,7 @@ class TestAnnotatedReturn:
         with pytest.raises(TaskDefinitionError) as refused:
             create_task_wrapper(task, _mock_app(), 'test.task')
 
-        assert refused.value.code == ErrorCode.TASK_INVALID_RETURN_TYPE
+        assert refused.value.code == HorsiesErrorCode.TASK_INVALID_RETURN_TYPE
 
 
 @pytest.mark.unit
@@ -568,7 +568,7 @@ class TestReceiverOfArgsFrom:
         assert reason is None
         code = json.loads(payload)['err']['error_code']
         assert code == {
-            '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+            '__builtin_task_code__': OperationalCode.WORKER_SERIALIZATION_ERROR.value,
         }
 
     def test_a_value_inside_the_constraint_runs(self) -> None:

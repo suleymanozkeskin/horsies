@@ -123,7 +123,7 @@ mod tests {
     use std::convert::Infallible;
 
     use horsies_core::core::task::fn_trait::TaskModule;
-    use horsies_core::{OperationalErrorCode, RegisteredTask, TaskErrorCode, TaskResult};
+    use horsies_core::{OperationalCode, RegisteredTask, TaskErrorCode, TaskResult};
     use serde::{Deserialize, Serialize};
 
     use crate::TaskError;
@@ -148,7 +148,7 @@ mod tests {
     }
 
     fn worker_serialization_error() -> TaskErrorCode {
-        TaskErrorCode::from(OperationalErrorCode::WorkerSerializationError)
+        TaskErrorCode::from(OperationalCode::WorkerSerializationError)
     }
 
     #[tokio::test]

@@ -19,7 +19,7 @@ from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.app import Horsies
 from horsies.core.types.status import TaskStatus
 from horsies.core.models.outcome import ReadResultDeserializationError, ReadTaskNotFound, ReadWaitTimeout
-from horsies.core.models.tasks import OperationalErrorCode, ContractCode, OutcomeCode, TaskError
+from horsies.core.models.tasks import OperationalCode, ContractCode, OutcomeCode, TaskError
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.errors import ConfigurationError
@@ -259,7 +259,7 @@ def test_exception_becomes_error() -> None:
     ):
         result = unwrap_send(basic_tasks.exception_task.send()).get(wait_ms=5000)
         task_error = failed_error(result)
-        assert task_error.code == OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert task_error.code == OperationalCode.UNHANDLED_EXCEPTION
         assert task_error.message is not None
         assert 'ValueError' in task_error.message
 
@@ -533,7 +533,7 @@ async def test_retry_precedence_exception_name_collision_no_retry(
     ):
         handle = unwrap_send(await instance_retry_precedence.exception_name_collision_task.send_async())
         result = await asyncio.to_thread(handle.get, wait_ms=10000)
-        assert_failed(result, expected_code=OperationalErrorCode.UNHANDLED_EXCEPTION)
+        assert_failed(result, expected_code=OperationalCode.UNHANDLED_EXCEPTION)
 
         async with current_resources(broker).session_factory() as session:
             task = await read_task(session, handle.task_id)
@@ -885,7 +885,7 @@ def test_worker_resolution_error(broker: PostgresBroker, app: Horsies) -> None:
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = app.get_result(task_id, wait_ms=5000)
-        assert_failed(result, expected_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR)
+        assert_failed(result, expected_code=OperationalCode.WORKER_RESOLUTION_ERROR)
 
 
 @pytest.mark.e2e
@@ -948,7 +948,7 @@ def test_return_none_from_task() -> None:
 
 @pytest.mark.e2e
 def test_library_error_code_in_user_task() -> None:
-    """L1.7.6: Task returning OperationalErrorCode is preserved correctly."""
+    """L1.7.6: Task returning OperationalCode is preserved correctly."""
     with run_worker(
         DEFAULT_INSTANCE,
         profile='isolated-1',
@@ -956,7 +956,7 @@ def test_library_error_code_in_user_task() -> None:
     ):
         result = unwrap_send(basic_tasks.error_code_task.send()).get(wait_ms=5000)
         task_error = failed_error(result)
-        assert task_error.code == OperationalErrorCode.TASK_EXCEPTION
+        assert task_error.code == OperationalCode.TASK_EXCEPTION
         assert task_error.message == 'boom'
 
 
@@ -1002,7 +1002,7 @@ async def test_argument_deserialization_error(
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = await asyncio.to_thread(app.get_result, task_id, wait_ms=5000)
-        assert_failed(result, expected_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR)
+        assert_failed(result, expected_code=OperationalCode.WORKER_SERIALIZATION_ERROR)
 
 
 @pytest.mark.e2e
@@ -1050,7 +1050,7 @@ async def test_malformed_pydantic_args(
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = await asyncio.to_thread(app.get_result, task_id, wait_ms=5000)
-        assert_failed(result, expected_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR)
+        assert_failed(result, expected_code=OperationalCode.WORKER_SERIALIZATION_ERROR)
 
 
 @pytest.mark.e2e

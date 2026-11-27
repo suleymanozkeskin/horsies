@@ -43,7 +43,7 @@ const parent = defineWorkflow(
 /** The app of the test database, or the failed test with every refusal. */
 function testApp(): Horsies {
   const created = Horsies.create({
-    broker: { databaseUrl: { kind: "value", value: testDatabaseUrl() } },
+    database: { databaseUrl: { kind: "value", value: testDatabaseUrl() } },
     tasks: [greet],
     workflows: [hello, parent],
   });

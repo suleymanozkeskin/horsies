@@ -127,7 +127,7 @@ SCENARIO_TIMEOUT_S: Final = 5.0
 
 APP = Horsies(
     AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://u:p@localhost/unused'),
         ),
     ),
@@ -1153,7 +1153,7 @@ class TestTheOutcomeOfAResult:
         exception = ValueError('v')
         out: Result[int, TaskError] = Err(
             TaskError(
-                code=child_runner.OperationalErrorCode.TASK_EXCEPTION,
+                code=child_runner.OperationalCode.TASK_EXCEPTION,
                 message='m',
                 exception=exception,
             ),

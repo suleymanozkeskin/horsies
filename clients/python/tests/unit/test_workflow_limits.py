@@ -10,7 +10,7 @@ import pytest
 from pydantic import SecretStr
 
 from horsies.core.app import Horsies
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
@@ -42,7 +42,7 @@ LEVEL_WHERE_THE_NESTING_ENDS = 3
 def _app() -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr('postgresql://user:pass@localhost/db'),
             ),
             queue_mode=QueueMode.CUSTOM,
@@ -73,7 +73,7 @@ class TestNodeLimit:
         with pytest.raises(WorkflowValidationError) as caught:
             _wide_spec(MAX_WORKFLOW_NODES + 1)
 
-        assert caught.value.code == ErrorCode.WORKFLOW_TOO_MANY_NODES
+        assert caught.value.code == HorsiesErrorCode.WORKFLOW_TOO_MANY_NODES
 
 
 class TestNestingFindingsInCheck:
@@ -102,10 +102,10 @@ class TestNestingFindingsInCheck:
 
         app.workflow_builder()(root)
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert [error.code for error in errors] == [
-            ErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT
+            HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT
         ]
 
     def test_a_subworkflow_that_includes_itself_with_the_same_kwargs_is_reported(
@@ -133,10 +133,10 @@ class TestNestingFindingsInCheck:
 
         app.workflow_builder()(root)
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert [error.code for error in errors] == [
-            ErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING
+            HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING
         ]
 
     def test_a_nesting_that_ends_before_the_limit_passes(self) -> None:
@@ -165,7 +165,7 @@ class TestNestingFindingsInCheck:
 
         app.workflow_builder()(root)
 
-        assert app.check(live=False) == []
+        assert app.check(live=False).refusals == []
 
 
 class TestNestingBehindADependency:
@@ -197,7 +197,7 @@ class TestNestingBehindADependency:
 
         app.workflow_builder()(root)
 
-        assert app.check(live=False) == []
+        assert app.check(live=False).refusals == []
 
     def test_a_nesting_past_the_limit_behind_dependencies_passes(self) -> None:
         app = _app()
@@ -227,7 +227,7 @@ class TestNestingBehindADependency:
 
         app.workflow_builder()(root)
 
-        assert app.check(live=False) == []
+        assert app.check(live=False).refusals == []
 
     def test_a_dependency_before_a_self_nesting_does_not_hide_it(self) -> None:
         """Once the definition starts, nothing between its two occurrences waits."""
@@ -257,10 +257,10 @@ class TestNestingBehindADependency:
 
         app.workflow_builder()(root)
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert [error.code for error in errors] == [
-            ErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING
+            HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING
         ]
 
     def test_a_dependency_before_a_nesting_past_the_limit_hides_it(self) -> None:
@@ -293,7 +293,7 @@ class TestNestingBehindADependency:
 
         app.workflow_builder()(root)
 
-        assert app.check(live=False) == []
+        assert app.check(live=False).refusals == []
 
 
 def _chain(length: int) -> NestingPath:
@@ -336,4 +336,4 @@ class TestNestingDecisionAtTheLimit:
         )
 
         assert isinstance(decision, StopWithFinding)
-        assert decision.finding.code == ErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT
+        assert decision.finding.code == HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT

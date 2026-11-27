@@ -304,7 +304,7 @@ mod tests {
                     member: "ENQUEUE_FAILED",
                 },
                 ErrorSlot::CodeSubset {
-                    subset: "BrokerOperationFailedCode",
+                    subset: "DatabaseOperationFailedCode",
                 },
                 ErrorSlot::NeverRetryable,
                 ErrorSlot::AlwaysRetryable,
@@ -328,7 +328,7 @@ mod tests {
                     member: "ENQUEUE_FAILED"
                 },
                 ClassSlot::CodeSubset {
-                    subset: "BrokerOperationFailedCode"
+                    subset: "DatabaseOperationFailedCode"
                 },
                 ClassSlot::NeverRetryable,
                 ClassSlot::AlwaysRetryable,
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn unions_subsets_records_and_new_types_have_their_modules() {
-        let broker = <horsies_core::BrokerOperationError as ErrorEnum>::ERROR_CATALOG;
+        let broker = <horsies_core::DatabaseOperationError as ErrorEnum>::ERROR_CATALOG;
         for union in ERROR_UNIONS {
             assert_eq!(error_union_module(union), error_catalog_module(&broker));
         }

@@ -24,7 +24,7 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.outcome import Succeeded, TaskOutcome
-from horsies.core.models.tasks import OperationalErrorCode, TaskError
+from horsies.core.models.tasks import OperationalCode, TaskError
 from horsies.core.models.workflow import (
     TaskNode,
     WorkflowDefinition,
@@ -46,7 +46,7 @@ pytestmark = [pytest.mark.unit]
 APP = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(database_url=SecretStr('postgresql://u@127.0.0.1:1/unused')),
+        database=PostgresConfig(database_url=SecretStr('postgresql://u@127.0.0.1:1/unused')),
     ),
 )
 
@@ -172,48 +172,48 @@ class TestBuildChild:
     def test_a_definition_that_does_not_load_fails_the_node(self) -> None:
         error = _failure(_build(_broker(), _node(sub_definition_key='unknown.v1'), {}))
 
-        assert error.code is OperationalErrorCode.SUBWORKFLOW_LOAD_FAILED
+        assert error.code is OperationalCode.SUBWORKFLOW_LOAD_FAILED
         assert error.message == 'Failed to load subworkflow definition for parent:3'
         assert error.data == {'definition_key': 'unknown.v1'}
 
     def test_a_stored_input_that_is_not_json_fails_the_node(self) -> None:
         error = _failure(_build(_broker(), _node(node_input='{not json'), {}))
 
-        assert error.code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+        assert error.code is OperationalCode.WORKER_SERIALIZATION_ERROR
         assert error.message == 'Corrupt kwargs JSON for subworkflow task 3'
 
     def test_an_empty_stored_input_fails_the_node(self) -> None:
         # A node without params stores '{}'; an empty text is corrupt data.
         error = _failure(_build(_broker(), _node(node_input=''), {}))
 
-        assert error.code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+        assert error.code is OperationalCode.WORKER_SERIALIZATION_ERROR
         assert error.message == 'Corrupt kwargs JSON for subworkflow task 3'
         assert error.data == {'workflow_id': 'parent-wf', 'task_index': 3}
 
     def test_an_input_that_does_not_decode_to_build_with_fails_the_node(self) -> None:
         error = _failure(_build(_broker(), _node(node_input='{"value": "x"}'), {}))
 
-        assert error.code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+        assert error.code is OperationalCode.WORKER_SERIALIZATION_ERROR
         assert (error.message or '').startswith('Typed decode of subworkflow kwargs failed for task 3: ')
 
     def test_an_args_from_text_that_is_not_json_fails_the_node(self) -> None:
         error = _failure(_build(_broker(), _node(args_from='{not json'), {}))
 
-        assert error.code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+        assert error.code is OperationalCode.WORKER_SERIALIZATION_ERROR
         assert error.message == 'Corrupt args_from JSON for subworkflow task 3'
 
     def test_an_empty_args_from_text_fails_the_node(self) -> None:
         # A node without args_from stores NULL; an empty text is corrupt data.
         error = _failure(_build(_broker(), _node(args_from=''), {}))
 
-        assert error.code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+        assert error.code is OperationalCode.WORKER_SERIALIZATION_ERROR
         assert error.message == 'Corrupt args_from JSON for subworkflow task 3'
         assert error.data == {'workflow_id': 'parent-wf', 'task_index': 3}
 
     def test_an_args_from_index_that_is_not_an_int_fails_the_node(self) -> None:
         error = _failure(_build(_broker(), _node(args_from='{"value": "0"}'), {}))
 
-        assert error.code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+        assert error.code is OperationalCode.WORKER_SERIALIZATION_ERROR
         assert error.message == 'args_from has non-int values for subworkflow task 3'
 
     @pytest.mark.parametrize('flag', ['true', 'false'])
@@ -227,7 +227,7 @@ class TestBuildChild:
             ),
         )
 
-        assert error.code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+        assert error.code is OperationalCode.WORKER_SERIALIZATION_ERROR
         assert error.message == 'args_from has non-int values for subworkflow task 3'
         assert error.data == {'workflow_id': 'parent-wf', 'task_index': 3}
 
@@ -236,7 +236,7 @@ class TestBuildChild:
             _build(_broker(), _node(node_input='{"value": 1}', args_from='{"value": 0}'), {}),
         )
 
-        assert error.code is OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED
+        assert error.code is OperationalCode.WORKFLOW_ENQUEUE_FAILED
         assert error.message == (
             "args_from key 'value' conflicts with static kwarg (subworkflow task 3)"
         )
@@ -260,7 +260,7 @@ class TestBuildChild:
             ),
         )
 
-        assert error.code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+        assert error.code is OperationalCode.WORKER_SERIALIZATION_ERROR
         assert (error.message or '').startswith(
             "args_from value for 'source' does not fit the type that build_with declares "
             '(subworkflow task 3): ',
@@ -271,7 +271,7 @@ class TestBuildChild:
             _build(_broker(), _node(sub_definition_key=BrokenChild.definition_key), {}),
         )
 
-        assert error.code is OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED
+        assert error.code is OperationalCode.WORKFLOW_ENQUEUE_FAILED
         assert error.message == (
             'Subworkflow build failed: RuntimeError: cannot build (workflow parent:3)'
         )
@@ -283,7 +283,7 @@ class TestBuildChild:
         ):
             error = _failure(_build(_broker(), _node(), {}))
 
-        assert error.code is OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED
+        assert error.code is OperationalCode.WORKFLOW_ENQUEUE_FAILED
         assert error.message == 'Invalid child task node args for child_build.value: positional args'
 
     def test_a_child_task_whose_queue_the_app_refuses_fails_the_node(self) -> None:
@@ -295,7 +295,7 @@ class TestBuildChild:
             built_spec.return_value = ValueChild.build_with(APP)
             error = _failure(_build(custom, _node(), {}))
 
-        assert error.code is OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED
+        assert error.code is OperationalCode.WORKFLOW_ENQUEUE_FAILED
         assert (error.message or '').startswith('Invalid queue/priority for child task child_build.value: ')
 
 
@@ -342,7 +342,7 @@ class TestBuildChildSpec:
         assert answer.message == 'Failed to load subworkflow definition for parent:3'
         envelope = json.loads(answer.failure_result)
         assert envelope['err']['error_code'] == {
-            '__builtin_task_code__': OperationalErrorCode.SUBWORKFLOW_LOAD_FAILED.value,
+            '__builtin_task_code__': OperationalCode.SUBWORKFLOW_LOAD_FAILED.value,
         }
         assert envelope['err']['data'] == {'definition_key': 'child_build.missing.v1'}
 
@@ -366,7 +366,7 @@ class TestBuildChildSpec:
         assert answer.message == message
         envelope = json.loads(answer.failure_result)
         assert envelope['err']['error_code'] == {
-            '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+            '__builtin_task_code__': OperationalCode.WORKER_SERIALIZATION_ERROR.value,
         }
 
     def test_a_build_that_raises_answers_the_node_failure(self) -> None:
@@ -391,7 +391,7 @@ class TestBuildChildSpec:
         assert 'does not encode as spec data' in answer.message
         envelope = json.loads(answer.failure_result)
         assert envelope['err']['error_code'] == {
-            '__builtin_task_code__': OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED.value,
+            '__builtin_task_code__': OperationalCode.WORKFLOW_ENQUEUE_FAILED.value,
         }
         assert envelope['err']['data'] == {
             'workflow_id': str(_request().parent_workflow_id),

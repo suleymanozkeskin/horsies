@@ -126,7 +126,7 @@ describe("the reads of an installed database", () => {
     });
     assert.deepEqual(await monitoring.getWorkflowNode(WORKFLOW_V4, 0), {
       ok: true,
-      value: { kind: "notFound", workflowId: WORKFLOW_V4, taskIndex: 0 },
+      value: { kind: "notFound", workflowId: WORKFLOW_V4, nodeIndex: 0 },
     });
   });
 
@@ -147,7 +147,7 @@ describe("the reads of an installed database", () => {
 });
 
 describe("an unreachable database", () => {
-  test("each monitoring read is DB_OPERATION_FAILED with the retry rule of the cause", async () => {
+  test("each monitoring read is DATABASE_OPERATION_FAILED with the retry rule of the cause", async () => {
     const { monitoring } = area(REFUSED_DATABASE_URL);
 
     const reads = [
@@ -159,7 +159,7 @@ describe("an unreachable database", () => {
     ] as const;
 
     for (const [subject, read] of reads) {
-      assert.ok(!read.ok && read.error.code === "DB_OPERATION_FAILED", subject);
+      assert.ok(!read.ok && read.error.code === "DATABASE_OPERATION_FAILED", subject);
       assert.ok(read.error.retryable, subject);
       assert.ok(read.error.message.startsWith(`${subject} failed:`), read.error.message);
     }
@@ -175,12 +175,12 @@ describe("an unreachable database", () => {
 
     assert.ok(!workers.ok && workers.error.code === "MONITORING_QUERY_FAILED");
     assert.ok(!coverage.ok && coverage.error.code === "MONITORING_QUERY_FAILED");
-    assert.ok(!ping.ok && ping.error.code === "DB_PING_FAILED");
+    assert.ok(!ping.ok && ping.error.code === "DATABASE_PING_FAILED");
     assert.ok(!pongs.ok && pongs.error.code === "WORKER_PING_FAILED");
-    assert.ok(!cancel.ok && cancel.error.code === "DB_OPERATION_FAILED" && cancel.error.retryable);
+    assert.ok(!cancel.ok && cancel.error.code === "DATABASE_OPERATION_FAILED" && cancel.error.retryable);
   });
 
-  test("each query bound is QUERY_REFUSED before the connect", async () => {
+  test("each query bound is invalidInput before the connect", async () => {
     const { monitoring } = area(REFUSED_DATABASE_URL);
     const until = Temporal.Now.instant();
 
@@ -195,11 +195,11 @@ describe("an unreachable database", () => {
       ["limit", await monitoring.taskBreakdown({ groupBy: "worker", limit: 501 })],
       ["limit", await monitoring.listWorkflowRuns({ limit: 0 })],
       ["limit", await monitoring.listWorkflowRuns({ limit: 201 })],
-      ["taskIndex", await monitoring.getWorkflowNode(WORKFLOW_V4, 2 ** 31)],
+      ["nodeIndex", await monitoring.getWorkflowNode(WORKFLOW_V4, 2 ** 31)],
     ] as const;
 
     for (const [field, read] of refusals) {
-      assert.ok(!read.ok && read.error.code === "QUERY_REFUSED" && read.error.field === field, field);
+      assert.ok(!read.ok && read.error.kind === "invalidInput" && "field" in read.error && read.error.field === field, field);
     }
   });
 

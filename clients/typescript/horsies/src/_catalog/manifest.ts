@@ -94,7 +94,7 @@ export interface DatabaseManifest {
   readonly pool_pre_ping: boolean;
   readonly pool_size: number;
   readonly max_overflow: number;
-  readonly pool_timeout: number;
+  readonly pool_timeout_seconds: number;
   readonly pool_recycle: PoolRecycle;
   readonly echo: boolean;
   readonly tcp_keepalives: TcpKeepalivesConfig;
@@ -199,7 +199,7 @@ export function databaseManifestToWire(value: DatabaseManifest): ReadonlyMap<str
     ["pool_pre_ping", value.pool_pre_ping],
     ["pool_size", integerToWire(value.pool_size, "DatabaseManifest.pool_size")],
     ["max_overflow", integerToWire(value.max_overflow, "DatabaseManifest.max_overflow")],
-    ["pool_timeout", integerToWire(value.pool_timeout, "DatabaseManifest.pool_timeout")],
+    ["pool_timeout_seconds", integerToWire(value.pool_timeout_seconds, "DatabaseManifest.pool_timeout_seconds")],
     ["pool_recycle", poolRecycleToWire(value.pool_recycle)],
     ["echo", value.echo],
     ["tcp_keepalives", tcpKeepalivesConfigToWire(value.tcp_keepalives)],

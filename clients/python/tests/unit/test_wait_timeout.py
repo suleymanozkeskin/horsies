@@ -12,7 +12,7 @@ from pydantic import SecretStr
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.result_types import BrokerInvalidInput
+from horsies.core.brokers.result_types import DatabaseInvalidInput
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.outcome import ReadInvalidInput
@@ -128,19 +128,19 @@ class TestBrokerAndApp:
         result = asyncio.run(broker.get_raw_result_record_async('task-1', wait_ms))
 
         refused = result.unwrap_err()
-        assert isinstance(refused, BrokerInvalidInput)
+        assert isinstance(refused, DatabaseInvalidInput)
         assert message in refused.message
         assert core_handle.mock_calls == []
 
     def test_app_get_raw_result_returns_the_broker_refusal(self) -> None:
-        app = Horsies(AppConfig(broker=PostgresConfig(database_url=_UNREACHABLE_URL)))
+        app = Horsies(AppConfig(database=PostgresConfig(database_url=_UNREACHABLE_URL)))
 
         result = asyncio.run(app.get_raw_result_async(uuid.uuid4(), wait_ms=-1))
 
-        assert isinstance(result.unwrap_err(), BrokerInvalidInput)
+        assert isinstance(result.unwrap_err(), DatabaseInvalidInput)
 
     def test_app_get_result_refuses_before_any_read(self) -> None:
-        app = Horsies(AppConfig(broker=PostgresConfig(database_url=_UNREACHABLE_URL)))
+        app = Horsies(AppConfig(database=PostgresConfig(database_url=_UNREACHABLE_URL)))
 
         result = asyncio.run(app.get_result_async(uuid.uuid4(), wait_ms=-1))
 

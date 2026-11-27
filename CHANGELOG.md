@@ -52,6 +52,188 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Breaking: the connection section of the app config is `database`.**
+  `AppConfig.broker` is `AppConfig.database` in Python and Rust. Rust
+  `AppConfig::for_database_url` and `PostgresConfig::from_url` are
+  `from_database_url`. A Rust TOML or JSON config with a `[broker]` table
+  fails at parse with an unknown field error that names `broker`; this
+  includes the file of `horsies web CONFIG`. Pydantic refuses the old
+  keyword. The worker banner and `AppConfig.log_config` name the section
+  `database`.
+- **Breaking: `PostgresConfig` settings are closed unions and full names.**
+  - `session_database` replaces `session_database_url`:
+    `SessionDatabaseSameAsDatabaseUrl()` (the default) or
+    `SessionDatabaseSeparate(url)`; Rust `SessionDatabase::SameAsDatabaseUrl`
+    or `SessionDatabase::Separate { url }`. In TOML:
+    `session_database = { kind = "SEPARATE", url = "..." }`.
+    `effective_session_database_url` does not change.
+  - `tcp_keepalives` is `TcpKeepalivesOn(idle_seconds, interval_seconds,
+    probes)` or `TcpKeepalivesOff()`. It replaces the switch and the three
+    flat fields `tcp_keepalives_idle`, `tcp_keepalives_interval` and
+    `tcp_keepalives_count`.
+  - `tcp_user_timeout` is `TcpUserTimeoutAfter(milliseconds)` or
+    `TcpUserTimeoutSystemDefault()`. It replaces `tcp_user_timeout_ms`, whose
+    `0` meant the system default.
+  - Python `pool_recycle` is `PoolRecycleAfterSeconds(seconds)` or
+    `PoolRecycleNever()`, as in Rust. It replaces the `-1` value.
+  - `pool_timeout` is `pool_timeout_seconds`.
+  - Rust: the keepalive and user timeout values are plain `u32` numbers.
+    `Horsies::new` refuses a value outside its bound with
+    `CONFIG_INVALID_KEEPALIVE`. The client no longer exports
+    `KeepaliveSeconds`, `KeepaliveProbes` and `TcpUserTimeoutMs`.
+    `PostgresConfigError::MissingSessionDatabaseUrl` is
+    `MissingSessionDatabase`.
+- **Breaking: `AppConfig.cluster_wide_cap` is a closed union.** Python
+  `ClusterCap(tasks)` or `NoClusterCap()` (the default); Rust
+  `ClusterCapSetting::ClusterCap { tasks }` or `ClusterCapSetting::NoClusterCap`.
+  `WorkerStateSnapshot.cluster_wide_cap` has the same type. The stored column
+  `cluster_wide_cap` keeps its integer form; NULL reads as `NoClusterCap`.
+- **Breaking: config names take full words.**
+  - `resend_on_transient_err` is `resend_on_transient_error` (the config
+    field, the `start_workflow` keyword and `WorkflowSpec`).
+  - `RecoveryConfig`: `auto_requeue_stale_claimed`,
+    `auto_terminate_orphaned_workflow_tasks` and `auto_fail_stale_running`
+    are `requeue_stale_claimed`, `terminate_orphaned_workflow_tasks` and
+    `fail_stale_running`. `phase2_quarantine_after_attempts` is
+    `finalization_quarantine_after_attempts`.
+  - `RetentionConfig`: `paused_workflow_auto_cancel_after` is
+    `paused_workflow_cancel_after`; `partition_maintenance_interval_s` and
+    `retention_sweep_interval_s` are `partition_maintenance_interval_seconds`
+    and `retention_sweep_interval_seconds`. `queue_class(queue_name)` (Rust
+    `resolve_queue_class`) is `resolve_queue_retention_class(queue)`. Python
+    `registrable_classes()` is `registrable_periods()`.
+  - `WorkerResilienceConfig`: `db_retry_initial_ms`, `db_retry_max_ms` and
+    `db_retry_max_attempts` are `database_retry_initial_ms`,
+    `database_retry_max_ms` and `database_retry_max_attempts`.
+  - An old key fails at parse, and the error names the key. New rows of
+    `horsies_worker_states.recovery_config` hold the new key names. An older
+    row keeps its keys; the readers pass that map through. The paused
+    workflow expiry error names `paused_workflow_cancel_after`.
+- **Breaking: the error code `BROKER_INVALID_URL` (`HRS-203`) is
+  `DATABASE_INVALID_URL`.** Python `ErrorCode.DATABASE_INVALID_URL`; Rust
+  `ErrorCode::DatabaseInvalidUrl`. The variant `AppConfigError::Broker` of
+  the core is `AppConfigError::DatabaseInvalidUrl`. The code number does not
+  change. There is no alias for the old name.
+- **Breaking: one container for the startup refusals.** `ValidationReport`
+  holds the refusals of one phase: `refusals` (Python attribute, Rust
+  `refusals()`) and `phase_name`. Python `check()` returns a
+  `ValidationReport`; an empty report is a pass. `MultipleValidationErrors`
+  stays the exception that carries a report. Rust `CheckReport` is removed:
+  `check()`, `check_live()`, `blocking().check_live()` and the
+  `CheckRefused` run ends carry a `ValidationReport`. Rust `Horsies::new`,
+  `Horsies::with_schema_mode` and `Horsies::with_core_connection` return
+  `Result<Horsies, ValidationReport>`; `ValidationReport` converts into
+  `HorsiesError`, so `?` works in a function that returns `HorsiesError` or
+  `Box<dyn Error>`.
+- **Breaking (Python): app names.**
+  - `Horsies(config, schema_mode=SchemaMode.MIGRATE_AND_VALIDATE)` and
+    `PostgresBroker(config, schema_mode=...)` replace the flags
+    `run_schema_migrations` and `assume_initialized`. `SchemaMode` has
+    `MIGRATE_AND_VALIDATE`, `OBSERVE_ONLY` and `ASSUME_INITIALIZED`.
+  - `set_role` takes an `AppRole` (`PRODUCER`, `WORKER`, `SCHEDULER`).
+  - `on_child_process_start` is `on_child_start`; `ChildProcessStartHook` is
+    `ChildStartHook`; `get_child_process_start_hooks` is
+    `get_child_start_hooks`. The parameter of `on_child_start`,
+    `on_shared_async_child_start` and `on_handler_child_start` is `hook`.
+  - `list_tasks()` is `registered_task_names()`;
+    `validate_queue_name(queue_name)` is `validate_queue(queue)`.
+  - `CoreStartFailed` is `RuntimeStartFailed`.
+  - `LogFormat` names the log format union.
+  - `PostgresBroker.get_raw_result_record(timeout_ms)` takes `wait_ms`;
+    `PostgresBroker.enqueue(enqueue_delay_seconds)` takes `delay_seconds`.
+- **Breaking: the child pool setting `check` is `pre_ping`, and the preload
+  text `none` is `no_preload`.** Python `IsolatedPool`, `SharedPool` and
+  `ResolvedPool` take `pre_ping`; `ChildPreload.NONE` is
+  `ChildPreload.NO_PRELOAD`. Rust TOML with `pool.check` or
+  `preload = "none"` fails at parse.
+- **Breaking (Rust): app and worker names.** `WorkerStart` is
+  `WorkerRunOptions`; `with_metrics_endpoint` is `with_metrics_listen`.
+  `CoreHandle` is `CoreConnection`, `Horsies::with_handle` is
+  `with_core_connection`, and its `profile` is `pool_profile`.
+  `ChildHostExit::code` is `exit_code`. `HANDLER_STATS_INTERVAL` is
+  `HANDLER_STATISTICS_INTERVAL`. `cli::LogFormat::Text` and `Json` are
+  `TextLogs` and `JsonLogs`. The run ends `WorkerRunError::RuntimeUnavailable`
+  and `SchedulerRunError::RuntimeUnavailable` are `RuntimeStartFailed`. The
+  parameter of `HorsiesError::with_help` is `help_text`.
+- **Breaking (CLI): flag names.** `--loglevel` is `--log-level` on every
+  command. `horsies metrics --listen` is `--metrics-listen`, as on
+  `horsies worker`. The positional app locator is shown as `module` on every
+  Python command, `web` included. An old flag exits 2.
+- **Breaking: health read arguments are closed unions.**
+  - Python `ping_workers` and `ping_workers_async` take `target`
+    (`PingTargetEveryWorker()` or `PingTargetWorker(worker_id)`), `wait_ms`
+    (an `int`, default 2,000) and `min_responses` (`MinResponsesFullWindow()`
+    or `MinResponsesAtLeast(count)`). These replace `target_worker_id`,
+    `timeout_seconds` and `min_responses=None`. A `wait_ms` that is not a
+    positive `int` gets `INVALID_INPUT`.
+  - Rust `ping_workers` takes `wait: Duration` and `min_responses:
+    MinResponses` (`FullWindow`, `AtLeast(NonZeroUsize)`).
+  - Python `get_worker_state_history` takes
+    `limit=WorkerHistoryLimitAllRetained()` or
+    `WorkerHistoryLimitNewest(count)`.
+  - The Python app has `get_stale_tasks(threshold_minutes)` and
+    `get_expired_tasks()`, blocking and with `_async`. They return a
+    `BoundedTaskList` (`BoundedTaskListComplete` or
+    `BoundedTaskListTruncated`) of `StaleTaskRow` or `ExpiredTaskRow`. The
+    `PostgresBroker` reads return the same types and take
+    `threshold_minutes`.
+  - `StaleTaskRow` and `ExpiredTaskRow` name the task `task_id`. The stale
+    row has `last_heartbeat_at`. The expired row has `expired_for` as a
+    `Duration` (Python `timedelta`).
+- **Breaking: one type per health record, and the execution class names.**
+  - The monitoring copies `WorkerPingInfo`, `DownSlotInfo`,
+    `SnapshotProfileInfo`, `ProfileNamedInfo`, `ProfileNotRecordedInfo`,
+    `BudgetLoadInfo`, `WorkerClassLoadInfo`, `StreamServedInfo`,
+    `StreamNoCapacityInfo`, `StreamUnservedInfo`, `StreamWaitingInfo`,
+    `StreamNoneDueInfo`, `PendingStreamInfo` and `ClassReportInfo` are
+    removed. `horsies.monitoring` and `horsies::monitoring` export the health
+    types.
+  - `get_class_coverage` and `get_class_report` are
+    `get_execution_class_coverage` and `get_execution_class_report`.
+    `ClassCoverage`, `ClassReport`, `ClassBudget`, `ClassBudgets` and
+    `WorkerClassLoad` are `ExecutionClassCoverage`, `ExecutionClassReport`,
+    `ExecutionClassBudget`, `ExecutionClassBudgets` and
+    `WorkerExecutionClassLoad`. The Python alias `ClassCapacity` is removed.
+  - `WorkerStateSnapshot`: `processes` is `child_count`; `max_claim_batch`
+    and `max_claim_per_worker` are `claim_limits: ClaimLimits`;
+    `class_capacity` is `execution_class_budgets`. `WorkerStateInfo` has
+    `child_count`. The stored columns keep their names.
+  - `PendingStream` and `StreamCoverage` hold `queue` and `coverage`. The
+    wait of a stream with a due row holds `oldest_due_at` (it was
+    `enqueued_at`); the Rust variant is `StreamWait::Due` (it was
+    `OldestWaiting`). `ExecutionClassReport` has `live_window`.
+  - `LivenessReport.database` is `DatabasePing` or `DatabaseUnreachable`
+    (Rust `DatabaseLiveness`). It replaces `db_latency_ms` and
+    `db_reachable`.
+  - `WORKER_STATE_LIVE_WINDOW_S` is `WORKER_STATE_LIVE_WINDOW_SECONDS`.
+  - Web JSON of the worker and class routes: `slot_health` is
+    `{kind, slots}` and `down_slots` is removed; `processes` is
+    `child_count`; `queue_name` is `queue`; the wait kind `waiting` is `due`
+    with `wait_seconds`; `live_window_s` is `live_window_seconds`; a budget
+    has no `free` (the page computes it); the liveness report has
+    `database`. The web UI in the same build reads the new form.
+- **Breaking: an idempotency key conflict is not retryable, and `resend`
+  refuses it.** A repeat of the same send does not complete it. While the owner
+  task is live, the repeat meets the same conflict. After the reservation ends,
+  the repeat starts a second task under the key, with the other command. To
+  complete the send, send the same command as the owner task, or use another
+  key.
+  - Core: `TaskSendError::retryable()` returns `false` for
+    `IdempotencyKeyConflict`, and `resend_target()` returns `None` for it.
+    `BrokerError::is_retryable()` was already `false`.
+  - Python: `TaskSendIdempotencyKeyConflict.retryable` is `False`. The alias
+    `TaskSendRetryable` is `TaskSendEnqueueFailed | TaskSendAsyncContext`:
+    `retry_send`, `retry_send_async`, `retry_schedule` and
+    `retry_schedule_async` take no `TaskSendIdempotencyKeyConflict`. A caller
+    without a type checker gets an `AssertionError` that names the variant.
+  - Rust: `retry_send` returns `Err(TaskSendError::ValidationFailed)` for
+    the error; nothing is written.
+  - The error class texts in the core catalog state the rule: not retryable
+    means that a repeat of the same call does not complete it; retryable means
+    that the same call, unchanged, can succeed later.
+  - The resend loop of the clients resends only `ENQUEUE_FAILED` with
+    `retryable` true, so it does not change.
+
 - **Breaking: `allow_failed_deps` is `allow_failed_dependencies`, and
   `workflow_ctx_from` is `workflow_context_from`.** Each concept has one name
   in every client. The old names have no alias.
@@ -73,6 +255,93 @@ and there is no migration contract between pre-1.0 versions.
   - The database does not change: the columns `allow_failed_deps` and
     `workflow_ctx_from` of `horsies_workflow_tasks` and the SQL function
     parameters keep their names. There is no migration.
+- **Breaking: one name per concept for the errors and their codes.** The old
+  names, code texts and field names have no alias.
+  - The database error family says "database" in Python and Rust:
+    `BrokerOperationError` is `DatabaseOperationError`, `BrokerErrorCode` is
+    `DatabaseErrorCode`, `BrokerOperationFailedCode` is
+    `DatabaseOperationFailedCode`, `BrokerResult` is `DatabaseResult`, and
+    each `Broker*` class is `Database*` (`DatabaseOperationFailed`,
+    `DatabaseEnqueueFailed`, `DatabasePayloadMismatch`,
+    `DatabaseIdempotencyKeyConflict`, `DatabaseInvalidJsonPayload`,
+    `DatabaseInvalidTaskOptions`, `DatabaseInvalidInput`,
+    `DatabaseAsyncContext`, `DatabaseListenerDisabled`,
+    `DatabaseWaitInsideTask`, `DatabaseNotAttached`,
+    `DatabaseNoTypeAvailable`; the unions `DatabaseCoreError`,
+    `DatabaseCoreEnqueueError`, `DatabaseEnqueueError` and
+    `DatabaseSyncCallError`). The `retryable` of each class does not change.
+  - Python: the read failure `BrokerError` is `ReadDatabaseError`.
+  - The errors of a workflow handle say "workflow handle":
+    `HandleOperationError` is `WorkflowHandleError` and `HandleErrorCode` is
+    `WorkflowHandleErrorCode`. The Python classes are
+    `WorkflowHandleNotFound`, `WorkflowHandleAsyncContext`,
+    `WorkflowHandleDatabaseOperationFailed`,
+    `WorkflowHandleResumeRecoveryFailed`, `WorkflowHandleStoredDataInvalid`
+    and `WorkflowHandleInvalidWorkflowId`. Rust:
+    `WorkflowHandleError::WorkflowNotFound` is `NotFound`.
+  - Python: `WorkflowHandleInvalidWorkflowId` has the code
+    `INVALID_WORKFLOW_ID`, a new member of `WorkflowHandleErrorCode`. No
+    handle operation gives it, and `WorkflowHandleError` does not hold it.
+  - `ErrorCode` (the `HRS-nnn` codes) is `HorsiesErrorCode`. Rust: the
+    family of an `HRS-nnn` error, `ErrorCategory`, is
+    `HorsiesErrorCategory`; the monitoring `ErrorCategory` keeps its name.
+    The `HRS-nnn` numbers do not change.
+  - `OperationalErrorCode` is `OperationalCode`.
+  - Python: `SubWorkflowError` is `SubWorkflowFailure`,
+    `FlattenedException` is `ExceptionRecord`,
+    `WorkflowContextMissingIdError` is `WorkflowContextMissingId`, and
+    `format_rust_style()` of `HorsiesError`, `ValidationReport` and
+    `MultipleValidationErrors` is `format_diagnostic()`.
+  - Python: the cause field of a catalog error class is `cause` (it was
+    `exception`): on the classes of `DatabaseOperationError`,
+    `TaskSendError`, `WorkflowStartError`, `WorkflowHandleError`,
+    `MonitoringQueryError` and `TaskActionError`, on `ReadDatabaseError` and
+    on `WorkflowHandleInvalidWorkflowId`. `TaskError.exception` keeps its
+    name. Rust: the field `source` of
+    `MonitoringQueryError::DatabaseOperationFailed` and
+    `MonitoringQueryError::HistoryContractViolation` is `cause`.
+  - Python: `broker_error_cause(error)` is removed. Each class of
+    `DatabaseOperationError`, `TaskSendError`, `WorkflowStartError`,
+    `WorkflowHandleError`, `MonitoringQueryError` and `TaskActionError`, and
+    `WorkflowHandleInvalidWorkflowId`, has the method `failure_cause()`: the
+    exception of the cause, or `NoCause()`.
+  - Rust: `TaskSendError::SendSuppressed` is `Suppressed`. The code
+    `SEND_SUPPRESSED` does not change.
+  - Code texts: `DB_OPERATION_FAILED` is `DATABASE_OPERATION_FAILED`,
+    `DB_PING_FAILED` is `DATABASE_PING_FAILED`, `MODULE_EXEC_ERROR` is
+    `MODULE_IMPORT_ERROR`, `WORKFLOW_INVALID_CTX_FROM` is
+    `WORKFLOW_INVALID_CONTEXT_FROM`, `WORKFLOW_CTX_PARAM_MISSING` is
+    `WORKFLOW_CONTEXT_PARAMETER_MISSING`, `WORKFLOW_CTX_MISSING_ID` is
+    `WORKFLOW_CONTEXT_MISSING_ID`, `SUBWORKFLOW_FAILED` is
+    `SUB_WORKFLOW_FAILED`, `BROKER_ERROR` is `DATABASE_ERROR`,
+    `BROKER_INVALID_URL` is `DATABASE_INVALID_URL`, `BROKER_INIT_FAILED` is
+    `DATABASE_INIT_FAILED`, `CONFIG_INVALID_BROKER_POOL` is
+    `CONFIG_INVALID_DATABASE_POOL`, and `NO_BROKER` is `NO_DATABASE`. The
+    variants and the classes of these codes follow (for example Rust
+    `DatabasePingFailed`, `ModuleImportError`, `SubWorkflowFailed` and
+    `OperationalCode::DatabaseError`, Python
+    `TaskActionDatabaseOperationFailed` and
+    `MonitoringQueryDatabaseOperationFailed`). The web JSON of a failed
+    monitoring read or action gives the new code texts.
+  - The code `QUERY_REFUSED` of `MonitoringQueryRefusalCode` is
+    `INVALID_INPUT`, the text that the database, the broker and the workflow
+    handle give for a refused value. Rust: the variant `QueryRefused` is
+    `InvalidInput`. The text is not stored.
+  - Python `UnknownCustomCode` and Rust `ReadError::UnknownUserCode` and
+    `WorkflowReadError::UnknownUserCode` have the code
+    `UNKNOWN_CUSTOM_CODE`, a new member of `RetrievalCode`. Before, they
+    gave `RESULT_DESERIALIZATION_ERROR`.
+  - Stored text: three stored task codes change (`DATABASE_ERROR`,
+    `WORKFLOW_CONTEXT_MISSING_ID` and `SUB_WORKFLOW_FAILED`). Migration 1007
+    writes `SUB_WORKFLOW_FAILED` in `horsies_task_error_envelope` and
+    `horsies_workflow_child_node_result`, and writes no row. A row that was
+    stored before the upgrade keeps the old text and fails closed: a read of
+    its stored result, node result or workflow error gives
+    `RESULT_DESERIALIZATION_ERROR`, and the monitoring node detail gives
+    `HISTORY_CONTRACT_VIOLATION`. Lists, counts and facets show the old text
+    as a `DOMAIN` code. A stored `auto_retry_for` text with an old code
+    matches no code. Drain the tasks and the workflows before the upgrade.
+    The values of the metric label `error_code` change.
 - **Breaking (Python): typed custom error codes.** `TaskError[C]` is generic
   in the type of its custom code, with the default `str`; `TaskError` with
   no argument keeps its meaning. `error_code` is `C | BuiltInTaskCode`.
@@ -94,7 +363,7 @@ and there is no migration contract between pre-1.0 versions.
     annotation of the body.
   - A stored custom code that `E` does not name (a row of another version
     of the task) is the new read failure `UnknownCustomCode`, with the code
-    `RESULT_DESERIALIZATION_ERROR` and the stored text in `custom_code`;
+    `UNKNOWN_CUSTOM_CODE` and the stored text in `custom_code`;
     for an `args_from` input it is `WORKER_SERIALIZATION_ERROR`.
   - `TaskError` now accepts a custom `Enum` member whose value is a code
     text; it refused one before.
@@ -107,6 +376,66 @@ and there is no migration contract between pre-1.0 versions.
   - The error of a workflow that `WorkflowHandle.get` gives, and the outcome
     of a `SubWorkflowNode`, keep custom codes as text: the error of a failed
     workflow is the error of its failed node, which can be any task.
+- **Breaking (all clients): a rerun checks the stored retry list of its
+  source.** Before the write, the rerun checks the `auto_retry_for` codes of
+  the stored options against the declared custom codes of the calling app's
+  tasks. A built-in code passes for every task. A custom code passes when
+  the app registers the task and the task declares the code. Otherwise the
+  rerun is refused and writes nothing; neither refusal is retryable:
+  - `RerunErrorCode::RetryCodeNotDeclared` (`RETRY_CODE_NOT_DECLARED`): the
+    stored list names a custom code that the task does not declare, so the
+    new task would not retry on it.
+  - `RerunErrorCode::TaskNotRegistered` (`TASK_NOT_REGISTERED`): the stored
+    list names a custom code, and the app does not register the task, so the
+    code cannot be checked.
+  - A stored list of built-in codes only, or no retry policy, needs no
+    registered task. A stored policy that does not fit its rule is not
+    checked here: the worker refuses it when it runs the task.
+  - Core: the input is `RegisteredTaskCodes` (each registered task by name,
+    with its `DeclaredErrorCodes`; `RegisteredTaskCodes::NONE` for an app
+    with no task); `RegisteredTaskCodes::of` gives `DeclaredCodes::Registered
+    { custom }` or `DeclaredCodes::TaskNotRegistered`. `prepare_rerun_write`
+    takes `codes` after `policy`, and `PostgresBroker::rerun_task` takes
+    `codes` last. `RerunPreparation` and `RerunError` have the variants
+    `RetryCodeNotDeclared { task_name, retry_code }` and
+    `TaskNotRegistered { task_name }`. `RetryRule::auto_retry_for` gives the
+    stored codes.
+  - Python: `rerun_task` takes the keyword `registered_task_codes`
+    (`Mapping[str, tuple[str, ...]]`), and `Horsies.registered_task_codes()`
+    gives it: every registered task with its `task_error_codes`.
+    `app.rerun_task_async` and `app.rerun_task` pass the app's codes. A
+    refusal raises `CorePreconditionFailed` (subject `rerun_task`); a code
+    set that is not a declared code set raises `ValueError`. The bridge
+    records are `RerunRetryCodeNotDeclared` and `RerunTaskNotRegistered`.
+  - Rust: `rerun::rerun_task_in(transaction, &command, &policy, &codes,
+    sent_at)` takes `&app.registered_task_codes()`; `Horsies::rerun_task`
+    passes the app's codes. `CallerRerunError` has the variants
+    `RetryCodeNotDeclared { task_name, retry_code }` and
+    `TaskNotRegistered { task_name }`. `horsies::rerun` exports
+    `RegisteredTaskCodes`.
+- **Breaking (Python): `auto_retry_for` takes code members.** An entry of
+  `RetryPolicy.auto_retry_for` is a member of a built-in code enum
+  (`OperationalCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`)
+  or a member of the `Enum` class that the task declares with
+  `error_codes=`. The type is `list[BuiltInTaskCode | Enum]` in the field,
+  `RetryPolicy.fixed` and `RetryPolicy.exponential`, so pyright refuses a
+  plain `str`.
+  - `@app.task` refuses a plain `str` (also a misspelled code such as
+    `"BROKR_ERROR"`), a member of another `Enum` class, and a custom member
+    of a task that declares a tuple or no `error_codes`, with
+    `TaskDefinitionError` `TASK_INVALID_OPTIONS` (`HRS-102`). The notes name
+    the task and the entry, and the task is not registered. One error per
+    refused entry; several come in one `MultipleValidationErrors`.
+  - A task that retries on a code of its own declares the code in an `Enum`
+    class, as a Rust task declares it in its code type. Its body can return
+    the member or its text.
+  - The `RetryPolicy` constructor no longer checks the entries; `@app.task`
+    checks them against the codes of the task.
+  - The stored retry policy holds the text of each code, as before.
+  - New in `horsies.core.declared_error_codes` (not exported by
+    `horsies`): `check_retry_codes`, `RetryEntryNotAMember`,
+    `RetryMemberNotDeclared`, `RetryEntryRefusal` and
+    `RetryEntriesRefused`.
 - **Breaking (Python): `Result` for task bodies, `ReadResult` for reads,
   `TaskOutcome` for node inputs.** `TaskResult` is removed, with no alias.
   - A task body returns `Result[T, TaskError]`: `Ok(value)` or
@@ -123,12 +452,13 @@ and there is no migration contract between pre-1.0 versions.
     union of one frozen class per code (`WaitTimeout`, `TaskNotFound`,
     `WorkflowNotFound`, `ResultNotAvailable`, `ResultNotReady`,
     `WaitInsideTask`, `AsyncContext`, `InvalidInput`,
-    `ResultDeserializationError`, `BrokerError`, `NoTypeAvailable`,
-    `WorkflowCtxMissingId`). Each class has `code` and `message`;
-    `BrokerError` also has `retryable` and `exception`. `RetrievalCode`
+    `ResultDeserializationError`, `UnknownCustomCode`, `ReadDatabaseError`,
+    `NoTypeAvailable`, `WorkflowCtxMissingId`). Each class has `code` and
+    `message`; `ReadDatabaseError` also has `retryable` and `cause`.
+    `RetrievalCode`
     values no longer arrive inside a `TaskError` from a read.
     `Horsies.get_result` gives these classes in place of the
-    `BrokerOperationError` variants.
+    `DatabaseOperationError` variants.
   - An `args_from` parameter is annotated `TaskOutcome[T, TaskError]` (or
     `| None`) and gets `Succeeded(value)` or `Failed(task_error)`.
     `WorkflowContext.result_for` returns a `TaskOutcome`.
@@ -137,7 +467,7 @@ and there is no migration contract between pre-1.0 versions.
     `TaskOutcome` values.
   - Every read checks the wait limit first: a `timeout_ms` that is not
     `None` or an int from 0 to 4,294,967,295 gives `InvalidInput`
-    (`BrokerInvalidInput` for `get_raw_result` and
+    (`DatabaseInvalidInput` for `get_raw_result` and
     `PostgresBroker.get_raw_result_record`) before `WaitInsideTask` and
     `AsyncContext`, as in the Rust and TypeScript clients.
   - The stored result envelope and the stored codes do not change.
@@ -146,10 +476,10 @@ and there is no migration contract between pre-1.0 versions.
   `forms: CallForms`, `AnyForm` or `BlockingFormOnly`. The `CodeCatalog`
   derive sets `BlockingFormOnly` for a variant with
   `#[code_catalog(blocking_form_only)]`, and refuses the key on the enum.
-  The `ASYNC_CONTEXT` members of `BrokerErrorCode`, `TaskSendErrorCode`,
-  `WorkflowStartErrorCode`, `HandleErrorCode` and `RetrievalCode` have it:
-  only a blocking call form (a Python sync call, a Rust blocking call)
-  gives these codes. An error class reads the mark through the member of
+  The `ASYNC_CONTEXT` members of `DatabaseErrorCode`, `TaskSendErrorCode`,
+  `WorkflowStartErrorCode`, `WorkflowHandleErrorCode` and `RetrievalCode`
+  have it: only a blocking call form (a Python sync call, a Rust blocking
+  call) gives these codes. An error class reads the mark through the member of
   its `code` slot; `CodeCatalog::member_named` finds that member. Code that
   builds a `CatalogMember` value sets the new field. The generated Python
   package does not change.
@@ -481,7 +811,7 @@ and there is no migration contract between pre-1.0 versions.
   read: the worker refuses the task before its body runs
   (`WORKER_SERIALIZATION_ERROR`, "stored retry_policy does not validate:
   retry_for: Field required ..."), and a workflow node with such options
-  fails at promotion. Schema migration 1007 gives the SQL validation of a
+  fails at promotion. Schema migration 1008 gives the SQL validation of a
   node's retry policy the new keys.
 - **Rust: the cancel grace is a plain number.** `TaskOptions.cancel_grace_ms`
   is `Option<u32>`. `Horsies::register` refuses a grace outside 100 to
@@ -571,18 +901,18 @@ and there is no migration contract between pre-1.0 versions.
   (`error_category`, `error_codes[].category`, the keys of
   `error_category_totals`) and the `error_category` query value use
   `CUSTOM`. A request with `error_category=DOMAIN` gets 400. The web UI
-  shows the category as "Custom". Schema migration 1007 gives the
+  shows the category as "Custom". Schema migration 1008 gives the
   monitoring SQL functions the new text.
-- **Schema migration 1007: the retry policy keys and the code category
-  `CUSTOM`.** The first start of this build applies migration 1007
-  (`core/migrations/1007_retry_policy_keys_and_custom_category.sql`). It
+- **Schema migration 1008: the retry policy keys and the code category
+  `CUSTOM`.** The first start of this build applies migration 1008
+  (`core/migrations/1008_retry_policy_keys_and_custom_category.sql`). It
   replaces nine functions in place and writes no row: the four validation
   functions of the retry policy of a workflow node read `intervals_seconds`
   and `retry_for`, and the five monitoring functions that hold the code
   category take `CUSTOM` (a `DOMAIN` argument gets `22023`). Stop every
   process of an earlier build before the first start, and upgrade every
   process together. A process of an earlier build that starts after it is
-  refused, and a database at 1007 does not go back to an earlier build.
+  refused, and a database at 1008 does not go back to an earlier build.
 
 ### Removed
 
@@ -593,6 +923,15 @@ and there is no migration contract between pre-1.0 versions.
 - **Rust `CancelGraceMs`.** Use a plain `u32` and `DEFAULT_CANCEL_GRACE_MS`.
 
 ### Fixed
+
+- **Python: the signature check refuses a tuple with an unpacked item.**
+  A parameter or return annotation such as `tuple[int, *tuple[bool, ...]]`
+  is refused at registration with `SignatureValidationError`. The error names
+  the task, the position and the supported forms. pydantic stores the unpacked
+  item as a nested array (`[1, [true, false]]`). It has no flat form for it.
+  The TypeScript client stores a tuple with a rest item as one flat array.
+  Use `tuple[T, ...]`, `tuple[T1, T2]`, or a dataclass or `BaseModel` with a
+  `tuple[T, ...]` field.
 
 - **A schema install of the `TYPESCRIPT` client family into an empty
   database records its family row.** The install writes the family row in

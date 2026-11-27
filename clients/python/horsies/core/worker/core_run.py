@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Final, assert_never
 from horsies import _core
 from horsies._catalog import worker_manifest as wire
 from horsies.core.app import Horsies
-from horsies.core.errors import ConfigurationError, ErrorCode, HorsiesError
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode, HorsiesError
 from horsies.core.history.identity.keys import IDEMPOTENCY_WINDOW_DEFAULT
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.gc_policy import freeze_startup_objects
@@ -108,7 +108,7 @@ class WorkerLaunch:
     imports: tuple[str, ...]
     sys_path_roots: tuple[str, ...]
     profile: str
-    loglevel: str
+    log_level: str
     metrics_endpoint: wire.MetricsEndpoint
     """The `--metrics-listen` value: an address, or no endpoint."""
 
@@ -157,7 +157,7 @@ def worker_manifest_json(
         sys_path_roots=launch.sys_path_roots,
         parent_sys_path=sys_path,
         parent_argv=child_argv(tuple(sys.argv)),
-        log_level=log_level_of(launch.loglevel),
+        log_level=log_level_of(launch.log_level),
     )
     match launched:
         case Ok(child_launch):
@@ -200,7 +200,7 @@ def profile_refused_error(refusal: str) -> ConfigurationError:
     """The startup error of one line of the core's profile refusal."""
     error = ConfigurationError(
         message=refusal,
-        code=ErrorCode.CONFIG_INVALID_WORKER_PROFILE,
+        code=HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE,
         help_text=PROFILE_REFUSED_HELP,
     )
     error.location = None
@@ -221,7 +221,7 @@ def main_module_locator_error(refused: MainModuleLocator) -> ConfigurationError:
             f'app locator {refused.app_locator!r} cannot work: a child is a new '
             'program with its own __main__'
         ),
-        code=ErrorCode.WORKER_INVALID_LOCATOR,
+        code=HorsiesErrorCode.WORKER_INVALID_LOCATOR,
         help_text=MAIN_MODULE_LOCATOR_HELP,
     )
     error.location = None
@@ -273,7 +273,7 @@ def _child_spec_broker(app: Horsies) -> Result[PostgresBroker, HorsiesError]:
     the run, so a broker that does not build is a startup error, not a
     failure of a workflow step. Starts nothing and connects nowhere.
 
-    Errors: the `HorsiesError` of `Horsies.get_broker` (`BROKER_INIT_FAILED`).
+    Errors: the `HorsiesError` of `Horsies.get_broker` (`DATABASE_INIT_FAILED`).
     """
     try:
         return Ok(app.get_broker())

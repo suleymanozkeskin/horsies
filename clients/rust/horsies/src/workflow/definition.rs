@@ -162,7 +162,7 @@ mod tests {
     use crate::workflow::node::tests::{add, task_node, test_builder, ChargeInput};
     use crate::workflow::spec::{SpecOutput, SpecSuccessPolicy, SuccessCase};
     use crate::workflow::OutputlessResults;
-    use crate::ErrorCode;
+    use crate::HorsiesErrorCode;
 
     fn charge_node() -> crate::TaskNode<f64, ChargeInput> {
         task_node::<f64, ChargeInput>("charge")
@@ -248,7 +248,7 @@ mod tests {
             WrongOutput::build(test_builder(WrongOutput::name()))
                 .unwrap_err()
                 .code,
-            Some(ErrorCode::WorkflowOutputTypeMismatch)
+            Some(HorsiesErrorCode::WorkflowOutputTypeMismatch)
         );
     }
 

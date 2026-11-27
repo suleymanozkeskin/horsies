@@ -461,7 +461,7 @@ def _run_fleet_metrics(
             'metrics',
             instance_path,
             f'--listen={listen}',
-            '--loglevel=warning',
+            '--log-level=warning',
         ],
         stdout=log_handle,
         stderr=subprocess.STDOUT,

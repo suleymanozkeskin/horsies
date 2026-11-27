@@ -2,22 +2,32 @@
 
 A pending stream is the ``PENDING`` rows of one queue and one execution
 class. A live worker serves a stream when the queue is one of its queues and
-one of its claim budgets serves the class (``ClassBudget.serves``). A worker
-is live while its latest state snapshot is at most
-``WORKER_STATE_LIVE_WINDOW_S`` old.
+one of its claim budgets serves the class (``ExecutionClassBudget.serves``).
+A worker is live while its latest state snapshot is at most
+``WORKER_STATE_LIVE_WINDOW_SECONDS`` old.
 
-The types are frozen reports. The class reads of
+The types are frozen reports. The execution class reads of
 ``PostgresBroker`` run in the core and give these types
-(``horsies.core.brokers.worker_state_records``).
+(``horsies.core.brokers.worker_state_records``). The execution class
+report and its parts are also the JSON of the monitoring route
+``GET /api/workers/classes``: a union member carries its ``kind`` tag, and
+a duration is a number of seconds under a ``_seconds`` key.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TypeAlias
+from typing import Annotated, Literal, TypeAlias
+
+from pydantic import Field, PlainSerializer
 
 from horsies.core.models.tasks import Execution
+
+
+def _seconds(duration: timedelta) -> float:
+    """The seconds of ``duration`` as a JSON number."""
+    return duration.total_seconds()
 
 
 @dataclass(slots=True, frozen=True)
@@ -32,6 +42,7 @@ class StreamServed:
 
     workers: int
     capacity: int
+    kind: Literal['served'] = 'served'
 
 
 @dataclass(slots=True, frozen=True)
@@ -41,6 +52,7 @@ class StreamWithoutCapacity:
     worker's snapshot. ``workers`` counts them, 1 or more."""
 
     workers: int
+    kind: Literal['no_capacity'] = 'no_capacity'
 
 
 @dataclass(slots=True, frozen=True)
@@ -48,27 +60,33 @@ class StreamUnserved:
     """No live worker serves the stream. Its rows wait until a worker that
     serves the class runs on the queue."""
 
+    kind: Literal['unserved'] = 'unserved'
 
-StreamCoverageState: TypeAlias = StreamServed | StreamWithoutCapacity | StreamUnserved
+
+StreamCoverageState: TypeAlias = Annotated[
+    StreamServed | StreamWithoutCapacity | StreamUnserved,
+    Field(discriminator='kind'),
+]
+"""Whether live workers serve a pending stream."""
 
 
 @dataclass(slots=True, frozen=True)
 class StreamCoverage:
     """The coverage of one pending stream."""
 
-    queue_name: str
+    queue: str
     execution: Execution
-    state: StreamCoverageState
+    coverage: StreamCoverageState
 
 
 @dataclass(slots=True, frozen=True)
-class ClassCoverage:
+class ExecutionClassCoverage:
     """The coverage of every pending stream, read at ``checked_at``.
 
     ``checked_at`` is database time. ``live_workers`` counts the workers
     whose latest snapshot was live; the coverage of each stream comes from
     these. ``streams`` holds one entry per (queue, class) that has
-    ``PENDING`` rows, ordered by queue name, then by ``Execution`` order.
+    ``PENDING`` rows, ordered by queue, then by ``Execution`` order.
     Empty when no row is pending.
     """
 
@@ -81,13 +99,19 @@ class ClassCoverage:
 class OldestWaiting:
     """At least one row of the stream is due.
 
-    ``enqueued_at`` is the due time of the oldest due row: its send time, or
-    the time its retry became due. ``wait`` is how long that row has waited
-    at ``checked_at``, 0 or more.
+    ``oldest_due_at`` is the due time of the oldest due row: its send time,
+    or the time its retry became due. ``wait`` is how long that row has
+    waited at ``checked_at``, 0 or more. In JSON, ``wait`` is
+    ``wait_seconds``, a number of seconds.
     """
 
-    enqueued_at: datetime
-    wait: timedelta
+    oldest_due_at: datetime
+    wait: Annotated[
+        timedelta,
+        PlainSerializer(_seconds, return_type=float, when_used='json'),
+        Field(serialization_alias='wait_seconds'),
+    ]
+    kind: Literal['due'] = 'due'
 
 
 @dataclass(slots=True, frozen=True)
@@ -96,19 +120,24 @@ class NoneDue:
     waits for its interval. ``next_due_at`` is the earliest due time."""
 
     next_due_at: datetime
+    kind: Literal['none_due'] = 'none_due'
 
 
-StreamWait: TypeAlias = OldestWaiting | NoneDue
+StreamWait: TypeAlias = Annotated[
+    OldestWaiting | NoneDue,
+    Field(discriminator='kind'),
+]
+"""How long the rows of a pending stream wait."""
 
 
 @dataclass(slots=True, frozen=True)
 class PendingStream:
-    """One pending stream: how long its rows wait, and whether a live worker serves it."""
+    """One pending stream: whether a live worker serves it, and how long its rows wait."""
 
-    queue_name: str
+    queue: str
     execution: Execution
+    coverage: StreamCoverageState
     wait: StreamWait
-    state: StreamCoverageState
 
 
 @dataclass(slots=True, frozen=True)
@@ -118,7 +147,8 @@ class BudgetLoad:
     ``capacity`` and ``serves`` come from the worker's latest snapshot.
     ``in_flight`` counts, at the read, the worker's ``RUNNING`` rows and its
     ``CLAIMED`` rows with a live lease whose class the budget serves. The
-    claim counts the same rows against the budget.
+    claim counts the same rows against the budget. The JSON holds these four
+    fields; a reader computes ``free``.
     """
 
     budget: Execution
@@ -138,7 +168,7 @@ class BudgetLoad:
 
 
 @dataclass(slots=True, frozen=True)
-class WorkerClassLoad:
+class WorkerExecutionClassLoad:
     """The claim budgets of one live worker, in ``Execution`` order."""
 
     worker_id: str
@@ -147,15 +177,22 @@ class WorkerClassLoad:
 
 
 @dataclass(slots=True, frozen=True)
-class ClassReport:
+class ExecutionClassReport:
     """Pending streams and the budget load of each live worker.
 
-    ``checked_at`` is database time. ``streams`` is ordered like
-    ``ClassCoverage.streams``; ``workers`` (the live workers) by worker id.
+    ``checked_at`` is database time. A worker is live while its latest
+    snapshot is at most ``live_window`` old
+    (``WORKER_STATE_LIVE_WINDOW_SECONDS``). ``streams`` is ordered like
+    ``ExecutionClassCoverage.streams``; ``workers`` (the live workers) by
+    worker id. In JSON, ``live_window`` is ``live_window_seconds``, a number
+    of seconds.
     """
 
     checked_at: datetime
+    live_window: Annotated[
+        timedelta,
+        PlainSerializer(_seconds, return_type=float, when_used='json'),
+        Field(serialization_alias='live_window_seconds'),
+    ]
     streams: tuple[PendingStream, ...]
-    workers: tuple[WorkerClassLoad, ...]
-
-
+    workers: tuple[WorkerExecutionClassLoad, ...]

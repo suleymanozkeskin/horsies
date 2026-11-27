@@ -78,6 +78,7 @@ async def test_the_reason_is_the_staged_classification(
         _connection(reason.value),
         RerunCommand(source_task_id=SOURCE_ID, good_until=None),
         _policy(),
+        registered_task_codes={},
     )
 
     assert outcome == RerunSourceAbsent(task_id=SOURCE_ID, reason=reason)
@@ -89,6 +90,7 @@ async def test_a_reason_outside_the_set_is_a_corrupt_source() -> None:
         _connection('PURGED'),
         RerunCommand(source_task_id=SOURCE_ID, good_until=None),
         _policy(),
+        registered_task_codes={},
     )
 
     match outcome:

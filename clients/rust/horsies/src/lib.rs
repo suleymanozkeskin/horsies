@@ -60,7 +60,7 @@ pub mod tools;
 pub use crate::app::{AppRole, Horsies, SchemaMode, StateNotProvided, SUPPRESS_SENDS_ENV};
 pub use crate::config::*;
 pub use crate::error::*;
-pub use horsies_core::handle::CoreHandle;
+pub use horsies_core::handle::CoreConnection;
 
 pub use crate::check::*;
 pub use crate::child::*;

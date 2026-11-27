@@ -36,7 +36,7 @@ pytestmark = [pytest.mark.integration]
 POOL_TIMEOUT_SECONDS = 3
 THREAD_JOIN_BOUND_SECONDS = 15.0
 RESULT_WAIT_MS = 300
-PING_WINDOW_SECONDS = 0.3
+PING_WAIT_MS = 300
 
 
 @pytest.fixture(scope='module')
@@ -64,11 +64,11 @@ def one_connection_app(schema_ready: None) -> Generator[OneConnectionApp, None, 
     """App whose broker pool holds exactly one connection, with one task."""
     app = Horsies(AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr(DB_URL),
             pool_size=1,
             max_overflow=0,
-            pool_timeout=POOL_TIMEOUT_SECONDS,
+            pool_timeout_seconds=POOL_TIMEOUT_SECONDS,
         ),
     ))
 
@@ -112,7 +112,7 @@ def test_ping_workers_after_sync_workflow_wait(
 
     waited, _ = _timed_call(lambda: handle.get(wait_ms=RESULT_WAIT_MS))
     pinged, _ = _timed_call(
-        lambda: app.ping_workers(timeout_seconds=PING_WINDOW_SECONDS),
+        lambda: app.ping_workers(wait_ms=PING_WAIT_MS),
     )
 
     assert isinstance(waited, Err), waited

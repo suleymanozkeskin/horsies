@@ -36,7 +36,7 @@ from typing import Final, TypeIs, assert_never, get_args, overload
 from horsies._catalog import events
 from horsies._catalog import worker_manifest as wire
 from horsies._catalog.events import AnyEvent
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_frames import MAX_EVENT_HANDLERS, MAX_HANDLER_NAME_CHARS
 
@@ -354,7 +354,7 @@ def event_type_refusal_error(refused: NotAnEventType) -> ConfigurationError:
     type (`HRS-222`). Pure."""
     return ConfigurationError(
         message='on_event takes an event type',
-        code=ErrorCode.EVENT_HANDLER_UNKNOWN_EVENT_TYPE,
+        code=HorsiesErrorCode.EVENT_HANDLER_UNKNOWN_EVENT_TYPE,
         notes=[f'got {refused.given}', f'the event types: {_event_type_names_text()}'],
         help_text=(
             'pass one event class of horsies.telemetry, for example '
@@ -385,22 +385,22 @@ def handler_refusal_error(
     subject = f"handler '{_handler_label(handler)}' of {event_type.name}"
     match refused:
         case NotAFunction(given=given):
-            code = ErrorCode.EVENT_HANDLER_INVALID_SIGNATURE
+            code = HorsiesErrorCode.EVENT_HANDLER_INVALID_SIGNATURE
             message = 'an event handler must be a function or a method'
             notes = [subject, f'got a {given}']
             help_text = 'decorate a def or an async def function'
         case GeneratorHandler():
-            code = ErrorCode.EVENT_HANDLER_INVALID_SIGNATURE
+            code = HorsiesErrorCode.EVENT_HANDLER_INVALID_SIGNATURE
             message = 'an event handler cannot be a generator function'
             notes = [subject, 'the call of a generator function does not run its body']
             help_text = 'use a def or an async def function that does not yield'
         case SignatureUnreadable(detail=detail):
-            code = ErrorCode.EVENT_HANDLER_INVALID_SIGNATURE
+            code = HorsiesErrorCode.EVENT_HANDLER_INVALID_SIGNATURE
             message = 'the signature of the event handler cannot be read'
             notes = [subject, detail]
             help_text = 'decorate a def or an async def function'
         case OneEventDoesNotBind(detail=detail):
-            code = ErrorCode.EVENT_HANDLER_INVALID_SIGNATURE
+            code = HorsiesErrorCode.EVENT_HANDLER_INVALID_SIGNATURE
             message = 'an event handler takes one event'
             notes = [subject, f'a call with one event does not bind: {detail}']
             help_text = (
@@ -408,12 +408,12 @@ def handler_refusal_error(
                 f'def handle(event: {event_type.name}) -> None'
             )
         case OtherEventAnnotated(parameter=parameter, annotated=annotated):
-            code = ErrorCode.EVENT_HANDLER_INVALID_SIGNATURE
+            code = HorsiesErrorCode.EVENT_HANDLER_INVALID_SIGNATURE
             message = 'the event parameter of the handler names another event type'
             notes = [subject, f"parameter '{parameter}' is annotated {annotated}"]
             help_text = f'annotate it {event_type.name}, the event type of on_event'
         case NoModuleName():
-            code = ErrorCode.EVENT_HANDLER_INVALID_NAME
+            code = HorsiesErrorCode.EVENT_HANDLER_INVALID_NAME
             message = 'the event handler has no module name'
             notes = [
                 subject,
@@ -423,7 +423,7 @@ def handler_refusal_error(
                 'define the handler in a module that the app or a task module imports'
             )
         case NameOverBound(name=name, chars=chars):
-            code = ErrorCode.EVENT_HANDLER_INVALID_NAME
+            code = HorsiesErrorCode.EVENT_HANDLER_INVALID_NAME
             message = (
                 f'the name of the event handler has {chars} characters; the most is '
                 f'{MAX_HANDLER_NAME_CHARS}'
@@ -431,7 +431,7 @@ def handler_refusal_error(
             notes = [subject, f'name: {name[:_MAX_GIVEN_CHARS]}...']
             help_text = 'define the handler in a module with a shorter path, or with a shorter function name'
         case NameTaken(name=name):
-            code = ErrorCode.EVENT_HANDLER_DUPLICATE_NAME
+            code = HorsiesErrorCode.EVENT_HANDLER_DUPLICATE_NAME
             message = f"an event handler named '{name}' is registered already"
             notes = [
                 subject,
@@ -439,7 +439,7 @@ def handler_refusal_error(
             ]
             help_text = 'register each function once; a second handler needs a function name of its own'
         case HandlerLimitReached():
-            code = ErrorCode.EVENT_HANDLER_LIMIT
+            code = HorsiesErrorCode.EVENT_HANDLER_LIMIT
             message = f'the app has {MAX_EVENT_HANDLERS} event handlers, the most'
             notes = [subject]
             help_text = 'join handlers of one event type into one function'

@@ -29,7 +29,9 @@ from pydantic import SecretStr, ValidationError
 from horsies._catalog import worker_manifest as wire
 from horsies.core.errors import ConfigurationError
 from horsies.core.models.app import AppConfig
+from horsies.core.models import broker as broker_config
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.cluster_cap import ClusterCap
 from horsies.core.models.child_sizing import (
     DEFAULT_ISOLATED_POOL_CONNECTIONS,
     DEFAULT_TASK_SEND_POOL_CONNECTIONS,
@@ -125,18 +127,15 @@ PROFILE_FIELDS: Final[dict[str, str]] = {
 # PostgresConfig field -> the worker manifest path it fills.
 BROKER_FIELDS: Final[dict[str, str]] = {
     'database_url': 'database.database_url',
-    'session_database_url': 'database.session_database',
+    'session_database': 'database.session_database',
     'pgbouncer_transaction_mode': 'database.pgbouncer_transaction_mode',
     'pool_pre_ping': 'database.pool_pre_ping',
     'worker_pool_pre_ping': 'database.worker_pool_pre_ping',
-    'pool_timeout': 'database.pool_timeout',
+    'pool_timeout_seconds': 'database.pool_timeout_seconds',
     'pool_recycle': 'database.pool_recycle',
     'echo': 'database.echo',
     'tcp_keepalives': 'database.tcp_keepalives',
-    'tcp_keepalives_idle': 'database.tcp_keepalives.idle_seconds',
-    'tcp_keepalives_interval': 'database.tcp_keepalives.interval_seconds',
-    'tcp_keepalives_count': 'database.tcp_keepalives.probes',
-    'tcp_user_timeout_ms': 'database.tcp_user_timeout',
+    'tcp_user_timeout': 'database.tcp_user_timeout',
     'retain_rerun_input_default': 'send.retain_rerun_input_default',
 }
 
@@ -151,7 +150,7 @@ WINDOW: Final = timedelta(hours=24)
 
 def _app_config(**overrides: Any) -> AppConfig:
     return AppConfig(
-        broker=PostgresConfig(database_url=SecretStr(MAIN_URL)),
+        database=PostgresConfig(database_url=SecretStr(MAIN_URL)),
         **overrides,
     )
 
@@ -163,7 +162,7 @@ RECOVERY_BOUNDS: Final[dict[str, tuple[str, int]]] = {
     'running_stale_threshold_ms': ('STALE_THRESHOLD_MS', 1_000),
     'finalizing_stale_threshold_ms': ('STALE_THRESHOLD_MS', 1_000),
     'crashed_worker_recovery_grace_ms': ('RECOVERY_GRACE_MS', 0),
-    'phase2_quarantine_after_attempts': ('RECOVERY_PASS_LIMIT', 3),
+    'finalization_quarantine_after_attempts': ('RECOVERY_PASS_LIMIT', 3),
     'workflow_recovery_failure_limit': ('RECOVERY_PASS_LIMIT', 3),
     'check_interval_ms': ('CHECK_INTERVAL_MS', 1_000),
     'orphan_task_audit_interval_ms': ('AUDIT_INTERVAL_MS', 1_000),
@@ -173,9 +172,9 @@ RECOVERY_BOUNDS: Final[dict[str, tuple[str, int]]] = {
 
 RECOVERY_FLAGS: Final[frozenset[str]] = frozenset(
     {
-        'auto_requeue_stale_claimed',
-        'auto_terminate_orphaned_workflow_tasks',
-        'auto_fail_stale_running',
+        'requeue_stale_claimed',
+        'terminate_orphaned_workflow_tasks',
+        'fail_stale_running',
     },
 )
 
@@ -183,13 +182,13 @@ RECOVERY_FLAGS: Final[frozenset[str]] = frozenset(
 RETENTION_FIELDS: Final[dict[str, str]] = {
     'worker_state_retention_hours': 'worker_state_retention',
     'terminal_record_retention_hours': 'terminal_record_retention',
-    'paused_workflow_auto_cancel_after': 'paused_workflow_auto_cancel_after',
+    'paused_workflow_cancel_after': 'paused_workflow_cancel_after',
     'history_leaf_horizon_days': 'history_leaf_horizon_days',
     'heartbeat_leaf_horizon_hours': 'heartbeat_leaf_horizon_hours',
     'retention_periods': 'retention_periods',
     'queue_retention': 'queue_retention',
-    'partition_maintenance_interval_s': 'partition_maintenance_interval_s',
-    'retention_sweep_interval_s': 'retention_sweep_interval_s',
+    'partition_maintenance_interval_seconds': 'partition_maintenance_interval_seconds',
+    'retention_sweep_interval_seconds': 'retention_sweep_interval_seconds',
     'retention_delete_batch_size': 'retention_delete_batch_size',
 }
 
@@ -199,15 +198,15 @@ RETENTION_BOUNDS: Final[dict[str, str]] = {
     'terminal_record_retention_hours': 'TERMINAL_RECORD_RETENTION_HOURS',
     'history_leaf_horizon_days': 'HISTORY_LEAF_HORIZON_DAYS',
     'heartbeat_leaf_horizon_hours': 'HEARTBEAT_LEAF_HORIZON_HOURS',
-    'partition_maintenance_interval_s': 'MAINTENANCE_INTERVAL_SECONDS',
-    'retention_sweep_interval_s': 'SWEEP_INTERVAL_SECONDS',
+    'partition_maintenance_interval_seconds': 'MAINTENANCE_INTERVAL_SECONDS',
+    'retention_sweep_interval_seconds': 'SWEEP_INTERVAL_SECONDS',
     'retention_delete_batch_size': 'DELETE_BATCH_SIZE',
 }
 
 # WorkerResilienceConfig field -> its manifest bound.
 RESILIENCE_BOUNDS: Final[dict[str, str]] = {
-    'db_retry_initial_ms': 'RETRY_INITIAL_MS',
-    'db_retry_max_ms': 'RETRY_MAX_MS',
+    'database_retry_initial_ms': 'RETRY_INITIAL_MS',
+    'database_retry_max_ms': 'RETRY_MAX_MS',
     'notify_poll_interval_ms': 'POLL_INTERVAL_MS',
 }
 
@@ -265,14 +264,14 @@ def _full_profile() -> WorkerProfile:
             recycle=IsolatedRecycle(
                 after=TaskLimit(tasks=50), above=MemoryLimit(mb=512)
             ),
-            pool=IsolatedPool(min_size=1, max_size=PoolSize(connections=3), check=True),
+            pool=IsolatedPool(min_size=1, max_size=PoolSize(connections=3), pre_ping=True),
             task_send_pool=PoolSize(connections=4),
         ),
         shared_async=SharedAsyncChildren(
             count=1,
             seats=20,
             recycle=SharedRecycle(after_per_seat=NoTaskLimit(), above=NoMemoryLimit()),
-            pool=SharedPool(min_size=0, max_size=PoolSize(connections=5), check=False),
+            pool=SharedPool(min_size=0, max_size=PoolSize(connections=5), pre_ping=False),
             executor=ExecutorThreads(threads=6),
             task_send_pool=PoolSize(connections=2),
         ),
@@ -335,7 +334,7 @@ class TestProfile:
                     after=wire.TaskLimitTasks(tasks=50),
                     above=wire.MemoryLimitMegabytes(mb=512),
                 ),
-                pool=wire.IsolatedPoolManifest(min_size=1, max_size=3, check=True),
+                pool=wire.IsolatedPoolManifest(min_size=1, max_size=3, pre_ping=True),
                 task_send_pool=4,
             ),
             shared_async=wire.SharedAsyncChildren(
@@ -348,7 +347,7 @@ class TestProfile:
                 pool=wire.SharedPoolManifest(
                     min_size=0,
                     max_size=wire.PoolMaxSizeConnections(connections=5),
-                    check=False,
+                    pre_ping=False,
                 ),
                 executor=wire.DefaultExecutorThreads(threads=6),
                 task_send_pool=2,
@@ -365,7 +364,7 @@ class TestProfile:
                 pool=wire.SharedPoolManifest(
                     min_size=0,
                     max_size=wire.PoolMaxSizeFromSeats(),
-                    check=False,
+                    pre_ping=False,
                 ),
                 task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
             ),
@@ -395,7 +394,7 @@ class TestProfile:
                 pool=wire.IsolatedPoolManifest(
                     min_size=0,
                     max_size=DEFAULT_ISOLATED_POOL_CONNECTIONS,
-                    check=False,
+                    pre_ping=False,
                 ),
                 task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
             ),
@@ -421,7 +420,7 @@ class TestProfile:
         assert values == {
             ChildPreload.LIBRARY: 'LIBRARY',
             ChildPreload.APP: 'APP',
-            ChildPreload.NONE: 'NO_PRELOAD',
+            ChildPreload.NO_PRELOAD: 'NO_PRELOAD',
         }
         cpus = {
             cpu: worker_profile_manifest(
@@ -487,7 +486,7 @@ class TestClaim:
                 CustomQueueConfig(name='low', priority=100, max_concurrency=None),
             ],
             claim_lease_ms=90_000,
-            cluster_wide_cap=20,
+            cluster_wide_cap=ClusterCap(tasks=20),
         )
         assert worker_claim_manifest(config) == wire.WorkerClaimManifest(
             queues=wire.QueuesCustom(
@@ -529,8 +528,8 @@ class TestClaim:
                 wire.MILLISECONDS_MAX,
             ),
             (
-                {'cluster_wide_cap': wire.TASK_LIMIT_MAX + 1},
-                'cluster_wide_cap',
+                {'cluster_wide_cap': ClusterCap(tasks=wire.TASK_LIMIT_MAX + 1)},
+                'cluster_wide_cap.tasks',
                 wire.TASK_LIMIT_MAX,
             ),
             (
@@ -575,7 +574,9 @@ class TestClaim:
         assert claim.prefetch_buffer == wire.CLAIM_COUNT_MAX
         assert claim.claim_lease == wire.ClaimLeaseMilliseconds(ms=wire.MILLISECONDS_MAX)
         assert claim.max_claim_renew_age_ms == wire.MILLISECONDS_MAX
-        capped = worker_claim_manifest(_app_config(cluster_wide_cap=wire.TASK_LIMIT_MAX))
+        capped = worker_claim_manifest(
+            _app_config(cluster_wide_cap=ClusterCap(tasks=wire.TASK_LIMIT_MAX)),
+        )
         assert capped.cluster_wide_cap == wire.ClusterWideCapTasks(
             tasks=wire.TASK_LIMIT_MAX
         )
@@ -585,12 +586,12 @@ class TestDatabase:
     def test_the_worker_database_keeps_both_pre_ping_settings(self) -> None:
         config = PostgresConfig(
             database_url=SecretStr(MAIN_URL),
-            session_database_url=SecretStr(SESSION_URL),
+            session_database=broker_config.SessionDatabaseSeparate(url=SecretStr(SESSION_URL)),
             pgbouncer_transaction_mode=True,
             pool_pre_ping=False,
             worker_pool_pre_ping=True,
-            pool_timeout=11,
-            pool_recycle=-1,
+            pool_timeout_seconds=11,
+            pool_recycle=broker_config.PoolRecycleNever(),
             echo=True,
         )
         assert worker_database_manifest(config) == wire.WorkerDatabaseManifest(
@@ -601,7 +602,7 @@ class TestDatabase:
             pgbouncer_transaction_mode=True,
             pool_pre_ping=False,
             worker_pool_pre_ping=True,
-            pool_timeout=11,
+            pool_timeout_seconds=11,
             pool_recycle=wire.PoolRecycleNever(),
             echo=True,
             tcp_keepalives=wire.TcpKeepalivesConfigOn(
@@ -634,31 +635,28 @@ class TestDatabase:
     def test_keepalives_on_carry_the_three_values(self) -> None:
         config = PostgresConfig(
             database_url=SecretStr(MAIN_URL),
-            tcp_keepalives=True,
-            tcp_keepalives_idle=45,
-            tcp_keepalives_interval=7,
-            tcp_keepalives_count=5,
+            tcp_keepalives=broker_config.TcpKeepalivesOn(
+                idle_seconds=45, interval_seconds=7, probes=5,
+            ),
         )
         assert worker_database_manifest(config).tcp_keepalives == (
             wire.TcpKeepalivesConfigOn(idle_seconds=45, interval_seconds=7, probes=5)
         )
 
-    def test_keepalives_off_is_the_off_variant_whatever_the_three_values(self) -> None:
-        config = PostgresConfig.model_validate(
-            {
-                'database_url': MAIN_URL,
-                'tcp_keepalives': False,
-                'tcp_keepalives_idle': 0,
-                'tcp_keepalives_interval': 0,
-                'tcp_keepalives_count': 0,
-            },
+    def test_keepalives_off_is_the_off_variant(self) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr(MAIN_URL),
+            tcp_keepalives=broker_config.TcpKeepalivesOff(),
         )
         assert worker_database_manifest(config).tcp_keepalives == (
             wire.TcpKeepalivesConfigOff()
         )
 
-    def test_a_tcp_user_timeout_of_zero_is_the_system_default(self) -> None:
-        config = PostgresConfig(database_url=SecretStr(MAIN_URL), tcp_user_timeout_ms=0)
+    def test_the_tcp_user_timeout_system_default_is_its_variant(self) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr(MAIN_URL),
+            tcp_user_timeout=broker_config.TcpUserTimeoutSystemDefault(),
+        )
         assert worker_database_manifest(config).tcp_user_timeout == (
             wire.TcpUserTimeoutConfigSystemDefault()
         )
@@ -670,7 +668,7 @@ class TestDatabase:
     ) -> None:
         config = PostgresConfig(
             database_url=SecretStr(MAIN_URL),
-            tcp_user_timeout_ms=milliseconds,
+            tcp_user_timeout=broker_config.TcpUserTimeoutAfter(milliseconds=milliseconds),
         )
         assert worker_database_manifest(config).tcp_user_timeout == (
             wire.TcpUserTimeoutConfigAfter(milliseconds=milliseconds)
@@ -679,20 +677,12 @@ class TestDatabase:
     def test_a_keepalive_value_that_the_validator_refuses_is_a_defect_here(
         self,
     ) -> None:
+        zero_probes = broker_config.TcpKeepalivesOn(probes=0)
         with pytest.raises(ConfigurationError):
-            PostgresConfig.model_validate(
-                {
-                    'database_url': MAIN_URL,
-                    'tcp_keepalives': True,
-                    'tcp_keepalives_count': 0,
-                },
-            )
+            PostgresConfig(database_url=SecretStr(MAIN_URL), tcp_keepalives=zero_probes)
         unvalidated = PostgresConfig.model_construct(
             database_url=SecretStr(MAIN_URL),
-            tcp_keepalives=True,
-            tcp_keepalives_idle=30,
-            tcp_keepalives_interval=10,
-            tcp_keepalives_count=0,
+            tcp_keepalives=zero_probes,
         )
         with pytest.raises(AssertionError, match='keepalive values'):
             tcp_keepalives_of(unvalidated)
@@ -700,12 +690,14 @@ class TestDatabase:
     def test_a_tcp_user_timeout_that_the_validator_refuses_is_a_defect_here(
         self,
     ) -> None:
+        zero = broker_config.TcpUserTimeoutAfter(milliseconds=0)
         with pytest.raises(ConfigurationError):
-            PostgresConfig.model_validate(
-                {'database_url': MAIN_URL, 'tcp_user_timeout_ms': -1},
-            )
-        with pytest.raises(AssertionError, match='tcp_user_timeout_ms=-1'):
-            tcp_user_timeout_of(-1)
+            PostgresConfig(database_url=SecretStr(MAIN_URL), tcp_user_timeout=zero)
+        unvalidated = PostgresConfig.model_construct(
+            database_url=SecretStr(MAIN_URL), tcp_user_timeout=zero,
+        )
+        with pytest.raises(AssertionError, match='tcp_user_timeout.milliseconds=0'):
+            tcp_user_timeout_of(unvalidated)
 
 
 class TestValues:
@@ -1024,14 +1016,14 @@ class TestRecovery:
 
     def test_a_value_of_its_own_in_each_field_is_kept(self) -> None:
         config = RecoveryConfig(
-            auto_requeue_stale_claimed=False,
-            auto_fail_stale_running=False,
-            auto_terminate_orphaned_workflow_tasks=False,
+            requeue_stale_claimed=False,
+            fail_stale_running=False,
+            terminate_orphaned_workflow_tasks=False,
             claimed_stale_threshold_ms=3_600_000,
             running_stale_threshold_ms=7_200_000,
             finalizing_stale_threshold_ms=2_000,
             crashed_worker_recovery_grace_ms=0,
-            phase2_quarantine_after_attempts=1_000,
+            finalization_quarantine_after_attempts=1_000,
             workflow_recovery_failure_limit=3,
             check_interval_ms=600_000,
             orphan_task_audit_interval_ms=86_400_000,
@@ -1066,13 +1058,13 @@ class TestRetention:
             terminal_record_retention=wire.TerminalRecordRetentionHours(
                 hours=24 * 30,
             ),
-            paused_workflow_auto_cancel_after=wire.PausedWorkflowExpiryNoExpiry(),
+            paused_workflow_cancel_after=wire.PausedWorkflowExpiryNoExpiry(),
             history_leaf_horizon_days=3,
             heartbeat_leaf_horizon_hours=6,
             retention_periods=(),
             queue_retention={},
-            partition_maintenance_interval_s=900,
-            retention_sweep_interval_s=300,
+            partition_maintenance_interval_seconds=900,
+            retention_sweep_interval_seconds=300,
             retention_delete_batch_size=500,
         )
 
@@ -1080,7 +1072,7 @@ class TestRetention:
         config = RetentionConfig(
             worker_state_retention_hours=None,
             terminal_record_retention_hours=None,
-            paused_workflow_auto_cancel_after=timedelta(days=2, microseconds=7),
+            paused_workflow_cancel_after=timedelta(days=2, microseconds=7),
             retention_periods=(timedelta(days=7), timedelta(days=90)),
             queue_retention={'high': timedelta(days=14), 'low': None},
         )
@@ -1089,7 +1081,7 @@ class TestRetention:
         assert section.terminal_record_retention == (
             wire.TerminalRecordRetentionNoPruning()
         )
-        assert section.paused_workflow_auto_cancel_after == (
+        assert section.paused_workflow_cancel_after == (
             wire.PausedWorkflowExpiryAfter(micros=2 * 86_400_000_000 + 7)
         )
         assert section.retention_periods == (7, 90)
@@ -1106,15 +1098,15 @@ class TestRetention:
             wire.PAUSED_AGE_MICROS_MAX
         )
         config = RetentionConfig(
-            paused_workflow_auto_cancel_after=PAUSED_WORKFLOW_AGE_MAX,
+            paused_workflow_cancel_after=PAUSED_WORKFLOW_AGE_MAX,
         )
-        assert retention_manifest(config).paused_workflow_auto_cancel_after == (
+        assert retention_manifest(config).paused_workflow_cancel_after == (
             wire.PausedWorkflowExpiryAfter(micros=wire.PAUSED_AGE_MICROS_MAX)
         )
 
     def test_a_paused_age_that_validation_refuses_is_a_defect_here(self) -> None:
         unvalidated = RetentionConfig.model_construct(
-            paused_workflow_auto_cancel_after=timedelta.max,
+            paused_workflow_cancel_after=timedelta.max,
         )
         with pytest.raises(AssertionError, match='validated paused workflow age'):
             retention_manifest(unvalidated)
@@ -1136,19 +1128,19 @@ class TestResilience:
         for field, bound in RESILIENCE_BOUNDS.items():
             lower, upper = _pydantic_bounds(WorkerResilienceConfig, field)
             assert _manifest_bounds(bound) == (lower[0], upper[0]), field
-        lower, upper = _pydantic_bounds(WorkerResilienceConfig, 'db_retry_max_attempts')
+        lower, upper = _pydantic_bounds(WorkerResilienceConfig, 'database_retry_max_attempts')
         assert (lower, upper) == ([0], [wire.RETRY_ATTEMPTS_MAX])
         assert wire.RETRY_ATTEMPTS_MIN == 1
 
     def test_zero_attempts_is_no_limit(self) -> None:
         assert resilience_manifest(WorkerResilienceConfig()) == wire.ResilienceManifest(
-            db_retry_initial_ms=500,
-            db_retry_max_ms=30_000,
-            db_retry_max_attempts=wire.RetryAttemptLimitNoLimit(),
+            database_retry_initial_ms=500,
+            database_retry_max_ms=30_000,
+            database_retry_max_attempts=wire.RetryAttemptLimitNoLimit(),
             notify_poll_interval_ms=5_000,
         )
-        limited = WorkerResilienceConfig(db_retry_max_attempts=10_000)
-        assert resilience_manifest(limited).db_retry_max_attempts == (
+        limited = WorkerResilienceConfig(database_retry_max_attempts=10_000)
+        assert resilience_manifest(limited).database_retry_max_attempts == (
             wire.RetryAttemptLimitAttempts(attempts=10_000)
         )
 
@@ -1295,14 +1287,14 @@ class TestDocument:
     def test_the_sections_are_written_in_the_form_the_core_parses(self) -> None:
         document = self._document()
         assert document['recovery']['running_stale_threshold_ms'] == 300_000
-        assert document['retention']['paused_workflow_auto_cancel_after'] == {
+        assert document['retention']['paused_workflow_cancel_after'] == {
             'kind': 'NO_EXPIRY',
         }
         assert document['retention']['worker_state_retention'] == {
             'kind': 'HOURS',
             'hours': 24 * 7,
         }
-        assert document['resilience']['db_retry_max_attempts'] == {'kind': 'NO_LIMIT'}
+        assert document['resilience']['database_retry_max_attempts'] == {'kind': 'NO_LIMIT'}
         assert document['payload'] == {
             'warn_bytes': {'kind': 'BYTES', 'bytes': 1_048_576},
             'reject_bytes': {'kind': 'NO_LIMIT'},

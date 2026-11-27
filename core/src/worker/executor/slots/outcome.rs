@@ -9,7 +9,7 @@
 //! | `Result`, a task error | the failed attempt, with the retry the policy admits for its code |
 //! | `Result` that does not read as the envelope | the failed attempt, `WORKER_SERIALIZATION_ERROR`, no retry |
 //! | `StoppedBeforeRunning` | none; an expired workflow task replays phase 2; an unconfirmed start releases the claim (`horsies_release_claims` with placement `SAME_CLASS`); the child's stop before start already wrote every other stop, the orphan cancel included |
-//! | `WorkerFailure` | the failed attempt, `BROKER_ERROR`, no retry |
+//! | `WorkerFailure` | the failed attempt, `DATABASE_ERROR`, no retry |
 //! | `TimedOut`, `KilledForLoop`, `Crashed` | the failed attempt with `TASK_TIMEOUT`, the loop code or `WORKER_CRASHED`, the retry the policy admits, at the placement of the end, under the claimed-row rule `RELEASE`: a row that is still CLAIMED goes back to the queue in the same statement |
 //! | `EndUnknown` | none: stale recovery or the lease decides the row |
 //! | `Cancelled` | none: the cancel statement (`horsies_cancel_task`) wrote the `CANCELLED` attempt and moved the row ([`Settlement::RecordedByCancel`]) |
@@ -45,7 +45,7 @@ use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::lifecycle::{AttemptPlacement, OwnedClaim, TerminalizationOutcome};
 use crate::core::task::error::{
-    BuiltInTaskCode, OperationalErrorCode, OutcomeCode, TaskError, TaskErrorCode,
+    BuiltInTaskCode, OperationalCode, OutcomeCode, TaskError, TaskErrorCode,
 };
 use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
 use crate::db::Transience;
@@ -359,7 +359,7 @@ pub fn task_error_write(
 }
 
 /// The failed attempt of a failure of the child's worker code (Python
-/// `_worker_failure_command`): `BROKER_ERROR`, never retried, with the
+/// `_worker_failure_command`): `DATABASE_ERROR`, never retried, with the
 /// placement of the attempt. Pure.
 pub fn worker_failure_write(
     task: &ClaimedTask,
@@ -371,7 +371,7 @@ pub fn worker_failure_write(
         true => WORKER_FAILURE_FALLBACK.to_owned(),
         false => detail.to_owned(),
     };
-    let mut error = TaskError::built_in(OperationalErrorCode::BrokerError, message.clone());
+    let mut error = TaskError::built_in(OperationalCode::DatabaseError, message.clone());
     error.data = Some(crate::core::codec::JsonText::of_engine_value(
         &serde_json::json!({ "task_id": task.task_id.to_string() }),
     ));
@@ -380,7 +380,7 @@ pub fn worker_failure_write(
         fence: fence(task, worker_id),
         retry: RetryRequest::NoRetry,
         result_json: error_envelope(error),
-        error_code: Some(OperationalErrorCode::BrokerError.to_string()),
+        error_code: Some(OperationalCode::DatabaseError.to_string()),
         failed_reason: Some(message.clone()),
         attempt: AttemptFailure {
             kind: AttemptFailureKind::WorkerFailure,
@@ -859,7 +859,7 @@ impl OutcomeWriter {
                 let writes = crash_recovery_writes(
                     task,
                     &self.worker_id,
-                    OperationalErrorCode::WorkerCrashed.into(),
+                    OperationalCode::WorkerCrashed.into(),
                     reason.into_string(),
                     RetryPlacement::SameClass,
                     placement,

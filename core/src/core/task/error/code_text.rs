@@ -85,7 +85,7 @@ fn is_upper_snake_case(code: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        ContractCode, CustomCode, OperationalErrorCode, OutcomeCode, RetrievalCode, TaskErrorCode,
+        ContractCode, CustomCode, OperationalCode, OutcomeCode, RetrievalCode, TaskErrorCode,
     };
     use super::*;
     use crate::catalog::CodeEnum;
@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn every_built_in_code_passes() {
         let values = [
-            OperationalErrorCode::CATALOG.members,
+            OperationalCode::CATALOG.members,
             ContractCode::CATALOG.members,
             RetrievalCode::CATALOG.members,
             OutcomeCode::CATALOG.members,

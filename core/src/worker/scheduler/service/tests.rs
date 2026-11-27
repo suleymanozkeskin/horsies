@@ -489,7 +489,7 @@ async fn a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task() {
         queue: None,
         good_until: None,
         retry_for: Some(vec![crate::core::TaskErrorCode::from(
-            crate::core::OperationalErrorCode::TaskException,
+            crate::core::OperationalCode::TaskException,
         )]),
         retry_policy: Some(crate::core::RetryPolicy::fixed(vec![60, 120], true).unwrap()),
         timeout_ms: Some(5_000),

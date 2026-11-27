@@ -87,7 +87,7 @@ The CLI fails closed on the argument combination.
 
 | Condition | Result |
 |---|---|
-| Both `<app_path>` and `--database-url`, or neither | Argument error |
+| Both `<module>` and `--database-url`, or neither | Argument error |
 | Non-loopback `--host` with `--auth none` | Exit 2 with an explanatory error |
 | Non-loopback `--host` | Requires `--auth trusted-header` and a header name |
 | `--auth none` on loopback, without `--enable-actions` | Policy is `ViewOnly` |
@@ -141,7 +141,7 @@ mode, pass it with `--session-database-url`, together with
 [CLI Reference](/horsies/cli/#horsies-web) (Python).
 
 In mounted mode this is already the broker config of the host app: the
-process listener uses `session_database_url` when set, and falls back to
+process listener uses the URL of a separate `session_database`, and falls back to
 `database_url` otherwise. Without a session-capable URL the event stream cannot connect, and
 the dashboard runs permanently on its polling fallback.
 

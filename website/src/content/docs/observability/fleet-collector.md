@@ -18,12 +18,12 @@ Run the collector as a process of its own, or scrape the web UI:
 
 | Where | Command or route |
 |-------|------------------|
-| Python | `horsies metrics <app> --listen HOST:PORT` |
-| Rust | `<binary> metrics --listen HOST:PORT`, the app's own binary through `horsies::cli::run` |
+| Python | `horsies metrics <app> --metrics-listen HOST:PORT` |
+| Rust | `<binary> metrics --metrics-listen HOST:PORT`, the app's own binary through `horsies::cli::run` |
 | Web UI | `GET /metrics` of `horsies web` and of a mounted monitoring app, in both clients |
 
 ```bash
-horsies metrics myapp.instance:app --listen 0.0.0.0:9465
+horsies metrics myapp.instance:app --metrics-listen 0.0.0.0:9465
 ```
 
 ```yaml
@@ -33,7 +33,7 @@ scrape_configs:
       - targets: ['metrics.internal:9465']
 ```
 
-- `--listen` is required and has no default: `HOST:PORT`, or `[IPV6]:PORT` for an IPv6 address. The host has 1 to 253 bytes; the port is 1 to 65535. The host is resolved when the server binds. A text that is not such an address is an argument error: exit code 2.
+- `--metrics-listen` is required and has no default: `HOST:PORT`, or `[IPV6]:PORT` for an IPv6 address. The host has 1 to 253 bytes; the port is 1 to 65535. The host is resolved when the server binds. A text that is not such an address is an argument error: exit code 2.
 - The command serves `GET /metrics` (and `HEAD`). Another path answers 404, another method 405.
 - `SIGTERM` or `SIGINT` stops it with exit code 0. The app does not load, the connection settings do not build, or the address does not bind: exit code 1.
 - A database that does not answer never ends the command: the gauges of each failed query have no series until a read answers.

@@ -858,7 +858,7 @@ pub fn check_trace_link_template(text: String) -> Envelope<TraceLinkCheck> {
 
 /// Write `message` as one ERROR record of the `horsies.web` logger, if its
 /// threshold lets it through. Starts the log bridge, not the core runtime.
-/// A log bridge that cannot start throws `CORE_START_FAILED`.
+/// A log bridge that cannot start throws `RUNTIME_START_FAILED`.
 #[napi(ts_return_type = "NativeEnvelope<undefined>")]
 #[allow(
     clippy::needless_pass_by_value,
@@ -872,7 +872,7 @@ pub fn log_monitoring_failure(message: String) -> Envelope<()> {
             });
             Envelope::Value(())
         }
-        Err(failure) => Envelope::Thrown(NativeThrown::CoreStartFailed {
+        Err(failure) => Envelope::Thrown(NativeThrown::RuntimeStartFailed {
             cause: failure.cause,
         }),
     })
@@ -889,7 +889,7 @@ pub(crate) const TEST_MANIFEST: &str = r#"{
         "pool_pre_ping": true,
         "pool_size": 5,
         "max_overflow": 0,
-        "pool_timeout": 30,
+        "pool_timeout_seconds": 30,
         "pool_recycle": {"kind": "AFTER_SECONDS", "seconds": 1800},
         "echo": false,
         "tcp_keepalives": {

@@ -80,7 +80,7 @@ from horsies.core.codec.wire_shape import (
     shape_refusals,
     verify_shape_rules,
 )
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendValidationFailed
 from horsies.core.models.workflow import (
@@ -1102,12 +1102,12 @@ class TestNestedTaskOutcome:
 def _mock_app() -> MagicMock:
     app = MagicMock()
     app.config.queue_mode.name = 'DEFAULT'
-    app.config.resend_on_transient_err = False
+    app.config.resend_on_transient_error = False
     app.config.payload = PayloadPolicy()
     app.config.exception_mapper = {}
     app.config.default_unhandled_error_code = 'UNHANDLED_EXCEPTION'
     app.are_sends_suppressed.return_value = False
-    app.validate_queue_name.return_value = 'default'
+    app.validate_queue.return_value = 'default'
     return app
 
 
@@ -1280,7 +1280,7 @@ class TestDefaultOnASchedule:
         result = _encode_schedule_kwargs(app, self._schedule('schedule_refused'))
 
         assert is_err(result)
-        assert result.err_value.code is ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert result.err_value.code is HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
 
     def test_a_valid_default_gives_no_stored_kwargs(self) -> None:
         app = _real_app()
@@ -1298,7 +1298,7 @@ class TestDefaultOnASchedule:
 def _real_app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://user:password@localhost/unused',
             ),
         ),
@@ -1342,7 +1342,7 @@ class TestBuildWithBoundary:
                 tasks=[SubWorkflowNode(workflow_def=_child(annotation, key=key))],
             )
 
-        assert refused.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert refused.value.code is HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
     def test_a_valid_type_passes(self) -> None:
         WorkflowSpec(
@@ -1517,7 +1517,7 @@ class TestBuildWithBoundary:
             errors = app._check_workflow_definitions()
 
         assert [error.code for error in errors] == [
-            ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+            HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
         ]
 
 
@@ -1551,7 +1551,7 @@ class TestDefinitionOfAny:
         with pytest.raises(WorkflowValidationError) as refused:
             WorkflowSpec(name='parent', tasks=[source, node])
 
-        assert refused.value.code is ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
+        assert refused.value.code is HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
     def test_it_cannot_be_an_output(self) -> None:
         node = SubWorkflowNode(workflow_def=self._child('any_output'))
@@ -1559,7 +1559,7 @@ class TestDefinitionOfAny:
         with pytest.raises(WorkflowValidationError) as refused:
             WorkflowSpec(name='parent', tasks=[node], output=node)
 
-        assert refused.value.code is ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert refused.value.code is HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
 
     def test_annotated_any_cannot_feed_args_from_or_be_an_output(self) -> None:
         class Child(WorkflowDefinition[Annotated[Any, 'note']]):
@@ -1585,12 +1585,12 @@ class TestDefinitionOfAny:
 
         with pytest.raises(WorkflowValidationError) as refused:
             WorkflowSpec(name='parent', tasks=[source, node])
-        assert refused.value.code is ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
+        assert refused.value.code is HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
         output = SubWorkflowNode(workflow_def=Child)
         with pytest.raises(WorkflowValidationError) as refused:
             WorkflowSpec(name='parent', tasks=[output], output=output)
-        assert refused.value.code is ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert refused.value.code is HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
 
     def test_it_can_run_with_no_consumer(self) -> None:
         WorkflowSpec(

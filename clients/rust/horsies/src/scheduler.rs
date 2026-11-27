@@ -15,18 +15,20 @@
 
 use std::sync::Arc;
 
-use horsies_core::handle::CoreHandle;
+use horsies_core::handle::CoreConnection;
 use horsies_core::scheduler_manifest::SchedulerManifest;
 use horsies_core::{RegisteredTask, SchedulerService, SchedulerStartError, SchedulerStarted};
 
 pub use horsies_core::SchedulerStop;
 
-use crate::check::{CheckReport, CheckScope, SCHEDULER_STARTUP};
+use crate::check::{CheckScope, SCHEDULER_STARTUP};
 use crate::config::{schedule_input_text, scheduler_manifest};
 use crate::process_state::{refuse_in_a_fork, runtime_for, RuntimeStartFailed};
 use crate::registry::resolve_task_queue;
 use crate::signals::stop_on_signals;
-use crate::{ErrorCode, Horsies, HorsiesError, ScheduleConfig, TaskSchedule};
+use crate::{
+    Horsies, HorsiesError, HorsiesErrorCode, ScheduleConfig, TaskSchedule, ValidationReport,
+};
 
 /// The scheduler ran until a stop request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +47,7 @@ pub enum SchedulerRunError {
     /// The static check refused the app: a task's options, or a schedule
     /// (Python's `scheduler-startup` report). Nothing started.
     #[error("{0}")]
-    CheckRefused(CheckReport),
+    CheckRefused(ValidationReport),
     /// The core's parser refused the scheduler manifest: a value outside
     /// its bound, a pattern that breaks its rules, or a repeated schedule
     /// name. `cause` names the field, never a value. Nothing started.
@@ -65,12 +67,12 @@ pub enum SchedulerRunError {
     /// listens for the stop signals. Nothing started; a later run tries the
     /// start again.
     #[error("{0}")]
-    RuntimeUnavailable(RuntimeStartFailed),
+    RuntimeStartFailed(RuntimeStartFailed),
 }
 
 /// A checked scheduler of the app's schedule section, not started.
 pub struct PreparedScheduler {
-    handle: Arc<CoreHandle>,
+    handle: Arc<CoreConnection>,
     manifest: SchedulerManifest,
     stop: SchedulerStop,
 }
@@ -175,7 +177,7 @@ impl Horsies {
         let prepared = self.scheduler()?;
         let stop = prepared.stop_handle();
         let signals = runtime_for(format_args!("Horsies::run_scheduler"))
-            .map_err(SchedulerRunError::RuntimeUnavailable)?
+            .map_err(SchedulerRunError::RuntimeStartFailed)?
             .handle()
             .spawn(stop_on_signals("scheduler", move || stop.request_stop()));
         let end = prepared.run().await;
@@ -208,7 +210,7 @@ impl Horsies {
                     "invalid queue configuration for schedule '{}'",
                     schedule.name
                 ))
-                .with_code(ErrorCode::ConfigInvalidSchedule)
+                .with_code(HorsiesErrorCode::ConfigInvalidSchedule)
                 .with_note(format!("underlying error: {}", cause.message))
                 .with_help("name a queue of the app config in the schedule, or none"),
             );
@@ -220,7 +222,7 @@ impl Horsies {
                     "schedule '{}' input does not read back as the input of task '{}'",
                     schedule.name, schedule.task_name
                 ))
-                .with_code(ErrorCode::ConfigInvalidSchedule)
+                .with_code(HorsiesErrorCode::ConfigInvalidSchedule)
                 .with_note(format!(
                     "input error: {}",
                     refused.message.as_deref().unwrap_or("no message")
@@ -245,7 +247,7 @@ impl Horsies {
             "scheduled task '{}' not registered",
             schedule.task_name
         ))
-        .with_code(ErrorCode::TaskNotRegistered)
+        .with_code(HorsiesErrorCode::TaskNotRegistered)
         .with_note(format!(
             "schedule '{}' references task '{}'",
             schedule.name, schedule.task_name
@@ -283,7 +285,7 @@ fn oversized_input(app: &Horsies, schedule: &TaskSchedule, size: usize) -> Optio
             "schedule '{}' input is {size} bytes, over payload.reject_bytes={limit}",
             schedule.name
         ))
-        .with_code(ErrorCode::ConfigInvalidSchedule)
+        .with_code(HorsiesErrorCode::ConfigInvalidSchedule)
         .with_note("every slot of the schedule sends the same input, so every enqueue is refused")
         .with_help("make the schedule's input smaller, or raise payload.reject_bytes")
     })
@@ -373,7 +375,7 @@ mod tests {
     }
 
     fn app_with(schedules: Vec<TaskSchedule>, enabled: bool) -> Horsies {
-        let mut config = AppConfig::for_database_url("postgresql://localhost/horsies");
+        let mut config = AppConfig::from_database_url("postgresql://localhost/horsies");
         config.schedule = Some(ScheduleConfig {
             enabled,
             schedules,
@@ -397,7 +399,7 @@ mod tests {
     /// connect, ends the run `Ok(SchedulerStopped)`, not `StartFailed`.
     #[tokio::test]
     async fn a_stop_before_the_connect_ends_the_run() {
-        let mut config = AppConfig::for_database_url("postgresql://127.0.0.1:1/horsies");
+        let mut config = AppConfig::from_database_url("postgresql://127.0.0.1:1/horsies");
         config.schedule = Some(ScheduleConfig {
             enabled: true,
             schedules: vec![schedule("every", "count", &json!({"count": 5}))],
@@ -432,10 +434,10 @@ mod tests {
         let Err(SchedulerRunError::CheckRefused(report)) = app.scheduler() else {
             panic!("the scheduler starts with an input of another type");
         };
-        assert_eq!(report.phase(), "scheduler-startup");
+        assert_eq!(report.phase_name(), "scheduler-startup");
         assert_eq!(
-            report.errors()[0].code,
-            Some(ErrorCode::ConfigInvalidSchedule)
+            report.refusals()[0].code,
+            Some(HorsiesErrorCode::ConfigInvalidSchedule)
         );
         assert!(!report.to_string().contains("five"));
     }
@@ -471,7 +473,10 @@ mod tests {
         let schedule = app.config().schedule.clone().unwrap();
         let refusals = app.schedule_refusals(&schedule);
         assert_eq!(refusals.len(), 1);
-        assert_eq!(refusals[0].code, Some(ErrorCode::ConfigInvalidSchedule));
+        assert_eq!(
+            refusals[0].code,
+            Some(HorsiesErrorCode::ConfigInvalidSchedule)
+        );
         assert!(
             refusals[0].notes[0].contains("'options.stpe'"),
             "{}",
@@ -503,7 +508,7 @@ mod tests {
         let app = app_with(vec![schedule_without_input("every", "missing")], true);
         let schedule = app.config().schedule.clone().unwrap();
         let refusals = app.schedule_refusals(&schedule);
-        assert_eq!(refusals[0].code, Some(ErrorCode::TaskNotRegistered));
+        assert_eq!(refusals[0].code, Some(HorsiesErrorCode::TaskNotRegistered));
         assert!(refusals[0].notes.iter().any(|note| note.contains("count")));
         let text = refusals[0].to_string();
         assert!(text.contains("schedule 'every'"), "{text}");
@@ -514,7 +519,7 @@ mod tests {
     /// any connection, with the schedule and the queue named.
     #[test]
     fn a_schedule_on_a_queue_that_the_app_does_not_admit_names_the_schedule_and_the_queue() {
-        let mut config = AppConfig::for_database_url("postgresql://localhost/horsies");
+        let mut config = AppConfig::from_database_url("postgresql://localhost/horsies");
         config.queue_mode = crate::QueueMode::Custom;
         config.custom_queues = Some(vec![crate::CustomQueueConfig {
             name: "fast".to_owned(),
@@ -538,7 +543,10 @@ mod tests {
         let schedule = app.config().schedule.clone().unwrap();
         let refusals = app.schedule_refusals(&schedule);
         assert_eq!(refusals.len(), 1);
-        assert_eq!(refusals[0].code, Some(ErrorCode::ConfigInvalidSchedule));
+        assert_eq!(
+            refusals[0].code,
+            Some(HorsiesErrorCode::ConfigInvalidSchedule)
+        );
         let text = refusals[0].to_string();
         assert!(text.contains("bad_queue_job"), "{text}");
         assert!(text.contains("nonexistent_queue"), "{text}");
@@ -554,7 +562,7 @@ mod tests {
 
     #[test]
     fn an_input_over_the_reject_limit_is_refused() {
-        let mut config = AppConfig::for_database_url("postgresql://localhost/horsies");
+        let mut config = AppConfig::from_database_url("postgresql://localhost/horsies");
         config.payload = PayloadPolicy {
             reject_bytes: Some(4),
             ..PayloadPolicy::default()
@@ -574,7 +582,7 @@ mod tests {
 
     #[test]
     fn no_schedule_section_and_a_disabled_one_are_refused() {
-        let app = Horsies::new(AppConfig::for_database_url(
+        let app = Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap();

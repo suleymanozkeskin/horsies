@@ -265,7 +265,7 @@ is a thing to look at in the dashboard, not a claim to take on trust.
 | `WorkflowMeta` | `pick_pack` | workflow id and node index in the result |
 | Crash recovery | `chaos`: `flaky_export` calls `os._exit(1)` | `WORKER_CRASHED` attempts, then recovery |
 | Worker health | 12 worker children, 10 s snapshots | CPU and memory history |
-| `resend_on_transient_err` | `AppConfig` | infra retry, distinct from `RetryPolicy` |
+| `resend_on_transient_error` | `AppConfig` | infra retry, distinct from `RetryPolicy` |
 
 ## Layout
 
@@ -321,7 +321,7 @@ will pause, because the draw is a hash of the return id.
 
 - `cluster_wide_cap` — mutually exclusive with a non-zero `prefetch_buffer`,
   and the showcase demonstrates exact per-queue caps instead.
-- `on_child_process_start` — there is no per-child engine to rebind here.
+- `on_child_start` — there is no per-child engine to rebind here.
 - `catch_up_missed=True` — restarting a demo would replay a backlog of noise.
 
 ## Configuration on show
@@ -345,6 +345,6 @@ Recovery is demo-tuned: worker snapshots every 10 s (so the CPU and memory
 charts move), the reaper polling at the same cadence, and terminal rows kept for
 24 hours.
 
-`resend_on_transient_err=True` retries transient enqueue failures on the send
+`resend_on_transient_error=True` retries transient enqueue failures on the send
 and start path. That is infrastructure retry, and it is a different thing from
 `RetryPolicy`, which retries task *execution*.

@@ -62,7 +62,7 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
     def test_start_workflow(self) -> None:
         app = Horsies(AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=PostgresConfig(database_url=SecretStr('postgresql://u:p@127.0.0.1:1/db')),
+            database=PostgresConfig(database_url=SecretStr('postgresql://u:p@127.0.0.1:1/db')),
         ))
 
         @app.task('routing.value')
@@ -80,7 +80,7 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
 
         with patch('horsies._core.WorkflowStartRequest') as request_class:
             result = start_workflow(
-                spec, broker, WORKFLOW_ID, sent_at, resend_on_transient_err=True,
+                spec, broker, WORKFLOW_ID, sent_at, resend_on_transient_error=True,
             )
 
         assert is_ok(result)

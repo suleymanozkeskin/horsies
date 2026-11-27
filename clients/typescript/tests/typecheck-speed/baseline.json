@@ -1,21 +1,41 @@
 {
   "entries": [
     {
-      "machine": {
+      "bun": "1.4.4+38afee6c8",
+      "controlSha256": "ebeb26884256ef3e1d8b61f7fe355773844f2e4125b8085c7b34b7f99c2e1202",
+      "appSha256": "78c8d65401a417422426f0a2515542e5f0a4dbc2f8efaccd9f7ea6f4c053ff7d",
+      "runsPerSession": 9,
+      "recordedOn": {
         "platform": "darwin",
         "arch": "arm64",
         "cpuModel": "Apple M2",
-        "logicalCores": 8,
-        "bun": "1.4.4+38afee6c8"
+        "logicalCores": 8
       },
-      "projectSha256": "ebeb26884256ef3e1d8b61f7fe355773844f2e4125b8085c7b34b7f99c2e1202",
+      "sessionRatios": [
+        8.713569494254557,
+        8.59088822179057,
+        8.17213663764233,
+        8.389813470345135,
+        8.24179104477612
+      ]
+    },
+    {
+      "bun": "1.4.4+38afee6c8",
+      "controlSha256": "ebeb26884256ef3e1d8b61f7fe355773844f2e4125b8085c7b34b7f99c2e1202",
+      "appSha256": "78c8d65401a417422426f0a2515542e5f0a4dbc2f8efaccd9f7ea6f4c053ff7d",
       "runsPerSession": 9,
-      "sessionMedians": [
-        "PT0.029353S",
-        "PT0.029255S",
-        "PT0.029342S",
-        "PT0.026934S",
-        "PT0.027455S"
+      "recordedOn": {
+        "platform": "linux",
+        "arch": "x64",
+        "cpuModel": "AMD EPYC 9V74 80-Core Processor",
+        "logicalCores": 4
+      },
+      "sessionRatios": [
+        8.483679269658083,
+        9.486891526442308,
+        9.281538897816429,
+        9.010685011709603,
+        9.326247304913569
       ]
     }
   ]

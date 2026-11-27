@@ -4,21 +4,23 @@
 import { formatDuration, formatRelative } from '@/lib/format-duration';
 import type {
   BudgetLoad,
-  ClassReport,
+  DownSlot,
+  ExecutionClassReport,
   PendingStream,
+  SlotHealth,
   StreamWait,
 } from '@/types/workers';
 
 /** The streams that no live worker can run: no worker serves the class on
  * the queue, or every serving worker has no child in service for it. */
-export function uncoveredStreams(report: ClassReport): PendingStream[] {
+export function uncoveredStreams(report: ExecutionClassReport): PendingStream[] {
   return report.streams.filter(stream => stream.coverage.kind !== 'served');
 }
 
 /** The budgets of one worker, or `undefined` when the report has no live
  * snapshot of it (a stale worker, or a report not loaded yet). */
 export function budgetsOf(
-  report: ClassReport | undefined,
+  report: ExecutionClassReport | undefined,
   workerId: string
 ): BudgetLoad[] | undefined {
   return report?.workers.find(worker => worker.worker_id === workerId)?.budgets;
@@ -26,7 +28,7 @@ export function budgetsOf(
 
 /** One line for the fleet warning: what waits, and what to start or check. */
 export function fleetWarningText(stream: PendingStream): string {
-  const subject = `PENDING ${stream.execution} tasks on queue '${stream.queue_name}'`;
+  const subject = `PENDING ${stream.execution} tasks on queue '${stream.queue}'`;
   switch (stream.coverage.kind) {
     case 'unserved':
       return stream.execution === 'ISOLATED'
@@ -54,14 +56,31 @@ export function coverageText(stream: PendingStream): string {
 /** The wait cell of the stream table. */
 export function waitText(wait: StreamWait): string {
   switch (wait.kind) {
-    case 'waiting':
-      return formatDuration(wait.wait_s);
+    case 'due':
+      return formatDuration(wait.wait_seconds);
     case 'none_due':
       return `next due ${formatRelative(wait.next_due_at)}`;
   }
 }
 
+/** The capacity of a budget that holds no row, at least 0: a worker with a
+ * prefetch buffer can hold more rows than its capacity. */
+export function freeCapacity(budget: BudgetLoad): number {
+  return Math.max(0, budget.capacity - budget.in_flight);
+}
+
 /** `3/8 free`: the free capacity of a budget out of its capacity in service. */
 export function budgetFreeText(budget: BudgetLoad): string {
-  return `${budget.free}/${budget.capacity} free`;
+  return `${freeCapacity(budget)}/${budget.capacity} free`;
+}
+
+/** The down slots of a slot health, in slot order: none when every slot
+ * serves. */
+export function downSlotsOf(health: SlotHealth): DownSlot[] {
+  switch (health.kind) {
+    case 'all_serving':
+      return [];
+    case 'slots_down':
+      return health.slots;
+  }
 }

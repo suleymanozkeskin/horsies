@@ -12,7 +12,7 @@ applies migrations). Coverage:
 7. duration semantics (spec 5.3) — which spans count up and which stay None
 8. workflow names / runs / run detail / node detail
 9. list_schedules — NULLS LAST ordering
-10. database failure — Err(DB_OPERATION_FAILED) rather than a raised exception
+10. database failure — Err(DATABASE_OPERATION_FAILED) rather than a raised exception
 """
 
 from __future__ import annotations
@@ -65,6 +65,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.typed import encode_task_result
@@ -83,7 +84,7 @@ from horsies.monitoring import (
     TaskPage,
     WorkflowRunsLimit,
     ErrorCategory,
-    MonitoringQueryDbOperationFailed,
+    MonitoringQueryDatabaseOperationFailed,
     MonitoringQueryHistoryContractViolation,
     TaskAbsenceReason,
     TaskDetail,
@@ -492,14 +493,14 @@ class TestTaskStats:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
-        assert isinstance(error.exception, HistoryContractError)
+        assert isinstance(error.cause, HistoryContractError)
         assert 'NOT_KNOWN' in error.message
         # Python's texts: the message names the read and holds the error's
         # text, and the exception is a HistoryContractError with that text.
-        assert type(error.exception) is HistoryContractError
-        cause_text = str(error.exception)
+        assert type(error.cause) is HistoryContractError
+        cause_text = str(error.cause)
         assert 'NOT_KNOWN' in cause_text
-        assert error.exception.args == (cause_text,)
+        assert error.cause.args == (cause_text,)
         assert error.message.endswith(f' failed: {cause_text}')
 
 
@@ -1871,7 +1872,7 @@ class TestErrorCategoryFilter:
             make_task(
                 queue_name='slow',
                 status=TaskStatus.FAILED,
-                error_code='BROKER_ERROR',
+                error_code='DATABASE_ERROR',
             ),
         )
 
@@ -2072,7 +2073,7 @@ class TestGetTaskDetail:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
-        assert isinstance(error.exception, HistoryContractError)
+        assert isinstance(error.cause, HistoryContractError)
         assert "'NOT_KNOWN'" in error.message
 
     async def test_standalone_task_has_no_workflow_linkage(
@@ -2745,7 +2746,7 @@ class TestGetWorkflowNode:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
-        assert isinstance(error.exception, HistoryContractError)
+        assert isinstance(error.cause, HistoryContractError)
         assert "'NOT_KNOWN'" in error.message
 
     async def test_subworkflow_node_has_no_leaf_or_attempts(
@@ -2851,7 +2852,7 @@ class TestGetWorkflowNode:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
-        assert isinstance(error.exception, HistoryContractError)
+        assert isinstance(error.cause, HistoryContractError)
 
 
 # --------------------------------------------------------------------------- #
@@ -3053,7 +3054,7 @@ class TestDatabaseFailure:
                     'postgresql://postgres:none@127.0.0.1:1/none'
                 )
             ),
-            assume_initialized=True,
+            schema_mode=SchemaMode.ASSUME_INITIALIZED,
         )
         yield broken
         await broken.close_async()
@@ -3078,13 +3079,13 @@ class TestDatabaseFailure:
 
         assert is_err(result)
         error = result.err_value
-        assert isinstance(error, MonitoringQueryDbOperationFailed)
+        assert isinstance(error, MonitoringQueryDatabaseOperationFailed)
         assert error.retryable is True
         assert 'task list query failed' in error.message
         # The driver error of Python's read, or the core's class of the cause
         # of the read on the core: no answer from the server.
-        assert isinstance(error.exception, SQLAlchemyError | CoreConnectionError)
-        match error.exception:
+        assert isinstance(error.cause, SQLAlchemyError | CoreConnectionError)
+        match error.cause:
             case CoreConnectionError():
                 # Python's texts: the message names the read and holds the
                 # cause's text; the exception is that text with the read as
@@ -3092,9 +3093,9 @@ class TestDatabaseFailure:
                 assert error.message.startswith('task list query failed: ')
                 cause_text = error.message.removeprefix('task list query failed: ')
                 assert cause_text != ''
-                assert error.exception.subject == 'task list query'
-                assert error.exception.message == cause_text
-                assert str(error.exception) == f'task list query: {cause_text}'
+                assert error.cause.subject == 'task list query'
+                assert error.cause.message == cause_text
+                assert str(error.cause) == f'task list query: {cause_text}'
             case _:
                 pass
 
@@ -3104,7 +3105,7 @@ class TestDatabaseFailure:
         result = await get_task_detail(unreachable_broker, uuid.uuid4())
 
         assert is_err(result)
-        assert isinstance(result.err_value, MonitoringQueryDbOperationFailed)
+        assert isinstance(result.err_value, MonitoringQueryDatabaseOperationFailed)
 
     async def test_aggregate_failure_is_reported(
         self, unreachable_broker: PostgresBroker

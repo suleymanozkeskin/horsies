@@ -15,7 +15,7 @@ use super::pool::Answer;
 use super::scripted::{drop_bytes, exit_at_stop, take_init, ScriptCount, Shown};
 use super::*;
 use crate::broker::attempt_writes::{AttemptFailureKind, RetryPlacement, RetryRequest};
-use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
+use crate::core::task::error::{OperationalCode, OutcomeCode, TaskError};
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     encode_child_frame, encode_parent_frame, BodyEnd, CancelGraceMs, ChildAfterFrame,
@@ -609,7 +609,7 @@ fn a_killed_child_write_stores_the_task_and_the_worker() {
     let claimed = task(ExecutionClass::SharedAsync, RETRY_ON_TIMEOUT);
     let expected = serde_json::json!({"task_id": TASK, "worker_id": "worker-1"});
     for code in [
-        OperationalErrorCode::WorkerCrashed,
+        OperationalCode::WorkerCrashed,
         LoopKillCode::TaskBlockedLoop.code(),
         LoopKillCode::NeighbourBlockedLoop.code(),
     ] {
@@ -789,7 +789,7 @@ fn a_crash_recovery_write_sent_again_names_the_retry() {
     let crash = crash_recovery_writes(
         &claimed,
         "worker-1",
-        OperationalErrorCode::WorkerCrashed.into(),
+        OperationalCode::WorkerCrashed.into(),
         lost.to_owned(),
         RetryPlacement::SameClass,
         crate::core::lifecycle::AttemptPlacement::NotObserved,
@@ -856,7 +856,7 @@ fn a_worker_failure_is_a_broker_error_that_never_retries() {
         "",
         crate::core::lifecycle::AttemptPlacement::NotObserved,
     );
-    assert_eq!(write.error_code.as_deref(), Some("BROKER_ERROR"));
+    assert_eq!(write.error_code.as_deref(), Some("DATABASE_ERROR"));
     assert_eq!(write.retry, RetryRequest::NoRetry);
     assert_eq!(write.attempt.kind, AttemptFailureKind::WorkerFailure);
     assert_eq!(write.failed_reason.as_deref(), Some("Worker failure"));
@@ -865,7 +865,7 @@ fn a_worker_failure_is_a_broker_error_that_never_retries() {
 #[test]
 fn a_reported_task_error_keeps_its_envelope_and_retries_by_policy() {
     let claimed = task(ExecutionClass::Isolated, RETRY_ON_TIMEOUT);
-    let error = TaskError::built_in(OperationalErrorCode::TaskException, "boom");
+    let error = TaskError::built_in(OperationalCode::TaskException, "boom");
     let envelope = ResultEnvelopeText::new(
         serde_json::to_string(
             &crate::core::task::result::TaskResult::<serde_json::Value>::Err(error.clone()),

@@ -104,8 +104,8 @@ export function relayedFacades(relay: SeatRelay): RelayedFacades {
       cancelTask: async (_handle, taskId, policy) => relayed(relay, { part: "cancel", call: { method: "cancelTask", args: [taskId, policy] } }),
     } satisfies RelayedAddon<CancelAddon>),
     rerun: Object.freeze({
-      rerunTask: async (_handle, command, policy, trace) =>
-        relayed(relay, { part: "rerun", call: { method: "rerunTask", args: [command, policy, trace] } }),
+      rerunTask: async (_handle, command, policy, trace, codes) =>
+        relayed(relay, { part: "rerun", call: { method: "rerunTask", args: [command, policy, trace, codes] } }),
     } satisfies RelayedAddon<Pick<RerunAddon, "rerunTask">>),
     ping: async () => relayed<NativeOutcome<DatabasePingRecord>>(relay, { part: "database", call: { method: "pingDatabase", args: [] } }),
     handle: relayedHandle(),
@@ -142,8 +142,8 @@ function relayedHealth(relay: SeatRelay): RelayedAddon<HealthAddon> {
     getWorkerStateHistory: async (_handle, workerId, limit) => health({ method: "getWorkerStateHistory", args: [workerId, limit] }),
     getStaleTasks: async (_handle, thresholdMinutes) => health({ method: "getStaleTasks", args: [thresholdMinutes] }),
     getExpiredTasks: async () => health({ method: "getExpiredTasks", args: [] }),
-    getClassCoverage: async () => health({ method: "getClassCoverage", args: [] }),
-    getClassReport: async () => health({ method: "getClassReport", args: [] }),
+    getExecutionClassCoverage: async () => health({ method: "getExecutionClassCoverage", args: [] }),
+    getExecutionClassReport: async () => health({ method: "getExecutionClassReport", args: [] }),
   } satisfies RelayedAddon<HealthAddon>);
 }
 

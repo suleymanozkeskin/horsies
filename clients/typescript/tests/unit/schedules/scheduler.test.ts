@@ -23,7 +23,7 @@ import {
   type SchedulerStart,
   type SchedulerStopped,
 } from "../../../horsies/src/scheduler/run.ts";
-import { CoreStartFailed } from "../../../horsies/src/thrown-errors.ts";
+import { RuntimeStartFailed } from "../../../horsies/src/thrown-errors.ts";
 import { err, ok, type Result } from "../../../horsies/src/wire/result.ts";
 import { DATABASE_URL, fakeChecks, fakeEnvironment } from "../app/support.ts";
 import { declare, FAKE_SCHEDULER, fakeCore, HOURLY, ping, unlisted } from "./support.ts";
@@ -31,7 +31,7 @@ import { declare, FAKE_SCHEDULER, fakeCore, HOURLY, ping, unlisted } from "./sup
 /** An app of `ping`, with no implementation, in a process started as `<entry> scheduler`: its sends start suppressed. */
 function unimplementedSchedulerApp(): Horsies {
   const created = createHorsies(
-    { broker: { databaseUrl: DATABASE_URL }, tasks: [ping] },
+    { database: { databaseUrl: DATABASE_URL }, tasks: [ping] },
     fakeEnvironment({ start: { argumentAfterScript: "scheduler", seatIsolate: false } }),
   );
 
@@ -149,7 +149,7 @@ describe("the scheduler run", () => {
   });
 
   test("a core that refuses the call is coreRefused; a defect passes on", async () => {
-    const refused = new CoreStartFailed({ cause: "no threads" });
+    const refused = new RuntimeStartFailed({ cause: "no threads" });
     const context = declare(schedulerApp(), PING_SCHEDULE, { kind: "core", calls: fakeCore() });
 
     assert.deepEqual(await runSchedulerOf(context, { logLevel: "INFO" }, runDeps(refused)), err({ kind: "coreRefused", error: refused }));
@@ -192,7 +192,7 @@ const ERRORS: readonly SchedulerRunError[] = [
   { kind: "checkRefused", report: checkReport("scheduler-startup", refusal("HRS-205", "schedules[0] a", "a rule", []), []) },
   { kind: "startRefused", schedule: "a", reason: "schedule 'a' cannot be sent" },
   { kind: "startFailed", message: "connection refused", retryable: true },
-  { kind: "coreRefused", error: new CoreStartFailed({ cause: "no threads" }) },
+  { kind: "coreRefused", error: new RuntimeStartFailed({ cause: "no threads" }) },
 ];
 
 describe("the scheduler command", () => {
@@ -248,7 +248,7 @@ describe("the scheduler command", () => {
         "error[HRS-205]: schedules[0] a: a rule\nerror: aborting due to 1 previous errors",
         "schedule 'a' cannot be sent",
         "the scheduler start failed: connection refused",
-        "the core refused the scheduler: CoreStartFailed: the core could not start: no threads",
+        "the core refused the scheduler: RuntimeStartFailed: the core could not start: no threads",
       ],
     );
   });

@@ -42,9 +42,8 @@ class TaskSendErrorCode(str, Enum):
 
     IDEMPOTENCY_KEY_CONFLICT = 'IDEMPOTENCY_KEY_CONFLICT'
     """The idempotency key is reserved by another task with a different
-    command. Nothing was written. The resend methods accept it: a resend
-    after the reservation ends is accepted, one before returns the same
-    error.
+    command. Nothing was written. Non-retryable: send the same command, or
+    use another key. The resend methods refuse it.
     """
 
     PAYLOAD_TOO_LARGE = 'PAYLOAD_TOO_LARGE'

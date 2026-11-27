@@ -1,8 +1,8 @@
--- horsies schema migration 1007: the retry policy keys intervals_seconds and retry_for, and the code category CUSTOM.
+-- horsies schema migration 1008: the retry policy keys intervals_seconds and retry_for, and the code category CUSTOM.
 --
 -- The install applies this text after the migration before it in the chain (MIGRATION_SOURCES,
 -- core/src/broker/migrations.rs), in one READ COMMITTED transaction with its bookkeeping row. A database that applied
--- an older text of migration 1007 is refused by the checksum.
+-- an older text of migration 1008 is refused by the checksum.
 --
 -- Changes:
 -- - The retry policy of a workflow node: the four validation functions of core/baseline/0005_workflow_functions.sql

@@ -30,7 +30,7 @@ use super::link::{read_frame, FrameWriter};
 use super::panic::install_panic_hook;
 use super::seats::ServeEnd;
 use crate::core::config::bounded::BoundedU32;
-use crate::core::error::ErrorCode;
+use crate::core::error::HorsiesErrorCode;
 use crate::core::task::Execution;
 use crate::events::{AnyEvent, EventDecodeError, EventTypeName, SlotRecovered, TaskClaimed};
 use crate::process_exit::ProcessExit;
@@ -165,21 +165,21 @@ fn each_handler_refusal_has_the_code_of_the_python_refusal() {
             EventHandlerRefused::InvalidName {
                 cause: "empty".to_owned(),
             },
-            ErrorCode::EventHandlerInvalidName,
+            HorsiesErrorCode::EventHandlerInvalidName,
             "HRS-225",
         ),
         (
             EventHandlerRefused::RepeatedName {
                 name: "audit".to_owned(),
             },
-            ErrorCode::EventHandlerDuplicateName,
+            HorsiesErrorCode::EventHandlerDuplicateName,
             "HRS-224",
         ),
         (
             EventHandlerRefused::TooMany {
                 name: "one.more".to_owned(),
             },
-            ErrorCode::EventHandlerLimit,
+            HorsiesErrorCode::EventHandlerLimit,
             "HRS-226",
         ),
     ];
@@ -564,7 +564,7 @@ fn the_start_hooks_of_the_handler_child_run_in_order_and_a_failure_exits_173() {
         ProcessExit::Standard,
     );
     assert_eq!(exit, ChildHostExit::ChildHookFailed);
-    assert_eq!(exit.code(), 173);
+    assert_eq!(exit.exit_code(), 173);
     assert_eq!(*calls.lock().unwrap(), vec!["first"]);
     runtime.shutdown_background();
 }

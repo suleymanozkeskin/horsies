@@ -5,9 +5,13 @@ import { describe, test } from "node:test";
 
 import {
   binFileProblems,
+  entryPointSpecifiers,
   exportTargets,
   horsiesFileProblems,
   horsiesManifestProblems,
+  LINT_PACKAGE_NAME,
+  lintFileProblems,
+  lintManifestProblems,
   platformExpectationOf,
   platformFileProblems,
   platformManifestProblems,
@@ -42,23 +46,38 @@ describe("exportTargets", () => {
   });
 });
 
+const PACKED_SKILLS = SKILL_FILES.map((name) => `.agents/skills/horsies/${name}`);
+const FOUND = { kind: "found", files: SKILL_FILES } as const;
+
+describe("entryPointSpecifiers", () => {
+  test("names the import specifier of each entry point, and not package.json", () => {
+    const exportsMap = { ...EXPORTS, "./rerun/pg": { types: "./dist/rerun/pg.d.ts", default: "./dist/rerun/pg.js" } };
+
+    assert.deepEqual(entryPointSpecifiers(exportsMap), ["horsies", "horsies/zod", "horsies/rerun/pg"]);
+  });
+
+  test("names none for a manifest with no exports map", () => {
+    assert.deepEqual(entryPointSpecifiers(undefined), []);
+  });
+});
+
 describe("horsiesFileProblems", () => {
   const targets = exportTargets(EXPORTS);
 
-  test("passes the packed files of the entry points", () => {
-    assert.deepEqual(horsiesFileProblems(PACKED, targets, { kind: "notWritten" }), []);
+  test("passes the packed files of the entry points and the five skill files", () => {
+    assert.deepEqual(horsiesFileProblems([...PACKED, ...PACKED_SKILLS], targets, FOUND), []);
   });
 
   test("a target of the exports map that is not packed", () => {
-    assert.deepEqual(horsiesFileProblems(PACKED.filter((file) => file !== "dist/zod.d.ts"), targets, { kind: "notWritten" }), [
-      "the exports map names dist/zod.d.ts, which is not packed",
-    ]);
+    const files = [...PACKED.filter((file) => file !== "dist/zod.d.ts"), ...PACKED_SKILLS];
+
+    assert.deepEqual(horsiesFileProblems(files, targets, FOUND), ["the exports map names dist/zod.d.ts, which is not packed"]);
   });
 
   test("an addon file, a source file, the dev-only entry and build info", () => {
-    const files = [...PACKED, "horsies.node", "src/index.ts", "dist/native/dev-addon.js", "tsconfig.tsbuildinfo"];
+    const files = [...PACKED, ...PACKED_SKILLS, "horsies.node", "src/index.ts", "dist/native/dev-addon.js", "tsconfig.tsbuildinfo"];
 
-    assert.deepEqual(horsiesFileProblems(files, targets, { kind: "notWritten" }), [
+    assert.deepEqual(horsiesFileProblems(files, targets, FOUND), [
       "holds the addon file horsies.node",
       "holds the source file src/index.ts",
       "holds the dev-only entry dist/native/dev-addon.js",
@@ -66,27 +85,35 @@ describe("horsiesFileProblems", () => {
     ]);
   });
 
-  test("a skill file when the source has no skill folder", () => {
-    assert.deepEqual(horsiesFileProblems([...PACKED, ".agents/skills/horsies/SKILL.md"], targets, { kind: "notWritten" }), [
-      "holds the skill file SKILL.md, and the source has no skill folder",
+  test("a source with no skill folder fails, also when the tarball holds the skill files", () => {
+    assert.deepEqual(horsiesFileProblems([...PACKED, ...PACKED_SKILLS], targets, { kind: "missing" }), [
+      "the source has no skill folder .agents/skills/horsies",
     ]);
   });
 
-  test("the five skill files of the source, packed", () => {
-    const skills = SKILL_FILES.map((name) => `.agents/skills/horsies/${name}`);
-
-    assert.deepEqual(horsiesFileProblems([...PACKED, ...skills], targets, { kind: "written", files: SKILL_FILES }), []);
+  test("a source with no skill folder and a tarball with none: every skill file is not packed", () => {
+    assert.deepEqual(horsiesFileProblems(PACKED, targets, { kind: "missing" }), [
+      "the source has no skill folder .agents/skills/horsies",
+      ...SKILL_FILES.map((name) => `the skill file ${name} is not packed`),
+    ]);
   });
 
-  test("a skill file of the source that is missing or not packed", () => {
-    const written = { kind: "written", files: ["SKILL.md", "tasks.md", "workflows.md", "configs.md"] } as const;
+  test("a skill file of the source that is missing, and skill files that are not packed", () => {
+    const found = { kind: "found", files: ["SKILL.md", "tasks.md", "workflows.md", "configs.md"] } as const;
 
-    assert.deepEqual(horsiesFileProblems([...PACKED, ".agents/skills/horsies/SKILL.md"], targets, written), [
+    assert.deepEqual(horsiesFileProblems([...PACKED, ".agents/skills/horsies/SKILL.md"], targets, found), [
       "the skill folder of the source has no monitoring.md",
+      "the skill file configs.md is not packed",
+      "the skill file monitoring.md is not packed",
       "the skill file tasks.md is not packed",
       "the skill file workflows.md is not packed",
-      "the skill file configs.md is not packed",
     ]);
+  });
+
+  test("a file of the skill folder besides the five that is not packed", () => {
+    const found = { kind: "found", files: [...SKILL_FILES, "extra.md"] } as const;
+
+    assert.deepEqual(horsiesFileProblems([...PACKED, ...PACKED_SKILLS], targets, found), ["the skill file extra.md is not packed"]);
   });
 });
 
@@ -216,5 +243,52 @@ describe("platformFileProblems and platformManifestProblems", () => {
     };
 
     assert.deepEqual(platformManifestProblems(darwinManifest, macos), ['@horsies/native-darwin-arm64: libc is ["glibc"], not undefined']);
+  });
+});
+
+describe("lintFileProblems", () => {
+  const targets = exportTargets({ ".": { types: "./dist/index.d.ts", default: "./dist/index.js" }, "./package.json": "./package.json" });
+  const PACKED_LINT = ["package.json", "README.md", "LICENSE", "dist/index.js", "dist/index.d.ts"];
+
+  test("passes the packed files", () => {
+    assert.deepEqual(lintFileProblems(PACKED_LINT, targets), []);
+  });
+
+  test("a target of the exports map, the README or the license that is not packed", () => {
+    assert.deepEqual(lintFileProblems(["package.json"], targets), [
+      `${LINT_PACKAGE_NAME} does not hold README.md`,
+      `${LINT_PACKAGE_NAME} does not hold LICENSE`,
+      `${LINT_PACKAGE_NAME} does not hold dist/index.d.ts`,
+      `${LINT_PACKAGE_NAME} does not hold dist/index.js`,
+    ]);
+  });
+
+  test("a source file, a test file and build info", () => {
+    const files = [...PACKED_LINT, "src/index.ts", "tests/rule.test.ts", "tsconfig.tsbuildinfo"];
+
+    assert.deepEqual(lintFileProblems(files, targets), [
+      `${LINT_PACKAGE_NAME} holds the source file src/index.ts`,
+      `${LINT_PACKAGE_NAME} holds the source file tests/rule.test.ts`,
+      `${LINT_PACKAGE_NAME} holds the build info tsconfig.tsbuildinfo`,
+    ]);
+  });
+});
+
+describe("lintManifestProblems", () => {
+  const GOOD = { name: LINT_PACKAGE_NAME, version: "0.8.1", publishConfig: { access: "public" } };
+
+  test("passes a publishable manifest at the version of the release", () => {
+    assert.deepEqual(lintManifestProblems(GOOD, "0.8.1"), []);
+  });
+
+  test("a wrong name, a wrong version, the field private and a restricted access", () => {
+    const manifest = { name: "eslint-plugin", version: "0.8.0", private: true, publishConfig: { access: "restricted" } };
+
+    assert.deepEqual(lintManifestProblems(manifest, "0.8.1"), [
+      `${LINT_PACKAGE_NAME}: the packed name is "eslint-plugin"`,
+      `${LINT_PACKAGE_NAME}: the packed version is "0.8.0", not 0.8.1`,
+      `${LINT_PACKAGE_NAME}: the packed manifest has the field private, so npm refuses to publish it`,
+      `${LINT_PACKAGE_NAME}: publishConfig.access is not public: a scoped package publishes as restricted`,
+    ]);
   });
 });

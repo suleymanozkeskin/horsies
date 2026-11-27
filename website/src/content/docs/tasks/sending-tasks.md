@@ -339,22 +339,22 @@ match my_task.send(name="alice", count=3):
         print(f"Permanent failure: {err.code}")
 ```
 
-The resend methods take a `TaskSendResendable`: `TaskSendEnqueueFailed`, `TaskSendAsyncContext` or `TaskSendIdempotencyKeyConflict`. Passing another variant is a type error; at run time it fails an assertion that names the variant. A resend of a `TaskSendIdempotencyKeyConflict` before the key's reservation ends returns the same error. A resend of a send with a delay keeps the delay.
+The resend methods take a `TaskSendResendable`: `TaskSendEnqueueFailed` or `TaskSendAsyncContext`. Passing another variant is a type error; at run time it fails an assertion that names the variant. `TaskSendIdempotencyKeyConflict` is not one of them: it has `retryable = False`, because a repeat of the same send does not complete it. Send the same command as the owner task, or use another key. A send with the key after the reservation ends starts a new task. A resend of a send with a delay keeps the delay.
 
 ### Automatic Resend via Config
 
-Set `resend_on_transient_err=True` in `AppConfig` to resend a transient enqueue failure before the send returns the error. The default is `False`. The resend rules are on [Atomic Enqueue and Topology](/horsies/operations/atomic-enqueue-and-topology/#resend-transient-failures).
+Set `resend_on_transient_error=True` in `AppConfig` to resend a transient enqueue failure before the send returns the error. The default is `False`. The resend rules are on [Atomic Enqueue and Topology](/horsies/operations/atomic-enqueue-and-topology/#resend-transient-failures).
 
 ```python
 from horsies import AppConfig, Horsies, QueueMode
 
-from myapp.config import broker_config
+from myapp.config import database_config
 
 app = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=broker_config,
-        resend_on_transient_err=True,
+        database=database_config,
+        resend_on_transient_error=True,
     )
 )
 ```
@@ -464,5 +464,5 @@ The codes, and which of them the resend methods accept, are in the [Errors Refer
 | `.task_id` | `uuid.UUID` | Unique task identifier |
 | `.get(wait_ms=None)` | `ReadResult[T, TaskError]` | Wait for result (blocking) |
 | `.get_async(wait_ms=None)` | `ReadResult[T, TaskError]` | Wait for result (async) |
-| `.info(include_result=False, include_failed_reason=False, include_attempts=False)` | `BrokerResult[TaskInfo \| None]` | Fetch task metadata from broker |
-| `.info_async(include_result=False, include_failed_reason=False, include_attempts=False)` | `BrokerResult[TaskInfo \| None]` | Async variant of `.info()` |
+| `.info(include_result=False, include_failed_reason=False, include_attempts=False)` | `DatabaseResult[TaskInfo \| None]` | Fetch task metadata from broker |
+| `.info_async(include_result=False, include_failed_reason=False, include_attempts=False)` | `DatabaseResult[TaskInfo \| None]` | Async variant of `.info()` |

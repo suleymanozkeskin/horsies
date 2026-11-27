@@ -47,7 +47,7 @@ pub enum WorkerBootCause {
     /// No child of the profile could start: the boot attempts of a slot ran
     /// out, or a slot repeated its defects.
     BootAttemptsExhausted,
-    /// An `on_child_process_start` hook failed in a child.
+    /// An `on_child_start` hook failed in a child.
     ChildHookFailed,
     /// The preload process of an `app` preload profile refused or did not
     /// start.

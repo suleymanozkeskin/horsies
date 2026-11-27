@@ -40,6 +40,7 @@ from horsies.core.codec.json_io import SerializationError, loads_json
 from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import AppRole
 from horsies.core.models.log_format import TextLogs
 from horsies.core.models.tracing import NoTracing
 from horsies.core.models.tasks import (
@@ -47,7 +48,7 @@ from horsies.core.models.tasks import (
     MAX_TASK_TIMEOUT_MS,
     MIN_CANCEL_GRACE_MS,
     MIN_TASK_TIMEOUT_MS,
-    OperationalErrorCode,
+    OperationalCode,
     TaskError,
 )
 from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
@@ -196,7 +197,7 @@ def _parse_task_result(json_str: str) -> dict[str, Any]:
 
 
 _SERIALIZATION_ERROR: Final = {
-    '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+    '__builtin_task_code__': OperationalCode.WORKER_SERIALIZATION_ERROR.value,
 }
 """The stored error code of ``WORKER_SERIALIZATION_ERROR``."""
 
@@ -446,7 +447,7 @@ class TestChildBoot:
         # Dropped, not closed: the boot calls no method of the import-time broker.
         assert inherited_broker.method_calls == []
         assert mocks['app']._broker is None
-        mocks['app'].set_role.assert_called_once_with('worker')
+        mocks['app'].set_role.assert_called_once_with(AppRole.WORKER)
 
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
@@ -468,7 +469,7 @@ class TestChildBoot:
         monkeypatch.delenv('HORSIES_CHILD_PROCESS', raising=False)
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr('postgresql://u:p@localhost/db'),
                     pool_size=30,
                     max_overflow=30,
@@ -665,7 +666,7 @@ class TestDiscardInheritedBroker:
     built in the child."""
 
     def test_without_a_broker_does_nothing(self) -> None:
-        app = Horsies(AppConfig(broker=PostgresConfig(
+        app = Horsies(AppConfig(database=PostgresConfig(
             database_url=SecretStr('postgresql://u:p@localhost:5432/db'),
         )))
         app._broker = None  # pyright: ignore[reportPrivateUsage]
@@ -944,7 +945,7 @@ class _Linked(BaseModel):
 def _registered_tasks() -> dict[str, Any]:
     """Registered tasks: the worker calls their wrapper, not a mock."""
     app = Horsies(AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://u:p@localhost:5432/db'),
         ),
     ))
@@ -1054,7 +1055,7 @@ class TestRunTaskEntryErrorPaths:
         assert 'KeyError' in _error_message(payload)
         parsed = _parse_task_result(payload)
         err = parsed.get('err') or parsed.get('error')
-        assert err['error_code'] == {'__builtin_task_code__': OperationalErrorCode.WORKER_RESOLUTION_ERROR.value}
+        assert err['error_code'] == {'__builtin_task_code__': OperationalCode.WORKER_RESOLUTION_ERROR.value}
 
     def test_input_json_invalid(
         self,
@@ -1171,7 +1172,7 @@ class TestRunTaskEntryErrorPaths:
 
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == {
-            '__builtin_task_code__': OperationalErrorCode.TASK_EXCEPTION.value,
+            '__builtin_task_code__': OperationalCode.TASK_EXCEPTION.value,
         }
         assert 'task wrapper' in err['message']
 
@@ -1192,7 +1193,7 @@ class TestRunTaskEntryErrorPaths:
 
         parsed = _parse_task_result(payload)
         err = parsed.get('err') or parsed.get('error')
-        assert err['error_code'] == {'__builtin_task_code__': OperationalErrorCode.TASK_EXCEPTION.value}
+        assert err['error_code'] == {'__builtin_task_code__': OperationalCode.TASK_EXCEPTION.value}
         assert 'ValueError' in err['message']
         assert 'boom' in err['message']
 
@@ -1450,7 +1451,7 @@ class TestRunTaskEntryErrorPaths:
         _ = payload.encode('utf-8')
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == {
-            '__builtin_task_code__': OperationalErrorCode.TASK_EXCEPTION.value,
+            '__builtin_task_code__': OperationalCode.TASK_EXCEPTION.value,
         }
 
     def test_unserializable_value_surfaces_as_serialization_error(
@@ -1493,7 +1494,7 @@ class TestRunTaskEntryErrorPaths:
         err = parsed.get('err') or parsed.get('error')
         assert err is not None
         assert err['error_code'] == {
-            '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+            '__builtin_task_code__': OperationalCode.WORKER_SERIALIZATION_ERROR.value,
         }
 
     def test_task_returns_task_result_ok(
@@ -2379,7 +2380,7 @@ class TestRunTaskEntryStoredErrorRefusal:
 
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == {
-            '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+            '__builtin_task_code__': OperationalCode.WORKER_SERIALIZATION_ERROR.value,
         }
         assert 'nope' in err['message']
         mock_task.assert_not_called()
@@ -2423,7 +2424,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         injected = mock_task.call_args.kwargs['workflow_context']
         entry = injected._results_by_id['node_a']
         assert isinstance(entry, Failed)
-        assert entry.error.code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert entry.error.code is OperationalCode.RESULT_DESERIALIZATION_ERROR
         assert 'nope' in entry.error.message
 
 
@@ -2490,7 +2491,7 @@ class TestRunTaskEntryStoredTimeout:
         app_lookup.assert_not_called()
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == {
-            '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+            '__builtin_task_code__': OperationalCode.WORKER_SERIALIZATION_ERROR.value,
         }
         assert err['message'] == refusal.reason
         assert err['data']['field'] == field

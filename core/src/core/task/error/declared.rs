@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{check_error_code_text, BuiltInTaskCode, CodeTextRefusal, TaskErrorCode};
 use crate::catalog::CodeEnum;
-use crate::core::error::ErrorCode;
+use crate::core::error::HorsiesErrorCode;
 
 /// The label value of a custom code that the task does not declare.
 pub const UNDECLARED_LABEL: &str = "undeclared";
@@ -81,21 +81,21 @@ impl DeclaredCodeRefusal {
     /// a reserved code (as for the codes of an exception mapper), `HRS-112`
     /// for another text that fails the code-text rule, `HRS-113` for a
     /// repeated code.
-    pub fn error_code(&self) -> ErrorCode {
+    pub fn error_code(&self) -> HorsiesErrorCode {
         match self {
             Self::Text {
                 refusal: CodeTextRefusal::ReservedName,
                 ..
             }
-            | Self::BuiltInName { .. } => ErrorCode::CheckReservedCodeCollision,
+            | Self::BuiltInName { .. } => HorsiesErrorCode::CheckReservedCodeCollision,
             Self::Text {
                 refusal:
                     CodeTextRefusal::Empty
                     | CodeTextRefusal::ExceptionClassName
                     | CodeTextRefusal::NotUpperSnakeCase,
                 ..
-            } => ErrorCode::TaskInvalidErrorCode,
-            Self::Repeated { .. } => ErrorCode::TaskDuplicateErrorCode,
+            } => HorsiesErrorCode::TaskInvalidErrorCode,
+            Self::Repeated { .. } => HorsiesErrorCode::TaskDuplicateErrorCode,
         }
     }
 }
@@ -220,7 +220,7 @@ impl From<DeclaredErrorCodes> for Vec<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCodeLabel<'a> {
     /// A built-in code; the label value is its value, for example
-    /// `BROKER_ERROR`.
+    /// `DATABASE_ERROR`.
     BuiltIn(&'a BuiltInTaskCode),
     /// A custom code that the task declares; the label value is the code.
     Declared(&'a DeclaredErrorCode),
@@ -270,9 +270,7 @@ fn built_in_value(code: &BuiltInTaskCode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        ContractCode, CustomCode, OperationalErrorCode, OutcomeCode, RetrievalCode,
-    };
+    use super::super::{ContractCode, CustomCode, OperationalCode, OutcomeCode, RetrievalCode};
     use super::*;
 
     fn declared(codes: &[&str]) -> DeclaredErrorCodes {
@@ -291,7 +289,7 @@ mod tests {
     }
 
     fn every_built_in_code() -> Vec<BuiltInTaskCode> {
-        OperationalErrorCode::ALL
+        OperationalCode::ALL
             .into_iter()
             .map(BuiltInTaskCode::from)
             .chain(ContractCode::ALL.into_iter().map(BuiltInTaskCode::from))
@@ -341,7 +339,10 @@ mod tests {
                 }],
                 "{code:?}"
             );
-            assert_eq!(found[0].error_code(), ErrorCode::TaskInvalidErrorCode);
+            assert_eq!(
+                found[0].error_code(),
+                HorsiesErrorCode::TaskInvalidErrorCode
+            );
             assert_eq!(found[0].error_code().as_code_str(), "HRS-112");
         }
     }
@@ -356,7 +357,10 @@ mod tests {
                 refusal: CodeTextRefusal::ReservedName,
             }]
         );
-        assert_eq!(found[0].error_code(), ErrorCode::CheckReservedCodeCollision);
+        assert_eq!(
+            found[0].error_code(),
+            HorsiesErrorCode::CheckReservedCodeCollision
+        );
     }
 
     #[test]
@@ -371,7 +375,10 @@ mod tests {
                 }],
                 "{value}"
             );
-            assert_eq!(found[0].error_code(), ErrorCode::CheckReservedCodeCollision);
+            assert_eq!(
+                found[0].error_code(),
+                HorsiesErrorCode::CheckReservedCodeCollision
+            );
             assert_eq!(found[0].error_code().as_code_str(), "HRS-212");
         }
     }
@@ -388,7 +395,10 @@ mod tests {
             code: "RATE_LIMITED".to_owned(),
         };
         assert_eq!(found, [repeat.clone(), repeat]);
-        assert_eq!(found[0].error_code(), ErrorCode::TaskDuplicateErrorCode);
+        assert_eq!(
+            found[0].error_code(),
+            HorsiesErrorCode::TaskDuplicateErrorCode
+        );
         assert_eq!(found[0].error_code().as_code_str(), "HRS-113");
     }
 
@@ -396,7 +406,7 @@ mod tests {
     /// it; a refused entry is not an earlier entry of a repeat.
     #[test]
     fn every_refused_entry_is_named_in_input_order() {
-        let found = refusals(&["bad", "BROKER_ERROR", "bad", "GOOD", "GOOD"]);
+        let found = refusals(&["bad", "DATABASE_ERROR", "bad", "GOOD", "GOOD"]);
         assert_eq!(
             found,
             [
@@ -405,7 +415,7 @@ mod tests {
                     refusal: CodeTextRefusal::NotUpperSnakeCase,
                 },
                 DeclaredCodeRefusal::BuiltInName {
-                    code: BuiltInTaskCode::from(OperationalErrorCode::BrokerError),
+                    code: BuiltInTaskCode::from(OperationalCode::DatabaseError),
                 },
                 DeclaredCodeRefusal::Text {
                     code: "bad".to_owned(),
@@ -420,12 +430,12 @@ mod tests {
 
     #[test]
     fn a_refusal_names_the_code_and_the_rule() {
-        let refused = DeclaredErrorCodes::parse(["rate", "BROKER_ERROR", "A", "A"])
+        let refused = DeclaredErrorCodes::parse(["rate", "DATABASE_ERROR", "A", "A"])
             .expect_err("the set is refused");
         assert_eq!(
             refused.to_string(),
             "the declared error codes are refused: declared error code 'rate' is invalid; \
-             expected UPPER_SNAKE_CASE (e.g. RATE_LIMITED); declared error code 'BROKER_ERROR' \
+             expected UPPER_SNAKE_CASE (e.g. RATE_LIMITED); declared error code 'DATABASE_ERROR' \
              is the name of a built-in code; declared error code 'A' is given more than once"
         );
     }

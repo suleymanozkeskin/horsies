@@ -54,7 +54,7 @@ class _HostWithoutChildSpecSource:
 
 def _manifest_json(profile: str | None) -> str:
     config = AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://user:secret@localhost:5432/db'),
         ),
         worker_profiles={

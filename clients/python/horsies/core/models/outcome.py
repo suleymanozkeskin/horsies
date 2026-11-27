@@ -19,7 +19,7 @@ A workflow node input that takes an upstream result (``args_from``) is a
 ``ReadError`` is a closed union of frozen classes, so a ``match`` on it is
 exhaustive under a type checker. Every class has ``code`` (its catalog
 member) and ``message`` (the subject and the cause, as text).
-``ReadDatabaseError`` also has ``retryable`` and ``exception``.
+``ReadDatabaseError`` also has ``retryable`` and ``cause``.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from typing import ClassVar, Literal
 
 from horsies._catalog.task_codes import (
     ContractCode,
-    OperationalErrorCode,
+    OperationalCode,
     RetrievalCode,
 )
 from horsies.core.types.error_detail import NoCause
@@ -171,8 +171,8 @@ class ReadResultDeserializationError:
     by the handle.
     """
 
-    code: ClassVar[Literal[OperationalErrorCode.RESULT_DESERIALIZATION_ERROR]] = (
-        OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+    code: ClassVar[Literal[OperationalCode.RESULT_DESERIALIZATION_ERROR]] = (
+        OperationalCode.RESULT_DESERIALIZATION_ERROR
     )
     message: str
 
@@ -183,9 +183,9 @@ class ReadUnknownCustomCode:
     task does not name: a row of another version of the task, or of a task
     with another code type. ``custom_code`` is the stored text.
 
-    The fix is a deploy of the ``Enum`` with the code, not a change of the
-    stored value. The same read gives the same error until the stored value
-    or the ``Enum`` changes. Kept by the handle.
+    An ``Enum`` that names the code reads the row. The same read gives the
+    same error until the stored value or the ``Enum`` changes. Kept by the
+    handle.
     """
 
     code: ClassVar[Literal[RetrievalCode.UNKNOWN_CUSTOM_CODE]] = (
@@ -201,16 +201,16 @@ class ReadDatabaseError:
 
     ``message`` names the code of the failed operation and its cause.
     ``retryable`` is the classification of the cause: ``True`` when the
-    condition may clear, so that a later read may succeed. ``exception`` is
-    the cause, or ``NoCause()``. Not kept by the handle.
+    condition may clear, so that a later read may succeed. ``cause`` is
+    the exception of the cause, or ``NoCause()``. Not kept by the handle.
     """
 
-    code: ClassVar[Literal[OperationalErrorCode.BROKER_ERROR]] = (
-        OperationalErrorCode.BROKER_ERROR
+    code: ClassVar[Literal[OperationalCode.DATABASE_ERROR]] = (
+        OperationalCode.DATABASE_ERROR
     )
     message: str
     retryable: bool
-    exception: BaseException | NoCause = field(repr=False)
+    cause: BaseException | NoCause = field(repr=False)
 
 
 @dataclass(slots=True, frozen=True)
@@ -228,8 +228,8 @@ class ReadNoTypeAvailable:
 class ReadWorkflowContextMissingId:
     """``result_for`` got a node with no ``node_id``. Nothing was read."""
 
-    code: ClassVar[Literal[ContractCode.WORKFLOW_CTX_MISSING_ID]] = (
-        ContractCode.WORKFLOW_CTX_MISSING_ID
+    code: ClassVar[Literal[ContractCode.WORKFLOW_CONTEXT_MISSING_ID]] = (
+        ContractCode.WORKFLOW_CONTEXT_MISSING_ID
     )
     message: str
 

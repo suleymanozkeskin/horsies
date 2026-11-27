@@ -20,15 +20,15 @@ describe("addonOrThrow", () => {
     });
   });
 
-  test("throws CoreStartFailed that names an unsupported host", () => {
+  test("throws RuntimeStartFailed that names an unsupported host", () => {
     assert.throws(() => addonOrThrow({ kind: "platformUnsupported", host: "win32-x64" }), {
-      name: "CoreStartFailed",
-      code: "CORE_START_FAILED",
+      name: "RuntimeStartFailed",
+      code: "RUNTIME_START_FAILED",
       cause: "no native addon of horsies is built for win32-x64",
     });
   });
 
-  test("throws CoreStartFailed that names the source and the cause of a failed load", () => {
+  test("throws RuntimeStartFailed that names the source and the cause of a failed load", () => {
     assert.throws(
       () =>
         addonOrThrow({
@@ -37,13 +37,13 @@ describe("addonOrThrow", () => {
           cause: "Cannot find module",
         }),
       {
-        name: "CoreStartFailed",
+        name: "RuntimeStartFailed",
         cause: "the native addon did not load from the package @horsies/native-linux-x64-gnu: Cannot find module",
       },
     );
   });
 
-  test("throws CoreStartFailed that names the dev build of a failed dev load", () => {
+  test("throws RuntimeStartFailed that names the dev build of a failed dev load", () => {
     assert.throws(
       () =>
         addonOrThrow({
@@ -52,7 +52,7 @@ describe("addonOrThrow", () => {
           cause: "no such file",
         }),
       {
-        name: "CoreStartFailed",
+        name: "RuntimeStartFailed",
         cause: "the native addon did not load from the dev build /builds/horsies.node: no such file",
       },
     );

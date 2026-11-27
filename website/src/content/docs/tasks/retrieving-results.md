@@ -46,7 +46,7 @@ read = await handle.get_async()  # a ReadResult: match it as in Basic Retrieval
 ```
 `get_async()` waits for broker notifications (LISTEN/NOTIFY) with a polling fallback if notifications are lost.
 
-On a thread that runs an event loop, sync `get()` returns `Err(ReadAsyncContext(...))`, and sync `info()` returns `Err(BrokerAsyncContext(...))`. Both do nothing. Use `get_async()` and `info_async()` there.
+On a thread that runs an event loop, sync `get()` returns `Err(ReadAsyncContext(...))`, and sync `info()` returns `Err(DatabaseAsyncContext(...))`. Both do nothing. Use `get_async()` and `info_async()` there.
 
 ### Timeouts
 
