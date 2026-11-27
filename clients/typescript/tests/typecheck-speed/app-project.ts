@@ -295,11 +295,11 @@ function schedulesFile(tasks: readonly Task[]): string {
 
   const entries = scheduled.map(
     (task, position) =>
-      `    { name: "schedule-${position}", task: task${task.index}, input: { ${sentFields(task.params)} }, pattern: { kind: "interval", every: Temporal.Duration.from({ seconds: 10 }) } },`,
+      `  taskSchedule({ name: "schedule-${position}", task: task${task.index}, input: { ${sentFields(task.params)} }, pattern: { kind: "interval", every: Temporal.Duration.from({ seconds: 10 }) } }),`,
   );
 
   return [
-    'import { app } from "./app.ts";',
+    'import { type ScheduleSection, taskSchedule } from "horsies";',
     contractImports(
       scheduled.map((task) => task.index),
       false,
@@ -307,11 +307,9 @@ function schedulesFile(tasks: readonly Task[]): string {
     'import { at, day, dec } from "./values.ts";',
     "void [at, day, dec];",
     "",
-    "export function registerSchedules(): void {",
-    "  app.schedules([",
+    "export const SCHEDULE: ScheduleSection = { schedules: [",
     ...entries,
-    "  ]);",
-    "}",
+    "] };",
     "",
   ].join("\n");
 }

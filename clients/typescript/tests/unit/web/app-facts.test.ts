@@ -10,6 +10,7 @@ import { monitoringAppOf } from "../../../horsies/src/web/app-facts.ts";
 import { queueSetupOf, type QueueSetup } from "../../../horsies/src/config/queues.ts";
 import { clientVersion } from "../../../horsies/src/web/client-version.ts";
 import { fakeCoreHandle, fakeProducer } from "../app/support.ts";
+import { declare, defaultModeApp, fakeCore, HOURLY, ping } from "../schedules/support.ts";
 
 /** The `package.json` of the horsies package. */
 const PACKAGE_JSON_URL = new URL("../../../horsies/package.json", import.meta.url);
@@ -38,6 +39,15 @@ describe("monitoringAppOf", () => {
     const facts = monitoringAppOf(contextWith(queues).context);
 
     assert.deepEqual(facts.queueNames, ["urgent", "bulk"]);
+  });
+
+  test("an app with a schedule section names each schedule in order, a disabled one too", () => {
+    const context = declare(defaultModeApp(), [
+      { name: "nightly", task: ping, input: {}, pattern: HOURLY },
+      { name: "paused", task: ping, input: {}, pattern: HOURLY, enabled: false },
+    ], { kind: "core", calls: fakeCore() });
+
+    assert.deepEqual(monitoringAppOf(context).scheduleNames, ["nightly", "paused"]);
   });
 
   test("a context with no addon is a defect", () => {

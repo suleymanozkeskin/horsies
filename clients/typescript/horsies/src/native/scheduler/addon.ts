@@ -2,7 +2,7 @@
 //
 // - `checkSchedulePattern`, `checkScheduleTimezone`, `schedulerConfigFacts` and `prepareScheduler` are pure: they
 //   start no core and apply no fork or stop rule, so a task child that runs the entry before `cli.run` still lets the
-//   child host shape its process runtime, and `app.schedules` never throws.
+//   child host shape its process runtime, and the declaration of the `schedule` section never throws.
 // - `runScheduler` is a service run on the core's process runtime: it starts the core of the process.
 
 import { requireAddon } from "../call/addon.ts";

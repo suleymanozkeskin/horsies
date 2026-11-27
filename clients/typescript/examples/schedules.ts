@@ -1,5 +1,6 @@
-// Schedules: the scheduler sends a task on a typed pattern. A schedule names its task contract, so its input is checked
-// against the task's input types at typecheck, and again by `check` and the scheduler start.
+// Schedules: the `schedule` section of the app config. The scheduler sends a task on a typed pattern. `taskSchedule`
+// names the task contract of an entry, so its input is checked against the task's input types at typecheck, and again
+// by `check` and the scheduler start.
 //
 //   node examples/schedules.ts check
 //   node examples/schedules.ts scheduler
@@ -8,7 +9,7 @@
 //
 // `demo` prints each schedule and the state that the scheduler stored for it.
 
-import { defineTask, h, Horsies, type Result, type ScheduleStateInfo } from "horsies";
+import { defineTask, h, Horsies, type Result, type ScheduleStateInfo, taskSchedule } from "horsies";
 
 import { DATABASE_URL, DEFAULT_PROFILE, DEMO_DONE, demoFailed, ISOLATED_PROFILE, printLine, refusalLines, runExample } from "./support.ts";
 
@@ -16,10 +17,27 @@ const recordHeartbeat = defineTask({ name: "record_heartbeat", input: { source: 
 
 const compactLogs = defineTask({ name: "compact_logs", input: { keepDays: h.int() }, output: h.int() });
 
+/** The schedules: a 10 s interval, and the fifth minute of each hour. A wrong input fails typecheck at its entry. */
+const SCHEDULES = [
+  taskSchedule({
+    name: "heartbeat-every-10s",
+    task: recordHeartbeat,
+    input: { source: "scheduler" },
+    pattern: { kind: "interval", every: Temporal.Duration.from({ seconds: 10 }) },
+  }),
+  taskSchedule({
+    name: "compact-hourly",
+    task: compactLogs,
+    input: { keepDays: 7 },
+    pattern: { kind: "hourly", minute: 5 },
+  }),
+];
+
 const created = Horsies.create({
   database: { databaseUrl: DATABASE_URL },
   workerProfiles: { [DEFAULT_PROFILE]: ISOLATED_PROFILE },
   tasks: [recordHeartbeat, compactLogs],
+  schedule: { schedules: SCHEDULES },
 });
 
 if (!created.ok) {
@@ -32,24 +50,6 @@ const app = created.value;
 app.implement(recordHeartbeat, ({ source }, { ok }) => ok(`heartbeat from ${source}`));
 
 app.implement(compactLogs, ({ keepDays }, { ok }) => ok(keepDays));
-
-/** The schedules: a 10 s interval, and the fifth minute of each hour. A wrong input fails typecheck at its entry. */
-const SCHEDULES = [
-  {
-    name: "heartbeat-every-10s",
-    task: recordHeartbeat,
-    input: { source: "scheduler" },
-    pattern: { kind: "interval", every: Temporal.Duration.from({ seconds: 10 }) },
-  },
-  {
-    name: "compact-hourly",
-    task: compactLogs,
-    input: { keepDays: 7 },
-    pattern: { kind: "hourly", minute: 5 },
-  },
-] as const;
-
-app.schedules(SCHEDULES);
 
 /** The line of the stored state of one schedule. Pure. */
 function stateLine(state: ScheduleStateInfo): string {

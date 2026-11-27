@@ -165,6 +165,7 @@ describe("the configs", () => {
     assert.deepEqual(Object.keys(config.workerProfiles ?? {}), [ISOLATED, SHARED_ASYNC, SHARED_THREAD]);
     assert.equal(config.tasks, TASKS);
     assert.equal(config.workflows, WORKFLOWS);
+    assert.equal(config.schedule, SCHEDULE_SECTION);
   });
 
   test("each profile has one child of its class and the 5 s drain", () => {
@@ -185,7 +186,7 @@ describe("the configs", () => {
     assert.equal(PARITY_SCHEDULE.timezone, "UTC");
     assert.equal(PARITY_SCHEDULE.catchUpMissed, true);
     assert.equal(PARITY_SCHEDULE.maxCatchUpRuns, 2);
-    assert.deepEqual(SCHEDULE_SECTION, { checkIntervalSeconds: 1 });
+    assert.deepEqual(SCHEDULE_SECTION, { schedules: [PARITY_SCHEDULE], checkIntervalSeconds: 1 });
   });
 
   test("the refused broker app has the parity contracts on port 1 with the short checkout wait", () => {

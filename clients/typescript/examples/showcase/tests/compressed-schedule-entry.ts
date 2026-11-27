@@ -4,7 +4,7 @@
 //
 //   ACME_DATABASE_URL=... ACME_TEST_SCHEDULE_MARKER=... <runtime> tests/compressed-schedule-entry.ts scheduler
 
-import { cli } from "horsies";
+import { cli, taskSchedule } from "horsies";
 
 import { appRefusedText, buildShowcase } from "../src/app.ts";
 import { prewarmSearch } from "../src/contracts/promotions.ts";
@@ -28,18 +28,16 @@ async function main(): Promise<number> {
     return 1;
   }
 
-  const built = buildShowcase(settings.value, (app) => {
-    app.schedules(
-      [
-        {
-          name: compressedScheduleName(marker),
-          task: prewarmSearch,
-          input: { campaignId: marker },
-          pattern: { kind: "interval", every: Temporal.Duration.from({ seconds: 1 }) },
-        },
-      ],
-      { checkIntervalSeconds: 1 },
-    );
+  const built = buildShowcase(settings.value, {
+    schedules: [
+      taskSchedule({
+        name: compressedScheduleName(marker),
+        task: prewarmSearch,
+        input: { campaignId: marker },
+        pattern: { kind: "interval", every: Temporal.Duration.from({ seconds: 1 }) },
+      }),
+    ],
+    checkIntervalSeconds: 1,
   });
 
   if (!built.ok) {

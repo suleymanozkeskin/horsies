@@ -1,16 +1,19 @@
-// The entries and the section of `app.schedules`, with the defaults of the fields that they leave out. A schedule
-// refers to a task contract, so its input has the contract's input type at typecheck.
+// The `schedule` section of the app config and its entries, with the defaults of the fields that they leave out. A
+// schedule refers to a task contract, so `taskSchedule` checks its input against the contract's input type at
+// typecheck: the entry type `TaskSchedule` comes only from `taskSchedule`.
 
 import type { Execution } from "../_catalog/monitoring_models.ts";
 import type { AnyTaskContract, TaskContract } from "../contract/define-task.ts";
 import type { OutputSchema, SendableInput } from "../contract/schema.ts";
 import type { SchedulePattern } from "./pattern.ts";
 
+declare const taskScheduleBrand: unique symbol;
+
 /** The input of each slot of a schedule of the contract `C`: the input that `app.send` of `C` takes. */
 export type ScheduleInput<C> = C extends TaskContract<infer P, OutputSchema, string, Execution> ? SendableInput<P> : never;
 
-/** One schedule: each slot of `pattern` sends `task` with `input`. */
-export interface TaskSchedule<C> {
+/** The fields of one schedule of the contract `C`, which `taskSchedule` takes: each slot of `pattern` sends `task` with `input`. */
+export interface TaskScheduleOptions<C> {
   /** Unique among the schedules of the app: the key of the schedule's state and of its slots' task ids. */
   readonly name: string;
   /** A contract of the app's `tasks` list. The scheduler only sends: the entry needs no implementation. */
@@ -31,24 +34,38 @@ export interface TaskSchedule<C> {
   readonly enabled?: boolean;
 }
 
-/** The entries of `app.schedules`: one entry per contract of `T`, in order. */
-export type ScheduleEntries<T extends readonly AnyTaskContract[]> = { readonly [K in keyof T]: TaskSchedule<T[K]> };
-
-/** One entry as the declaration reads it: a contract, and the input as the object that it is. */
-export type DeclaredEntry = Omit<TaskSchedule<AnyTaskContract>, "task" | "input"> & {
+/**
+ * One schedule of the `schedule` section: a contract, and the input as the object that it is. Only `taskSchedule`
+ * makes it, so the input of each entry was checked against its own task contract at typecheck.
+ */
+export type TaskSchedule = Omit<TaskScheduleOptions<AnyTaskContract>, "task" | "input"> & {
   readonly task: AnyTaskContract;
   readonly input: object;
+  readonly [taskScheduleBrand]: "TaskSchedule";
 };
 
-/** The entries of `app.schedules` as the declaration reads them, in order. Pure. */
-export function declaredEntries<T extends readonly AnyTaskContract[]>(entries: ScheduleEntries<T>): readonly DeclaredEntry[] {
-  return entries.map((entry: TaskSchedule<T[number]>): DeclaredEntry => ({ ...entry, task: entry.task, input: Object(entry.input) }));
+/** One entry as the declaration reads it: an entry with no brand, as a caller with no type check writes it. */
+export type DeclaredEntry = Omit<TaskSchedule, typeof taskScheduleBrand>;
+
+/**
+ * The schedule of `options`, for the `schedules` list of the `schedule` section. The input type is the input type of
+ * `options.task`; a wrong input fails typecheck at this call. `check` and the scheduler start check the entry again at
+ * run time. Pure.
+ */
+export function taskSchedule<C extends AnyTaskContract>(options: TaskScheduleOptions<C>): TaskSchedule {
+  const entry: DeclaredEntry = { ...options, task: options.task, input: Object(options.input) };
+
+  // SAFETY: the brand is the fact that the input type of the entry was the input type of its task, checked by the
+  // parameter type of this function.
+  return Object.freeze(entry) as TaskSchedule;
 }
 
-/** The section of `app.schedules`: the switches of the scheduler. */
+/** The `schedule` section of the app config: the switches of the scheduler and its schedules. */
 export interface ScheduleSection {
   /** The master switch: off, the scheduler command refuses to start. Left out: `true`. */
   readonly enabled?: boolean;
+  /** The schedules of the app, in order; each one made by `taskSchedule`. */
+  readonly schedules: readonly TaskSchedule[];
   /** The wait between two checks for due slots, in whole seconds, 1 to 60. Left out: 1. */
   readonly checkIntervalSeconds?: number;
 }

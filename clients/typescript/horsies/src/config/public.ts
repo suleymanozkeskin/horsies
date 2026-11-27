@@ -14,6 +14,8 @@ export type {
 
 export type { PayloadBound, PayloadPolicyInput } from "./payload.ts";
 
+export type { LogFormat, SchemaMode } from "./process-settings.ts";
+
 export type { CustomQueueInput, QueueConfigInput, TaskCap } from "./queues.ts";
 
 export type { RecoveryConfigInput } from "./recovery.ts";

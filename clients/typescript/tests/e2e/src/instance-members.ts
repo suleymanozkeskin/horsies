@@ -1,15 +1,15 @@
-// The members of an app instance besides its tasks and its failing start members (`app.ts`): the schedules of the
-// scheduler instances, the event handlers of `handlers`, the OpenTelemetry SDK of the children of
+// The members of an app instance besides its tasks and its failing start members (`app.ts`): the event handlers of
+// `handlers`, the OpenTelemetry SDK of the children of
 // `worker_ended_spans`, the main-thread block of the children of `thread_profiles` (a thread body asks for it,
 // `tasks/threads.ts`), and the workflows of an instance.
 
 import { isMainThread } from "node:worker_threads";
 
-import type { AnyWorkflowContract, Horsies } from "#horsies";
+import type { AnyWorkflowContract, Horsies, HorsiesConfig } from "#horsies";
 import { entryThread } from "./entry-thread.ts";
 import { registerFailingHandlerChildStart, registerHandlers } from "./handlers.ts";
 import type { DefaultTaskInstance, Instance } from "./instances.ts";
-import { declareInvalidRuleSchedules, declareSchedules, declareUnlistedTaskSchedule } from "./tasks/scheduled.ts";
+import { INVALID_RULE_SECTION, SCHEDULER_SECTION, UNLISTED_TASK_SECTION } from "./tasks/scheduled.ts";
 import { endedSpansFlow } from "./tasks/ended-spans.ts";
 import { RECOVERY_QUEUE_WORKFLOWS } from "./tasks/recovery-queues.ts";
 import { blockMainThreadOnAsk } from "./tasks/threads.ts";
@@ -54,18 +54,6 @@ async function installSeatSpanLinesSdk(): Promise<void> {
 /** Add the members of `instance` to `app`: none for most instances. Calls no I/O. */
 export function addInstanceMembers(app: Horsies, instance: DefaultTaskInstance): void {
   switch (instance) {
-    case "scheduler":
-      declareSchedules(app);
-
-      return;
-    case "scheduler_invalid_rules":
-      declareInvalidRuleSchedules(app);
-
-      return;
-    case "scheduler_invalid_task":
-      declareUnlistedTaskSchedule(app);
-
-      return;
     case "handlers":
       registerHandlers(app);
 
@@ -96,7 +84,39 @@ export function addInstanceMembers(app: Horsies, instance: DefaultTaskInstance):
     case "hook_throws":
     case "provider_throws":
     case "hook_past_bound":
+    case "scheduler":
+    case "scheduler_invalid_rules":
+    case "scheduler_invalid_task":
       return;
+  }
+}
+
+/** The `schedule` section of the config of `instance`: the scheduler instances have one, the others none. Pure. */
+export function instanceSchedule(instance: Instance): Pick<HorsiesConfig, "schedule"> {
+  switch (instance) {
+    case "scheduler":
+      return { schedule: SCHEDULER_SECTION };
+    case "scheduler_invalid_rules":
+      return { schedule: INVALID_RULE_SECTION };
+    case "scheduler_invalid_task":
+      return { schedule: UNLISTED_TASK_SECTION };
+    case "default":
+    case "custom_queues":
+    case "recovery_queues":
+    case "cluster_cap":
+    case "recovery":
+    case "soft_cap":
+    case "queue_retention":
+    case "declared_retention":
+    case "hook_throws":
+    case "provider_throws":
+    case "hook_past_bound":
+    case "thread_profiles":
+    case "handlers":
+    case "handler_hook_throws":
+    case "handler_hook_past_bound":
+    case "worker_ended_spans":
+      return {};
   }
 }
 

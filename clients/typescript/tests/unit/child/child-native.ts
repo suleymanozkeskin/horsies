@@ -15,6 +15,8 @@ import type {
 import type { HandlerChildPlan } from "../../../horsies/src/native/handler-child/addon.ts";
 import type { AppConfigCheck, NativeTaskError, TaskErrorBuild, TaskErrorParts } from "../../../horsies/src/native/sends/addon.ts";
 import type { PanicRule } from "../../../horsies/src/thrown-errors.ts";
+import type { SchemaMode } from "../../../horsies/src/_catalog/manifest.ts";
+import type { LogFormat } from "../../../horsies/src/config/process-settings.ts";
 import { fakeSendRules } from "../app/support.ts";
 
 /** The task error that the fake builds: the stored text names the parts. */
@@ -48,6 +50,8 @@ export class FakeChildNative implements ChildNative {
   readonly builds: TaskErrorParts[] = [];
   readonly serves: ServeCall[] = [];
   readonly handlerPlans: HandlerChildPlan[] = [];
+  /** The schema mode of each config check, in order. */
+  readonly schemaModes: SchemaMode[] = [];
   #end: (end: ChildServeEnd) => void = () => undefined;
 
   /** End the serve with `code`. */
@@ -127,7 +131,13 @@ export class FakeChildNative implements ChildNative {
     this.calls.push(`setPanicRule ${rule}`);
   }
 
-  checkAppConfig(): AppConfigCheck {
+  applyLogFormat(format: LogFormat): void {
+    this.calls.push(`applyLogFormat ${format.kind}`);
+  }
+
+  checkAppConfig(_appConfigJson: string, schemaMode: SchemaMode): AppConfigCheck {
+    this.schemaModes.push(schemaMode);
+
     return {
       kind: "accepted",
       rules: fakeSendRules(),

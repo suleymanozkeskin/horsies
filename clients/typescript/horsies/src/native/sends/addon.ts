@@ -9,6 +9,7 @@
 // - `enqueue`, `getResult` and `taskInfo` are operations on a core handle: they start the core of the process at the
 //   first call and run on its runtime.
 
+import type { SchemaMode } from "../../_catalog/manifest.ts";
 import { requireAddon } from "../call/addon.ts";
 import type { NativeEnvelope } from "../call/envelope.ts";
 import type { InstallCoverageArg, NativeCoreHandle } from "../handle/addon.ts";
@@ -343,7 +344,7 @@ export type TaskErrorBuild =
 
 /** The functions of the `sends` area. */
 export interface SendsAddon {
-  checkAppConfig(appConfigJson: string): NativeEnvelope<AppConfigCheck>;
+  checkAppConfig(appConfigJson: string, schemaMode: SchemaMode): NativeEnvelope<AppConfigCheck>;
   parseDeclaredErrorCodes(codes: string[]): NativeEnvelope<DeclaredCodesCheck>;
   checkTaskOptions(facts: TaskOptionsFacts): NativeEnvelope<TaskOptionsCheck>;
   enqueue(

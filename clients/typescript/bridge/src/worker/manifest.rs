@@ -193,7 +193,7 @@ mod tests {
 
     use super::*;
     use crate::call::thrown::Envelope;
-    use crate::sends::checks::{check_app_config, AppConfigCheck};
+    use crate::sends::checks::{check_app_config, AppConfigCheck, AppSchemaMode};
 
     /// The JSON text of an app config with `rest` after its broker section.
     fn config_text(rest: &str) -> String {
@@ -205,7 +205,7 @@ mod tests {
     fn read(text: &str) -> (AppConfig, ProducerManifest) {
         let config: AppConfig = serde_json::from_str(text).expect("the config text reads");
         let Envelope::Value(AppConfigCheck::Accepted { manifest_json, .. }) =
-            check_app_config(text.to_owned())
+            check_app_config(text.to_owned(), AppSchemaMode::MigrateAndValidate)
         else {
             panic!("the config is accepted");
         };
