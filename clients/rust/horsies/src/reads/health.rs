@@ -45,9 +45,11 @@ pub enum MinResponses {
 /// How many state snapshots of a worker a history read returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerHistoryLimit {
-    /// Every retained snapshot.
+    /// Every retained snapshot, at most `WORKER_HISTORY_ROW_BOUND` (10,000).
+    /// A worker that holds more refuses the read with `INVALID_INPUT`.
     AllRetained,
-    /// The newest `n` snapshots.
+    /// The newest `n` snapshots; `n` above `WORKER_HISTORY_ROW_BOUND` is
+    /// refused with `INVALID_INPUT`.
     Newest(NonZeroU32),
 }
 
@@ -70,7 +72,8 @@ impl Horsies {
     /// passed. A worker that is in `list_worker_states` and not here did not
     /// answer.
     ///
-    /// Errors: `INVALID_INPUT` for a zero `wait`, with no statement;
+    /// Errors: `INVALID_INPUT` for a zero `wait`, or a `wait` above
+    /// `WORKER_PING_WAIT_BOUND` (60 s), with no statement;
     /// `LISTENER_DISABLED` for an app whose schema mode has no listener;
     /// `WORKER_PING_FAILED`.
     pub async fn ping_workers(
@@ -126,7 +129,9 @@ impl Horsies {
 
     /// The state snapshots of worker `worker_id`, newest first.
     ///
-    /// Errors: as `list_worker_states`.
+    /// Errors: as `list_worker_states`; `INVALID_INPUT` for a `Newest` count
+    /// above `WORKER_HISTORY_ROW_BOUND`, and for `AllRetained` on a worker that
+    /// holds more snapshots than the bound.
     pub async fn get_worker_state_history(
         &self,
         worker_id: &str,

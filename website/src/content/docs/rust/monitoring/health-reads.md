@@ -52,11 +52,11 @@ A `WorkerStateSnapshot` holds `child_count`, `claim_limits` (a `ClaimLimits`; `c
 |----------|----------------|
 | `target: PingTarget::Worker(worker_id)` | That worker replied |
 | `min_responses: MinResponses::AtLeast(n)` | `n` distinct workers replied |
-| `wait` | The time passed. With `PingTarget::EveryWorker` and `MinResponses::FullWindow`, the read waits the whole `wait` and lists every worker that replied |
+| `wait` | The time passed (at most 60 s, `WORKER_PING_WAIT_BOUND`; a zero or longer `wait` is `InvalidInput`). With `PingTarget::EveryWorker` and `MinResponses::FullWindow`, the read waits the whole `wait` and lists every worker that replied |
 
 A worker that `list_worker_states` lists and `ping_workers` does not return did not answer.
 
-`get_worker_state_history` takes a `WorkerHistoryLimit`: `AllRetained` (every retained snapshot) or `Newest(NonZeroU32)` (the newest `n`).
+`get_worker_state_history` takes a `WorkerHistoryLimit`: `AllRetained` (every retained snapshot) or `Newest(NonZeroU32)` (the newest `n`). A read returns at most `WORKER_HISTORY_ROW_BOUND` (10,000) snapshots. `Newest(n)` with `n` above the bound is `InvalidInput`. `AllRetained` is `InvalidInput` for a worker that holds more than the bound; no snapshots are returned in part.
 
 `get_stale_tasks` takes a `StaleMinutes`. `StaleMinutes::parse(minutes)` accepts 0 to `MAX_STALE_THRESHOLD_MINUTES` (525,600, one year) whole minutes and refuses another value with `StaleThresholdRefusal`. A RUNNING task is stale when its latest runner beat since its start, or its start when it has no such beat, is older than the threshold. `StaleTaskRow.last_heartbeat_at` is that beat, `None` when the task has none: the start writes no beat, and a beat of an earlier attempt of a retried task does not count. The read does not recover the task: the reaper does.
 
