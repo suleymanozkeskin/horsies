@@ -120,6 +120,20 @@ describe("taskActionCoreErrorFromNative", () => {
     });
   });
 
+  test("TaskActionOutcomeUnknown", () => {
+    const value = taskActionCoreErrorFromNative({
+      class: "TaskActionOutcomeUnknown",
+      slots: { message: MESSAGE, retryable: true, task_id: TASK_ID, cause: SERVER_FAILURE },
+    });
+
+    expectConverted(value, {
+      shown: { kind: "outcomeUnknown", code: "OUTCOME_UNKNOWN", retryable: true, taskId: TASK_ID },
+      hidden: ["message", "cause"],
+      message: MESSAGE,
+      cause: SERVER_FAILURE,
+    });
+  });
+
   test("TaskActionStoredDataInvalid", () => {
     const value = taskActionCoreErrorFromNative({
       class: "TaskActionStoredDataInvalid",

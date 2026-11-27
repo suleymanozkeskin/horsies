@@ -54,6 +54,15 @@ export interface TaskActionDatabaseOperationFailed {
   readonly cause: CoreCause;
 }
 
+export interface TaskActionOutcomeUnknown {
+  readonly kind: "outcomeUnknown";
+  readonly code: "OUTCOME_UNKNOWN";
+  readonly message: string;
+  readonly retryable: boolean;
+  readonly taskId: string;
+  readonly cause: CoreCause;
+}
+
 export interface TaskActionStoredDataInvalid {
   readonly kind: "storedDataInvalid";
   readonly code: "STORED_DATA_INVALID";
@@ -72,6 +81,7 @@ export type TaskActionCoreError =
   | TaskActionNotCancellable
   | TaskActionIsWorkflowTask
   | TaskActionDatabaseOperationFailed
+  | TaskActionOutcomeUnknown
   | TaskActionStoredDataInvalid;
 
 export interface NativeMonitoringQueryDatabaseOperationFailed {
@@ -127,6 +137,16 @@ export interface NativeTaskActionDatabaseOperationFailed {
   };
 }
 
+export interface NativeTaskActionOutcomeUnknown {
+  readonly class: "TaskActionOutcomeUnknown";
+  readonly slots: {
+    readonly message: string;
+    readonly retryable: boolean;
+    readonly task_id: string;
+    readonly cause: CoreCause;
+  };
+}
+
 export interface NativeTaskActionStoredDataInvalid {
   readonly class: "TaskActionStoredDataInvalid";
   readonly slots: {
@@ -147,6 +167,7 @@ export type NativeTaskActionCoreError =
   | NativeTaskActionNotCancellable
   | NativeTaskActionIsWorkflowTask
   | NativeTaskActionDatabaseOperationFailed
+  | NativeTaskActionOutcomeUnknown
   | NativeTaskActionStoredDataInvalid;
 
 function unknownClass(converter: string, raw: { readonly class: string }): never {
@@ -255,6 +276,24 @@ export function taskActionCoreErrorFromNative(raw: NativeTaskActionCoreError): T
       const value: TaskActionDatabaseOperationFailed = {
         kind: "databaseOperationFailed",
         code: "DATABASE_OPERATION_FAILED",
+        message: raw.slots.message,
+        retryable: raw.slots.retryable,
+        taskId: raw.slots.task_id,
+        cause: Object.freeze({ ...raw.slots.cause }),
+      };
+
+      return Object.freeze(
+        Object.defineProperties(value, {
+          message: { enumerable: false },
+          cause: { enumerable: false },
+        }),
+      );
+    }
+
+    case "TaskActionOutcomeUnknown": {
+      const value: TaskActionOutcomeUnknown = {
+        kind: "outcomeUnknown",
+        code: "OUTCOME_UNKNOWN",
         message: raw.slots.message,
         retryable: raw.slots.retryable,
         taskId: raw.slots.task_id,
