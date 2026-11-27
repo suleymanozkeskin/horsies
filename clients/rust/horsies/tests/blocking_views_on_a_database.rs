@@ -599,7 +599,7 @@ async fn blocking_reads_of_a_completed_task_answer_its_result() {
             assert_eq!(info.status, TaskStatus::Completed);
             match &info.result {
                 ResultSlot::Stored(TaskResult::Ok(text)) => {
-                    assert_eq!(text.get(), SENT_VALUE.to_string())
+                    assert_eq!(text.get(), SENT_VALUE.to_string());
                 }
                 other => panic!("expected the stored value {SENT_VALUE}, got {other:?}"),
             }
