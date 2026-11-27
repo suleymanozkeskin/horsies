@@ -7,8 +7,13 @@
 //
 // Thresholds follow the dotted names, as Python's `logging` does: a threshold set for
 // `horsies.workflow` applies to `horsies.workflow.engine` unless that logger has its own.
+//
+// The worker, the scheduler, `check` and each worker child write the stderr lines in the app's `logFormat`
+// (`configureCommandLogging`, `applyLogFormat`).
 
+import type { WorkerLogLevel } from "./_catalog/worker_manifest.ts";
 import { processStart } from "./app/suppression.ts";
+import type { LogFormat } from "./config/process-settings.ts";
 import { nativeValue } from "./native/call/envelope.ts";
 import { thrownFacts } from "./native/call/thrown-facts.ts";
 import { loggingAddon } from "./native/logging/addon.ts";
@@ -131,6 +136,37 @@ export function configureLogging(options: LoggingOptions): void {
       const unexpected: never = thread;
 
       throw new TypeError(`configureLogging: a thread outside its type: ${String(unexpected)}`);
+    }
+  }
+}
+
+/**
+ * The log setup of a command that loads the app (the worker, the scheduler, `check`): the default threshold `level`,
+ * then the format of the app's `logFormat`. Loads the addon. Not exported from an entry point.
+ */
+export function configureCommandLogging(level: WorkerLogLevel, format: LogFormat): void {
+  configureLogging({ levels: { default: level } });
+  applyLogFormat(format);
+}
+
+/**
+ * Write the stderr lines of later core log records in `format`. Loads the addon. In a seat isolate it does nothing,
+ * as `configureLogging`. Not exported from an entry point.
+ */
+export function applyLogFormat(format: LogFormat): void {
+  const thread = loggingThread();
+
+  switch (thread) {
+    case "seatIsolate":
+      return;
+    case "processCore":
+      nativeValue("setLogFormat", () => loggingAddon().setLogFormat(format.kind));
+
+      return;
+    default: {
+      const unexpected: never = thread;
+
+      throw new TypeError(`applyLogFormat: a thread outside its type: ${String(unexpected)}`);
     }
   }
 }

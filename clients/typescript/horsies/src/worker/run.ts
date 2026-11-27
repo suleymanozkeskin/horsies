@@ -34,7 +34,7 @@ import { setPanicRule } from "../native/process-core/process-core.ts";
 import { checkAppConfig, checkTaskOptions, parseDeclaredErrorCodes } from "../native/sends/sends.ts";
 import { prepareWorker, requestWorkerStop, runWorker } from "../native/worker/worker.ts";
 import { appCoreHandle } from "../app/core-access.ts";
-import { configureLogging } from "../logging.ts";
+import { configureCommandLogging } from "../logging.ts";
 import { ClientDefect, CoreError } from "../thrown-errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import {
@@ -82,7 +82,7 @@ export type WorkerRunError =
 
 /** What the worker run does that has effects. The process gives the addon's; a test gives fakes. */
 export interface WorkerRunDeps {
-  /** Set the thresholds of the core log of this process. */
+  /** Set the default threshold of the core log of this process, and the app's log format. */
   setLogLevel(level: WorkerLogLevel): void;
   /** Set the panic rule of a worker process (`ABORT_PROCESS`). */
   setWorkerPanicRule(): void;
@@ -276,7 +276,7 @@ export function processWorkerRunDeps(
   native: NativeWorkerCalls = NATIVE_WORKER_CALLS,
 ): WorkerRunDeps {
   return {
-    setLogLevel: (level) => configureLogging({ levels: { default: level } }),
+    setLogLevel: (level) => configureCommandLogging(level, context.config.logFormat),
     setWorkerPanicRule: () => setPanicRule("ABORT_PROCESS"),
     coreChecks: { checkAppConfig, parseDeclaredErrorCodes, checkTaskOptions },
     launchFacts: processLaunchFacts,

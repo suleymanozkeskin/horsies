@@ -3,7 +3,8 @@
 //   <entry> check [--live] [--log-level LEVEL]
 //
 // - `--live`: after a passing static check, the connectivity of the database and the connection fit of each worker
-//   profile. It installs no schema.
+//   profile, on a core handle of its own with the schema mode `OBSERVE_ONLY` (Python's `check(live=True)`), closed at
+//   the end. It installs no schema.
 // - `--log-level`: the lowest level of the core records of this process; default `WARNING`.
 //
 // Exit codes: 0 for a passing check (its summary on stdout); 1 for a check report, or a core that refused the live
@@ -14,14 +15,17 @@ import type { AppContext } from "../app/context.ts";
 import { liveCheckOutcome } from "../check/live-check.ts";
 import { type CheckOutcome, type CheckPassed, passedText, reportText } from "../check/report.ts";
 import { staticCheck } from "../check/static-check.ts";
-import { configureLogging } from "../logging.ts";
+import { configureCommandLogging } from "../logging.ts";
 import { checkAppConfig, checkTaskOptions, parseDeclaredErrorCodes } from "../native/sends/sends.ts";
 import type { LiveCheckOutcome } from "../native/worker/addon.ts";
 import { checkLive } from "../native/worker/worker.ts";
 import { ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../native/call/never.ts";
-import { CoreError } from "../thrown-errors.ts";
-import { appCoreHandle } from "../app/core-access.ts";
+import { ClientDefect, CoreError } from "../thrown-errors.ts";
+import type { SchemaMode } from "../_catalog/manifest.ts";
+import type { AppConfig } from "../config/app-config.ts";
+import { buildCoreHandle, type CoreHandle } from "../native/handle/core-handle.ts";
+import type { AppConfigCheck } from "../native/sends/addon.ts";
 import {
   type CommandExitCode,
   type CommandOutput,
@@ -64,6 +68,7 @@ export type LiveStepsOutcome = CheckOutcome | { readonly kind: "coreRefused"; re
 /** What `check` calls that has effects. */
 export interface CheckCommandDeps {
   readonly output: CommandOutput;
+  /** Set the default threshold of the core log of this process, and the app's log format. */
   setLogLevel(level: WorkerLogLevel): void;
   staticCheck(): CheckOutcome;
   /** The live steps after a static check that passed with `passed`. */
@@ -76,10 +81,56 @@ export function processCheckCommandDeps(context: AppContext): CheckCommandDeps {
 
   return {
     output: processOutput(),
-    setLogLevel: (level) => configureLogging({ levels: { default: level } }),
+    setLogLevel: (level) => configureCommandLogging(level, context.config.logFormat),
     staticCheck: () => staticCheck(context, checks, "withSchedules", "check"),
-    liveCheck: async (passed) => liveSteps(passed, async () => checkLive(appCoreHandle(context.core), context.config.coreConfigJson)),
+    liveCheck: async (passed) => liveSteps(passed, async () => liveCheckOnOwnHandle(context.config, NATIVE_LIVE_CHECK)),
   };
+}
+
+/** The schema mode of the core handle of the live steps: no schema statement, whatever the app's `schemaMode`. */
+export const LIVE_CHECK_SCHEMA_MODE: SchemaMode = "OBSERVE_ONLY";
+
+/** The addon calls of the live steps, over a handle of type `H`. The process gives the addon's; a test gives fakes. */
+export interface LiveCheckNative<H> {
+  checkAppConfig(appConfigJson: string, schemaMode: SchemaMode): AppConfigCheck;
+  /** A core handle of the producer manifest `manifestJson` with the producer pool profile. Starts nothing. */
+  buildHandle(manifestJson: string): H;
+  checkLive(handle: H, appConfigJson: string): Promise<LiveCheckOutcome>;
+  close(handle: H): Promise<undefined>;
+}
+
+/** The addon calls of the live steps in this process. */
+const NATIVE_LIVE_CHECK: LiveCheckNative<CoreHandle> = Object.freeze({
+  checkAppConfig,
+  buildHandle: (manifestJson: string) => buildCoreHandle(manifestJson, "PRODUCER"),
+  checkLive,
+  close: async (handle: CoreHandle) => handle.close(),
+});
+
+/**
+ * The live steps of `config` on a core handle of their own, with `LIVE_CHECK_SCHEMA_MODE`; the handle is closed after
+ * the steps, and the app's handle is not used. A config that the core refuses again is a defect: `ClientDefect`. The
+ * refusals of `checkLive` and of the close pass on.
+ */
+export async function liveCheckOnOwnHandle<H>(config: AppConfig, native: LiveCheckNative<H>): Promise<LiveCheckOutcome> {
+  const checked = native.checkAppConfig(config.coreConfigJson, LIVE_CHECK_SCHEMA_MODE);
+
+  switch (checked.kind) {
+    case "refused":
+      throw new ClientDefect({ subject: "check --live", rule: "the config check refuses the config that Horsies.create accepted" });
+    case "accepted": {
+      const handle = native.buildHandle(checked.manifestJson);
+
+      try {
+        return await native.checkLive(handle, config.coreConfigJson);
+      } finally {
+        await native.close(handle);
+      }
+    }
+
+    default:
+      return unreachable(checked);
+  }
 }
 
 /** The outcome of the live steps that `run` gives, or the core refusal that it rejects with. A defect passes on. */

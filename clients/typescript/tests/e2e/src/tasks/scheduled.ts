@@ -8,7 +8,7 @@
 //   refuses them.
 // - `scheduler_invalid_task`: a schedule of a contract that the app does not list. The scheduler start refuses it.
 
-import { defineTask, h, type Horsies, type SchedulePattern } from "../../../../horsies/src/index.ts";
+import { defineTask, h, type Horsies, type SchedulePattern, type ScheduleSection, taskSchedule } from "../../../../horsies/src/index.ts";
 
 /** The interval of the interval schedules of the `scheduler` instance that do not catch up, in seconds. */
 export const SCHEDULE_INTERVAL_SECONDS = 2;
@@ -70,42 +70,37 @@ const EVERY_MINUTE: SchedulePattern = {
   day: { kind: "everyDay" },
 };
 
-/** The schedules of the `scheduler` instance. */
-export function declareSchedules(app: Horsies): void {
-  app.schedules(
-    [
-      {
-        name: SCHEDULE_SIMPLE_INTERVAL,
-        task: scheduledSimple,
-        input: {},
-        pattern: everySeconds(SCHEDULE_INTERVAL_SECONDS),
-        timezone: "UTC",
-        catchUpMissed: false,
-      },
-      { name: SCHEDULE_DISABLED, task: scheduledSimple, input: {}, pattern: everySeconds(1), enabled: false },
-      { name: SCHEDULE_WITH_ARGS, task: scheduledWithArgs, input: { value: SCHEDULED_VALUE }, pattern: everySeconds(SCHEDULE_INTERVAL_SECONDS) },
-      { name: SCHEDULE_CATCH_UP, task: catchUpTask, input: {}, pattern: everySeconds(1), catchUpMissed: true },
-      { name: SCHEDULE_CRON_EVERY_MINUTE, task: cronTask, input: {}, pattern: EVERY_MINUTE, timezone: "UTC", catchUpMissed: false },
-    ],
-    { checkIntervalSeconds: CHECK_INTERVAL_SECONDS },
-  );
-}
+/** The schedule section of the `scheduler` instance. */
+export const SCHEDULER_SECTION: ScheduleSection = {
+  schedules: [
+    taskSchedule({
+      name: SCHEDULE_SIMPLE_INTERVAL,
+      task: scheduledSimple,
+      input: {},
+      pattern: everySeconds(SCHEDULE_INTERVAL_SECONDS),
+      timezone: "UTC",
+      catchUpMissed: false,
+    }),
+    taskSchedule({ name: SCHEDULE_DISABLED, task: scheduledSimple, input: {}, pattern: everySeconds(1), enabled: false }),
+    taskSchedule({ name: SCHEDULE_WITH_ARGS, task: scheduledWithArgs, input: { value: SCHEDULED_VALUE }, pattern: everySeconds(SCHEDULE_INTERVAL_SECONDS) }),
+    taskSchedule({ name: SCHEDULE_CATCH_UP, task: catchUpTask, input: {}, pattern: everySeconds(1), catchUpMissed: true }),
+    taskSchedule({ name: SCHEDULE_CRON_EVERY_MINUTE, task: cronTask, input: {}, pattern: EVERY_MINUTE, timezone: "UTC", catchUpMissed: false }),
+  ],
+  checkIntervalSeconds: CHECK_INTERVAL_SECONDS,
+};
 
-/** The schedules of the `scheduler_invalid_rules` instance: an interval of zero, and one name twice. */
-export function declareInvalidRuleSchedules(app: Horsies): void {
-  app.schedules(
-    [
-      { name: NO_TIME_UNIT_SCHEDULE, task: scheduledSimple, input: {}, pattern: everySeconds(0) },
-      { name: DUPLICATE_SCHEDULE, task: scheduledSimple, input: {}, pattern: everySeconds(5) },
-      { name: DUPLICATE_SCHEDULE, task: catchUpTask, input: {}, pattern: everySeconds(10) },
-    ],
-    { checkIntervalSeconds: CHECK_INTERVAL_SECONDS },
-  );
-}
+/** The schedule section of the `scheduler_invalid_rules` instance: an interval of zero, and one name twice. */
+export const INVALID_RULE_SECTION: ScheduleSection = {
+  schedules: [
+    taskSchedule({ name: NO_TIME_UNIT_SCHEDULE, task: scheduledSimple, input: {}, pattern: everySeconds(0) }),
+    taskSchedule({ name: DUPLICATE_SCHEDULE, task: scheduledSimple, input: {}, pattern: everySeconds(5) }),
+    taskSchedule({ name: DUPLICATE_SCHEDULE, task: catchUpTask, input: {}, pattern: everySeconds(10) }),
+  ],
+  checkIntervalSeconds: CHECK_INTERVAL_SECONDS,
+};
 
-/** The schedule of the `scheduler_invalid_task` instance: a contract that the app does not list. */
-export function declareUnlistedTaskSchedule(app: Horsies): void {
-  app.schedules([{ name: UNLISTED_TASK_SCHEDULE, task: unlistedTask, input: {}, pattern: everySeconds(5) }], {
-    checkIntervalSeconds: CHECK_INTERVAL_SECONDS,
-  });
-}
+/** The schedule section of the `scheduler_invalid_task` instance: a contract that the app does not list. */
+export const UNLISTED_TASK_SECTION: ScheduleSection = {
+  schedules: [taskSchedule({ name: UNLISTED_TASK_SCHEDULE, task: unlistedTask, input: {}, pattern: everySeconds(5) })],
+  checkIntervalSeconds: CHECK_INTERVAL_SECONDS,
+};

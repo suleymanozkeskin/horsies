@@ -11,7 +11,7 @@ import { type AnyTaskContract, defineTask, h, Horsies } from "../../../horsies/s
 import { err, ok, type Result } from "../../../horsies/src/wire/result.ts";
 import type { Connection } from "./connection.ts";
 import { entryThread, type StartMember, startMarkerName } from "./entry-thread.ts";
-import { addInstanceMembers, instanceWorkflows } from "./instance-members.ts";
+import { addInstanceMembers, instanceSchedule, instanceWorkflows } from "./instance-members.ts";
 import { type DefaultTaskInstance, type Instance, instanceConfig } from "./instances.ts";
 import { createOnce, markerErrorText } from "./markers.ts";
 import { BASIC_CONTRACTS, implementBasic } from "./tasks/basic.ts";
@@ -72,7 +72,12 @@ const DEFAULT_CONTRACTS = [
 
 /** The app of `instance` on `connection`, with its tasks and start members. No I/O: the app connects at its first use. */
 export function buildApp(instance: Instance, connection: Connection): Result<Horsies, string> {
-  const created = Horsies.create({ ...instanceConfig(instance, connection), tasks: instanceTasks(instance), workflows: instanceWorkflows(instance) });
+  const created = Horsies.create({
+    ...instanceConfig(instance, connection),
+    tasks: instanceTasks(instance),
+    workflows: instanceWorkflows(instance),
+    ...instanceSchedule(instance),
+  });
 
   if (!created.ok) {
     return err(created.error.refusals.map((refused) => `${refused.code} ${refused.path}: ${refused.message}`).join("; "));

@@ -66,6 +66,8 @@ export type AppConfigInput = QueueConfigInput & {
     readonly workerProfiles?: Readonly<Record<string, WorkerProfileInput>>;
     readonly resendOnTransientError?: boolean;
     readonly tracing?: TracingConfigInput;
+    readonly schemaMode?: SchemaMode;
+    readonly logFormat?: LogFormat;
 };
 
 // @public (undocumented)
@@ -1666,7 +1668,6 @@ export class Horsies {
     rerunTaskIn(transaction: CallerTransaction, command: RerunCommand, policy: RerunEnqueuePolicy): Promise<Result<RerunOutcome, CallerRerunError>>;
     resend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>;
     resendStart<R extends BuildReturn>(error: StartEnqueueFailed<R>): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>;
-    schedules<const T extends readonly AnyTaskContract[]>(entries: ScheduleEntries<T>, section?: ScheduleSection): void;
     send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution>(contract: TaskContract<P, O, E, X>, input: NoInfer<SendableInput<P>>, options?: TaskSendOptions): Promise<Result<TaskHandle<SchemaValue<O>, E>, TaskSendError<SchemaValue<O>, E>>>;
     start<P extends ParameterSchemas, R extends BuildReturn>(workflow: WorkflowContract<P, R>, parameters: NoInfer<SendableInput<P>>, options?: StartOptions): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>;
     taskHandle<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution>(contract: TaskContract<P, O, E, X>, taskId: TaskId): TaskHandle<SchemaValue<O>, E>;
@@ -1677,6 +1678,7 @@ export class Horsies {
 export type HorsiesConfig = AppConfigInput & {
     readonly tasks: readonly AnyTaskContract[];
     readonly workflows?: readonly AnyWorkflowContract[];
+    readonly schedule?: ScheduleSection;
 };
 
 // @public
@@ -1961,6 +1963,13 @@ export type LogFieldValue = {
 } | {
     readonly kind: "text";
     readonly text: string;
+};
+
+// @public
+export type LogFormat = {
+    readonly kind: "textLogs";
+} | {
+    readonly kind: "jsonLogs";
 };
 
 // @public
@@ -3581,11 +3590,6 @@ export interface RunTraceNoCarrier {
 }
 
 // @public
-export type ScheduleEntries<T extends readonly AnyTaskContract[]> = {
-    readonly [K in keyof T]: TaskSchedule<T[K]>;
-};
-
-// @public
 export type ScheduleInput<C> = C extends TaskContract<infer P, OutputSchema, string, Execution> ? SendableInput<P> : never;
 
 // @public
@@ -3595,6 +3599,7 @@ export type SchedulePattern = IntervalSchedule | HourlySchedule | DailySchedule 
 export interface ScheduleSection {
     readonly checkIntervalSeconds?: number;
     readonly enabled?: boolean;
+    readonly schedules: readonly TaskSchedule[];
 }
 
 // @public (undocumented)
@@ -3612,6 +3617,9 @@ export interface ScheduleStateInfo {
     // (undocumented)
     readonly updatedAt: Temporal.Instant;
 }
+
+// @public (undocumented)
+export type SchemaMode = "MIGRATE_AND_VALIDATE" | "OBSERVE_ONLY" | "ASSUME_INITIALIZED";
 
 // @public
 export type SchemaSent<S> = S extends AnyWire ? SentOf<S> : ZodSentOf<S>;
@@ -4471,7 +4479,17 @@ export class TaskRuntime {
 }
 
 // @public
-export interface TaskSchedule<C> {
+export type TaskSchedule = Omit<TaskScheduleOptions<AnyTaskContract>, "task" | "input"> & {
+    readonly task: AnyTaskContract;
+    readonly input: object;
+    readonly [taskScheduleBrand]: "TaskSchedule";
+};
+
+// @public
+export function taskSchedule<C extends AnyTaskContract>(options: TaskScheduleOptions<C>): TaskSchedule;
+
+// @public
+export interface TaskScheduleOptions<C> {
     readonly catchUpMissed?: boolean;
     readonly enabled?: boolean;
     readonly input: NoInfer<ScheduleInput<C>>;

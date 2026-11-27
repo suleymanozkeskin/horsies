@@ -2,7 +2,7 @@
 // order:
 //
 // 1. The log level of the process, before the first core call.
-// 2. The schedule declaration of the app (`app.schedules`): none is `notConfigured`.
+// 2. The schedule declaration of the app (the `schedule` section of its config): none is `notConfigured`.
 // 3. The master switch of the declaration's section: off is `disabled`.
 // 4. The static check with the schedules: a refusal is the `scheduler-startup` report. A refusal of a schedule, of
 //    the section or of the core's manifest parser is in this report.
@@ -19,7 +19,7 @@ import { appCoreHandle } from "../app/core-access.ts";
 import type { CoreChecks } from "../app/core-checks.ts";
 import { type CheckReport, reportText } from "../check/report.ts";
 import { staticCheck } from "../check/static-check.ts";
-import { configureLogging } from "../logging.ts";
+import { configureCommandLogging } from "../logging.ts";
 import { raiseDefect } from "../native/call/defect.ts";
 import { unreachable } from "../native/call/never.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
@@ -38,9 +38,9 @@ export type SchedulerStopped = { readonly kind: "stopped" };
 
 /** Why a scheduler run ended without a stop request. The `scheduler` command exits 1 for each. */
 export type SchedulerRunError =
-  /** The app makes no `app.schedules` call. Nothing started. */
+  /** The app config has no `schedule` section. Nothing started. */
   | { readonly kind: "notConfigured" }
-  /** The master switch of the `app.schedules` section is off. Nothing started. */
+  /** The master switch of the `schedule` section is off. Nothing started. */
   | { readonly kind: "disabled" }
   /** The static check refused the app (the `scheduler-startup` report). Nothing started. */
   | { readonly kind: "checkRefused"; readonly report: CheckReport }
@@ -53,7 +53,7 @@ export type SchedulerRunError =
 
 /** What the scheduler run does that has effects. The process gives the addon's; a test gives fakes. */
 export interface SchedulerRunDeps {
-  /** Set the thresholds of the core log of this process. */
+  /** Set the default threshold of the core log of this process, and the app's log format. */
   setLogLevel(level: WorkerLogLevel): void;
   readonly coreChecks: CoreChecks;
   run(scheduler: NativePreparedScheduler): Promise<SchedulerRunEnded>;
@@ -155,9 +155,9 @@ export function outcomeOf(ended: SchedulerRunEnded): Result<SchedulerStopped, Sc
 export function schedulerRunErrorText(error: SchedulerRunError): string {
   switch (error.kind) {
     case "notConfigured":
-      return "no schedules: the app makes no app.schedules call before cli.run";
+      return "no schedules: the app config has no schedule section";
     case "disabled":
-      return "the scheduler is disabled: the app.schedules section has enabled: false";
+      return "the scheduler is disabled: the schedule section has enabled: false";
     case "checkRefused":
       return reportText(error.report);
     case "startRefused":
@@ -190,7 +190,7 @@ export function processSchedulerRunDeps(
   native: NativeSchedulerCalls = NATIVE_SCHEDULER_CALLS,
 ): SchedulerRunDeps {
   return {
-    setLogLevel: (level) => configureLogging({ levels: { default: level } }),
+    setLogLevel: (level) => configureCommandLogging(level, context.config.logFormat),
     coreChecks: { checkAppConfig, parseDeclaredErrorCodes, checkTaskOptions },
     run: async (scheduler) => native.runScheduler(scheduler, appCoreHandle(context.core)),
     requestStop: (scheduler) => native.requestSchedulerStop(scheduler),

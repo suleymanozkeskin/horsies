@@ -30,6 +30,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use horsies_core::frame_protocol::ChildLogLevel;
 use horsies_core::ChildLogSetup;
 
+use super::format::{current_format, line_in, notice_line, LogFormatKind};
 use super::forwarder;
 use super::levels::{LogThreshold, RecordLevel, WhenFull, LEVELS};
 use super::names::LoggerName;
@@ -339,16 +340,25 @@ impl LogSink {
     }
 
     /// Write a record that cannot enter the channel to stderr, with the
-    /// counts.
+    /// counts: in the text format one line with the counts after the record,
+    /// in the JSON format the line of the record and then a notice line of
+    /// the counts.
     fn spill(&self, record: &CoreLogRecord) {
-        let _write_failure_ignored = writeln!(
-            std::io::stderr(),
-            "{} (horsies log channel full or closed; dropped TRACE/DEBUG/INFO records: {}, \
-             WARNING/ERROR records written to stderr: {})",
-            record.stderr_line(),
+        let counts = format!(
+            "horsies log channel full or closed; dropped TRACE/DEBUG/INFO records: {}, \
+             WARNING/ERROR records written to stderr: {}",
             self.dropped_low.load(Ordering::Relaxed),
             self.spilled_high.load(Ordering::Relaxed),
         );
+        let text = match current_format() {
+            LogFormatKind::TextLogs => format!("{} ({counts})", record.stderr_line()),
+            LogFormatKind::JsonLogs => format!(
+                "{}\n{}",
+                line_in(LogFormatKind::JsonLogs, record),
+                notice_line(counts)
+            ),
+        };
+        let _write_failure_ignored = writeln!(std::io::stderr(), "{text}");
     }
 
     /// Count `count` records of a batch that the JavaScript sink did not

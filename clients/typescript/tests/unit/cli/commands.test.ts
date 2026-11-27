@@ -7,6 +7,9 @@ import { describe, test } from "node:test";
 import { refusal } from "../../../horsies/src/app/refusal.ts";
 import {
   type CheckCommandDeps,
+  LIVE_CHECK_SCHEMA_MODE,
+  liveCheckOnOwnHandle,
+  type LiveCheckNative,
   liveSteps,
   type LiveStepsOutcome,
   parseCheckFlags,
@@ -17,7 +20,12 @@ import { parseWorkerStart, runWorkerCommand, type WorkerCommandDeps } from "../.
 import { type CheckOutcome, checkReport } from "../../../horsies/src/check/report.ts";
 import type { WorkerLogLevel } from "../../../horsies/src/_catalog/worker_manifest.ts";
 import type { ListenAddressCheck } from "../../../horsies/src/native/worker/addon.ts";
-import { RuntimeStartFailed } from "../../../horsies/src/thrown-errors.ts";
+import { ClientDefect, RuntimeStartFailed } from "../../../horsies/src/thrown-errors.ts";
+import type { SchemaMode } from "../../../horsies/src/_catalog/manifest.ts";
+import type { LiveCheckOutcome } from "../../../horsies/src/native/worker/addon.ts";
+import type { AppConfigCheck } from "../../../horsies/src/native/sends/addon.ts";
+import { fakeSendRules } from "../app/support.ts";
+import { contextOf, testApp } from "../worker/support.ts";
 import { err, ok } from "../../../horsies/src/wire/result.ts";
 import type { WorkerRunError, WorkerStart } from "../../../horsies/src/worker/run.ts";
 
@@ -208,5 +216,81 @@ describe("the check command", () => {
       }),
       RangeError,
     );
+  });
+});
+
+/** A fake of the live check calls: each call in order, with the answers that a test sets. */
+function fakeLiveNative(answers: { readonly config: AppConfigCheck["kind"]; readonly live: () => Promise<LiveCheckOutcome> }): LiveCheckNative<string> & {
+  readonly calls: string[];
+} {
+  const calls: string[] = [];
+
+  return {
+    calls,
+    checkAppConfig: (_json: string, schemaMode: SchemaMode): AppConfigCheck => {
+      calls.push(`checkAppConfig ${schemaMode}`);
+
+      return answers.config === "accepted"
+        ? {
+            kind: "accepted",
+            rules: fakeSendRules(),
+            manifestJson: "observe-manifest",
+            installCoverage: { historyHorizonDays: 7, heartbeatHorizonHours: 24, declaredPeriodDays: [] },
+          }
+        : { kind: "refused", refusals: [] };
+    },
+    buildHandle: (manifestJson) => {
+      calls.push(`buildHandle ${manifestJson}`);
+
+      return "own-handle";
+    },
+    checkLive: async (handle) => {
+      calls.push(`checkLive ${handle}`);
+
+      return answers.live();
+    },
+    close: async (handle) => {
+      calls.push(`close ${handle}`);
+
+      return undefined;
+    },
+  };
+}
+
+describe("the live steps of check", () => {
+  test("run on a handle of their own with OBSERVE_ONLY, whatever the app's mode, then close it", async () => {
+    for (const schemaMode of ["MIGRATE_AND_VALIDATE", "ASSUME_INITIALIZED"] as const) {
+      const native = fakeLiveNative({ config: "accepted", live: async () => ({ kind: "passed" }) });
+
+      assert.deepEqual(await liveCheckOnOwnHandle(contextOf(testApp({ schemaMode })).config, native), { kind: "passed" });
+      assert.equal(LIVE_CHECK_SCHEMA_MODE, "OBSERVE_ONLY");
+      assert.deepEqual(native.calls, [
+        "checkAppConfig OBSERVE_ONLY",
+        "buildHandle observe-manifest",
+        "checkLive own-handle",
+        "close own-handle",
+      ]);
+    }
+  });
+
+  test("a live step that rejects still closes the handle, and the rejection passes on", async () => {
+    const refusedByCore = new RuntimeStartFailed({ cause: "no threads" });
+
+    const native = fakeLiveNative({
+      config: "accepted",
+      live: async () => {
+        throw refusedByCore;
+      },
+    });
+
+    await assert.rejects(liveCheckOnOwnHandle(contextOf(testApp()).config, native), refusedByCore);
+    assert.deepEqual(native.calls.at(-1), "close own-handle");
+  });
+
+  test("a config that the core refuses again is a defect, and no handle is built", async () => {
+    const native = fakeLiveNative({ config: "refused", live: async () => ({ kind: "passed" }) });
+
+    await assert.rejects(liveCheckOnOwnHandle(contextOf(testApp()).config, native), ClientDefect);
+    assert.deepEqual(native.calls, ["checkAppConfig OBSERVE_ONLY"]);
   });
 });

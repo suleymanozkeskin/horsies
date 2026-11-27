@@ -103,7 +103,7 @@ function sendRulesOf(queues: QueueConfigInput): NativeSendRules {
     assert.fail(`the config is refused: ${JSON.stringify(config.error)}`);
   }
 
-  const checked = checkAppConfig(config.value.coreConfigJson);
+  const checked = checkAppConfig(config.value.coreConfigJson, config.value.schemaMode);
 
   if (checked.kind !== "accepted") {
     assert.fail(`the core refuses the config: ${JSON.stringify(checked.refusals)}`);

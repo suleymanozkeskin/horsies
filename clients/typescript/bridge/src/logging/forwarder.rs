@@ -23,6 +23,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 
 use super::bridge::{CoreLogRecord, DropCounts, LogSink, LOG_CHANNEL_CAPACITY};
+use super::format::{notice_line, record_line};
 use super::js_sink::{self, Handed, SINK_ANSWER_BOUND};
 use super::levels::{RecordLevel, LEVELS};
 use super::names::LoggerName;
@@ -124,19 +125,23 @@ fn settle_batch(sink: &LogSink, batch: &[CoreLogRecord], handed: Handed) {
         Handed::NotTaken(reason) => {
             let _write_failure_ignored = writeln!(
                 std::io::stderr(),
-                "horsies: {} log records go to stderr: {reason}",
-                batch.len()
+                "{}",
+                notice_line(format!(
+                    "horsies: {} log records go to stderr: {reason}",
+                    batch.len()
+                ))
             );
             write_stderr(batch);
         }
     }
 }
 
-/// Write each record of `batch` to stderr, one line each.
+/// Write each record of `batch` to stderr, one line each, in the format of
+/// the process.
 fn write_stderr(batch: &[CoreLogRecord]) {
     let mut stderr = std::io::stderr().lock();
     for record in batch {
-        let _write_failure_ignored = writeln!(stderr, "{}", record.stderr_line());
+        let _write_failure_ignored = writeln!(stderr, "{}", record_line(record));
     }
 }
 
