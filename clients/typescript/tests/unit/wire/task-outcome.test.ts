@@ -41,6 +41,7 @@ describe("h.taskOutcome", () => {
     assert.deepEqual(kindOf(h.taskOutcome(priced)), {
       node: "taskOutcome",
       output: { state: "compiled", kind: kindOf(Total) },
+      codes: { state: "declared", upstream: "the task priced", codes: ["NO_PRICE"] },
     });
   });
 
@@ -48,6 +49,7 @@ describe("h.taskOutcome", () => {
     assert.deepEqual(kindOf(h.taskOutcome(pricing)), {
       node: "taskOutcome",
       output: { state: "compiled", kind: kindOf(Total) },
+      codes: { state: "open" },
     });
   });
 
@@ -57,6 +59,7 @@ describe("h.taskOutcome", () => {
     assert.deepEqual(kindOf(h.taskOutcome(named)), {
       node: "taskOutcome",
       output: { state: "compiled", kind: { node: "string" } },
+      codes: { state: "open" },
     });
   });
 
@@ -112,15 +115,64 @@ describe("the decode of an h.taskOutcome parameter", () => {
     assert.equal(decoded.ok ? undefined : decoded.error.path, "$.price.ok.total");
   });
 
-  test("a stored custom code that the contract does not list decodes as a custom code (#2557)", () => {
-    const stored = '{"error_code":"OTHER","message":null,"data":null,"exception":null}';
-    const text = writtenJsonText(`{"price":{"__h_task_result__":true,"ok":null,"err":${stored}}}`);
+  const failedWith = (code: string): ReturnType<typeof decodeParameters> => {
+    const stored = `{"error_code":"${code}","message":null,"data":null,"exception":null}`;
 
+    return decodeParameters(
+      parameters,
+      writtenJsonText(`{"price":{"__h_task_result__":true,"ok":null,"err":${stored}}}`),
+      "worker",
+    );
+  };
+
+  test("a stored custom code that the contract declares decodes as a custom code", () => {
     const failed = {
       kind: "failed",
-      error: { kind: "custom", code: "OTHER", message: null, data: null, exception: null, subWorkflow: null },
+      error: { kind: "custom", code: "NO_PRICE", message: null, data: null, exception: null, subWorkflow: null },
     };
 
-    assert.deepEqual(decodeParameters(parameters, text, "worker"), { ok: true, value: { price: failed } });
+    assert.deepEqual(failedWith("NO_PRICE"), { ok: true, value: { price: failed } });
+  });
+
+  test("a stored custom code that the contract does not declare: NotAMember naming the code and the task", () => {
+    const decoded = failedWith("OTHER");
+
+    assert(!decoded.ok && decoded.error.kind === "decodeRefused");
+    assert.deepEqual(
+      [decoded.error.refusal, decoded.error.path, decoded.error.detail],
+      [
+        "NotAMember",
+        "$.price.err.error_code",
+        "the error code OTHER is not declared in the errorCodes of the task priced",
+      ],
+    );
+  });
+
+  test("a stored built-in code decodes whatever the contract declares", () => {
+    const stored =
+      '{"error_code":{"__builtin_task_code__":"WORKER_CRASHED"},"message":null,"data":null,"exception":null}';
+
+    const builtIn = decodeParameters(
+      parameters,
+      writtenJsonText(`{"price":{"__h_task_result__":true,"ok":null,"err":${stored}}}`),
+      "worker",
+    );
+
+    assert(builtIn.ok, "the built-in code decodes");
+  });
+
+  test("a task with no errorCodes and a workflow contract allow any custom code", () => {
+    for (const upstream of [defineTask({ name: "free", input: {}, output: Total }), pricing]) {
+      const open = parametersWith(h.taskOutcome(upstream));
+      const stored = '{"error_code":"ANYTHING","message":null,"data":null,"exception":null}';
+
+      const decoded = decodeParameters(
+        open,
+        writtenJsonText(`{"price":{"__h_task_result__":true,"ok":null,"err":${stored}}}`),
+        "worker",
+      );
+
+      assert(decoded.ok, "any custom code decodes");
+    }
   });
 });

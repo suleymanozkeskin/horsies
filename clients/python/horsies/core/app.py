@@ -16,6 +16,7 @@ from typing import (
     cast,
     get_origin,
 )
+from horsies._catalog.queue_defaults import DEFAULT_QUEUE_NAME
 from horsies.core.models.app import AppConfig
 from horsies.core.models.health_reads import (
     BoundedTaskList,
@@ -834,7 +835,7 @@ class Horsies:
     def get_valid_queue_names(self) -> list[str]:
         """Get list of valid queue names based on configuration"""
         if self.config.queue_mode == QueueMode.DEFAULT:
-            return ['default']
+            return [DEFAULT_QUEUE_NAME]
         else:  # CUSTOM mode
             return [queue.name for queue in (self.config.custom_queues or [])]
 
@@ -851,7 +852,7 @@ class Horsies:
                     ],
                     help_text='either remove queue_name or switch to QueueMode.CUSTOM',
                 )
-            return 'default'
+            return DEFAULT_QUEUE_NAME
         else:  # CUSTOM mode
             if queue is None:
                 raise ConfigurationError(

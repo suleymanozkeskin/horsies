@@ -1,15 +1,10 @@
 // One public name for the built-in task codes: the public `BuiltInTaskCode` is the generated `BuiltInTaskCode`, which
-// the event types name, and the codec's list holds the same codes in the same order as the generated list until the
-// codec reads the generated list (#2372).
+// the event types name. The codec reads the generated list, so no second list exists to compare.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import {
-  BUILT_IN_TASK_CODES as GENERATED_BUILT_IN_TASK_CODES,
-  type BuiltInTaskCode as GeneratedBuiltInTaskCode,
-} from "../../../horsies/src/_catalog/task_code.ts";
-import { BUILT_IN_TASK_CODES } from "../../../horsies/src/_catalog/task_code.ts";
+import type { BuiltInTaskCode as GeneratedBuiltInTaskCode } from "../../../horsies/src/_catalog/task_code.ts";
 import type { BuiltInTaskCode } from "../../../horsies/src/wire/task-error.ts";
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
@@ -18,9 +13,7 @@ type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ?
 const sameType = <A, B>(same: Equal<A, B>): Equal<A, B> => same;
 
 describe("the name of the built-in task codes", () => {
-  test("BuiltInTaskCode is the generated set, and the codec's list is the same set", () => {
+  test("BuiltInTaskCode is the generated set", () => {
     assert.equal(sameType<BuiltInTaskCode, GeneratedBuiltInTaskCode>(true), true);
-    assert.equal(sameType<(typeof BUILT_IN_TASK_CODES)[number], BuiltInTaskCode>(true), true);
-    assert.deepEqual([...BUILT_IN_TASK_CODES], [...GENERATED_BUILT_IN_TASK_CODES]);
   });
 });

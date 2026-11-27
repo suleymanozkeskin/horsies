@@ -69,16 +69,3 @@ export interface ScheduleSection {
   /** The wait between two checks for due slots, in whole seconds, 1 to 60. Left out: 1. */
   readonly checkIntervalSeconds?: number;
 }
-
-// The defaults below are the core's (`core/src/core/config/schedule.rs`: `default_timezone`,
-// `default_max_catch_up_runs`, `default_check_interval`), the same as Python's `TaskSchedule` and `ScheduleConfig`.
-// The generated catalog holds no constant for them yet; issue #2494 moves them to the codegen output.
-
-/** The zone of a schedule that names none. */
-export const DEFAULT_SCHEDULE_TIMEZONE = "UTC";
-
-/** The most slots per check of a catch-up schedule that names no count. */
-export const DEFAULT_MAX_CATCH_UP_RUNS = 100;
-
-/** The wait between two checks of a section that names none, in seconds. */
-export const DEFAULT_CHECK_INTERVAL_SECONDS = 1;

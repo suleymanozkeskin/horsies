@@ -94,17 +94,33 @@ function providerOf(ids: SdkIds, exporter: InMemorySpanExporter): TracerProvider
   }
 }
 
-/** Set an SDK as the globals of the API. Call `remove` after the test. */
-export function installSdk(ids: SdkIds = "sdkIds"): TestSdk {
+/** The members of an API module that set and remove its globals: the module of any minor of the API 1.x has them. */
+export interface ApiGlobals {
+  readonly context: { setGlobalContextManager(manager: never): boolean; disable(): void };
+  readonly propagation: { setGlobalPropagator(propagator: never): boolean; disable(): void };
+  readonly trace: { setGlobalTracerProvider(provider: never): boolean; disable(): void };
+  readonly metrics: { setGlobalMeterProvider(provider: never): boolean; disable(): void };
+}
+
+/**
+ * Set an SDK as the globals of the API module `globals` (the installed API by default; a test of another minor gives
+ * that minor's module). Call `remove` after the test.
+ */
+export function installSdk(ids: SdkIds = "sdkIds", globals: ApiGlobals = otel): TestSdk {
   const exporter = new InMemorySpanExporter();
   const provider = providerOf(ids, exporter);
   const reader = new TestMetricReader();
   const meters = new MeterProvider({ readers: [reader] });
 
-  otel.context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
-  otel.propagation.setGlobalPropagator(new W3CTraceContextPropagator());
-  otel.trace.setGlobalTracerProvider(provider);
-  otel.metrics.setGlobalMeterProvider(meters);
+  // SAFETY: the parameters of `ApiGlobals` are `never` so that the module of any minor fits; each minor's setter takes
+  // the objects of the SDK that is installed here (the same shape in every minor of the API 1.x).
+  globals.context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable() as never);
+  // SAFETY: as above.
+  globals.propagation.setGlobalPropagator(new W3CTraceContextPropagator() as never);
+  // SAFETY: as above.
+  globals.trace.setGlobalTracerProvider(provider as never);
+  // SAFETY: as above.
+  globals.metrics.setGlobalMeterProvider(meters as never);
 
   return {
     provider,
@@ -115,10 +131,10 @@ export function installSdk(ids: SdkIds = "sdkIds"): TestSdk {
       return collected.resourceMetrics;
     },
     remove: () => {
-      otel.trace.disable();
-      otel.metrics.disable();
-      otel.propagation.disable();
-      otel.context.disable();
+      globals.trace.disable();
+      globals.metrics.disable();
+      globals.propagation.disable();
+      globals.context.disable();
     },
   };
 }
@@ -170,4 +186,41 @@ export function onlySpan(spans: readonly ReadableSpan[], name: string): Readable
   }
 
   return first;
+}
+
+/** The text of the throw of a span that cannot end. */
+export const SPAN_END_BROKEN = "the span end is broken";
+
+/** `span` with an `end` that throws; every other member is the span's own. */
+function withBrokenEnd<T extends object>(span: T): T {
+  return new Proxy(span, {
+    get(target, member) {
+      if (member === "end") {
+        return () => {
+          throw new Error(SPAN_END_BROKEN);
+        };
+      }
+
+      const value: unknown = Reflect.get(target, member);
+
+      return value instanceof Function ? value.bind(target) : value;
+    },
+  });
+}
+
+/** The API of the installed SDK whose spans throw at their end. */
+export function apiWithBrokenSpanEnd(): OtelApi {
+  const api = loadedApi();
+
+  return {
+    ...api,
+    trace: {
+      ...api.trace,
+      getTracer: (name, version) => {
+        const tracer = api.trace.getTracer(name, version);
+
+        return { startSpan: (spanName, options, context) => withBrokenEnd(tracer.startSpan(spanName, options, context)) };
+      },
+    },
+  };
 }
