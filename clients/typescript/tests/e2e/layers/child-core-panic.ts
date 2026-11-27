@@ -17,7 +17,7 @@ import { describe } from "node:test";
 
 import type { TaskAttempt, TaskHandle } from "#horsies";
 import { loadAddon } from "#horsies";
-import { endedItselfLine, refusedCallLine, stopLine } from "../src/forwarder-panic.ts";
+import { childLastLine, endedItselfLine, refusedCallLine, stopLine } from "../src/forwarder-panic.ts";
 import * as basic from "../src/tasks/basic.ts";
 import * as panic from "../src/tasks/core-panic.ts";
 import { infoOf, sentHandle, succeeded } from "../support/outcome.ts";
@@ -94,6 +94,7 @@ describe("a task child whose core background task panicked", () => {
     const newChild = await succeeded(second, RESULT_WAIT_MS);
 
     await childEndedItself(worker, stoppedChild);
+    await worker.waitForLog(childLastLine("At the start of task", second.taskId, panic.PANIC_TEXT), END_WAIT_MS);
     assert.notEqual(newChild, stoppedChild);
     assert.deepEqual(await attemptFacts(first), [completedIn(stoppedChild)], "the run before the panic keeps its result");
     assert.deepEqual(await attemptFacts(second), [completedIn(newChild)], "the next task was charged one attempt, in the new child");
@@ -108,6 +109,7 @@ describe("a task child whose core background task panicked", () => {
 
     await coreStopped(suite, worker, ranIn);
     await childEndedItself(worker, ranIn);
+    await worker.waitForLog(childLastLine("After the body of task", handle.taskId, panic.PANIC_TEXT), END_WAIT_MS);
     assert.deepEqual(pidLines(suite, `${token}-runs`), [ranIn], "one run, with no retry");
     assert.deepEqual(pidLines(suite, `${token}-returned`), [ranIn], "the run reached its return");
     assert.deepEqual(await attemptFacts(handle), [completedIn(ranIn)]);

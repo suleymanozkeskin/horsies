@@ -21,6 +21,14 @@ export interface ForwarderPanicAddon {
   probePanicLogForwarder(text: string): NativeEnvelope<undefined>;
 }
 
+/** The state of the core that the child host of a task child reads (`TaskChildCoreRead` of the bridge). */
+export type TaskChildCoreRead = "running" | "stopped";
+
+/** The test export of the read of the core that the child host of a task child makes; the first read enters the task child rule. */
+export interface TaskChildCoreProbe {
+  probeReadTaskChildCore(): NativeEnvelope<TaskChildCoreRead>;
+}
+
 /** Why the forwarder was not armed: the addon has no probe, or the probe threw (no log forwarder runs). */
 export type ProbeRefused = { readonly kind: "notInBuild" } | { readonly kind: "thrown"; readonly thrown: NativeThrown };
 
@@ -67,6 +75,11 @@ export function stopLine(pid: number, text: string): string {
 /** The stderr line of a child whose stopped core refused a core call of a body (`refused_call_line` of the bridge). */
 export function refusedCallLine(text: string): string {
   return `horsies: At a core call of this child: the core of this child stopped after a panic in a core background task (thread ${FORWARDER_THREAD}: ${text}`;
+}
+
+/** The last log line of a child whose run met its stopped core (`CoreStopEnd::line` of the core's child host). */
+export function childLastLine(moment: "At the start of task" | "After the body of task", taskId: string, text: string): string {
+  return `${moment} ${taskId}: the core of this child stopped after a panic in a core background task (thread ${FORWARDER_THREAD}: ${text}`;
 }
 
 /** The worker's line for child `pid` that ended itself with exit code 80 while it held no task (`log_core_stopped_child`). */

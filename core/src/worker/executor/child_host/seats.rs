@@ -684,7 +684,7 @@ enum CoreStopNotice {
 /// after the first frame that says `ends_itself` (Python
 /// `shared_child._end_after_written`).
 #[derive(Clone)]
-pub(super) struct CoreStopWatch {
+struct CoreStopWatch {
     notice: Arc<watch::Sender<CoreStopNotice>>,
 }
 
