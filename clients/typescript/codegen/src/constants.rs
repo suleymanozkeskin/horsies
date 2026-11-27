@@ -43,9 +43,9 @@ use horsies_core::monitoring::{
 use horsies_core::telemetry::labels::DeclaredSource;
 use horsies_core::{
     DEFAULT_MAX_CATCH_UP_RUNS, DEFAULT_QUEUE_NAME, DEFAULT_QUEUE_PRIORITY,
-    DEFAULT_SCHEDULE_ENABLED, DEFAULT_SCHEDULE_TIMEZONE, IDEMPOTENCY_KEY_MAX_BYTES,
-    LIVENESS_LOCK_LOST_EXIT_CODE, MAX_WAIT_LIMIT_MS, RUNNER_HEARTBEAT_LOST_EXIT_CODE,
-    TASK_LIST_BOUND,
+    DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, DEFAULT_SCHEDULE_ENABLED, DEFAULT_SCHEDULE_TIMEZONE,
+    IDEMPOTENCY_KEY_MAX_BYTES, LIVENESS_LOCK_LOST_EXIT_CODE, MAX_WAIT_LIMIT_MS,
+    RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND,
 };
 
 use crate::output::{catalog_file, GeneratedFile};
@@ -362,7 +362,7 @@ const SEND_CONSTANTS: [PublishedConstant; 4] = [
 /// The stem of the module of the defaults of a task schedule.
 const SCHEDULE_DEFAULTS_MODULE: &str = "schedule_defaults";
 
-const SCHEDULE_DEFAULT_CONSTANTS: [PublishedConstant; 3] = [
+const SCHEDULE_DEFAULT_CONSTANTS: [PublishedConstant; 4] = [
     PublishedConstant::Flag {
         name: "DEFAULT_SCHEDULE_ENABLED",
         value: DEFAULT_SCHEDULE_ENABLED,
@@ -374,6 +374,10 @@ const SCHEDULE_DEFAULT_CONSTANTS: [PublishedConstant; 3] = [
     PublishedConstant::Integer {
         name: "DEFAULT_MAX_CATCH_UP_RUNS",
         value: DEFAULT_MAX_CATCH_UP_RUNS as i128,
+    },
+    PublishedConstant::Integer {
+        name: "DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS",
+        value: DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS as i128,
     },
 ];
 
@@ -841,13 +845,18 @@ mod tests {
     }
 
     #[test]
-    fn the_schedule_defaults_hold_the_enabled_flag_the_zone_and_the_catch_up_bound() {
+    fn the_schedule_defaults_hold_the_enabled_flag_the_zone_the_catch_up_bound_and_the_check_interval(
+    ) {
         assert_eq!(
             module_of("schedule_defaults"),
             format!(
-                "{GENERATED_HEADER}\n\nexport const DEFAULT_SCHEDULE_ENABLED = {DEFAULT_SCHEDULE_ENABLED};\n{}{}",
+                "{GENERATED_HEADER}\n\nexport const DEFAULT_SCHEDULE_ENABLED = {DEFAULT_SCHEDULE_ENABLED};\n{}{}{}",
                 text_statement("DEFAULT_SCHEDULE_TIMEZONE", DEFAULT_SCHEDULE_TIMEZONE),
                 integer_statement("DEFAULT_MAX_CATCH_UP_RUNS", DEFAULT_MAX_CATCH_UP_RUNS as i128),
+                integer_statement(
+                    "DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS",
+                    DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS as i128
+                ),
             )
         );
     }

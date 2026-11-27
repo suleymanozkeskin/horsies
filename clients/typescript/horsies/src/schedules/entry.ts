@@ -69,10 +69,3 @@ export interface ScheduleSection {
   /** The wait between two checks for due slots, in whole seconds, 1 to 60. Left out: 1. */
   readonly checkIntervalSeconds?: number;
 }
-
-// The defaults of a schedule and of its zone and catch-up bound are the core's, in `_catalog/schedule_defaults.ts`.
-// The core exports no constant for the check interval; its default is the core's `default_check_interval`
-// (`core/src/core/config/schedule.rs`), the same as Python's `ScheduleConfig`.
-
-/** The wait between two checks of a section that names none, in seconds. */
-export const DEFAULT_CHECK_INTERVAL_SECONDS = 1;

@@ -37,6 +37,7 @@ import {
 } from "../../../horsies/src/_catalog/monitoring_bounds.ts";
 import {
   DEFAULT_MAX_CATCH_UP_RUNS,
+  DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS,
   DEFAULT_SCHEDULE_ENABLED,
   DEFAULT_SCHEDULE_TIMEZONE,
 } from "../../../horsies/src/_catalog/schedule_defaults.ts";
@@ -89,6 +90,7 @@ const bounds = [
   IDEMPOTENCY_KEY_MAX_BYTES,
   DEFAULT_QUEUE_PRIORITY,
   DEFAULT_MAX_CATCH_UP_RUNS,
+  DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS,
 ];
 
 describe("generated constant modules", () => {
@@ -143,6 +145,11 @@ describe("generated constant modules", () => {
   test("the default catch-up bound is 100, and the schedule entry holds no copy", () => {
     expect(DEFAULT_MAX_CATCH_UP_RUNS).toBe(100);
     expect(Object.keys(scheduleEntry)).not.toContain("DEFAULT_MAX_CATCH_UP_RUNS");
+  });
+
+  test("the default check interval is 1 second, and the schedule entry holds no copy", () => {
+    expect(DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS).toBe(1);
+    expect(Object.keys(scheduleEntry)).not.toContain("DEFAULT_CHECK_INTERVAL_SECONDS");
   });
 
   test("the label value of an unknown handler fits the length rule of a handler name", () => {
