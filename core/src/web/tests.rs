@@ -3688,7 +3688,7 @@ async fn a_route_that_reads_no_query_ignores_a_parameter() {
 /// broker.
 #[tokio::test]
 async fn a_refused_view_has_a_refusal_before_any_broker() {
-    let refusal = refusal_by_policy(grant(Verdict::Refused, Verdict::NotAsked))
+    let refusal = refusal_by_policy(AccessNeed::View, grant(Verdict::Refused, Verdict::NotAsked))
         .await
         .expect("a refusal");
     assert_eq!(refusal.status, StatusCode::FORBIDDEN);
@@ -3701,9 +3701,12 @@ async fn a_refused_view_has_a_refusal_before_any_broker() {
 /// A refused act, after an allowed view, has the same refusal.
 #[tokio::test]
 async fn a_refused_act_has_a_refusal_before_any_broker() {
-    let refusal = refusal_by_policy(grant(Verdict::Allowed, Verdict::Refused))
-        .await
-        .expect("a refusal");
+    let refusal = refusal_by_policy(
+        AccessNeed::ViewAndAct,
+        grant(Verdict::Allowed, Verdict::Refused),
+    )
+    .await
+    .expect("a refusal");
     assert_eq!(refusal.status, StatusCode::FORBIDDEN);
     assert_eq!(
         body_json(&refusal),
@@ -3720,7 +3723,10 @@ async fn an_allowed_or_public_request_has_no_refusal_before_the_broker() {
         grant(Verdict::Allowed, Verdict::Allowed),
         grant(Verdict::NotAsked, Verdict::NotAsked),
     ] {
-        assert!(refusal_by_policy(allowed).await.is_none(), "{allowed:?}");
+        assert!(
+            refusal_by_policy(AccessNeed::View, allowed).await.is_none(),
+            "{allowed:?}"
+        );
     }
 }
 
@@ -3739,9 +3745,35 @@ async fn the_refusal_before_the_broker_is_the_answer_of_the_handler() {
                 refused,
             )
             .await;
-        let early = refusal_by_policy(refused).await.expect("a refusal");
+        let early = refusal_by_policy(AccessNeed::ViewAndAct, refused)
+            .await
+            .expect("a refusal");
         assert_eq!(early.status, answer.status, "{refused:?}");
         assert_eq!(early.headers, answer.headers, "{refused:?}");
         assert_eq!(early.body, answer.body, "{refused:?}");
     }
+}
+
+/// `/api/meta` reports the act verdict: a refused act with an allowed view
+/// is not a refusal of the request.
+#[tokio::test]
+async fn a_refused_act_on_the_meta_route_is_not_a_refusal() {
+    let allowed_view_refused_act = grant(Verdict::Allowed, Verdict::Refused);
+    assert!(
+        refusal_by_policy(AccessNeed::ViewReportAct, allowed_view_refused_act)
+            .await
+            .is_none()
+    );
+}
+
+/// A refused view refuses `/api/meta` too.
+#[tokio::test]
+async fn a_refused_view_on_the_meta_route_is_a_refusal() {
+    let refusal = refusal_by_policy(
+        AccessNeed::ViewReportAct,
+        grant(Verdict::Refused, Verdict::NotAsked),
+    )
+    .await
+    .expect("a refusal");
+    assert_eq!(refusal.status, StatusCode::FORBIDDEN);
 }

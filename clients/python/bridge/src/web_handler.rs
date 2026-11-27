@@ -442,12 +442,18 @@ impl<'py> IntoPyObject<'py> for SubscribeOutcome {
 
 async fn handle_operation(
     state: Arc<HandlerState>,
+    actions: Actions,
     core: &'static Core,
     request: MonitoringRequest,
 ) -> HandleOutcome {
     // A refused caller gets the refusal before the broker connects, so the
     // answer shows nothing of the database.
-    if let Some(refusal) = refusal_by_policy(request.grant).await {
+    if let Some(refusal) = refusal_by_policy(
+        route_access(actions, &request.parts.method, &request.parts.path).need,
+        request.grant,
+    )
+    .await
+    {
         return HandleOutcome::Response(MonitoringResponse::of(refusal));
     }
     let built = match state.built(core).await {
@@ -639,7 +645,7 @@ impl MonitoringHandler {
             core,
             "MonitoringHandler.handle_async",
             kind,
-            handle_operation(Arc::clone(&self.state), core, request),
+            handle_operation(Arc::clone(&self.state), self.actions, core, request),
         )
     }
 

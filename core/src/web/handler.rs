@@ -329,19 +329,35 @@ impl MonitoringHandler {
     }
 }
 
-/// The answer to a request that a verdict of the user's policy refused: 403
-/// `Not authorized.`, the answer of the router's guards. `None` when no
-/// verdict refused the request.
+/// The answer to a request that the user's policy refused: 403
+/// `Not authorized.`, the answer of the router's guards. `None` when the
+/// policy did not refuse the request.
+///
+/// `need` is the access of the request ([`route_access`]). A refused view
+/// refuses every request that asks it. A refused act refuses an action
+/// route ([`AccessNeed::ViewAndAct`]); `/api/meta`
+/// ([`AccessNeed::ViewReportAct`]) reports the act verdict and answers 200.
 ///
 /// A host that builds its [`MonitoringHandler`] on demand (a broker that
 /// connects at the first request) calls it before the build: a refused
 /// caller gets this answer and learns nothing about the database. Pure: it
 /// reads no request body and no broker.
-pub async fn refusal_by_policy(grant: AccessGrant) -> Option<ResponseParts> {
-    match (grant.view, grant.act) {
-        (Verdict::Refused, _) | (_, Verdict::Refused) => {
-            let refused = ApiError::detail(StatusCode::FORBIDDEN, NOT_AUTHORIZED);
-            let mut answer = response_parts(refused.into_response()).await;
+pub async fn refusal_by_policy(need: AccessNeed, grant: AccessGrant) -> Option<ResponseParts> {
+    let refused = match (need, grant.view, grant.act) {
+        (AccessNeed::Public, _, _) => false,
+        (_, Verdict::Refused, _) => true,
+        (AccessNeed::ViewAndAct, _, Verdict::Refused) => true,
+        (
+            AccessNeed::View | AccessNeed::ViewReportAct | AccessNeed::ViewAndAct,
+            Verdict::Allowed | Verdict::NotAsked,
+            Verdict::Allowed | Verdict::NotAsked | Verdict::Refused,
+        ) => false,
+    };
+    match refused {
+        false => None,
+        true => {
+            let refusal = ApiError::detail(StatusCode::FORBIDDEN, NOT_AUTHORIZED);
+            let mut answer = response_parts(refusal.into_response()).await;
             // The router's answer carries its length; so does this one.
             answer.headers.push((
                 http::header::CONTENT_LENGTH,
@@ -349,7 +365,6 @@ pub async fn refusal_by_policy(grant: AccessGrant) -> Option<ResponseParts> {
             ));
             Some(answer)
         }
-        (Verdict::Allowed | Verdict::NotAsked, Verdict::Allowed | Verdict::NotAsked) => None,
     }
 }
 

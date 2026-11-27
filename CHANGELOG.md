@@ -1198,9 +1198,9 @@ and there is no migration contract between pre-1.0 versions.
   `Not authorized.` before it connects its broker. Before, with the database
   down, the Python mount and the Rust mount answered 503 or 500 with the
   connect error text to a caller that the policy refuses. The core exports
-  `horsies_core::web::refusal_by_policy(grant)` for a host that builds the
-  handler on demand: it gives the 403 for a refused grant and `None` for any
-  other.
+  `horsies_core::web::refusal_by_policy(need, grant)` for a host that builds
+  the handler on demand: it gives the 403 for a refused request and `None` for
+  any other. A refused act on `/api/meta` is not a refusal; the route reports it.
 
 ## [0.8.1] - 2026-11-25
 

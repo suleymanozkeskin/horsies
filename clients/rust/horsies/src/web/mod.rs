@@ -183,7 +183,7 @@ where
     let grant = grant_of(&mount.policy, access.need, MonitoringRequest::of(&head)).await;
     // A refused caller gets the refusal before the broker connects, so the
     // answer shows nothing of the database.
-    if let Some(refusal) = refusal_by_policy(grant).await {
+    if let Some(refusal) = refusal_by_policy(access.need, grant).await {
         return into_response(refusal);
     }
     let handler = match mount.handler().await {
