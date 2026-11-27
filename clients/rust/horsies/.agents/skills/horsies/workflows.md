@@ -102,7 +102,7 @@ impl WorkflowDefinition for Checkout {
 
 | Item | Rule |
 |---|---|
-| `type Output` | The type of the workflow's result: the output node's type, or `OutputlessResults` for a workflow with no output node |
+| `type Output` | The type of the workflow's result: the output node's type, or for a workflow with no output node `OutputlessResults` (the outcome of each node) or `NoWorkflowOutput` (the value of its sub-workflow node, and of a handle that reads no node outcomes) |
 | `type Parameters` | The parameters of `build_with` (`Serialize + DeserializeOwned`); `()` for a definition without parameters |
 | `fn name()` | The workflow name, unique in the app |
 | `fn definition_key()` | The stable identity, unique in the app. A start and the engine find the workflow by it |
@@ -436,6 +436,10 @@ with the error's id.
   `iter()`, `len()`, `is_empty()`, each outcome as
   `TaskOutcome<JsonText, CustomCode>`: the value as its stored text, read with
   `decode::<T>()`.
+- A sub-workflow node of a child with no output node reads as the value
+  `NoWorkflowOutput` (the stored `Ok(null)`); another stored value does not
+  read. A handle typed `NoWorkflowOutput` reads a workflow with no output node
+  as `Succeeded(NoWorkflowOutput)` or its stored error.
 - `NodeResult` is `Outcome(TaskOutcome<JsonText, CustomCode>)` or
   `Unreadable { cause }`.
 - `WorkflowNodeInfo` has `node_id`, `index`, `name`, `status`
@@ -446,7 +450,8 @@ with the error's id.
 |---|---|---|
 | `WaitTimeout { workflow_id }` | `WAIT_TIMEOUT` | The workflow had not ended when the limit passed |
 | `WorkflowNotFound { workflow_id }` | `WORKFLOW_NOT_FOUND` | No workflow has the id |
-| `ResultNotReady { workflow_id, node_id }` | `RESULT_NOT_READY` | `result_for`: the node stores no result yet, or no node has the id |
+| `NodeNotFound { workflow_id, node_id }` | `NODE_NOT_FOUND` | `result_for`: the workflow has no node of the id. The same id gives the same error on every read |
+| `ResultNotReady { workflow_id, node_id }` | `RESULT_NOT_READY` | `result_for`: the node exists and stores no result yet |
 | `ResultDeserializationError { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored value does not read with the handle's types |
 | `UnknownCustomCode { workflow_id, cause }` | `UNKNOWN_CUSTOM_CODE` | The stored custom code is not a code of `E` |
 | `InvalidInput { workflow_id, cause }` | `INVALID_INPUT` | `get`: the `Within` limit is above `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms); `cause` is `WaitLimitRefused`. The first check, before any statement |

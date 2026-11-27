@@ -302,8 +302,8 @@ pub use crate::failure_cause::{FailureCause, ServerErrorFacts};
 pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow};
 pub use crate::workflow_engine::phase2_recovery::Phase2RecoverySummary;
 pub use crate::workflow_engine::query::{
-    NodeResultsRead, NodesRead, StoredNode, StoredNodeResult, TerminalErrorStatus, WorkflowEnd,
-    WorkflowWait,
+    NodeResultRead, NodeResultsRead, NodesRead, StoredNode, StoredNodeResult, TerminalErrorStatus,
+    WorkflowEnd, WorkflowWait,
 };
 pub use crate::workflow_engine::recovery::recover_stuck_workflows;
 pub use crate::workflow_engine::recovery::{

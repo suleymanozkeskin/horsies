@@ -310,9 +310,9 @@ class CoreHandle:
         """The nodes of one workflow that store a result. Reads only."""
     def workflow_node_results_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowNodeResultsRead | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid]:
         """The awaitable form of the method above."""
-    def workflow_node_result(self, workflow_id: uuid.UUID, node_id: str) -> StoredNodeResultRecord | NodeResultNotStored | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid:
+    def workflow_node_result(self, workflow_id: uuid.UUID, node_id: str) -> StoredNodeResultRecord | NodeResultNotStored | NodeAbsent | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid:
         """The stored result of one node. Reads only."""
-    def workflow_node_result_async(self, workflow_id: uuid.UUID, node_id: str) -> asyncio.Future[StoredNodeResultRecord | NodeResultNotStored | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid]:
+    def workflow_node_result_async(self, workflow_id: uuid.UUID, node_id: str) -> asyncio.Future[StoredNodeResultRecord | NodeResultNotStored | NodeAbsent | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid]:
         """The awaitable form of the method above."""
     def workflow_nodes(self, workflow_id: uuid.UUID) -> WorkflowNodesRead | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid:
         """The nodes of one workflow in index order. Reads only."""
@@ -2147,9 +2147,16 @@ class WorkflowNodeResultsRead:
 
 @final
 class NodeResultNotStored:
-    """No node of this id stores a result, or no workflow has the id; the read does not tell
-    the two apart.
-    """
+    """The node of this id exists and stores no result yet."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def node_id(self) -> str: ...
+
+
+@final
+class NodeAbsent:
+    """The workflow exists and has no node of this id."""
     @property
     def workflow_id(self) -> uuid.UUID: ...
     @property

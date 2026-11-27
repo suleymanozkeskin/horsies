@@ -67,8 +67,9 @@ Codes of the read errors of `handle.get()` / `get_async()`, `result_for()` and t
 | `WAIT_TIMEOUT` | `get()` timed out; task may still be running | No |
 | `TASK_NOT_FOUND` | Task ID doesn't exist in database | No |
 | `WORKFLOW_NOT_FOUND` | Workflow ID doesn't exist in database, or retention removed the workflow after `get()` read its terminal status | No |
+| `NODE_NOT_FOUND` | The workflow exists and has no node of the id that `result_for()` asked for | No |
 | `RESULT_NOT_AVAILABLE` | Result cache was never set | No |
-| `RESULT_NOT_READY` | Result not yet available; task is still running | No |
+| `RESULT_NOT_READY` | Result not yet available; the task or the workflow node is still running | No |
 | `ASYNC_CONTEXT` | Sync `get()` / `result_for()` was called on a thread that runs an event loop; nothing ran; not cached. Call `await handle.get_async()` / `result_for_async()` | No |
 | `INVALID_INPUT` | An argument of `get()` / `get_async()` was refused before any read, for example a `wait_ms` that is negative, not an int, or above `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached | No |
 | `WAIT_INSIDE_TASK` | A result wait was called inside a worker child, where task bodies run; it waited for nothing; not cached. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task) | No |
@@ -99,7 +100,7 @@ Workflow-specific error codes are distributed across the four families above:
 
 - **OperationalCode**: `WORKFLOW_ENQUEUE_FAILED`, `SUBWORKFLOW_LOAD_FAILED`, `WORKFLOW_RECOVERY_LIMIT_REACHED`, `SUBWORKFLOW_DEPTH_LIMIT_REACHED`
 - **ContractCode**: `WORKFLOW_CONTEXT_MISSING_ID`
-- **RetrievalCode**: `WORKFLOW_NOT_FOUND`
+- **RetrievalCode**: `WORKFLOW_NOT_FOUND`, `NODE_NOT_FOUND`
 - **OutcomeCode**: `WORKFLOW_PAUSED`, `WORKFLOW_EXPIRED`, `WORKFLOW_FAILED`, `WORKFLOW_CANCELLED`, `UPSTREAM_SKIPPED`, `SUB_WORKFLOW_FAILED`, `WORKFLOW_SUCCESS_CASE_NOT_MET`, `WORKFLOW_OUTPUT_SKIPPED`
 
 ### Reserved Codes

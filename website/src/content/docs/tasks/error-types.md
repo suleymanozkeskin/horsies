@@ -48,8 +48,9 @@ The cause object follows the same rule. Where the library catches a pydantic `Va
 | `ReadWaitTimeout` | `RetrievalCode.WAIT_TIMEOUT` | The task or the workflow did not end before the wait limit. It may still run | No |
 | `ReadTaskNotFound` | `RetrievalCode.TASK_NOT_FOUND` | Neither the live table nor the task history holds the task. A handle built by id can race the commit of its send | No |
 | `ReadWorkflowNotFound` | `RetrievalCode.WORKFLOW_NOT_FOUND` | No workflow has the id of the handle | – |
+| `ReadNodeNotFound` | `RetrievalCode.NODE_NOT_FOUND` | `result_for()`: the workflow has no node of the id | – |
 | `ReadResultNotAvailable` | `RetrievalCode.RESULT_NOT_AVAILABLE` | The task reached a terminal status and stored no result, or the handle has no broker | Yes |
-| `ReadResultNotReady` | `RetrievalCode.RESULT_NOT_READY` | `result_for()`: the node stores no result yet | – |
+| `ReadResultNotReady` | `RetrievalCode.RESULT_NOT_READY` | `result_for()`: the node exists and stores no result yet | – |
 | `ReadWaitInsideTask` | `RetrievalCode.WAIT_INSIDE_TASK` | A result wait in a process that runs task bodies. Nothing was read | No |
 | `ReadAsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form | No |
 | `ReadInvalidInput` | `RetrievalCode.INVALID_INPUT` | `wait_ms` is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`. Nothing was read | No |

@@ -23,6 +23,7 @@ from horsies.core.models.workflow.nodes import (
     SuccessPolicy,
     WorkflowTerminalResults,
 )
+from horsies.core.models.workflow.no_output import NoWorkflowOutput
 from horsies.core.models.workflow.typing_utils import (
     NODE_ID_PATTERN as NODE_ID_PATTERN,
     node_id_from_text,
@@ -77,6 +78,7 @@ __all__ = [
     'SuccessCase',
     'SuccessPolicy',
     'WorkflowTerminalResults',
+    'NoWorkflowOutput',
     # typing utils
     'NODE_ID_PATTERN',
     'node_id_from_text',

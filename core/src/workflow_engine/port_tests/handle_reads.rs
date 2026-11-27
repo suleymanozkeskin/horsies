@@ -20,7 +20,7 @@ use crate::test_support::child_specs::TestChildSpecs;
 use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::lifecycle::expire_paused_workflows;
-use crate::workflow_engine::query::NodesRead;
+use crate::workflow_engine::query::{NodeResultRead, NodesRead};
 
 /// How long `get()` waits for a workflow that is terminal before the call.
 const GET_WAIT: Duration = Duration::from_secs(1);
@@ -364,7 +364,7 @@ async fn result_for_gives_the_typed_result_of_one_node() {
 /// the node of an unfinished workflow stores no result, which a client reads
 /// as `RESULT_NOT_READY`.
 #[tokio::test]
-async fn an_unfinished_node_stores_no_result() {
+async fn an_unfinished_node_is_not_stored() {
     let pool = shared_pool().await;
     let workflow_id = start(
         &pool,
@@ -378,7 +378,41 @@ async fn an_unfinished_node_stores_no_result() {
         .await
         .expect("the node result read");
 
-    assert_eq!(stored, None);
+    assert_eq!(stored, NodeResultRead::NotStored);
+}
+
+/// A node id that the workflow does not have is `NodeAbsent`, not
+/// `NotStored`: a caller that polls tells a wrong id from a node that has not
+/// ended.
+#[tokio::test]
+async fn a_node_id_the_workflow_does_not_have_is_node_absent() {
+    let pool = shared_pool().await;
+    let workflow_id = start(
+        &pool,
+        &single("result_for_no_node", OnError::Fail),
+        &TestChildSpecs::empty(),
+    )
+    .await;
+
+    let read = handle(&pool, workflow_id)
+        .node_result("no_such_node")
+        .await
+        .expect("the node result read");
+
+    assert_eq!(read, NodeResultRead::NodeAbsent);
+}
+
+/// An id that no workflow has is `WorkflowAbsent`.
+#[tokio::test]
+async fn a_workflow_id_that_no_workflow_has_is_workflow_absent() {
+    let pool = shared_pool().await;
+
+    let read = handle(&pool, Uuid::new_v4())
+        .node_result("node_0")
+        .await
+        .expect("the node result read");
+
+    assert_eq!(read, NodeResultRead::WorkflowAbsent);
 }
 
 /// `TestWorkflowHandleResults.test_results_empty_when_no_tasks_completed`

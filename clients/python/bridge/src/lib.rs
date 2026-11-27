@@ -366,6 +366,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::workflow_reads::StoredNodeResultRecord>()?;
     module.add_class::<operations::workflow_reads::WorkflowNodeResultsRead>()?;
     module.add_class::<operations::workflow_reads::NodeResultNotStored>()?;
+    module.add_class::<operations::workflow_reads::NodeAbsent>()?;
     module.add_class::<operations::workflow_reads::StoredNodeRecord>()?;
     module.add_class::<operations::workflow_reads::WorkflowNodesRead>()?;
     module.add_class::<operations::workflow_retention::WorkflowsDeleted>()?;

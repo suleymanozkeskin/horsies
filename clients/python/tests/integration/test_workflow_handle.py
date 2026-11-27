@@ -25,6 +25,7 @@ from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.models.outcome import (
     Failed,
     ReadDatabaseError,
+    ReadNodeNotFound,
     ReadResultNotReady,
     ReadWaitTimeout,
     ReadWorkflowContextMissingId,
@@ -33,6 +34,7 @@ from horsies.core.models.outcome import (
 )
 from horsies.core.models.tasks import TaskError, OutcomeCode
 from horsies.core.models.workflow import (
+    NodeKey,
     TaskNode,
     WorkflowHandle,
     WorkflowStatus,
@@ -327,6 +329,36 @@ class TestWorkflowHandleResults:
         result = await handle.result_for_async(node_a)
 
         assert isinstance(result, Err) and isinstance(result.err_value, ReadResultNotReady), result
+
+    async def test_result_for_returns_node_not_found_for_an_unknown_node_id(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """result_for() returns Err(ReadNodeNotFound) for a node id that the workflow does not have."""
+        task_a = make_simple_task(app, 'result_for_no_node_a')
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker, name='result_for_no_node', tasks=[node_a],
+        )
+        handle = await start_ok(spec, broker)
+
+        result = await handle.result_for_async(NodeKey(node_id='no_such_node'))
+
+        assert isinstance(result, Err) and isinstance(result.err_value, ReadNodeNotFound), result
+
+    async def test_result_for_returns_workflow_not_found_for_an_unknown_workflow(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+    ) -> None:
+        """result_for() returns Err(ReadWorkflowNotFound) when no workflow has the id."""
+        handle = WorkflowHandle(workflow_id=uuid.uuid4(), broker=broker)
+
+        result = await handle.result_for_async(NodeKey(node_id='any_node'))
+
+        assert isinstance(result, Err) and isinstance(result.err_value, ReadWorkflowNotFound), result
 
     async def test_result_for_missing_node_id_returns_error(
         self,

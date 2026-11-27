@@ -17,7 +17,7 @@ use crate::core::workflow::handle_types::{HandleOperation, HandleResult};
 use crate::core::WorkflowStatus;
 use crate::workflow_engine::lifecycle::workflow_handle_error;
 use crate::workflow_engine::query::{
-    self, NodeResultsRead, NodesRead, StoredNodeResult, WorkflowWait,
+    self, NodeResultRead, NodeResultsRead, NodesRead, StoredNodeResult, WorkflowWait,
 };
 
 impl PostgresBroker {
@@ -64,18 +64,19 @@ impl PostgresBroker {
             .map_err(|error| workflow_handle_error(&HandleOperation::Results, error, workflow_id))
     }
 
-    /// The stored result of one node: one read (Python `WorkflowHandle.result_for_async`).
+    /// The result of one node: one read (Python `WorkflowHandle.result_for_async`).
     ///
-    /// Outcomes: the node's stored result; `None` when no node of this id stores a result or no
-    /// workflow has the id (the read does not tell the two apart); `DATABASE_OPERATION_FAILED` for a
-    /// failed read, with a message that names the node.
+    /// Outcomes: [`NodeResultRead`]: the node's stored result, `NotStored` for a node that has none
+    /// yet, `NodeAbsent` for a workflow with no node of this id, `WorkflowAbsent` for an id that no
+    /// workflow has; `DATABASE_OPERATION_FAILED` for a failed read, with a message that names the
+    /// node.
     ///
     /// Panics: a row that does not decode (a defect).
-    pub async fn workflow_node_result(
+    pub async fn workflow_node_result_read(
         &self,
         workflow_id: Uuid,
         node_id: &str,
-    ) -> HandleResult<Option<StoredNodeResult>> {
+    ) -> HandleResult<NodeResultRead> {
         query::read_workflow_node_result(self, workflow_id, node_id)
             .await
             .map_err(|error| {
@@ -84,6 +85,29 @@ impl PostgresBroker {
                 };
                 workflow_handle_error(&operation, error, workflow_id)
             })
+    }
+
+    /// The stored result of one node: [`Self::workflow_node_result_read`] with the three states
+    /// without a result collapsed into `None`. A caller that must tell them apart reads
+    /// `workflow_node_result_read`.
+    ///
+    /// Outcomes: the node's stored result; `None` when no node of this id stores a result, the
+    /// workflow has no such node, or no workflow has the id; `DATABASE_OPERATION_FAILED`.
+    ///
+    /// Panics: a row that does not decode (a defect).
+    pub async fn workflow_node_result(
+        &self,
+        workflow_id: Uuid,
+        node_id: &str,
+    ) -> HandleResult<Option<StoredNodeResult>> {
+        Ok(
+            match self.workflow_node_result_read(workflow_id, node_id).await? {
+                NodeResultRead::Stored(stored) => Some(stored),
+                NodeResultRead::WorkflowAbsent
+                | NodeResultRead::NodeAbsent
+                | NodeResultRead::NotStored => None,
+            },
+        )
     }
 
     /// The nodes of a workflow in index order: one read (Python `WorkflowHandle.tasks_async`).

@@ -268,6 +268,13 @@ fn each_read_failure_has_python_s_code() {
             RetrievalCode::WorkflowNotFound.into(),
         ),
         (
+            WorkflowReadError::NodeNotFound {
+                workflow_id: workflow(),
+                node_id: "n".to_owned(),
+            },
+            RetrievalCode::NodeNotFound.into(),
+        ),
+        (
             WorkflowReadError::ResultNotReady {
                 workflow_id: workflow(),
                 node_id: "n".to_owned(),
@@ -718,36 +725,63 @@ fn a_workflow_handle_is_debug_send_and_sync() {
 }
 
 /// The core stores `Ok(null)` for the node of a sub-workflow that has no
-/// output. A sub-workflow node of an outputless definition is typed
-/// `OutputlessResults`, which reads a map of node ids: the stored `null`
-/// does not read. DEFECT: Python reads this as `Succeeded(None)`. The test
-/// pins the current refusal; it changes with the fix.
+/// output. The node reads as the one value `NoWorkflowOutput`: the read of a
+/// downstream node's input (`arg_from`) and of `WorkflowContext::result_for`
+/// decode with `read_stored_result`.
 #[test]
-fn defect_an_outputless_child_node_result_does_not_read_as_outputless_results() {
+fn an_outputless_child_node_result_reads_as_no_workflow_output() {
     let text = json!({"__h_task_result__": true, "ok": null, "err": null}).to_string();
-    // The read of a downstream node's input (`arg_from`) and the read of
-    // `WorkflowContext::result_for` both decode with `read_stored_result`.
-    let input = serde_json::from_str::<TaskOutcome<OutputlessResults, Infallible>>(&text);
-    assert!(input.is_err(), "current behaviour: {input:?}");
-    let context_read = read_stored_result::<OutputlessResults>(&text);
-    assert!(context_read.is_err());
-    // A read as `serde_json::Value` holds the null, so the stored form is valid.
+    let input = serde_json::from_str::<TaskOutcome<NoWorkflowOutput, Infallible>>(&text).unwrap();
+    assert_eq!(input, TaskOutcome::Succeeded(NoWorkflowOutput));
+    let context_read = read_stored_result::<NoWorkflowOutput>(&text).unwrap();
+    assert!(matches!(context_read, TaskResult::Ok(NoWorkflowOutput)));
+    // A read as `serde_json::Value` holds the null: the stored form is unchanged.
     assert_eq!(
         envelope_outcome::<serde_json::Value, Infallible>(workflow(), &text).unwrap(),
         TaskOutcome::Succeeded(serde_json::Value::Null)
     );
 }
 
-/// A parent workflow whose output node is the outputless sub-workflow node
-/// stores `Ok(null)` as its own result. A handle typed `OutputlessResults`
-/// (the node's type) refuses it. DEFECT, as above.
+/// A stored value other than `null` is a value that the child returned, not
+/// the absence of one.
 #[test]
-fn defect_a_handle_read_of_an_outputless_child_node_is_unreadable() {
+fn a_stored_value_is_not_no_workflow_output() {
+    let text = json!({"__h_task_result__": true, "ok": 5, "err": null}).to_string();
+    assert!(read_stored_result::<NoWorkflowOutput>(&text).is_err());
+    assert!(matches!(
+        envelope_outcome::<NoWorkflowOutput, Infallible>(workflow(), &text),
+        Err(WorkflowReadError::ResultDeserializationError { .. })
+    ));
+}
+
+/// A parent workflow whose output node is the outputless sub-workflow node
+/// stores `Ok(null)` as its own result. A handle typed `NoWorkflowOutput`
+/// reads it.
+#[test]
+fn a_handle_read_of_an_outputless_child_node_gives_no_workflow_output() {
     let end = completed(Some(
         json!({"__h_task_result__": true, "ok": null, "err": null}),
     ));
-    assert!(matches!(
-        end_outcome::<OutputlessResults>(workflow(), end),
-        Err(WorkflowReadError::StoredResultUnreadable { .. })
-    ));
+    assert_eq!(
+        end_outcome::<NoWorkflowOutput>(workflow(), end).unwrap(),
+        TaskOutcome::Succeeded(NoWorkflowOutput)
+    );
+}
+
+/// A workflow with no output node, read by a handle typed `NoWorkflowOutput`:
+/// the value, or the stored error. The terminal results are not read.
+#[test]
+fn an_outputless_workflow_read_as_no_workflow_output_gives_the_value_or_its_error() {
+    assert_eq!(
+        end_outcome::<NoWorkflowOutput>(workflow(), completed(Some(outputless()))).unwrap(),
+        TaskOutcome::Succeeded(NoWorkflowOutput)
+    );
+    let failed = completed(Some(json!({
+        "__h_task_result__": true,
+        "__h_outputless_terminals__": true,
+        "ok": null,
+        "err": {"error_code": "DECLINED", "message": "no"},
+    })));
+    let outcome = end_outcome::<NoWorkflowOutput>(workflow(), failed).unwrap();
+    assert_eq!(code_text(&outcome), "DECLINED");
 }

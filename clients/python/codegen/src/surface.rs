@@ -527,7 +527,8 @@ const WAIT_WORKFLOW_RESULT_OUTCOME: &str = "WorkflowCompletedRead | WorkflowEnde
 const WORKFLOW_NODE_RESULTS_OUTCOME: &str = "WorkflowNodeResultsRead | WorkflowAbsent | \
      WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 const WORKFLOW_NODE_RESULT_OUTCOME: &str = "StoredNodeResultRecord | NodeResultNotStored | \
-     WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
+     NodeAbsent | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | \
+     WorkflowHandleStoredDataInvalid";
 const WORKFLOW_NODES_OUTCOME: &str =
     "WorkflowNodesRead | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 
@@ -2875,7 +2876,17 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "NodeResultNotStored",
-        doc: "No node of this id stores a result, or no workflow has the id; the read does not tell\nthe two apart.",
+        doc: "The node of this id exists and stores no result yet.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property("node_id", "str"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "NodeAbsent",
+        doc: "The workflow exists and has no node of this id.",
         constructor: Constructor::NoConstructor,
         properties: &[
             property("workflow_id", "uuid.UUID"),
