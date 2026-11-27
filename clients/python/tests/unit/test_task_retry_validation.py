@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 import json
+from enum import Enum
 from functools import wraps
 import pytest
 
 from horsies.core.app import Horsies
 from horsies.core.codec.task_options import serialize_task_options
 from pydantic import ValidationError
-from horsies.core.errors import TaskDefinitionError, ErrorCode
+from horsies.core.errors import (
+    ErrorCode,
+    MultipleValidationErrors,
+    TaskDefinitionError,
+)
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskError, TaskOptions, RetryPolicy
+from horsies.core.models.tasks import (
+    OperationalErrorCode,
+    OutcomeCode,
+    RetryPolicy,
+    TaskError,
+    TaskOptions,
+)
 from horsies.core.types.result import Ok, Result
 
 
@@ -26,19 +37,22 @@ def _make_app() -> Horsies:
     )
 
 
+class _TaskCode(str, Enum):
+    """The codes that the tasks of these tests declare."""
+
+    TRANSIENT = 'TRANSIENT'
+    RATE_LIMITED = 'RATE_LIMITED'
+
+
+class _OtherCode(str, Enum):
+    """Codes of an Enum class that no task here declares."""
+
+    RATE_LIMITED = 'RATE_LIMITED'
+
+
 @pytest.mark.unit
 class TestRetryPolicyValidation:
     """Tests for RetryPolicy model-level validation."""
-
-    def test_exception_name_rejected_in_auto_retry_for(self) -> None:
-        """RetryPolicy rejects exception class names in auto_retry_for."""
-        with pytest.raises(ValueError, match='auto_retry_for'):
-            RetryPolicy.fixed([5], auto_retry_for=['TimeoutError'])
-
-    def test_reserved_code_rejected_in_auto_retry_for(self) -> None:
-        """No task error carries WORKFLOW_STOPPED, so no retry can name it."""
-        with pytest.raises(ValueError, match='reserved error code name'):
-            RetryPolicy.fixed([5], auto_retry_for=['WORKFLOW_STOPPED'])
 
     def test_empty_auto_retry_for_rejected(self) -> None:
         """RetryPolicy rejects empty auto_retry_for list."""
@@ -51,7 +65,7 @@ class TestRetryPolicyValidation:
             base_seconds=60,
             max_retries=5,
             max_delay_seconds=600,
-            auto_retry_for=['TRANSIENT'],
+            auto_retry_for=[_TaskCode.TRANSIENT],
             jitter=False,
         )
 
@@ -65,7 +79,7 @@ class TestRetryPolicyValidation:
                 base_seconds=60,
                 max_retries=5,
                 max_delay_seconds=0,
-                auto_retry_for=['TRANSIENT'],
+                auto_retry_for=[_TaskCode.TRANSIENT],
             )
 
     def test_max_delay_seconds_serializes_only_when_set(self) -> None:
@@ -73,13 +87,13 @@ class TestRetryPolicyValidation:
         uncapped = RetryPolicy.exponential(
             base_seconds=60,
             max_retries=5,
-            auto_retry_for=['TRANSIENT'],
+            auto_retry_for=[_TaskCode.TRANSIENT],
         )
         capped = RetryPolicy.exponential(
             base_seconds=60,
             max_retries=5,
             max_delay_seconds=600,
-            auto_retry_for=['TRANSIENT'],
+            auto_retry_for=[_TaskCode.TRANSIENT],
         )
 
         uncapped_json = serialize_task_options(
@@ -216,6 +230,125 @@ class TestTaskDecoratorValidation:
                 return Ok('ok')
 
         assert exc_info.value.code == ErrorCode.TASK_NO_RETURN_TYPE
+
+
+@pytest.mark.unit
+class TestRetryCodeMembers:
+    """`@app.task()` takes code members in `auto_retry_for`: members of the
+    built-in code enums and of the `Enum` class of `error_codes=`."""
+
+    def test_built_in_and_declared_members_register(self) -> None:
+        """A built-in member and a declared member register; the stored
+        policy holds their texts, the texts that a failure with each code
+        stores."""
+        app = _make_app()
+
+        @app.task(
+            'retries_on_members',
+            error_codes=_TaskCode,
+            retry_policy=RetryPolicy.fixed(
+                [1, 2],
+                auto_retry_for=[OperationalErrorCode.WORKER_CRASHED, _TaskCode.RATE_LIMITED],
+            ),
+        )
+        def retries_on_members() -> Result[str, TaskError]:
+            return Ok('ok')
+
+        options_json = retries_on_members.task_options_json
+        assert options_json is not None
+        stored = json.loads(options_json)['retry_policy']['auto_retry_for']
+        assert stored == ['WORKER_CRASHED', 'RATE_LIMITED']
+        failure = TaskError(error_code=_TaskCode.RATE_LIMITED).model_dump(mode='json')
+        assert failure['error_code'] == stored[1]
+
+    def test_plain_text_entry_refused(self) -> None:
+        """A plain `str` entry is TASK_INVALID_OPTIONS; the notes name the
+        task and the entry, and nothing is registered."""
+        app = _make_app()
+        with pytest.raises(TaskDefinitionError) as exc_info:
+
+            @app.task(
+                'plain_text_retry',
+                retry_policy=RetryPolicy.fixed([1], auto_retry_for=['BROKR_ERROR']),  # pyright: ignore[reportArgumentType]
+            )
+            def plain_text_retry() -> Result[str, TaskError]:
+                return Ok('ok')
+
+        error = exc_info.value
+        assert error.code == ErrorCode.TASK_INVALID_OPTIONS
+        assert error.message == 'auto_retry_for[0] is not a code member'
+        assert error.notes == [
+            "task 'plain_text_retry'",
+            "auto_retry_for[0]='BROKR_ERROR' is a str, not a code member",
+            'the task declares no Enum class with error_codes=',
+        ]
+        assert 'plain_text_retry' not in app.list_tasks()
+
+    def test_member_of_another_enum_refused(self) -> None:
+        """A member of an Enum class that the task does not declare is
+        TASK_INVALID_OPTIONS, also when its value is a declared code."""
+        app = _make_app()
+        with pytest.raises(TaskDefinitionError) as exc_info:
+
+            @app.task(
+                'other_enum_retry',
+                error_codes=_TaskCode,
+                retry_policy=RetryPolicy.fixed([1], auto_retry_for=[_OtherCode.RATE_LIMITED]),
+            )
+            def other_enum_retry() -> Result[str, TaskError]:
+                return Ok('ok')
+
+        error = exc_info.value
+        assert error.code == ErrorCode.TASK_INVALID_OPTIONS
+        assert error.message == 'auto_retry_for[0] is not a code of the task'
+        assert error.notes == [
+            "task 'other_enum_retry'",
+            'auto_retry_for[0]=_OtherCode.RATE_LIMITED is neither a built-in '
+            'code nor a member of the declared Enum class',
+            'the task declares error_codes=_TaskCode',
+        ]
+        assert 'other_enum_retry' not in app.list_tasks()
+
+    def test_custom_member_without_an_enum_declaration_refused(self) -> None:
+        """A custom member of a task that declares no Enum class is
+        TASK_INVALID_OPTIONS: a tuple declaration gives no code members."""
+        app = _make_app()
+        with pytest.raises(TaskDefinitionError) as exc_info:
+
+            @app.task(
+                'tuple_declared_retry',
+                error_codes=('RATE_LIMITED',),
+                retry_policy=RetryPolicy.fixed([1], auto_retry_for=[_TaskCode.RATE_LIMITED]),
+            )
+            def tuple_declared_retry() -> Result[str, TaskError]:
+                return Ok('ok')
+
+        error = exc_info.value
+        assert error.code == ErrorCode.TASK_INVALID_OPTIONS
+        assert error.notes[2] == 'the task declares no Enum class with error_codes='
+
+    def test_every_refused_entry_is_reported(self) -> None:
+        """Two refused entries give one error each, in list order, in a
+        MultipleValidationErrors."""
+        app = _make_app()
+        with pytest.raises(MultipleValidationErrors) as exc_info:
+
+            @app.task(
+                'two_refused_entries',
+                retry_policy=RetryPolicy.fixed(
+                    [1],
+                    auto_retry_for=['TRANSIENT', OutcomeCode.TASK_TIMEOUT, _OtherCode.RATE_LIMITED],  # pyright: ignore[reportArgumentType]
+                ),
+            )
+            def two_refused_entries() -> Result[str, TaskError]:
+                return Ok('ok')
+
+        messages = [error.message for error in exc_info.value.report.errors]
+        assert messages == [
+            'auto_retry_for[0] is not a code member',
+            'auto_retry_for[2] is not a code of the task',
+        ]
+        assert 'two_refused_entries' not in app.list_tasks()
 
 
 @pytest.mark.unit

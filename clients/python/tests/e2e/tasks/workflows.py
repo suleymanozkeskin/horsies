@@ -802,8 +802,15 @@ spec_dual_injection = _workflow(
 # =============================================================================
 
 import os
+from enum import Enum
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
 from horsies.core.models.tasks import RetryPolicy
+
+
+class WorkflowRetryCode(str, Enum):
+    """The code that ``e2e_wf_retry_then_ok`` retries on."""
+
+    RETRY_NEEDED = 'RETRY_NEEDED'
 
 
 @app.task(task_name='e2e_wf_mark')
@@ -826,7 +833,10 @@ def slow_mark_task(*, value: str, delay_ms: int = 200) -> Result[str, TaskError]
 
 @app.task(
     task_name='e2e_wf_retry_then_ok',
-    retry_policy=RetryPolicy.exponential(base_seconds=1, max_retries=3, auto_retry_for=['RETRY_NEEDED']),
+    error_codes=WorkflowRetryCode,
+    retry_policy=RetryPolicy.exponential(
+        base_seconds=1, max_retries=3, auto_retry_for=[WorkflowRetryCode.RETRY_NEEDED],
+    ),
 )
 def retry_then_ok_task(
     *, counter_file: str, succeed_on_attempt: int = 2

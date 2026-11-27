@@ -65,8 +65,9 @@ function mainFacades(handle: NativeCoreHandle, called: string[]): FacadeAddons {
       cancelTask: async (given, taskId) => done("cancelTask", { taskId, wasStatus: "CLAIMED" })(given),
     }),
     rerun: () => ({
-      rerunTask: async (given) => {
+      rerunTask: async (given, _command, _policy, _trace, codes) => {
         assert.equal(given, handle);
+        assert.deepEqual(codes, { tasks: [{ taskName: "charge", codes: ["CARD_DECLINED"] }] });
         called.push("rerunTask");
 
         return valueEnvelope({ kind: "done" as const, outcome: { kind: "sourceLive" as const, taskId: TASK_ID } });
@@ -74,6 +75,9 @@ function mainFacades(handle: NativeCoreHandle, called: string[]): FacadeAddons {
     }),
   };
 }
+
+/** The declared custom codes that the seat isolate's app passes with a rerun. */
+const CHARGE_CODES = { tasks: [{ taskName: "charge", codes: ["CARD_DECLINED"] }] };
 
 /** A relay of a seat isolate whose main thread is this one: it serves each operation on `main` with `facades`. */
 function loopbackRelay(main: CoreAccess, facades: FacadeAddons): IsolateRelay {
@@ -152,7 +156,7 @@ describe("each facade call kind of a seat body goes through the relay", () => {
     const called: string[] = [];
     const handle = mainHandle(called);
     const relay = loopbackRelay(mainThreadAccess(handle), mainFacades(handle, called));
-    const rerun = rerunAreaOfCore({ kind: "seatRelay", relay }, () => ({ kind: "noCarrier" }));
+    const rerun = rerunAreaOfCore({ kind: "seatRelay", relay }, () => ({ kind: "noCarrier" }), () => CHARGE_CODES);
 
     assert.deepEqual(await rerun.rerunTask(COMMAND, POLICY), { ok: true, value: { kind: "sourceLive", taskId: TASK_ID } });
     assert.deepEqual(called, ["rerunTask"]);
@@ -217,7 +221,7 @@ describe("each facade call kind past the bound of the relay gives SEAT_RELAY_FUL
 
   test("the rerun in the app's transaction", async () => {
     const { relay } = fullSeatArea();
-    const rerun = await rerunAreaOfCore({ kind: "seatRelay", relay }, () => ({ kind: "noCarrier" })).rerunTask(COMMAND, POLICY);
+    const rerun = await rerunAreaOfCore({ kind: "seatRelay", relay }, () => ({ kind: "noCarrier" }), () => CHARGE_CODES).rerunTask(COMMAND, POLICY);
 
     assert.deepEqual(failure(rerun), RELAY_FULL);
   });

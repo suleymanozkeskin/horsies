@@ -15,7 +15,6 @@ from typing import (
     Self,
     Annotated,
     Final,
-    Union,
     cast,
     overload,
 )
@@ -44,7 +43,6 @@ from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.exception_mapper import (
     RESERVED_NON_TASK_CODES,
     reserved_code_message,
-    validate_error_code_string,
 )
 
 type BuiltInTaskCode = (
@@ -532,7 +530,16 @@ class RetryPolicy(BaseModel):
         backoff_strategy: 'fixed' uses intervals as-is, 'exponential' uses intervals[0] as base
         jitter: whether to add ±25% randomization to delays
         max_delay_seconds: optional maximum delay after backoff and jitter
-        auto_retry_for: error codes that trigger automatic retries
+        auto_retry_for: the code members that start a retry: members of the
+            built-in code enums (`OperationalErrorCode`, `ContractCode`,
+            `RetrievalCode`, `OutcomeCode`), or members of the `Enum` class
+            that the task declares with `error_codes=`. At least one.
+
+    `auto_retry_for` takes no plain `str`. The model keeps each entry as it
+    is given: the task decorator checks the entries against the codes of
+    the task (`check_retry_codes`) and refuses any other entry with
+    `TASK_INVALID_OPTIONS`. The JSON form (`model_dump(mode='json')`), which
+    the stored task options hold, has the value of each member.
     """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
@@ -560,10 +567,19 @@ class RetryPolicy(BaseModel):
         Optional[PositiveInt],
         Field(description='Optional maximum retry delay in seconds'),
     ] = None
-    auto_retry_for: Annotated[
-        list[Union[str, BuiltInTaskCode]],
-        Field(min_length=1),
-    ]
+    # The type checker sees code members only. At run time the field keeps
+    # each entry as it is given, so that the task decorator, which knows the
+    # task, refuses a wrong entry with the task's name.
+    if TYPE_CHECKING:
+        auto_retry_for: Annotated[
+            list[BuiltInTaskCode | Enum],
+            Field(min_length=1),
+        ]
+    else:
+        auto_retry_for: Annotated[
+            list[object],
+            Field(min_length=1),
+        ]
 
     @model_validator(mode='after')
     def validate_strategy_consistency(self) -> Self:
@@ -588,23 +604,13 @@ class RetryPolicy(BaseModel):
 
         return self
 
-    @model_validator(mode='after')
-    def validate_error_code_fields(self) -> Self:
-        """Validate that auto_retry_for entries are valid error code strings."""
-        for entry in self.auto_retry_for:
-            code = entry.value if isinstance(entry, Enum) else entry
-            err = validate_error_code_string(code, field_name='auto_retry_for')
-            if err is not None:
-                raise ValueError(err)
-        return self
-
     # Convenience constructors to prevent misconfiguration at call sites
     @classmethod
     def fixed(
         cls,
         intervals: list[int],
         *,
-        auto_retry_for: list[Union[str, BuiltInTaskCode]],
+        auto_retry_for: list[BuiltInTaskCode | Enum],
         jitter: bool = True,
     ) -> 'RetryPolicy':
         """Create a fixed backoff policy where intervals length defines max_retries."""
@@ -622,7 +628,7 @@ class RetryPolicy(BaseModel):
         base_seconds: int,
         *,
         max_retries: int,
-        auto_retry_for: list[Union[str, BuiltInTaskCode]],
+        auto_retry_for: list[BuiltInTaskCode | Enum],
         jitter: bool = True,
         max_delay_seconds: int | None = None,
     ) -> 'RetryPolicy':
@@ -655,7 +661,7 @@ class TaskOptions(BaseModel):
             does not count). On expiry the task fails with
             OutcomeCode.TASK_TIMEOUT and the child process is killed with the
             subprocesses in its session; retry only happens when
-            'TASK_TIMEOUT' is listed in auto_retry_for. Other tasks on the
+            OutcomeCode.TASK_TIMEOUT is listed in auto_retry_for. Other tasks on the
             worker continue. The worker must start a new child, so timeouts
             are for exceptional hangs, not routine control flow. A
             SHARED_ASYNC task on a shared async child is cancelled instead,

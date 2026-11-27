@@ -6,8 +6,13 @@
 //! a rule here is a defect of the package: the caller throws
 //! `CLIENT_DEFECT` with the [`BoundaryRefusal`].
 
+use std::collections::BTreeMap;
+
 use chrono::Duration;
-use horsies_core::{EnqueueRetention, RerunEnqueuePolicy, RerunTask, RetentionDays};
+use horsies_core::{
+    DeclaredErrorCodes, EnqueueRetention, RegisteredTaskCodes, RerunEnqueuePolicy, RerunTask,
+    RetentionDays,
+};
 use napi::bindgen_prelude::BigInt;
 use napi_derive::napi;
 
@@ -89,6 +94,23 @@ pub struct RerunPolicyArg {
     pub reservation_window_micros: BigInt,
 }
 
+/// One task that the calling app lists, with the custom codes that its
+/// contract declares. A contract that declares no list has no codes here.
+#[napi(object, object_to_js = false)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RegisteredTaskArg {
+    pub task_name: String,
+    pub codes: Vec<String>,
+}
+
+/// The tasks that the calling app lists, each once. A rerun checks the
+/// stored retry list of its source against them.
+#[napi(object, object_to_js = false)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RegisteredTaskCodesArg {
+    pub tasks: Vec<RegisteredTaskArg>,
+}
+
 /// The core's rerun request of `command`, with no trace carrier. Pure.
 ///
 /// Errors: the [`BoundaryRefusal`] of a source task id that is not
@@ -128,6 +150,29 @@ pub fn rerun_policy(policy: &RerunPolicyArg) -> Result<RerunEnqueuePolicy, Bound
         Duration::microseconds(window_micros),
     )
     .map_err(|refused| BoundaryRefusal::new("policy", &refused.to_string()))
+}
+
+/// The core's declared custom codes of the app's tasks in `codes`. Pure.
+///
+/// Errors: the [`BoundaryRefusal`] of a task name that the list holds
+/// twice, or of a code set that the core refuses
+/// (`DeclaredErrorCodes::parse`).
+pub fn registered_task_codes(
+    codes: &RegisteredTaskCodesArg,
+) -> Result<RegisteredTaskCodes, BoundaryRefusal> {
+    let mut tasks: BTreeMap<String, DeclaredErrorCodes> = BTreeMap::new();
+    for task in &codes.tasks {
+        let declared = DeclaredErrorCodes::parse(&task.codes).map_err(|refused| {
+            BoundaryRefusal::new(&format!("codes.{}", task.task_name), &refused.to_string())
+        })?;
+        if tasks.insert(task.task_name.clone(), declared).is_some() {
+            return Err(BoundaryRefusal::new(
+                "codes",
+                &format!("each task name once; '{}' is listed twice", task.task_name),
+            ));
+        }
+    }
+    Ok(RegisteredTaskCodes::new(tasks))
 }
 
 /// The class key of `retention`, by the core's rule
@@ -255,6 +300,52 @@ mod tests {
                 "{days}"
             );
         }
+    }
+
+    fn registered(task_name: &str, codes: &[&str]) -> RegisteredTaskArg {
+        RegisteredTaskArg {
+            task_name: task_name.to_owned(),
+            codes: codes.iter().map(|code| (*code).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn each_listed_task_is_registered_with_its_codes() {
+        let converted = registered_task_codes(&RegisteredTaskCodesArg {
+            tasks: vec![
+                registered("charge", &["CARD_DECLINED"]),
+                registered("ping", &[]),
+            ],
+        })
+        .expect("the codes follow the boundary rules");
+        assert!(matches!(
+            converted.of("charge"),
+            horsies_core::DeclaredCodes::Registered { custom } if custom.get("CARD_DECLINED").is_some()
+        ));
+        assert!(matches!(
+            converted.of("ping"),
+            horsies_core::DeclaredCodes::Registered { custom } if custom.is_empty()
+        ));
+        assert!(matches!(
+            converted.of("other"),
+            horsies_core::DeclaredCodes::TaskNotRegistered
+        ));
+    }
+
+    #[test]
+    fn a_task_name_listed_twice_is_refused() {
+        let refused = registered_task_codes(&RegisteredTaskCodesArg {
+            tasks: vec![registered("charge", &[]), registered("charge", &[])],
+        });
+        assert!(matches!(refused, Err(refusal) if refusal.subject == "codes"));
+    }
+
+    #[test]
+    fn a_code_set_that_the_core_refuses_is_refused() {
+        let refused = registered_task_codes(&RegisteredTaskCodesArg {
+            tasks: vec![registered("charge", &["TASK_TIMEOUT"])],
+        });
+        assert!(matches!(refused, Err(refusal) if refusal.subject == "codes.charge"));
     }
 
     #[test]

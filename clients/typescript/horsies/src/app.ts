@@ -41,6 +41,7 @@ import type { PingDatabaseError, PingWorkersError } from "./monitoring/errors.ts
 import type { DatabasePing, PingWorkersOptions, WorkerPong } from "./monitoring/health-types.ts";
 import { type RerunArea, rerunAreaOfCore } from "./rerun/app-area.ts";
 import type { CallerTransaction } from "./rerun/caller.ts";
+import { registeredCodesOf } from "./rerun/registered-codes.ts";
 import type { CallerRerunError, RerunError } from "./rerun/errors.ts";
 import type { RerunCommand, RerunOutcome, RerunEnqueuePolicy } from "./rerun/types.ts";
 
@@ -76,7 +77,11 @@ export class Horsies {
     });
     this.#monitoringArea = createMonitoringArea(context.core);
     this.monitoring = this.#monitoringArea.monitoring;
-    this.#rerunArea = rerunAreaOfCore(context.core, () => context.observer.activeCarrier());
+    this.#rerunArea = rerunAreaOfCore(
+      context.core,
+      () => context.observer.activeCarrier(),
+      () => registeredCodesOf(context.listed),
+    );
     recordAppContext(this, context);
   }
 

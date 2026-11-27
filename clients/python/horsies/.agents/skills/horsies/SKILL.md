@@ -316,6 +316,9 @@ outcome = await rerun_task(
         retain_rerun_input=True,
         reservation_window=timedelta(hours=24),
     ),
+    # The declared codes of the app's tasks: the stored retry list of the
+    # source is checked against them before the write.
+    registered_task_codes=app.registered_task_codes(),
 )
 match outcome:
     case RerunEnqueued(new_task_id=new_id):
@@ -336,6 +339,16 @@ checking one variant. Eligibility is decided **at enqueue** by
 was not retained cannot be rerun. A `COMPLETED` source is not eligible.
 `RerunSourceAbsent.reason` is a `TaskAbsenceReason`: it says whether
 retention can explain that no record has the id (see `monitoring.md`).
+
+Before the write, the rerun checks the stored `auto_retry_for` of the source
+against `registered_task_codes` (`app.registered_task_codes()`: each
+registered task by name, with its `task_error_codes`). A built-in code
+passes for every task; a custom code passes when the app registers the task
+and the task declares the code. Otherwise `CorePreconditionFailed` (subject
+`rerun_task`, not retryable, nothing written): `RETRY_CODE_NOT_DECLARED`
+for a code that the task does not declare, `TASK_NOT_REGISTERED` for a task
+that the app does not register. `app.rerun_task_async` and `app.rerun_task`
+pass the app's codes themselves.
 
 `app.rerun_task_async(connection, command, policy)` is the same rerun with
 the tracing setting of the app (blocking: `app.rerun_task` on a SQLAlchemy

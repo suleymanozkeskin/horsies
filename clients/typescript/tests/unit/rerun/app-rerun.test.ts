@@ -11,12 +11,12 @@ import type { RerunHost } from "../../../horsies/src/rerun/app-area.ts";
 import type { RerunError } from "../../../horsies/src/rerun/errors.ts";
 import type { RerunOutcome } from "../../../horsies/src/rerun/types.ts";
 import type { Result } from "../../../horsies/src/wire/result.ts";
-import { CARRIER, COMMAND, ENQUEUED_ANSWERS, NEW_TASK_ID, POLICY, SOURCE_TASK_ID, fakeBridge, unusedCoreHandle } from "./support.ts";
+import { CARRIER, CODES, COMMAND, ENQUEUED_ANSWERS, NEW_TASK_ID, POLICY, SOURCE_TASK_ID, fakeBridge, unusedCoreHandle } from "./support.ts";
 
 const HANDLE = unusedCoreHandle();
 
 /** A host with the test handle and an active span. */
-const HOST: RerunHost = { coreHandle: () => HANDLE, activeCarrier: () => CARRIER };
+const HOST: RerunHost = { coreHandle: () => HANDLE, activeCarrier: () => CARRIER, registeredCodes: () => CODES };
 
 /** The answer of `app.rerunTask` when the addon answers `rerunTask`. */
 async function rerunAnswering(rerunTask: Parameters<typeof fakeBridge>[0]["rerunTask"]): Promise<Result<RerunOutcome, RerunError>> {
@@ -52,6 +52,7 @@ describe("app.rerunTask", () => {
           policy: { retention: { kind: "days", days: 7 }, rerunInput: "keep", reservationWindowMicros: 86_400_000_000n },
         },
         trace: CARRIER,
+        codes: CODES,
       },
     ]);
   });
@@ -137,6 +138,28 @@ describe("app.rerunTask errors", () => {
       code: "INVALID_POLICY",
       retryable: false,
       message: "invalid rerun policy: x",
+    });
+  });
+
+  test("RETRY_CODE_NOT_DECLARED is not retryable and names the task and the code", async () => {
+    assert.deepEqual(
+      await errorOf({ code: "RETRY_CODE_NOT_DECLARED", message: "rerun refused: undeclared", taskName: "charge", retryCode: "CARD_DECLINED" }),
+      {
+        code: "RETRY_CODE_NOT_DECLARED",
+        retryable: false,
+        message: "rerun refused: undeclared",
+        taskName: "charge",
+        retryCode: "CARD_DECLINED",
+      },
+    );
+  });
+
+  test("TASK_NOT_REGISTERED is not retryable and names the task", async () => {
+    assert.deepEqual(await errorOf({ code: "TASK_NOT_REGISTERED", message: "rerun refused: unlisted", taskName: "charge" }), {
+      code: "TASK_NOT_REGISTERED",
+      retryable: false,
+      message: "rerun refused: unlisted",
+      taskName: "charge",
     });
   });
 
