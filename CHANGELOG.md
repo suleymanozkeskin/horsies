@@ -10,6 +10,14 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- **Core: one builder of the producer manifest and one reservation window constant.**
+  `horsies_core::manifest` gives `producer_manifest(&PostgresConfig, SchemaMode)`,
+  `send_manifest`, `session_database_manifest`, `core_database_url`,
+  `core_scheme_url` and `ReservationWindowMicros::DEFAULT` (24 hours, the window
+  of the broker). The builder gives every refusal in field order as a
+  `BrokerSettingRefused` with its catalog code: `HRS-213` for `pool_size` and
+  `max_overflow`, `HRS-215` for a TCP keepalive or user timeout value. The Rust
+  client calls the builder; its own copies are removed.
 - **Core: public constants for the client checks.**
   `horsies_core` exports the idempotency key bound
   (`IDEMPOTENCY_KEY_MAX_BYTES`, 255 UTF-8 bytes), the route of
