@@ -511,9 +511,13 @@ async fn test_task_cancelled() {
         .send(basic::simple::Input { x: 5 })
         .await
         .expect("send");
-    let _cancelled = horsies::monitoring::cancel_task(&suite.app, handle.task_id(), false)
-        .await
-        .expect("cancel the pending task");
+    let _cancelled = horsies::monitoring::cancel_task(
+        &suite.app,
+        handle.task_id(),
+        horsies::monitoring::CancelPolicy::PendingOrClaimedOnly,
+    )
+    .await
+    .expect("cancel the pending task");
     match outcome(&handle, Duration::from_secs(1)).await {
         TaskOutcome::Failed(error) => {
             assert_eq!(error.code().as_str(), "TASK_CANCELLED");
@@ -542,9 +546,13 @@ async fn test_task_cancelled_get_result() {
         .send(basic::simple::Input { x: 5 })
         .await
         .expect("send");
-    let _cancelled = horsies::monitoring::cancel_task(&suite.app, handle.task_id(), false)
-        .await
-        .expect("cancel the pending task");
+    let _cancelled = horsies::monitoring::cancel_task(
+        &suite.app,
+        handle.task_id(),
+        horsies::monitoring::CancelPolicy::PendingOrClaimedOnly,
+    )
+    .await
+    .expect("cancel the pending task");
     let read = suite
         .app
         .get_result::<i64, Infallible>(handle.task_id(), within(Duration::from_secs(1)))

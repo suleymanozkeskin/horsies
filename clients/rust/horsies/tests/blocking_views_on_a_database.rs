@@ -2,7 +2,7 @@
 //! runs its async method on the core's process runtime and returns its
 //! answer (Python's sync calls: `send`, `resend`,
 //! `TaskHandle.get` and `info`, the app's reads by task id and health
-//! reads, `check(live=True)`, the workflow starts and `retry_start`, and the
+//! reads, `check(live=True)`, the workflow starts and `resend_start`, and the
 //! sync methods of `WorkflowHandle`). One test per outcome of the database.
 //!
 //! The blocking calls run on an OS thread of their own that runs no tokio
@@ -26,9 +26,9 @@ use chrono::{DateTime, Utc};
 use horsies::{
     task, AppConfig, HandleResult, Horsies, HorsiesError, NodeKey, NodeResult, PingTarget,
     ReadError, TaskError, TaskFunction, TaskInfoParts, TaskOutcome, TaskSendErrorCode,
-    TaskSendOptions, TaskStatus, WaitLimit, WholeSeconds, WorkerHistoryLimit, WorkflowDefConfig,
-    WorkflowDefinition, WorkflowHandleError, WorkflowReadError, WorkflowSpec, WorkflowSpecBuilder,
-    WorkflowStartErrorCode, WorkflowStatus,
+    TaskSendOptions, TaskStatus, WaitLimit, WholeSeconds, WorkerHistoryLimit, WorkflowDefinition,
+    WorkflowDefinitionConfig, WorkflowHandleError, WorkflowReadError, WorkflowSpec,
+    WorkflowSpecBuilder, WorkflowStartErrorCode, WorkflowStatus,
 };
 use horsies_core::core::lifecycle::{OwnedClaim, TerminalizationOutcome, WorkflowSuccessOutcome};
 use horsies_core::{
@@ -126,9 +126,11 @@ const TEMPLATE_PARAMS: u32 = 1;
 
 /// One node, the task `answer` with the node id [`ANSWER_NODE`], which is
 /// the output. The app of the builder registers `answer` before any build.
-fn answer_output(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+fn answer_output(
+    builder: &mut WorkflowSpecBuilder,
+) -> Result<WorkflowDefinitionConfig, HorsiesError> {
     let output = builder.task(answer::node().node_id(ANSWER_NODE))?;
-    Ok(WorkflowDefConfig::new().output(output))
+    Ok(WorkflowDefinitionConfig::new().output(output))
 }
 
 /// A definition without params, for the views of a workflow function.
@@ -136,7 +138,7 @@ struct Nightly;
 
 impl WorkflowDefinition for Nightly {
     type Output = u32;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "blocking_views_nightly"
@@ -146,7 +148,7 @@ impl WorkflowDefinition for Nightly {
         "tests.blocking_views.nightly.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         answer_output(builder)
     }
 }
@@ -156,7 +158,7 @@ struct Regional;
 
 impl WorkflowDefinition for Regional {
     type Output = u32;
-    type Params = u32;
+    type Parameters = u32;
 
     fn name() -> &'static str {
         "blocking_views_regional"
@@ -166,7 +168,7 @@ impl WorkflowDefinition for Regional {
         "tests.blocking_views.regional.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         answer_output(builder)
     }
 }
@@ -176,7 +178,7 @@ struct ByTypeNightly;
 
 impl WorkflowDefinition for ByTypeNightly {
     type Output = u32;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "blocking_views_by_type_nightly"
@@ -186,7 +188,7 @@ impl WorkflowDefinition for ByTypeNightly {
         "tests.blocking_views.by_type_nightly.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         answer_output(builder)
     }
 }
@@ -196,7 +198,7 @@ struct ByTypeRegional;
 
 impl WorkflowDefinition for ByTypeRegional {
     type Output = u32;
-    type Params = u32;
+    type Parameters = u32;
 
     fn name() -> &'static str {
         "blocking_views_by_type_regional"
@@ -206,7 +208,7 @@ impl WorkflowDefinition for ByTypeRegional {
         "tests.blocking_views.by_type_regional.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         answer_output(builder)
     }
 }
@@ -984,7 +986,7 @@ async fn blocking_function_and_template_starts_write_their_workflows() {
             .workflow_id();
         assert_eq!(found, nightly);
         let template = app
-            .workflow_template::<Regional>()
+            .register_workflow_definition_with::<Regional>()
             .expect("register the template");
         let regional = template
             .blocking()
@@ -1027,7 +1029,7 @@ async fn blocking_starts_by_type_write_their_workflows() {
             .register_workflow_definition::<ByTypeNightly>()
             .expect("register the definition");
         let _template = app
-            .workflow_template::<ByTypeRegional>()
+            .register_workflow_definition_with::<ByTypeRegional>()
             .expect("register the template");
         let nightly = app
             .blocking()
@@ -1063,11 +1065,11 @@ async fn blocking_starts_by_type_write_their_workflows() {
     database.drop().await;
 }
 
-/// `retry_start`: a start on a runtime thread answers `ASYNC_CONTEXT` with
+/// `resend_start`: a start on a runtime thread answers `ASYNC_CONTEXT` with
 /// its workflow id and writes nothing; the retry of that error on a thread
 /// without a runtime writes the workflow with that id.
 #[tokio::test]
-async fn a_blocking_retry_start_writes_the_refused_start_with_its_workflow_id() {
+async fn a_blocking_resend_start_writes_the_refused_start_with_its_workflow_id() {
     let (database, worker) = covered_database().await;
     let url = database.url().to_owned();
     let refused_id = off_the_runtime(move || {
@@ -1085,7 +1087,7 @@ async fn a_blocking_retry_start_writes_the_refused_start_with_its_workflow_id() 
         );
         let started = function
             .blocking()
-            .retry_start(&refused)
+            .resend_start(&refused)
             .expect("the blocking retry of the refused start")
             .workflow_id();
         assert_eq!(started, refused.workflow_id());
@@ -1119,7 +1121,7 @@ async fn blocking_handle_reads_of_a_running_workflow() {
 
         let status = view.status();
         assert!(matches!(status, Ok(WorkflowStatus::Running)), "{status:?}");
-        let nodes = view.tasks().expect("the nodes of the workflow");
+        let nodes = view.nodes().expect("the nodes of the workflow");
         match nodes.as_slice() {
             [node] => {
                 assert_eq!(node.node_id.as_deref(), Some(ANSWER_NODE));
@@ -1285,7 +1287,7 @@ async fn blocking_handle_methods_of_an_unknown_workflow_are_workflow_not_found()
         let view = handle.blocking();
 
         assert_workflow_not_found(view.status(), workflow_id);
-        assert_workflow_not_found(view.tasks(), workflow_id);
+        assert_workflow_not_found(view.nodes(), workflow_id);
         assert_workflow_not_found(view.results(), workflow_id);
         assert_workflow_not_found(view.pause(), workflow_id);
         assert_workflow_not_found(view.resume(), workflow_id);

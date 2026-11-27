@@ -42,8 +42,8 @@ export type ContextReadError =
 /** The workflow context of one task run. */
 export interface WorkflowContext {
   readonly workflowId: WorkflowId;
-  /** The index of the task's node in its workflow. */
-  readonly taskIndex: number;
+  /** The index of the task's node in its workflow (stored key `task_index`). */
+  readonly nodeIndex: number;
   /** The task name of the node. */
   readonly taskName: string;
   /** The outcome of the context node `nodeId`, read with the output type and the codes of `contract`. */
@@ -105,7 +105,7 @@ export function workflowContextOfTree(tree: TreeValue): Result<WorkflowContext, 
   }
 
   const workflowId = tree["workflow_id"];
-  const taskIndex = tree["task_index"];
+  const nodeIndex = tree["task_index"];
   const taskName = tree["task_name"];
   const results = tree["results_by_id"] ?? {};
   const summaries = tree["summaries_by_id"] ?? {};
@@ -114,7 +114,7 @@ export function workflowContextOfTree(tree: TreeValue): Result<WorkflowContext, 
     return refused("workflow_id", "not a UUID in the lower-case 8-4-4-4-12 form");
   }
 
-  if (!isNumber(taskIndex) || !Number.isSafeInteger(taskIndex) || taskIndex < INDEX_MIN) {
+  if (!isNumber(nodeIndex) || !Number.isSafeInteger(nodeIndex) || nodeIndex < INDEX_MIN) {
     return refused("task_index", "not an integer of 0 or more");
   }
 
@@ -133,7 +133,7 @@ export function workflowContextOfTree(tree: TreeValue): Result<WorkflowContext, 
   }
 
   // SAFETY: `workflowId` passed `isUuidText`, the rule of `WorkflowId.parse`.
-  return ok(contextValue(workflowId as WorkflowId, taskIndex, taskName, results, stored.value));
+  return ok(contextValue(workflowId as WorkflowId, nodeIndex, taskName, results, stored.value));
 }
 
 /** The summaries of `summaries_by_id`, by node id, or the refusal of the first one that does not read. Pure. */
@@ -166,7 +166,7 @@ function refused(member: string, detail: string): Result<never, ContextRefused> 
 
 function contextValue(
   workflowId: WorkflowId,
-  taskIndex: number,
+  nodeIndex: number,
   taskName: string,
   results: TreeObject,
   summaries: ReadonlyMap<string, StoredSummary>,
@@ -191,7 +191,7 @@ function contextValue(
 
   return Object.freeze({
     workflowId,
-    taskIndex,
+    nodeIndex,
     taskName,
     // SAFETY: the reader decodes with `contract`: its output type and its codes are the result's types.
     resultFor: resultFor as WorkflowContext["resultFor"],

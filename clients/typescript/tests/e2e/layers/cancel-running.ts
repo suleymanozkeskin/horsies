@@ -112,7 +112,7 @@ async function assertCancelledWithOneAttempt<O, E extends string>(suite: Suite, 
   const detail = read.value.taskDetail;
   const [attempt, ...others] = detail.attempts;
 
-  assert.equal(detail.leaf.status, "CANCELLED");
+  assert.equal(detail.taskRow.status, "CANCELLED");
   assert.ok(attempt !== undefined && others.length === 0, `one attempt in the detail, not ${String(detail.attempts.length)}`);
   assert.notEqual(attempt.startedAt, null, "the cancelled attempt started");
   assert.equal(attempt.phases.kind === "captured" ? attempt.phases.recordedBy.kind : attempt.phases.kind, "cancel");

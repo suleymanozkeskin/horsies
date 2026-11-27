@@ -267,7 +267,7 @@ async fn export_report(
 The cancel signal of a run fires for two causes. The first cause stays.
 
 - `CancelCause::Operator`: an operator cancel of the task
-  (`horsies::monitoring::cancel_task` with `include_running = true`, or the
+  (`horsies::monitoring::cancel_task` with `CancelPolicy::IncludeRunning`, or the
   web UI), in every execution class. One statement writes the attempt row
   with outcome `Cancelled` and moves the task to history as `CANCELLED`; a
   waiting `TaskHandle::get` returns `Failed` with `TASK_CANCELLED`. What the
@@ -629,9 +629,9 @@ calling thread.
 | `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `with_options(..).send`, `resend` |
 | `TaskHandleView` | `handle.blocking()` | `get`, `info` |
 | `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_execution_class_coverage`, `get_execution_class_report`, `check_live`, `start`, `start_with_id`, `start_workflow`, `start_workflow_with` |
-| `WorkflowFunctionView` | `workflow_function.blocking()` | `start`, `start_with_id`, `retry_start` |
+| `WorkflowFunctionView` | `workflow_function.blocking()` | `start`, `start_with_id`, `resend_start` |
 | `WorkflowTemplateView` | `workflow_template.blocking()` | `start`, `start_with_id` |
-| `WorkflowHandleView` | `workflow_handle.blocking()` | `get`, `result_for`, `status`, `results`, `tasks`, `cancel`, `pause`, `resume` |
+| `WorkflowHandleView` | `workflow_handle.blocking()` | `get`, `result_for`, `status`, `results`, `nodes`, `cancel`, `pause`, `resume` |
 
 The starts of a definition by its type are methods of the app view:
 `app.blocking().start_workflow::<D>()` and
@@ -644,7 +644,7 @@ The starts of a definition by its type are methods of the app view:
   `ReadError::AsyncContext`, `DatabaseOperationError::AsyncContext`, a
   `ValidationReport` with `HRS-217`,
   `WorkflowStartError::AsyncContext` (with the `workflow_id` of the
-  start; `retry_start(&error).await` completes the same start from async
+  start; `resend_start(&error).await` completes the same start from async
   code), `WorkflowHandleError::AsyncContext`, or
   `WorkflowReadError::AsyncContext`.
 - The thread of a `#[blocking_task]` body in a worker child drives no async
@@ -654,7 +654,7 @@ The starts of a definition by its type are methods of the app view:
   `Suppressed` on any thread, and a read with a `Within` limit above
   `MAX_WAIT_LIMIT_MS` is `InvalidInput` on any thread. A workflow start
   checks the thread first, as Python's `WorkflowSpec.start`: on a runtime
-  thread a template's build does not run. `retry_start` checks its error
+  thread a template's build does not run. `resend_start` checks its error
   first.
 
 ## Rerun a Terminal Task

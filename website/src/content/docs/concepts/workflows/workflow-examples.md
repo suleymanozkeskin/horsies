@@ -1,7 +1,7 @@
 ---
 title: Workflow Examples
 section: python
-summary: Python examples of the workflow rules - status helpers, failed and skipped dependencies, resume, joins, sentinels, retries, success policies, result keys, WorkflowContext, WorkflowMeta, and node result reads.
+summary: Python examples of the workflow rules - status helpers, failed and skipped dependencies, resume, joins, sentinels, retries, success policies, result keys, WorkflowContext, WorkflowMetadata, and node result reads.
 related: [workflow-semantics, workflow-api, typed-node-builder, subworkflows]
 tags: [workflows, examples, TaskNode, WorkflowContext, SuccessPolicy, NodeKey, TaskOutcome, ReadResult]
 ---
@@ -17,20 +17,20 @@ Each status has `is_terminal`. The frozenset constants hold the terminal statuse
 ```python
 from horsies import (
     WorkflowStatus,
-    WorkflowTaskStatus,
+    WorkflowNodeStatus,
     WORKFLOW_TERMINAL_STATES,
-    WORKFLOW_TASK_TERMINAL_STATES,
+    WORKFLOW_NODE_TERMINAL_STATES,
 )
 
 WorkflowStatus.COMPLETED.is_terminal  # True
 WorkflowStatus.PAUSED.is_terminal     # False
 
-WorkflowTaskStatus.SKIPPED.is_terminal  # True
-WorkflowTaskStatus.ENQUEUED.is_terminal # False
+WorkflowNodeStatus.SKIPPED.is_terminal  # True
+WorkflowNodeStatus.ENQUEUED.is_terminal # False
 
 # Frozensets for use in queries or filters
 WORKFLOW_TERMINAL_STATES       # frozenset({COMPLETED, FAILED, CANCELLED, EXPIRED})
-WORKFLOW_TASK_TERMINAL_STATES  # frozenset({COMPLETED, FAILED, SKIPPED})
+WORKFLOW_NODE_TERMINAL_STATES  # frozenset({COMPLETED, FAILED, SKIPPED})
 ```
 
 ## Upstream Failure and args_from
@@ -244,7 +244,7 @@ policy = SuccessPolicy(
 
 workflow = app.workflow(
     "my_workflow",
-    tasks=[task_a, task_b, cleanup_task],
+    nodes=[task_a, task_b, cleanup_task],
     success_policy=policy,
     definition_key="myapp.my_workflow.v1",
 )
@@ -275,7 +275,7 @@ policy = SuccessPolicy(
 
 spec = app.workflow(
     name="ship_package",
-    tasks=[pickup, deliver_recipient, deliver_neighbor, deliver_locker, notify],
+    nodes=[pickup, deliver_recipient, deliver_neighbor, deliver_locker, notify],
     success_policy=policy,
     definition_key="myapp.ship_package.v1",
 )
@@ -351,7 +351,7 @@ def review_step() -> Result[str, TaskError]:
 
 workflow = app.workflow(
     "critical_pipeline",
-    tasks=[TaskNode(function=review_step, node_id="review")],
+    nodes=[TaskNode(function=review_step, node_id="review")],
     on_error=OnError.PAUSE,  # Stop for manual review on failure
     definition_key="myapp.critical_pipeline.v1",
 )
@@ -364,7 +364,7 @@ workflow = app.workflow(
 # Designate which task's result is the workflow output
 workflow = app.workflow(
     "pipeline",
-    tasks=[a, b, c, final],
+    nodes=[a, b, c, final],
     output=final,  # workflow.get() returns final's result
     definition_key="myapp.pipeline.v1",
 )
@@ -379,7 +379,7 @@ fetch_b = TaskNode(function=fetch_data, kwargs={'url': "url_b"})  # index 1
 
 spec = WorkflowSpec(
     name="parallel_fetch",
-    tasks=[fetch_a, fetch_b],
+    nodes=[fetch_a, fetch_b],
     broker=broker,
     definition_key="myapp.parallel_fetch.v1",
 )
@@ -517,41 +517,41 @@ RuntimeError: TaskNode node_id is not set. Ensure WorkflowSpec assigns node_id
 or provide an explicit node_id.
 ```
 
-`slugify()` gives the slug that an auto-assigned node id starts with:
+`node_id_from_text()` gives the slug that an auto-assigned node id starts with:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import slugify
+from horsies import node_id_from_text
 
 # Workflow name with spaces
 spec = app.workflow(
     name="My Data Pipeline",
-    tasks=[a, b],
+    nodes=[a, b],
     definition_key="myapp.my_data_pipeline.v1",
 )
 # Auto-generated node_ids: "My_Data_Pipeline:0", "My_Data_Pipeline:1"
 
-# Manual slugify for custom use
-safe_name = slugify("Hello World!")  # "Hello_World"
+# node_id_from_text for your own use
+safe_name = node_id_from_text("Hello World!")  # "Hello_World"
 ```
 
-## WorkflowMeta
+## WorkflowMetadata
 
-A task that needs only the workflow metadata declares a `WorkflowMeta` parameter:
+A task that needs only the workflow metadata declares a `WorkflowMetadata` parameter:
 
 ```python
-from horsies import WorkflowMeta
+from horsies import WorkflowMetadata
 
 @app.task(name="my_task")
-def my_task(*, workflow_meta: WorkflowMeta | None = None) -> Result[str, TaskError]:
+def my_task(*, workflow_meta: WorkflowMetadata | None = None) -> Result[str, TaskError]:
     if workflow_meta:
         print(f"Running in workflow {workflow_meta.workflow_id}")
-        print(f"Task index: {workflow_meta.task_index}")
+        print(f"Node index: {workflow_meta.node_index}")
         print(f"Task name: {workflow_meta.task_name}")
     return Ok("done")
 ```
 
-`WorkflowMeta` is auto-injected if the task declares the parameter. Unlike `WorkflowContext`, it doesn't require `workflow_context_from`.
+`WorkflowMetadata` is auto-injected if the task declares the parameter. Unlike `WorkflowContext`, it doesn't require `workflow_context_from`.
 
 ## What the Receiving Function Gets
 

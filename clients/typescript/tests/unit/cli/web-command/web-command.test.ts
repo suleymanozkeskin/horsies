@@ -111,7 +111,7 @@ describe("the flags of web", () => {
         authorization: "none",
         trustedHeaderName: "X-Forwarded-User",
         actions: "disabled",
-        traceLink: { kind: "noTraceLink" },
+        traceLink: { kind: "text" },
         logLevel: "INFO",
       },
     });

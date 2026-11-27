@@ -66,8 +66,8 @@ from horsies.core.task_read import read_of_record
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
 from horsies.core.workflows.lifecycle import (
-    pause_workflow_sync,
-    resume_workflow_sync,
+    pause_workflow,
+    resume_workflow,
     start_workflow,
 )
 from horsies.core.workflows.start_types import (
@@ -296,7 +296,7 @@ def test_send_maps_broker_async_context_to_send_async_context() -> None:
 
 
 @pytest.mark.parametrize(
-    'name', ['status', 'results', 'tasks', 'cancel', 'pause', 'resume'],
+    'name', ['status', 'results', 'nodes', 'cancel', 'pause', 'resume'],
 )
 def test_workflow_handle_wrap_method_returns_async_context(
     app: Horsies, name: str,
@@ -342,7 +342,7 @@ def test_workflow_handle_read_method_returns_async_context(
 
 
 @pytest.mark.parametrize(
-    'operation', [pause_workflow_sync, resume_workflow_sync],
+    'operation', [pause_workflow, resume_workflow],
 )
 def test_lifecycle_sync_wrapper_returns_async_context(
     app: Horsies, operation: Callable[[PostgresBroker, str], Any],
@@ -389,10 +389,10 @@ def test_spec_start_returns_async_context(app: Horsies) -> None:
     _assert_nothing_ran(app.get_broker())
 
 
-def test_spec_retry_start_returns_async_context(app: Horsies) -> None:
+def test_spec_resend_start_returns_async_context(app: Horsies) -> None:
     spec = _spec(app)
 
-    result = _inside_loop(lambda: spec.retry_start(_failed_start()))
+    result = _inside_loop(lambda: spec.resend_start(_failed_start()))
 
     assert is_err(result)
     assert result.err_value.code is WorkflowStartErrorCode.ASYNC_CONTEXT
@@ -400,8 +400,8 @@ def test_spec_retry_start_returns_async_context(app: Horsies) -> None:
     _assert_nothing_ran(app.get_broker())
 
 
-def test_spec_retry_start_accepts_an_async_context_error(app: Horsies) -> None:
-    """Outside a loop, retry_start of an ASYNC_CONTEXT error starts with its id."""
+def test_spec_resend_start_accepts_an_async_context_error(app: Horsies) -> None:
+    """Outside a loop, resend_start of an ASYNC_CONTEXT error starts with its id."""
     spec = _spec(app)
     refused = WorkflowStartAsyncContext(
         message='refused',
@@ -412,7 +412,7 @@ def test_spec_retry_start_accepts_an_async_context_error(app: Horsies) -> None:
 
     # The spec is frozen; patch the method on its class.
     with patch.object(type(spec), 'start', return_value=Ok(started)) as start:
-        result = spec.retry_start(refused)
+        result = spec.resend_start(refused)
 
     assert is_ok(result)
     assert result.ok_value is started
@@ -547,8 +547,8 @@ BLOCKING_SITES: dict[str, BlockingSite] = {
         'workflow_node_results',
         WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED,
     ),
-    'WorkflowHandle.tasks': BlockingSite(
-        lambda app, broker: _workflow_handle(broker).tasks(),
+    'WorkflowHandle.nodes': BlockingSite(
+        lambda app, broker: _workflow_handle(broker).nodes(),
         'workflow_nodes',
         WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED,
     ),
@@ -582,13 +582,13 @@ BLOCKING_SITES: dict[str, BlockingSite] = {
         'start_workflow',
         WorkflowStartErrorCode.ENQUEUE_FAILED,
     ),
-    'pause_workflow_sync': BlockingSite(
-        lambda app, broker: pause_workflow_sync(broker, uuid.UUID(WORKFLOW_ID)),
+    'pause_workflow': BlockingSite(
+        lambda app, broker: pause_workflow(broker, uuid.UUID(WORKFLOW_ID)),
         'pause_workflow',
         WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED,
     ),
-    'resume_workflow_sync': BlockingSite(
-        lambda app, broker: resume_workflow_sync(broker, uuid.UUID(WORKFLOW_ID)),
+    'resume_workflow': BlockingSite(
+        lambda app, broker: resume_workflow(broker, uuid.UUID(WORKFLOW_ID)),
         'resume_workflow',
         WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED,
     ),
@@ -713,25 +713,25 @@ ASYNC_TWINS: dict[str, tuple[Callable[[Horsies], Any], str]] = {
             lambda app, name=name: getattr(_workflow_handle(app.get_broker()), name)(),
             f'handle.{name}_async(',
         )
-        for name in ('status', 'results', 'tasks', 'cancel', 'pause', 'resume')
+        for name in ('status', 'results', 'nodes', 'cancel', 'pause', 'resume')
     },
     'WorkflowHandle.get': (
         lambda app: _workflow_handle(app.get_broker()).get(wait_ms=0),
         'handle.get_async(',
     ),
     'WorkflowHandle.result_for': (_workflow_result_for, 'handle.result_for_async('),
-    'pause_workflow_sync': (
-        lambda app: pause_workflow_sync(app.get_broker(), uuid.UUID(WORKFLOW_ID)),
-        'pause_workflow(broker, workflow_id)',
+    'pause_workflow': (
+        lambda app: pause_workflow(app.get_broker(), uuid.UUID(WORKFLOW_ID)),
+        'pause_workflow_async(broker, workflow_id)',
     ),
-    'resume_workflow_sync': (
-        lambda app: resume_workflow_sync(app.get_broker(), uuid.UUID(WORKFLOW_ID)),
-        'resume_workflow(broker, workflow_id)',
+    'resume_workflow': (
+        lambda app: resume_workflow(app.get_broker(), uuid.UUID(WORKFLOW_ID)),
+        'resume_workflow_async(broker, workflow_id)',
     ),
     'WorkflowSpec.start': (lambda app: _spec(app).start(WORKFLOW_ID), 'spec.start_async('),
-    'WorkflowSpec.retry_start': (
-        lambda app: _spec(app).retry_start(_failed_start()),
-        'spec.retry_start_async(',
+    'WorkflowSpec.resend_start': (
+        lambda app: _spec(app).resend_start(_failed_start()),
+        'spec.resend_start_async(',
     ),
     'start_workflow': (
         lambda app: start_workflow(_spec(app), app.get_broker(), WORKFLOW_ID),

@@ -327,10 +327,10 @@ class TestStartPauseGate:
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
                 node = TaskNode(function=child_task)
-                return app.workflow(name=cls.name, tasks=[node], output=node)
+                return app.workflow(name=cls.name, nodes=[node], output=node)
 
         fast = TaskNode(function=fast_task, kwargs={'value': 1})
-        sub = SubWorkflowNode(workflow_def=GateChild)
+        sub = SubWorkflowNode(workflow_definition=GateChild)
         spec = app.workflow(
             f'pause_gate_{uuid.uuid4().hex[:6]}', [fast, sub],
             on_error=OnError.PAUSE,
@@ -386,9 +386,9 @@ class TestStartPauseGate:
         ).scalar()
         assert n_tasks == 0
 
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from horsies.core.workflows.lifecycle import resume_workflow_async
 
-        resume_r = await resume_workflow(broker, wf_id)
+        resume_r = await resume_workflow_async(broker, wf_id)
         assert not is_err(resume_r), resume_r
         fast_status = (
             await session.execute(
@@ -439,11 +439,11 @@ class TestStartPauseGate:
 
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-                node = SubWorkflowNode(workflow_def=BrokenGrandchild)
-                return app.workflow(name=cls.name, tasks=[node], output=node)
+                node = SubWorkflowNode(workflow_definition=BrokenGrandchild)
+                return app.workflow(name=cls.name, nodes=[node], output=node)
 
         fast = TaskNode(function=fast_task, kwargs={'value': 1})
-        sub = SubWorkflowNode(workflow_def=BadChild)
+        sub = SubWorkflowNode(workflow_definition=BadChild)
         spec = app.workflow(
             f'pause_prop_{uuid.uuid4().hex[:6]}',
             [fast, sub],
@@ -490,9 +490,9 @@ class TestStartPauseGate:
         ).scalar()
         assert n_tasks == 0
 
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from horsies.core.workflows.lifecycle import resume_workflow_async
 
-        resume_r = await resume_workflow(broker, wf_id)
+        resume_r = await resume_workflow_async(broker, wf_id)
         assert not is_err(resume_r), resume_r
         fast_status = (
             await session.execute(

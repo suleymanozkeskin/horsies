@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 use super::*;
-use crate::core::WorkflowTaskStatus;
+use crate::core::WorkflowNodeStatus;
 use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::test_support::TestDatabase;
 
@@ -43,26 +43,26 @@ const NONTERMINAL_NODE_INDEX: &str = "idx_horsies_workflow_tasks_nonterminal";
 
 /// Every node status with the text that the enum writes for it. The match
 /// does not compile when a status is added.
-fn every_node_status() -> Vec<(WorkflowTaskStatus, &'static str)> {
+fn every_node_status() -> Vec<(WorkflowNodeStatus, &'static str)> {
     [
-        WorkflowTaskStatus::Pending,
-        WorkflowTaskStatus::Ready,
-        WorkflowTaskStatus::Enqueued,
-        WorkflowTaskStatus::Running,
-        WorkflowTaskStatus::Completed,
-        WorkflowTaskStatus::Failed,
-        WorkflowTaskStatus::Skipped,
+        WorkflowNodeStatus::Pending,
+        WorkflowNodeStatus::Ready,
+        WorkflowNodeStatus::Enqueued,
+        WorkflowNodeStatus::Running,
+        WorkflowNodeStatus::Completed,
+        WorkflowNodeStatus::Failed,
+        WorkflowNodeStatus::Skipped,
     ]
     .into_iter()
     .map(|status| {
         let text = match status {
-            WorkflowTaskStatus::Pending => "PENDING",
-            WorkflowTaskStatus::Ready => "READY",
-            WorkflowTaskStatus::Enqueued => "ENQUEUED",
-            WorkflowTaskStatus::Running => "RUNNING",
-            WorkflowTaskStatus::Completed => "COMPLETED",
-            WorkflowTaskStatus::Failed => "FAILED",
-            WorkflowTaskStatus::Skipped => "SKIPPED",
+            WorkflowNodeStatus::Pending => "PENDING",
+            WorkflowNodeStatus::Ready => "READY",
+            WorkflowNodeStatus::Enqueued => "ENQUEUED",
+            WorkflowNodeStatus::Running => "RUNNING",
+            WorkflowNodeStatus::Completed => "COMPLETED",
+            WorkflowNodeStatus::Failed => "FAILED",
+            WorkflowNodeStatus::Skipped => "SKIPPED",
         };
         assert_eq!(
             serde_json::to_value(status).expect("a status encodes"),
@@ -136,7 +136,7 @@ async fn seed_node(
 /// case-0 candidate when node 0 is terminal), and a workflow with one node in
 /// that status (a completion candidate when the node is terminal).
 struct StatusWorkflows {
-    status: WorkflowTaskStatus,
+    status: WorkflowNodeStatus,
     text: &'static str,
     waiting: Uuid,
     single: Uuid,

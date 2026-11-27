@@ -4198,10 +4198,13 @@ mod terminal_at_stamp_tests {
         seed(&pool, &id, "PENDING", None, None).await;
         let before = database_now(&pool).await;
 
-        let cancelled =
-            crate::monitoring::cancel_task(&broker, Uuid::parse_str(&id).unwrap(), false)
-                .await
-                .expect("cancel");
+        let cancelled = crate::monitoring::cancel_task(
+            &broker,
+            Uuid::parse_str(&id).unwrap(),
+            crate::monitoring::CancelPolicy::PendingOrClaimedOnly,
+        )
+        .await
+        .expect("cancel");
         assert_eq!(
             cancelled.was_status,
             crate::core::types::status::TaskStatus::Pending

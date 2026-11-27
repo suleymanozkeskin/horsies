@@ -239,13 +239,13 @@ def _quorum(*, min_success: int | None, join: Any = 'quorum') -> None:
         join=join,
         min_success=min_success,
     )
-    WorkflowSpec(name='hints_join', tasks=[first, second])
+    WorkflowSpec(name='hints_join', nodes=[first, second])
 
 
 def _quorum_with_no_dependencies(*, min_success: int | None) -> None:
     WorkflowSpec(
         name='hints_join_empty',
-        tasks=[
+        nodes=[
             TaskNode(
                 function=_one,
                 node_id='only',
@@ -257,11 +257,11 @@ def _quorum_with_no_dependencies(*, min_success: int | None) -> None:
 
 
 def _no_tasks() -> None:
-    WorkflowSpec(name='hints_empty', tasks=[])
+    WorkflowSpec(name='hints_empty', nodes=[])
 
 
 def _blank_node_id() -> None:
-    WorkflowSpec(name='hints_blank', tasks=[TaskNode(function=_one, node_id=' ')])
+    WorkflowSpec(name='hints_blank', nodes=[TaskNode(function=_one, node_id=' ')])
 
 
 def _skip_index_assignment(_spec: object) -> None:
@@ -270,7 +270,7 @@ def _skip_index_assignment(_spec: object) -> None:
 
 def _index_not_set() -> None:
     with patch.object(WorkflowSpec, '_assign_indices', _skip_index_assignment):
-        WorkflowSpec(name='hints_index', tasks=[TaskNode(function=_one)])
+        WorkflowSpec(name='hints_index', nodes=[TaskNode(function=_one)])
 
 
 def _task_key() -> None:
@@ -283,7 +283,7 @@ def _subworkflow_key() -> None:
         definition_key = _key('key_child')
         only = TaskNode(function=_one)
 
-    SubWorkflowNode(workflow_def=Child).key()
+    SubWorkflowNode(workflow_definition=Child).key()
 
 
 def _no_name() -> None:
@@ -327,7 +327,7 @@ def _duplicate_definition_key() -> None:
 def _cached_spec() -> None:
     prebuilt: WorkflowSpec[Any] = WorkflowSpec(
         name='hints_cached',
-        tasks=[TaskNode(function=_one)],
+        nodes=[TaskNode(function=_one)],
     )
 
     class Cached(WorkflowDefinition[Any]):
@@ -346,7 +346,7 @@ def _cached_spec() -> None:
 def _value_built_past_validation() -> None:
     WorkflowSpec(
         name='hints_read_back',
-        tasks=[
+        nodes=[
             TaskNode(function=_takes_note, kwargs={'note': _Note.model_construct(n='7')}),
         ],
     )
@@ -355,7 +355,7 @@ def _value_built_past_validation() -> None:
 def _value_with_a_field_the_type_lacks() -> None:
     WorkflowSpec(
         name='hints_fields',
-        tasks=[
+        nodes=[
             TaskNode(function=_takes_note, kwargs={'note': _SubNote(n=1, secret='kept')}),
         ],
     )
@@ -499,7 +499,7 @@ class TestARefusedSignatureSplitsItsReport:
         with pytest.raises(WorkflowValidationError) as refused:
             WorkflowSpec(
                 name='hints_parent',
-                tasks=[SubWorkflowNode(workflow_def=_RefusedChild)],
+                nodes=[SubWorkflowNode(workflow_definition=_RefusedChild)],
             )
 
         assert refused.value.code is HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
@@ -507,7 +507,7 @@ class TestARefusedSignatureSplitsItsReport:
 
     def test_at_the_boot_check(self) -> None:
         class Parent:
-            child = SubWorkflowNode(workflow_def=_RefusedChild)
+            child = SubWorkflowNode(workflow_definition=_RefusedChild)
 
         with (
             patch.object(_app, '_discovered_task_modules', ['boot_module']),

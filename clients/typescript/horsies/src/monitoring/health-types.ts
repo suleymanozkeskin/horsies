@@ -155,7 +155,10 @@ export interface ExpiredTaskRow {
   readonly expiredFor: Temporal.Duration;
 }
 
-/** A task list, and whether it stopped at its bound: `truncated` holds the first `bound` rows, and more rows match. */
+/**
+ * A task list, and whether it stopped at its bound: `truncated` holds the first `bound` rows (`TASK_LIST_ROW_BOUND`),
+ * and more rows match.
+ */
 export type BoundedTaskList<T> =
   | { readonly kind: "complete"; readonly rows: readonly T[] }
   | { readonly kind: "truncated"; readonly rows: readonly T[]; readonly bound: number };

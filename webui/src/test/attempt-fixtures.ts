@@ -5,7 +5,7 @@
 // engine steps of milliseconds.
 
 import type { AttemptPhases } from '@/types/timing';
-import type { LeafTask, TaskAttempt } from '@/types/workflows';
+import type { TaskRow, TaskAttempt } from '@/types/workflows';
 
 import { TIMING_EXAMPLES } from './timing-examples';
 import { at, nth } from './workflow-fixtures';
@@ -102,7 +102,7 @@ export function leafTask(
   retryCount: number,
   maxRetries: number,
   times: { enqueuedAt: string | null; startedAt: string | null }
-): LeafTask {
+): TaskRow {
   return {
     task_id: '00000000-0000-0000-0000-00000000000a',
     status,
@@ -114,8 +114,8 @@ export function leafTask(
     started_at: times.startedAt,
     completed_at: null,
     failed_at: null,
-    queue_s: null,
-    exec_s: null,
+    queue_seconds: null,
+    execution_seconds: null,
     worker_hostname: null,
     good_until: null,
     trace_id: null,

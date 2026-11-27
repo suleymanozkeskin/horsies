@@ -69,7 +69,7 @@ def subworkflow_start_request(workflow_id: uuid.UUID) -> WorkflowStartRequest:
     Raises:
         RuntimeError: the spec data does not encode (a defect of the builder).
     """
-    child: SubWorkflowNode[int] = SubWorkflowNode(workflow_def=ExtensionChild)
+    child: SubWorkflowNode[int] = SubWorkflowNode(workflow_definition=ExtensionChild)
     spec = APP.workflow(
         PARENT_NAME,
         [child],

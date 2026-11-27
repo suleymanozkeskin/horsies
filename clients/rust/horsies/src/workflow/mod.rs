@@ -23,13 +23,13 @@ mod start;
 mod sub_workflow;
 
 pub use context::{WorkflowContext, WorkflowContextError};
-pub use definition::{WorkflowDefConfig, WorkflowDefinition};
+pub use definition::{WorkflowDefinition, WorkflowDefinitionConfig};
 pub use dependency::OutputlessResults;
 pub use function::{WorkflowCheckBuilderRegistration, WorkflowFunction, WorkflowTemplate};
 pub use handle::{NodeResult, WorkflowHandle, WorkflowNodeInfo, WorkflowReadError};
 pub use node::{InputField, JoinType, NodeKey, NodeRef, TaskNode, TypedNodeRef};
 pub use spec::{SuccessCase, SuccessPolicy, WorkflowSpec, WorkflowSpecBuilder};
-pub use sub_workflow::{SubWorkflowNode, SubWorkflowParams};
+pub use sub_workflow::{SubWorkflowNode, SubWorkflowParameters};
 
 pub(crate) use node::NodeRegistration;
 pub(crate) use registry::WorkflowRegistry;
@@ -68,7 +68,7 @@ pub use horsies_core::{
 /// The workflow types of the core: the error policy, the statuses, the
 /// summary of a child workflow and the workflow meta of a task.
 pub use horsies_core::{
-    OnError, SubWorkflowSummary, WorkflowMeta, WorkflowStatus, WorkflowTaskStatus,
+    OnError, SubWorkflowSummary, WorkflowMetadata, WorkflowNodeStatus, WorkflowStatus,
 };
 
 /// A JSON value kept as its stored text: the `output` of a

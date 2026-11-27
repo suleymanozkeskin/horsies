@@ -41,7 +41,7 @@ function fakeAddons(handle: NativeCoreHandle, called: string[]): MonitoringAddon
   };
 
   const reads: MonitoringReadsAddon = {
-    readTaskStats: json("readTaskStats", "[]"),
+    readTaskStatusCounts: json("readTaskStatusCounts", "[]"),
     readTaskFacets: json("readTaskFacets", coreText(sample("Facets"))),
     readTaskBreakdown: json("readTaskBreakdown", coreText(sample("Breakdown"))),
     readTaskList: json("readTaskList", coreText(sample("TaskListPage"))),
@@ -87,7 +87,7 @@ describe("createMonitoringArea", () => {
     const { monitoring } = area;
 
     const answers = [
-      await monitoring.taskStats(),
+      await monitoring.taskStatusCounts(),
       await monitoring.taskFacets(),
       await monitoring.taskBreakdown({ groupBy: "taskName" }),
       await monitoring.listTasks(),
@@ -111,7 +111,7 @@ describe("createMonitoringArea", () => {
 
     assert.ok(answers.every((answer) => answer.ok));
     assert.deepEqual(called, [
-      "readTaskStats",
+      "readTaskStatusCounts",
       "readTaskFacets",
       "readTaskBreakdown",
       "readTaskList",

@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { describe } from "node:test";
 
-import type { TaskAttemptInfo, TaskId } from "#horsies";
+import type { TaskAttemptDetail, TaskId } from "#horsies";
 import { loadAddon } from "#horsies";
 import type { Instance } from "../src/instances.ts";
 import * as basic from "../src/tasks/basic.ts";
@@ -24,7 +24,7 @@ const RESULT_WAIT_MS = 15_000;
 const TASKS = 3;
 
 /** The one attempt of task `taskId` in its monitoring detail. */
-async function onlyAttempt(suite: Suite, taskId: TaskId): Promise<TaskAttemptInfo> {
+async function onlyAttempt(suite: Suite, taskId: TaskId): Promise<TaskAttemptDetail> {
   const read = await suite.app.monitoring.getTaskDetail(taskId);
 
   assert.ok(read.ok && read.value.kind === "found", `read the detail of task ${taskId}: ${read.ok ? read.value.kind : read.error.code}`);
@@ -40,7 +40,7 @@ async function onlyAttempt(suite: Suite, taskId: TaskId): Promise<TaskAttemptInf
  * The phases of `attempt`: captured and written by the worker, one counted claim whose first claim is the claim that
  * ran it, a due time at or before the claim, and a placement at or after the claim.
  */
-function assertPlacedByTheWorker(taskId: TaskId, attempt: TaskAttemptInfo): void {
+function assertPlacedByTheWorker(taskId: TaskId, attempt: TaskAttemptDetail): void {
   const phases = attempt.phases;
 
   assert.equal(attempt.outcome, "COMPLETED", `task ${taskId}`);

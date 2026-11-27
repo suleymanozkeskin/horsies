@@ -16,7 +16,7 @@ use super::support::{
     sub_workflow_node, task_node, workflow_status, IsolatedDatabase, PORT_QUEUE,
 };
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
-use crate::core::workflow::node::SubWorkflowParams;
+use crate::core::workflow::node::SubWorkflowParameters;
 use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
 use crate::core::{AnyNode, TaskResult, WorkflowSpec};
 use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
@@ -337,7 +337,7 @@ fn container_child(grandchild_key: &'static str) -> TestChildBuild {
             };
             let mut nested = sub_workflow_node(1, &grandchild);
             nested.input_json = input.to_owned();
-            nested.sub_workflow_params = SubWorkflowParams::Given;
+            nested.sub_workflow_params = SubWorkflowParameters::Given;
             let mut child = spec("container_child", vec![copy, nested]);
             child.output_index = Some(0);
             Ok(child)
@@ -381,7 +381,7 @@ async fn a_sub_workflow_node_and_its_children_store_their_container_input() {
     };
     let mut root = sub_workflow_node(0, &child_stub);
     root.input_json = r#"{"values": [1, 2]}"#.to_owned();
-    root.sub_workflow_params = SubWorkflowParams::Given;
+    root.sub_workflow_params = SubWorkflowParameters::Given;
     let mut parent = spec("container_parent", vec![root]);
     parent.output_index = Some(0);
     let values = serde_json::json!({"values": [1, 2]});

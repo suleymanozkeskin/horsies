@@ -20,7 +20,7 @@ import { keyEntryId, TimingKey, type KeyEntry, type KeyLight, type KeyPhase } fr
 import { durationText, unavailableReasonText } from './timing-text';
 
 const nodeLabelOf = (detail: WorkflowRunDetail, taskIndex: number): string => {
-  const node = detail.nodes.find(candidate => candidate.task_index === taskIndex);
+  const node = detail.nodes.find(candidate => candidate.node_index === taskIndex);
   return node === undefined ? `#${taskIndex}` : (node.node_id ?? node.task_name);
 };
 

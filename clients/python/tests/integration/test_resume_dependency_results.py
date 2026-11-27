@@ -1,6 +1,6 @@
 """Regression tests: resume must decode stored dependency results.
 
-The resume (``resume_workflow`` and its cascade to paused children) called
+The resume (``resume_workflow_async`` and its cascade to paused children) called
 ``get_dependency_results`` without ``app``, so every COMPLETED dependency
 decoded to a ``RESULT_DESERIALIZATION_ERROR`` (stage='no_app') sentinel and
 resumed ``args_from`` consumers received error envelopes for genuinely
@@ -21,7 +21,7 @@ from horsies.core.models.outcome import TaskOutcome
 from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode
 from horsies.core.types.result import Ok, Result, is_ok
-from horsies.core.workflows.engine import resume_workflow
+from horsies.core.workflows.engine import resume_workflow_async
 
 from .conftest import finish_task, start_ok
 
@@ -85,7 +85,7 @@ async def test_resume_injects_real_dependency_results(
     )
     spec: Any = app.workflow(
         name='resume_dep_results',
-        tasks=[node_a, node_b],
+        nodes=[node_a, node_b],
         output=node_b,
         definition_key='tests.resume_dep_results.v1',
     )
@@ -136,7 +136,7 @@ async def test_resume_injects_real_dependency_results(
     )
 
     # 3. Resume re-enqueues the consumer with stored dependency results.
-    resume_r = await resume_workflow(broker, handle.workflow_id)
+    resume_r = await resume_workflow_async(broker, handle.workflow_id)
     assert is_ok(resume_r)
     session.expire_all()
 

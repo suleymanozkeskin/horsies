@@ -17,7 +17,7 @@ import {
   decodeTaskListPage,
   decodeWorkflowRunDetail,
   decodeWorkflowRunSummary,
-  decodeWorkflowTaskDetail,
+  decodeWorkflowNodeDetail,
   type Facets,
   type ScheduleStateInfo,
   type StatusCount,
@@ -25,7 +25,7 @@ import {
   type TaskListPage,
   type WorkflowRunDetail,
   type WorkflowRunSummary,
-  type WorkflowTaskDetail,
+  type WorkflowNodeDetail,
 } from "../_catalog/monitoring_models.ts";
 import type { TaskId, WorkflowId } from "../contract/ids.ts";
 import type { NativeEnvelope } from "../native/call/envelope.ts";
@@ -60,8 +60,8 @@ import {
   taskFacetsArg,
   type TaskListQuery,
   taskListArg,
-  type TaskStatsQuery,
-  taskStatsArg,
+  type TaskStatusCountsQuery,
+  taskStatusCountsArg,
   wholeNumber,
   type WorkflowRunsQuery,
   workflowRunsArg,
@@ -85,7 +85,7 @@ export type WorkflowRunRead =
 
 /** A node of a workflow run by its node index, or no node. */
 export type WorkflowNodeRead =
-  | { readonly kind: "found"; readonly node: WorkflowTaskDetail }
+  | { readonly kind: "found"; readonly node: WorkflowNodeDetail }
   | { readonly kind: "notFound"; readonly workflowId: WorkflowId; readonly nodeIndex: number };
 
 /** The addon and the handle that the reads call. */
@@ -95,18 +95,18 @@ export interface ReadTarget {
 }
 
 /** The count of each task status in the window: all seven statuses, in a fixed order. */
-export async function taskStats(
+export async function taskStatusCounts(
   target: ReadTarget,
-  query: TaskStatsQuery,
+  query: TaskStatusCountsQuery,
 ): Promise<Result<readonly StatusCount[], MonitoringReadError>> {
-  const arg = taskStatsArg(query);
+  const arg = taskStatusCountsArg(query);
 
   if (!arg.ok) {
     return arg;
   }
 
-  return readModel("taskStats", () => target.addon.readTaskStats(target.handle, arg.value), (text) =>
-    modelList("taskStats", text, decodeStatusCount),
+  return readModel("taskStatusCounts", () => target.addon.readTaskStatusCounts(target.handle, arg.value), (text) =>
+    modelList("taskStatusCounts", text, decodeStatusCount),
   );
 }
 
@@ -221,7 +221,7 @@ export async function workflowNode(
 
     return value === null
       ? Object.freeze({ kind: "notFound", workflowId, nodeIndex: index.value })
-      : Object.freeze({ kind: "found", node: decodedOrDefect("workflowNode", decodeWorkflowTaskDetail(value)) });
+      : Object.freeze({ kind: "found", node: decodedOrDefect("workflowNode", decodeWorkflowNodeDetail(value)) });
   });
 }
 

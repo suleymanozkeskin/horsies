@@ -61,24 +61,24 @@ from horsies.core.models.class_coverage import (
     BudgetLoad,
     ExecutionClassCoverage,
     ExecutionClassReport,
-    NoneDue,
-    OldestWaiting,
+    StreamWaitNoneDue,
+    StreamWaitDue,
     PendingStream,
     StreamCoverage,
-    StreamServed,
-    StreamUnserved,
-    StreamWithoutCapacity,
+    StreamCoverageStateServed,
+    StreamCoverageStateUnserved,
+    StreamCoverageStateNoCapacity,
     WorkerExecutionClassLoad,
 )
 from horsies.core.models.cluster_cap import ClusterCap, NoClusterCap
 from horsies.core.models.health import (
-    AllSlotsServing,
+    SlotHealthAllServing,
     ExecutionClassBudget,
     ExecutionClassBudgets,
     DownSlot,
-    ProfileNamed,
-    ProfileNotRecorded,
-    SlotsDown,
+    SnapshotProfileNamed,
+    SnapshotProfileNotRecorded,
+    SlotHealthSlotsDown,
     SnapshotProfile,
     WorkerPong,
     WorkerStateSnapshot,
@@ -195,8 +195,8 @@ _SLOTS_DOWN_RECORD: Final = _record(
 
 def _snapshot(
     worker_id: str,
-    slot_health: AllSlotsServing | SlotsDown,
-    profile: SnapshotProfile = ProfileNamed(name='batch'),
+    slot_health: SlotHealthAllServing | SlotHealthSlotsDown,
+    profile: SnapshotProfile = SnapshotProfileNamed(name='batch'),
     cluster_wide_cap: ClusterCap | NoClusterCap = NoClusterCap(),
 ) -> WorkerStateSnapshot:
     return WorkerStateSnapshot(
@@ -235,7 +235,7 @@ def _snapshot(
     )
 
 
-_SLOTS_DOWN: Final = SlotsDown(
+_SLOTS_DOWN: Final = SlotHealthSlotsDown(
     (
         DownSlot(
             slot=1,
@@ -272,7 +272,7 @@ class TestWorkerStates:
         result = await broker.list_worker_states_async()
 
         assert result == Ok([
-            _snapshot('w1', AllSlotsServing()),
+            _snapshot('w1', SlotHealthAllServing()),
             _snapshot('w2', _SLOTS_DOWN),
         ])
 
@@ -296,8 +296,8 @@ class TestWorkerStates:
         result = await broker.list_worker_states_async()
 
         assert result == Ok([
-            _snapshot('w1', AllSlotsServing(), ProfileNamed(name='batch')),
-            _snapshot('w2', AllSlotsServing(), ProfileNotRecorded()),
+            _snapshot('w1', SlotHealthAllServing(), SnapshotProfileNamed(name='batch')),
+            _snapshot('w2', SlotHealthAllServing(), SnapshotProfileNotRecorded()),
         ])
 
     @pytest.mark.asyncio
@@ -316,8 +316,8 @@ class TestWorkerStates:
         result = await broker.list_worker_states_async()
 
         assert result == Ok([
-            _snapshot('w1', AllSlotsServing(), cluster_wide_cap=ClusterCap(tasks=20)),
-            _snapshot('w2', AllSlotsServing(), cluster_wide_cap=NoClusterCap()),
+            _snapshot('w1', SlotHealthAllServing(), cluster_wide_cap=ClusterCap(tasks=20)),
+            _snapshot('w2', SlotHealthAllServing(), cluster_wide_cap=NoClusterCap()),
         ])
 
     @pytest.mark.asyncio
@@ -340,7 +340,7 @@ class TestWorkerStates:
 
         result = await broker.get_worker_state_async('w9')
 
-        assert result == Ok(_snapshot('w9', AllSlotsServing()))
+        assert result == Ok(_snapshot('w9', SlotHealthAllServing()))
 
     @pytest.mark.parametrize(
         ('limit', 'handle_limit'),
@@ -445,9 +445,9 @@ class TestClassReads:
                 checked_at=_AT,
                 live_workers=2,
                 streams=(
-                    StreamCoverage('a', Execution.ISOLATED, StreamServed(workers=2, capacity=4)),
-                    StreamCoverage('a', Execution.SHARED_ASYNC, StreamWithoutCapacity(workers=1)),
-                    StreamCoverage('b', Execution.SHARED_THREAD, StreamUnserved()),
+                    StreamCoverage('a', Execution.ISOLATED, StreamCoverageStateServed(workers=2, capacity=4)),
+                    StreamCoverage('a', Execution.SHARED_ASYNC, StreamCoverageStateNoCapacity(workers=1)),
+                    StreamCoverage('b', Execution.SHARED_THREAD, StreamCoverageStateUnserved()),
                 ),
             ),
         )
@@ -509,14 +509,14 @@ class TestClassReads:
                     PendingStream(
                         'a',
                         Execution.ISOLATED,
-                        StreamUnserved(),
-                        OldestWaiting(oldest_due_at=_STARTED, wait=timedelta(seconds=90)),
+                        StreamCoverageStateUnserved(),
+                        StreamWaitDue(oldest_due_at=_STARTED, wait=timedelta(seconds=90)),
                     ),
                     PendingStream(
                         'b',
                         Execution.SHARED_ASYNC,
-                        StreamServed(workers=1, capacity=8),
-                        NoneDue(next_due_at=_AT),
+                        StreamCoverageStateServed(workers=1, capacity=8),
+                        StreamWaitNoneDue(next_due_at=_AT),
                     ),
                 ),
                 workers=(

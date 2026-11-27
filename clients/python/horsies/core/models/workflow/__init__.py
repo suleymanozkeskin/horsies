@@ -10,8 +10,8 @@ from horsies.core.models.workflow.enums import (
     OutT as OutT,
     WorkflowStatus,
     WORKFLOW_TERMINAL_STATES,
-    WorkflowTaskStatus,
-    WORKFLOW_TASK_TERMINAL_STATES,
+    WorkflowNodeStatus,
+    WORKFLOW_NODE_TERMINAL_STATES,
     OnError,
 )
 from horsies.core.models.workflow.nodes import (
@@ -25,17 +25,17 @@ from horsies.core.models.workflow.nodes import (
 )
 from horsies.core.models.workflow.typing_utils import (
     NODE_ID_PATTERN as NODE_ID_PATTERN,
-    slugify,
+    node_id_from_text,
     validate_workflow_generic_output_match,
 )
 from horsies.core.models.workflow.context import (
     SubWorkflowSummary,
-    WorkflowMeta,
+    WorkflowMetadata,
     WorkflowContextMissingId,
     WorkflowContext,
 )
 from horsies.core.models.workflow.handle import (
-    WorkflowTaskInfo,
+    WorkflowNodeInfo,
     WorkflowHandle,
 )
 from horsies.core.models.workflow.handle_types import (
@@ -66,8 +66,8 @@ __all__ = [
     'OutT',
     'WorkflowStatus',
     'WORKFLOW_TERMINAL_STATES',
-    'WorkflowTaskStatus',
-    'WORKFLOW_TASK_TERMINAL_STATES',
+    'WorkflowNodeStatus',
+    'WORKFLOW_NODE_TERMINAL_STATES',
     'OnError',
     # nodes
     'NodeKey',
@@ -79,15 +79,15 @@ __all__ = [
     'WorkflowTerminalResults',
     # typing utils
     'NODE_ID_PATTERN',
-    'slugify',
+    'node_id_from_text',
     'validate_workflow_generic_output_match',
     # context
     'SubWorkflowSummary',
-    'WorkflowMeta',
+    'WorkflowMetadata',
     'WorkflowContextMissingId',
     'WorkflowContext',
     # handle
-    'WorkflowTaskInfo',
+    'WorkflowNodeInfo',
     'WorkflowHandle',
     # handle types
     'WorkflowHandleAsyncContext',

@@ -135,7 +135,7 @@ save = save_result.node()(result=from_node(process))
 
 spec = app.workflow(
     name="etl_pipeline",
-    tasks=[fetch, process, save],
+    nodes=[fetch, process, save],
     definition_key="myapp.etl_pipeline.v1",
     on_error=OnError.FAIL,
     output=save,
@@ -171,7 +171,7 @@ spec = ETLPipeline.build(app)
 
 `config = WorkflowDefinitionConfig(...)` sets `output`, `on_error` and `success_policy`, and can name the nodes of the same class body. A `Meta` attribute raises HRS-033 when the class is created.
 
-Best for static, reusable DAGs. Use `build_with(app, **params)` for parameterized builds.
+Best for static, reusable DAGs. Use `build_with(app, **parameters)` for parameterized builds.
 
 ### Node options
 
@@ -196,16 +196,16 @@ match spec.start():
 
 Async: `spec.start_async()`.
 
-### Retry a Failed Start
+### Start Again After a Failed Start
 
-`retry_start` takes `WorkflowStartResendable`: `WorkflowStartEnqueueFailed` or `WorkflowStartAsyncContext`. It starts again with the error's `workflow_id`:
+`resend_start` takes `WorkflowStartResendable`: `WorkflowStartEnqueueFailed` or `WorkflowStartAsyncContext`. It starts again with the error's `workflow_id`:
 
 ```python
 match spec.start():
     case Ok(handle):
         ...
     case Err(WorkflowStartEnqueueFailed(retryable=True) as err):
-        match spec.retry_start(err):
+        match spec.resend_start(err):
             case Ok(handle):
                 ...
             case Err(retry_err):
@@ -214,7 +214,7 @@ match spec.start():
         ...
 ```
 
-A start with an existing `workflow_id` compares its start command with the stored one. The same command returns the existing handle; another command is `WorkflowStartCommandConflict` (`WORKFLOW_COMMAND_CONFLICT`, never retryable, nothing written). `retry_start` builds the same spec again, so a first attempt that committed comes back as the existing handle. Runs started before this release are not checked.
+A start with an existing `workflow_id` compares its start command with the stored one. The same command returns the existing handle; another command is `WorkflowStartCommandConflict` (`WORKFLOW_COMMAND_CONFLICT`, never retryable, nothing written). `resend_start` builds the same spec again, so a first attempt that committed comes back as the existing handle. Runs started before this release are not checked.
 
 ### Auto-retry ( this is not execution retry, only for sending tasks / starting workflows, for task execution retry see `RetryPolicy` )
 
@@ -229,7 +229,7 @@ task sends and workflow starts.
 handle.status()          # HandleResult[WorkflowStatus] — unwrap before use
 handle.get(wait_ms=N) # ReadResult[T, TaskError] (blocks for output node)
 handle.results()         # HandleResult[dict[str, TaskOutcome[Any, TaskError]]] — unwrap before use
-handle.tasks()           # HandleResult[list[WorkflowTaskInfo]] — unwrap before use
+handle.nodes()           # HandleResult[list[WorkflowNodeInfo]] — unwrap before use
 handle.cancel()          # cancel workflow
 handle.pause()           # pause (RUNNING -> PAUSED)
 handle.resume()          # resume (PAUSED -> RUNNING)
@@ -239,14 +239,14 @@ All methods have `_async()` variants.
 
 ### Reconnect to an Existing Workflow
 
-`WorkflowHandle.for_id(text, broker)` parses a workflow id text once, at the
+`app.workflow_handle(workflow_id)` parses a workflow id text once, at the
 boundary: `Ok(handle)`, or `Err(WorkflowHandleInvalidWorkflowId)` for text that is not
 a UUID (no handle is built).
 
 ```python
-from horsies import Err, Ok, WorkflowHandle
+from horsies import Err, Ok
 
-match WorkflowHandle.for_id("3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f", app.get_broker()):
+match app.workflow_handle("3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f"):
     case Ok(ok_value=handle):
         result = handle.get(wait_ms=30_000)
     case Err(err_value=invalid):
@@ -382,7 +382,7 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`. Read a 
 
 Every call runs on the core of the process: one pool for every thread and event loop, so no call has an event loop limit.
 
-`ASYNC_CONTEXT` (every catalog above, `DatabaseErrorCode`, and the read error `ReadAsyncContext`): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell). Its wait would stall that loop, so nothing ran. Call the `*_async` form. `retryable=False` where the error has the field; a handle does not keep an `ReadAsyncContext` read error; `await spec.retry_start_async(err)` completes a start that returned it. `app.check(live=True)` there reports `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`).
+`ASYNC_CONTEXT` (every catalog above, `DatabaseErrorCode`, and the read error `ReadAsyncContext`): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell). Its wait would stall that loop, so nothing ran. Call the `*_async` form. `retryable=False` where the error has the field; a handle does not keep an `ReadAsyncContext` read error; `await spec.resend_start_async(err)` completes a start that returned it. `app.check(live=True)` there reports `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`).
 
 ### Raised, never returned: `ForkedAfterCoreStart`, `CoreStopped`
 

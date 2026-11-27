@@ -153,7 +153,7 @@ The codes of the client calls. The error types that carry them are on the client
 | `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written. Use another id |
 | `WORKFLOW_COMMAND_CONFLICT` | No | The workflow id holds a workflow of the same name that another start command started, or a sub-workflow; nothing was written. Send the same start command, or use another id. See [Start a Workflow Once per Entity](/horsies/guides/start-workflow-once/) |
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error. Any other exception in the start transaction propagates |
-| `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` was called on a thread that runs an event loop; nothing was written. Call `await spec.retry_start_async(err)` to complete the start with the error's id |
+| `ASYNC_CONTEXT` | No | Sync `spec.start()` / `resend_start()` was called on a thread that runs an event loop; nothing was written. Call `await spec.resend_start_async(err)` to complete the start with the error's id |
 
 ### Workflow Handle Error Codes
 
@@ -164,7 +164,7 @@ The codes of the client calls. The error types that carry them are on the client
 | `DATABASE_OPERATION_FAILED` | `WorkflowHandleDatabaseOperationFailed` | `cause: BaseException` | The core's classification of the cause | A database or driver error. A read changed nothing; `cancel()`, `pause()` and `resume()` before its commit rolled back, or the commit outcome is unknown |
 | `STORED_DATA_INVALID` | `WorkflowHandleStoredDataInvalid` | `cause: BaseException` | No | A stored workflow status that is not a `WorkflowStatus` (`status()`, `cancel()`), or a subworkflow summary that is not valid (`tasks()`); nothing changed, and a repeat returns the same error |
 | `RESUME_RECOVERY_FAILED` | `WorkflowHandleResumeRecoveryFailed` | `cause: BaseException` | No | `resume()` committed, and the recovery pass for the workflow tree, which runs after the commit, failed with a database error. The workflow is `RUNNING`; the worker reaper runs the same pass over all workflows. A repeated `resume()` returns `Ok(False)` |
-| `ASYNC_CONTEXT` | `WorkflowHandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran. Call the `*_async` form (sync `get()` / `result_for()` return the read error `ASYNC_CONTEXT` instead) |
+| `ASYNC_CONTEXT` | `WorkflowHandleAsyncContext` | – | No | A sync handle method or `pause_workflow` / `resume_workflow` called on a thread that runs an event loop; nothing ran. Call the `*_async` form (sync `get()` / `result_for()` return the read error `ASYNC_CONTEXT` instead) |
 | `INVALID_WORKFLOW_ID` | `WorkflowHandleInvalidWorkflowId` | `workflow_id_text: str`, `cause: BaseException` | No | The workflow id text of `WorkflowHandle.for_id` is not a UUID; no handle was built, and the same text is refused again. It is not in the `WorkflowHandleError` union |
 
 `get()` returns a status read failure as a read error. `WORKFLOW_NOT_FOUND` becomes `Err(ReadWorkflowNotFound(...))`. `DATABASE_OPERATION_FAILED` and `STORED_DATA_INVALID` become `Err(ReadDatabaseError(...))`.
@@ -254,7 +254,7 @@ deployment pattern.
 | HRS-027 | `WORKFLOW_CHECK_CASES_REQUIRED` | Parameterized workflow builder missing test cases |
 | HRS-028 | `WORKFLOW_CHECK_CASE_INVALID` | Workflow builder test case is invalid |
 | HRS-029 | `WORKFLOW_CHECK_BUILDER_EXCEPTION` | Workflow builder raised an exception or returned non-WorkflowSpec, or `build_with()` returned a spec that this call did not build |
-| HRS-030 | `WORKFLOW_CHECK_UNDECORATED_BUILDER` | Function returns WorkflowSpec but lacks @app.workflow_builder |
+| HRS-030 | `WORKFLOW_CHECK_UNDECORATED_BUILDER` | Function returns WorkflowSpec but lacks @app.check_workflow_builder |
 | HRS-031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails JSON serialization, also a lone surrogate in a string or a dict key |
 | HRS-032 | `WORKFLOW_INVALID_ID` | supplied `workflow_id` is not a UUID |
 | HRS-033 | `WORKFLOW_INVALID_DEFINITION_CONFIG` | A `WorkflowDefinition` class defines `Meta`, or sets `config` to a value that is not a `WorkflowDefinitionConfig`; raised when the class is created |

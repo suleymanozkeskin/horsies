@@ -7,8 +7,8 @@
 //! moves requests and responses between axum and the handler:
 //!
 //! 1. The route's needed verdicts come from the core's `route_access`.
-//! 2. The mount asks the user's [`MonitoringAuthPolicy`] for those verdicts,
-//!    and no other.
+//! 2. The mount asks the user's [`MonitoringAuthorizationPolicy`] for those
+//!    verdicts, and no other.
 //! 3. The event stream (`GET /api/events`), once the view is allowed, is the
 //!    core's frame texts as a `text/event-stream` body. Every other request
 //!    goes to the handler with its verdicts, and its answer is sent as it
@@ -54,22 +54,16 @@ use crate::process_state::refuse_in_a_fork;
 use crate::workflow::WorkflowRegistry;
 use crate::Horsies;
 
-pub use auth::{AllowAll, MonitoringAuthPolicy, MonitoringRequest, TrustedHeader, ViewOnly};
+pub use auth::{
+    AllowAll, MonitoringAuthorizationPolicy, MonitoringRequest, TrustedHeader, ViewOnly,
+};
 pub use horsies_core::web::{
-    MonitoringUiConfig, TraceLink, TraceLinkRefusal, TraceLinkTemplate, INTENT_HEADER, INTENT_VALUE,
+    Actions, MonitoringUiConfig, TraceLink, TraceLinkRefusal, TraceLinkTemplate, INTENT_HEADER,
+    INTENT_VALUE,
 };
 
-/// Whether the action routes (task cancel, workflow pause, resume and
-/// cancel) run. Disabled actions answer 403 without asking the policy's
-/// `can_act`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Actions {
-    Enabled,
-    Disabled,
-}
-
 /// The settings of a monitoring mount. The default enables the actions, as
-/// Python's `actions_enabled=True`, with the default UI settings.
+/// Python's `actions=Actions.ENABLED`, with the default UI settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonitoringConfig {
     pub ui: MonitoringUiConfig,
@@ -97,26 +91,22 @@ impl Default for MonitoringConfig {
 /// workflow registry of `app`, with the definitions registered when each
 /// child builds. No schema step runs: build the app with
 /// `SchemaMode::ObserveOnly` for a monitoring tool.
-pub fn router<P>(app: &Horsies, config: MonitoringConfig, policy: P) -> Router
+pub fn router<P>(app: &Horsies, config: MonitoringConfig, authorization_policy: P) -> Router
 where
-    P: MonitoringAuthPolicy,
+    P: MonitoringAuthorizationPolicy,
 {
-    let actions_enabled = match config.actions {
-        Actions::Enabled => true,
-        Actions::Disabled => false,
-    };
     let fleet_labels = fleet_labels_of(app);
     let mount = Arc::new(Mount {
         handle: app.reads_handle(),
         workflows: Arc::clone(app.workflows()),
         settings: MonitoringHandlerConfig {
-            actions_enabled,
+            actions: config.actions,
             ui: config.ui,
             client_version: env!("CARGO_PKG_VERSION").to_owned(),
             heartbeat: HEARTBEAT,
             fleet_labels,
         },
-        policy,
+        policy: authorization_policy,
         handler: OnceCell::new(),
     });
     Router::new().fallback(serve::<P>).with_state(mount)
@@ -179,14 +169,10 @@ impl<P> Mount<P> {
 /// event stream or the handler's answer.
 async fn serve<P>(State(mount): State<Arc<Mount<P>>>, request: Request) -> Response
 where
-    P: MonitoringAuthPolicy,
+    P: MonitoringAuthorizationPolicy,
 {
     let (head, body) = request.into_parts();
-    let access = route_access(
-        mount.settings.actions_enabled,
-        &head.method,
-        head.uri.path(),
-    );
+    let access = route_access(mount.settings.actions, &head.method, head.uri.path());
     let grant = grant_of(&mount.policy, access.need, MonitoringRequest::of(&head)).await;
     let handler = match mount.handler().await {
         Ok(handler) => handler,
@@ -216,7 +202,7 @@ where
 /// then `can_act` only when the view was allowed.
 async fn grant_of<P>(policy: &P, need: AccessNeed, request: MonitoringRequest<'_>) -> AccessGrant
 where
-    P: MonitoringAuthPolicy,
+    P: MonitoringAuthorizationPolicy,
 {
     match need {
         AccessNeed::Public => AccessGrant {

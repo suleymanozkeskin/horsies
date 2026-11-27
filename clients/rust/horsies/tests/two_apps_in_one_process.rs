@@ -16,7 +16,7 @@ use std::convert::Infallible;
 
 use horsies::{
     task, AppConfig, Horsies, HorsiesError, HorsiesErrorCode, TaskError, TaskSendError,
-    TaskSendOptions, WholeSeconds, WorkflowDefConfig, WorkflowDefinition, WorkflowSpec,
+    TaskSendOptions, WholeSeconds, WorkflowDefinition, WorkflowDefinitionConfig, WorkflowSpec,
     WorkflowSpecBuilder, WorkflowStartError,
 };
 use horsies_core::{
@@ -70,9 +70,11 @@ async fn answer() -> Result<u32, TaskError<Infallible>> {
 }
 
 /// The one node of each definition: `answer`, as the output.
-fn answer_output(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+fn answer_output(
+    builder: &mut WorkflowSpecBuilder,
+) -> Result<WorkflowDefinitionConfig, HorsiesError> {
     let output = builder.task(answer::node().node_id(ANSWER_NODE))?;
-    Ok(WorkflowDefConfig::new().output(output))
+    Ok(WorkflowDefinitionConfig::new().output(output))
 }
 
 /// A definition without params, started by its type.
@@ -80,7 +82,7 @@ struct Nightly;
 
 impl WorkflowDefinition for Nightly {
     type Output = u32;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "two_apps_nightly"
@@ -90,7 +92,7 @@ impl WorkflowDefinition for Nightly {
         "tests.two_apps.nightly.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         answer_output(builder)
     }
 }
@@ -100,7 +102,7 @@ struct Regional;
 
 impl WorkflowDefinition for Regional {
     type Output = u32;
-    type Params = u32;
+    type Parameters = u32;
 
     fn name() -> &'static str {
         "two_apps_regional"
@@ -110,7 +112,7 @@ impl WorkflowDefinition for Regional {
         "tests.two_apps.regional.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         answer_output(builder)
     }
 }
@@ -147,7 +149,7 @@ fn app_on(url: &str) -> Horsies {
         .register_workflow_definition::<Nightly>()
         .expect("register the definition");
     let _regional = app
-        .workflow_template::<Regional>()
+        .register_workflow_definition_with::<Regional>()
         .expect("register the template");
     app
 }

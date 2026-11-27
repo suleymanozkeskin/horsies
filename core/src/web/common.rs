@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::broker::DatabaseOperationError;
 use crate::db::Transience;
 use crate::monitoring::{
-    database_failure_status, ErrorCategory, MonitoringQueryError, PaginationRefused, SortDirection,
+    database_failure_status, ErrorCategory, MonitoringQueryError, PageRefused, SortDirection,
     TaskGroupBy, TaskSortField,
 };
 use crate::TaskStatus;
@@ -378,7 +378,7 @@ pub(crate) fn parse_error_categories(values: Vec<String>) -> Result<Vec<ErrorCat
         .collect()
 }
 
-pub(crate) fn parse_sort_by(value: &str) -> Result<TaskSortField, ApiError> {
+pub(crate) fn parse_sort_field(value: &str) -> Result<TaskSortField, ApiError> {
     match value {
         "enqueued_at" => Ok(TaskSortField::EnqueuedAt),
         "started_at" => Ok(TaskSortField::StartedAt),
@@ -386,26 +386,28 @@ pub(crate) fn parse_sort_by(value: &str) -> Result<TaskSortField, ApiError> {
         "failed_at" => Ok(TaskSortField::FailedAt),
         "status" => Ok(TaskSortField::Status),
         "task_name" => Ok(TaskSortField::TaskName),
-        "queue_name" => Ok(TaskSortField::QueueName),
+        "queue" => Ok(TaskSortField::Queue),
         "priority" => Ok(TaskSortField::Priority),
         "retry_count" => Ok(TaskSortField::RetryCount),
-        "queue_s" => Ok(TaskSortField::QueueSeconds),
-        "exec_s" => Ok(TaskSortField::ExecutionSeconds),
-        _ => Err(ApiError::bad_request(format!("Unknown sort_by '{value}'."))),
+        "queue_seconds" => Ok(TaskSortField::QueueSeconds),
+        "execution_seconds" => Ok(TaskSortField::ExecutionSeconds),
+        _ => Err(ApiError::bad_request(format!(
+            "Unknown sort_field '{value}'."
+        ))),
     }
 }
 
 pub(crate) fn parse_sort_direction(value: &str) -> Result<SortDirection, ApiError> {
     match value {
-        "asc" => Ok(SortDirection::Ascending),
-        "desc" => Ok(SortDirection::Descending),
+        "ASCENDING" => Ok(SortDirection::Ascending),
+        "DESCENDING" => Ok(SortDirection::Descending),
         _ => Err(ApiError::query_constraint(
-            "sort_dir",
+            "sort_direction",
             "literal_error",
-            "Input should be 'asc' or 'desc'",
+            "Input should be 'ASCENDING' or 'DESCENDING'",
             value,
             "expected",
-            "'asc' or 'desc'",
+            "'ASCENDING' or 'DESCENDING'",
         )),
     }
 }
@@ -451,7 +453,7 @@ pub(crate) fn broker_read_failed(subject: &str, error: &DatabaseOperationError) 
 }
 
 pub(crate) fn pagination_refused(
-    error: PaginationRefused,
+    error: PageRefused,
     values: &QueryValues,
     default_field: &'static str,
     default_input: i64,

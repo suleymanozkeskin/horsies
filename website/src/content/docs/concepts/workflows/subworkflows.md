@@ -128,7 +128,7 @@ node_b = TaskNode(function=task_b, waits_for=[node_a])
 
 spec = app.workflow(
     name="simple_workflow",
-    tasks=[node_a, node_b],
+    nodes=[node_a, node_b],
     definition_key="myapp.simple_workflow.v1",
     output=node_b,
 )
@@ -310,7 +310,7 @@ class ParentWorkflow(WorkflowDefinition[int]):
     name = "parent_workflow"
     definition_key = "myapp.parent_workflow.v1"
 
-    child = SubWorkflowNode(workflow_def=ChildPipeline)
+    child = SubWorkflowNode(workflow_definition=ChildPipeline)
 
     config = WorkflowDefinitionConfig(
         output=child,  # Parent result = child workflow result
@@ -357,7 +357,7 @@ class DataProcessor(WorkflowDefinition[ProcessedData]):
 
         return WorkflowSpec(
             name=cls.name,
-            tasks=[fetch, clean, process],
+            nodes=[fetch, clean, process],
             output=process,
         )
 ```
@@ -387,7 +387,7 @@ surfacing at runtime.
 A **runtime-parameterized** subworkflow — one that injects dependency results
 into `build_with` via `args_from` — cannot be built at check time, so it is not
 expanded. To get check coverage for one, register its `build_with` as a
-workflow builder (`@app.workflow_builder`, with `cases` for required params).
+workflow builder (`@app.check_workflow_builder`, with `cases` for required params).
 :::
 
 <!-- check: skip partial -- uses names that the page does not define -->
@@ -398,11 +398,11 @@ class MultiSourceAggregation(WorkflowDefinition[Report]):
     definition_key = "myapp.multi_source_aggregation.v1"
 
     source1 = SubWorkflowNode(
-        workflow_def=DataProcessor,
+        workflow_definition=DataProcessor,
         kwargs={"source_url": "https://api1.example.com"},
     )
     source2 = SubWorkflowNode(
-        workflow_def=DataProcessor,
+        workflow_definition=DataProcessor,
         kwargs={"source_url": "https://api2.example.com"},
     )
     aggregate = TaskNode(
@@ -511,7 +511,7 @@ class ShardReport(WorkflowDefinition[int]):
         )(shard_count=len(count_nodes))
         return app.workflow(
             name=cls.name,
-            tasks=[*count_nodes, total],
+            nodes=[*count_nodes, total],
             output=total,
         )
 
@@ -522,7 +522,7 @@ class TenantReport(WorkflowDefinition[int]):
 
     shards = list_shards.node(node_id="shards")(tenant_id="tenant-1")
     report = SubWorkflowNode(
-        workflow_def=ShardReport,
+        workflow_definition=ShardReport,
         waits_for=[shards],
         args_from={"shards": shards},
         node_id="report",
@@ -540,7 +540,7 @@ Rules for this pattern:
 - An exception in `build_with()` fails the `SubWorkflowNode` with `WORKFLOW_ENQUEUE_FAILED`. The message starts with `Subworkflow build failed`.
 - The child start parses the task options of each child root and of each child task with `good_until`. Options that do not parse are a defect, not a node failure. They occur only when the `task_options_json` of a task function changed after registration. The child start raises `SerializationError`, and its transaction rolls back, as in the workflow start transaction.
 - The child start also encodes and serializes the kwargs of each child node. Spec construction in `build_with()` already encoded and decoded them, and refuses a value that does not fit with `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (the node fails with `WORKFLOW_ENQUEUE_FAILED`). So a refusal at the child start is a defect: the child start raises `SerializationError` and its transaction rolls back.
-- `horsies check` does not expand a `SubWorkflowNode` that has `args_from`. See the note above on `@app.workflow_builder`.
+- `horsies check` does not expand a `SubWorkflowNode` that has `args_from`. See the note above on `@app.check_workflow_builder`.
 - A raise in the child start stops in the reaper's recovery, and the [recovery limit](/horsies/concepts/workflows/workflow-semantics/#recovery-limit) bounds it. At the limit, the `SubWorkflowNode` goes `FAILED` with `WORKFLOW_RECOVERY_LIMIT_REACHED`.
 - A child workflow that reaches the recovery limit goes `FAILED`. Its parent node then goes `FAILED` with `SUB_WORKFLOW_FAILED`, and `sub_workflow_summary.error_summary` holds the message of the child.
 
@@ -566,10 +566,10 @@ def report_health(
     return Ok(HealthReport(
         status=summary.status,           # WorkflowStatus (COMPLETED, FAILED, etc.)
         output=summary.output,           # Child workflow output (if completed)
-        total_tasks=summary.total_tasks,       # Total tasks in child
-        completed=summary.completed_tasks,     # Successfully completed tasks
-        failed=summary.failed_tasks,           # Failed tasks
-        skipped=summary.skipped_tasks,         # Skipped tasks
+        total_nodes=summary.total_nodes,       # Total nodes in child
+        completed=summary.completed_nodes,     # Completed nodes
+        failed=summary.failed_nodes,           # Failed nodes
+        skipped=summary.skipped_nodes,         # Skipped nodes
         error_summary=summary.error_summary,   # Error details (if failed)
     ))
 
@@ -578,7 +578,7 @@ class MonitoredPipeline(WorkflowDefinition[HealthReport]):
     name = "monitored"
     definition_key = "myapp.monitored_pipeline.v1"
 
-    child = SubWorkflowNode(workflow_def=ChildPipeline)
+    child = SubWorkflowNode(workflow_definition=ChildPipeline)
     reporter = TaskNode(
         function=report_health,
         waits_for=[child],
@@ -595,10 +595,10 @@ class MonitoredPipeline(WorkflowDefinition[HealthReport]):
 |-------|------|-------------|
 | `status` | `WorkflowStatus` | Terminal status of child workflow. `COMPLETED` on a FAILED node when the child's output is an err |
 | `output` | `Any \| None` | Child workflow output (if COMPLETED). `None` when the child's output result is an err |
-| `total_tasks` | `int` | Total tasks in child workflow |
-| `completed_tasks` | `int` | Tasks that completed successfully |
-| `failed_tasks` | `int` | Tasks that failed |
-| `skipped_tasks` | `int` | Tasks that were skipped |
+| `total_nodes` | `int` | Total nodes in the child workflow |
+| `completed_nodes` | `int` | Nodes that completed |
+| `failed_nodes` | `int` | Nodes that failed |
+| `skipped_nodes` | `int` | Nodes that were skipped |
 | `error_summary` | `str \| None` | Error summary (if FAILED) |
 
 ### 6.5 Receiving Subworkflow Results via `args_from`
@@ -625,7 +625,7 @@ class ParentWithDataFlow(WorkflowDefinition[ParentOutput]):
     name = "parent_data_flow"
     definition_key = "myapp.parent_data_flow.v1"
 
-    child = SubWorkflowNode(workflow_def=ChildPipeline)
+    child = SubWorkflowNode(workflow_definition=ChildPipeline)
     processor = TaskNode(
         function=process_child_result,
         waits_for=[child],
@@ -926,7 +926,7 @@ node_c = TaskNode(function=aggregate, waits_for=[a, b], workflow_context_from=[a
 recovery = TaskNode(function=recover, waits_for=[primary], allow_failed_dependencies=True)
 
 # Use SubWorkflowNode for reusable workflow modules
-child = SubWorkflowNode(workflow_def=ReusablePipeline)
+child = SubWorkflowNode(workflow_definition=ReusablePipeline)
 
 # Keep build_with() deterministic
 @classmethod
@@ -1126,11 +1126,11 @@ def aggregate_sources(
     for node in [source1_node, source2_node]:
         summary = workflow_context.summary_for(node)
         if summary.status.value == "COMPLETED":
-            sources.append(f"{node.name}: {summary.completed_tasks}/{summary.total_tasks} tasks")
+            sources.append(f"{node.workflow_name}: {summary.completed_nodes}/{summary.total_nodes} nodes")
             if summary.output:
                 total += len(summary.output.records)
         else:
-            errors.append(f"{node.name}: {summary.error_summary or 'unknown error'}")
+            errors.append(f"{node.workflow_name}: {summary.error_summary or 'unknown error'}")
 
     return Ok(AggregatedReport(
         total_records=total,
@@ -1165,7 +1165,7 @@ class DataSourcePipeline(WorkflowDefinition[ProcessedData]):
         )
         return WorkflowSpec(
             name=cls.name,
-            tasks=[fetch, process],
+            nodes=[fetch, process],
             output=process,
         )
 
@@ -1174,11 +1174,11 @@ class DataSourcePipeline(WorkflowDefinition[ProcessedData]):
 
 # Define nodes at module level for workflow_context_from reference
 source1_node = SubWorkflowNode(
-    workflow_def=DataSourcePipeline,
+    workflow_definition=DataSourcePipeline,
     kwargs={"source_url": "https://api1.example.com/data"},
 )
 source2_node = SubWorkflowNode(
-    workflow_def=DataSourcePipeline,
+    workflow_definition=DataSourcePipeline,
     kwargs={"source_url": "https://api2.example.com/data"},
 )
 aggregate_node = TaskNode(

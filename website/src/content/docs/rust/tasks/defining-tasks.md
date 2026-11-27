@@ -166,7 +166,7 @@ async fn sync_feed(rt: TaskRuntime, feed_url: String) -> Result<u32, TaskError<F
 
 The cancel signal fires in two cases. The first cause stays: a later cause does not change it.
 
-- **An operator cancel** of the task (`cancel_task` with `include_running = true`, or the web UI), in every execution class: the cause is `CancelCause::Operator`. The task is `CANCELLED` at once, and what the body returns after the cancel is dropped. A cancel that comes before the body starts: the body does not run.
+- **An operator cancel** of the task (`cancel_task` with `CancelPolicy::IncludeRunning`, or the web UI), in every execution class: the cause is `CancelCause::Operator`. The task is `CANCELLED` at once, and what the body returns after the cancel is dropped. A cancel that comes before the body starts: the body does not run.
 - **The deadline** of a `shared_async` or a `shared_thread` run, at its `timeout_ms`: the cause is `CancelCause::Deadline`. The run then ends as `TASK_TIMEOUT` whatever the body returns. At its deadline an `isolated` run is killed with no signal.
 
 When the body does not stop:

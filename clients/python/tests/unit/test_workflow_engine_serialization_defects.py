@@ -89,7 +89,7 @@ class TestSpecConstructionRefusesALoneSurrogate:
         with pytest.raises(WorkflowValidationError) as raised:
             _ = app.workflow(
                 name='surrogate-task-node',
-                tasks=[TaskNode(function=note, kwargs=kwargs)],
+                nodes=[TaskNode(function=note, kwargs=kwargs)],
                 definition_key=_key('task_node'),
             )
 
@@ -115,8 +115,8 @@ class TestSpecConstructionRefusesALoneSurrogate:
         with pytest.raises(WorkflowValidationError) as raised:
             _ = app.workflow(
                 name='surrogate-sub-node',
-                tasks=[SubWorkflowNode(
-                    workflow_def=ChildWorkflow,
+                nodes=[SubWorkflowNode(
+                    workflow_definition=ChildWorkflow,
                     kwargs={'text': LONE_SURROGATE_TEXT},
                 )],
                 definition_key=_key('sub_node'),
@@ -162,8 +162,8 @@ class TestDictKeyWithoutAJsonForm:
         with pytest.raises(WorkflowValidationError) as raised:
             _ = app.workflow(
                 name='no-json-key',
-                tasks=[SubWorkflowNode(
-                    workflow_def=ChildWorkflow, kwargs={'labels': value},
+                nodes=[SubWorkflowNode(
+                    workflow_definition=ChildWorkflow, kwargs={'labels': value},
                 )],
                 definition_key=_key('no_json_key'),
             )
@@ -196,7 +196,7 @@ class TestValueThatHoldsItself:
         with pytest.raises(WorkflowValidationError) as raised:
             _ = app.workflow(
                 name='circular-task-node',
-                tasks=[TaskNode(function=linked, kwargs={'x': node})],
+                nodes=[TaskNode(function=linked, kwargs={'x': node})],
                 definition_key=_key('circular_task_node'),
             )
 
@@ -226,8 +226,8 @@ class TestValueThatHoldsItself:
         with pytest.raises(WorkflowValidationError) as raised:
             _ = app.workflow(
                 name='circular-sub-node',
-                tasks=[SubWorkflowNode(
-                    workflow_def=ChildWorkflow, kwargs={'labels': value},
+                nodes=[SubWorkflowNode(
+                    workflow_definition=ChildWorkflow, kwargs={'labels': value},
                 )],
                 definition_key=_key('circular_sub_node'),
             )
@@ -252,7 +252,7 @@ class TestValueThatIsTooDeep:
         with pytest.raises(WorkflowValidationError) as raised:
             _ = app.workflow(
                 name='deep-task-node',
-                tasks=[TaskNode(function=linked, kwargs={'x': node})],
+                nodes=[TaskNode(function=linked, kwargs={'x': node})],
                 definition_key=_key('deep_task_node'),
             )
 
@@ -277,7 +277,7 @@ class TestValuePastTheDepthBound:
         with pytest.raises(WorkflowValidationError) as raised:
             _ = app.workflow(
                 name='cycle-task-node',
-                tasks=[TaskNode(function=holds_json, kwargs={'x': value})],
+                nodes=[TaskNode(function=holds_json, kwargs={'x': value})],
                 definition_key=_key('cycle_task_node'),
             )
 
@@ -306,8 +306,8 @@ class TestBytesThatAreNotUtf8:
         with pytest.raises(WorkflowValidationError) as raised:
             _ = app.workflow(
                 name='not-utf8-sub-node',
-                tasks=[SubWorkflowNode(
-                    workflow_def=ChildWorkflow, kwargs={'payload': b'\xff'},
+                nodes=[SubWorkflowNode(
+                    workflow_definition=ChildWorkflow, kwargs={'payload': b'\xff'},
                 )],
                 definition_key=_key('not_utf8_sub_node'),
             )

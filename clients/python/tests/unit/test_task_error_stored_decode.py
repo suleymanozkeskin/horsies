@@ -86,10 +86,10 @@ _NOT_A_TASK_ERROR_IDS = [
 _SUMMARY: dict[str, Json] = {
     'status': 'FAILED',
     'output': None,
-    'total_tasks': 1,
-    'completed_tasks': 0,
-    'failed_tasks': 1,
-    'skipped_tasks': 0,
+    'total_nodes': 1,
+    'completed_nodes': 0,
+    'failed_nodes': 1,
+    'skipped_nodes': 0,
     'error_summary': None,
 }
 
@@ -360,7 +360,7 @@ class TestDecodeTaskError:
         })
         assert isinstance(decoded, SubWorkflowFailure)
         assert decoded.sub_workflow_id == 'wf-child'
-        assert decoded.sub_workflow_summary.failed_tasks == 1
+        assert decoded.sub_workflow_summary.failed_nodes == 1
 
     def test_a_subworkflow_error_refuses_an_unknown_key(self) -> None:
         with pytest.raises(ValueValidationError, match='nope'):

@@ -1215,7 +1215,7 @@ mod tests {
                 task_id: TASK,
                 current_status: crate::TaskStatus::Completed,
             },
-            TaskActionError::WorkflowTask {
+            TaskActionError::IsWorkflowTask {
                 message: format!(
                     "Task {TASK} belongs to a workflow; use the workflow actions instead."
                 ),

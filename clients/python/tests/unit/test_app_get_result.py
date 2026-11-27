@@ -268,10 +268,10 @@ class TestHorsiesGetResultEnvelopeGuards:
             sub_workflow_summary=SubWorkflowSummary(
                 status=WorkflowStatus.FAILED,
                 output=None,
-                total_tasks=2,
-                completed_tasks=0,
-                failed_tasks=2,
-                skipped_tasks=0,
+                total_nodes=2,
+                completed_nodes=0,
+                failed_nodes=2,
+                skipped_nodes=0,
                 error_summary='boom',
             ),
         )
@@ -293,7 +293,7 @@ class TestHorsiesGetResultEnvelopeGuards:
         match result:
             case Ok(Failed(SubWorkflowFailure() as sub)):
                 assert sub.sub_workflow_id == 'wf-abc'
-                assert sub.sub_workflow_summary.failed_tasks == 2
+                assert sub.sub_workflow_summary.failed_nodes == 2
             case _:
                 pytest.fail(f'expected Ok(Failed(SubWorkflowFailure)), got {result!r}')
 
@@ -397,10 +397,10 @@ class TestHorsiesGetTaskInfoErrFastPath:
             sub_workflow_summary=SubWorkflowSummary(
                 status=WorkflowStatus.FAILED,
                 output=None,
-                total_tasks=1,
-                completed_tasks=0,
-                failed_tasks=1,
-                skipped_tasks=0,
+                total_nodes=1,
+                completed_nodes=0,
+                failed_nodes=1,
+                skipped_nodes=0,
                 error_summary='child boom',
             ),
         )

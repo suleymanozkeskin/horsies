@@ -475,8 +475,9 @@ Every duration in the UI follows one rule:
   `1.00s`, and `59.96s` is `1m 0.0s`.
 - Zero is `0ms`.
 - A time with no end yet has the suffix `so far` (`5m 43.9s so far`).
-- The monitoring API sends its durations (`queue_s`, `exec_s`, `wall_s`,
-  `uptime_s`, `snapshot_age_s`, `wait_seconds`) as seconds with microsecond
+- The monitoring API sends its durations (`queue_seconds`,
+  `execution_seconds`, `wall_seconds`, `uptime_seconds`,
+  `snapshot_age_seconds`, `wait_seconds`) as seconds with microsecond
   detail. The digits that the UI shows come from the record.
 - An axis label is a round time: `0`, `0.1ms`, `100ms`, `1s`, `30s`,
   `1m 30s`, `1h`.
@@ -579,7 +580,7 @@ Three rules govern how actions behave in the interface:
   task detail panel. The workflow actions are in the toolbar of the selected
   run. Table rows and list items carry no action buttons.
 
-When actions are disabled — by configuration, by the auth policy, or by a schema
+When actions are disabled — by configuration, by the authorization policy, or by a schema
 mismatch — the affordances are absent rather than shown-and-disabled.
 
 After the request, a message in the lower right corner gives the outcome. The

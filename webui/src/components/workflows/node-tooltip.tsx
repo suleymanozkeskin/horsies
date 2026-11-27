@@ -42,7 +42,7 @@ export type NodeFocus =
 export type PauseFocus = { kind: 'in_pause'; pause: PauseInterval } | { kind: 'not_in_pause' };
 
 export const nodeLabel = (node: WorkflowNode): string =>
-  node.node_id ?? node.task_name ?? `#${node.task_index}`;
+  node.node_id ?? node.task_name ?? `#${node.node_index}`;
 
 /** The end of a node in words: `completed at 09:54:36.528`, `not ended`. */
 export function nodeEndText(endpoint: NodeEndpoint): string {
@@ -218,7 +218,7 @@ export function PauseLine({ pause, drawAtMs }: { pause: PauseFocus; drawAtMs: nu
 /** What a node is beyond its times: that it is a sub-workflow, or its task
  * or attempt count; and its place on the longest chain. */
 export function nodeCountText(node: WorkflowNode, membership: ChainMembership): string {
-  const count = node.is_subworkflow ? 'sub-workflow' : runCountText(nodeRunCount(timedSegments(node.timing)));
+  const count = node.is_sub_workflow ? 'sub-workflow' : runCountText(nodeRunCount(timedSegments(node.timing)));
   switch (membership) {
     case 'on_chain':
       return `${count} · on the longest chain`;
@@ -321,7 +321,7 @@ export function NodeTooltip({ workflowId, ...props }: NodeTooltipProps & { workf
 }
 
 function FailedNodeTooltip({ workflowId, ...props }: NodeTooltipProps & { workflowId: string }) {
-  const failure = useNodeErrorCode(workflowId, props.node.task_index, true);
+  const failure = useNodeErrorCode(workflowId, props.node.node_index, true);
   return <NodeTooltipBody {...props} failure={failure} />;
 }
 

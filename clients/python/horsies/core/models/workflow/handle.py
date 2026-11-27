@@ -74,7 +74,7 @@ from .enums import (
     OkT,
     OutT,
     WorkflowStatus,
-    WorkflowTaskStatus,
+    WorkflowNodeStatus,
     stored_node_status,
 )
 from .handle_types import (
@@ -122,13 +122,13 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class WorkflowTaskInfo:
-    """Information about a task within a workflow."""
+class WorkflowNodeInfo:
+    """The state of one node of a workflow: a task node or a sub-workflow node."""
 
     node_id: str | None
     index: int
     name: str
-    status: WorkflowTaskStatus
+    status: WorkflowNodeStatus
     result: TaskOutcome[Any, TaskError[Any]] | None
     started_at: datetime | None
     completed_at: datetime | None
@@ -312,9 +312,9 @@ def _ended_workflow_error(
 
 
 class _OutputlessTerminals:
-    """Sentinel ``out_type`` for workflows without an explicit output node.
+    """Sentinel ``output_type`` for workflows without an explicit output node.
 
-    Started handles set ``out_type = _OUTPUTLESS_TERMINALS`` when the
+    Started handles set ``output_type = _OUTPUTLESS_TERMINALS`` when the
     workflow spec's ``output`` is ``None``. ``WorkflowHandle.get()``
     dispatches to a dedicated decode path that walks the per-node
     ``results_by_id`` map embedded in the outer envelope.
@@ -358,7 +358,7 @@ def _folded(
     decoded: Result[TaskOutcome[Any, TaskError[Any]], _NodeUnreadable | ReadUnknownCustomCode],
 ) -> TaskOutcome[Any, TaskError[Any]]:
     """The entry of a node in a map of node outcomes (``results``,
-    ``tasks``): a node that does not read, or whose stored custom code its
+    ``nodes``): a node that does not read, or whose stored custom code its
     task's ``Enum`` does not name, is a failed outcome with
     ``RESULT_DESERIALIZATION_ERROR``, so the other entries stay readable."""
     match decoded:
@@ -381,11 +381,11 @@ def _decode_per_task_envelope(
     """Decode a single workflow_task row's envelope using the source's OkT
     and the source task's custom code type.
 
-    Used by ``result_for``, ``results``, and ``tasks``. A node that does not
+    Used by ``result_for``, ``results``, and ``nodes``. A node that does not
     read is ``Err(_NodeUnreadable)``, and a stored custom code that the
     source task's ``Enum`` does not name is ``Err(ReadUnknownCustomCode)``:
     ``result_for`` returns them as read failures, and the maps of
-    ``results`` and ``tasks`` fold them into the node's entry
+    ``results`` and ``nodes`` fold them into the node's entry
     (``_folded``).
 
     ``sub_definition_key`` (from the row's ``sub_definition_key`` column)
@@ -477,7 +477,7 @@ def _stored_node_result(
     node_id: str,
     sub_definition_key: str | None,
 ) -> TaskOutcome[Any, TaskError[Any]] | None:
-    """The ``result`` of one node of ``tasks()``, from its stored result
+    """The ``result`` of one node of ``nodes()``, from its stored result
     text. Pure apart from the type lookups of the decode.
 
     Outcomes:
@@ -603,7 +603,7 @@ def _decode_outputless_ok(
 
 def _decode_workflow_envelope(
     raw: Json,
-    out_type: TypeAnnotation | None,
+    output_type: TypeAnnotation | None,
     *,
     app: Any | None,
     workflow_id: str,
@@ -613,12 +613,12 @@ def _decode_workflow_envelope(
     Routes:
     - Not an envelope, or an outputless marker that the handle's type does
       not match → ``Err(ReadResultDeserializationError)``.
-    - Err slot populated → ``Ok(Failed(task_error))`` (no out_type needed).
-    - out_type is ``_OUTPUTLESS_TERMINALS`` → per-node decode using
+    - Err slot populated → ``Ok(Failed(task_error))`` (no output_type needed).
+    - output_type is ``_OUTPUTLESS_TERMINALS`` → per-node decode using
       ``task_name_by_id`` embedded in the envelope and the local task
       registry on ``app``.
-    - out_type is set → ``decode_task_result(raw, out_type)``.
-    - out_type is None and ok slot populated → ``Err(ReadNoTypeAvailable)``.
+    - output_type is set → ``decode_task_result(raw, output_type)``.
+    - output_type is None and ok slot populated → ``Err(ReadNoTypeAvailable)``.
     """
     if not isinstance(raw, dict):
         return _unreadable(
@@ -632,14 +632,14 @@ def _decode_workflow_envelope(
         )
 
     # The outputless flag of the wire and the type of the handle must agree
-    # before any per-slot decoding. A mismatch (typed out_type with
+    # before any per-slot decoding. A mismatch (typed output_type with
     # outputless payload, or outputless handle reading a typed payload) is a
     # contract violation: the workflow definition changed between produce
     # and consume, or the caller wired the wrong handle. Checking this
     # before the err slot ensures a smuggled outputless flag on a typed
     # envelope cannot slip through via the err route either.
     wire_outputless = envelope.get('__h_outputless_terminals__') is True
-    handle_outputless = out_type is _OUTPUTLESS_TERMINALS
+    handle_outputless = output_type is _OUTPUTLESS_TERMINALS
     if wire_outputless != handle_outputless:
         return _unreadable(
             f'Workflow {workflow_id} outputless/typed envelope '
@@ -664,14 +664,14 @@ def _decode_workflow_envelope(
         return _decode_outputless_ok(
             envelope.get('ok'), app=app, workflow_id=workflow_id,
         )
-    if out_type is None:
+    if output_type is None:
         return Err(ReadNoTypeAvailable(message=(
             f'Workflow {workflow_id} ok-result decode requires '
             f'a declared OutT; handle has none. Use '
             f'raw_result() instead.'
         )))
     try:
-        return ok_of_outcome(decode_task_result(raw, out_type))
+        return ok_of_outcome(decode_task_result(raw, output_type))
     except (StrictJsonError, ValueValidationError) as exc:
         return _unreadable(f'decode_task_result failed: {exc}')
 
@@ -688,13 +688,13 @@ class WorkflowHandle(Generic[OutT]):
     - Cancel the workflow
 
     ``workflow_id`` is a ``UUID``: a start returns a handle with the id of
-    its workflow, and ``for_id`` builds the handle of a workflow id text, or
-    refuses text that is not a UUID. The id in every message and error class
+    its workflow, and ``Horsies.workflow_handle`` builds the handle of a
+    workflow id text, or refuses text that is not a UUID. The id in every message and error class
     of the handle is the canonical text of the UUID (``str(workflow_id)``).
 
     Error handling follows two strategies:
 
-    **Wrap strategy** (status, cancel, pause, resume, results, tasks):
+    **Wrap strategy** (status, cancel, pause, resume, results, nodes):
     Returns ``HandleResult[T]``. Infrastructure errors are
     ``Err(WorkflowHandleError)``.
 
@@ -722,34 +722,7 @@ class WorkflowHandle(Generic[OutT]):
     # a dedicated per-node decode path. By-id reconstruction without a
     # registered spec leaves this ``None`` and ``get()`` folds
     # NO_TYPE_AVAILABLE into the err slot when the ok slot is present.
-    out_type: TypeAnnotation | None = None
-
-    @staticmethod
-    def for_id(
-        text: str, broker: PostgresBroker,
-    ) -> Result[WorkflowHandle[Any], WorkflowHandleInvalidWorkflowId]:
-        """The handle of the workflow whose id is ``text``, read through
-        ``broker``, or why ``text`` is not a workflow id. Pure: the handle
-        reads nothing until one of its methods runs, and a workflow that does
-        not exist is ``WORKFLOW_NOT_FOUND`` of that method.
-
-        ``text`` is any spelling of a UUID that ``uuid.UUID`` accepts (upper
-        case, braces, ``urn:uuid:``, no hyphens); the handle holds the UUID,
-        whose text is the canonical form. Text that ``uuid.UUID`` refuses is
-        ``Err(WorkflowHandleInvalidWorkflowId)`` with its ``ValueError``; the same
-        text gives the same error. The handle has no output type
-        (``out_type`` is ``None``).
-        """
-        try:
-            workflow_key = uuid.UUID(text)
-        except ValueError as exc:
-            return Err(WorkflowHandleInvalidWorkflowId(
-                message=f'workflow id {text!r} is not a UUID: {exc}',
-                workflow_id_text=text,
-                cause=exc,
-            ))
-        handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=workflow_key, broker=broker)
-        return Ok(handle)
+    output_type: TypeAnnotation | None = None
 
     # ─── sync refusal ────────────────────────────────────────────────
 
@@ -914,7 +887,7 @@ class WorkflowHandle(Generic[OutT]):
         (``CoreHandle.wait_workflow_result_async``): a finished workflow is
         one read; a running one is read again on its ``workflow_done`` wake,
         and at least every 5 s. The handle decodes the stored result with its
-        ``out_type``.
+        ``output_type``.
         """
         from horsies._core import CoreError
 
@@ -1036,7 +1009,7 @@ class WorkflowHandle(Generic[OutT]):
                     return _unreadable(f'Workflow result JSON corrupt: {loads_r.err_value}')
                 return _decode_workflow_envelope(
                     loads_r.ok_value,
-                    self.out_type,
+                    self.output_type,
                     app=self.broker.app,
                     workflow_id=str(self.workflow_id),
                 )
@@ -1189,7 +1162,7 @@ class WorkflowHandle(Generic[OutT]):
             task_name=record.task_name,
             node_id=node_id,
             sub_definition_key=(
-                record.sub_definition_key if record.is_subworkflow else None
+                record.sub_definition_key if record.is_sub_workflow else None
             ),
         )
         return _node_read(decoded)
@@ -1292,15 +1265,15 @@ class WorkflowHandle(Generic[OutT]):
                 task_name=node.task_name,
                 node_id=node_id,
                 sub_definition_key=(
-                    node.sub_definition_key if node.is_subworkflow else None
+                    node.sub_definition_key if node.is_sub_workflow else None
                 ),
             ))
         return Ok(out)
 
-    # ─── tasks ───────────────────────────────────────────────────────
+    # ─── nodes ───────────────────────────────────────────────────────
 
-    def tasks(self) -> HandleResult[list[WorkflowTaskInfo]]:
-        """Get status of all tasks in workflow.
+    def nodes(self) -> HandleResult[list[WorkflowNodeInfo]]:
+        """Get the state of every node of the workflow.
 
         ``Ok([])``: the workflow exists and has no node.
         ``Err(WorkflowHandleNotFound)``: no workflow has this id.
@@ -1313,7 +1286,7 @@ class WorkflowHandle(Generic[OutT]):
         ``result`` with ``RESULT_DESERIALIZATION_ERROR``.
 
         One read in the core (``CoreHandle.workflow_nodes``) on the calling
-        thread, with the GIL released; the outcomes of ``tasks_async``. On a
+        thread, with the GIL released; the outcomes of ``nodes_async``. On a
         thread that runs an event loop it returns ``Err(WorkflowHandleAsyncContext)``
         and runs nothing.
         """
@@ -1324,7 +1297,7 @@ class WorkflowHandle(Generic[OutT]):
         )
 
         if in_running_event_loop():
-            return self._async_context_err('tasks')
+            return self._async_context_err('nodes')
         try:
             record = self.broker._core_handle.workflow_nodes(  # pyright: ignore[reportPrivateUsage]
                 self.workflow_id,
@@ -1333,10 +1306,10 @@ class WorkflowHandle(Generic[OutT]):
             return Err(core_call_error(
                 call_refusal_or_raise(exc), self.workflow_id, WorkflowOperation.TASKS,
             ))
-        return self._tasks_answer(record)
+        return self._nodes_answer(record)
 
-    async def tasks_async(self) -> HandleResult[list[WorkflowTaskInfo]]:
-        """Async version of tasks(): one read in the core
+    async def nodes_async(self) -> HandleResult[list[WorkflowNodeInfo]]:
+        """Async version of nodes(): one read in the core
         (``CoreHandle.workflow_nodes_async``); the handle decodes each stored
         result and summary."""
         from horsies._core import CoreError
@@ -1353,9 +1326,9 @@ class WorkflowHandle(Generic[OutT]):
             return Err(core_call_error(
                 call_refusal_or_raise(exc), self.workflow_id, WorkflowOperation.TASKS,
             ))
-        return self._tasks_answer(record)
+        return self._nodes_answer(record)
 
-    def _tasks_answer(
+    def _nodes_answer(
         self,
         record: (
             WorkflowNodesRead
@@ -1363,8 +1336,8 @@ class WorkflowHandle(Generic[OutT]):
             | WorkflowHandleDatabaseOperationFailed
             | WorkflowHandleStoredDataInvalid
         ),
-    ) -> HandleResult[list[WorkflowTaskInfo]]:
-        """The answer of ``tasks`` and ``tasks_async`` for the core's record.
+    ) -> HandleResult[list[WorkflowNodeInfo]]:
+        """The answer of ``nodes`` and ``nodes_async`` for the core's record.
         A failure is the core's class, returned as it is. Pure apart from the
         type lookups of the decode."""
         from horsies._core import WorkflowAbsent, WorkflowNodesRead
@@ -1382,7 +1355,7 @@ class WorkflowHandle(Generic[OutT]):
             case _ as unreachable:
                 assert_never(unreachable)
 
-        out: list[WorkflowTaskInfo] = []
+        out: list[WorkflowNodeInfo] = []
         for row in nodes:
             # The column is nullable; every spec assigns a node id, and the
             # read before the switch used the stored value as it is.
@@ -1393,7 +1366,7 @@ class WorkflowHandle(Generic[OutT]):
                 task_name=row.task_name,
                 node_id=node_id,
                 sub_definition_key=(
-                    row.sub_definition_key if row.is_subworkflow else None
+                    row.sub_definition_key if row.is_sub_workflow else None
                 ),
             )
 
@@ -1424,7 +1397,7 @@ class WorkflowHandle(Generic[OutT]):
                             cause=summary_exc,
                         ))
 
-            out.append(WorkflowTaskInfo(
+            out.append(WorkflowNodeInfo(
                 node_id=row.node_id,
                 index=row.task_index,
                 name=row.task_name,
@@ -1577,9 +1550,9 @@ class WorkflowHandle(Generic[OutT]):
             Ok(True) if workflow was paused, Ok(False) if not RUNNING (no-op).
             Err(WorkflowHandleError) on failure: match on the variant.
         """
-        from horsies.core.workflows.engine import pause_workflow
+        from horsies.core.workflows.engine import pause_workflow_async
 
-        return await pause_workflow(self.broker, self.workflow_id)
+        return await pause_workflow_async(self.broker, self.workflow_id)
 
     # ─── resume ──────────────────────────────────────────────────────
 
@@ -1615,6 +1588,6 @@ class WorkflowHandle(Generic[OutT]):
             Ok(True) if workflow was resumed, Ok(False) if not PAUSED (no-op).
             Err(WorkflowHandleError) on failure: match on the variant.
         """
-        from horsies.core.workflows.engine import resume_workflow
+        from horsies.core.workflows.engine import resume_workflow_async
 
-        return await resume_workflow(self.broker, self.workflow_id)
+        return await resume_workflow_async(self.broker, self.workflow_id)

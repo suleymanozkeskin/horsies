@@ -91,7 +91,7 @@ horsies scheduler myapp.instance:app --log-level=DEBUG
 
 Validate configuration, task registration, workflow structure, and optionally broker connectivity without starting services. Runs the same validation that workers and schedulers perform at startup.
 
-For details on validation phases, `@app.workflow_builder`, the guarantee model, and CI usage, see [Startup Validation](../configuration/app-config#startup-validation-appcheck).
+For details on validation phases, `@app.check_workflow_builder`, the guarantee model, and CI usage, see [Startup Validation](../configuration/app-config#startup-validation-appcheck).
 
 `horsies check` validates every worker profile of the app, and each error names the profile and the field path (`HRS-218`). With `--live`, a profile whose worker opens more Postgres connections itself than the server has usable slots is an error (`HRS-219`). The error also states the connections that task code that sends adds. See [Worker Profiles](/horsies/workers/worker-profiles/#validation).
 
@@ -147,7 +147,7 @@ Pass either `module` or `--database-url`, not both. With `--database-url` the UI
 | `--pgbouncer-transaction-mode` | false | Disable prepared statements for a transaction-pooled URL |
 | `--host HOST` | 127.0.0.1 | Bind address |
 | `--port N` | 8600 | Bind port |
-| `--auth MODE` | none | `none` (loopback hosts only) or `trusted-header` |
+| `--authorization MODE` | none | `none` (loopback hosts only) or `trusted-header` |
 | `--trusted-header NAME` | X-Forwarded-User | Identity header that the proxy sets |
 | `--enable-actions` | false | Allow task cancel, and workflow pause, resume and cancel (default is view-only) |
 | `--trace-link TEMPLATE` | none | The link of a task's trace id in the task detail: an `http` or `https` URL with one `{trace_id}`. A template that breaks a rule exits 2 and names the rule. Without it the id shows as text |
@@ -164,7 +164,7 @@ horsies web --database-url postgresql://user:pw@host/db
 
 # Behind a proxy that authenticates callers and sets the header
 horsies web myapp.tasks:app --host 0.0.0.0 \
-    --auth trusted-header --trusted-header X-Forwarded-User --enable-actions
+    --authorization trusted-header --trusted-header X-Forwarded-User --enable-actions
 
 # Behind a transaction-pooled PgBouncer: the listener takes a direct URL
 horsies web \
@@ -440,13 +440,13 @@ scheduler: horsies scheduler myapp.instance:app
 
 ## Things to Avoid
 
-**Don't serve `horsies web` on a non-loopback address with `--auth none`.** The command exits with code 2. See [Things to Avoid](/horsies/monitoring/web-ui-deployment/#things-to-avoid) of Web UI Deployment & Authentication.
+**Don't serve `horsies web` on a non-loopback address with `--authorization none`.** The command exits with code 2. See [Things to Avoid](/horsies/monitoring/web-ui-deployment/#things-to-avoid) of Web UI Deployment & Authentication.
 
 ```bash
 # Wrong — refused with exit 2
-horsies web myapp.tasks:app --host 0.0.0.0 --auth none
+horsies web myapp.tasks:app --host 0.0.0.0 --authorization none
 
 # Correct — a proxy owns identity, and it strips the header on ingress
 horsies web myapp.tasks:app --host 0.0.0.0 \
-    --auth trusted-header --trusted-header X-Forwarded-User
+    --authorization trusted-header --trusted-header X-Forwarded-User
 ```

@@ -45,7 +45,7 @@ def _workflow(
 ) -> Any:
     return app.workflow(
         name=name,
-        tasks=tasks,
+        nodes=tasks,
         definition_key=f'tests.integration.{name}.v1',
         **kwargs,
     )
@@ -110,7 +110,7 @@ class ParamChildWorkflow(WorkflowDefinition[int]):
         node = TaskNode(function=child_task, kwargs={'value': raw_value})
         return app.workflow(
             name=cls.name,
-            tasks=[node],
+            nodes=[node],
             output=node,
             on_error=OnError.FAIL,
         )
@@ -137,7 +137,7 @@ class ConstrainedChildWorkflow(WorkflowDefinition[int]):
         node = TaskNode(function=child_task, kwargs={'value': raw_value})
         return app.workflow(
             name=cls.name,
-            tasks=[node],
+            nodes=[node],
             output=node,
             on_error=OnError.FAIL,
         )
@@ -156,7 +156,7 @@ class StartChildWorkflow(WorkflowDefinition[int]):
         node = TaskNode(function=child_task)
         return app.workflow(
             name=cls.name,
-            tasks=[node],
+            nodes=[node],
             output=node,
             on_error=OnError.FAIL,
         )
@@ -182,7 +182,7 @@ class CollisionChildWorkflow(WorkflowDefinition[int]):
         node = TaskNode(function=child_task)
         return app.workflow(
             name=cls.name,
-            tasks=[node],
+            nodes=[node],
             output=node,
             on_error=OnError.FAIL,
         )
@@ -197,11 +197,11 @@ class MiddleWorkflow(WorkflowDefinition[int]):
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
+            workflow_definition=StartChildWorkflow,
         )
         return app.workflow(
             name=cls.name,
-            tasks=[node_child],
+            nodes=[node_child],
             output=node_child,
             on_error=OnError.FAIL,
         )
@@ -291,7 +291,7 @@ class TestSubworkflowIntegration:
             return Ok('i-am-a-string-task')
 
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=CollisionChildWorkflow,
+            workflow_definition=CollisionChildWorkflow,
         )
         spec = _workflow(
             app,
@@ -340,7 +340,7 @@ class TestSubworkflowIntegration:
 
         node_a: TaskNode[int] = TaskNode(function=producer_task, kwargs={'value': 7})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=ConstrainedChildWorkflow,
+            workflow_definition=ConstrainedChildWorkflow,
             waits_for=[node_a],
             args_from={'value': node_a},
         )
@@ -375,7 +375,7 @@ class TestSubworkflowIntegration:
         session, broker, app = setup
 
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
+            workflow_definition=StartChildWorkflow,
         )
 
         spec = _workflow(app, 
@@ -414,7 +414,7 @@ class TestSubworkflowIntegration:
         session, broker, app = setup
 
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
+            workflow_definition=StartChildWorkflow,
         )
 
         spec = _workflow(app, 
@@ -452,7 +452,7 @@ class TestSubworkflowIntegration:
         session, broker, app = setup
 
         node_middle: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=MiddleWorkflow,
+            workflow_definition=MiddleWorkflow,
         )
 
         spec = _workflow(app, 
@@ -528,14 +528,14 @@ class TestSubworkflowValidation:
         class CycleA(WorkflowDefinition[int]):
             name = 'cycle_a'
             definition_key = 'tests.cycle_a.v1'
-            sub_b: SubWorkflowNode[int] = SubWorkflowNode(workflow_def=CycleB)
+            sub_b: SubWorkflowNode[int] = SubWorkflowNode(workflow_definition=CycleB)
 
         # Back-reference: CycleB → CycleA. Must override _workflow_nodes because
         # CycleA didn't exist when CycleB's metaclass ran. This is the only way to
         # create mutual references in Python's top-down class definition order.
-        CycleB._workflow_nodes = [('sub_a', SubWorkflowNode(workflow_def=CycleA))]
+        CycleB._workflow_nodes = [('sub_a', SubWorkflowNode(workflow_definition=CycleA))]
 
-        parent_node: SubWorkflowNode[int] = SubWorkflowNode(workflow_def=CycleA)
+        parent_node: SubWorkflowNode[int] = SubWorkflowNode(workflow_definition=CycleA)
 
         with pytest.raises(WorkflowValidationError) as exc:
             _workflow(app, 
@@ -552,7 +552,7 @@ class TestSubworkflowValidation:
 
         node_a: TaskNode[int] = TaskNode(function=task_a_fn, kwargs={'value': 1})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=ParamChildWorkflow,
+            workflow_definition=ParamChildWorkflow,
             # waits_for is empty, but args_from references node_a
             args_from={'value': node_a},
         )
@@ -617,7 +617,7 @@ class TypedKwargsChildWorkflow(WorkflowDefinition[int]):
         node = TaskNode(function=child_task)
         return app.workflow(
             name=cls.name,
-            tasks=[node],
+            nodes=[node],
             output=node,
             on_error=OnError.FAIL,
         )
@@ -662,7 +662,7 @@ class TestSubworkflowKwargsTypedSerde:
         original_payload = _TypedPayload(stream_id='stream-abc', count=7)
 
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=TypedKwargsChildWorkflow,
+            workflow_definition=TypedKwargsChildWorkflow,
             kwargs={'payload': original_payload},
         )
 
@@ -693,7 +693,7 @@ class TestSubworkflowKwargsTypedSerde:
         original_payload = _TypedPayload(stream_id='stream-xyz', count=42)
 
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=TypedKwargsChildWorkflow,
+            workflow_definition=TypedKwargsChildWorkflow,
             kwargs={'payload': original_payload},
         )
 

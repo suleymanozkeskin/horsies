@@ -48,27 +48,27 @@ from horsies.core.models.class_coverage import (
     BudgetLoad,
     ExecutionClassCoverage,
     ExecutionClassReport,
-    NoneDue,
-    OldestWaiting,
+    StreamWaitNoneDue,
+    StreamWaitDue,
     PendingStream,
     StreamCoverage,
     StreamCoverageState,
-    StreamServed,
-    StreamUnserved,
+    StreamCoverageStateServed,
+    StreamCoverageStateUnserved,
     StreamWait,
-    StreamWithoutCapacity,
+    StreamCoverageStateNoCapacity,
     WorkerExecutionClassLoad,
 )
 from horsies.core.models.cluster_cap import ClusterCap, NoClusterCap
 from horsies.core.models.health import (
-    AllSlotsServing,
+    SlotHealthAllServing,
     DownSlot,
     ExecutionClassBudget,
     ExecutionClassBudgets,
-    ProfileNamed,
-    ProfileNotRecorded,
+    SnapshotProfileNamed,
+    SnapshotProfileNotRecorded,
     SlotHealth,
-    SlotsDown,
+    SlotHealthSlotsDown,
     SnapshotProfile,
     WorkerStateSnapshot,
 )
@@ -107,9 +107,9 @@ def _down_slot(record: DownSlotRecord) -> DownSlot:
 def _slot_health(record: AllSlotsServingRecord | SlotsDownRecord) -> SlotHealth:
     match record:
         case AllSlotsServingRecord():
-            return AllSlotsServing()
+            return SlotHealthAllServing()
         case SlotsDownRecord(slots=slots):
-            return SlotsDown(tuple(_down_slot(slot) for slot in slots))
+            return SlotHealthSlotsDown(tuple(_down_slot(slot) for slot in slots))
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -119,9 +119,9 @@ def _snapshot_profile(
 ) -> SnapshotProfile:
     match record:
         case ProfileNamedRecord(name=name):
-            return ProfileNamed(name=name)
+            return SnapshotProfileNamed(name=name)
         case ProfileNotRecordedRecord():
-            return ProfileNotRecorded()
+            return SnapshotProfileNotRecorded()
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -203,11 +203,11 @@ def _coverage_state(
 ) -> StreamCoverageState:
     match record:
         case StreamServedRecord(workers=workers, capacity=capacity):
-            return StreamServed(workers=workers, capacity=capacity)
+            return StreamCoverageStateServed(workers=workers, capacity=capacity)
         case StreamWithoutCapacityRecord(workers=workers):
-            return StreamWithoutCapacity(workers=workers)
+            return StreamCoverageStateNoCapacity(workers=workers)
         case StreamUnservedRecord():
-            return StreamUnserved()
+            return StreamCoverageStateUnserved()
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -234,9 +234,9 @@ def execution_class_coverage_of(
 def _stream_wait(record: OldestWaitingRecord | NoneDueRecord) -> StreamWait:
     match record:
         case OldestWaitingRecord(oldest_due_at=oldest_due_at, wait=wait):
-            return OldestWaiting(oldest_due_at=oldest_due_at, wait=wait)
+            return StreamWaitDue(oldest_due_at=oldest_due_at, wait=wait)
         case NoneDueRecord(next_due_at=next_due_at):
-            return NoneDue(next_due_at=next_due_at)
+            return StreamWaitNoneDue(next_due_at=next_due_at)
         case _ as unreachable:
             assert_never(unreachable)
 

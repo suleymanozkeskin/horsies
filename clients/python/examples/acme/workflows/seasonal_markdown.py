@@ -64,7 +64,7 @@ class SeasonalMarkdown(WorkflowDefinition[SalesRollup]):
         )
         return app.workflow(
             name=cls.name,
-            tasks=[*repricings, rollup],
+            nodes=[*repricings, rollup],
             on_error=OnError.FAIL,
             output=rollup,
         )
@@ -73,7 +73,7 @@ class SeasonalMarkdown(WorkflowDefinition[SalesRollup]):
 _CHECK_SKUS: Final[list[str]] = [f'ACME-SKU-{index:04d}' for index in range(1, 7)]
 
 
-@app.workflow_builder(
+@app.check_workflow_builder(
     cases=[{'campaign_id': 'MARKDOWN-CHECK', 'skus': _CHECK_SKUS}],
 )
 def build_seasonal_markdown(

@@ -33,7 +33,7 @@ from horsies.core.models.workflow import (
     OnError,
 )
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.workflows.engine import resume_workflow
+from horsies.core.workflows.engine import resume_workflow_async
 
 from .conftest import finish_task, make_simple_task, start_ok
 
@@ -52,7 +52,7 @@ def _workflow(
 ) -> Any:
     return app.workflow(
         name=name,
-        tasks=tasks,
+        nodes=tasks,
         definition_key=f'tests.integration.{name}.v1',
         **kwargs,
     )
@@ -79,7 +79,7 @@ class PausingChildWorkflow(WorkflowDefinition[int]):
 
         return app.workflow(
             name=cls.name,
-            tasks=[node_c, node_d],
+            nodes=[node_c, node_d],
             output=node_d,
             on_error=OnError.PAUSE,
         )
@@ -127,7 +127,7 @@ class TestCascadeResumeMissingCompletionCheck:
 
         node_a: TaskNode[int] = TaskNode(function=parent_task_fn, kwargs={'value': 1})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=PausingChildWorkflow,
+            workflow_definition=PausingChildWorkflow,
         )
 
         parent_spec = _workflow(app, 
@@ -189,7 +189,7 @@ class TestCascadeResumeMissingCompletionCheck:
         assert parent_status == 'PAUSED', f'Expected parent PAUSED, got {parent_status}'
 
         # 3. Resume parent -> should cascade to child
-        resume_result = await resume_workflow(broker, handle.workflow_id)
+        resume_result = await resume_workflow_async(broker, handle.workflow_id)
         assert isinstance(resume_result, Ok), f'Expected Ok, got {resume_result}'
         assert resume_result.ok_value is True
 

@@ -490,9 +490,9 @@ def _node_wire(
 ) -> dict[str, Any]:
     """The wire form that a spec keeps for one `SubWorkflowNode`."""
     node: SubWorkflowNode[int] = SubWorkflowNode(
-        workflow_def=workflow_def, kwargs=kwargs,
+        workflow_definition=workflow_def, kwargs=kwargs,
     )
-    wire = WorkflowSpec(name='wire', tasks=[node]).tasks[0].wire_kwargs
+    wire = WorkflowSpec(name='wire', nodes=[node]).nodes[0].wire_kwargs
     assert wire is not None
     return dict(wire)
 
@@ -557,13 +557,13 @@ class TestSubworkflowNodeKwargs:
     ) -> None:
         source: TaskNode[int] = TaskNode(function=_int_source)
         node: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=workflow_def,
+            workflow_definition=workflow_def,
             waits_for=[source],
             args_from={'a': source},
         )
 
         with pytest.raises(WorkflowValidationError) as caught:
-            WorkflowSpec(name='wire', tasks=[source, node])
+            WorkflowSpec(name='wire', nodes=[source, node])
 
         assert caught.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
@@ -582,14 +582,14 @@ class TestSubworkflowNodeKwargs:
     def test_the_app_slot_takes_no_args_from_whatever_its_name(self) -> None:
         source: TaskNode[int] = TaskNode(function=_int_source)
         node: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=_NamedAppWorkflow,
+            workflow_definition=_NamedAppWorkflow,
             waits_for=[source],
             args_from={'horsies_app': source},
             kwargs={'x': 1},
         )
 
         with pytest.raises(WorkflowValidationError) as caught:
-            WorkflowSpec(name='wire', tasks=[source, node])
+            WorkflowSpec(name='wire', nodes=[source, node])
 
         assert caught.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 

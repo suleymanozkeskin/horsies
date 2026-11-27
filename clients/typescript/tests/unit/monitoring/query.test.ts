@@ -9,7 +9,7 @@ import {
   taskBreakdownArg,
   taskFacetsArg,
   taskListArg,
-  taskStatsArg,
+  taskStatusCountsArg,
   windowArg,
   workflowRunsArg,
 } from "../../../horsies/src/monitoring/query.ts";
@@ -79,7 +79,7 @@ describe("taskListArg", () => {
 
 describe("the other queries", () => {
   test("the stats argument has no statuses", () => {
-    const arg = taskStatsArg({ queues: ["q"] });
+    const arg = taskStatusCountsArg({ queues: ["q"] });
 
     assert.ok(arg.ok);
     assert.equal("statuses" in arg.value, false);
@@ -107,15 +107,15 @@ describe("the other queries", () => {
     assert.equal(refused.error.field, "limit");
   });
 
-  test("the runs read has no name, no status and the core's default limit when the query names none", () => {
+  test("the runs read has no workflow name, no status and the core's default limit when the query names none", () => {
     assert.deepEqual(workflowRunsArg({}), {
       ok: true,
-      value: { name: { kind: "anyName" }, status: { kind: "anyStatus" }, limit: { kind: "coreDefault" } },
+      value: { workflowName: { kind: "anyName" }, status: { kind: "anyStatus" }, limit: { kind: "coreDefault" } },
     });
     assert.deepEqual(workflowRunsArg({ workflowName: "nightly", status: "FAILED", limit: 5 }), {
       ok: true,
       value: {
-        name: { kind: "named", name: "nightly" },
+        workflowName: { kind: "named", workflowName: "nightly" },
         status: { kind: "status", status: "FAILED" },
         limit: { kind: "set", value: 5 },
       },

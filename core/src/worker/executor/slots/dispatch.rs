@@ -316,8 +316,8 @@ pub enum AttemptEnd {
     /// The child was killed and its exit was not seen. Nothing is written:
     /// stale recovery or the claim lease decides the row.
     EndUnknown { pid: ProcessId },
-    /// An operator cancelled the task while it ran (`cancel_task` with
-    /// `include_running`). The cancel statement wrote the `CANCELLED`
+    /// An operator cancelled the task while it ran (`cancel_task` with the
+    /// policy `INCLUDE_RUNNING`). The cancel statement wrote the `CANCELLED`
     /// attempt and moved the row; nothing is written.
     Cancelled(CancelledEnd),
 }

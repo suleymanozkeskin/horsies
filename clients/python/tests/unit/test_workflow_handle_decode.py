@@ -3,7 +3,7 @@
 Strict-serde phase 5/6 regression coverage. The decode routine must:
 
 1. Reject envelopes whose ``__h_outputless_terminals__`` flag disagrees
-   with the handle's ``out_type`` (silent coercion was the bug).
+   with the handle's ``output_type`` (silent coercion was the bug).
 2. Apply the disagreement check BEFORE the err-fast-path so a smuggled
    outputless flag on a typed payload can't slip through the err route.
 3. Use `decode_task_error` for polymorphic err decoding so a
@@ -85,18 +85,18 @@ def _err_envelope(err_payload: dict[str, Any]) -> dict[str, Any]:
 
 @pytest.mark.unit
 class TestWorkflowEnvelopeOutputlessMismatch:
-    """Mismatch between wire flag and handle ``out_type`` is a contract
+    """Mismatch between wire flag and handle ``output_type`` is a contract
     violation — silent coercion to the wrong shape is the bug."""
 
     def test_typed_handle_on_outputless_wire_rejected(self) -> None:
-        """Handle has a typed ``out_type`` but the envelope is outputless."""
+        """Handle has a typed ``output_type`` but the envelope is outputless."""
         wire = _outputless_envelope(
             results_by_id={},
             task_name_by_id={},
         )
         result = _decode_workflow_envelope(
             cast(Json, wire),
-            out_type=int,
+            output_type=int,
             app=None,
             workflow_id='wf-1',
         )
@@ -108,7 +108,7 @@ class TestWorkflowEnvelopeOutputlessMismatch:
         wire = _typed_envelope(ok=42)
         result = _decode_workflow_envelope(
             cast(Json, wire),
-            out_type=_OUTPUTLESS_TERMINALS,
+            output_type=_OUTPUTLESS_TERMINALS,
             app=None,
             workflow_id='wf-2',
         )
@@ -139,7 +139,7 @@ class TestWorkflowEnvelopeOutputlessMismatch:
         # BEFORE the err-fast-path returns a (spurious) decode.
         result = _decode_workflow_envelope(
             cast(Json, wire),
-            out_type=int,
+            output_type=int,
             app=None,
             workflow_id='wf-3',
         )
@@ -154,7 +154,7 @@ class TestWorkflowEnvelopeMarkerGuards:
     def test_non_dict_envelope_rejected(self) -> None:
         result = _decode_workflow_envelope(
             cast(Json, 42),
-            out_type=int,
+            output_type=int,
             app=None,
             workflow_id='wf-x',
         )
@@ -164,7 +164,7 @@ class TestWorkflowEnvelopeMarkerGuards:
     def test_missing_marker_rejected(self) -> None:
         result = _decode_workflow_envelope(
             cast(Json, {'ok': 1, 'err': None}),
-            out_type=int,
+            output_type=int,
             app=None,
             workflow_id='wf-x',
         )
@@ -187,7 +187,7 @@ class TestWorkflowEnvelopeErrSlot:
         wire = _err_envelope(err_payload)
         result = _decode_workflow_envelope(
             cast(Json, wire),
-            out_type=int,
+            output_type=int,
             app=None,
             workflow_id='wf-x',
         )
@@ -209,24 +209,24 @@ class TestWorkflowEnvelopeErrSlot:
             sub_workflow_summary=SubWorkflowSummary(
                 status=WorkflowStatus.FAILED,
                 output=None,
-                total_tasks=3,
-                completed_tasks=1,
-                failed_tasks=2,
-                skipped_tasks=0,
+                total_nodes=3,
+                completed_nodes=1,
+                failed_nodes=2,
+                skipped_nodes=0,
                 error_summary='downstream',
             ),
         )
         wire = _err_envelope(encode_task_error(original))
         result = _decode_workflow_envelope(
             cast(Json, wire),
-            out_type=int,
+            output_type=int,
             app=None,
             workflow_id='wf-parent',
         )
         match result:
             case Ok(Failed(SubWorkflowFailure() as decoded)):
                 assert decoded.sub_workflow_id == 'wf-child'
-                assert decoded.sub_workflow_summary.failed_tasks == 2
+                assert decoded.sub_workflow_summary.failed_nodes == 2
             case _:
                 pytest.fail(f'expected Ok(Failed(SubWorkflowFailure)), got {result!r}')
 
@@ -259,7 +259,7 @@ class TestWorkflowEnvelopeOutputlessPath:
         )
         result = _decode_workflow_envelope(
             cast(Json, wire),
-            out_type=_OUTPUTLESS_TERMINALS,
+            output_type=_OUTPUTLESS_TERMINALS,
             app=app,
             workflow_id='wf-out',
         )
@@ -281,7 +281,7 @@ class TestWorkflowEnvelopeOutputlessPath:
         )
         result = _decode_workflow_envelope(
             cast(Json, wire),
-            out_type=_OUTPUTLESS_TERMINALS,
+            output_type=_OUTPUTLESS_TERMINALS,
             app=app,
             workflow_id='wf-out',
         )

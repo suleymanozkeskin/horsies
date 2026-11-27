@@ -35,7 +35,7 @@ use super::start_tests::{
 use crate::broker::{OrphanSelfHeal, PostgresBroker};
 use crate::core::registry::task::TaskRegistry;
 use crate::core::task::fn_trait::{
-    AsyncTaskFn, BlockingTaskFn, RawTaskResult, RegisteredTask, TaskMeta,
+    AsyncTaskFn, BlockingTaskFn, RawTaskResult, RegisteredTask, TaskMetadata,
 };
 use crate::core::task::result::TaskResult;
 use crate::events::{AttemptNumber, AttemptStart, QueueName, RunTrace};
@@ -314,14 +314,14 @@ fn names_of(names: &[crate::worker::executor::protocol::LeftoverName]) -> Vec<&s
 fn async_task(task: impl AsyncTaskFn) -> RegisteredTask {
     RegisteredTask::Async {
         task: Arc::new(task),
-        meta: TaskMeta::default(),
+        metadata: TaskMetadata::default(),
     }
 }
 
 fn blocking_task(task: impl BlockingTaskFn) -> RegisteredTask {
     RegisteredTask::Blocking {
         task: Arc::new(task),
-        meta: TaskMeta::default(),
+        metadata: TaskMetadata::default(),
     }
 }
 

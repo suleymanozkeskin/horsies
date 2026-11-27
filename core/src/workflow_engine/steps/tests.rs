@@ -534,7 +534,7 @@ async fn step_rows_read_the_outcome_and_the_owed_child_starts_in_any_order() {
                 args_from: Some(r#"{"value": 2}"#.to_owned()),
                 sub_workflow_name: Some("child".to_owned()),
                 sub_definition_key: Some("tests.child.v1".to_owned()),
-                sub_workflow_params: SubWorkflowParams::Given,
+                sub_workflow_params: SubWorkflowParameters::Given,
                 parent_depth: 4,
                 sources: vec![ChildStartSource {
                     task_index: 2,

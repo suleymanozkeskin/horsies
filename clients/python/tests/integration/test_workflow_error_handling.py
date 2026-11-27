@@ -218,7 +218,7 @@ class TestValidationGuards:
 
         spec = WorkflowSpec(
             name='unresolved',
-            tasks=[node_a],
+            nodes=[node_a],
             definition_key='tests.integration.unresolved.v1',
             broker=broker,
         )
@@ -246,7 +246,7 @@ class TestValidationGuards:
 
         spec = WorkflowSpec(
             name='unresolved_prio',
-            tasks=[node_a],
+            nodes=[node_a],
             definition_key='tests.integration.unresolved_prio.v1',
             broker=broker,
         )
@@ -294,7 +294,7 @@ class TestWorkflowStartErrors:
         node.priority = 100
         spec = WorkflowSpec(
             name='no_broker',
-            tasks=[node],
+            nodes=[node],
             definition_key='tests.integration.no_broker.v1',
         )
 
@@ -315,7 +315,7 @@ class TestWorkflowStartErrors:
         node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = WorkflowSpec(
             name='val_q_wf',
-            tasks=[node_a],
+            nodes=[node_a],
             definition_key='tests.integration.val_q_wf.v1',
             broker=broker,
         )
@@ -338,7 +338,7 @@ class TestWorkflowStartErrors:
         node_a = TaskNode(function=task_a, kwargs={'value': 1})
         node_a.queue = 'default'
         node_a.priority = 100
-        spec = WorkflowSpec(name='missing_def_key_wf', tasks=[node_a], broker=broker)
+        spec = WorkflowSpec(name='missing_def_key_wf', nodes=[node_a], broker=broker)
 
         r = await start_workflow_async(spec, broker)
         assert is_err(r)
@@ -357,7 +357,7 @@ class TestWorkflowStartErrors:
         node_a.queue = 'default'
         spec = WorkflowSpec(
             name='val_p_wf',
-            tasks=[node_a],
+            nodes=[node_a],
             definition_key='tests.integration.val_p_wf.v1',
             broker=broker,
         )
@@ -456,9 +456,9 @@ class TestWorkflowStartErrors:
                 node = TaskNode(function=task_a, kwargs={'value': 1})
                 return app.workflow(cls.name, [node], output=node)
 
-        broken = SubWorkflowNode(workflow_def=RollbackBroken)
+        broken = SubWorkflowNode(workflow_definition=RollbackBroken)
         started_after = SubWorkflowNode(
-            workflow_def=RollbackChild, waits_for=[broken], allow_failed_dependencies=True,
+            workflow_definition=RollbackChild, waits_for=[broken], allow_failed_dependencies=True,
         )
         spec = app.workflow(
             'rollback_wf', [broken, started_after], definition_key=f'rollback-wf-{suffix}',

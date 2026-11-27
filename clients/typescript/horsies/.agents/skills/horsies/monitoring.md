@@ -90,7 +90,7 @@ export async function checkHealth(app: Horsies): Promise<boolean> {
   per handle, as a send does; then it reads only. The database ping reads
   only.
 - `BoundedTaskList<T>` is `{ kind: "complete", rows }` or
-  `{ kind: "truncated", rows, bound }`, at most 10,000 rows.
+  `{ kind: "truncated", rows, bound }`, at most `TASK_LIST_ROW_BOUND` (10,000) rows.
 - `WorkerStateSnapshot.profile` is `{ kind: "named", name }` (the worker
   profile that the worker runs) or `{ kind: "notRecorded" }` (a worker of a
   build before schema migration 1004). A value that the worker could not
@@ -119,7 +119,7 @@ nothing and does not install the schema.
 import type { Horsies } from "horsies";
 
 export async function failedTasksOfLastDay(app: Horsies): Promise<void> {
-  const stats = await app.monitoring.taskStats();
+  const stats = await app.monitoring.taskStatusCounts();
 
   if (stats.ok) {
     for (const count of stats.value) {
@@ -141,14 +141,14 @@ export async function failedTasksOfLastDay(app: Horsies): Promise<void> {
   }
 
   for (const task of page.value.rows) {
-    console.log(task.id, task.taskName, task.errorCode ?? "no error code");
+    console.log(task.taskId, task.taskName, task.errorCode ?? "no error code");
   }
 }
 ```
 
 | Method | Returns |
 |---|---|
-| `taskStats(query?: TaskStatsQuery)` | `readonly StatusCount[]` (`status`, `count`): each of the seven statuses, live table plus the history window |
+| `taskStatusCounts(query?: TaskStatusCountsQuery)` | `readonly StatusCount[]` (`status`, `count`): each of the seven statuses, live table plus the history window |
 | `taskFacets(query?: TaskFacetsQuery)` | `Facets`: workers, task names, queues and error codes with counts |
 | `taskBreakdown(query: TaskBreakdownQuery)` | `Breakdown`: counts per `groupBy` (`"worker"`, `"taskName"`, `"queue"`) |
 | `listTasks(query?: TaskListQuery)` | `TaskListPage` (`rows: readonly TaskSummary[]`, `total`) |
@@ -164,7 +164,7 @@ Queries:
 | Query | Fields |
 |---|---|
 | `TaskFilters` | `window`, `statuses` (`TaskStatus[]`), `taskNames`, `queues`, `workers`, `errorCodes`, `errorCategories` (`ErrorCategory[]`), `retriedOnly` (`true`: only the tasks that ran more than one attempt). A list left out, or empty, keeps every value |
-| `TaskStatsQuery` | `TaskFilters` without `statuses`: the read counts each status |
+| `TaskStatusCountsQuery` | `TaskFilters` without `statuses`: the read counts each status |
 | `TaskFacetsQuery` | `window`, `statuses`, `errorCategories`, `retriedOnly` |
 | `TaskBreakdownQuery` | `TaskFilters` plus `groupBy` and `limit` (1 to `MAX_BREAKDOWN_LIMIT`, 500) |
 | `TaskListQuery` | `TaskFilters` plus `sort` (`{ field: TaskSortField, direction: "ascending" \| "descending" }`), `offset` (0 or more) and `limit` (1 to `MAX_TASK_PAGE_LIMIT`, 200); `offset + limit` at most `MAX_TASK_PAGE_REACH` (500) |
@@ -175,7 +175,7 @@ Queries:
   `MONITORING_WINDOW_DEFAULT` (24 hours) before `until`. The core refuses a
   window that does not increase or that is longer than 30 days.
 - `TaskSortField`: `enqueuedAt`, `startedAt`, `completedAt`, `failedAt`,
-  `status`, `taskName`, `queueName`, `priority`, `retryCount`,
+  `status`, `taskName`, `queue`, `priority`, `retryCount`,
   `queueSeconds`, `executionSeconds`.
 - A field that a query leaves out takes the core's default.
 - `TaskListPage.total` is exact when any filter is active. With no filter it
@@ -191,22 +191,22 @@ Errors:
 
 | Code | When |
 |---|---|
-| `INVALID_INPUT` (`invalidInput`) | An argument that the call refuses before any connect: `field` (`window`, `page`, `limit`, `taskNames`, `queues`, `workers`, `errorCodes`, `workflowName`, `nodeIndex`) and `reason`. A count that is not a whole number, a value outside the core's bound, and text with a lone surrogate. Nothing ran. Not retryable |
+| `INVALID_INPUT` (`invalidInput`) | An argument that the call refuses before any connect: `field` (`window`, `page`, `limit`, `taskNames`, `queues`, `workers`, `errorCodes`, `workflowName`, `nodeIndex`), `reason`, and `message` (`<field>: <reason>`). A count that is not a whole number, a value outside the core's bound, and text with a lone surrogate. Nothing ran. Not retryable |
 | `DATABASE_OPERATION_FAILED` | The database or the connect failed. `retryable` is the classification of the cause; `cause` holds the cause |
 | `HISTORY_CONTRACT_VIOLATION` | A history row does not decode. Not retryable |
 
-`taskDetail`, `workflowNames`, `workflowRun` and `schedules` take no query,
+`getTaskDetail`, `listWorkflowNames`, `getWorkflowRun` and `listSchedules` take no query,
 so their error is `MonitoringQueryError` (no `invalidInput`).
 
 Phase timing (the lifecycle record of migration 1001):
 
-- `TaskAttemptInfo.phases`: `{ kind: "notCaptured" }` (a row written before
+- `TaskAttemptDetail.phases`: `{ kind: "notCaptured" }` (a row written before
   the record) or `{ kind: "captured", enqueuedAt, claimedAt, claims,
   finalizing, recordedBy }`. `recordedBy` names the writer: the worker, the
   recovery, or the cancel of a `RUNNING` task (outcome `CANCELLED`).
-- `WorkflowNodeInfo.timing` (`NodeTimingInfo`): `exact`, `partial`,
+- `WorkflowNodeSummary.timing` (`NodeTimingInfo`): `exact`, `partial`,
   `unavailable` or `inconsistent`. A segment (`TimingSegmentInfo`) has a
-  phase (`SegmentPhaseInfo`), a start, an end (ended or open) and a source.
+  phase (`SegmentPhaseInfo`), a start, an end (closed or open) and a source.
 - `WorkflowRunDetail.timing` (`RunTimingInfo`): `{ kind: "unavailable",
   asOf, capturedSince, reason }` or `{ kind: "composed", asOf,
   capturedSince, coverage, rangeStartedAt, rangeEndedAt, openSegments,
@@ -242,7 +242,7 @@ export async function cancelPending(app: Horsies, storedId: string): Promise<boo
     case "notFound":
     case "notCancellable":
       return false;
-    case "workflowTask":
+    case "isWorkflowTask":
     case "databaseOperationFailed":
     case "storedDataInvalid":
     case "seatRelayFull":
@@ -730,13 +730,13 @@ import {
   type StaleTasksQuery,
   // Monitoring reads
   type Monitoring, MONITORING_WINDOW_DEFAULT, MAX_TASK_PAGE_LIMIT, MAX_TASK_PAGE_REACH, MAX_BREAKDOWN_LIMIT,
-  MAX_WORKFLOW_RUNS_LIMIT, MonitoringQueryRefusalCode, TaskStatus,
-  type MonitoringWindow, type TaskFilters, type TaskStatsQuery, type TaskFacetsQuery, type TaskBreakdownQuery,
+  MAX_WORKFLOW_RUNS_LIMIT, TASK_LIST_ROW_BOUND, MonitoringQueryRefusalCode, TaskStatus,
+  type MonitoringWindow, type TaskFilters, type TaskStatusCountsQuery, type TaskFacetsQuery, type TaskBreakdownQuery,
   type TaskListQuery, type TaskSort, type TaskSortField, type SortDirection, type TaskGroupBy,
   type ErrorCategory, type WorkflowRunsQuery,
   type StatusCount, type Facets, type Breakdown, type TaskListPage, type TaskSummary, type TaskDetail,
   type TaskDetailRead, type WorkflowRunSummary, type WorkflowRunDetail, type WorkflowRunRead,
-  type WorkflowTaskDetail, type WorkflowNodeRead, type ScheduleStateInfo, type TaskAbsenceReason,
+  type WorkflowNodeDetail, type WorkflowNodeRead, type ScheduleStateInfo, type TaskAbsenceReason,
   type MonitoringReadError, type MonitoringQueryCoreError, type QueryRefused, type QueryRefusedField,
   type AttemptPhasesInfo, type NodeTimingInfo, type RunTimingInfo, type TimingSegmentInfo,
   // Cancel

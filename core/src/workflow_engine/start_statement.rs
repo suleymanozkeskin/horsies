@@ -23,7 +23,7 @@ use uuid::Uuid;
 use crate::broker::core_rows::RowDecodeError;
 use crate::broker::workflow_start::{ClientStartOutcome, ExistingRun, IdHolder};
 use crate::broker::PostgresBroker;
-use crate::core::workflow::node::SubWorkflowParams;
+use crate::core::workflow::node::SubWorkflowParameters;
 use crate::core::{AnyNode, OnError, OperationalCode, TaskError, TaskResult, WorkflowSpec};
 use crate::db::{BoundStatement, CheckoutClass, ParameterBinder, ParameterType, TypedStatement};
 use crate::telemetry::trace_carrier::StoredTrace;
@@ -429,7 +429,7 @@ pub(crate) struct ChildInput {
 pub(crate) async fn build_child<'a>(
     node: ChildOfNode<'_>,
     input: ChildInput,
-    params: SubWorkflowParams,
+    params: SubWorkflowParameters,
     build: &'a dyn ChildSpecSource,
 ) -> Result<ChildBuildOutcome<'a>, WorkflowError> {
     let depth = match child_workflow_depth(

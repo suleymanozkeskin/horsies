@@ -99,9 +99,9 @@ class TestWireForm:
     ) -> None:
         app = _app()
         node = TaskNode(function=_task(app, label, annotation), kwargs={'value': value})
-        spec = app.workflow(name=label, tasks=[node], definition_key=f'd.{label}')
+        spec = app.workflow(name=label, nodes=[node], definition_key=f'd.{label}')
 
-        assert stored_kwargs(spec.tasks[0]) == {'value': wire}
+        assert stored_kwargs(spec.nodes[0]) == {'value': wire}
 
     @pytest.mark.parametrize(
         ('label', 'annotation', 'value', 'wire'),
@@ -113,35 +113,35 @@ class TestWireForm:
     ) -> None:
         app = _app()
         node = SubWorkflowNode(
-            workflow_def=_child(f'child_{label}', _with_hint(annotation)),
+            workflow_definition=_child(f'child_{label}', _with_hint(annotation)),
             kwargs={'value': value},
         )
-        spec = app.workflow(name=label, tasks=[node], definition_key=f'd.{label}')
+        spec = app.workflow(name=label, nodes=[node], definition_key=f'd.{label}')
 
-        assert spec.tasks[0].wire_kwargs == {'value': wire}
+        assert spec.nodes[0].wire_kwargs == {'value': wire}
 
     def test_a_node_of_an_earlier_spec_keeps_its_wire_form(self) -> None:
         app = _app()
         node = TaskNode(function=_task(app, 'reused', list[int]), kwargs={'value': [1, 2]})
-        first = app.workflow(name='first', tasks=[node], definition_key='d.first')
+        first = app.workflow(name='first', nodes=[node], definition_key='d.first')
         second = app.workflow(
             name='second',
-            tasks=list(first.tasks),
+            nodes=list(first.nodes),
             definition_key='d.second',
         )
 
-        assert second.tasks[0].kwargs['value'] == (1, 2)
-        assert stored_kwargs(second.tasks[0]) == {'value': [1, 2]}
+        assert second.nodes[0].kwargs['value'] == (1, 2)
+        assert stored_kwargs(second.nodes[0]) == {'value': [1, 2]}
 
     def test_a_later_change_to_the_source_does_not_reach_the_wire(self) -> None:
         app = _app()
         values = [1, 2]
         node = TaskNode(function=_task(app, 'detached', list[int]), kwargs={'value': values})
-        spec = app.workflow(name='detached', tasks=[node], definition_key='d.detached')
+        spec = app.workflow(name='detached', nodes=[node], definition_key='d.detached')
 
         values.append(3)
 
-        assert stored_kwargs(spec.tasks[0]) == {'value': [1, 2]}
+        assert stored_kwargs(spec.nodes[0]) == {'value': [1, 2]}
 
     def test_a_node_that_no_spec_took_is_a_defect(self) -> None:
         app = _app()
@@ -158,7 +158,7 @@ class TestWireForm:
         node = TaskNode(function=scaffold, kwargs={'value': [1, 2]})
 
         with pytest.raises(WorkflowValidationError) as caught:
-            WorkflowSpec(name='s', tasks=[node])
+            WorkflowSpec(name='s', nodes=[node])
 
         assert caught.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
@@ -170,7 +170,7 @@ class TestWireForm:
         node = TaskNode(function=scaffold, kwargs={'value': 1})
 
         with pytest.raises(WorkflowValidationError, match='no readable hints') as caught:
-            WorkflowSpec(name='s', tasks=[node])
+            WorkflowSpec(name='s', nodes=[node])
 
         assert caught.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
@@ -179,20 +179,20 @@ class TestWireForm:
             return value
 
         scaffold.task_name = 'scaffold'  # type: ignore[attr-defined]
-        spec = WorkflowSpec(name='s', tasks=[TaskNode(function=scaffold)])
+        spec = WorkflowSpec(name='s', nodes=[TaskNode(function=scaffold)])
 
-        assert stored_kwargs(spec.tasks[0]) == {}
+        assert stored_kwargs(spec.nodes[0]) == {}
 
     def test_the_wire_form_stays_out_of_the_repr_and_the_compare(self) -> None:
         app = _app()
         task = _task(app, 'compared', list[int])
         spec = app.workflow(
             name='compared',
-            tasks=[TaskNode(function=task, kwargs={'value': [1]})],
+            nodes=[TaskNode(function=task, kwargs={'value': [1]})],
             definition_key='d.compared',
         )
 
-        assert 'wire_kwargs' not in repr(spec.tasks[0])
+        assert 'wire_kwargs' not in repr(spec.nodes[0])
 
 
 @pytest.mark.unit
@@ -200,23 +200,23 @@ class TestBuildWithWithoutHints:
     def test_opaque_params_take_no_kwarg(self) -> None:
         app = _app()
         node = SubWorkflowNode(
-            workflow_def=_child('opaque_params', _with_opaque_params),
+            workflow_definition=_child('opaque_params', _with_opaque_params),
             kwargs={'values': [1, 2]},
         )
 
         with pytest.raises(WorkflowValidationError) as caught:
-            app.workflow(name='o', tasks=[node], definition_key='d.o')
+            app.workflow(name='o', nodes=[node], definition_key='d.o')
 
         assert caught.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_a_named_parameter_with_no_hint_is_refused_at_the_spec(self) -> None:
         app = _app()
         node = SubWorkflowNode(
-            workflow_def=_child('no_hint', _with_no_hint),
+            workflow_definition=_child('no_hint', _with_no_hint),
             kwargs={'value': 1},
         )
 
         with pytest.raises(WorkflowValidationError) as caught:
-            app.workflow(name='h', tasks=[node], definition_key='d.h')
+            app.workflow(name='h', nodes=[node], definition_key='d.h')
 
         assert caught.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE

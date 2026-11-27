@@ -26,10 +26,10 @@ use crate::broker::{
     BudgetLoad, DownSlot, ExecutionClassReport, PendingStream, WorkerExecutionClassLoad, WorkerPong,
 };
 use crate::monitoring::models::{
-    Breakdown, BreakdownCounts, ErrorFacet, FacetValue, Facets, GroupRow, LeafTaskInfo,
-    LivenessReport, ScheduleStateInfo, StatusCount, TaskAttemptInfo, TaskDetail, TaskListPage,
-    TaskSummary, WorkerHistoryPoint, WorkerStateInfo, WorkflowEdge, WorkflowNodeInfo,
-    WorkflowRunDetail, WorkflowRunSummary, WorkflowTaskDetail,
+    Breakdown, BreakdownCounts, ErrorFacet, FacetValue, Facets, GroupRow, LivenessReport,
+    ScheduleStateInfo, StatusCount, TaskAttemptDetail, TaskDetail, TaskListPage, TaskRowInfo,
+    TaskSummary, WorkerHistoryPoint, WorkerStateInfo, WorkflowEdge, WorkflowNodeDetail,
+    WorkflowNodeSummary, WorkflowRunDetail, WorkflowRunSummary,
 };
 
 /// The contract of the Pydantic models, by model name.
@@ -58,9 +58,12 @@ enum CompatibleDifference {
 /// a named difference that no field has.
 const COMPATIBLE_DIFFERENCES: &[(&str, CompatibleDifference)] = &[
     ("TaskDetail.workflow_id", CompatibleDifference::UuidIntoText),
-    ("WorkflowRunSummary.id", CompatibleDifference::UuidIntoText),
     (
-        "WorkflowNodeInfo.sub_workflow_id",
+        "WorkflowRunSummary.workflow_id",
+        CompatibleDifference::UuidIntoText,
+    ),
+    (
+        "WorkflowNodeSummary.sub_workflow_id",
         CompatibleDifference::UuidIntoText,
     ),
     (
@@ -588,8 +591,8 @@ fn contract() -> Map<String, Value> {
 type Check = fn(&str, &Map<String, Value>) -> Comparison;
 
 const CHECKS: [(&str, Check); 27] = [
-    ("TaskAttemptInfo", compare::<TaskAttemptInfo>),
-    ("LeafTaskInfo", compare::<LeafTaskInfo>),
+    ("TaskAttemptDetail", compare::<TaskAttemptDetail>),
+    ("TaskRowInfo", compare::<TaskRowInfo>),
     ("StatusCount", compare::<StatusCount>),
     ("FacetValue", compare::<FacetValue>),
     ("ErrorFacet", compare::<ErrorFacet>),
@@ -601,10 +604,10 @@ const CHECKS: [(&str, Check); 27] = [
     ("TaskListPage", compare::<TaskListPage>),
     ("TaskDetail", compare::<TaskDetail>),
     ("WorkflowRunSummary", compare::<WorkflowRunSummary>),
-    ("WorkflowNodeInfo", compare::<WorkflowNodeInfo>),
+    ("WorkflowNodeSummary", compare::<WorkflowNodeSummary>),
     ("WorkflowEdge", compare::<WorkflowEdge>),
     ("WorkflowRunDetail", compare::<WorkflowRunDetail>),
-    ("WorkflowTaskDetail", compare::<WorkflowTaskDetail>),
+    ("WorkflowNodeDetail", compare::<WorkflowNodeDetail>),
     ("DownSlot", compare::<DownSlot>),
     ("WorkerStateInfo", compare::<WorkerStateInfo>),
     ("BudgetLoad", compare::<BudgetLoad>),

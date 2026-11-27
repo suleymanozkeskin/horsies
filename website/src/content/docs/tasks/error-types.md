@@ -135,7 +135,7 @@ Two more core errors are never a result: see [Process-State Refusals](#process-s
 `ForkedAfterCoreStart` and `CoreStopped` are states of the process, not of one call. The core refuses every later call in the process, so a retry in the same process gets the same refusal. Import both from `horsies`.
 
 - Every call that runs on the core raises them. No call returns them as a result, and no result type has a variant for them.
-- This covers the task sends and the two resend methods, `enqueue()`, the task, result and health reads of the app and the broker, the broker's task lists and recovery passes, `ensure_schema_initialized()`, `check(live=True)`, the workflow start and its retry, every `WorkflowHandle` method that reads or changes the workflow, `pause_workflow()` and `resume_workflow()`, the reads and `cancel_task()` of `horsies.monitoring`, and the schema probe of `horsies web`. Each sync form and each `*_async` form raises them.
+- This covers the task sends and the two resend methods, `enqueue()`, the task, result and health reads of the app and the broker, the broker's task lists and recovery passes, `ensure_schema_initialized()`, `check(live=True)`, the workflow start and its retry, every `WorkflowHandle` method that reads or changes the workflow, `pause_workflow_async()` and `resume_workflow_async()`, the reads and `cancel_task()` of `horsies.monitoring`, and the schema probe of `horsies web`. Each sync form and each `*_async` form raises them.
 - Nothing ran. `close()` and `close_async()` raise them from the close of the core handle.
 - In a worker child, the child ends itself at its next core call and the worker replaces it. The child exits with code 80; its last log line names the cause.
   - At the start of a task, before task code ran: the worker releases the claim with no attempt charged, and a new child runs the task.
@@ -294,17 +294,17 @@ For a validation failure, the cause names the field, the message and the type, n
 
 ## Workflow Start Errors (WorkflowStartResult)
 
-`spec.start()`, `start_async()`, `retry_start()` and `retry_start_async()` return `WorkflowStartResult[WorkflowHandle[T]]` = `Result[WorkflowHandle[T], WorkflowStartError]`. `WorkflowStartError` is a union with one frozen variant per code; the variants and their fields are on the [Workflow API](/horsies/concepts/workflows/workflow-api/) page.
+`spec.start()`, `start_async()`, `resend_start()` and `resend_start_async()` return `WorkflowStartResult[WorkflowHandle[T]]` = `Result[WorkflowHandle[T], WorkflowStartError]`. `WorkflowStartError` is a union with one frozen variant per code; the variants and their fields are on the [Workflow API](/horsies/concepts/workflows/workflow-api/) page.
 
-The retry methods accept `ENQUEUE_FAILED` and `ASYNC_CONTEXT` (`WorkflowStartResendable`).
+`resend_start()` and `resend_start_async()` accept `ENQUEUE_FAILED` and `ASYNC_CONTEXT` (`WorkflowStartResendable`).
 
 ## Workflow Handle Errors (HandleResult)
 
-`WorkflowHandle` methods that read or change the workflow row (`status()`, `results()`, `tasks()`, `cancel()`, `pause()`, `resume()` and their `*_async` forms) and `pause_workflow()` / `resume_workflow()` and their sync forms return `HandleResult[T]` = `Result[T, WorkflowHandleError]`. `get()`, `result_for()` and their `*_async` forms return a `ReadResult` instead: see [Read Errors](#read-errors-readresult).
+`WorkflowHandle` methods that read or change the workflow row (`status()`, `results()`, `tasks()`, `cancel()`, `pause()`, `resume()` and their `*_async` forms) and `pause_workflow()` / `resume_workflow()` and their `*_async` forms return `HandleResult[T]` = `Result[T, WorkflowHandleError]`. `get()`, `result_for()` and their `*_async` forms return a `ReadResult` instead: see [Read Errors](#read-errors-readresult).
 
-`WorkflowHandleError` is a union with one frozen variant per `WorkflowHandleErrorCode` member other than `INVALID_WORKFLOW_ID`. Every variant has `code`, `message`, `retryable` and `workflow_id`. `message` and the cause do not show in `repr()`. Match on the variant. Any other exception, for example a defect in `pause_workflow()` or `resume_workflow()`, propagates.
+`WorkflowHandleError` is a union with one frozen variant per `WorkflowHandleErrorCode` member other than `INVALID_WORKFLOW_ID`. Every variant has `code`, `message`, `retryable` and `workflow_id`. `message` and the cause do not show in `repr()`. Match on the variant. Any other exception, for example a defect in `pause_workflow_async()` or `resume_workflow_async()`, propagates.
 
-`WorkflowHandle.for_id(text, broker)` returns `WorkflowHandleInvalidWorkflowId` for a workflow id text that is not a UUID: `code` (`INVALID_WORKFLOW_ID`), `message`, `workflow_id_text` and `cause` (the `ValueError` of `uuid.UUID`). No handle is built. It is not a `WorkflowHandleError` variant.
+`app.workflow_handle(workflow_id)` returns `WorkflowHandleInvalidWorkflowId` for a workflow id text that is not a UUID: `code` (`INVALID_WORKFLOW_ID`), `message`, `workflow_id_text` and `cause` (the `ValueError` of `uuid.UUID`). No handle is built. It is not a `WorkflowHandleError` variant.
 
 ## Custom Error Codes
 
@@ -478,7 +478,7 @@ from horsies.core.errors import HorsiesError
 try:
     spec = app.workflow(
         name="order_flow",
-        tasks=[node_a, node_b],
+        nodes=[node_a, node_b],
         definition_key="myapp.order_flow.v1",
     )
 except HorsiesError as e:

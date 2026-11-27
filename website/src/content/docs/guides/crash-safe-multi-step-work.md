@@ -288,7 +288,7 @@ class CheckoutWorkflow(WorkflowDefinition[str]):
             to_address=order.customer_email,
             invoice=from_node(invoice),
         )
-        return app.workflow(name=cls.name, tasks=[charge, invoice, receipt], output=receipt)
+        return app.workflow(name=cls.name, nodes=[charge, invoice, receipt], output=receipt)
 
 
 def start_checkout(order: Order) -> WorkflowStartResult[WorkflowHandle[str]]:
@@ -345,7 +345,7 @@ A node runs at least once. Its body can run more than once:
 - The answer is lost. The provider did the effect, but the call timed out. The step returns a code in `retry_for`, and the retry calls the provider again.
 - The workflow starts again. A new start runs every node again.
 
-A cancel does not undo an effect. An operator cancel of a running step (`cancel_task` with `include_running=True`, or the web UI) makes the step `CANCELLED` at once. The body gets the cancel: an `async def` body at its next `await`, a `def` body when it reads `runtime.cancel_state()`. An effect that the body did before it stopped stays, and no result is stored for it. See [Cancelling a RUNNING Task](/horsies/monitoring/action-semantics/#cancelling-a-running-task).
+A cancel does not undo an effect. An operator cancel of a running step (`cancel_task` with `policy=CancelPolicy.INCLUDE_RUNNING`, or the web UI) makes the step `CANCELLED` at once. The body gets the cancel: an `async def` body at its next `await`, a `def` body when it reads `runtime.cancel_state()`. An effect that the body did before it stopped stays, and no result is stored for it. See [Cancelling a RUNNING Task](/horsies/monitoring/action-semantics/#cancelling-a-running-task).
 
 Rules:
 

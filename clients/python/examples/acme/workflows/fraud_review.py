@@ -60,7 +60,7 @@ class FraudReview(WorkflowDefinition[PaymentRefund]):
         )
         return app.workflow(
             name=cls.name,
-            tasks=[reconcile, refund],
+            nodes=[reconcile, refund],
             on_error=OnError.PAUSE,
             output=refund,
         )
@@ -69,7 +69,7 @@ class FraudReview(WorkflowDefinition[PaymentRefund]):
 _CHECK_ORDER: Final[str] = 'ACME-CHECK-0001'
 
 
-@app.workflow_builder(cases=[{'order_id': _CHECK_ORDER, 'amount_cents': 4_900}])
+@app.check_workflow_builder(cases=[{'order_id': _CHECK_ORDER, 'amount_cents': 4_900}])
 def build_fraud_review(
     *,
     order_id: str,

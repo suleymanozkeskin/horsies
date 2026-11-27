@@ -25,7 +25,7 @@ use crate::core::registry::task::TaskRegistry;
 use crate::core::task::error::{OperationalCode, TaskError};
 use crate::core::task::fencing::FencingToken;
 use crate::core::task::fn_trait::{
-    AsyncTaskFn, BlockingTaskFn, RegisteredTask, TaskMeta, TaskModule,
+    AsyncTaskFn, BlockingTaskFn, RegisteredTask, TaskMetadata, TaskModule,
 };
 use crate::events::{QueueName, TraceCarrierText};
 use crate::worker::executor::protocol::{IsolatedWork, RunEnd, RunFrame, TaskInputText};
@@ -251,7 +251,7 @@ fn async_task(seen: &SeenInside, result: fn() -> RawTaskResult) -> RegisteredTas
             seen: Arc::clone(seen),
             result,
         }),
-        meta: TaskMeta::default(),
+        metadata: TaskMetadata::default(),
     }
 }
 
@@ -261,7 +261,7 @@ fn blocking_task(seen: &SeenInside, result: fn() -> RawTaskResult) -> Registered
             seen: Arc::clone(seen),
             result,
         }),
-        meta: TaskMeta::default(),
+        metadata: TaskMetadata::default(),
     }
 }
 

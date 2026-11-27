@@ -40,7 +40,7 @@ function mainFacades(handle: NativeCoreHandle, called: string[]): FacadeAddons {
 
   return {
     reads: () => ({
-      readTaskStats: json("readTaskStats"),
+      readTaskStatusCounts: json("readTaskStatusCounts"),
       readTaskFacets: unused,
       readTaskBreakdown: unused,
       readTaskList: unused,
@@ -117,9 +117,9 @@ describe("each facade call kind of a seat body goes through the relay", () => {
   test("a monitoring read", async () => {
     const { area, called } = seatArea();
 
-    assert.deepEqual(await area.monitoring.taskStats(), { ok: true, value: [] });
+    assert.deepEqual(await area.monitoring.taskStatusCounts(), { ok: true, value: [] });
     assert.deepEqual(await area.monitoring.listWorkflowNames(), { ok: true, value: [] });
-    assert.deepEqual(called, ["readTaskStats", "readWorkflowNames"]);
+    assert.deepEqual(called, ["readTaskStatusCounts", "readWorkflowNames"]);
   });
 
   test("a health read", async () => {
@@ -196,7 +196,7 @@ const RELAY_FULL = { code: SeatRelayCode.SEAT_RELAY_FULL, retryable: true, bound
 
 describe("each facade call kind past the bound of the relay gives SEAT_RELAY_FULL", () => {
   test("a monitoring read", async () => {
-    assert.deepEqual(failure(await fullSeatArea().area.monitoring.taskStats()), RELAY_FULL);
+    assert.deepEqual(failure(await fullSeatArea().area.monitoring.taskStatusCounts()), RELAY_FULL);
   });
 
   test("a monitoring read with no query", async () => {

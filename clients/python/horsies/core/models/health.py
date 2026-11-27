@@ -82,14 +82,14 @@ class DownSlot:
 
 
 @dataclass(slots=True, frozen=True)
-class AllSlotsServing:
+class SlotHealthAllServing:
     """No slot of the worker was down when it wrote the snapshot."""
 
     kind: Literal['all_serving'] = 'all_serving'
 
 
 @dataclass(slots=True, frozen=True)
-class SlotsDown:
+class SlotHealthSlotsDown:
     """The worker is degraded: these slots were down, in slot order. Never empty."""
 
     slots: tuple[DownSlot, ...]
@@ -97,7 +97,7 @@ class SlotsDown:
 
 
 SlotHealth: TypeAlias = Annotated[
-    AllSlotsServing | SlotsDown,
+    SlotHealthAllServing | SlotHealthSlotsDown,
     Field(discriminator='kind'),
 ]
 """Whether any slot of the worker was down when it wrote the snapshot."""
@@ -131,7 +131,7 @@ class ExecutionClassBudgets:
 
 
 @dataclass(slots=True, frozen=True)
-class ProfileNamed:
+class SnapshotProfileNamed:
     """The worker ran the profile ``name`` of ``AppConfig.worker_profiles``.
 
     ``name`` has 1 to 64 characters: letters, digits, ``_``, ``.`` and
@@ -143,7 +143,7 @@ class ProfileNamed:
 
 
 @dataclass(slots=True, frozen=True)
-class ProfileNotRecorded:
+class SnapshotProfileNotRecorded:
     """The snapshot holds no profile name: the worker that wrote it did not
     record one. A worker of a build before schema migration 1004 wrote it;
     every worker of this build records its profile name."""
@@ -152,7 +152,7 @@ class ProfileNotRecorded:
 
 
 SnapshotProfile: TypeAlias = Annotated[
-    ProfileNamed | ProfileNotRecorded,
+    SnapshotProfileNamed | SnapshotProfileNotRecorded,
     Field(discriminator='kind'),
 ]
 """The worker profile that a snapshot names."""
@@ -177,7 +177,7 @@ class WorkerStateSnapshot:
     ``cluster_wide_cap`` is the cap that the worker ran with:
     ``ClusterCap(tasks)`` or ``NoClusterCap()``.
     ``profile`` names the worker profile that the worker ran:
-    ``ProfileNamed(name)`` or ``ProfileNotRecorded()``.
+    ``SnapshotProfileNamed(name)`` or ``SnapshotProfileNotRecorded()``.
     """
 
     worker_id: str

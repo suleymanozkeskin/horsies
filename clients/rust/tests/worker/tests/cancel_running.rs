@@ -1,5 +1,5 @@
 //! The operator cancel of a RUNNING task on a live worker
-//! (`horsies::monitoring::cancel_task` with `include_running`), per
+//! (`horsies::monitoring::cancel_task` with `CancelPolicy::IncludeRunning`), per
 //! execution class and body kind:
 //!
 //! - the task code sees the cancel within 2 s on a local database: an async
@@ -86,9 +86,13 @@ async fn started_pid(suite: &Suite, token: &str) -> String {
 /// before the cancel.
 async fn cancel_running(suite: &Suite, task_id: Uuid) -> u128 {
     let cancel_at = markers::unix_millis();
-    let _cancelled = horsies::monitoring::cancel_task(&suite.app, task_id, true)
-        .await
-        .unwrap_or_else(|error| panic!("cancel the running task {task_id}: {error}"));
+    let _cancelled = horsies::monitoring::cancel_task(
+        &suite.app,
+        task_id,
+        horsies::monitoring::CancelPolicy::IncludeRunning,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("cancel the running task {task_id}: {error}"));
     cancel_at
 }
 

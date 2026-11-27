@@ -88,7 +88,7 @@ describe("the reads of an installed database", () => {
 
   test("each monitoring read answers its model", async () => {
     const { monitoring } = await installedArea();
-    const stats = await monitoring.taskStats();
+    const stats = await monitoring.taskStatusCounts();
 
     assert.ok(stats.ok && stats.value.length === 7);
     assert.ok((await monitoring.taskFacets()).ok);
@@ -166,7 +166,7 @@ describe("an unreachable database", () => {
     const { monitoring } = area(REFUSED_DATABASE_URL);
 
     const reads = [
-      ["task stats query", await monitoring.taskStats()],
+      ["task status counts query", await monitoring.taskStatusCounts()],
       ["task list query", await monitoring.listTasks()],
       ["task detail query", await monitoring.getTaskDetail(UUID_V4)],
       ["workflow names query", await monitoring.listWorkflowNames()],
@@ -201,7 +201,7 @@ describe("an unreachable database", () => {
 
     const refusals = [
       ["window", await monitoring.listTasks({ window: { since: until, until } })],
-      ["window", await monitoring.taskStats({ window: { since: until.subtract({ hours: 31 * 24 }), until } })],
+      ["window", await monitoring.taskStatusCounts({ window: { since: until.subtract({ hours: 31 * 24 }), until } })],
       ["page", await monitoring.listTasks({ offset: -1 })],
       ["page", await monitoring.listTasks({ limit: 0 })],
       ["page", await monitoring.listTasks({ limit: 201 })],

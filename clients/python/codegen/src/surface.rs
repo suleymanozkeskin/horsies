@@ -272,7 +272,10 @@ const ENSURE_PARTITION_COVERAGE_PARAMETERS: &[StubParameter] =
     &[positional("request", "CoverageRequest")];
 const CANCEL_TASK_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
-    keyword("include_running", "bool"),
+    keyword(
+        "policy",
+        "Literal['PENDING_OR_CLAIMED_ONLY', 'INCLUDE_RUNNING']",
+    ),
 ];
 const WORKFLOW_ID_PARAMETERS: &[StubParameter] = &[positional("workflow_id", "uuid.UUID")];
 const WAIT_WORKFLOW_RESULT_PARAMETERS: &[StubParameter] = &[
@@ -346,8 +349,8 @@ const TASK_LIST_QUERY_PARAMETERS: &[StubParameter] = &[
     keyword("error_codes", "list[str]"),
     keyword("error_categories", "list[str]"),
     keyword("retried_only", "bool"),
-    keyword("sort_by", "str"),
-    keyword("sort_dir", "str"),
+    keyword("sort_field", "str"),
+    keyword("sort_direction", "Literal['ASCENDING', 'DESCENDING']"),
     keyword("offset", "int"),
     keyword("limit", "int"),
 ];
@@ -358,7 +361,7 @@ const TASK_FACETS_QUERY_PARAMETERS: &[StubParameter] = &[
     keyword("error_categories", "list[str]"),
     keyword("retried_only", "bool"),
 ];
-const TASK_STATS_QUERY_PARAMETERS: &[StubParameter] = &[
+const TASK_STATUS_COUNTS_QUERY_PARAMETERS: &[StubParameter] = &[
     keyword("window_lower", "datetime.datetime"),
     keyword("window_upper", "datetime.datetime"),
     keyword("task_names", "list[str]"),
@@ -382,11 +385,12 @@ const TASK_BREAKDOWN_QUERY_PARAMETERS: &[StubParameter] = &[
     keyword("limit", "int"),
 ];
 const WORKFLOW_RUNS_QUERY_PARAMETERS: &[StubParameter] = &[
-    keyword("name", "str | None"),
+    keyword("workflow_name", "str | None"),
     keyword("status", "str | None"),
     keyword("limit", "int"),
 ];
-const MONITORING_TASK_STATS_PARAMETERS: &[StubParameter] = &[positional("query", "TaskStatsQuery")];
+const MONITORING_TASK_STATUS_COUNTS_PARAMETERS: &[StubParameter] =
+    &[positional("query", "TaskStatusCountsQuery")];
 const MONITORING_TASK_BREAKDOWN_PARAMETERS: &[StubParameter] =
     &[positional("query", "TaskBreakdownQuery")];
 const MONITORING_WORKFLOW_RUNS_PARAMETERS: &[StubParameter] =
@@ -395,7 +399,7 @@ const MONITORING_WORKFLOW_RUN_PARAMETERS: &[StubParameter] =
     &[positional("workflow_id", "uuid.UUID")];
 const MONITORING_WORKFLOW_NODE_PARAMETERS: &[StubParameter] = &[
     positional("workflow_id", "uuid.UUID"),
-    keyword("task_index", "int"),
+    keyword("node_index", "int"),
 ];
 const MONITORING_LIST_TASKS_PARAMETERS: &[StubParameter] = &[positional("query", "TaskListQuery")];
 const MONITORING_TASK_DETAIL_PARAMETERS: &[StubParameter] = &[positional("task_id", "uuid.UUID")];
@@ -766,7 +770,7 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         name: "cancel_task_async",
         parameters: CANCEL_TASK_PARAMETERS,
         returns: TypeText::FutureOf(CANCEL_TASK_OUTCOME),
-        doc: "Cancel one plain task; a RUNNING task only with include_running. Writes, in one\nstatement. An outcome that contradicts the function raises PanicException.",
+        doc: "Cancel one plain task; a RUNNING task only with the policy INCLUDE_RUNNING. Writes, in\none statement. An outcome that contradicts the function raises PanicException.",
     },
     StubFunction {
         name: "expire_pending_tasks_async",
@@ -1008,8 +1012,8 @@ const MONITORING_HANDLE_METHODS: &[StubFunction] = &[
         doc: "The facets of one scope: the JSON text of the core's Facets. Reads only, in one\nstatement. A cancelled await drops the read.",
     },
     StubFunction {
-        name: "monitoring_task_stats_async",
-        parameters: MONITORING_TASK_STATS_PARAMETERS,
+        name: "monitoring_task_status_counts_async",
+        parameters: MONITORING_TASK_STATUS_COUNTS_PARAMETERS,
         returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
         doc: "The count of each task status: the JSON text of the core's list of StatusCount. Reads\nonly, in one statement.",
     },
@@ -1041,7 +1045,7 @@ const MONITORING_HANDLE_METHODS: &[StubFunction] = &[
         name: "monitoring_workflow_node_async",
         parameters: MONITORING_WORKFLOW_NODE_PARAMETERS,
         returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
-        doc: "One node with its task: the JSON text of the core's WorkflowTaskDetail, or null when the\nrun has no node at the index. Reads only, in one statement. An index outside 32 bits\nraises OverflowError.",
+        doc: "One node with its task: the JSON text of the core's WorkflowNodeDetail, or null when the\nrun has no node at the index. Reads only, in one statement. An index outside 32 bits\nraises OverflowError.",
     },
     StubFunction {
         name: "monitoring_schedules_async",
@@ -2212,7 +2216,7 @@ const MONITORING_REQUEST_PARAMETERS: &[StubParameter] = &[
 
 const MONITORING_HANDLER_PARAMETERS: &[StubParameter] = &[
     positional("handle", "CoreHandle"),
-    keyword("actions_enabled", "bool"),
+    keyword("actions", "Literal['ENABLED', 'DISABLED']"),
     keyword("custom_css_url", "str | None"),
     keyword("trace_link_template", "str | None"),
     keyword("client_version", "str"),
@@ -2255,9 +2259,9 @@ const MONITORING_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "TaskStatsQuery",
-        doc: "One frozen task stats read: the window and every filter but the status. A value outside\nits rule raises ValueError; a naive bound raises TypeError.",
-        constructor: Constructor::Parameters(TASK_STATS_QUERY_PARAMETERS),
+        name: "TaskStatusCountsQuery",
+        doc: "One frozen task status counts read: the window and every filter but the status. A\nvalue outside its rule raises ValueError; a naive bound raises TypeError.",
+        constructor: Constructor::Parameters(TASK_STATUS_COUNTS_QUERY_PARAMETERS),
         properties: &[],
         methods: &[],
     },
@@ -2270,7 +2274,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "WorkflowRunsQuery",
-        doc: "One frozen workflow runs read: the exact name and status filters (None for none) and the\nlimit. A limit outside 1 to 200 raises ValueError.",
+        doc: "One frozen workflow runs read: the exact workflow name and status filters (None for none)\nand the limit. A limit outside 1 to 200 raises ValueError.",
         constructor: Constructor::Parameters(WORKFLOW_RUNS_QUERY_PARAMETERS),
         properties: &[],
         methods: &[],
@@ -2854,7 +2858,7 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
             property("node_id", "str | None"),
             property("task_name", "str"),
             property("result_json", "str"),
-            property("is_subworkflow", "bool"),
+            property("is_sub_workflow", "bool"),
             property("sub_definition_key", "str | None"),
         ],
         methods: &[],
@@ -2893,7 +2897,7 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
             property("completed_at", "datetime.datetime | None"),
             property("sub_workflow_id", "uuid.UUID | None"),
             property("sub_workflow_summary_json", "str | None"),
-            property("is_subworkflow", "bool"),
+            property("is_sub_workflow", "bool"),
             property("sub_definition_key", "str | None"),
         ],
         methods: &[],

@@ -39,8 +39,8 @@ pub use task::{
 pub use types::{TaskAttemptOutcome, TaskStatus, TASK_TERMINAL_STATES, TASK_TERMINAL_VALUES};
 pub use workflow::{
     AnyNode, HandleOperation, HandleResult, JoinType, NodeKey, OnError, StartRefusalCause,
-    SubWorkflowParams, SubWorkflowSummary, SuccessCase, SuccessPolicy, WorkflowContext,
-    WorkflowHandleError, WorkflowHandleErrorCode, WorkflowMeta, WorkflowSpec, WorkflowStartError,
-    WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus,
-    WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
+    SubWorkflowParameters, SubWorkflowSummary, SuccessCase, SuccessPolicy, WorkflowContext,
+    WorkflowHandleError, WorkflowHandleErrorCode, WorkflowMetadata, WorkflowNodeStatus,
+    WorkflowSpec, WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus,
+    WF_TASK_TERMINAL_VALUES, WORKFLOW_NODE_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };

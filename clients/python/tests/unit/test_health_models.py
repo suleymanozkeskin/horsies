@@ -10,21 +10,21 @@ from pydantic import TypeAdapter
 from horsies.core.models.boot_failure import ResourceShortage, ShortageErrno
 from horsies.core.models.class_coverage import (
     ExecutionClassReport,
-    NoneDue,
-    OldestWaiting,
+    StreamWaitNoneDue,
+    StreamWaitDue,
     PendingStream,
-    StreamServed,
-    StreamWithoutCapacity,
+    StreamCoverageStateServed,
+    StreamCoverageStateNoCapacity,
 )
 from horsies.core.models.cluster_cap import NoClusterCap
 from horsies.core.models.health import (
-    AllSlotsServing,
+    SlotHealthAllServing,
     DatabasePing,
     DownSlot,
     ExecutionClassBudgets,
-    ProfileNamed,
+    SnapshotProfileNamed,
     SlotHealth,
-    SlotsDown,
+    SlotHealthSlotsDown,
     WorkerPong,
     WorkerStateSnapshot,
 )
@@ -76,9 +76,9 @@ class TestResultModels:
             cpu_percent=None,
             children_memory_mb=None,
             worker_started_at=now,
-            slot_health=AllSlotsServing(),
+            slot_health=SlotHealthAllServing(),
             execution_class_budgets=ExecutionClassBudgets(()),
-            profile=ProfileNamed(name='default'),
+            profile=SnapshotProfileNamed(name='default'),
         )
         assert snap.cluster_wide_cap == NoClusterCap()
         assert snap.queues == ['default']
@@ -90,7 +90,7 @@ class TestJsonForm:
     """The health records are the JSON of the monitoring routes."""
 
     def test_down_slots_are_tagged_and_the_cause_is_text(self) -> None:
-        health = SlotsDown(
+        health = SlotHealthSlotsDown(
             (
                 DownSlot(
                     slot=1,
@@ -116,7 +116,7 @@ class TestJsonForm:
                 },
             ],
         }
-        assert TypeAdapter(SlotHealth).dump_python(AllSlotsServing(), mode='json') == {
+        assert TypeAdapter(SlotHealth).dump_python(SlotHealthAllServing(), mode='json') == {
             'kind': 'all_serving',
         }
 
@@ -128,14 +128,14 @@ class TestJsonForm:
                 PendingStream(
                     'a',
                     Execution.ISOLATED,
-                    StreamServed(workers=2, capacity=6),
-                    OldestWaiting(oldest_due_at=_AT, wait=timedelta(milliseconds=90_500)),
+                    StreamCoverageStateServed(workers=2, capacity=6),
+                    StreamWaitDue(oldest_due_at=_AT, wait=timedelta(milliseconds=90_500)),
                 ),
                 PendingStream(
                     'b',
                     Execution.SHARED_ASYNC,
-                    StreamWithoutCapacity(workers=1),
-                    NoneDue(next_due_at=_AT),
+                    StreamCoverageStateNoCapacity(workers=1),
+                    StreamWaitNoneDue(next_due_at=_AT),
                 ),
             ),
             workers=(),

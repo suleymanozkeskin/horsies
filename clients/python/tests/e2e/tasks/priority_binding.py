@@ -70,7 +70,7 @@ class PriorityChildWorkflow(WorkflowDefinition[int]):
         scrape = TaskNode(function=scrape_task, node_id='scrape')
         return WorkflowSpec(
             name=cls.name,
-            tasks=[scrape],
+            nodes=[scrape],
             output=scrape,
             on_error=OnError.FAIL,
         )
@@ -78,12 +78,12 @@ class PriorityChildWorkflow(WorkflowDefinition[int]):
 
 # Module-scope parent spec: a single SubWorkflowNode expanding the child above.
 _parent_child_node = SubWorkflowNode(
-    workflow_def=PriorityChildWorkflow,
+    workflow_definition=PriorityChildWorkflow,
     node_id='pb_parent_child',
 )
 spec_priority_parent = app.workflow(
     name='pb_priority_parent',
-    tasks=[_parent_child_node],
+    nodes=[_parent_child_node],
     output=_parent_child_node,
     on_error=OnError.FAIL,
     definition_key='tests.e2e.pb.priority_parent.v1',

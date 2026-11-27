@@ -94,7 +94,7 @@ describe("the workflow context in a child", () => {
 
     const context = first.context.kind === "context" ? first.context.context : assert.fail("the runtime holds no context");
 
-    assert.deepEqual([context.workflowId, context.taskIndex, context.taskName], [WORKFLOW_ID, 2, "audit"]);
+    assert.deepEqual([context.workflowId, context.nodeIndex, context.taskName], [WORKFLOW_ID, 2, "audit"]);
     assert.deepEqual(context.resultFor("produce", produce), { ok: true, value: { kind: "succeeded", value: 10 } });
     assert.deepEqual(child.native.values, [[3n, "null"]]);
   });

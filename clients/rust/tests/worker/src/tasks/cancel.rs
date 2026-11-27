@@ -1,5 +1,5 @@
 //! Tasks that an operator cancels while they run (`cancel_task` with
-//! `include_running`): one per execution class and body kind that waits for
+//! `CancelPolicy::IncludeRunning`): one per execution class and body kind that waits for
 //! the cancel, one that ignores it and is killed after its grace, and one
 //! that ignores it with no grace and runs to its end. Each writes the
 //! marker `<token>-started` with the pid of its child when it starts; the

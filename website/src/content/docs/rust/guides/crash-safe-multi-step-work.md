@@ -215,7 +215,7 @@ struct Checkout;
 
 impl WorkflowDefinition for Checkout {
     type Output = String;
-    type Params = CheckoutParams;
+    type Parameters = CheckoutParams;
 
     fn name() -> &'static str {
         "checkout"
@@ -261,7 +261,7 @@ fn register_checkout(
     let _charge_card = charge_card::register(app)?;
     let _write_invoice = write_invoice::register(app)?;
     let _send_receipt = send_receipt::register(app)?;
-    app.workflow_template::<Checkout>()
+    app.register_workflow_definition_with::<Checkout>()
 }
 
 async fn start_checkout(
@@ -322,7 +322,7 @@ A node runs at least once. Its body can run more than once:
 - The answer is lost. The provider did the effect, but the call timed out. The step returns a code in `retry_for`, and the retry calls the provider again.
 - The workflow starts again. A new start runs every node again.
 
-A cancel does not undo an effect. An operator cancel of a running step (`horsies::monitoring::cancel_task` with `include_running = true`, or the web UI) makes the step `CANCELLED` at once. The cancel signal of the run fires: `TaskRuntime::cancelled()` completes, and `TaskRuntime::cancel_state()` is `Requested`. An effect that the body did before it stopped stays, and no result is stored for it. See [Cancelling a RUNNING Task](/horsies/monitoring/action-semantics/#cancelling-a-running-task).
+A cancel does not undo an effect. An operator cancel of a running step (`horsies::monitoring::cancel_task` with `CancelPolicy::IncludeRunning`, or the web UI) makes the step `CANCELLED` at once. The cancel signal of the run fires: `TaskRuntime::cancelled()` completes, and `TaskRuntime::cancel_state()` is `Requested`. An effect that the body did before it stopped stays, and no result is stored for it. See [Cancelling a RUNNING Task](/horsies/monitoring/action-semantics/#cancelling-a-running-task).
 
 Rules:
 

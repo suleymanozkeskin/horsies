@@ -161,13 +161,13 @@ export function keyboardInspection(
   if (count === 0) {
     return inspection;
   }
-  const cursor = segmentCursor(inspection, node.task_index);
+  const cursor = segmentCursor(inspection, node.node_index);
   const current = cursor.kind === 'on_segment' ? cursor.index : step > 0 ? -1 : count;
   const segmentIndex = Math.min(Math.max(current + step, 0), count - 1);
   const box = row.querySelector(`[data-segment-index="${segmentIndex}"]`)?.getBoundingClientRect();
   return {
     kind: 'row',
-    taskIndex: node.task_index,
+    taskIndex: node.node_index,
     focus: { kind: 'segment', segmentIndex },
     pause: { kind: 'not_in_pause' },
     xPx: box === undefined ? 0 : box.left + box.width / 2,

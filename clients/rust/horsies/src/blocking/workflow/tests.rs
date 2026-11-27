@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 use crate::workflow::tests_support::{add, test_builder, unit_task_node};
-use crate::{AppConfig, Horsies, HorsiesError, WorkflowDefConfig, WorkflowSpecBuilder};
+use crate::{AppConfig, Horsies, HorsiesError, WorkflowDefinitionConfig, WorkflowSpecBuilder};
 use horsies_core::WorkflowStartErrorCode;
 
 fn app() -> Horsies {
@@ -19,9 +19,9 @@ fn app() -> Horsies {
 }
 
 /// One task node as the output.
-fn one_task(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+fn one_task(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
     let tick = add(builder, unit_task_node("tick"));
-    Ok(WorkflowDefConfig::new().output(tick))
+    Ok(WorkflowDefinitionConfig::new().output(tick))
 }
 
 /// A definition without params, for the views of a workflow function.
@@ -29,7 +29,7 @@ struct Nightly;
 
 impl WorkflowDefinition for Nightly {
     type Output = u32;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "blocking_nightly"
@@ -39,7 +39,7 @@ impl WorkflowDefinition for Nightly {
         "tests.blocking.nightly.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         one_task(builder)
     }
 }
@@ -49,7 +49,7 @@ struct Weekly;
 
 impl WorkflowDefinition for Weekly {
     type Output = u32;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "blocking_weekly"
@@ -59,7 +59,7 @@ impl WorkflowDefinition for Weekly {
         "tests.blocking.weekly.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         one_task(builder)
     }
 }
@@ -75,7 +75,7 @@ struct Regional;
 
 impl WorkflowDefinition for Regional {
     type Output = u32;
-    type Params = Region;
+    type Parameters = Region;
 
     fn name() -> &'static str {
         "blocking_regional"
@@ -149,12 +149,12 @@ async fn a_blocking_retry_checks_its_error_before_the_thread() {
     };
     let other = function
         .blocking()
-        .retry_start(&failed("another"))
+        .resend_start(&failed("another"))
         .unwrap_err();
     assert_eq!(other.code(), WorkflowStartErrorCode::ValidationFailed);
     let retried = function
         .blocking()
-        .retry_start(&failed("blocking_nightly"))
+        .resend_start(&failed("blocking_nightly"))
         .unwrap_err();
     assert_async_context(&retried, "blocking_nightly");
     assert_eq!(retried.workflow_id(), workflow_id);
@@ -170,7 +170,7 @@ async fn a_blocking_retry_takes_an_async_context_error_of_its_workflow() {
     let workflow_id = Uuid::from_u128(12);
     let earlier = function.blocking().start_with_id(workflow_id).unwrap_err();
     assert_async_context(&earlier, "blocking_nightly");
-    let retried = function.blocking().retry_start(&earlier).unwrap_err();
+    let retried = function.blocking().resend_start(&earlier).unwrap_err();
     assert_async_context(&retried, "blocking_nightly");
     assert_eq!(retried.workflow_id(), workflow_id);
 }
@@ -178,7 +178,7 @@ async fn a_blocking_retry_takes_an_async_context_error_of_its_workflow() {
 #[tokio::test]
 async fn a_blocking_template_start_on_a_runtime_thread_runs_no_build() {
     let mut app = app();
-    let template = app.workflow_template::<Regional>().unwrap();
+    let template = app.register_workflow_definition_with::<Regional>().unwrap();
     assert_async_context(
         &template.blocking().start(region()).unwrap_err(),
         "blocking_regional",
@@ -207,7 +207,7 @@ async fn a_blocking_start_by_type_on_a_runtime_thread_writes_nothing() {
         &app.blocking().start_workflow::<Weekly>().unwrap_err(),
         "blocking_weekly",
     );
-    let _template = app.workflow_template::<Regional>().unwrap();
+    let _template = app.register_workflow_definition_with::<Regional>().unwrap();
     assert_async_context(
         &app.blocking()
             .start_workflow_with::<Regional>(region())
@@ -247,7 +247,7 @@ async fn a_blocking_handle_method_on_a_runtime_thread_is_async_context() {
     let refusals = [
         view.status().map(|_status| ()).unwrap_err(),
         view.results().map(|_results| ()).unwrap_err(),
-        view.tasks().map(|_tasks| ()).unwrap_err(),
+        view.nodes().map(|_tasks| ()).unwrap_err(),
         view.cancel().unwrap_err(),
         view.pause().map(|_paused| ()).unwrap_err(),
         view.resume().map(|_resumed| ()).unwrap_err(),

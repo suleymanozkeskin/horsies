@@ -24,7 +24,8 @@ use crate::{AppConfig, SessionDatabase, ValidationReport};
 /// The largest TOML config file that `web` reads.
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
-/// The warning of `--auth trusted-header` (Python `_TRUSTED_HEADER_WARNING`).
+/// The warning of `--authorization trusted-header` (Python
+/// `_TRUSTED_HEADER_WARNING`).
 const TRUSTED_HEADER_WARNING: &str = "SECURITY: the reverse proxy in front of this server MUST \
 strip or overwrite the {header} header on incoming requests. A proxy that forwards a \
 client-supplied header makes this mode trivially spoofable, and horsies cannot detect that.";
@@ -56,8 +57,8 @@ pub(super) struct WebArgs {
     #[arg(long, default_value_t = 8600)]
     port: u16,
     /// Authorization mode: none (a loopback host only) or trusted-header.
-    #[arg(long, value_enum, default_value_t = AuthMode::None)]
-    auth: AuthMode,
+    #[arg(long, value_enum, default_value_t = AuthorizationMode::None)]
+    authorization: AuthorizationMode,
     /// Identity header that the proxy sets, in trusted-header mode.
     #[arg(long, default_value = "X-Forwarded-User")]
     trusted_header: String,
@@ -76,9 +77,9 @@ pub(super) struct WebArgs {
     log_level: LogLevel,
 }
 
-/// The `--auth` values.
+/// The `--authorization` values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum AuthMode {
+enum AuthorizationMode {
     None,
     TrustedHeader,
 }
@@ -93,14 +94,15 @@ enum ConfigSource<'a> {
     },
 }
 
-/// The access policy of the served UI (Python `resolve_web_auth_policy`).
+/// The authorization policy of the served UI (Python
+/// `resolve_web_authorization_policy`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum WebPolicy {
-    /// `--auth none --enable-actions` on a loopback host.
+    /// `--authorization none --enable-actions` on a loopback host.
     AllowAll,
-    /// `--auth none` on a loopback host.
+    /// `--authorization none` on a loopback host.
     ViewOnly,
-    /// `--auth trusted-header`: the header that the proxy sets.
+    /// `--authorization trusted-header`: the header that the proxy sets.
     TrustedHeader { header: String },
 }
 
@@ -111,8 +113,8 @@ enum WebError {
     #[error("horsies web requires the `web` cargo feature")]
     MissingFeature,
     #[error(
-        "--auth none is only allowed on a loopback host; {host:?} is reachable from the \
-         network. Use --auth trusted-header with a proxy-set header."
+        "--authorization none is only allowed on a loopback host; {host:?} is reachable from \
+         the network. Use --authorization trusted-header with a proxy-set header."
     )]
     ExposedWithoutAuthentication { host: String },
     #[error("--trusted-header requires a header name")]
@@ -201,12 +203,16 @@ fn serve(args: &WebArgs) -> Result<(), WebError> {
 
     let trace_link = trace_link_of(args.trace_link.as_deref())?;
     let policy = web_policy(
-        args.auth,
+        args.authorization,
         &args.host,
         &args.trusted_header,
         args.enable_actions,
     )?;
-    let built = built_policy(policy, args.enable_actions)?;
+    let actions = match args.enable_actions {
+        true => Actions::Enabled,
+        false => Actions::Disabled,
+    };
+    let built = built_policy(policy, actions)?;
     if let BuiltPolicy::TrustedHeader(_) = &built {
         eprintln!(
             "{}",
@@ -225,10 +231,7 @@ fn serve(args: &WebArgs) -> Result<(), WebError> {
             custom_css_url: args.custom_css_url.clone(),
             trace_link,
         },
-        actions: match args.enable_actions {
-            true => Actions::Enabled,
-            false => Actions::Disabled,
-        },
+        actions,
     };
     let router = match built {
         BuiltPolicy::AllowAll => crate::web::router(&app, monitoring, crate::web::AllowAll),
@@ -242,7 +245,7 @@ fn serve(args: &WebArgs) -> Result<(), WebError> {
         .block_on(serve_router(router, &args.host, args.port))
 }
 
-/// The trace link of `--trace-link`: `NoTraceLink` without the flag, else
+/// The trace link of `--trace-link`: `TraceLink::Text` without the flag, else
 /// the checked template. Errors: `InvalidTraceLink` with the rule that the
 /// text breaks (an argument error). Pure.
 #[cfg(feature = "web")]
@@ -250,7 +253,7 @@ fn trace_link_of(text: Option<&str>) -> Result<crate::web::TraceLink, WebError> 
     use crate::web::{TraceLink, TraceLinkTemplate};
 
     match text {
-        None => Ok(TraceLink::NoTraceLink),
+        None => Ok(TraceLink::Text),
         Some(text) => TraceLinkTemplate::parse(text)
             .map(TraceLink::Template)
             .map_err(|refused| WebError::InvalidTraceLink {
@@ -272,17 +275,15 @@ enum BuiltPolicy {
 ///
 /// Errors: [`WebError::InvalidTrustedHeader`].
 #[cfg(feature = "web")]
-fn built_policy(policy: WebPolicy, enable_actions: bool) -> Result<BuiltPolicy, WebError> {
+fn built_policy(policy: WebPolicy, actions: crate::web::Actions) -> Result<BuiltPolicy, WebError> {
     match policy {
         WebPolicy::AllowAll => Ok(BuiltPolicy::AllowAll),
         WebPolicy::ViewOnly => Ok(BuiltPolicy::ViewOnly),
-        WebPolicy::TrustedHeader { header } => {
-            crate::web::TrustedHeader::new(&header, enable_actions)
-                .map(BuiltPolicy::TrustedHeader)
-                .map_err(|cause| WebError::InvalidTrustedHeader {
-                    cause: cause.to_string(),
-                })
-        }
+        WebPolicy::TrustedHeader { header } => crate::web::TrustedHeader::new(&header, actions)
+            .map(BuiltPolicy::TrustedHeader)
+            .map_err(|cause| WebError::InvalidTrustedHeader {
+                cause: cause.to_string(),
+            }),
     }
 }
 
@@ -305,32 +306,32 @@ async fn serve_router(router: axum::Router, host: &str, port: u16) -> Result<(),
         .map_err(WebError::Serve)
 }
 
-/// The policy of the arguments (Python `resolve_web_auth_policy`). A host
-/// that is not a loopback host refuses `--auth none`: anyone who can reach
-/// the port could read the task data. Pure.
+/// The policy of the arguments (Python `resolve_web_authorization_policy`).
+/// A host that is not a loopback host refuses `--authorization none`: anyone
+/// who can reach the port could read the task data. Pure.
 ///
 /// Errors: [`WebError::ExposedWithoutAuthentication`],
 /// [`WebError::BlankTrustedHeader`].
 fn web_policy(
-    auth: AuthMode,
+    authorization: AuthorizationMode,
     host: &str,
     trusted_header: &str,
     enable_actions: bool,
 ) -> Result<WebPolicy, WebError> {
-    match (auth, enable_actions) {
-        (AuthMode::TrustedHeader, _) => match trusted_header.trim().is_empty() {
+    match (authorization, enable_actions) {
+        (AuthorizationMode::TrustedHeader, _) => match trusted_header.trim().is_empty() {
             true => Err(WebError::BlankTrustedHeader),
             false => Ok(WebPolicy::TrustedHeader {
                 header: trusted_header.to_owned(),
             }),
         },
-        (AuthMode::None, _) if !is_loopback_host(host) => {
+        (AuthorizationMode::None, _) if !is_loopback_host(host) => {
             Err(WebError::ExposedWithoutAuthentication {
                 host: host.to_owned(),
             })
         }
-        (AuthMode::None, true) => Ok(WebPolicy::AllowAll),
-        (AuthMode::None, false) => Ok(WebPolicy::ViewOnly),
+        (AuthorizationMode::None, true) => Ok(WebPolicy::AllowAll),
+        (AuthorizationMode::None, false) => Ok(WebPolicy::ViewOnly),
     }
 }
 
@@ -445,16 +446,16 @@ mod tests {
     }
 
     #[test]
-    fn auth_none_gives_allow_all_or_view_only_on_a_loopback_host() {
-        let allow = web_policy(AuthMode::None, "127.0.0.1", "X-User", true).unwrap();
+    fn authorization_none_gives_allow_all_or_view_only_on_a_loopback_host() {
+        let allow = web_policy(AuthorizationMode::None, "127.0.0.1", "X-User", true).unwrap();
         assert_eq!(allow, WebPolicy::AllowAll);
-        let view = web_policy(AuthMode::None, "localhost", "X-User", false).unwrap();
+        let view = web_policy(AuthorizationMode::None, "localhost", "X-User", false).unwrap();
         assert_eq!(view, WebPolicy::ViewOnly);
     }
 
     #[test]
-    fn auth_none_on_an_exposed_host_is_an_argument_error() {
-        let refused = web_policy(AuthMode::None, "0.0.0.0", "X-User", false).unwrap_err();
+    fn authorization_none_on_an_exposed_host_is_an_argument_error() {
+        let refused = web_policy(AuthorizationMode::None, "0.0.0.0", "X-User", false).unwrap_err();
         assert!(matches!(
             &refused,
             WebError::ExposedWithoutAuthentication { host } if host == "0.0.0.0"
@@ -464,14 +465,16 @@ mod tests {
 
     #[test]
     fn a_trusted_header_is_taken_on_any_host_and_a_blank_one_is_refused() {
-        let trusted = web_policy(AuthMode::TrustedHeader, "0.0.0.0", "X-User", true).unwrap();
+        let trusted =
+            web_policy(AuthorizationMode::TrustedHeader, "0.0.0.0", "X-User", true).unwrap();
         assert_eq!(
             trusted,
             WebPolicy::TrustedHeader {
                 header: "X-User".to_owned()
             }
         );
-        let blank = web_policy(AuthMode::TrustedHeader, "0.0.0.0", "  ", true).unwrap_err();
+        let blank =
+            web_policy(AuthorizationMode::TrustedHeader, "0.0.0.0", "  ", true).unwrap_err();
         assert!(matches!(blank, WebError::BlankTrustedHeader));
         assert_eq!(blank.exit_code(), 2);
     }
@@ -546,7 +549,7 @@ mod tests {
     fn a_trace_link_is_absent_without_the_flag_and_a_bad_template_is_an_argument_error() {
         use crate::web::TraceLink;
 
-        assert!(matches!(trace_link_of(None), Ok(TraceLink::NoTraceLink)));
+        assert!(matches!(trace_link_of(None), Ok(TraceLink::Text)));
         let template = "https://grafana.example.com/explore?traceId={trace_id}";
         match trace_link_of(Some(template)) {
             Ok(TraceLink::Template(checked)) => assert_eq!(checked.as_str(), template),

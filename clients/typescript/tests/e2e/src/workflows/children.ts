@@ -79,7 +79,7 @@ export const FailedChildProbe = h.object({
   argsChildId: h.string(),
   ctxChildId: h.string(),
   summaryStatus: h.string(),
-  summaryFailedTasks: h.int(),
+  summaryFailedNodes: h.int(),
 });
 
 /** What a node after a completed child read of it through its context. */
@@ -87,7 +87,7 @@ export const CompletedChildProbe = h.object({
   resultValue: h.int(),
   summaryStatus: h.string(),
   summaryOutput: h.int(),
-  summaryCompletedTasks: h.int(),
+  summaryCompletedNodes: h.int(),
 });
 
 /** Python `e2e_sub_int_ok`: returns `value`. */
@@ -472,7 +472,7 @@ function implementProbes(app: Horsies): void {
       argsChildId: argsChild.value.childId,
       ctxChildId: ctxChild.value.childId,
       summaryStatus: summary.value.status,
-      summaryFailedTasks: summary.value.failedTasks,
+      summaryFailedNodes: summary.value.failedNodes,
     });
   });
   app.implement(subProbeCompletedChild, ({ childNode }, { ok, err, workflowContext }) => {
@@ -500,7 +500,7 @@ function implementProbes(app: Horsies): void {
       resultValue: value.value,
       summaryStatus: summary.value.status,
       summaryOutput: output.value.value,
-      summaryCompletedTasks: summary.value.completedTasks,
+      summaryCompletedNodes: summary.value.completedNodes,
     });
   });
 }

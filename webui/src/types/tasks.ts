@@ -1,8 +1,8 @@
 // Mirrors the horsies.monitoring task response models.
-// LeafTask and TaskAttempt are shared with the workflow viewer (same horsies
+// TaskRow and TaskAttempt are shared with the workflow viewer (same horsies
 // rows) and re-used from types/workflows.
 
-import type { LeafTask, TaskAttempt } from '@/types/workflows';
+import type { TaskRow, TaskAttempt } from '@/types/workflows';
 
 /** horsies task lifecycle status. Open union so unseen values still render. */
 export type TaskStatus =
@@ -25,9 +25,9 @@ export type ErrorCategory =
 
 /** One leaf task row, shaped for the list view. */
 export interface TaskSummary {
-  id: string;
+  task_id: string;
   task_name: string;
-  queue_name: string;
+  queue: string;
   status: TaskStatus;
   priority: number;
   retry_count: number;
@@ -42,9 +42,9 @@ export interface TaskSummary {
   completed_at: string | null;
   failed_at: string | null;
   /** Queue wait in seconds, exact to the microsecond. */
-  queue_s: number | null;
+  queue_seconds: number | null;
   /** Execution time in seconds, exact to the microsecond. */
-  exec_s: number | null;
+  execution_seconds: number | null;
 }
 
 /** A paginated slice of tasks plus the total matching the active filters. */
@@ -92,11 +92,11 @@ export type TaskSortBy =
   | 'failed_at'
   | 'status'
   | 'task_name'
-  | 'queue_name'
+  | 'queue'
   | 'priority'
   | 'retry_count'
-  | 'queue_s'
-  | 'exec_s';
+  | 'queue_seconds'
+  | 'execution_seconds';
 
 export type SortDir = 'asc' | 'desc';
 
@@ -151,9 +151,9 @@ export interface TaskFilters {
 
 /** A single task's execution detail plus its full attempt history. */
 export interface TaskDetail {
-  leaf: LeafTask;
+  task_row: TaskRow;
   task_name: string;
-  queue_name: string;
+  queue: string;
   priority: number;
   is_workflow_task: boolean;
   error_category: ErrorCategory | null;
@@ -162,5 +162,5 @@ export interface TaskDetail {
    * on any server that predates this field. */
   workflow_id: string | null;
   /** The row's node index within that run — the deep-link target. */
-  workflow_task_index: number | null;
+  workflow_node_index: number | null;
 }

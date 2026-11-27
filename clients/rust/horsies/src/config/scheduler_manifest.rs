@@ -179,7 +179,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMeta};
+    use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMetadata};
     use horsies_core::scheduler_manifest::{
         ScheduleActivation, ScheduleSendManifest, ScheduleTaskOptions,
     };
@@ -201,7 +201,7 @@ mod tests {
     fn task(timeout_ms: Option<u32>, queue: Option<&str>) -> RegisteredTask {
         RegisteredTask::Blocking {
             task: Arc::new(EchoTask),
-            meta: TaskMeta::default(),
+            metadata: TaskMetadata::default(),
         }
         .with_task_options(TaskOptions {
             task_name: "reports.nightly".to_owned(),
@@ -314,7 +314,7 @@ mod tests {
             "cleanup".to_owned(),
             RegisteredTask::Blocking {
                 task: Arc::new(EchoTask),
-                meta: TaskMeta::default(),
+                metadata: TaskMetadata::default(),
             },
             QueueSource::TaskOptions,
         )

@@ -49,7 +49,7 @@ from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow.context import (
     SubWorkflowSummary,
     WorkflowContext,
-    WorkflowMeta,
+    WorkflowMetadata,
 )
 from horsies.core.types.result import Err, Ok, Result
 
@@ -374,13 +374,13 @@ class TestInternalTypesExempt:
         _check(f)
 
     def test_workflow_meta_param(self) -> None:
-        def f(*, meta: WorkflowMeta) -> Result[int, TaskError]: ...
+        def f(*, meta: WorkflowMetadata) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_internal_codec_types_contains_expected(self) -> None:
         assert TaskError in INTERNAL_CODEC_TYPES
         assert WorkflowContext in INTERNAL_CODEC_TYPES
-        assert WorkflowMeta in INTERNAL_CODEC_TYPES
+        assert WorkflowMetadata in INTERNAL_CODEC_TYPES
         assert SubWorkflowSummary in INTERNAL_CODEC_TYPES
 
     def test_internal_codec_types_does_not_contain_result_or_outcome(self) -> None:

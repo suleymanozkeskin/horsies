@@ -623,7 +623,7 @@ async def test_workflow_task_retries(broker: PostgresBroker, tmp_path: Path) -> 
 
     spec_retry = app.workflow(
         name='e2e_retry_test',
-        tasks=[node_retry],
+        nodes=[node_retry],
         definition_key='tests.e2e.retry_test.v1',
     )
 
@@ -675,7 +675,7 @@ async def test_workflow_task_retries_exhausted(
 
     spec_retry_fail = app.workflow(
         name='e2e_retry_exhausted',
-        tasks=[node_retry],
+        nodes=[node_retry],
         definition_key='tests.e2e.retry_exhausted.v1',
     )
 

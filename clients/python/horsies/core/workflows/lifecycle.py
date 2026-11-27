@@ -292,12 +292,12 @@ def _start_request(
         spec._require_definition_key()
 
         # Validate output type matches declared generic (HRS-025)
-        if spec.workflow_def_cls is not None:
-            validate_workflow_generic_output_match(spec.workflow_def_cls, spec)
+        if spec.workflow_definition is not None:
+            validate_workflow_generic_output_match(spec.workflow_definition, spec)
 
         # Validate that WorkflowSpec was created via app.workflow()
         # TaskNodes must have resolved queue and priority (SubWorkflowNodes don't have these)
-        for node in spec.tasks:
+        for node in spec.nodes:
             if isinstance(node, SubWorkflowNode):
                 continue  # SubWorkflowNodes don't have queue/priority
             task = node
@@ -305,14 +305,14 @@ def _start_request(
                 raise WorkflowValidationError(
                     message='TaskNode has unresolved queue',
                     code=HorsiesErrorCode.WORKFLOW_UNRESOLVED_QUEUE,
-                    notes=[f"TaskNode '{task.name}' has queue=None"],
+                    notes=[f"TaskNode '{task.task_name}' has queue=None"],
                     help_text='use app.workflow() to create WorkflowSpec with proper validation',
                 )
             if task.priority is None:
                 raise WorkflowValidationError(
                     message='TaskNode has unresolved priority',
                     code=HorsiesErrorCode.WORKFLOW_UNRESOLVED_PRIORITY,
-                    notes=[f"TaskNode '{task.name}' has priority=None"],
+                    notes=[f"TaskNode '{task.task_name}' has priority=None"],
                     help_text='use app.workflow() to create WorkflowSpec with proper validation',
                 )
     except WorkflowValidationError as exc:
@@ -413,7 +413,7 @@ def _start_answer(
         WorkflowHandle(
             workflow_id=workflow_key,
             broker=broker,
-            out_type=(
+            output_type=(
                 _resolve_source_node_ok_type(spec.output)
                 if spec.output is not None
                 else _OUTPUTLESS_TERMINALS
@@ -444,9 +444,9 @@ def start_workflow(
     ``CoreCallTimedOut``; its outcome is unknown.
 
     On a thread that runs an event loop it returns ``ASYNC_CONTEXT`` and
-    writes nothing; ``retry_start_async(err)`` completes the start with the
+    writes nothing; ``resend_start_async(err)`` completes the start with the
     error's id.
-    ``WorkflowSpec.start()`` and ``retry_start()`` check first, so their
+    ``WorkflowSpec.start()`` and ``resend_start()`` check first, so their
     message names their own async form.
 
     Args:
@@ -529,7 +529,7 @@ def _start_with_trace(
     return _start_answer(spec, broker, wf_id, workflow_key, outcome)
 
 
-async def pause_workflow(
+async def pause_workflow_async(
     broker: 'PostgresBroker',
     workflow_id: uuid.UUID,
 ) -> HandleResult[bool]:
@@ -548,12 +548,12 @@ async def pause_workflow(
     handle (``CoreHandle.pause_workflow_async``); a cancel of the caller
     does not stop it.
 
-    Use resume_workflow() to continue execution.
+    Use resume_workflow_async() to continue execution.
 
     Args:
         broker: PostgreSQL broker for database operations.
         workflow_id: The workflow ID to pause: a ``UUID``
-            (``WorkflowHandle.for_id`` parses a text).
+            (``Horsies.workflow_handle`` parses a text).
 
     Returns:
         ``Ok(True)`` if workflow was paused.
@@ -590,7 +590,7 @@ def pause_workflow_blocking(
     broker: 'PostgresBroker',
     workflow_id: uuid.UUID,
 ) -> HandleResult[bool]:
-    """The blocking form of ``pause_workflow()``: ``CoreHandle.pause_workflow``
+    """The blocking form of ``pause_workflow_async()``: ``CoreHandle.pause_workflow``
     on the calling thread, with the GIL released, and the same outcomes. A
     raised signal handler (Ctrl+C) leaves the call; the pause runs on to its
     end. A pause that does not end within the core's bound of a blocking
@@ -598,7 +598,7 @@ def pause_workflow_blocking(
     outcome is unknown.
 
     The caller returns ``ASYNC_CONTEXT`` first on a thread that runs an
-    event loop (``pause_workflow_sync``, ``WorkflowHandle.pause``).
+    event loop (``pause_workflow``, ``WorkflowHandle.pause``).
     """
     from horsies._core import CoreError
     from horsies.core.types.core_failure import call_refusal_or_raise
@@ -653,20 +653,20 @@ def _pause_answer(
             assert_never(unreachable)
 
 
-def pause_workflow_sync(
+def pause_workflow(
     broker: 'PostgresBroker',
     workflow_id: uuid.UUID,
 ) -> HandleResult[bool]:
     """Pause a running workflow synchronously.
 
-    The blocking form of ``pause_workflow()`` (``pause_workflow_blocking``):
+    The blocking form of ``pause_workflow_async()`` (``pause_workflow_blocking``):
     the same outcomes, on the calling thread. On a thread that runs an event
     loop it returns ``WorkflowHandleAsyncContext`` and changes nothing.
 
     Args:
         broker: PostgreSQL broker for database operations.
         workflow_id: The workflow ID to pause: a ``UUID``
-            (``WorkflowHandle.for_id`` parses a text).
+            (``Horsies.workflow_handle`` parses a text).
 
     Returns:
         ``Ok(True)`` if workflow was paused.
@@ -681,15 +681,15 @@ def pause_workflow_sync(
     if in_running_event_loop():
         return Err(WorkflowHandleAsyncContext(
             message=async_context_message(
-                f'pause_workflow_sync for workflow {workflow_id}',
-                'pause_workflow(broker, workflow_id)',
+                f'pause_workflow for workflow {workflow_id}',
+                'pause_workflow_async(broker, workflow_id)',
             ),
             workflow_id=str(workflow_id),
         ))
     return pause_workflow_blocking(broker, workflow_id)
 
 
-async def resume_workflow(
+async def resume_workflow_async(
     broker: 'PostgresBroker',
     workflow_id: uuid.UUID,
 ) -> HandleResult[bool]:
@@ -710,7 +710,7 @@ async def resume_workflow(
     Args:
         broker: PostgreSQL broker for database operations.
         workflow_id: The workflow ID to resume: a ``UUID``
-            (``WorkflowHandle.for_id`` parses a text).
+            (``Horsies.workflow_handle`` parses a text).
 
     Returns:
         ``Ok(True)`` if workflow was resumed.
@@ -756,7 +756,7 @@ def resume_workflow_blocking(
     broker: 'PostgresBroker',
     workflow_id: uuid.UUID,
 ) -> HandleResult[bool]:
-    """The blocking form of ``resume_workflow()``: ``CoreHandle.resume_workflow``
+    """The blocking form of ``resume_workflow_async()``: ``CoreHandle.resume_workflow``
     on the calling thread, with the GIL released, and the same outcomes and
     raises. The child starts that the resume owes build their children by
     their ``build_with`` on the core's callback thread while this thread
@@ -766,7 +766,7 @@ def resume_workflow_blocking(
     ``CoreCallTimedOut``; its outcome is unknown.
 
     The caller returns ``ASYNC_CONTEXT`` first on a thread that runs an
-    event loop (``resume_workflow_sync``, ``WorkflowHandle.resume``).
+    event loop (``resume_workflow``, ``WorkflowHandle.resume``).
     """
     from horsies._core import CoreError
     from horsies.core.types.core_failure import call_refusal_or_raise
@@ -823,13 +823,13 @@ def _resume_answer(
             assert_never(unreachable)
 
 
-def resume_workflow_sync(
+def resume_workflow(
     broker: 'PostgresBroker',
     workflow_id: uuid.UUID,
 ) -> HandleResult[bool]:
     """Resume a paused workflow synchronously.
 
-    The blocking form of ``resume_workflow()`` (``resume_workflow_blocking``):
+    The blocking form of ``resume_workflow_async()`` (``resume_workflow_blocking``):
     the same outcomes and raises, on the calling thread. On a thread that
     runs an event loop it returns ``WorkflowHandleAsyncContext`` and changes
     nothing.
@@ -837,7 +837,7 @@ def resume_workflow_sync(
     Args:
         broker: PostgreSQL broker for database operations.
         workflow_id: The workflow ID to resume: a ``UUID``
-            (``WorkflowHandle.for_id`` parses a text).
+            (``Horsies.workflow_handle`` parses a text).
 
     Returns:
         ``Ok(True)`` if workflow was resumed.
@@ -852,8 +852,8 @@ def resume_workflow_sync(
     if in_running_event_loop():
         return Err(WorkflowHandleAsyncContext(
             message=async_context_message(
-                f'resume_workflow_sync for workflow {workflow_id}',
-                'resume_workflow(broker, workflow_id)',
+                f'resume_workflow for workflow {workflow_id}',
+                'resume_workflow_async(broker, workflow_id)',
             ),
             workflow_id=str(workflow_id),
         ))

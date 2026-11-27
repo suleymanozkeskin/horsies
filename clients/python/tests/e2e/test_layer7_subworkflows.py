@@ -31,7 +31,7 @@ from horsies.core.models.workflow import (
     TaskNode,
     WorkflowHandle,
     WorkflowStatus,
-    WorkflowTaskStatus,
+    WorkflowNodeStatus,
     WorkflowTerminalResults,
 )
 from horsies.core.types.result import Ok, Result, is_err, is_ok
@@ -137,7 +137,7 @@ def _assert_subworkflow_error(
     if child_id is not None:
         assert err.sub_workflow_id == child_id
     assert err.sub_workflow_summary.status == WorkflowStatus.FAILED
-    assert err.sub_workflow_summary.failed_tasks >= 1
+    assert err.sub_workflow_summary.failed_nodes >= 1
     return err
 
 
@@ -151,7 +151,7 @@ def _workflow_spec(
 ) -> Any:
     return app.workflow(
         name=f'e2e_layer7_{name}',
-        tasks=tasks,
+        nodes=tasks,
         output=output,
         success_policy=success_policy,
         on_error=on_error,
@@ -381,8 +381,8 @@ async def test_subworkflow_success_full_surface_matrix(
         summary = _decode_summary_column(parent_task['sub_workflow_summary'])
         assert summary.status == WorkflowStatus.COMPLETED
         assert summary.output == 11
-        assert summary.total_tasks == 1
-        assert summary.completed_tasks == 1
+        assert summary.total_nodes == 1
+        assert summary.completed_nodes == 1
 
         child_row = await _workflow_row(broker, child_id)
         assert child_row['status'] == 'COMPLETED'
@@ -391,10 +391,10 @@ async def test_subworkflow_success_full_surface_matrix(
         assert child_row['depth'] == 1
         assert child_row['root_workflow_id'] == str(handle.workflow_id)
 
-        task_infos = _unwrap_handle_result(await asyncio.to_thread(handle.tasks))
+        task_infos = _unwrap_handle_result(await asyncio.to_thread(handle.nodes))
         assert len(task_infos) == 1
         task_info = task_infos[0]
-        assert task_info.status == WorkflowTaskStatus.COMPLETED
+        assert task_info.status == WorkflowNodeStatus.COMPLETED
         assert task_info.sub_workflow_id == child_id
         assert task_info.sub_workflow_summary is not None
         assert task_info.sub_workflow_summary.status == WorkflowStatus.COMPLETED
@@ -439,10 +439,10 @@ async def test_subworkflow_failure_fail_policy_preserves_error_everywhere(
         handle_result = await asyncio.to_thread(handle.get, wait_ms=2000)
         _assert_subworkflow_error(outcome_of(handle_result), child_id=child_id)
 
-        task_infos = _unwrap_handle_result(await asyncio.to_thread(handle.tasks))
+        task_infos = _unwrap_handle_result(await asyncio.to_thread(handle.nodes))
         assert len(task_infos) == 1
         task_info = task_infos[0]
-        assert task_info.status == WorkflowTaskStatus.FAILED
+        assert task_info.status == WorkflowNodeStatus.FAILED
         assert task_info.sub_workflow_id == child_id
         assert task_info.sub_workflow_summary is not None
         assert task_info.sub_workflow_summary.status == WorkflowStatus.FAILED
@@ -690,12 +690,12 @@ async def test_nested_subworkflow_failure_surfaces_each_child_error(
 
         root_result = await asyncio.to_thread(handle.get, wait_ms=2000)
         root_error = _assert_subworkflow_error(outcome_of(root_result), child_id=middle_id)
-        assert root_error.sub_workflow_summary.failed_tasks == 1
+        assert root_error.sub_workflow_summary.failed_nodes == 1
 
         middle = await _workflow_row(broker, middle_id)
         middle_error = _decode_error_column(middle['error'])
         assert isinstance(middle_error, SubWorkflowFailure)
-        assert middle_error.sub_workflow_summary.failed_tasks == 1
+        assert middle_error.sub_workflow_summary.failed_nodes == 1
 
         middle_tasks = await _workflow_task_rows(broker, middle_id)
         leaf_id = middle_tasks[0]['sub_workflow_id']
@@ -862,7 +862,7 @@ async def test_subworkflow_join_any_first_success(
         kwargs={'value': 'slow', 'delay_ms': 1_000},
     )
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubOkWorkflow,
+        workflow_definition=wf_tasks.E2ESubOkWorkflow,
         node_id='l7_any_child',
         waits_for=[fast, slow],
         join='any',
@@ -909,7 +909,7 @@ async def test_subworkflow_join_any_all_fail(
         kwargs={'error_code': 'L7_ANY_FAIL_B'},
     )
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubOkWorkflow,
+        workflow_definition=wf_tasks.E2ESubOkWorkflow,
         node_id='l7_any_all_fail_child',
         waits_for=[fail_a, fail_b],
         join='any',
@@ -956,7 +956,7 @@ async def test_subworkflow_join_quorum_met(
         kwargs={'error_code': 'L7_QUORUM_OPTIONAL_FAIL'},
     )
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubOkWorkflow,
+        workflow_definition=wf_tasks.E2ESubOkWorkflow,
         node_id='l7_quorum_met_child',
         waits_for=[ok_a, ok_b, fail_c],
         join='quorum',
@@ -1009,7 +1009,7 @@ async def test_subworkflow_join_quorum_unmet(
         kwargs={'error_code': 'L7_QUORUM_FAIL_C'},
     )
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubOkWorkflow,
+        workflow_definition=wf_tasks.E2ESubOkWorkflow,
         node_id='l7_quorum_unmet_child',
         waits_for=[ok_a, fail_b, fail_c],
         join='quorum',
@@ -1057,7 +1057,7 @@ async def test_subworkflow_join_quorum_impossible(
         kwargs={'value': 'slow_c', 'delay_ms': 1_000},
     )
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubOkWorkflow,
+        workflow_definition=wf_tasks.E2ESubOkWorkflow,
         node_id='l7_quorum_impossible_child',
         waits_for=[fail_a, fail_b, slow_c],
         join='quorum',
@@ -1100,7 +1100,7 @@ async def test_subworkflow_skip_task_fail_to_sub_skip(
         kwargs={'error_code': 'L7_TASK_FAILS_BEFORE_SUB'},
     )
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubOkWorkflow,
+        workflow_definition=wf_tasks.E2ESubOkWorkflow,
         node_id='l7_skip_sub_after_task_fail',
         waits_for=[source],
     )
@@ -1129,7 +1129,7 @@ async def test_subworkflow_skip_sub_fail_to_task_skip(
     broker: PostgresBroker,
 ) -> None:
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubFailWorkflow,
+        workflow_definition=wf_tasks.E2ESubFailWorkflow,
         node_id='l7_skip_failed_sub',
     )
     downstream = TaskNode(
@@ -1199,7 +1199,7 @@ async def test_subworkflow_skip_chain_skip(
         kwargs={'error_code': 'L7_CHAIN_SOURCE_FAIL'},
     )
     first_sub = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubOkWorkflow,
+        workflow_definition=wf_tasks.E2ESubOkWorkflow,
         node_id='l7_chain_first_sub_skipped',
         waits_for=[source],
     )
@@ -1210,7 +1210,7 @@ async def test_subworkflow_skip_chain_skip(
         waits_for=[first_sub],
     )
     second_sub = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubOkWorkflow,
+        workflow_definition=wf_tasks.E2ESubOkWorkflow,
         node_id='l7_chain_second_sub_skipped',
         waits_for=[middle],
     )
@@ -1241,7 +1241,7 @@ async def test_subworkflow_cancel_running_child_cascade(
     broker: PostgresBroker,
 ) -> None:
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubSlowWorkflow,
+        workflow_definition=wf_tasks.E2ESubSlowWorkflow,
         node_id='l7_cancel_running_child',
         kwargs={'value': 'cancel_me', 'delay_ms': 2_000},
     )
@@ -1282,7 +1282,7 @@ async def test_subworkflow_cancel_before_start(
         kwargs={'value': 'gate', 'delay_ms': 2_000},
     )
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubOkWorkflow,
+        workflow_definition=wf_tasks.E2ESubOkWorkflow,
         node_id='l7_cancel_before_start_child',
         waits_for=[gate],
     )
@@ -1340,7 +1340,7 @@ async def test_subworkflow_cancel_nested_cascade(
     broker: PostgresBroker,
 ) -> None:
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubNestedSlowMiddleWorkflow,
+        workflow_definition=wf_tasks.E2ESubNestedSlowMiddleWorkflow,
         node_id='l7_cancel_nested_middle',
     )
     spec = _workflow_spec(
@@ -1385,7 +1385,7 @@ async def test_subworkflow_pause_running_child(
     broker: PostgresBroker,
 ) -> None:
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubSlowWorkflow,
+        workflow_definition=wf_tasks.E2ESubSlowWorkflow,
         node_id='l7_pause_running_child',
         kwargs={'value': 'pause_me', 'delay_ms': 1_000},
     )
@@ -1418,7 +1418,7 @@ async def test_subworkflow_pause_resume_completes(
     broker: PostgresBroker,
 ) -> None:
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubSlowWorkflow,
+        workflow_definition=wf_tasks.E2ESubSlowWorkflow,
         node_id='l7_pause_resume_child',
         kwargs={'value': 'resume_me', 'delay_ms': 500},
     )
@@ -1459,7 +1459,7 @@ async def test_subworkflow_pause_then_cancel(
     broker: PostgresBroker,
 ) -> None:
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubSlowWorkflow,
+        workflow_definition=wf_tasks.E2ESubSlowWorkflow,
         node_id='l7_pause_then_cancel_child',
         kwargs={'value': 'pause_cancel_me', 'delay_ms': 2_000},
     )
@@ -1502,7 +1502,7 @@ async def test_subworkflow_recovery_ready_unstarted(
         kwargs={'value': 'gate'},
     )
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubOkWorkflow,
+        workflow_definition=wf_tasks.E2ESubOkWorkflow,
         node_id='l7_recovery_ready_child',
         waits_for=[gate],
     )
@@ -1647,7 +1647,7 @@ async def test_subworkflow_recovery_parent_crashed_mid_child(
     broker: PostgresBroker,
 ) -> None:
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubSlowWorkflow,
+        workflow_definition=wf_tasks.E2ESubSlowWorkflow,
         node_id='l7_recovery_mid_child',
         kwargs={'value': 'recovered_child', 'delay_ms': 1_000},
     )
@@ -1727,7 +1727,7 @@ async def test_subworkflow_child_retries_succeed_eventually(
 ) -> None:
     counter_file = tmp_path / 'sub_retry_success.txt'
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubRetryWorkflow,
+        workflow_definition=wf_tasks.E2ESubRetryWorkflow,
         node_id='l7_retry_success_child',
         kwargs={
             'counter_file': str(counter_file),
@@ -1761,7 +1761,7 @@ async def test_subworkflow_child_retries_exhaust(
 ) -> None:
     counter_file = tmp_path / 'sub_retry_exhaust.txt'
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubRetryWorkflow,
+        workflow_definition=wf_tasks.E2ESubRetryWorkflow,
         node_id='l7_retry_exhaust_child',
         kwargs={
             'counter_file': str(counter_file),
@@ -1799,7 +1799,7 @@ async def test_subworkflow_child_good_until_expired(
     broker: PostgresBroker,
 ) -> None:
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubExpiredWorkflow,
+        workflow_definition=wf_tasks.E2ESubExpiredWorkflow,
         node_id='l7_good_until_expired_child',
         kwargs={'expires_in_ms': -100},
     )
@@ -1837,7 +1837,7 @@ async def test_subworkflow_success_policy_required_fail_workflow_fail(
     broker: PostgresBroker,
 ) -> None:
     child = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubFailWorkflow,
+        workflow_definition=wf_tasks.E2ESubFailWorkflow,
         node_id='l7_policy_required_fail_child',
     )
     spec = _workflow_spec(
@@ -1875,7 +1875,7 @@ async def test_subworkflow_success_policy_optional_fail_workflow_complete(
         kwargs={'value': 'required_ok'},
     )
     optional = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubFailWorkflow,
+        workflow_definition=wf_tasks.E2ESubFailWorkflow,
         node_id='l7_policy_optional_failed_sub',
     )
     spec = _workflow_spec(
@@ -1907,11 +1907,11 @@ async def test_subworkflow_success_policy_multi_case_any(
     broker: PostgresBroker,
 ) -> None:
     case_fail = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubFailWorkflow,
+        workflow_definition=wf_tasks.E2ESubFailWorkflow,
         node_id='l7_policy_case_fail_sub',
     )
     case_ok = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubOkWorkflow,
+        workflow_definition=wf_tasks.E2ESubOkWorkflow,
         node_id='l7_policy_case_ok_sub',
     )
     spec = _workflow_spec(
@@ -1946,7 +1946,7 @@ async def test_subworkflow_success_policy_mixed_required_optional(
     broker: PostgresBroker,
 ) -> None:
     required_sub = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubOkWorkflow,
+        workflow_definition=wf_tasks.E2ESubOkWorkflow,
         node_id='l7_policy_mixed_required_sub',
     )
     required_task = TaskNode(
@@ -1955,7 +1955,7 @@ async def test_subworkflow_success_policy_mixed_required_optional(
         kwargs={'value': 'task_ok'},
     )
     optional_sub = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubFailWorkflow,
+        workflow_definition=wf_tasks.E2ESubFailWorkflow,
         node_id='l7_policy_mixed_optional_sub',
     )
     spec = _workflow_spec(
@@ -2008,14 +2008,14 @@ async def test_subworkflow_reconstructed_handle_status(
     reconstructed: WorkflowHandle[int] = WorkflowHandle(
         workflow_id=handle.workflow_id,
         broker=broker,
-        out_type=int,
+        output_type=int,
     )
     reconstructed_status = _unwrap_handle_result(await asyncio.to_thread(reconstructed.status))
     assert reconstructed_status == WorkflowStatus.COMPLETED
     assert_succeeded(await asyncio.to_thread(reconstructed.get, wait_ms=2000), expected_value=11)
 
 
-async def test_subworkflow_reconstructed_handle_tasks(
+async def test_subworkflow_reconstructed_handle_nodes(
     broker: PostgresBroker,
 ) -> None:
     with run_worker(
@@ -2032,12 +2032,12 @@ async def test_subworkflow_reconstructed_handle_tasks(
     reconstructed: WorkflowHandle[int] = WorkflowHandle(
         workflow_id=handle.workflow_id,
         broker=broker,
-        out_type=int,
+        output_type=int,
     )
-    task_infos = _unwrap_handle_result(await asyncio.to_thread(reconstructed.tasks))
+    task_infos = _unwrap_handle_result(await asyncio.to_thread(reconstructed.nodes))
     assert len(task_infos) == 1
     task_info = task_infos[0]
-    assert task_info.status == WorkflowTaskStatus.COMPLETED
+    assert task_info.status == WorkflowNodeStatus.COMPLETED
     assert isinstance(task_info.sub_workflow_id, str)
     assert task_info.sub_workflow_summary is not None
     assert task_info.sub_workflow_summary.status == WorkflowStatus.COMPLETED
@@ -2061,7 +2061,7 @@ async def test_subworkflow_reconstructed_handle_results(
     reconstructed: WorkflowHandle[int] = WorkflowHandle(
         workflow_id=handle.workflow_id,
         broker=broker,
-        out_type=int,
+        output_type=int,
     )
     results = _unwrap_handle_result(await asyncio.to_thread(reconstructed.results))
     assert set(results) == {wf_tasks.node_e2e_sub_success_child.node_id}
@@ -2077,7 +2077,7 @@ async def test_subworkflow_deep_outputless_nested_failed_optional(
         kwargs={'value': 'required_ok'},
     )
     nested_fail = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubNestedFailMiddleWorkflow,
+        workflow_definition=wf_tasks.E2ESubNestedFailMiddleWorkflow,
         node_id='l7_deep_outputless_nested_fail',
     )
     spec = _workflow_spec(
@@ -2118,11 +2118,11 @@ async def test_subworkflow_deep_outputless_all_failed_required(
     broker: PostgresBroker,
 ) -> None:
     fail_a = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubFailWorkflow,
+        workflow_definition=wf_tasks.E2ESubFailWorkflow,
         node_id='l7_deep_all_failed_a',
     )
     fail_b = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubNestedFailMiddleWorkflow,
+        workflow_definition=wf_tasks.E2ESubNestedFailMiddleWorkflow,
         node_id='l7_deep_all_failed_b',
     )
     spec = _workflow_spec(
@@ -2163,7 +2163,7 @@ async def test_subworkflow_deep_mixed_paths(
     broker: PostgresBroker,
 ) -> None:
     ok_sub = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubOkWorkflow,
+        workflow_definition=wf_tasks.E2ESubOkWorkflow,
         node_id='l7_deep_mixed_ok_sub',
     )
     failed_source = TaskNode(
@@ -2172,14 +2172,14 @@ async def test_subworkflow_deep_mixed_paths(
         kwargs={'error_code': 'L7_DEEP_MIXED_SOURCE_FAIL'},
     )
     allow_failed_sub = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubFailedInputWorkflow,
+        workflow_definition=wf_tasks.E2ESubFailedInputWorkflow,
         node_id='l7_deep_mixed_allow_failed_sub',
         waits_for=[failed_source],
         args_from={'value': failed_source},
         allow_failed_dependencies=True,
     )
     nested_optional_fail = SubWorkflowNode(
-        workflow_def=wf_tasks.E2ESubNestedFailMiddleWorkflow,
+        workflow_definition=wf_tasks.E2ESubNestedFailMiddleWorkflow,
         node_id='l7_deep_mixed_nested_optional_fail',
     )
     spec = _workflow_spec(

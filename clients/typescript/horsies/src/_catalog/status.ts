@@ -47,7 +47,7 @@ export const WORKFLOW_TERMINAL_STATES: ReadonlySet<WorkflowStatus> = new Set<Wor
   WorkflowStatus.EXPIRED,
 ]);
 
-export const WorkflowTaskStatus = {
+export const WorkflowNodeStatus = {
   PENDING: "PENDING",
   READY: "READY",
   ENQUEUED: "ENQUEUED",
@@ -57,10 +57,10 @@ export const WorkflowTaskStatus = {
   SKIPPED: "SKIPPED",
 } as const;
 
-export type WorkflowTaskStatus = (typeof WorkflowTaskStatus)[keyof typeof WorkflowTaskStatus];
+export type WorkflowNodeStatus = (typeof WorkflowNodeStatus)[keyof typeof WorkflowNodeStatus];
 
-export const WORKFLOW_TASK_TERMINAL_STATES: ReadonlySet<WorkflowTaskStatus> = new Set<WorkflowTaskStatus>([
-  WorkflowTaskStatus.COMPLETED,
-  WorkflowTaskStatus.FAILED,
-  WorkflowTaskStatus.SKIPPED,
+export const WORKFLOW_NODE_TERMINAL_STATES: ReadonlySet<WorkflowNodeStatus> = new Set<WorkflowNodeStatus>([
+  WorkflowNodeStatus.COMPLETED,
+  WorkflowNodeStatus.FAILED,
+  WorkflowNodeStatus.SKIPPED,
 ]);

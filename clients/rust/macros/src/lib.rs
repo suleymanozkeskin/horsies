@@ -115,7 +115,7 @@ pub fn blocking_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///     region: String,
 /// }
 ///
-/// RegionReport::node(SubWorkflowParams::NotGiven)?
+/// RegionReport::node(SubWorkflowParameters::NotGiven)?
 ///     .set(RegionParams::field_region(), "eu".to_owned())?;
 /// ```
 #[proc_macro_derive(WorkflowInput)]

@@ -49,17 +49,17 @@ def _make_app() -> Horsies:
 
 
 class TestWorkflowBuilderRegistration:
-    """Tests for @app.workflow_builder() decorator registration."""
+    """Tests for @app.check_workflow_builder() decorator registration."""
 
     def test_decorator_registers_builder(self) -> None:
         """Decorated function is stored in the builder registry."""
         app = _make_app()
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def my_builder() -> WorkflowSpec[Any]:
             raise NotImplementedError  # pragma: no cover
 
-        builders = app.get_workflow_builders()
+        builders = app.get_check_workflow_builders()
         assert len(builders) == 1
         assert builders[0].function is my_builder
 
@@ -67,7 +67,7 @@ class TestWorkflowBuilderRegistration:
         """Decorated function carries the sentinel attribute."""
         app = _make_app()
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def my_builder() -> WorkflowSpec[Any]:
             raise NotImplementedError  # pragma: no cover
 
@@ -80,29 +80,29 @@ class TestWorkflowBuilderRegistration:
         def my_builder() -> WorkflowSpec[Any]:
             raise NotImplementedError  # pragma: no cover
 
-        decorated = app.workflow_builder()(my_builder)
+        decorated = app.check_workflow_builder()(my_builder)
         assert decorated is my_builder
 
     def test_decorator_stores_cases(self) -> None:
         """Cases passed to decorator are stored in metadata."""
         app = _make_app()
 
-        @app.workflow_builder(cases=[{'x': 1}, {'x': 2}])
+        @app.check_workflow_builder(cases=[{'x': 1}, {'x': 2}])
         def my_builder(x: int) -> WorkflowSpec[Any]:
             raise NotImplementedError  # pragma: no cover
 
-        builders = app.get_workflow_builders()
+        builders = app.get_check_workflow_builders()
         assert builders[0].cases == [{'x': 1}, {'x': 2}]
 
     def test_decorator_stores_source_location(self) -> None:
         """Source location is captured from the decorated function."""
         app = _make_app()
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def my_builder() -> WorkflowSpec[Any]:
             raise NotImplementedError  # pragma: no cover
 
-        builders = app.get_workflow_builders()
+        builders = app.get_check_workflow_builders()
         loc = builders[0].location
         assert loc is not None
         assert loc.file.endswith('test_workflow_builder_check.py')
@@ -111,15 +111,15 @@ class TestWorkflowBuilderRegistration:
         """Multiple decorated builders accumulate in the registry."""
         app = _make_app()
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def builder_a() -> WorkflowSpec[Any]:
             raise NotImplementedError  # pragma: no cover
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def builder_b() -> WorkflowSpec[Any]:
             raise NotImplementedError  # pragma: no cover
 
-        assert len(app.get_workflow_builders()) == 2
+        assert len(app.get_check_workflow_builders()) == 2
 
 
 # =============================================================================
@@ -135,7 +135,7 @@ class TestCheckWorkflowBuilders:
         app = _make_app()
         call_count = 0
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def my_builder() -> WorkflowSpec[Any]:
             nonlocal call_count
             call_count += 1
@@ -151,7 +151,7 @@ class TestCheckWorkflowBuilders:
         app = _make_app()
         call_count = 0
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def my_builder(x: int = 5) -> WorkflowSpec[Any]:
             nonlocal call_count
             call_count += 1
@@ -167,7 +167,7 @@ class TestCheckWorkflowBuilders:
         phase (check-phase containment contract)."""
         app = _make_app()
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def my_builder() -> WorkflowSpec[Any]:
             return mock.MagicMock(spec=WorkflowSpec)
 
@@ -185,7 +185,7 @@ class TestCheckWorkflowBuilders:
         """Unexpected exception from builder is wrapped with HRS-029."""
         app = _make_app()
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def bad_builder() -> WorkflowSpec[Any]:
             raise RuntimeError('kaboom')
 
@@ -198,7 +198,7 @@ class TestCheckWorkflowBuilders:
         """Builder returning non-WorkflowSpec is reported as HRS-029."""
         app = _make_app()
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def bad_builder() -> WorkflowSpec[Any]:
             return None  # type: ignore[return-value]
 
@@ -211,7 +211,7 @@ class TestCheckWorkflowBuilders:
         """WorkflowValidationError from builder is collected directly."""
         app = _make_app()
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def bad_workflow_builder() -> WorkflowSpec[Any]:
             raise WorkflowValidationError(
                 message='bad graph',
@@ -226,7 +226,7 @@ class TestCheckWorkflowBuilders:
         """Parameterized builder missing cases= fails with HRS-027."""
         app = _make_app()
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def my_builder(urls: list[str]) -> WorkflowSpec[Any]:
             raise NotImplementedError  # pragma: no cover
 
@@ -240,7 +240,7 @@ class TestCheckWorkflowBuilders:
         app = _make_app()
         invocations: list[dict[str, Any]] = []
 
-        @app.workflow_builder(cases=[{'x': 1}, {'x': 2}])
+        @app.check_workflow_builder(cases=[{'x': 1}, {'x': 2}])
         def my_builder(x: int) -> WorkflowSpec[Any]:
             invocations.append({'x': x})
             return mock.MagicMock(spec=WorkflowSpec)
@@ -253,7 +253,7 @@ class TestCheckWorkflowBuilders:
         """Case with keys not in builder signature fails with HRS-028."""
         app = _make_app()
 
-        @app.workflow_builder(cases=[{'x': 1, 'bogus': 2}])
+        @app.check_workflow_builder(cases=[{'x': 1, 'bogus': 2}])
         def my_builder(x: int) -> WorkflowSpec[Any]:
             raise NotImplementedError  # pragma: no cover
 
@@ -266,7 +266,7 @@ class TestCheckWorkflowBuilders:
         """Case missing required keys fails with HRS-028."""
         app = _make_app()
 
-        @app.workflow_builder(cases=[{'x': 1}])
+        @app.check_workflow_builder(cases=[{'x': 1}])
         def my_builder(x: int, y: str) -> WorkflowSpec[Any]:
             raise NotImplementedError  # pragma: no cover
 
@@ -279,7 +279,7 @@ class TestCheckWorkflowBuilders:
         """Non-dict case fails with HRS-028."""
         app = _make_app()
 
-        @app.workflow_builder(cases=["not_a_dict"])  # type: ignore[list-item]
+        @app.check_workflow_builder(cases=["not_a_dict"])  # type: ignore[list-item]
         def my_builder(x: int) -> WorkflowSpec[Any]:
             raise NotImplementedError  # pragma: no cover
 
@@ -291,7 +291,7 @@ class TestCheckWorkflowBuilders:
         """Exception during case execution is wrapped with HRS-029."""
         app = _make_app()
 
-        @app.workflow_builder(cases=[{'x': 1}])
+        @app.check_workflow_builder(cases=[{'x': 1}])
         def my_builder(x: int) -> WorkflowSpec[Any]:
             raise ValueError(f'bad value: {x}')
 
@@ -305,7 +305,7 @@ class TestCheckWorkflowBuilders:
         app = _make_app()
         suppressed_during_call = False
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def my_builder() -> WorkflowSpec[Any]:
             nonlocal suppressed_during_call
             suppressed_during_call = app.are_sends_suppressed()
@@ -322,11 +322,11 @@ class TestCheckWorkflowBuilders:
         """Errors from multiple builders are all collected."""
         app = _make_app()
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def builder_a(x: int) -> WorkflowSpec[Any]:
             raise NotImplementedError  # pragma: no cover
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def builder_b(y: str) -> WorkflowSpec[Any]:
             raise NotImplementedError  # pragma: no cover
 
@@ -339,7 +339,7 @@ class TestCheckWorkflowBuilders:
         """HorsiesError from builder is collected as-is (not wrapped)."""
         app = _make_app()
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def my_builder() -> WorkflowSpec[Any]:
             raise ConfigurationError(
                 message='bad config in builder',
@@ -397,10 +397,10 @@ class TestCheckUndecoratedBuilders:
             self._cleanup_module(mod_name)
 
     def test_decorated_builder_not_flagged(self) -> None:
-        """Function with @app.workflow_builder is NOT flagged."""
+        """Function with @app.check_workflow_builder is NOT flagged."""
         app = _make_app()
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def build_wf() -> WorkflowSpec[Any]:
             raise NotImplementedError  # pragma: no cover
 
@@ -573,7 +573,7 @@ class TestCheckUndecoratedBuilders:
         """Decorated builder in a sub-module is NOT flagged."""
         app = _make_app()
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def build_pipeline() -> WorkflowSpec[Any]:
             raise NotImplementedError  # pragma: no cover
 
@@ -645,7 +645,7 @@ class TestCheckIntegration:
         """Builder check errors appear in check() output."""
         app = _make_app()
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def missing_cases_builder(x: int) -> WorkflowSpec[Any]:
             raise NotImplementedError  # pragma: no cover
 
@@ -658,7 +658,7 @@ class TestCheckIntegration:
         """check() passes when builder is valid and produces no errors."""
         app = _make_app()
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def good_builder() -> WorkflowSpec[Any]:
             return mock.MagicMock(spec=WorkflowSpec)
 
@@ -670,7 +670,7 @@ class TestCheckIntegration:
         app = _make_app()
         call_count = 0
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def my_builder() -> WorkflowSpec[Any]:
             nonlocal call_count
             call_count += 1
@@ -714,11 +714,11 @@ class TestCheckIntegration:
         """Builders returning a raw WorkflowSpec without definition_key fail check()."""
         app = _make_app()
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def missing_key_builder() -> WorkflowSpec[Any]:
             return WorkflowSpec(
                 name='missing_key_builder',
-                tasks=[TaskNode(function=mock.MagicMock(task_name='task_a'))],
+                nodes=[TaskNode(function=mock.MagicMock(task_name='task_a'))],
             )
 
         errors = app.check(live=False).refusals
@@ -753,11 +753,11 @@ class TestNodeBindingInCheck:
         """A node on a valid CUSTOM queue binds cleanly — check reports nothing."""
         app = _make_custom_app(('scraping', 30))
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def valid_builder() -> WorkflowSpec[Any]:
             return WorkflowSpec(
                 name='valid_builder',
-                tasks=[
+                nodes=[
                     TaskNode(
                         function=mock.MagicMock(
                             task_name='scrape', queue='scraping',
@@ -773,11 +773,11 @@ class TestNodeBindingInCheck:
         """A node on an unknown queue fails check with TASK_INVALID_QUEUE."""
         app = _make_custom_app(('scraping', 30))
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def invalid_builder() -> WorkflowSpec[Any]:
             return WorkflowSpec(
                 name='invalid_builder',
-                tasks=[
+                nodes=[
                     TaskNode(
                         function=mock.MagicMock(
                             task_name='scrape', queue='nonexistent',
@@ -825,13 +825,13 @@ class TestRecursiveSubworkflowBindingInCheck:
             @classmethod
             def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
                 bad = TaskNode(function=_mock_fn('ghost'), node_id='bad')
-                return WorkflowSpec(name=cls.name, tasks=[bad], output=bad)
+                return WorkflowSpec(name=cls.name, nodes=[bad], output=bad)
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def parent_builder() -> WorkflowSpec[Any]:
             return app.workflow(
                 'parent',
-                [SubWorkflowNode(workflow_def=Child)],
+                [SubWorkflowNode(workflow_definition=Child)],
                 definition_key='parent.v1',
             )
 
@@ -850,13 +850,13 @@ class TestRecursiveSubworkflowBindingInCheck:
             @classmethod
             def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
                 ok = TaskNode(function=_mock_fn('scraping'), node_id='ok')
-                return WorkflowSpec(name=cls.name, tasks=[ok], output=ok)
+                return WorkflowSpec(name=cls.name, nodes=[ok], output=ok)
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def parent_builder() -> WorkflowSpec[Any]:
             return app.workflow(
                 'parent_ok',
-                [SubWorkflowNode(workflow_def=Child)],
+                [SubWorkflowNode(workflow_definition=Child)],
                 definition_key='parent_ok.v1',
             )
 
@@ -892,12 +892,12 @@ class TestRecursiveSubworkflowBindingInCheck:
                     node_id='leaf',
                     kwargs={'values': values, 'shape': shape},
                 )
-                return WorkflowSpec(name=cls.name, tasks=[leaf], output=leaf)
+                return WorkflowSpec(name=cls.name, nodes=[leaf], output=leaf)
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def parent_builder() -> WorkflowSpec[Any]:
             sub = SubWorkflowNode(
-                workflow_def=ChildContainers,
+                workflow_definition=ChildContainers,
                 kwargs={'values': [1, 2], 'shape': {'a': 1}},
             )
             return app.workflow(
@@ -926,9 +926,9 @@ class TestRecursiveSubworkflowBindingInCheck:
             ) -> WorkflowSpec[Any]:
                 raise AssertionError('the check must stop before the build')
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def parent_builder() -> WorkflowSpec[Any]:
-            sub = SubWorkflowNode(workflow_def=Child)
+            sub = SubWorkflowNode(workflow_definition=Child)
             return app.workflow(
                 'parent_refused_default', [sub], definition_key='parent_refused_default.v1',
             )
@@ -961,9 +961,9 @@ class TestRecursiveSubworkflowBindingInCheck:
             ) -> WorkflowSpec[Any]:
                 raise AssertionError('the check must stop before the build')
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def parent_builder() -> WorkflowSpec[Any]:
-            sub = SubWorkflowNode(workflow_def=Child)
+            sub = SubWorkflowNode(workflow_definition=Child)
             return app.workflow(
                 'parent_broken_validator',
                 [sub],
@@ -995,9 +995,9 @@ class TestRecursiveSubworkflowBindingInCheck:
             def build_with(cls, app: Horsies, *, x: int = 1) -> WorkflowSpec[Any]:
                 raise KeyError('user code')
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def parent_builder() -> WorkflowSpec[Any]:
-            sub = SubWorkflowNode(workflow_def=Child)
+            sub = SubWorkflowNode(workflow_definition=Child)
             return app.workflow(
                 'parent_raises', [sub], definition_key='parent_raises.v1',
             )
@@ -1017,13 +1017,13 @@ class TestRecursiveSubworkflowBindingInCheck:
             def build_with(cls, app: Horsies, n: int) -> WorkflowSpec[Any]:
                 seen.append(n)
                 leaf = TaskNode(function=_mock_fn('scraping'), node_id='leaf')
-                return WorkflowSpec(name=cls.name, tasks=[leaf], output=leaf)
+                return WorkflowSpec(name=cls.name, nodes=[leaf], output=leaf)
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def parent_builder() -> WorkflowSpec[Any]:
-            first = SubWorkflowNode(workflow_def=Child, node_id='a', kwargs={'n': 1})
-            second = SubWorkflowNode(workflow_def=Child, node_id='b', kwargs={'n': 2})
-            same = SubWorkflowNode(workflow_def=Child, node_id='c', kwargs={'n': 1})
+            first = SubWorkflowNode(workflow_definition=Child, node_id='a', kwargs={'n': 1})
+            second = SubWorkflowNode(workflow_definition=Child, node_id='b', kwargs={'n': 2})
+            same = SubWorkflowNode(workflow_definition=Child, node_id='c', kwargs={'n': 1})
             return app.workflow(
                 'parent_each_kwarg',
                 [first, second, same],
@@ -1050,15 +1050,15 @@ class TestRecursiveSubworkflowBindingInCheck:
                 cls, app: Horsies, v: TaskOutcome[int, TaskError],
             ) -> WorkflowSpec[Any]:
                 bad = TaskNode(function=_mock_fn('ghost'), node_id='bad')
-                return WorkflowSpec(name=cls.name, tasks=[bad], output=bad)
+                return WorkflowSpec(name=cls.name, nodes=[bad], output=bad)
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def parent_builder() -> WorkflowSpec[Any]:
             source_fn = _mock_fn('scraping')
             source_fn.task_ok_type = int
             src = TaskNode(function=source_fn, node_id='src')
             sub = SubWorkflowNode(
-                workflow_def=ChildRuntime, args_from={'v': src}, waits_for=[src],
+                workflow_definition=ChildRuntime, args_from={'v': src}, waits_for=[src],
             )
             return app.workflow(
                 'parent_rt', [src, sub], definition_key='parent_rt.v1',
@@ -1078,16 +1078,16 @@ class TestRecursiveSubworkflowBindingInCheck:
             @classmethod
             def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
                 t = TaskNode(function=_mock_fn('scraping'), node_id='t')
-                child = SubWorkflowNode(workflow_def=Recur, node_id='self')
+                child = SubWorkflowNode(workflow_definition=Recur, node_id='self')
                 return app.workflow(
                     cls.name, [t, child], definition_key=cls.definition_key,
                 )
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def parent_builder() -> WorkflowSpec[Any]:
             return app.workflow(
                 'parent_recur',
-                [SubWorkflowNode(workflow_def=Recur)],
+                [SubWorkflowNode(workflow_definition=Recur)],
                 definition_key='parent_recur.v1',
             )
 
@@ -1118,21 +1118,21 @@ class TestRecursiveSubworkflowBindingInCheck:
                     # different kwargs that bind an invalid queue at depth 1.
                     t = TaskNode(function=_mock_fn('scraping'), node_id='t0')
                     deeper = SubWorkflowNode(
-                        workflow_def=Recur, kwargs={'depth': 1}, node_id='deeper',
+                        workflow_definition=Recur, kwargs={'depth': 1}, node_id='deeper',
                     )
                     return app.workflow(
                         cls.name, [t, deeper], definition_key=cls.definition_key,
                     )
                 bad = TaskNode(function=_mock_fn('ghost'), node_id='bad')
                 return WorkflowSpec(
-                    name=f'{cls.name}_d{depth}', tasks=[bad], output=bad,
+                    name=f'{cls.name}_d{depth}', nodes=[bad], output=bad,
                 )
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def parent_builder() -> WorkflowSpec[Any]:
             return app.workflow(
                 'parent_pv',
-                [SubWorkflowNode(workflow_def=Recur, kwargs={'depth': 0})],
+                [SubWorkflowNode(workflow_definition=Recur, kwargs={'depth': 0})],
                 definition_key='parent_pv.v1',
             )
 
@@ -1155,13 +1155,13 @@ class TestRecursiveSubworkflowBindingInCheck:
 
             @classmethod
             def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
-                return WorkflowSpec(name=cls.name, tasks=[])  # WORKFLOW_NO_NODES
+                return WorkflowSpec(name=cls.name, nodes=[])  # WORKFLOW_NO_NODES
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def parent_builder() -> WorkflowSpec[Any]:
             return app.workflow(
                 'parent_empty',
-                [SubWorkflowNode(workflow_def=EmptyChild)],
+                [SubWorkflowNode(workflow_definition=EmptyChild)],
                 definition_key='parent_empty.v1',
             )
 
@@ -1185,11 +1185,11 @@ class TestRecursiveSubworkflowBindingInCheck:
                     cls.name, [a, b], definition_key=cls.definition_key,
                 )
 
-        @app.workflow_builder()
+        @app.check_workflow_builder()
         def parent_builder() -> WorkflowSpec[Any]:
             return app.workflow(
                 'parent_multi',
-                [SubWorkflowNode(workflow_def=MultiBadChild)],
+                [SubWorkflowNode(workflow_definition=MultiBadChild)],
                 definition_key='parent_multi.v1',
             )
 

@@ -18,7 +18,7 @@ import type { ActionKind } from '@/types/actions';
 import type { TaskDetail } from '@/types/tasks';
 
 const taskSnapshot = (detail: TaskDetail | undefined): SettleContext => ({
-  wasStatus: detail?.leaf.status ?? null,
+  wasStatus: detail?.task_row.status ?? null,
 });
 
 const hasSettled = (action: ActionKind, detail: TaskDetail): boolean =>
@@ -47,7 +47,7 @@ export function useTaskActions(
     reread,
     successContext: current => ({
       drainingNodes: 0,
-      workerHostname: current?.leaf.worker_hostname ?? null,
+      workerHostname: current?.task_row.worker_hostname ?? null,
     }),
     ...(onGone === undefined ? {} : { onGone }),
   });
@@ -61,7 +61,7 @@ export function useTaskActions(
       ? null
       : {
           isWorkflowTask: detail.is_workflow_task,
-          status: detail.leaf.status,
+          status: detail.task_row.status,
         };
 
   return {

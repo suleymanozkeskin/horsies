@@ -1,20 +1,22 @@
-"""``WorkflowHandle.for_id``: the parse of a workflow id text.
+"""``Horsies.workflow_handle``: the parse of a workflow id text.
 
-``for_id`` returns ``Ok(handle)`` for each spelling of a UUID that
+``workflow_handle`` returns ``Ok(handle)`` for each spelling of a UUID that
 ``uuid.UUID`` accepts; the handle holds the UUID, whose text is the canonical
-form. Any other text is ``Err(WorkflowHandleInvalidWorkflowId)`` with the text and
-the ``ValueError`` of ``uuid.UUID``. The parse reads nothing.
+form, and the broker of the app. Any other text is
+``Err(WorkflowHandleInvalidWorkflowId)`` with the text and the ``ValueError`` of
+``uuid.UUID``, and the app builds no broker. The parse reads nothing.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import uuid
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
 
-from horsies import WorkflowHandleInvalidWorkflowId, WorkflowHandleError, WorkflowHandle
+from horsies import WorkflowHandleInvalidWorkflowId, WorkflowHandleError, Horsies
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.models.workflow.handle_types import WorkflowHandleErrorCode
 from tests.union_members import union_members
@@ -47,14 +49,22 @@ REFUSED_TEXTS: dict[str, str] = {
 """Texts that ``uuid.UUID`` refuses."""
 
 
+def _app_with(broker: MagicMock) -> MagicMock:
+    """An app whose ``get_broker`` returns ``broker``."""
+    app = MagicMock(spec=Horsies)
+    app.get_broker.return_value = broker
+    return app
+
+
 @pytest.mark.parametrize(
     'text', list(ACCEPTED_SPELLINGS.values()), ids=list(ACCEPTED_SPELLINGS),
 )
 def test_each_spelling_that_uuid_accepts_gives_the_canonical_id(text: str) -> None:
     assert uuid.UUID(text) == uuid.UUID(CANONICAL)
     broker = MagicMock()
+    app = _app_with(broker)
 
-    result = WorkflowHandle.for_id(text, broker)
+    result = Horsies.workflow_handle(cast(Horsies, app), text)
 
     assert is_ok(result)
     handle = result.ok_value
@@ -62,7 +72,7 @@ def test_each_spelling_that_uuid_accepts_gives_the_canonical_id(text: str) -> No
     assert handle.workflow_id == uuid.UUID(CANONICAL)
     assert str(handle.workflow_id) == CANONICAL
     assert handle.broker is broker
-    assert handle.out_type is None
+    assert handle.output_type is None
     assert broker.mock_calls == []
 
 
@@ -71,8 +81,9 @@ def test_text_that_is_not_a_uuid_is_an_invalid_workflow_id(text: str) -> None:
     with pytest.raises(ValueError) as parse_error:
         uuid.UUID(text)
     broker = MagicMock()
+    app = _app_with(broker)
 
-    result = WorkflowHandle.for_id(text, broker)
+    result = Horsies.workflow_handle(cast(Horsies, app), text)
 
     assert is_err(result)
     error = result.err_value
@@ -81,14 +92,15 @@ def test_text_that_is_not_a_uuid_is_an_invalid_workflow_id(text: str) -> None:
     assert type(error.cause) is ValueError
     assert str(error.cause) == str(parse_error.value)
     assert error.message == f'workflow id {text!r} is not a UUID: {parse_error.value}'
+    assert app.get_broker.mock_calls == []
     assert broker.mock_calls == []
 
 
 def test_the_same_text_gives_the_same_error() -> None:
-    broker = MagicMock()
+    app = cast(Horsies, _app_with(MagicMock()))
 
-    first = WorkflowHandle.for_id('not-a-uuid', broker)
-    second = WorkflowHandle.for_id('not-a-uuid', broker)
+    first = Horsies.workflow_handle(app, 'not-a-uuid')
+    second = Horsies.workflow_handle(app, 'not-a-uuid')
 
     assert is_err(first)
     assert is_err(second)

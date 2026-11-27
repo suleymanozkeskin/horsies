@@ -14,7 +14,7 @@ use super::support::{
 use crate::core::workflow::handle_types::WorkflowHandleErrorCode;
 use crate::core::PausedWorkflowAge;
 use crate::core::{
-    OnError, SubWorkflowSummary, TaskResult, WorkflowSpec, WorkflowStatus, WorkflowTaskStatus,
+    OnError, SubWorkflowSummary, TaskResult, WorkflowNodeStatus, WorkflowSpec, WorkflowStatus,
 };
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::test_support::sql::{self, TestPool};
@@ -441,8 +441,8 @@ async fn tasks_gives_enqueued_for_a_root_and_pending_for_a_dependent() {
 
     let tasks = handle(&pool, workflow_id).tasks().await.expect("tasks()");
 
-    assert_eq!(tasks[0].status, WorkflowTaskStatus::Enqueued);
-    assert_eq!(tasks[1].status, WorkflowTaskStatus::Pending);
+    assert_eq!(tasks[0].status, WorkflowNodeStatus::Enqueued);
+    assert_eq!(tasks[1].status, WorkflowNodeStatus::Pending);
     assert!(tasks[0].result.is_none());
     assert!(tasks[1].result.is_none());
 }
@@ -466,7 +466,7 @@ async fn tasks_gives_the_result_and_times_of_a_finished_node() {
 
     assert_eq!(tasks.len(), 1);
     let info = &tasks[0];
-    assert_eq!(info.status, WorkflowTaskStatus::Completed);
+    assert_eq!(info.status, WorkflowNodeStatus::Completed);
     let result = info.result.as_ref().expect("a finished node has a result");
     assert_eq!(ok_value(result), &serde_json::json!(42));
     assert!(info.started_at.is_some(), "the node started at its enqueue");
@@ -528,7 +528,7 @@ async fn a_started_sub_workflow_node_gives_its_child_id() {
 #[tokio::test]
 async fn a_finished_sub_workflow_node_gives_its_summary() {
     let pool = shared_pool().await;
-    let summary = r#"{"status": "COMPLETED", "output": null, "total_tasks": 3, "completed_tasks": 3, "failed_tasks": 0, "skipped_tasks": 0, "error_summary": null}"#;
+    let summary = r#"{"status": "COMPLETED", "output": null, "total_nodes": 3, "completed_nodes": 3, "failed_nodes": 0, "skipped_nodes": 0, "error_summary": null}"#;
     let (parent, child) = seed_linked_child(&pool, "COMPLETED", "COMPLETED", Some(summary)).await;
 
     let tasks = handle(&pool, parent).tasks().await.expect("tasks()");
@@ -541,10 +541,10 @@ async fn a_finished_sub_workflow_node_gives_its_summary() {
     assert_eq!(summary.status, WorkflowStatus::Completed);
     assert_eq!(
         (
-            summary.total_tasks,
-            summary.completed_tasks,
-            summary.failed_tasks,
-            summary.skipped_tasks,
+            summary.total_nodes,
+            summary.completed_nodes,
+            summary.failed_nodes,
+            summary.skipped_nodes,
         ),
         (3, 3, 0, 0)
     );
@@ -582,7 +582,7 @@ async fn a_corrupt_summary_is_read_as_stored() {
 #[tokio::test]
 async fn a_summary_with_an_unknown_status_is_read_as_stored() {
     let pool = shared_pool().await;
-    let stored = r#"{"status": "NOT_A_STATUS", "total_tasks": 1}"#;
+    let stored = r#"{"status": "NOT_A_STATUS", "total_nodes": 1}"#;
     let (parent, child) = seed_linked_child(&pool, "COMPLETED", "COMPLETED", Some(stored)).await;
 
     let summary = stored_summary_of(&pool, parent).await;

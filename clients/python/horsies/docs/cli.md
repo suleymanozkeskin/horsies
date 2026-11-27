@@ -129,7 +129,7 @@ Pass either `module` or `--database-url`, not both. With `--database-url` the UI
 | `--pgbouncer-transaction-mode` | false | Disable prepared statements for a transaction-pooled URL |
 | `--host HOST` | 127.0.0.1 | Bind address |
 | `--port N` | 8600 | Bind port |
-| `--auth MODE` | none | `none` (loopback hosts only) or `trusted-header` |
+| `--authorization MODE` | none | `none` (loopback hosts only) or `trusted-header` |
 | `--trusted-header NAME` | X-Forwarded-User | Identity header that the proxy sets |
 | `--enable-actions` | false | Allow task cancel, and workflow pause, resume and cancel (default is view-only) |
 | `--log-level LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
@@ -145,7 +145,7 @@ horsies web --database-url postgresql://user:pw@host/db
 
 # Behind a proxy that authenticates callers and sets the header
 horsies web myapp.tasks:app --host 0.0.0.0 \
-    --auth trusted-header --trusted-header X-Forwarded-User --enable-actions
+    --authorization trusted-header --trusted-header X-Forwarded-User --enable-actions
 ```
 
 ### horsies get-docs

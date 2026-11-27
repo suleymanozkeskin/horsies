@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::*;
 use crate::workflow::node::tests::{add, task_node, test_builder};
 use crate::workflow::{
-    OutputlessResults, SubWorkflowParams, WorkflowDefConfig, WorkflowSpecBuilder,
+    OutputlessResults, SubWorkflowParameters, WorkflowDefinitionConfig, WorkflowSpecBuilder,
 };
 
 /// The typed functions of an app with no task: the definitions here add
@@ -35,7 +35,7 @@ fn child_request(definition_key: &str, node_input: &str) -> ChildSpecRequest {
         task_index: 0,
         child_depth: 1,
         definition_key: Some(definition_key.to_owned()),
-        params: horsies_core::SubWorkflowParams::Given,
+        params: horsies_core::SubWorkflowParameters::Given,
         node_input: node_input.to_owned(),
         args_from: None,
         sources: Vec::new(),
@@ -64,7 +64,7 @@ struct Level {
 fn spec_with<D>(
     mut builder: WorkflowSpecBuilder,
     key: &str,
-    child: Option<(SubWorkflowParams<D::Params>, bool)>,
+    child: Option<(SubWorkflowParameters<D::Parameters>, bool)>,
 ) -> Result<WorkflowSpec, HorsiesError>
 where
     D: WorkflowDefinition,
@@ -87,7 +87,7 @@ struct Countdown;
 
 impl WorkflowDefinition for Countdown {
     type Output = OutputlessResults;
-    type Params = Level;
+    type Parameters = Level;
 
     fn name() -> &'static str {
         "countdown"
@@ -103,7 +103,7 @@ impl WorkflowDefinition for Countdown {
     ) -> Result<WorkflowSpec, HorsiesError> {
         let child = match params.n {
             0 => None,
-            n => Some((SubWorkflowParams::Given(Level { n: n - 1 }), false)),
+            n => Some((SubWorkflowParameters::Given(Level { n: n - 1 }), false)),
         };
         spec_with::<Countdown>(builder, "tests.countdown.v1", child)
     }
@@ -114,7 +114,7 @@ struct Countup;
 
 impl WorkflowDefinition for Countup {
     type Output = OutputlessResults;
-    type Params = Level;
+    type Parameters = Level;
 
     fn name() -> &'static str {
         "countup"
@@ -128,7 +128,7 @@ impl WorkflowDefinition for Countup {
         builder: WorkflowSpecBuilder,
         params: Level,
     ) -> Result<WorkflowSpec, HorsiesError> {
-        let next = SubWorkflowParams::Given(Level { n: params.n + 1 });
+        let next = SubWorkflowParameters::Given(Level { n: params.n + 1 });
         spec_with::<Countup>(builder, "tests.countup.v1", Some((next, false)))
     }
 }
@@ -139,7 +139,7 @@ struct Mirror;
 
 impl WorkflowDefinition for Mirror {
     type Output = OutputlessResults;
-    type Params = Level;
+    type Parameters = Level;
 
     fn name() -> &'static str {
         "mirror"
@@ -153,7 +153,7 @@ impl WorkflowDefinition for Mirror {
         builder: WorkflowSpecBuilder,
         params: Level,
     ) -> Result<WorkflowSpec, HorsiesError> {
-        let same = SubWorkflowParams::Given(params);
+        let same = SubWorkflowParameters::Given(params);
         spec_with::<Mirror>(builder, "tests.mirror.v1", Some((same, false)))
     }
 }
@@ -162,7 +162,7 @@ struct Waiting;
 
 impl WorkflowDefinition for Waiting {
     type Output = OutputlessResults;
-    type Params = Level;
+    type Parameters = Level;
 
     fn name() -> &'static str {
         "waiting"
@@ -176,7 +176,7 @@ impl WorkflowDefinition for Waiting {
         builder: WorkflowSpecBuilder,
         params: Level,
     ) -> Result<WorkflowSpec, HorsiesError> {
-        let same = SubWorkflowParams::Given(params);
+        let same = SubWorkflowParameters::Given(params);
         spec_with::<Waiting>(builder, "tests.waiting.v1", Some((same, true)))
     }
 }
@@ -186,10 +186,10 @@ struct Root<D>(std::marker::PhantomData<D>);
 
 impl<D> WorkflowDefinition for Root<D>
 where
-    D: WorkflowDefinition<Params = Level>,
+    D: WorkflowDefinition<Parameters = Level>,
 {
     type Output = OutputlessResults;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "root"
@@ -199,9 +199,9 @@ where
         "tests.root.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        builder.sub_workflow(D::node(SubWorkflowParams::Given(Level { n: 3 }))?);
-        Ok(WorkflowDefConfig::new())
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
+        builder.sub_workflow(D::node(SubWorkflowParameters::Given(Level { n: 3 }))?);
+        Ok(WorkflowDefinitionConfig::new())
     }
 }
 
@@ -210,7 +210,7 @@ struct Plain;
 
 impl WorkflowDefinition for Plain {
     type Output = OutputlessResults;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "plain"
@@ -220,9 +220,9 @@ impl WorkflowDefinition for Plain {
         "tests.plain.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         add(builder, task_node::<u32, ()>("tick"));
-        Ok(WorkflowDefConfig::new())
+        Ok(WorkflowDefinitionConfig::new())
     }
 }
 
@@ -412,7 +412,7 @@ struct NoParams;
 
 impl WorkflowDefinition for NoParams {
     type Output = OutputlessResults;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "no_params"
@@ -733,7 +733,7 @@ struct Panicking;
 
 impl WorkflowDefinition for Panicking {
     type Output = OutputlessResults;
-    type Params = Level;
+    type Parameters = Level;
 
     fn name() -> &'static str {
         "panicking"

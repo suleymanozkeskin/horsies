@@ -30,12 +30,12 @@ describe('graphNodeFacts', () => {
   it('says what the icon and the count of a sub-workflow node are, and how to open it', () => {
     expect(
       graphNodeFacts(
-        node({ is_subworkflow: true, sub_workflow_id: 'child-1', child_total: 3, child_failed: 1 }),
+        node({ is_sub_workflow: true, sub_workflow_id: 'child-1', child_total: 3, child_failed: 1 }),
         'COMPLETED'
       )
     ).toEqual(['Sub-workflow: 3 child nodes, 1 failed. Double-click to open it.']);
     // A child run that is not there yet has no count and nothing to open.
-    expect(graphNodeFacts(node({ is_subworkflow: true }), 'RUNNING')).toEqual(['Sub-workflow.']);
+    expect(graphNodeFacts(node({ is_sub_workflow: true }), 'RUNNING')).toEqual(['Sub-workflow.']);
   });
 
   it('says what the badge of a node that runs on under a cancelled run is', () => {

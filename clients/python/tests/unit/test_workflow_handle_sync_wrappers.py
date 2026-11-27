@@ -56,7 +56,7 @@ WRAP_METHODS: Final[dict[str, tuple[str, Callable[[WorkflowHandle[Any]], Any]]]]
     'pause': ('pause_workflow', lambda handle: handle.pause()),
     'resume': ('resume_workflow', lambda handle: handle.resume()),
     'results': ('workflow_node_results', lambda handle: handle.results()),
-    'tasks': ('workflow_nodes', lambda handle: handle.tasks()),
+    'nodes': ('workflow_nodes', lambda handle: handle.nodes()),
 }
 
 
@@ -149,7 +149,7 @@ class TestReadStrategy:
         completed = MagicMock(spec=core.WorkflowCompletedRead)
         completed.result_json = '{"__h_task_result__": true, "ok": 42, "err": null}'
         handle, broker = _make_handle('wait_workflow_result', completed)
-        handle.out_type = int
+        handle.output_type = int
 
         result = handle.get(wait_ms=100)
 

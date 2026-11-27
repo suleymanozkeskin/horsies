@@ -317,7 +317,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::task_workflow_node::TaskWorkflowNodeNotLinked>()?;
     module.add_class::<operations::monitoring_reads::TaskListQuery>()?;
     module.add_class::<operations::monitoring_reads::TaskFacetsQuery>()?;
-    module.add_class::<operations::monitoring_reads::TaskStatsQuery>()?;
+    module.add_class::<operations::monitoring_reads::TaskStatusCountsQuery>()?;
     module.add_class::<operations::monitoring_reads::TaskBreakdownQuery>()?;
     module.add_class::<operations::monitoring_reads::WorkflowRunsQuery>()?;
     module.add_class::<operations::monitoring_reads::MonitoringJson>()?;

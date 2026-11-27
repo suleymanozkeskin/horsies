@@ -10,6 +10,7 @@ from typing import (
     Any,
     Generic,
     Literal,
+    assert_never,
 )
 
 from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
@@ -158,7 +159,7 @@ class TaskNode(Generic[OkT_co, CodeT_co]):
     node_id: str | None = field(default=None, repr=False)
     """
     Optional stable identifier for this task within the workflow.
-    If None, auto-assigned as '{slugify(workflow_name)}:{task_index}'.
+    If None, auto-assigned as '{node_id_from_text(workflow_name)}:{index}'.
     Must be unique within the workflow.
     Must match pattern: [A-Za-z0-9_\\-:.]+
     """
@@ -205,8 +206,8 @@ class TaskNode(Generic[OkT_co, CodeT_co]):
         object.__delattr__(self, name)
 
     @property
-    def name(self) -> str:
-        """Get the task name from the wrapped function."""
+    def task_name(self) -> str:
+        """The task name of the wrapped function."""
         return self.function.task_name
 
     def key(self) -> NodeKey[OkT_co, CodeT_co]:
@@ -243,13 +244,13 @@ class SubWorkflowNode(Generic[OkT_co]):
             ...
 
         pipeline: SubWorkflowNode[ProcessedData] = SubWorkflowNode(
-            workflow_def=DataPipeline,
+            workflow_definition=DataPipeline,
             kwargs={"source_url": "https://..."},  # passed to build_with()
         )
         # Downstream: args_from={"data": pipeline} → TaskOutcome[ProcessedData, TaskError]
     """
 
-    workflow_def: type[WorkflowDefinition[OkT_co]]
+    workflow_definition: type[WorkflowDefinition[OkT_co]]
     """
     - The WorkflowDefinition subclass to run as a child workflow
     - Must implement build_with() for parameterization
@@ -263,7 +264,7 @@ class SubWorkflowNode(Generic[OkT_co]):
 
     kwargs: Mapping[str, Any] = field(default_factory=lambda: {})
     """
-    - Keyword arguments passed to workflow_def.build_with(app, **kwargs)
+    - Keyword arguments passed to workflow_definition.build_with(app, **kwargs)
     - Use with args_from to inject upstream results as parameters
     - A spec replaces them with a frozen snapshot for inspection, where a list is a
       tuple and a dict is a mappingproxy. It does not fit the declared types, so code
@@ -320,7 +321,7 @@ class SubWorkflowNode(Generic[OkT_co]):
     node_id: str | None = field(default=None, repr=False)
     """
     Optional stable identifier for this subworkflow within the parent workflow.
-    If None, auto-assigned as '{slugify(workflow_name)}:{task_index}'.
+    If None, auto-assigned as '{node_id_from_text(workflow_name)}:{index}'.
     Must be unique within the workflow.
     Must match pattern: [A-Za-z0-9_\\-:.]+
     """
@@ -367,9 +368,9 @@ class SubWorkflowNode(Generic[OkT_co]):
         object.__delattr__(self, name)
 
     @property
-    def name(self) -> str:
-        """Get the subworkflow name."""
-        return self.workflow_def.name
+    def workflow_name(self) -> str:
+        """The workflow name of the child workflow definition."""
+        return self.workflow_definition.name
 
     def key(self) -> NodeKey[OkT_co]:
         """Return a typed NodeKey for this subworkflow node."""
@@ -389,6 +390,17 @@ Type alias for any node type
 """
 
 
+def node_target_name(node: AnyNode) -> str:
+    """The task name of a task node, or the workflow name of a sub-workflow node. Pure."""
+    match node:
+        case TaskNode():
+            return node.task_name
+        case SubWorkflowNode():
+            return node.workflow_name
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def stored_kwargs(node: AnyNode) -> dict[str, Any]:
     """The kwargs that a workflow start writes: the form that `WorkflowSpec` proved.
 
@@ -396,7 +408,7 @@ def stored_kwargs(node: AnyNode) -> dict[str, Any]:
     node without it is a defect.
     """
     assert node.wire_kwargs is not None, (
-        f'node {node.name!r} did not pass through a WorkflowSpec'
+        f'node {node_target_name(node)!r} did not pass through a WorkflowSpec'
     )
     return dict(node.wire_kwargs)
 

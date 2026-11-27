@@ -31,7 +31,7 @@ def _seconds(duration: timedelta) -> float:
 
 
 @dataclass(slots=True, frozen=True)
-class StreamServed:
+class StreamCoverageStateServed:
     """Live workers serve the stream, and they have capacity in service for it.
 
     ``workers`` counts the live workers that serve the stream, 1 or more.
@@ -46,7 +46,7 @@ class StreamServed:
 
 
 @dataclass(slots=True, frozen=True)
-class StreamWithoutCapacity:
+class StreamCoverageStateNoCapacity:
     """Live workers serve the stream, and none of them has capacity in service
     for it: every child or seat of the serving budgets was down at the
     worker's snapshot. ``workers`` counts them, 1 or more."""
@@ -56,7 +56,7 @@ class StreamWithoutCapacity:
 
 
 @dataclass(slots=True, frozen=True)
-class StreamUnserved:
+class StreamCoverageStateUnserved:
     """No live worker serves the stream. Its rows wait until a worker that
     serves the class runs on the queue."""
 
@@ -64,7 +64,7 @@ class StreamUnserved:
 
 
 StreamCoverageState: TypeAlias = Annotated[
-    StreamServed | StreamWithoutCapacity | StreamUnserved,
+    StreamCoverageStateServed | StreamCoverageStateNoCapacity | StreamCoverageStateUnserved,
     Field(discriminator='kind'),
 ]
 """Whether live workers serve a pending stream."""
@@ -96,7 +96,7 @@ class ExecutionClassCoverage:
 
 
 @dataclass(slots=True, frozen=True)
-class OldestWaiting:
+class StreamWaitDue:
     """At least one row of the stream is due.
 
     ``oldest_due_at`` is the due time of the oldest due row: its send time,
@@ -115,7 +115,7 @@ class OldestWaiting:
 
 
 @dataclass(slots=True, frozen=True)
-class NoneDue:
+class StreamWaitNoneDue:
     """Every row of the stream is due later: a delayed send, or a retry that
     waits for its interval. ``next_due_at`` is the earliest due time."""
 
@@ -124,7 +124,7 @@ class NoneDue:
 
 
 StreamWait: TypeAlias = Annotated[
-    OldestWaiting | NoneDue,
+    StreamWaitDue | StreamWaitNoneDue,
     Field(discriminator='kind'),
 ]
 """How long the rows of a pending stream wait."""

@@ -163,7 +163,7 @@ impl From<&TaskErrorCode> for AttemptErrorCode {
 }
 
 /// How a run ended after an operator cancelled its task (`cancel_task` with
-/// `include_running`). The cancel statement recorded the attempt as
+/// the policy `INCLUDE_RUNNING`). The cancel statement recorded the attempt as
 /// `CANCELLED` and moved the task to history; what the body returned is
 /// dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::EventSchema)]

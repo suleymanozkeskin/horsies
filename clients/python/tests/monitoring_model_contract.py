@@ -73,8 +73,8 @@ CONTRACT_PATH: Final = (
 # The models whose JSON the core writes for a read or a web response, by the
 # name of both the Pydantic class (or health dataclass) and the Rust type.
 CONTRACT_MODELS: Final[tuple[type, ...]] = (
-    models.TaskAttemptInfo,
-    models.LeafTaskInfo,
+    models.TaskAttemptDetail,
+    models.TaskRowInfo,
     models.StatusCount,
     models.FacetValue,
     models.ErrorFacet,
@@ -86,10 +86,10 @@ CONTRACT_MODELS: Final[tuple[type, ...]] = (
     models.TaskListPage,
     models.TaskDetail,
     models.WorkflowRunSummary,
-    models.WorkflowNodeInfo,
+    models.WorkflowNodeSummary,
     models.WorkflowEdge,
     models.WorkflowRunDetail,
-    models.WorkflowTaskDetail,
+    models.WorkflowNodeDetail,
     models.DownSlot,
     models.WorkerStateInfo,
     models.BudgetLoad,
@@ -108,7 +108,7 @@ of the claim of a segment of the timing of a node of a run
 (``WorkflowRunDetail``). A deeper schema is a defect of the reduction."""
 
 INLINE_KIND_NAMES: Final[Mapping[Place, str]] = {
-    ('EndpointTerminalInfo', 'status'): 'TerminalNodeStatus',
+    ('NodeEndpointTerminalInfo', 'status'): 'TerminalNodeStatus',
 }
 """The name of each union and enum that a contract model writes inline, by
 its field: the name of the Rust type."""

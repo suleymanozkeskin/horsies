@@ -58,15 +58,15 @@ pub use crate::core::{
     PostgresConfig, PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
     ResilienceConfigError, RetentionChoice, RetentionClassKeyRefused, RetentionConfig,
     RetentionConfigError, RetrievalCode, RetryPolicy, RetryPolicyError, ScheduleConfig,
-    SchedulePattern, StartRefusalCause, SubWorkflowFailure, SubWorkflowParams, SubWorkflowSummary,
-    SuccessCase, SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode,
-    TaskErrorKind, TaskInfo, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
-    TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, ValidationReport, Weekday,
-    WeeklySchedule, WorkerResilienceConfig, WorkflowContext, WorkflowHandleError,
-    WorkflowHandleErrorCode, WorkflowMeta, WorkflowSpec, WorkflowStartError,
-    WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus,
+    SchedulePattern, StartRefusalCause, SubWorkflowFailure, SubWorkflowParameters,
+    SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError,
+    TaskErrorCode, TaskErrorKind, TaskInfo, TaskOptions, TaskRegistry, TaskResult, TaskSchedule,
+    TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus,
+    ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig, WorkflowContext,
+    WorkflowHandleError, WorkflowHandleErrorCode, WorkflowMetadata, WorkflowNodeStatus,
+    WorkflowSpec, WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus,
     DEFAULT_CANCEL_GRACE_MS, TASK_TERMINAL_STATES, UNDECLARED_LABEL, WF_TASK_TERMINAL_VALUES,
-    WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
+    WORKFLOW_NODE_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };
 pub use crate::core::{AppConfig, HorsiesError};
 // A user value kept as its stored text: a sub-workflow summary output, the `data` of a task error.

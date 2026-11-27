@@ -63,7 +63,7 @@ macro_rules! async_task_fn {
 
         $crate::__private::RegisteredTask::Async {
             task: ::std::sync::Arc::new(__HorsiesAsyncBody),
-            meta: $crate::__private::TaskMeta::for_input::<$input>()
+            metadata: $crate::__private::TaskMetadata::for_input::<$input>()
                 .in_module(::std::module_path!())
                 .with_error_codes($crate::__private::async_task_codes::<$input, _, _, _, _>(
                     &$function,
@@ -109,7 +109,7 @@ macro_rules! blocking_task_fn {
 
         $crate::__private::RegisteredTask::Blocking {
             task: ::std::sync::Arc::new(__HorsiesBlockingBody),
-            meta: $crate::__private::TaskMeta::for_input::<$input>()
+            metadata: $crate::__private::TaskMetadata::for_input::<$input>()
                 .in_module(::std::module_path!())
                 .with_error_codes($crate::__private::blocking_task_codes::<$input, _, _, _>(
                     &$function,
@@ -153,15 +153,15 @@ mod tests {
 
     #[tokio::test]
     async fn an_async_task_decodes_runs_and_encodes() {
-        let RegisteredTask::Async { task, meta } = crate::async_task_fn!(add, AddInput) else {
+        let RegisteredTask::Async { task, metadata } = crate::async_task_fn!(add, AddInput) else {
             panic!("async_task_fn! built a blocking task");
         };
         match task.execute(&input(2, 3)).await {
             TaskResult::Ok(bytes) => assert_eq!(bytes, b"5"),
             TaskResult::Err(error) => panic!("the task failed: {error}"),
         }
-        assert!(meta.expects_input);
-        assert_eq!(meta.module, TaskModule::Path(module_path!()));
+        assert!(metadata.expects_input);
+        assert_eq!(metadata.module, TaskModule::Path(module_path!()));
     }
 
     #[test]

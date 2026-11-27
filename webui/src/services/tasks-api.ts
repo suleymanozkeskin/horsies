@@ -11,6 +11,12 @@ import type {
   TaskSortBy,
 } from '@/types/tasks';
 
+/** The `sort_direction` query value of each sort direction. */
+const SORT_DIRECTION_PARAM: Record<SortDir, 'ASCENDING' | 'DESCENDING'> = {
+  asc: 'ASCENDING',
+  desc: 'DESCENDING',
+};
+
 /**
  * Build the query object. Array dimensions serialize as repeated keys; empty
  * dimensions are omitted so an unset filter is never sent as an empty value.
@@ -46,7 +52,7 @@ export const getTaskStats = (
 ): Promise<StatusCount[]> => {
   const { status: _status, ...rest } = filters;
   void _status;
-  return apiGet<StatusCount[]>('/tasks/stats', buildParams(rest));
+  return apiGet<StatusCount[]>('/tasks/status-counts', buildParams(rest));
 };
 
 /** Scoped distinct filter values (with counts) for the filter comboboxes.
@@ -90,8 +96,8 @@ export const listTasks = (args: {
   apiGet<TaskListPage>(
     '/tasks',
     buildParams(args.filters ?? {}, {
-      sort_by: args.sortBy,
-      sort_dir: args.sortDir,
+      sort_field: args.sortBy,
+      sort_direction: SORT_DIRECTION_PARAM[args.sortDir],
       offset: args.offset,
       limit: args.limit,
     })

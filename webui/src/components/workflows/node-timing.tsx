@@ -158,7 +158,7 @@ export function NodeTimingSection({
   taskIndex: number;
 }) {
   const { detail, readClock } = useWorkflowRun(workflowId);
-  const node = detail?.nodes.find(candidate => candidate.task_index === taskIndex);
+  const node = detail?.nodes.find(candidate => candidate.node_index === taskIndex);
   if (detail === undefined || node === undefined || readClock === undefined) {
     return null;
   }

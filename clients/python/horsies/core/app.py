@@ -47,6 +47,8 @@ from horsies.core.models.workflow import (
     WorkflowTerminalResults,
     OnError,
     SuccessPolicy,
+    WorkflowHandle,
+    WorkflowHandleInvalidWorkflowId,
 )
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.logging import get_logger
@@ -266,7 +268,7 @@ def _shared_async_hook_kind(fn: object) -> _SharedAsyncHookKind:
     return _HookIsSync()
 
 
-# Sentinel attribute name stamped on functions decorated with @app.workflow_builder
+# Sentinel attribute name stamped on functions decorated with @app.check_workflow_builder
 _BUILDER_ATTR = '__horsies_workflow_builder__'
 
 # Attribute name for opt-out of undecorated builder detection
@@ -1471,7 +1473,7 @@ class Horsies:
             if not isinstance(value, SubWorkflowNode):
                 continue
             try:
-                check_build_with_signature(value.workflow_def, workflow_name=name)
+                check_build_with_signature(value.workflow_definition, workflow_name=name)
             except SignatureValidationError as refusal:
                 errors.append(
                     WorkflowValidationError(
@@ -2028,6 +2030,39 @@ class Horsies:
                 notes=[str(e)],
                 help_text='check database_url in PostgresConfig; the note holds the cause',
             ) from e
+
+    def workflow_handle(
+        self, workflow_id: str,
+    ) -> Result[WorkflowHandle[Any], WorkflowHandleInvalidWorkflowId]:
+        """The handle of the workflow whose id is ``workflow_id``, read
+        through this app's broker (``get_broker``), or why ``workflow_id`` is
+        not a workflow id. The handle reads nothing until one of its methods
+        runs, and a workflow that does not exist is ``WORKFLOW_NOT_FOUND`` of
+        that method.
+
+        ``workflow_id`` is any spelling of a UUID that ``uuid.UUID`` accepts
+        (upper case, braces, ``urn:uuid:``, no hyphens); the handle holds the
+        UUID, whose text is the canonical form. Text that ``uuid.UUID``
+        refuses is ``Err(WorkflowHandleInvalidWorkflowId)`` with its ``ValueError``;
+        the same text gives the same error, and no broker is built. The
+        handle has no output type (``output_type`` is ``None``).
+
+        Raises:
+            HorsiesError: broker construction failed (``get_broker``,
+                DATABASE_INIT_FAILED).
+        """
+        try:
+            workflow_key = UUID(workflow_id)
+        except ValueError as exc:
+            return Err(WorkflowHandleInvalidWorkflowId(
+                message=f'workflow id {workflow_id!r} is not a UUID: {exc}',
+                workflow_id_text=workflow_id,
+                cause=exc,
+            ))
+        handle: WorkflowHandle[Any] = WorkflowHandle(
+            workflow_id=workflow_key, broker=self.get_broker(),
+        )
+        return Ok(handle)
 
     def _broker_config(self) -> PostgresConfig:
         """The config of the broker that ``get_broker()`` builds."""
@@ -2789,51 +2824,51 @@ class Horsies:
     def workflow(
         self,
         name: str,
-        tasks: list[TaskNode[Any, Any] | SubWorkflowNode[Any]],
+        nodes: list[TaskNode[Any, Any] | SubWorkflowNode[Any]],
         on_error: OnError,
         output: TaskNode[OutT, Any] | SubWorkflowNode[OutT],
         success_policy: SuccessPolicy | None = None,
         *,
         definition_key: str | None = None,
-        workflow_def_cls: type[Any] | None = None,
+        workflow_definition: type[Any] | None = None,
     ) -> WorkflowSpec[OutT]: ...
 
     @overload
     def workflow(
         self,
         name: str,
-        tasks: list[TaskNode[Any, Any] | SubWorkflowNode[Any]],
+        nodes: list[TaskNode[Any, Any] | SubWorkflowNode[Any]],
         on_error: OnError = OnError.FAIL,
         *,
         output: TaskNode[OutT, Any] | SubWorkflowNode[OutT],
         success_policy: SuccessPolicy | None = None,
         definition_key: str | None = None,
-        workflow_def_cls: type[Any] | None = None,
+        workflow_definition: type[Any] | None = None,
     ) -> WorkflowSpec[OutT]: ...
 
     @overload
     def workflow(
         self,
         name: str,
-        tasks: list[TaskNode[Any, Any] | SubWorkflowNode[Any]],
+        nodes: list[TaskNode[Any, Any] | SubWorkflowNode[Any]],
         on_error: OnError = OnError.FAIL,
         output: None = None,
         success_policy: SuccessPolicy | None = None,
         *,
         definition_key: str | None = None,
-        workflow_def_cls: type[Any] | None = None,
+        workflow_definition: type[Any] | None = None,
     ) -> WorkflowSpec[WorkflowTerminalResults]: ...
 
     def workflow(
         self,
         name: str,
-        tasks: list[TaskNode[Any, Any] | SubWorkflowNode[Any]],
+        nodes: list[TaskNode[Any, Any] | SubWorkflowNode[Any]],
         on_error: OnError = OnError.FAIL,
         output: TaskNode[OutT, Any] | SubWorkflowNode[OutT] | None = None,
         success_policy: SuccessPolicy | None = None,
         *,
         definition_key: str | None = None,
-        workflow_def_cls: type[Any] | None = None,
+        workflow_definition: type[Any] | None = None,
     ) -> WorkflowSpec[OutT] | WorkflowSpec[WorkflowTerminalResults]:
         """
         Create a validated WorkflowSpec with proper queue and priority resolution.
@@ -2843,7 +2878,7 @@ class Horsies:
 
         Args:
             name: Human-readable workflow name
-            tasks: List of TaskNode/SubWorkflowNode instances
+            nodes: List of TaskNode/SubWorkflowNode instances
             on_error: Error handling policy (FAIL or PAUSE)
             output: Explicit output task (optional)
             success_policy: Custom success policy for workflow completion (optional)
@@ -2869,7 +2904,7 @@ class Horsies:
         # Caveat: the save/restore is not thread-safe; do not build specs
         # sharing the same node objects from concurrent threads.
         saved_node_config: list[tuple[TaskNode[Any, Any], str | None, int | None]] = []
-        for node in tasks:
+        for node in nodes:
             # SubWorkflowNode doesn't have queue/priority - handled at execution time
             if isinstance(node, SubWorkflowNode):
                 continue
@@ -2910,13 +2945,13 @@ class Horsies:
             # set above.
             spec = WorkflowSpec(
                 name=name,
-                tasks=tasks,
+                nodes=nodes,
                 on_error=on_error,
                 output=output,
                 success_policy=success_policy,
                 broker=self.get_broker(),
                 definition_key=definition_key,
-                workflow_def_cls=workflow_def_cls,
+                workflow_definition=workflow_definition,
                 resend_on_transient_error=self.config.resend_on_transient_error,
             )
             spec._require_definition_key()
@@ -2931,7 +2966,7 @@ class Horsies:
         return spec
 
     # -------- workflow builder contract --------
-    def workflow_builder(
+    def check_workflow_builder(
         self,
         *,
         cases: list[dict[str, Any]] | None = None,
@@ -2962,7 +2997,7 @@ class Horsies:
 
         return decorator
 
-    def get_workflow_builders(self) -> list[_WorkflowBuilderMeta]:
+    def get_check_workflow_builders(self) -> list[_WorkflowBuilderMeta]:
         """Return registered builders (for tests and introspection)."""
         return list(self._workflow_builders)
 
@@ -3033,7 +3068,7 @@ class Horsies:
                         f'required params: {[p.name for p in required_params]}',
                     ],
                     help_text=(
-                        'add cases= to @app.workflow_builder() with at least one '
+                        'add cases= to @app.check_workflow_builder() with at least one '
                         'dict of kwargs covering each required parameter'
                     ),
                 ),
@@ -3152,7 +3187,7 @@ class Horsies:
         ``path`` holds the SubWorkflowNodes from the root spec to ``spec``.
         Raises nothing for a finding.
         """
-        for node in getattr(spec, 'tasks', ()):
+        for node in getattr(spec, 'nodes', ()):
             if isinstance(node, SubWorkflowNode):
                 self._check_subworkflow_node(node, errors, path)
                 continue
@@ -3181,7 +3216,7 @@ class Horsies:
         if node.args_from:
             return
         try:
-            def_key = node.workflow_def._require_definition_key()
+            def_key = node.workflow_definition._require_definition_key()
         except HorsiesError:
             return  # missing definition_key reported elsewhere
         # Key a repeat on (definition_key, kwargs signature), not
@@ -3195,7 +3230,7 @@ class Horsies:
             kwargs_signature=repr(sorted(wire.items())),
             start=child_start(node),
         )
-        match decide_nesting(path, node.name, step):
+        match decide_nesting(path, node.workflow_name, step):
             case StopWithoutFinding():
                 return
             case StopWithFinding(finding=finding):
@@ -3225,15 +3260,15 @@ class Horsies:
             # The engine's read of the same row: real containers and
             # filled defaults, not the frozen snapshot on the node.
             child_kwargs = fill_build_with_defaults(
-                node.workflow_def,
-                decode_subworkflow_kwargs(node.workflow_def, wire),
+                node.workflow_definition,
+                decode_subworkflow_kwargs(node.workflow_definition, wire),
             )
         except (StrictJsonError, ValueValidationError) as exc:
             # At run time this fails the parent node, so it is a finding.
             errors.append(WorkflowValidationError(
                 message='subworkflow kwargs do not fit build_with',
                 code=HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
-                notes=[f"node '{node.name}': {exc}"],
+                notes=[f"node '{node.workflow_name}': {exc}"],
                 help_text='fix the kwarg, or the default of the parameter',
             ))
             return _ChildNotBuilt()
@@ -3241,12 +3276,12 @@ class Horsies:
             # No verdict on the value: a validator can need a service that
             # is down at boot, so this must not stop the process.
             self.logger.warning(
-                f"check could not fill the defaults of node '{node.name}': "
+                f"check could not fill the defaults of node '{node.workflow_name}': "
                 f'{type(exc).__name__}: {exception_text(exc)}',
             )
             return _ChildNotBuilt()
         try:
-            child_spec = node.workflow_def.build_with(self, **child_kwargs)
+            child_spec = node.workflow_definition.build_with(self, **child_kwargs)
         except MultipleValidationErrors as exc:
             errors.extend(exc.report.refusals)
             return _ChildNotBuilt()
@@ -3321,10 +3356,10 @@ class Horsies:
                         code=HorsiesErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER,
                         location=location,
                         notes=[
-                            f"function '{fn_name}' returns WorkflowSpec but is not decorated with @app.workflow_builder",
+                            f"function '{fn_name}' returns WorkflowSpec but is not decorated with @app.check_workflow_builder",
                         ],
                         help_text=(
-                            'add @app.workflow_builder() to register this builder for check validation;\n'
+                            'add @app.check_workflow_builder() to register this builder for check validation;\n'
                             f'or set {fn_name}.__horsies_no_check__ = True to suppress this warning'
                         ),
                     ),
@@ -3417,5 +3452,5 @@ class Horsies:
         """Return True for WorkflowSpec instances and test doubles with spec shape."""
         if isinstance(value, WorkflowSpec):
             return True
-        required_attrs = ('name', 'tasks', 'on_error', 'broker')
+        required_attrs = ('name', 'nodes', 'on_error', 'broker')
         return all(hasattr(value, attr) for attr in required_attrs)

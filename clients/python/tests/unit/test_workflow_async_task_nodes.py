@@ -45,11 +45,11 @@ class TestAsyncTaskNodes:
 
         spec = app.workflow(
             name='async_node',
-            tasks=[double.node()(value=3)],
+            nodes=[double.node()(value=3)],
             definition_key='async_node.v1',
         )
 
-        node = spec.tasks[0]
+        node = spec.nodes[0]
         assert isinstance(node, TaskNode)
         assert node.function is double
         assert stored_kwargs(node) == {'value': 3}
@@ -84,12 +84,12 @@ class TestAsyncTaskNodes:
         third = sink.node()(upstream=from_node(second))
         spec = app.workflow(
             name='mixed_chain',
-            tasks=[first, second, third],
+            nodes=[first, second, third],
             output=third,
             definition_key='mixed_chain.v1',
         )
 
-        assert [node.index for node in spec.tasks] == [0, 1, 2]
+        assert [node.index for node in spec.nodes] == [0, 1, 2]
 
     def test_an_args_from_type_mismatch_into_an_async_task_is_refused(self) -> None:
         app = _app()
@@ -114,7 +114,7 @@ class TestAsyncTaskNodes:
         with pytest.raises(WorkflowValidationError) as exc_info:
             app.workflow(
                 name='mismatch',
-                tasks=[first, second],
+                nodes=[first, second],
                 definition_key='mismatch.v1',
             )
 
@@ -137,7 +137,7 @@ class TestAsyncTaskNodes:
         with pytest.raises(WorkflowValidationError) as exc_info:
             app.workflow(
                 name='ctx_missing',
-                tasks=[first, second],
+                nodes=[first, second],
                 definition_key='ctx_missing.v1',
             )
 
@@ -163,11 +163,11 @@ class TestAsyncTaskNodes:
         second = with_ctx.node(waits_for=[first], workflow_context_from=[first])()
         spec = app.workflow(
             name='ctx_present',
-            tasks=[first, second],
+            nodes=[first, second],
             definition_key='ctx_present.v1',
         )
 
-        node = spec.tasks[1]
+        node = spec.nodes[1]
         assert isinstance(node, TaskNode)
         assert node.function is with_ctx
         assert node.workflow_context_from is not None

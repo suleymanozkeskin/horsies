@@ -142,7 +142,7 @@ let _audit = builder.task(
 | `WorkflowContext` method | Returns |
 |--------------------------|---------|
 | `workflow_id()` | The workflow's `Uuid` |
-| `task_index()` | The index of the task's node |
+| `node_index()` | The index of the task's node |
 | `task_name()` | The task name of the node |
 | `result_for::<T, E>(&key)` | `Result<TaskOutcome<T, E>, WorkflowContextError>` |
 | `has_result(node_id)` | Whether the context holds the node's result |

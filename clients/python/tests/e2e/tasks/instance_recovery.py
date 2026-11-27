@@ -58,7 +58,7 @@ broker.app = app
 def _workflow(*, name: str, tasks: list[TaskNode], **kwargs: object) -> object:
     return app.workflow(
         name=name,
-        tasks=tasks,
+        nodes=tasks,
         definition_key=f'tests.e2e.tasks.instance_recovery.{name}.v1',
         **kwargs,
     )

@@ -297,7 +297,7 @@ horsies web --database-url postgresql://app:secret@localhost:5432/horsies
 horsies web --database-url postgresql://app:secret@pooler.example.com:6432/horsies \
   --session-database-url postgresql://app:secret@db.example.com:5432/horsies \
   --pgbouncer-transaction-mode
-horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
+horsies web horsies.toml --host 0.0.0.0 --authorization trusted-header --enable-actions
 ```
 
 | Option | Default | Description |
@@ -308,7 +308,7 @@ horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
 | `--pgbouncer-transaction-mode` | off | `--database-url` is a PgBouncer transaction-pool endpoint. Needs `--database-url` and `--session-database-url` |
 | `--host HOST` | `127.0.0.1` | Bind address |
 | `--port PORT` | `8600` | Bind port; `0` asks the operating system for a free port |
-| `--auth MODE` | `none` | `none` (a loopback host only) or `trusted-header` |
+| `--authorization MODE` | `none` | `none` (a loopback host only) or `trusted-header` |
 | `--trusted-header NAME` | `X-Forwarded-User` | The identity header that the proxy sets, in `trusted-header` mode |
 | `--enable-actions` | off | Allow task cancel and workflow pause, resume and cancel. Without it the UI is view only |
 | `--custom-css-url URL` | none | A stylesheet URL that the page loads after its own stylesheet |
@@ -324,7 +324,7 @@ database_url = "postgresql://app:secret@db.example.com:5432/horsies"
 
 - The config file is read up to 1 MiB. A key that no config section has is refused by name, with exit code 1.
 - The server never installs or migrates the schema (`SchemaMode::ObserveOnly`).
-- `--auth none` on a host that is not `localhost` or a loopback address exits with code 2. A blank `--trusted-header`, or a value that is not a header name, exits with code 2. `--auth trusted-header` prints a warning: the proxy must strip or overwrite that header on each incoming request. The access rules are on the shared page: [Bind rules](/horsies/monitoring/web-ui-deployment/#bind-rules) and [Trusted-header mode](/horsies/monitoring/web-ui-deployment/#trusted-header-mode).
+- `--authorization none` on a host that is not `localhost` or a loopback address exits with code 2. A blank `--trusted-header`, or a value that is not a header name, exits with code 2. `--authorization trusted-header` prints a warning: the proxy must strip or overwrite that header on each incoming request. The access rules are on the shared page: [Bind rules](/horsies/monitoring/web-ui-deployment/#bind-rules) and [Trusted-header mode](/horsies/monitoring/web-ui-deployment/#trusted-header-mode).
 - The binary has no task or workflow of an app. A resume of a paused workflow that owes a sub-workflow child needs the app's workflow definitions: serve the UI from the app's own binary with `horsies::web::router` (feature `web`).
 - `SIGTERM` or `SIGINT` stops the server; requests in flight end first, and it exits with code 0.
 - Built without the `web` feature, `horsies web` prints ``horsies web requires the `web` cargo feature`` and exits with code 1.

@@ -49,7 +49,7 @@ from horsies._core import (
 from horsies.core.app import Horsies
 from horsies.core.fleet_metrics import fleet_label_names
 from horsies.core.errors import ConfigurationError, HorsiesErrorCode
-from horsies.web.auth import INTENT_HEADER, MonitoringAuthPolicy
+from horsies.web.authorization import INTENT_HEADER, Actions, MonitoringAuthorizationPolicy
 from horsies.web.schema import SchemaState
 
 EVENT_HEARTBEAT_MS: Final = 15_000
@@ -103,28 +103,28 @@ class TraceLinkTemplate(BaseModel):
                 )
 
 
-class NoTraceLink(BaseModel):
+class TraceLinkText(BaseModel):
     """The task detail shows the trace id as text."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid', frozen=True)
 
-    kind: Literal['no_trace_link'] = 'no_trace_link'
+    kind: Literal['trace_link_text'] = 'trace_link_text'
 
 
-TraceLinkSetting = Annotated[
-    Union[TraceLinkTemplate, NoTraceLink],
+TraceLink = Annotated[
+    Union[TraceLinkTemplate, TraceLinkText],
     Field(discriminator='kind'),
 ]
-"""The trace link of the page."""
+"""The trace link of the page: ``TraceLinkTemplate`` or ``TraceLinkText``."""
 
 
-def trace_link_template_text(setting: TraceLinkTemplate | NoTraceLink) -> str | None:
+def trace_link_template_text(setting: TraceLinkTemplate | TraceLinkText) -> str | None:
     """The template text that the core handler takes, or ``None`` for
-    ``NoTraceLink``. Pure."""
+    ``TraceLinkText``. Pure."""
     match setting:
         case TraceLinkTemplate(template=template):
             return template
-        case NoTraceLink():
+        case TraceLinkText():
             return None
         case _ as unreachable:
             assert_never(unreachable)
@@ -139,21 +139,21 @@ class MonitoringUIConfig(BaseModel):
     theming.
 
     ``trace_link`` is the link of a task's trace id in the task detail
-    (``TraceLinkTemplate``), or ``NoTraceLink`` (the default) for the id as
-    text.
+    (``TraceLinkTemplate``), or ``TraceLinkText`` (the default) for the id
+    as text.
     """
 
     custom_css_url: str | None = None
-    trace_link: TraceLinkSetting = Field(default_factory=NoTraceLink)
+    trace_link: TraceLink = Field(default_factory=TraceLinkText)
 
 
 class MetaResponse(BaseModel):
     """What the SPA needs on boot to decide what to render: the body of
     ``GET /api/meta``.
 
-    ``actions_enabled`` is the server's verdict — the deployment's own switch
-    ANDed with schema compatibility — while ``can_act`` is this caller's
-    policy verdict. A schema the tool cannot write through forces actions off
+    ``actions`` is the server's verdict — ``ENABLED`` only when the
+    deployment's own switch and schema compatibility both allow the actions
+    — while ``can_act`` is this caller's policy verdict. A schema the tool cannot write through forces actions off
     for everyone and names itself in ``actions_disabled_reason``.
     ``schema_state`` is the probe's verdict itself, so a client never derives
     it from the version numbers. ``trace_link_template`` is the template of
@@ -162,7 +162,7 @@ class MetaResponse(BaseModel):
 
     horsies_version: str
     base_path: str
-    actions_enabled: bool
+    actions: Actions
     can_act: bool
     schema_version: int | None
     expected_schema_version: int
@@ -222,7 +222,7 @@ def _verdict(answer: object) -> Verdict:
 
 async def ask_policy(
     need: Literal['PUBLIC', 'VIEW', 'VIEW_REPORT_ACT', 'VIEW_AND_ACT'],
-    policy: MonitoringAuthPolicy,
+    policy: MonitoringAuthorizationPolicy,
     request: Request,
 ) -> AccessGrant:
     """Call the user's policy for the verdicts that ``need`` names, in order.
@@ -340,7 +340,7 @@ async def one_response(
 
 async def serve_request(
     handler: MonitoringHandler,
-    policy: MonitoringAuthPolicy,
+    policy: MonitoringAuthorizationPolicy,
     request: Request,
 ) -> Response:
     """Answer one request: the policy's verdicts, then the handler's answer.
@@ -361,14 +361,14 @@ async def serve_request(
 def create_monitoring_app(
     app: Horsies,
     *,
-    auth_policy: MonitoringAuthPolicy,
-    config: MonitoringUIConfig | None = None,
-    actions_enabled: bool = True,
+    authorization_policy: MonitoringAuthorizationPolicy,
+    ui: MonitoringUIConfig | None = None,
+    actions: Actions = Actions.ENABLED,
 ) -> FastAPI:
     """Build the monitoring application for a horsies app.
 
-    ``auth_policy`` is required and has no default: a deployment must choose
-    consciously. When mounting this under a host application, the mount must
+    ``authorization_policy`` is required and has no default: a deployment
+    must choose consciously. When mounting this under a host application, the mount must
     sit behind that application's own authentication — ``AllowAll()`` states
     that it does.
 
@@ -383,11 +383,11 @@ def create_monitoring_app(
     series, and the first request logs one WARNING line that names it.
     """
     broker = app.get_broker()
-    ui_config = config or MonitoringUIConfig()
+    ui_config = ui or MonitoringUIConfig()
     names = fleet_label_names(app)
     handler = MonitoringHandler(
         broker._core_handle,  # pyright: ignore[reportPrivateUsage]
-        actions_enabled=actions_enabled,
+        actions=actions.value,
         custom_css_url=ui_config.custom_css_url,
         trace_link_template=trace_link_template_text(ui_config.trace_link),
         client_version=__version__,
@@ -421,6 +421,6 @@ def create_monitoring_app(
     )
     async def serve(request: Request) -> Response:
         """Answer one request through the handler."""
-        return await serve_request(handler, auth_policy, request)
+        return await serve_request(handler, authorization_policy, request)
 
     return monitoring_app

@@ -13,7 +13,7 @@ use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::lifecycle::ResumeFailure;
 
 use super::failure_status::database_failure_status;
-use super::models::ActionResponse;
+use super::models::{ActionResponse, CancelPolicy};
 use super::task_actions::{
     cancel_task, TaskActionError, TaskActionErrorCode, TaskActionResult, TaskCancelled,
 };
@@ -157,7 +157,7 @@ fn workflow_not_found(workflow_id: Uuid) -> ActionOutcome {
 fn task_action_failed(error: TaskActionError) -> ActionOutcome {
     match error {
         TaskActionError::NotFound { message, .. } => detail(404, message),
-        TaskActionError::WorkflowTask { .. } => ActionOutcome {
+        TaskActionError::IsWorkflowTask { .. } => ActionOutcome {
             status_code: 400,
             body: ActionBody::Code {
                 code: TaskActionErrorCode::TaskIsWorkflowTask,
@@ -239,9 +239,9 @@ pub fn task_action_outcome(result: TaskActionResult<TaskCancelled>) -> ActionOut
 pub async fn cancel_task_action(
     broker: &PostgresBroker,
     task_id: Uuid,
-    include_running: bool,
+    policy: CancelPolicy,
 ) -> ActionOutcome {
-    task_action_outcome(cancel_task(broker, task_id, include_running).await)
+    task_action_outcome(cancel_task(broker, task_id, policy).await)
 }
 
 pub async fn pause_workflow_action(broker: &PostgresBroker, workflow_id: Uuid) -> ActionOutcome {
@@ -359,7 +359,7 @@ mod tests {
             conflict(ActionConflictCode::TaskNotCancellable, None).result_word(),
             "TASK_NOT_CANCELLABLE"
         );
-        let workflow_task = TaskActionError::WorkflowTask {
+        let workflow_task = TaskActionError::IsWorkflowTask {
             message: "a workflow task".to_owned(),
             task_id: Uuid::nil(),
             current_status: crate::TaskStatus::Pending,

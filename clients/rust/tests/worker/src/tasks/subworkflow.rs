@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use horsies::{
     blocking_task, task, HorsiesError, NodeKey, TaskError, TaskOutcome, WorkflowContext,
-    WorkflowDefConfig, WorkflowDefinition, WorkflowInput, WorkflowSpec, WorkflowSpecBuilder,
+    WorkflowDefinition, WorkflowDefinitionConfig, WorkflowInput, WorkflowSpec, WorkflowSpecBuilder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -144,7 +144,7 @@ pub async fn sub_probe_failed_child(
         "ctx_is_subworkflow_error": ctx_child.is_some(),
         "ids_match": args_child.is_some() && args_child == ctx_child,
         "summary_status": summary.status,
-        "summary_failed_tasks": summary.failed_tasks,
+        "summary_failed_tasks": summary.failed_nodes,
     }))
 }
 
@@ -176,7 +176,7 @@ pub async fn sub_probe_success_ctx(
         "result_error_code": failed_code(&result),
         "summary_status": summary.status,
         "summary_output": output,
-        "summary_completed_tasks": summary.completed_tasks,
+        "summary_completed_tasks": summary.completed_nodes,
     }))
 }
 
@@ -199,7 +199,7 @@ pub struct SubOk;
 
 impl WorkflowDefinition for SubOk {
     type Output = i64;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "e2e_sub_ok_workflow"
@@ -209,13 +209,13 @@ impl WorkflowDefinition for SubOk {
         "tests.e2e.sub.ok.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let child = builder.task(
             sub_int_ok::node()
                 .node_id("child")
                 .set(sub_int_ok::fields::value(), SUB_OK_VALUE)?,
         )?;
-        Ok(WorkflowDefConfig::new().output(child))
+        Ok(WorkflowDefinitionConfig::new().output(child))
     }
 }
 
@@ -225,7 +225,7 @@ pub struct SubFail;
 
 impl WorkflowDefinition for SubFail {
     type Output = i64;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "e2e_sub_fail_workflow"
@@ -235,12 +235,12 @@ impl WorkflowDefinition for SubFail {
         "tests.e2e.sub.fail.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let child = builder.task(sub_int_fail::node().node_id("child").set(
             sub_int_fail::fields::error_code(),
             SUB_CHILD_FAIL.to_owned(),
         )?)?;
-        Ok(WorkflowDefConfig::new().output(child))
+        Ok(WorkflowDefinitionConfig::new().output(child))
     }
 }
 
@@ -250,7 +250,7 @@ pub struct SubNestedOkMiddle;
 
 impl WorkflowDefinition for SubNestedOkMiddle {
     type Output = i64;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "e2e_sub_nested_ok_middle_workflow"
@@ -260,10 +260,10 @@ impl WorkflowDefinition for SubNestedOkMiddle {
         "tests.e2e.sub.nested.ok.middle.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let child = builder
-            .sub_workflow(SubOk::node(horsies::SubWorkflowParams::NotGiven)?.node_id("child"));
-        Ok(WorkflowDefConfig::new().output(child))
+            .sub_workflow(SubOk::node(horsies::SubWorkflowParameters::NotGiven)?.node_id("child"));
+        Ok(WorkflowDefinitionConfig::new().output(child))
     }
 }
 
@@ -273,7 +273,7 @@ pub struct SubNestedFailMiddle;
 
 impl WorkflowDefinition for SubNestedFailMiddle {
     type Output = i64;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "e2e_sub_nested_fail_middle_workflow"
@@ -283,10 +283,11 @@ impl WorkflowDefinition for SubNestedFailMiddle {
         "tests.e2e.sub.nested.fail.middle.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        let child = builder
-            .sub_workflow(SubFail::node(horsies::SubWorkflowParams::NotGiven)?.node_id("child"));
-        Ok(WorkflowDefConfig::new().output(child))
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
+        let child = builder.sub_workflow(
+            SubFail::node(horsies::SubWorkflowParameters::NotGiven)?.node_id("child"),
+        );
+        Ok(WorkflowDefinitionConfig::new().output(child))
     }
 }
 
@@ -303,7 +304,7 @@ pub struct SubParam;
 
 impl WorkflowDefinition for SubParam {
     type Output = i64;
-    type Params = UpstreamParams;
+    type Parameters = UpstreamParams;
 
     fn name() -> &'static str {
         "e2e_sub_param_workflow"
@@ -338,7 +339,7 @@ pub struct SubFailedInput;
 
 impl WorkflowDefinition for SubFailedInput {
     type Output = serde_json::Value;
-    type Params = UpstreamParams;
+    type Parameters = UpstreamParams;
 
     fn name() -> &'static str {
         "e2e_sub_failed_input_workflow"
@@ -386,7 +387,7 @@ pub struct SubLabel;
 
 impl WorkflowDefinition for SubLabel {
     type Output = String;
-    type Params = LabelParams;
+    type Parameters = LabelParams;
 
     fn name() -> &'static str {
         "e2e_sub_label_workflow"
@@ -434,7 +435,7 @@ pub struct SubTypedKwarg;
 
 impl WorkflowDefinition for SubTypedKwarg {
     type Output = serde_json::Value;
-    type Params = PetParams;
+    type Parameters = PetParams;
 
     fn name() -> &'static str {
         "e2e_sub_typed_kwarg_workflow"
@@ -488,7 +489,7 @@ pub struct SubSlow;
 
 impl WorkflowDefinition for SubSlow {
     type Output = String;
-    type Params = SlowParams;
+    type Parameters = SlowParams;
 
     fn name() -> &'static str {
         "e2e_sub_slow_workflow"
@@ -528,10 +529,10 @@ pub fn register(app: &mut horsies::Horsies) -> Result<(), HorsiesError> {
     let _fail = app.register_workflow_definition::<SubFail>()?;
     let _nested_ok = app.register_workflow_definition::<SubNestedOkMiddle>()?;
     let _nested_fail = app.register_workflow_definition::<SubNestedFailMiddle>()?;
-    let _param = app.workflow_template::<SubParam>()?;
-    let _failed_input = app.workflow_template::<SubFailedInput>()?;
-    let _label = app.workflow_template::<SubLabel>()?;
-    let _typed_kwarg = app.workflow_template::<SubTypedKwarg>()?;
-    let _slow = app.workflow_template::<SubSlow>()?;
+    let _param = app.register_workflow_definition_with::<SubParam>()?;
+    let _failed_input = app.register_workflow_definition_with::<SubFailedInput>()?;
+    let _label = app.register_workflow_definition_with::<SubLabel>()?;
+    let _typed_kwarg = app.register_workflow_definition_with::<SubTypedKwarg>()?;
+    let _slow = app.register_workflow_definition_with::<SubSlow>()?;
     Ok(())
 }

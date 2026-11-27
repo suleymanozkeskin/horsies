@@ -75,16 +75,16 @@ if is_ok(result):
 Match `slot_health` to find the slots that are down:
 
 ```python
-from horsies import AllSlotsServing, SlotsDown, is_ok
+from horsies import SlotHealthAllServing, SlotHealthSlotsDown, is_ok
 
 result = await app.list_worker_states_async()
 if is_ok(result):
     for snap in result.ok_value:
         match snap.slot_health:
-            case SlotsDown(slots=down):
+            case SlotHealthSlotsDown(slots=down):
                 for slot in down:
                     print(f"{snap.worker_id} slot {slot.slot}: {slot.cause} since {slot.down_since}")
-            case AllSlotsServing():
+            case SlotHealthAllServing():
                 pass
 ```
 
@@ -106,15 +106,15 @@ if is_ok(result):
 Match `profile` to see the worker profile of each worker:
 
 ```python
-from horsies import ProfileNamed, ProfileNotRecorded, is_ok
+from horsies import SnapshotProfileNamed, SnapshotProfileNotRecorded, is_ok
 
 result = await app.list_worker_states_async()
 if is_ok(result):
     for snap in result.ok_value:
         match snap.profile:
-            case ProfileNamed(name=name):
+            case SnapshotProfileNamed(name=name):
                 print(f"{snap.worker_id} runs the profile {name}")
-            case ProfileNotRecorded():
+            case SnapshotProfileNotRecorded():
                 print(f"{snap.worker_id}: the snapshot holds no profile name")
 ```
 
@@ -159,33 +159,33 @@ The reads do not change the tasks. The reaper recovers stale tasks; no worker cl
 ### Check the Execution Class Coverage
 
 ```python
-from horsies import StreamServed, StreamUnserved, StreamWithoutCapacity, is_ok
+from horsies import StreamCoverageStateServed, StreamCoverageStateUnserved, StreamCoverageStateNoCapacity, is_ok
 
 result = await app.get_execution_class_coverage_async()
 if is_ok(result):
     for stream in result.ok_value.streams:
         match stream.coverage:
-            case StreamUnserved():
+            case StreamCoverageStateUnserved():
                 print(f"{stream.queue}/{stream.execution.value}: no live worker serves it")
-            case StreamWithoutCapacity(workers=workers):
+            case StreamCoverageStateNoCapacity(workers=workers):
                 print(f"{stream.queue}/{stream.execution.value}: {workers} worker(s), no child in service")
-            case StreamServed():
+            case StreamCoverageStateServed():
                 pass
 ```
 
 ### Read the Execution Class Report
 
 ```python
-from horsies import OldestWaiting, NoneDue, is_ok
+from horsies import StreamWaitDue, StreamWaitNoneDue, is_ok
 
 result = await app.get_execution_class_report_async()
 if is_ok(result):
     report = result.ok_value
     for stream in report.streams:
         match stream.wait:
-            case OldestWaiting(wait=wait):
+            case StreamWaitDue(wait=wait):
                 print(f"{stream.queue}/{stream.execution.value}: oldest waits {wait}")
-            case NoneDue(next_due_at=due):
+            case StreamWaitNoneDue(next_due_at=due):
                 print(f"{stream.queue}/{stream.execution.value}: next due {due}")
     for worker in report.workers:
         for budget in worker.budgets:
@@ -271,18 +271,18 @@ if is_ok(states) and is_ok(pongs):
 | `BoundedTaskListComplete` | `rows: tuple[Row, ...]`: every matching row |
 | `BoundedTaskListTruncated` | `rows: tuple[Row, ...]`, `bound: int`: the first `bound` matching rows; more rows match |
 | `ExecutionClassCoverage` | `checked_at: datetime`, `live_workers: int`, `streams: tuple[StreamCoverage, ...]` |
-| `StreamCoverage` | `queue: str`, `execution: Execution`, `coverage: StreamServed \| StreamWithoutCapacity \| StreamUnserved` |
-| `StreamServed` | `workers: int`, `capacity: int` |
-| `StreamWithoutCapacity` | `workers: int` |
-| `StreamUnserved` | (no fields) |
+| `StreamCoverage` | `queue: str`, `execution: Execution`, `coverage: StreamCoverageStateServed \| StreamCoverageStateNoCapacity \| StreamCoverageStateUnserved` |
+| `StreamCoverageStateServed` | `workers: int`, `capacity: int` |
+| `StreamCoverageStateNoCapacity` | `workers: int` |
+| `StreamCoverageStateUnserved` | (no fields) |
 | `ExecutionClassReport` | `checked_at: datetime`, `live_window: timedelta`, `streams: tuple[PendingStream, ...]`, `workers: tuple[WorkerExecutionClassLoad, ...]` |
-| `PendingStream` | `queue: str`, `execution: Execution`, `coverage` (as in `StreamCoverage`), `wait: OldestWaiting \| NoneDue` |
-| `OldestWaiting` | `oldest_due_at: datetime`, `wait: timedelta` |
-| `NoneDue` | `next_due_at: datetime` |
+| `PendingStream` | `queue: str`, `execution: Execution`, `coverage` (as in `StreamCoverage`), `wait: StreamWaitDue \| StreamWaitNoneDue` |
+| `StreamWaitDue` | `oldest_due_at: datetime`, `wait: timedelta` |
+| `StreamWaitNoneDue` | `next_due_at: datetime` |
 | `WorkerExecutionClassLoad` | `worker_id: str`, `snapshot_at: datetime`, `budgets: tuple[BudgetLoad, ...]` |
 | `BudgetLoad` | `budget: Execution`, `capacity: int`, `serves: tuple[Execution, ...]`, `in_flight: int`, and the property `free: int` |
 
-The state names map to the states on the shared page: `StreamServed` is served, `StreamWithoutCapacity` is without capacity, `StreamUnserved` is unserved.
+The state names map to the states on the shared page: `StreamCoverageStateServed` is served, `StreamCoverageStateNoCapacity` is without capacity, `StreamCoverageStateUnserved` is unserved.
 
 ### `WorkerStateSnapshot` Types
 
@@ -308,8 +308,8 @@ The meaning of each field is on [Snapshot Fields](/horsies/monitoring/worker-hea
 | `cpu_percent` | `float \| None` |
 | `children_memory_mb` | `float \| None` |
 | `worker_started_at` | `datetime` |
-| `slot_health` | `AllSlotsServing()` or `SlotsDown(slots)`, where `slots` holds one `DownSlot` per slot that was down, in slot order |
+| `slot_health` | `SlotHealthAllServing()` or `SlotHealthSlotsDown(slots)`, where `slots` holds one `DownSlot` per slot that was down, in slot order |
 | `execution_class_budgets` | `ExecutionClassBudgets(budgets)`, where `budgets` holds one `ExecutionClassBudget(budget, capacity, serves)` per budget, in `Execution` order |
-| `profile` | `ProfileNamed(name)` or `ProfileNotRecorded()` |
+| `profile` | `SnapshotProfileNamed(name)` or `SnapshotProfileNotRecorded()` |
 
 `DownSlot` fields: `slot` (index), `cause` (`ResourceShortage(errno)` or `ThreadStartRefused()`), `detail` (`str`), `down_since` (aware `datetime`), `failed_boots` (`int`, at least 1).

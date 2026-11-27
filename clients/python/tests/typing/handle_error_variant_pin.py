@@ -8,7 +8,7 @@ config makes an unneeded ignore comment an error, so a cause that
 ``raise ... from`` accepts without a match, a cause field that accepts
 ``NoCause()``, or an async status read that can return ``ASYNC_CONTEXT``
 fails the check. A handle id is a ``UUID``: a text goes through
-``WorkflowHandle.for_id``, whose error is not a handle operation failure.
+``Horsies.workflow_handle``, whose error is not a handle operation failure.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from horsies import (
     WorkflowHandleResumeRecoveryFailed,
     WorkflowHandleStoredDataInvalid,
     WorkflowHandleNotFound,
+    Horsies,
     NoCause,
     WorkflowHandle,
 )
@@ -95,8 +96,8 @@ def the_handle_id_is_a_uuid(broker: PostgresBroker) -> None:
     )
 
 
-def a_workflow_id_text_goes_through_for_id(broker: PostgresBroker) -> uuid.UUID:
-    match WorkflowHandle.for_id('3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f', broker):
+def a_workflow_id_text_goes_through_the_app(app: Horsies) -> uuid.UUID:
+    match app.workflow_handle('3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f'):
         case Ok(ok_value=handle):
             return handle.workflow_id
         case Err(err_value=WorkflowHandleInvalidWorkflowId(cause=cause) as refused):

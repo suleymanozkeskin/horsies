@@ -282,7 +282,7 @@ BEGIN
                       AND ((wft_node(v_wf, 0)).result::json -> 'err' -> 'error_code' ->> '__builtin_task_code__')
                           = 'SUB_WORKFLOW_FAILED'
                       AND ((wft_node(v_wf, 0)).result::json -> 'err' ->> 'sub_workflow_id') = v_child::text
-                      AND ((wft_node(v_wf, 0)).sub_workflow_summary::json ->> 'failed_tasks') = '1',
+                      AND ((wft_node(v_wf, 0)).sub_workflow_summary::json ->> 'failed_nodes') = '1',
                       'start, child that ends at once: parent node FAILED with SUB_WORKFLOW_FAILED and summary');
     PERFORM wft_check((wft_node(v_wf, 1)).status = 'ENQUEUED' AND wft_task_of(v_wf, 1) IS NOT NULL,
                       'start, child that ends at once: parent dependent promoted in the same statement');

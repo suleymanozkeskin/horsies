@@ -213,9 +213,9 @@ class CoreHandle:
         """One pruning pass on the session-work pool. Writes (DDL and catalog rows); each leaf's
         detach and drop commit alone.
         """
-    def cancel_task_async(self, task_id: uuid.UUID, *, include_running: bool) -> asyncio.Future[TaskCancelledRecord | TaskActionCoreError]:
-        """Cancel one plain task; a RUNNING task only with include_running. Writes, in one
-        statement. An outcome that contradicts the function raises PanicException.
+    def cancel_task_async(self, task_id: uuid.UUID, *, policy: Literal['PENDING_OR_CLAIMED_ONLY', 'INCLUDE_RUNNING']) -> asyncio.Future[TaskCancelledRecord | TaskActionCoreError]:
+        """Cancel one plain task; a RUNNING task only with the policy INCLUDE_RUNNING. Writes, in
+        one statement. An outcome that contradicts the function raises PanicException.
         """
     def expire_pending_tasks_async(self) -> asyncio.Future[PendingExpiryDrained | PendingExpiryBoundReached | PendingExpiryFailed]:
         """One pending expiry pass. Writes; each batch commits alone."""
@@ -343,7 +343,7 @@ class CoreHandle:
         """The facets of one scope: the JSON text of the core's Facets. Reads only, in one
         statement. A cancelled await drops the read.
         """
-    def monitoring_task_stats_async(self, query: TaskStatsQuery) -> asyncio.Future[MonitoringJson | MonitoringQueryCoreError]:
+    def monitoring_task_status_counts_async(self, query: TaskStatusCountsQuery) -> asyncio.Future[MonitoringJson | MonitoringQueryCoreError]:
         """The count of each task status: the JSON text of the core's list of StatusCount. Reads
         only, in one statement.
         """
@@ -361,8 +361,8 @@ class CoreHandle:
         """One run with its nodes and edges: the JSON text of the core's WorkflowRunDetail, or null
         when no run has the id. Reads only, in one statement.
         """
-    def monitoring_workflow_node_async(self, workflow_id: uuid.UUID, *, task_index: int) -> asyncio.Future[MonitoringJson | MonitoringQueryCoreError]:
-        """One node with its task: the JSON text of the core's WorkflowTaskDetail, or null when the
+    def monitoring_workflow_node_async(self, workflow_id: uuid.UUID, *, node_index: int) -> asyncio.Future[MonitoringJson | MonitoringQueryCoreError]:
+        """One node with its task: the JSON text of the core's WorkflowNodeDetail, or null when the
         run has no node at the index. Reads only, in one statement. An index outside 32 bits
         raises OverflowError.
         """
@@ -1505,7 +1505,7 @@ class TaskListQuery:
     """One frozen task list read: the window, the filters, the sort and the page. A value
     outside its rule raises ValueError; a naive bound raises TypeError.
     """
-    def __init__(self, *, window_lower: datetime.datetime, window_upper: datetime.datetime, statuses: list[str], task_names: list[str], queues: list[str], workers: list[str], error_codes: list[str], error_categories: list[str], retried_only: bool, sort_by: str, sort_dir: str, offset: int, limit: int) -> None: ...
+    def __init__(self, *, window_lower: datetime.datetime, window_upper: datetime.datetime, statuses: list[str], task_names: list[str], queues: list[str], workers: list[str], error_codes: list[str], error_categories: list[str], retried_only: bool, sort_field: str, sort_direction: Literal['ASCENDING', 'DESCENDING'], offset: int, limit: int) -> None: ...
 
 
 @final
@@ -1518,9 +1518,9 @@ class TaskFacetsQuery:
 
 
 @final
-class TaskStatsQuery:
-    """One frozen task stats read: the window and every filter but the status. A value outside
-    its rule raises ValueError; a naive bound raises TypeError.
+class TaskStatusCountsQuery:
+    """One frozen task status counts read: the window and every filter but the status. A
+    value outside its rule raises ValueError; a naive bound raises TypeError.
     """
     def __init__(self, *, window_lower: datetime.datetime, window_upper: datetime.datetime, task_names: list[str], queues: list[str], workers: list[str], error_codes: list[str], error_categories: list[str], retried_only: bool) -> None: ...
 
@@ -1535,10 +1535,10 @@ class TaskBreakdownQuery:
 
 @final
 class WorkflowRunsQuery:
-    """One frozen workflow runs read: the exact name and status filters (None for none) and the
-    limit. A limit outside 1 to 200 raises ValueError.
+    """One frozen workflow runs read: the exact workflow name and status filters (None for none)
+    and the limit. A limit outside 1 to 200 raises ValueError.
     """
-    def __init__(self, *, name: str | None, status: str | None, limit: int) -> None: ...
+    def __init__(self, *, workflow_name: str | None, status: str | None, limit: int) -> None: ...
 
 
 @final
@@ -1973,7 +1973,7 @@ class MonitoringHandler:
     without a child spec source raises RuntimeError; heartbeat_ms outside 1 to 3,600,000
     raises ValueError.
     """
-    def __init__(self, handle: CoreHandle, *, actions_enabled: bool, custom_css_url: str | None, trace_link_template: str | None, client_version: str, heartbeat_ms: int, queue_names: list[str], schedule_names: list[str]) -> None: ...
+    def __init__(self, handle: CoreHandle, *, actions: Literal['ENABLED', 'DISABLED'], custom_css_url: str | None, trace_link_template: str | None, client_version: str, heartbeat_ms: int, queue_names: list[str], schedule_names: list[str]) -> None: ...
     @property
     def max_request_body_bytes(self) -> int: ...
     def route_access(self, method: str, path: str) -> RouteAccess:
@@ -2131,7 +2131,7 @@ class StoredNodeResultRecord:
     @property
     def result_json(self) -> str: ...
     @property
-    def is_subworkflow(self) -> bool: ...
+    def is_sub_workflow(self) -> bool: ...
     @property
     def sub_definition_key(self) -> str | None: ...
 
@@ -2178,7 +2178,7 @@ class StoredNodeRecord:
     @property
     def sub_workflow_summary_json(self) -> str | None: ...
     @property
-    def is_subworkflow(self) -> bool: ...
+    def is_sub_workflow(self) -> bool: ...
     @property
     def sub_definition_key(self) -> str | None: ...
 

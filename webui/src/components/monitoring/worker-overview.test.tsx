@@ -102,7 +102,7 @@ const sharedAsync = (inFlight: number) => [
   budgetLoad('SHARED_ASYNC', 100, ['SHARED_ASYNC'], inFlight),
 ];
 
-const stale = { stale: true, snapshot_age_s: 7200 };
+const stale = { stale: true, snapshot_age_seconds: 7200 };
 
 const FLEET: Answers = {
   workers: [

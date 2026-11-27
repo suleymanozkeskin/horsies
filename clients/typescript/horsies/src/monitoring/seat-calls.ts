@@ -117,14 +117,14 @@ function relayedReads(relay: SeatRelay): RelayedAddon<MonitoringReadsAddon> {
     relayed<V>(relay, { part: "reads", call });
 
   return Object.freeze({
-    readTaskStats: async (_handle, query) => read({ method: "readTaskStats", args: [query] }),
+    readTaskStatusCounts: async (_handle, query) => read({ method: "readTaskStatusCounts", args: [query] }),
     readTaskFacets: async (_handle, query) => read({ method: "readTaskFacets", args: [query] }),
     readTaskBreakdown: async (_handle, query) => read({ method: "readTaskBreakdown", args: [query] }),
     readTaskList: async (_handle, query) => read({ method: "readTaskList", args: [query] }),
     readWorkflowNames: async () => read({ method: "readWorkflowNames", args: [] }),
     readWorkflowRuns: async (_handle, query) => read({ method: "readWorkflowRuns", args: [query] }),
     readWorkflowRun: async (_handle, workflowId) => read({ method: "readWorkflowRun", args: [workflowId] }),
-    readWorkflowNode: async (_handle, workflowId, taskIndex) => read({ method: "readWorkflowNode", args: [workflowId, taskIndex] }),
+    readWorkflowNode: async (_handle, workflowId, nodeIndex) => read({ method: "readWorkflowNode", args: [workflowId, nodeIndex] }),
     readSchedules: async () => read({ method: "readSchedules", args: [] }),
     readTaskDetail: async (_handle, taskId) => read({ method: "readTaskDetail", args: [taskId] }),
   } satisfies RelayedAddon<MonitoringReadsAddon>);

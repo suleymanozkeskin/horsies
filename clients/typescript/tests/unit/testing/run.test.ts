@@ -105,7 +105,7 @@ describe("TaskRuntime.forTest", () => {
     const forTest = TaskRuntime.forTest({ taskId: TASK_ID, attempt: attempt(1), workflowContext: STORED_CONTEXT });
     const context = forTest.workflowContext.kind === "context" ? forTest.workflowContext.context : assert.fail("no context");
 
-    assert.deepEqual([context.taskIndex, context.taskName], [1, "audit"]);
+    assert.deepEqual([context.nodeIndex, context.taskName], [1, "audit"]);
     assert.deepEqual(context.resultFor("produce", produce), { ok: true, value: { kind: "succeeded", value: 10 } });
   });
 

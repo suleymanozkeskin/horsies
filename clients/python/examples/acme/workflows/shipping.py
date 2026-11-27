@@ -61,7 +61,7 @@ class ShippingWorkflow(WorkflowDefinition[TrackingSeed]):
         )
         return app.workflow(
             name=cls.name,
-            tasks=[book, label, seed],
+            nodes=[book, label, seed],
             on_error=OnError.FAIL,
             output=seed,
         )

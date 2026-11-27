@@ -7,9 +7,9 @@ import pytest
 from horsies.core.types.status import TaskStatus, TASK_TERMINAL_STATES
 from horsies.core.models.workflow import (
     WorkflowStatus,
-    WorkflowTaskStatus,
+    WorkflowNodeStatus,
     WORKFLOW_TERMINAL_STATES,
-    WORKFLOW_TASK_TERMINAL_STATES,
+    WORKFLOW_NODE_TERMINAL_STATES,
 )
 from tests.baseline_sql import installed_function
 
@@ -112,45 +112,45 @@ class TestWorkflowStatusTerminal:
 
 
 @pytest.mark.unit
-class TestWorkflowTaskStatusTerminal:
-    """Tests for WorkflowTaskStatus terminal states."""
+class TestWorkflowNodeStatusTerminal:
+    """Tests for WorkflowNodeStatus terminal states."""
 
     def test_terminal_members(self) -> None:
         """is_terminal returns True for each terminal member."""
-        assert WorkflowTaskStatus.COMPLETED.is_terminal is True
-        assert WorkflowTaskStatus.FAILED.is_terminal is True
-        assert WorkflowTaskStatus.SKIPPED.is_terminal is True
+        assert WorkflowNodeStatus.COMPLETED.is_terminal is True
+        assert WorkflowNodeStatus.FAILED.is_terminal is True
+        assert WorkflowNodeStatus.SKIPPED.is_terminal is True
 
     def test_non_terminal_members(self) -> None:
         """is_terminal returns False for each non-terminal member."""
-        assert WorkflowTaskStatus.PENDING.is_terminal is False
-        assert WorkflowTaskStatus.READY.is_terminal is False
-        assert WorkflowTaskStatus.ENQUEUED.is_terminal is False
-        assert WorkflowTaskStatus.RUNNING.is_terminal is False
+        assert WorkflowNodeStatus.PENDING.is_terminal is False
+        assert WorkflowNodeStatus.READY.is_terminal is False
+        assert WorkflowNodeStatus.ENQUEUED.is_terminal is False
+        assert WorkflowNodeStatus.RUNNING.is_terminal is False
 
     def test_frozenset_contents(self) -> None:
         """Frozenset contains exactly the expected terminal states."""
-        assert WORKFLOW_TASK_TERMINAL_STATES == frozenset({
-            WorkflowTaskStatus.COMPLETED,
-            WorkflowTaskStatus.FAILED,
-            WorkflowTaskStatus.SKIPPED,
+        assert WORKFLOW_NODE_TERMINAL_STATES == frozenset({
+            WorkflowNodeStatus.COMPLETED,
+            WorkflowNodeStatus.FAILED,
+            WorkflowNodeStatus.SKIPPED,
         })
 
     def test_exhaustiveness(self) -> None:
-        """Every WorkflowTaskStatus member is either terminal or non-terminal."""
-        for member in WorkflowTaskStatus:
+        """Every WorkflowNodeStatus member is either terminal or non-terminal."""
+        for member in WorkflowNodeStatus:
             assert isinstance(member.is_terminal, bool)
-        terminal = {m for m in WorkflowTaskStatus if m.is_terminal}
-        non_terminal = {m for m in WorkflowTaskStatus if not m.is_terminal}
-        assert terminal | non_terminal == set(WorkflowTaskStatus)
+        terminal = {m for m in WorkflowNodeStatus if m.is_terminal}
+        non_terminal = {m for m in WorkflowNodeStatus if not m.is_terminal}
+        assert terminal | non_terminal == set(WorkflowNodeStatus)
         assert terminal & non_terminal == set()
 
     def test_is_terminal_matches_frozenset(self) -> None:
-        """is_terminal property agrees with WORKFLOW_TASK_TERMINAL_STATES membership."""
-        for member in WorkflowTaskStatus:
-            assert member.is_terminal == (member in WORKFLOW_TASK_TERMINAL_STATES)
+        """is_terminal property agrees with WORKFLOW_NODE_TERMINAL_STATES membership."""
+        for member in WorkflowNodeStatus:
+            assert member.is_terminal == (member in WORKFLOW_NODE_TERMINAL_STATES)
 
     def test_frozenset_is_immutable(self) -> None:
         """Frozenset cannot be modified."""
         with pytest.raises(AttributeError):
-            WORKFLOW_TASK_TERMINAL_STATES.add(WorkflowTaskStatus.PENDING)  # type: ignore[attr-defined]
+            WORKFLOW_NODE_TERMINAL_STATES.add(WorkflowNodeStatus.PENDING)  # type: ignore[attr-defined]

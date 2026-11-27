@@ -46,7 +46,7 @@ const PANEL_WIDTH_KEY = 'workflow-panel-width';
 function viewTitle(view: PanelView): string {
   return view.kind === 'graph'
     ? view.label
-    : (view.node.node_id ?? view.node.task_name ?? `#${view.node.task_index}`);
+    : (view.node.node_id ?? view.node.task_name ?? `#${view.node.node_index}`);
 }
 
 export interface WorkflowExplorerProps {
@@ -103,7 +103,7 @@ export function WorkflowExplorer({
   // (null while viewing a subworkflow graph or a child detail).
   const rootSelectedIndex =
     top?.kind === 'detail' && runId !== null && top.workflowId === runId
-      ? top.node.task_index
+      ? top.node.node_index
       : null;
 
   // Deep link: restore the open node once the run's nodes are known. Only while
@@ -116,7 +116,7 @@ export function WorkflowExplorer({
     const target = search.node;
     if (target !== undefined) {
       const node = runDetail.nodes.find(
-        candidate => candidate.task_index === target
+        candidate => candidate.node_index === target
       );
       if (node !== undefined) {
         setViews([{ kind: 'detail', workflowId: runId, node }]);
@@ -203,7 +203,7 @@ export function WorkflowExplorer({
               selectedRunId={runId}
               onSelect={run => {
                 setViews([]);
-                onSearchChange({ run: run.id, node: undefined });
+                onSearchChange({ run: run.workflow_id, node: undefined });
               }}
             />
           </div>
@@ -258,9 +258,9 @@ export function WorkflowExplorer({
             {runId !== null && runDetail !== undefined ? (
               <span
                 className="min-w-0 flex-1 truncate font-medium"
-                title={runDetail.run.name}
+                title={runDetail.run.workflow_name}
               >
-                {runDetail.run.name}
+                {runDetail.run.workflow_name}
               </span>
             ) : (
               <span className="text-muted-foreground">

@@ -105,7 +105,7 @@ class OrderFulfillment(WorkflowDefinition[PaymentCapture]):
             node_id='generate_invoice',
         )
         shipping = SubWorkflowNode(
-            workflow_def=ShippingWorkflow,
+            workflow_definition=ShippingWorkflow,
             kwargs={
                 'order_id': order_id,
                 'courier': simulate.choice(tuning.COURIERS, order_id, 'courier'),
@@ -131,7 +131,7 @@ class OrderFulfillment(WorkflowDefinition[PaymentCapture]):
         )
         return app.workflow(
             name=cls.name,
-            tasks=[validate, *reservations, authorize, pick, invoice, shipping, capture, email],
+            nodes=[validate, *reservations, authorize, pick, invoice, shipping, capture, email],
             on_error=OnError.FAIL,
             output=capture,
         )
@@ -157,7 +157,7 @@ _CHECK_ORDER: Final[Order] = Order(
 """Widest shape the builder can produce, used by `horsies check`."""
 
 
-@app.workflow_builder(cases=[{'order': _CHECK_ORDER}])
+@app.check_workflow_builder(cases=[{'order': _CHECK_ORDER}])
 def build_order_fulfillment(*, order: Order) -> WorkflowSpec[PaymentCapture]:
     """Build the fulfillment DAG for one order.
 

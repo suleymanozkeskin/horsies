@@ -7,7 +7,7 @@
 // reads one node with that node's contract. `get` of a workflow with no `outputType` reads the outputless envelope as
 // the outcome of each terminal node (`terminal-results.ts`).
 
-import { WorkflowTaskStatus } from "../_catalog/status.ts";
+import { WorkflowNodeStatus } from "../_catalog/status.ts";
 import { ContractCode, OperationalCode, RetrievalCode } from "../_catalog/task_codes.ts";
 import type { HandleCoreError } from "../_catalog/workflow_handle_errors.ts";
 import { jsonTextCheckedByCore } from "../codec/json-text.ts";
@@ -59,13 +59,13 @@ export type NodeResult =
   | { readonly kind: "unreadable"; readonly cause: string };
 
 /** One node of a workflow. */
-export interface WorkflowTaskInfo {
+export interface WorkflowNodeInfo {
   /** The node id; a node stored without one has none. */
   readonly nodeId: Recorded<string>;
   readonly index: number;
   /** The task name, or the child's workflow name. */
   readonly name: string;
-  readonly status: WorkflowTaskStatus;
+  readonly status: WorkflowNodeStatus;
   readonly result: Recorded<NodeResult>;
   readonly startedAt: Recorded<Temporal.Instant>;
   readonly completedAt: Recorded<Temporal.Instant>;
@@ -87,7 +87,7 @@ export interface WorkflowHandleBase<R extends BuildReturn> {
   /** The stored result of each node that has one, by node id. */
   results(): Promise<Result<ReadonlyMap<string, NodeResult>, WorkflowHandleError>>;
   /** Every node, in index order. */
-  nodes(): Promise<Result<readonly WorkflowTaskInfo[], WorkflowHandleError>>;
+  nodes(): Promise<Result<readonly WorkflowNodeInfo[], WorkflowHandleError>>;
   /** Pause a RUNNING workflow. `true`: it paused. `false`: it is not RUNNING, no change. */
   pause(): Promise<Result<boolean, WorkflowHandleError>>;
   /** Resume a PAUSED workflow. `true`: it resumed. `false`: it is not PAUSED, no change. */
@@ -522,12 +522,12 @@ async function nodeResults(facts: HandleFacts): Promise<Result<ReadonlyMap<strin
   }
 }
 
-async function nodeInfos(facts: HandleFacts): Promise<Result<readonly WorkflowTaskInfo[], WorkflowHandleError>> {
+async function nodeInfos(facts: HandleFacts): Promise<Result<readonly WorkflowNodeInfo[], WorkflowHandleError>> {
   const read = await facts.core.nodes(facts.workflowId);
 
   switch (read.kind) {
     case "nodes": {
-      const infos: WorkflowTaskInfo[] = [];
+      const infos: WorkflowNodeInfo[] = [];
 
       for (const node of read.nodes) {
         const info = nodeInfoOf(facts.workflowId, node);
@@ -559,14 +559,14 @@ function recorded<T>(value: T): Recorded<T> {
   return Object.freeze({ kind: "recorded", value });
 }
 
-const NODE_STATUSES: ReadonlySet<string> = new Set(Object.values(WorkflowTaskStatus));
+const NODE_STATUSES: ReadonlySet<string> = new Set(Object.values(WorkflowNodeStatus));
 
-function isNodeStatus(status: string): status is WorkflowTaskStatus {
+function isNodeStatus(status: string): status is WorkflowNodeStatus {
   return NODE_STATUSES.has(status);
 }
 
 /** One node, or `STORED_DATA_INVALID` for a stored status or summary that does not read. Pure. */
-function nodeInfoOf(workflowId: string, node: StoredNodeRecord): Result<WorkflowTaskInfo, HandleCoreError> {
+function nodeInfoOf(workflowId: string, node: StoredNodeRecord): Result<WorkflowNodeInfo, HandleCoreError> {
   if (!isNodeStatus(node.status)) {
     return err(
       storedDataInvalid(

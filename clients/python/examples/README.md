@@ -262,7 +262,7 @@ is a thing to look at in the dashboard, not a claim to take on trust.
 | `MonthlySchedule` | month-end close, catalog audit | — |
 | `CronSchedule`, typed | every 4 h at :15; Friday the 13th via `BothDays` | the case a cron string cannot express |
 | Disabled schedules | 3 of the 31 | what a disabled schedule looks like |
-| `WorkflowMeta` | `pick_pack` | workflow id and node index in the result |
+| `WorkflowMetadata` | `pick_pack` | workflow id and node index in the result |
 | Crash recovery | `chaos`: `flaky_export` calls `os._exit(1)` | `WORKER_CRASHED` attempts, then recovery |
 | Worker health | 12 worker children, 10 s snapshots | CPU and memory history |
 | `resend_on_transient_error` | `AppConfig` | infra retry, distinct from `RetryPolicy` |

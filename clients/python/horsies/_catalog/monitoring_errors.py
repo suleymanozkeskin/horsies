@@ -11,7 +11,7 @@ from horsies._catalog.error_detail import NoCause
 from horsies._catalog.monitoring import MonitoringQueryErrorCode, TaskActionErrorCode
 from horsies._catalog.status import TaskStatus
 
-__all__ = ['MonitoringQueryDatabaseOperationFailed', 'MonitoringQueryHistoryContractViolation', 'TaskActionNotFound', 'TaskActionNotCancellable', 'TaskActionWorkflowTask', 'TaskActionDatabaseOperationFailed', 'TaskActionStoredDataInvalid', 'MonitoringQueryCoreError', 'TaskActionCoreError']
+__all__ = ['MonitoringQueryDatabaseOperationFailed', 'MonitoringQueryHistoryContractViolation', 'TaskActionNotFound', 'TaskActionNotCancellable', 'TaskActionIsWorkflowTask', 'TaskActionDatabaseOperationFailed', 'TaskActionStoredDataInvalid', 'MonitoringQueryCoreError', 'TaskActionCoreError']
 
 
 @dataclass(slots=True, frozen=True)
@@ -92,8 +92,8 @@ class TaskActionNotCancellable:
     """The task's status does not admit the cancel. Nothing changed.
 
     ``current_status`` is the status that the cancel found: a terminal
-    status, or ``RUNNING`` when ``include_running`` is ``False``. A call
-    with ``include_running=True`` cancels a ``RUNNING`` task.
+    status, or ``RUNNING`` with the policy ``PENDING_OR_CLAIMED_ONLY``. A
+    call with the policy ``INCLUDE_RUNNING`` cancels a ``RUNNING`` task.
     """
 
     code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.TASK_NOT_CANCELLABLE
@@ -112,7 +112,7 @@ class TaskActionNotCancellable:
 
 
 @dataclass(slots=True, frozen=True)
-class TaskActionWorkflowTask:
+class TaskActionIsWorkflowTask:
     """The task belongs to a workflow. Nothing changed.
 
     Only the workflow primitives drive a workflow task: pause, resume and
@@ -197,7 +197,7 @@ type MonitoringQueryCoreError = (
 type TaskActionCoreError = (
     TaskActionNotFound
     | TaskActionNotCancellable
-    | TaskActionWorkflowTask
+    | TaskActionIsWorkflowTask
     | TaskActionDatabaseOperationFailed
     | TaskActionStoredDataInvalid
 )

@@ -19,7 +19,7 @@ pub async fn run() -> ScenarioResult<()> {
     say("next");
     say("  cargo run -p acme-showcase --bin acme -- worker");
     say("  cargo run -p acme-showcase --bin acme -- scheduler");
-    say("  cargo run -p acme-showcase --features web --bin acme -- web --auth none");
+    say("  cargo run -p acme-showcase --features web --bin acme -- web --authorization none");
     say("  cargo run -p acme-showcase --bin acme -- steady");
     say("  open http://127.0.0.1:8600");
     store.close().await;

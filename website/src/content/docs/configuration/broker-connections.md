@@ -186,8 +186,8 @@ that call. Nothing runs.
 | `send()`, `resend()` | `TaskSendAsyncContext` (`TaskSendErrorCode.ASYNC_CONTEXT`); the error keeps the payload for `resend_async()` |
 | `app.get_raw_result()`, `app.get_task_info()`, `app.ping_database()`, `app.ping_workers()`, `app.list_worker_states()`, `app.get_worker_state()`, `app.get_worker_state_history()`, `app.get_stale_tasks()`, `app.get_expired_tasks()`, `TaskHandle.info()`, `broker.enqueue()`, `broker.get_task_info()`, `broker.get_raw_result_record()`, `broker.close()` | `DatabaseAsyncContext` (`DatabaseErrorCode.ASYNC_CONTEXT`) |
 | `TaskHandle.get()`, `WorkflowHandle.get()`, `WorkflowHandle.result_for()`, `app.get_result()` | `Err(ReadAsyncContext(...))` (`RetrievalCode.ASYNC_CONTEXT`), not kept by the handle |
-| `WorkflowHandle.status()`, `.results()`, `.tasks()`, `.cancel()`, `.pause()`, `.resume()`, `pause_workflow_sync()`, `resume_workflow_sync()` | `WorkflowHandleAsyncContext` (`WorkflowHandleErrorCode.ASYNC_CONTEXT`) |
-| `spec.start()`, `spec.retry_start()` | `WorkflowStartAsyncContext` (`WorkflowStartErrorCode.ASYNC_CONTEXT`); the error keeps the workflow id for `retry_start_async()` |
+| `WorkflowHandle.status()`, `.results()`, `.nodes()`, `.cancel()`, `.pause()`, `.resume()`, `pause_workflow()`, `resume_workflow()` | `WorkflowHandleAsyncContext` (`WorkflowHandleErrorCode.ASYNC_CONTEXT`) |
+| `spec.start()`, `spec.resend_start()` | `WorkflowStartAsyncContext` (`WorkflowStartErrorCode.ASYNC_CONTEXT`); the error keeps the workflow id for `resend_start_async()` |
 | `app.check(live=True)` | `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`); the live check does not connect |
 
 On such a thread, use the `*_async` form:
@@ -200,7 +200,7 @@ result = await handle.get_async(wait_ms=5000)
 
 - A `TaskHandle` that already holds its result returns it from `get()`,
   because that call does not wait.
-- `await spec.retry_start_async(err)` completes a start that returned
+- `await spec.resend_start_async(err)` completes a start that returned
   `ASYNC_CONTEXT`, with the error's workflow id.
 - To run a sync call from async code, run it on a thread without an event
   loop, for example `await asyncio.to_thread(app.check, live=True)`.

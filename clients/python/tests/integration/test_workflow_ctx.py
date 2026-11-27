@@ -23,7 +23,7 @@ from horsies.core.models.workflow import (
     NodeKey,
     TaskNode,
     WorkflowContext,
-    WorkflowMeta,
+    WorkflowMetadata,
     WorkflowValidationError,
 )
 from horsies.core.worker.current import set_current_app
@@ -163,9 +163,9 @@ class TestWorkflowCtx:
 
         return WorkflowContext.from_serialized(
             workflow_id=typed_ctx_data.get('workflow_id', ''),
-            task_index=typed_ctx_data.get('task_index', 0),
+            node_index=typed_ctx_data.get('task_index', 0),
             task_name=typed_ctx_data.get('task_name', ''),
-            results_by_id=results_by_id,
+            results_by_node_id=results_by_id,
         )
 
     async def test_ctx_injected_and_result_for_works(
@@ -211,7 +211,7 @@ class TestWorkflowCtx:
 
         # Validate metadata too
         assert ctx.workflow_id == str(handle.workflow_id)
-        assert ctx.task_index == 1
+        assert ctx.node_index == 1
         assert ctx.task_name == 'ctx_inject_b'
 
     async def test_ctx_not_injected_without_ctx_from(
@@ -256,11 +256,11 @@ class TestWorkflowCtx:
 
         @app.task(name='meta_only_b')
         def meta_reader(
-            *, workflow_meta: WorkflowMeta | None = None,
+            *, workflow_meta: WorkflowMetadata | None = None,
         ) -> Result[int, TaskError]:
             if workflow_meta is None:
                 return Ok(-1)
-            return Ok(workflow_meta.task_index)
+            return Ok(workflow_meta.node_index)
 
         node_a: TaskNode[int] = TaskNode(function=task_a, kwargs={'value': 5})
         node_b: TaskNode[int] = TaskNode(
@@ -554,10 +554,10 @@ class TestWorkflowCtx:
 
         @app.task(name='meta_worker_b')
         def meta_worker_b(
-            *, workflow_meta: WorkflowMeta,
+            *, workflow_meta: WorkflowMetadata,
         ) -> Result[str, TaskError]:
             return Ok(
-                f'{workflow_meta.workflow_id}:{workflow_meta.task_index}:{workflow_meta.task_name}'
+                f'{workflow_meta.workflow_id}:{workflow_meta.node_index}:{workflow_meta.task_name}'
             )
 
         node_a: TaskNode[int] = TaskNode(function=task_a, kwargs={'value': 5})

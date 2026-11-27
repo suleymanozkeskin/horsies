@@ -405,9 +405,9 @@ describe("the carrier of a rerun", () => {
       const rerunTrace = await suite.app.monitoring.getTaskDetail(rerun.value.newTaskId);
 
       assert.ok(sourceTrace.ok && sourceTrace.value.kind === "found" && rerunTrace.ok && rerunTrace.value.kind === "found");
-      assert.equal(rerunTrace.value.taskDetail.leaf.traceId, caller.spanContext().traceId);
-      assert.equal(sourceTrace.value.taskDetail.leaf.traceId, tracing.parent.spanContext().traceId);
-      assert.notEqual(rerunTrace.value.taskDetail.leaf.traceId, sourceTrace.value.taskDetail.leaf.traceId);
+      assert.equal(rerunTrace.value.taskDetail.taskRow.traceId, caller.spanContext().traceId);
+      assert.equal(sourceTrace.value.taskDetail.taskRow.traceId, tracing.parent.spanContext().traceId);
+      assert.notEqual(rerunTrace.value.taskDetail.taskRow.traceId, sourceTrace.value.taskDetail.taskRow.traceId);
     });
   });
 });

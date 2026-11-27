@@ -5,16 +5,16 @@ import { renderHook, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { useNodeErrorCode } from '@/hooks/use-workflow-task';
-import type { WorkflowTaskDetail } from '@/types/workflows';
+import type { WorkflowNodeDetail } from '@/types/workflows';
 
-const detail = (errorCode: string | null): WorkflowTaskDetail => ({
-  task_index: 4,
+const detail = (errorCode: string | null): WorkflowNodeDetail => ({
+  node_index: 4,
   node_id: 'authorize_payment',
   task_name: 'authorize_payment',
   node_status: 'FAILED',
-  is_subworkflow: false,
+  is_sub_workflow: false,
   node_error: null,
-  leaf: {
+  task_row: {
     task_id: 't',
     status: 'FAILED',
     error_code: errorCode,
@@ -25,8 +25,8 @@ const detail = (errorCode: string | null): WorkflowTaskDetail => ({
     started_at: null,
     completed_at: null,
     failed_at: null,
-    queue_s: null,
-    exec_s: null,
+    queue_seconds: null,
+    execution_seconds: null,
     worker_hostname: null,
     good_until: null,
     trace_id: null,
@@ -34,7 +34,7 @@ const detail = (errorCode: string | null): WorkflowTaskDetail => ({
   attempts: [],
 });
 
-const stubFetch = (body: WorkflowTaskDetail): ReturnType<typeof vi.fn> => {
+const stubFetch = (body: WorkflowNodeDetail): ReturnType<typeof vi.fn> => {
   const stub = vi.fn((_input: RequestInfo | URL) =>
     Promise.resolve(
       new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })

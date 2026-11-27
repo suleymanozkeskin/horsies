@@ -10,6 +10,8 @@ use crate::core::lifecycle::OutcomeDecodeError;
 use crate::core::types::status::TaskStatus;
 use crate::failure_cause::FailureCause;
 
+use super::models::CancelPolicy;
+
 /// Why a task action did not apply.
 ///
 /// Each member names one variant of `TaskActionError`.
@@ -64,8 +66,8 @@ pub enum TaskActionError {
     /// The task's status does not admit the cancel. Nothing changed.
     ///
     /// ``current_status`` is the status that the cancel found: a terminal
-    /// status, or ``RUNNING`` when ``include_running`` is ``False``. A call
-    /// with ``include_running=True`` cancels a ``RUNNING`` task.
+    /// status, or ``RUNNING`` with the policy ``PENDING_OR_CLAIMED_ONLY``. A
+    /// call with the policy ``INCLUDE_RUNNING`` cancels a ``RUNNING`` task.
     #[error("{message}")]
     #[error_class(
         class = "TaskActionNotCancellable",
@@ -86,11 +88,11 @@ pub enum TaskActionError {
     /// cancel on its workflow. ``current_status`` is the task's status.
     #[error("{message}")]
     #[error_class(
-        class = "TaskActionWorkflowTask",
+        class = "TaskActionIsWorkflowTask",
         code = "TaskIsWorkflowTask",
         never_retryable
     )]
-    WorkflowTask {
+    IsWorkflowTask {
         #[error_slot(python = "Str", hidden)]
         message: String,
         #[error_slot(python = "Uuid")]
@@ -173,7 +175,7 @@ impl TaskActionError {
         match self {
             Self::NotFound { message, .. }
             | Self::NotCancellable { message, .. }
-            | Self::WorkflowTask { message, .. }
+            | Self::IsWorkflowTask { message, .. }
             | Self::DatabaseOperationFailed { message, .. }
             | Self::StoredDataInvalid { message, .. } => message,
         }
@@ -186,7 +188,7 @@ impl TaskActionError {
             Self::DatabaseOperationFailed { retryable, .. } => *retryable,
             Self::NotFound { .. }
             | Self::NotCancellable { .. }
-            | Self::WorkflowTask { .. }
+            | Self::IsWorkflowTask { .. }
             | Self::StoredDataInvalid { .. } => false,
         }
     }
@@ -196,7 +198,7 @@ impl TaskActionError {
         match self {
             Self::NotFound { task_id, .. }
             | Self::NotCancellable { task_id, .. }
-            | Self::WorkflowTask { task_id, .. }
+            | Self::IsWorkflowTask { task_id, .. }
             | Self::DatabaseOperationFailed { task_id, .. }
             | Self::StoredDataInvalid { task_id, .. } => *task_id,
         }
@@ -209,7 +211,7 @@ impl TaskActionError {
         match self {
             Self::DatabaseOperationFailed { cause, .. } => cause.failure_cause(),
             Self::StoredDataInvalid { .. } => FailureCause::ContractViolation,
-            Self::NotFound { .. } | Self::NotCancellable { .. } | Self::WorkflowTask { .. } => {
+            Self::NotFound { .. } | Self::NotCancellable { .. } | Self::IsWorkflowTask { .. } => {
                 FailureCause::PreconditionFailed
             }
         }
@@ -234,7 +236,7 @@ fn not_found(task_id: Uuid) -> TaskActionError {
 }
 
 fn workflow_bound(task_id: Uuid, current_status: TaskStatus) -> TaskActionError {
-    TaskActionError::WorkflowTask {
+    TaskActionError::IsWorkflowTask {
         message: format!("Task {task_id} belongs to a workflow; use the workflow actions instead."),
         task_id,
         current_status,
@@ -262,10 +264,10 @@ fn stored_data_invalid(task_id: Uuid, cause: OutcomeDecodeError) -> TaskActionEr
 /// Move a non-workflow live task to CANCELLED (Python
 /// `horsies.monitoring.task_actions.cancel_task`).
 ///
-/// PENDING and CLAIMED are eligible. RUNNING is eligible only when
-/// `include_running` is true: the same statement records the running attempt
-/// with the outcome `CANCELLED`, and the worker that runs it gets the cancel
-/// notice and gives the cancel to the task code. A workflow task, live or
+/// PENDING and CLAIMED are eligible. RUNNING is eligible only with
+/// [`CancelPolicy::IncludeRunning`]: the same statement records the running
+/// attempt with the outcome `CANCELLED`, and the worker that runs it gets the
+/// cancel notice and gives the cancel to the task code. A workflow task, live or
 /// finished, is `TaskIsWorkflowTask`; a finished plain task is
 /// `TaskNotCancellable` with its terminal status; a task held nowhere is
 /// `TaskNotFound`.
@@ -275,8 +277,13 @@ fn stored_data_invalid(task_id: Uuid, cause: OutcomeDecodeError) -> TaskActionEr
 pub async fn cancel_task(
     broker: &PostgresBroker,
     task_id: Uuid,
-    include_running: bool,
+    policy: CancelPolicy,
 ) -> TaskActionResult<TaskCancelled> {
+    // The SQL function keeps its schema parameter `p_include_running`.
+    let include_running = match policy {
+        CancelPolicy::IncludeRunning => true,
+        CancelPolicy::PendingOrClaimedOnly => false,
+    };
     match broker.cancel_task(task_id, include_running).await {
         Ok(CancelAnswer::Cancelled { was_status }) => Ok(TaskCancelled {
             task_id,

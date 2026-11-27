@@ -417,7 +417,7 @@ info = broker.get_task_info("task-uuid", include_result=True)  # sync
 
 **Monitoring** (async only): `get_stale_tasks(threshold_minutes=2)`, `get_expired_tasks()` (each `BoundedTaskList[StaleTaskRow]` / `BoundedTaskList[ExpiredTaskRow]`; the app has them too, sync and async), `mark_stale_tasks_as_failed()`, `requeue_stale_claimed()`, `terminate_orphaned_workflow_tasks()`. See website docs `monitoring/broker-methods` for full signatures.
 
-**Health/liveness** (app, async + sync): `ping_database_async()` (DatabasePing latency), `ping_workers_async(target=PingTargetEveryWorker(), wait_ms=2_000, min_responses=MinResponsesFullWindow())` (list[WorkerPong] — active ping-pong; `target=PingTargetWorker(worker_id)` pings one worker; `min_responses=MinResponsesAtLeast(1)` = fast liveness gate, returns on first reply), `list_worker_states_async()` / `get_worker_state_async(worker_id)` / `get_worker_state_history_async(worker_id, limit=WorkerHistoryLimitAllRetained())` (WorkerStateSnapshot, includes idle workers; `WorkerHistoryLimitNewest(count)` bounds the history), `get_stale_tasks_async(threshold_minutes)` / `get_expired_tasks_async()` (`BoundedTaskList` of `StaleTaskRow` / `ExpiredTaskRow`, at most 10,000 rows: `BoundedTaskListComplete(rows)` or `BoundedTaskListTruncated(rows, bound)`). `get_execution_class_coverage_async()` (ExecutionClassCoverage — fleet check: each (queue, class) with PENDING rows is StreamServed / StreamWithoutCapacity / StreamUnserved by live workers; the reaper logs unserved at error), `get_execution_class_report_async()` (ExecutionClassReport — oldest wait per pending (queue, class), budget capacity/in_flight/free per live worker). Replaces the retired `get_worker_stats()`. `WorkerStateSnapshot.memory_usage_mb` is the parent process only; `children_memory_mb` is the summed RSS of executor children (the memory-quota driver — use it to size `IsolatedRecycle.after` / `IsolatedRecycle.above`, and `SharedRecycle` for shared children). See website docs `monitoring/health-reads` (the methods) and `monitoring/worker-health` (what each read means).
+**Health/liveness** (app, async + sync): `ping_database_async()` (DatabasePing latency), `ping_workers_async(target=PingTargetEveryWorker(), wait_ms=2_000, min_responses=MinResponsesFullWindow())` (list[WorkerPong] — active ping-pong; `target=PingTargetWorker(worker_id)` pings one worker; `min_responses=MinResponsesAtLeast(1)` = fast liveness gate, returns on first reply), `list_worker_states_async()` / `get_worker_state_async(worker_id)` / `get_worker_state_history_async(worker_id, limit=WorkerHistoryLimitAllRetained())` (WorkerStateSnapshot, includes idle workers; `WorkerHistoryLimitNewest(count)` bounds the history), `get_stale_tasks_async(threshold_minutes)` / `get_expired_tasks_async()` (`BoundedTaskList` of `StaleTaskRow` / `ExpiredTaskRow`, at most 10,000 rows: `BoundedTaskListComplete(rows)` or `BoundedTaskListTruncated(rows, bound)`). `get_execution_class_coverage_async()` (ExecutionClassCoverage — fleet check: each (queue, class) with PENDING rows is StreamCoverageStateServed / StreamCoverageStateNoCapacity / StreamCoverageStateUnserved by live workers; the reaper logs unserved at error), `get_execution_class_report_async()` (ExecutionClassReport — oldest wait per pending (queue, class), budget capacity/in_flight/free per live worker). Replaces the retired `get_worker_stats()`. `WorkerStateSnapshot.memory_usage_mb` is the parent process only; `children_memory_mb` is the summed RSS of executor children (the memory-quota driver — use it to size `IsolatedRecycle.after` / `IsolatedRecycle.above`, and `SharedRecycle` for shared children). See website docs `monitoring/health-reads` (the methods) and `monitoring/worker-health` (what each read means).
 
 ## PostgresConfig
 
@@ -582,7 +582,7 @@ Failures stay with one task:
   other slot is down too; a failed boot while another slot is in service
   starts the count again, so only 3 attempts in a row stop the worker. The worker starts degraded when one child is ready
   and each other slot is down. `WorkerStateSnapshot.slot_health` names the
-  slots that are down (`SlotsDown`).
+  slots that are down (`SlotHealthSlotsDown`).
 - An outside SIGKILL of a booting replacement child uses no attempt while
   another child is serving. It does count at first start, and when no other
   child serves.
@@ -1166,7 +1166,7 @@ Phases are fail-fast: errors in phase N stop later phases.
 | 2 — Imports | Import each discovered module | ImportError, HRS-210 |
 | 3 — Workflows | `WorkflowSpec` DAG validation during imports | HRS-001–HRS-031, HRS-033–HRS-038 |
 | 3.1 — Definitions | Validate imported `WorkflowDefinition` classes (each declares `definition_key`) | HRS-016 |
-| 3.2 — Builders | Execute `@app.workflow_builder` functions | HRS-027–HRS-030 |
+| 3.2 — Builders | Execute `@app.check_workflow_builder` functions | HRS-027–HRS-030 |
 | 3.3 — Undecorated | Scan for functions returning WorkflowSpec without decorator | HRS-030 |
 | 3.5 — Policies | Re-validate exception_mapper after imports | HRS-209 |
 | 3.6 — Schedules | Validate timezone, task registration, queue and kwargs wire contract of each enabled schedule (not run for workers) | — |
@@ -1174,7 +1174,7 @@ Phases are fail-fast: errors in phase N stop later phases.
 | 4.1 — Worker connections | Each worker profile against `max_connections` less reserved slots (`--live` only; skipped with no profiles or with `pgbouncer_transaction_mode=True`) | HRS-219 |
 
 **Guarantee model:**
-- **Strong:** `@app.workflow_builder` functions are fully executed and validated.
+- **Strong:** `@app.check_workflow_builder` functions are fully executed and validated.
 - **Best-effort:** Undecorated builder detection (HRS-030) only scans directly discovered modules.
 
 Worker and scheduler also run `app.check(live=False)` at startup.
@@ -1226,12 +1226,12 @@ horsies check <module> [--live] [--log-level LEVEL]
 ### `horsies web`
 
 ```bash
-horsies web <module> [--host 127.0.0.1] [--port 8600] [--auth none|trusted-header] [--trusted-header X-Forwarded-User] [--enable-actions] [--trace-link TEMPLATE] [--log-level INFO]
+horsies web <module> [--host 127.0.0.1] [--port 8600] [--authorization none|trusted-header] [--trusted-header X-Forwarded-User] [--enable-actions] [--trace-link TEMPLATE] [--log-level INFO]
 horsies web --database-url "postgresql://..." [--session-database-url URL] [--pgbouncer-transaction-mode] [...]
 ```
 
 Serves the monitoring dashboard (requires the `web` extra). Fail-closed:
-non-loopback hosts require `--auth trusted-header`; actions are off unless
+non-loopback hosts require `--authorization trusted-header`; actions are off unless
 `--enable-actions`. Never executes DDL. See `monitoring.md` for the full
 reference including the registry-less capability boundary.
 

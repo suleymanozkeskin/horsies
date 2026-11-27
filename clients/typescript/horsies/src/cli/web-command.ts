@@ -80,8 +80,8 @@ export const WEB_FLAG_OPTIONS = {
 /** The `--authorization` modes. */
 export type WebAuthorizationMode = "none" | "trustedHeader";
 
-/** The `--trace-link` flag: absent, or the template text. */
-export type TraceLinkFlag = { readonly kind: "noTraceLink" } | { readonly kind: "template"; readonly text: string };
+/** The `--trace-link` flag: absent (the page shows the trace id as text), or the template text. */
+export type TraceLinkFlag = { readonly kind: "text" } | { readonly kind: "template"; readonly text: string };
 
 /** The parsed flags of `web`. */
 export interface WebFlags {
@@ -305,7 +305,7 @@ export function parseWebFlags(args: readonly string[]): Result<WebFlags, UsageEr
     authorization: authorization.value,
     trustedHeaderName: textFlag(values, "trusted-header") ?? WEB_DEFAULT_TRUSTED_HEADER,
     actions: switchFlag(values, "enable-actions") ? "enabled" : "disabled",
-    traceLink: traceLink === undefined ? { kind: "noTraceLink" } : { kind: "template", text: traceLink },
+    traceLink: traceLink === undefined ? { kind: "text" } : { kind: "template", text: traceLink },
     logLevel: logLevel.value,
   });
 }
@@ -337,7 +337,7 @@ function checkedTraceLink(
   check: (text: string) => Result<TraceLinkTemplate, TraceLinkRefusal>,
 ): Result<TraceLinkTemplate | undefined, UsageError> {
   switch (flag.kind) {
-    case "noTraceLink":
+    case "text":
       return ok(undefined);
     case "template": {
       const checked = check(flag.text);

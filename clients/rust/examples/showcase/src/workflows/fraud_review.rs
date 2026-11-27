@@ -1,7 +1,9 @@
 //! The fraud review: reconcile the disputed window, then refund the order.
 //! A failed step pauses the workflow for an operator.
 
-use horsies::{HorsiesError, OnError, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder};
+use horsies::{
+    HorsiesError, OnError, WorkflowDefinition, WorkflowDefinitionConfig, WorkflowSpecBuilder,
+};
 
 use crate::domain::PaymentRefund;
 use crate::tasks::payments::{reconcile_payments, refund_payment};
@@ -16,7 +18,7 @@ pub struct FraudReview;
 
 impl WorkflowDefinition for FraudReview {
     type Output = PaymentRefund;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "fraud_review"
@@ -30,7 +32,7 @@ impl WorkflowDefinition for FraudReview {
         OnError::Pause
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let reconcile = builder.task(
             reconcile_payments::node()
                 .node_id("reconcile_payments")
@@ -46,6 +48,6 @@ impl WorkflowDefinition for FraudReview {
                 .set(refund_payment::fields::amount_cents(), AMOUNT_CENTS)?
                 .waits_for(reconcile),
         )?;
-        Ok(WorkflowDefConfig::new().output(refund))
+        Ok(WorkflowDefinitionConfig::new().output(refund))
     }
 }

@@ -300,13 +300,13 @@ class TestWorkflowValidatesFrozenNodes:
         )
         frozen = list(
             WorkflowSpec(
-                name='d', tasks=[node], output=node, definition_key='d.v1',
-            ).tasks
+                name='d', nodes=[node], output=node, definition_key='d.v1',
+            ).nodes
         )
         assert getattr(frozen[0], '_frozen', False) is True
 
         with pytest.raises((ConfigurationError, MultipleValidationErrors)) as exc_info:
-            app.workflow(name='w', tasks=frozen, definition_key='w.v1')
+            app.workflow(name='w', nodes=frozen, definition_key='w.v1')
 
         err = exc_info.value
         codes = (
@@ -329,10 +329,10 @@ class TestWorkflowValidatesFrozenNodes:
         )
         frozen = list(
             WorkflowSpec(
-                name='d2', tasks=[node], output=node, definition_key='d2.v1',
-            ).tasks
+                name='d2', nodes=[node], output=node, definition_key='d2.v1',
+            ).nodes
         )
 
-        spec = app.workflow(name='w2', tasks=frozen, definition_key='w2.v1')
-        bound = [t for t in spec.tasks if isinstance(t, TaskNode)]
+        spec = app.workflow(name='w2', nodes=frozen, definition_key='w2.v1')
+        bound = [t for t in spec.nodes if isinstance(t, TaskNode)]
         assert [(t.queue, t.priority) for t in bound] == [('scraping', 30)]

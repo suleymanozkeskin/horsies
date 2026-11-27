@@ -364,9 +364,9 @@ class TestWiringCompare:
         first = TaskNode(function=source)
         second = TaskNode(function=target, waits_for=[first], args_from={'value': first})
 
-        spec = WorkflowSpec(name='wiring', tasks=[first, second])
+        spec = WorkflowSpec(name='wiring', nodes=[first, second])
 
-        assert len(spec.tasks) == 2
+        assert len(spec.nodes) == 2
 
 
 class _Base(BaseModel):

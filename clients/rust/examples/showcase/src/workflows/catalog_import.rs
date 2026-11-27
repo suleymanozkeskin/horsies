@@ -2,7 +2,8 @@
 //! is the outcome of every chunk by node id (`OutputlessResults`).
 
 use horsies::{
-    HorsiesError, OutputlessResults, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
+    HorsiesError, OutputlessResults, WorkflowDefinition, WorkflowDefinitionConfig,
+    WorkflowSpecBuilder,
 };
 
 use crate::tasks::analytics::catalog_import_chunk;
@@ -16,7 +17,7 @@ pub struct CatalogImport;
 
 impl WorkflowDefinition for CatalogImport {
     type Output = OutputlessResults;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "catalog_import"
@@ -26,7 +27,7 @@ impl WorkflowDefinition for CatalogImport {
         "acme.catalog_import.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let chunks = i32::try_from(tuning::CATALOG_IMPORT_CHUNKS)
             .map_err(|_| HorsiesError::new("CATALOG_IMPORT_CHUNKS is above i32::MAX"))?;
         for chunk_index in 0..chunks {
@@ -40,6 +41,6 @@ impl WorkflowDefinition for CatalogImport {
                     .set(catalog_import_chunk::fields::chunk_index(), chunk_index)?,
             )?;
         }
-        Ok(WorkflowDefConfig::new())
+        Ok(WorkflowDefinitionConfig::new())
     }
 }

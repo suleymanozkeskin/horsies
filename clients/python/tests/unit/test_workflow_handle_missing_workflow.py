@@ -71,7 +71,7 @@ class TestTasks:
     async def test_no_workflow_row_is_workflow_not_found(self) -> None:
         handle = _handle('workflow_nodes_async', _record(core.WorkflowAbsent))
 
-        result = await handle.tasks_async()
+        result = await handle.nodes_async()
 
         assert is_err(result)
         error = result.err_value
@@ -82,7 +82,7 @@ class TestTasks:
     async def test_a_workflow_without_a_node_is_an_empty_list(self) -> None:
         handle = _handle('workflow_nodes_async', _record(core.WorkflowNodesRead, nodes=[]))
 
-        result = await handle.tasks_async()
+        result = await handle.nodes_async()
 
         assert is_ok(result)
         assert result.ok_value == []

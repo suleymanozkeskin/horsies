@@ -116,7 +116,7 @@ export function readContext(context: WorkflowContext): void {
   }
 
   if (summary.ok) {
-    expectType<Equal<typeof summary.value.totalTasks, number>>();
+    expectType<Equal<typeof summary.value.totalNodes, number>>();
   }
 
   expectType<Equal<ReturnType<typeof context.hasResult>, boolean>>();

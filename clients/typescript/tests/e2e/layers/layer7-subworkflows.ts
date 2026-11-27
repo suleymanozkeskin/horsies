@@ -142,10 +142,10 @@ describe("layer 7: sub-workflows", () => {
     assert.deepEqual(info.result, { kind: "recorded", value: { kind: "outcome", outcome: { kind: "succeeded", value: SUB_OK_VALUE } } });
     assert.ok(info.subWorkflowSummary.kind === "recorded", "the node info holds the summary of the ended child");
     assert.deepEqual(
-      [info.subWorkflowSummary.value.status, info.subWorkflowSummary.value.output, info.subWorkflowSummary.value.totalTasks],
+      [info.subWorkflowSummary.value.status, info.subWorkflowSummary.value.output, info.subWorkflowSummary.value.totalNodes],
       ["COMPLETED", SUB_OK_VALUE, 1],
     );
-    assert.equal(info.subWorkflowSummary.value.completedTasks, 1);
+    assert.equal(info.subWorkflowSummary.value.completedNodes, 1);
     assert.equal(await nodeValue("the child node", handle.resultFor("e2e_sub_success_child")), SUB_OK_VALUE);
 
     const child = await workflowRow(suite.rows, childId);
@@ -209,7 +209,7 @@ describe("layer 7: sub-workflows", () => {
       resultValue: SUB_OK_VALUE,
       summaryStatus: "COMPLETED",
       summaryOutput: SUB_OK_VALUE,
-      summaryCompletedTasks: 1,
+      summaryCompletedNodes: 1,
     });
   });
 
@@ -225,7 +225,7 @@ describe("layer 7: sub-workflows", () => {
       argsChildId: childId,
       ctxChildId: childId,
       summaryStatus: "FAILED",
-      summaryFailedTasks: 1,
+      summaryFailedNodes: 1,
     });
   });
 
@@ -298,12 +298,12 @@ describe("layer 7: sub-workflows", () => {
 
     const middleId = childIdOf(node);
 
-    assert.equal(subWorkflowFailure(await workflowError(handle), middleId).summary.failedTasks, 1);
+    assert.equal(subWorkflowFailure(await workflowError(handle), middleId).summary.failedNodes, 1);
 
     const leafId = childIdOf(nodeById(await workflowNodes(suite.rows, middleId), CHILD_NODE));
     const middle = suite.app.workflowHandle(subNestedFailMiddle, middleId);
 
-    assert.equal(subWorkflowFailure(await workflowError(middle), leafId).summary.failedTasks, 1);
+    assert.equal(subWorkflowFailure(await workflowError(middle), leafId).summary.failedNodes, 1);
     failedChildOf(await nodeOutcome("the node of the middle child", middle.resultFor(CHILD_NODE, subFail)), leafId);
   });
 

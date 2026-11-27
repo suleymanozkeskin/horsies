@@ -17,8 +17,8 @@
 //! ([`run_cancel_state`]). It fires at most once, with the first cause:
 //!
 //! - [`CancelCause::Operator`] in every child kind, when the parent sends
-//!   `cancel_run` for the run: an operator cancelled the task with
-//!   `include_running`, and the cancel statement already recorded the
+//!   `cancel_run` for the run: an operator cancelled the task with the
+//!   policy `INCLUDE_RUNNING`, and the cancel statement already recorded the
 //!   attempt as `CANCELLED`.
 //! - [`CancelCause::Deadline`] in a shared async child at the run's deadline,
 //!   and in a shared thread child at the run's deadline. In an isolated
@@ -232,8 +232,8 @@ pub enum CancelCause {
     /// end is then `TASK_TIMEOUT`, or a `SHARED_THREAD` run, whose thread
     /// runs on.
     Deadline,
-    /// An operator cancelled the task with `include_running`. The task is
-    /// `CANCELLED` already; what the body returns is dropped.
+    /// An operator cancelled the task with the policy `INCLUDE_RUNNING`.
+    /// The task is `CANCELLED` already; what the body returns is dropped.
     Operator,
 }
 

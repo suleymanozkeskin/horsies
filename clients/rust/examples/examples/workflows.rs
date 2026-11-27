@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use horsies::{
     task, AppConfig, CustomErrorCode, Horsies, HorsiesError, TaskError, TaskOutcome, WaitLimit,
-    WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
+    WorkflowDefinition, WorkflowDefinitionConfig, WorkflowSpecBuilder,
 };
 use horsies_examples::{
     app_refused, database_url, isolated_profile, main_of, DemoResult, DEFAULT_PROFILE,
@@ -83,7 +83,7 @@ struct OrderSummary;
 
 impl WorkflowDefinition for OrderSummary {
     type Output = String;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "order_summary"
@@ -93,7 +93,7 @@ impl WorkflowDefinition for OrderSummary {
         "examples.order_summary.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let load =
             builder.task(load_prices::node().set(load_prices::fields::order_id(), ORDER_ID)?)?;
         let total =
@@ -105,7 +105,7 @@ impl WorkflowDefinition for OrderSummary {
                 .arg_from(summarize::fields::total(), total)
                 .arg_from(summarize::fields::count(), count),
         )?;
-        Ok(WorkflowDefConfig::new().output(summary))
+        Ok(WorkflowDefinitionConfig::new().output(summary))
     }
 }
 

@@ -907,10 +907,10 @@ mod tests {
         SubWorkflowSummary {
             status: WorkflowStatus::Failed,
             output: None,
-            total_tasks: 3,
-            completed_tasks: 1,
-            failed_tasks: 1,
-            skipped_tasks: 1,
+            total_nodes: 3,
+            completed_nodes: 1,
+            failed_nodes: 1,
+            skipped_nodes: 1,
             error_summary: Some("child task 'b' failed".to_owned()),
         }
     }
@@ -1252,15 +1252,15 @@ mod tests {
                 r#"{"exception":null,"error_code":{"__builtin_task_code__":"SUB_WORKFLOW_FAILED"},"data":null,"#,
                 r#""message":"Subworkflow 00000000-0000-0000-0000-000000000000 failed","#,
                 r#""sub_workflow_id":"00000000-0000-0000-0000-000000000000","#,
-                r#""sub_workflow_summary":{"status":"FAILED","output":null,"total_tasks":3,"completed_tasks":1,"#,
-                r#""failed_tasks":1,"skipped_tasks":1,"error_summary":"child task 'b' failed"}}"#,
+                r#""sub_workflow_summary":{"status":"FAILED","output":null,"total_nodes":3,"completed_nodes":1,"#,
+                r#""failed_nodes":1,"skipped_nodes":1,"error_summary":"child task 'b' failed"}}"#,
             )
         );
         let back: TaskError = serde_json::from_str(&text).unwrap();
         assert_eq!(back, err);
         let details = back.sub_workflow_details().expect("a sub-workflow error");
         assert_eq!(details.sub_workflow_id, uuid::Uuid::nil());
-        assert_eq!(details.sub_workflow_summary.failed_tasks, 1);
+        assert_eq!(details.sub_workflow_summary.failed_nodes, 1);
     }
 
     #[test]
@@ -1270,7 +1270,7 @@ mod tests {
         let decoded: TaskResult<serde_json::Value> = serde_json::from_str(&json).unwrap();
         let recovered = decoded.unwrap_err();
         let details = recovered.sub_workflow_details().unwrap();
-        assert_eq!(details.sub_workflow_summary.completed_tasks, 1);
+        assert_eq!(details.sub_workflow_summary.completed_nodes, 1);
     }
 
     /// A summary output outside the `i64` and `u64` range is written with its text.

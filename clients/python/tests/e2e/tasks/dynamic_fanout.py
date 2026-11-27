@@ -103,7 +103,7 @@ class ShardReport(WorkflowDefinition[int]):
         )(shard_count=len(count_nodes))
         return app.workflow(
             name=cls.name,
-            tasks=[*count_nodes, total],
+            nodes=[*count_nodes, total],
             output=total,
         )
 
@@ -116,7 +116,7 @@ class TenantReport(WorkflowDefinition[int]):
 
     shards = list_shards.node(node_id='shards')(tenant_id=FANOUT_TENANT_ID)
     report = SubWorkflowNode(
-        workflow_def=ShardReport,
+        workflow_definition=ShardReport,
         waits_for=[shards],
         args_from={'shards': shards},
         node_id='report',

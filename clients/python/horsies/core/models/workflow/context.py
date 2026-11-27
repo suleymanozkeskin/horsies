@@ -47,8 +47,8 @@ class SubWorkflowSummary(Generic[OkT_co]):
                     message="make_report ran without a workflow context",
                 ))
             summary = workflow_context.summary_for(data_pipeline_node)
-            if summary.failed_tasks > 0:
-                return Ok(f"Partial: {summary.completed_tasks}/{summary.total_tasks}")
+            if summary.failed_nodes > 0:
+                return Ok(f"Partial: {summary.completed_nodes}/{summary.total_nodes}")
             return Ok(f"Full: {summary.output}")
     """
 
@@ -58,17 +58,17 @@ class SubWorkflowSummary(Generic[OkT_co]):
     output: OkT_co | None
     """Child's output value (typed via generic parameter)"""
 
-    total_tasks: int
-    """Total number of tasks in child workflow"""
+    total_nodes: int
+    """Total number of nodes in the child workflow"""
 
-    completed_tasks: int
-    """Number of COMPLETED tasks"""
+    completed_nodes: int
+    """Number of COMPLETED nodes"""
 
-    failed_tasks: int
-    """Number of FAILED tasks"""
+    failed_nodes: int
+    """Number of FAILED nodes"""
 
-    skipped_tasks: int
-    """Number of SKIPPED tasks"""
+    skipped_nodes: int
+    """Number of SKIPPED nodes"""
 
     error_summary: str | None = None
     """Brief description of failure (if child failed)"""
@@ -83,10 +83,10 @@ class SubWorkflowSummary(Generic[OkT_co]):
         return {
             'status': self.status.value,
             'output': self.output,
-            'total_tasks': self.total_tasks,
-            'completed_tasks': self.completed_tasks,
-            'failed_tasks': self.failed_tasks,
-            'skipped_tasks': self.skipped_tasks,
+            'total_nodes': self.total_nodes,
+            'completed_nodes': self.completed_nodes,
+            'failed_nodes': self.failed_nodes,
+            'skipped_nodes': self.skipped_nodes,
             'error_summary': self.error_summary,
         }
 
@@ -151,35 +151,35 @@ class SubWorkflowSummary(Generic[OkT_co]):
         return cls(
             status=status,
             output=payload.get('output'),
-            total_tasks=_require_count('total_tasks', payload.get('total_tasks')),
-            completed_tasks=_require_count('completed_tasks', payload.get('completed_tasks')),
-            failed_tasks=_require_count('failed_tasks', payload.get('failed_tasks')),
-            skipped_tasks=_require_count('skipped_tasks', payload.get('skipped_tasks')),
+            total_nodes=_require_count('total_nodes', payload.get('total_nodes')),
+            completed_nodes=_require_count('completed_nodes', payload.get('completed_nodes')),
+            failed_nodes=_require_count('failed_nodes', payload.get('failed_nodes')),
+            skipped_nodes=_require_count('skipped_nodes', payload.get('skipped_nodes')),
             error_summary=error_summary,
         )
 
 
 # =============================================================================
-# WorkflowMeta (metadata only, no result access)
+# WorkflowMetadata (metadata only, no result access)
 # =============================================================================
 
 
 @dataclass
-class WorkflowMeta:
+class WorkflowMetadata:
     """
     Workflow execution metadata.
 
-    Auto-injected if task declares `workflow_meta: WorkflowMeta | None` parameter.
+    Auto-injected if task declares `workflow_meta: WorkflowMetadata | None` parameter.
     Contains only metadata, no result access.
 
     Attributes:
         workflow_id: UUID of the workflow instance
-        task_index: Index of the current task in the workflow
+        node_index: Index of the current node in the workflow
         task_name: Name of the current task
     """
 
     workflow_id: str
-    task_index: int
+    node_index: int
     task_name: str
 
 
@@ -210,14 +210,14 @@ class WorkflowContext(BaseModel):
 
     Attributes:
         workflow_id: UUID of the workflow instance
-        task_index: Index of the current task in the workflow
+        node_index: Index of the current node in the workflow
         task_name: Name of the current task
     """
 
     model_config = {'arbitrary_types_allowed': True}
 
     workflow_id: str  # UUID as string for JSON serialization
-    task_index: int
+    node_index: int
     task_name: str
 
     # Internal storage: results keyed by node_id
@@ -228,21 +228,21 @@ class WorkflowContext(BaseModel):
     def __init__(
         self,
         workflow_id: str,
-        task_index: int,
+        node_index: int,
         task_name: str,
-        results_by_id: dict[str, TaskOutcome[Any, TaskError]] | None = None,
-        summaries_by_id: dict[str, SubWorkflowSummary[Any]] | None = None,
+        results_by_node_id: dict[str, TaskOutcome[Any, TaskError]] | None = None,
+        summaries_by_node_id: dict[str, SubWorkflowSummary[Any]] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(
             workflow_id=workflow_id,
-            task_index=task_index,
+            node_index=node_index,
             task_name=task_name,
             **kwargs,
         )
         # Store results internally (not exposed as Pydantic field)
-        object.__setattr__(self, '_results_by_id', results_by_id or {})
-        object.__setattr__(self, '_summaries_by_id', summaries_by_id or {})
+        object.__setattr__(self, '_results_by_id', results_by_node_id or {})
+        object.__setattr__(self, '_summaries_by_id', summaries_by_node_id or {})
 
     @staticmethod
     def _dump_payload_map(
@@ -305,16 +305,16 @@ class WorkflowContext(BaseModel):
         if raw_results is None:
             return {}
         if not isinstance(raw_results, dict):
-            raise ValueError('WorkflowContext results_by_id must be a dict')
+            raise ValueError('WorkflowContext results_by_node_id must be a dict')
 
         results: dict[str, TaskOutcome[Any, TaskError]] = {}
         raw_result_map = cast(dict[Any, Any], raw_results)
         for key, value in raw_result_map.items():
             if not isinstance(key, str):
-                raise ValueError('WorkflowContext results_by_id keys must be strings')
+                raise ValueError('WorkflowContext results_by_node_id keys must be strings')
             if not isinstance(value, Succeeded | Failed):
                 raise ValueError(
-                    f'WorkflowContext results_by_id[{key!r}] must be a '
+                    f'WorkflowContext results_by_node_id[{key!r}] must be a '
                     f'TaskOutcome (Succeeded or Failed); got {type(value).__name__}. '
                     f'Strict-serde decodes raw envelopes at the engine/'
                     f'worker boundary, not inside the model validator.'
@@ -330,13 +330,13 @@ class WorkflowContext(BaseModel):
         if raw_summaries is None:
             return {}
         if not isinstance(raw_summaries, dict):
-            raise ValueError('WorkflowContext summaries_by_id must be a dict')
+            raise ValueError('WorkflowContext summaries_by_node_id must be a dict')
 
         summaries: dict[str, SubWorkflowSummary[Any]] = {}
         raw_summary_map = cast(dict[Any, Any], raw_summaries)
         for key, value in raw_summary_map.items():
             if not isinstance(key, str):
-                raise ValueError('WorkflowContext summaries_by_id keys must be strings')
+                raise ValueError('WorkflowContext summaries_by_node_id keys must be strings')
             if isinstance(value, SubWorkflowSummary):
                 summaries[key] = value
                 continue
@@ -390,17 +390,17 @@ class WorkflowContext(BaseModel):
         )
 
         if self._should_dump_payload_field(
-            'results_by_id',
+            'results_by_node_id',
             include=include,
             exclude=exclude,
         ):
-            data['results_by_id'] = self._dump_payload_map(self._results_by_id)
+            data['results_by_node_id'] = self._dump_payload_map(self._results_by_id)
         if self._should_dump_payload_field(
-            'summaries_by_id',
+            'summaries_by_node_id',
             include=include,
             exclude=exclude,
         ):
-            data['summaries_by_id'] = self._dump_payload_map(self._summaries_by_id)
+            data['summaries_by_node_id'] = self._dump_payload_map(self._summaries_by_id)
 
         return data
 
@@ -467,10 +467,10 @@ class WorkflowContext(BaseModel):
             )
 
         data: dict[str, Any] = dict(cast(dict[str, Any], obj))
-        raw_results: Any = data.pop('results_by_id', None)
+        raw_results: Any = data.pop('results_by_node_id', None)
         if raw_results is None and '_results_by_id' in data:
             raw_results = data.pop('_results_by_id')
-        raw_summaries: Any = data.pop('summaries_by_id', None)
+        raw_summaries: Any = data.pop('summaries_by_node_id', None)
         if raw_summaries is None and '_summaries_by_id' in data:
             raw_summaries = data.pop('_summaries_by_id')
 
@@ -621,7 +621,7 @@ class WorkflowContext(BaseModel):
         from horsies.core.codec.typed import decode_value
         from .typing_utils import _resolve_workflow_def_ok_type
 
-        output_type = _resolve_workflow_def_ok_type(node.workflow_def)
+        output_type = _resolve_workflow_def_ok_type(node.workflow_definition)
         if output_type is None or output_type is Any:
             return cast('SubWorkflowSummary[OkT]', raw_summary)
 
@@ -635,10 +635,10 @@ class WorkflowContext(BaseModel):
         return SubWorkflowSummary(
             status=raw_summary.status,
             output=decoded_output,
-            total_tasks=raw_summary.total_tasks,
-            completed_tasks=raw_summary.completed_tasks,
-            failed_tasks=raw_summary.failed_tasks,
-            skipped_tasks=raw_summary.skipped_tasks,
+            total_nodes=raw_summary.total_nodes,
+            completed_nodes=raw_summary.completed_nodes,
+            failed_nodes=raw_summary.failed_nodes,
+            skipped_nodes=raw_summary.skipped_nodes,
             error_summary=raw_summary.error_summary,
         )
 
@@ -652,16 +652,16 @@ class WorkflowContext(BaseModel):
     def from_serialized(
         cls,
         workflow_id: str,
-        task_index: int,
+        node_index: int,
         task_name: str,
-        results_by_id: dict[str, TaskOutcome[Any, TaskError]],
-        summaries_by_id: dict[str, SubWorkflowSummary[Any]] | None = None,
+        results_by_node_id: dict[str, TaskOutcome[Any, TaskError]],
+        summaries_by_node_id: dict[str, SubWorkflowSummary[Any]] | None = None,
     ) -> WorkflowContext:
         """Reconstruct WorkflowContext from serialized data."""
         return cls(
             workflow_id=workflow_id,
-            task_index=task_index,
+            node_index=node_index,
             task_name=task_name,
-            results_by_id=results_by_id,
-            summaries_by_id=summaries_by_id,
+            results_by_node_id=results_by_node_id,
+            summaries_by_node_id=summaries_by_node_id,
         )

@@ -1,7 +1,7 @@
 //! The daily report: the sales rollup, then the abandoned-cart sweep, then
 //! the win-back send to the swept carts.
 
-use horsies::{HorsiesError, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder};
+use horsies::{HorsiesError, WorkflowDefinition, WorkflowDefinitionConfig, WorkflowSpecBuilder};
 
 use crate::domain::AbandonedCartSweep;
 use crate::tasks::analytics::{abandoned_cart_sweep, sales_rollup};
@@ -16,7 +16,7 @@ pub struct DailyReport;
 
 impl WorkflowDefinition for DailyReport {
     type Output = AbandonedCartSweep;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "daily_report"
@@ -26,7 +26,7 @@ impl WorkflowDefinition for DailyReport {
         "acme.daily_report.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let rollup = builder.task(
             sales_rollup::node()
                 .node_id("sales_rollup")
@@ -50,6 +50,6 @@ impl WorkflowDefinition for DailyReport {
                 )?
                 .arg_from(winback_blast::fields::sweep(), sweep),
         )?;
-        Ok(WorkflowDefConfig::new().output(sweep))
+        Ok(WorkflowDefinitionConfig::new().output(sweep))
     }
 }

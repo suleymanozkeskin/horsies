@@ -61,7 +61,7 @@ export const ContextReport = h.union("kind", [
   h.object({
     kind: h.literal("context"),
     workflowId: h.string(),
-    taskIndex: h.int(),
+    nodeIndex: h.int(),
     taskName: h.string(),
     sourceValue: h.int(),
   }),
@@ -412,10 +412,10 @@ function implementContextNodes(app: Horsies): void {
         return ok({ kind: "noContext" });
       case "context": {
         const value = contextInt(seen, source);
-        const { workflowId, taskIndex, taskName } = seen.context;
+        const { workflowId, nodeIndex, taskName } = seen.context;
 
         return value.ok
-          ? ok({ kind: "context", workflowId, taskIndex, taskName, sourceValue: value.value })
+          ? ok({ kind: "context", workflowId, nodeIndex, taskName, sourceValue: value.value })
           : err(value.error);
       }
     }

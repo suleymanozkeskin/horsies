@@ -12,7 +12,7 @@
 //! - The task detail answers [`TaskDetailRead::Found`], or
 //!   [`TaskDetailRead::NotFound`] with its [`TaskAbsenceReason`]. A run or a
 //!   node that no row holds is `Ok(None)`.
-//! - The list and aggregate reads take a query built on a [`HistoryWindow`],
+//! - The list and aggregate reads take a query built on a [`MonitoringWindow`],
 //!   which only [`resolve_monitoring_window`] builds.
 //! - [`cancel_task`] writes; the `*_action` functions write and answer as
 //!   the monitoring web routes do ([`ActionOutcome`]).
@@ -32,22 +32,21 @@ use crate::Horsies;
 
 pub use horsies_core::monitoring::resolve_monitoring_window;
 pub use horsies_core::monitoring::{
-    categorize_error_code, elapsed, span, task_action_outcome, ActionBody, ActionConflictCode,
+    categorize_error_code, duration, elapsed, task_action_outcome, ActionBody, ActionConflictCode,
     ActionOutcome, ActionResponse, Breakdown, BreakdownCounts, BreakdownGroup, BudgetLoad,
-    CancelTaskBody, DatabaseLiveness, DownSlot, DownSlots, ErrorCategory, ErrorFacet,
-    ExecutionClassReport, FacetValue, Facets, GroupRow, HistoryContractSource, HistoryWindow,
-    LeafTaskInfo, LivenessReport, MonitoringQueryError, MonitoringQueryErrorCode,
-    MonitoringQueryErrorSource, MonitoringResult, PaginationRefused, PendingStream,
-    ScheduleStateInfo, SlotHealth, SnapshotProfile, SortDirection, StatusCount,
-    StreamCoverageState, StreamWait, TaskAbsenceReason, TaskActionError, TaskActionErrorCode,
-    TaskActionResult, TaskAttemptInfo, TaskBreakdownQuery, TaskCancelled, TaskDetail,
-    TaskDetailNotFound, TaskDetailRead, TaskFacetsQuery, TaskFilters, TaskGroupBy, TaskListPage,
-    TaskListQuery, TaskSortField, TaskStatsQuery, TaskSummary, WindowRefused,
-    WorkerExecutionClassLoad, WorkerHistoryPoint, WorkerPong, WorkerStateInfo, WorkflowEdge,
-    WorkflowNodeInfo, WorkflowRunDetail, WorkflowRunSummary, WorkflowRunsQuery, WorkflowTaskDetail,
-    INTERNAL_SERVER_ERROR_TEXT, LIST_ROW_BOUND, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT,
-    MAX_TASK_PAGE_REACH, MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
-    RESUME_RECOVERY_WARNING, STATE_CONFLICT,
+    CancelPolicy, CancelTaskBody, DatabaseLiveness, DownSlot, DownSlots, ErrorCategory, ErrorFacet,
+    ExecutionClassReport, FacetValue, Facets, GroupRow, HistoryContractSource, LivenessReport,
+    MonitoringQueryError, MonitoringQueryErrorCode, MonitoringQueryErrorSource, MonitoringResult,
+    MonitoringWindow, PageRefused, PendingStream, ScheduleStateInfo, SlotHealth, SnapshotProfile,
+    SortDirection, StatusCount, StreamCoverageState, StreamWait, TaskAbsenceReason,
+    TaskActionError, TaskActionErrorCode, TaskActionResult, TaskAttemptDetail, TaskBreakdownQuery,
+    TaskCancelled, TaskDetail, TaskDetailNotFound, TaskDetailRead, TaskFacetsQuery, TaskFilters,
+    TaskGroupBy, TaskListPage, TaskListQuery, TaskRowInfo, TaskSortField, TaskStatusCountsQuery,
+    TaskSummary, WindowRefused, WorkerExecutionClassLoad, WorkerHistoryPoint, WorkerPong,
+    WorkerStateInfo, WorkflowEdge, WorkflowNodeDetail, WorkflowNodeSummary, WorkflowRunDetail,
+    WorkflowRunSummary, WorkflowRunsQuery, INTERNAL_SERVER_ERROR_TEXT, LIST_ROW_BOUND,
+    MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT, MAX_TASK_PAGE_REACH, MAX_WORKFLOW_RUNS_LIMIT,
+    MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX, RESUME_RECOVERY_WARNING, STATE_CONFLICT,
 };
 pub use horsies_core::monitoring::{
     AttemptClaimsInfo, AttemptFinalizingInfo, AttemptPhasesInfo, AttemptPlacementInfo,
@@ -62,17 +61,17 @@ pub use horsies_core::monitoring::{
 ///
 /// Errors: `DATABASE_OPERATION_FAILED`; `HISTORY_CONTRACT_VIOLATION` for a history
 /// row whose status is not a task status.
-pub async fn task_stats(
+pub async fn task_status_counts(
     app: &Horsies,
-    query: &TaskStatsQuery,
+    query: &TaskStatusCountsQuery,
 ) -> MonitoringResult<Vec<StatusCount>> {
-    let broker = monitoring_broker(app, "task stats query").await?;
-    core_monitoring::task_stats(&broker, query).await
+    let broker = monitoring_broker(app, "task status counts query").await?;
+    core_monitoring::task_status_counts(&broker, query).await
 }
 
 /// The distinct workers, task names, queues and error codes with counts.
 ///
-/// Errors: as [`task_stats`].
+/// Errors: as [`task_status_counts`].
 pub async fn task_facets(app: &Horsies, query: &TaskFacetsQuery) -> MonitoringResult<Facets> {
     let broker = monitoring_broker(app, "task facets query").await?;
     core_monitoring::task_facets(&broker, query).await
@@ -80,7 +79,7 @@ pub async fn task_facets(app: &Horsies, query: &TaskFacetsQuery) -> MonitoringRe
 
 /// The task counts per worker, task name or queue, highest total first.
 ///
-/// Errors: as [`task_stats`].
+/// Errors: as [`task_status_counts`].
 pub async fn task_breakdown(
     app: &Horsies,
     query: &TaskBreakdownQuery,
@@ -92,7 +91,7 @@ pub async fn task_breakdown(
 /// One page of the task list over the live table and the history window,
 /// with its total.
 ///
-/// Errors: as [`task_stats`].
+/// Errors: as [`task_status_counts`].
 pub async fn list_tasks(app: &Horsies, query: &TaskListQuery) -> MonitoringResult<TaskListPage> {
     let broker = monitoring_broker(app, "task list query").await?;
     core_monitoring::list_tasks(&broker, query).await
@@ -116,7 +115,7 @@ pub async fn list_workflow_names(app: &Horsies) -> MonitoringResult<Vec<String>>
     core_monitoring::list_workflow_names(&broker).await
 }
 
-/// The newest root runs, filtered by name and status.
+/// The newest root runs, filtered by workflow name and status.
 ///
 /// Errors: `DATABASE_OPERATION_FAILED`.
 pub async fn list_workflow_runs(
@@ -141,17 +140,17 @@ pub async fn get_workflow_run(
     core_monitoring::get_workflow_run(&broker, workflow_id).await
 }
 
-/// The node `task_index` of the run `workflow_id`, with its task and the
+/// The node `node_index` of the run `workflow_id`, with its task and the
 /// task's attempts, or `None` when the run has no such node.
 ///
 /// Errors: as [`get_task_detail`].
 pub async fn get_workflow_node(
     app: &Horsies,
     workflow_id: Uuid,
-    task_index: i32,
-) -> MonitoringResult<Option<WorkflowTaskDetail>> {
+    node_index: i32,
+) -> MonitoringResult<Option<WorkflowNodeDetail>> {
     let broker = monitoring_broker(app, "workflow node detail query").await?;
-    core_monitoring::get_workflow_node(&broker, workflow_id, task_index).await
+    core_monitoring::get_workflow_node(&broker, workflow_id, node_index).await
 }
 
 /// Every schedule state, soonest next run first, at most
@@ -165,7 +164,7 @@ pub async fn list_schedules(app: &Horsies) -> MonitoringResult<Vec<ScheduleState
 
 /// Move a live task that is not a workflow task to CANCELLED (Python
 /// `horsies.monitoring.cancel_task`). PENDING and CLAIMED are eligible;
-/// RUNNING only with `include_running`. Writes.
+/// RUNNING only with [`CancelPolicy::IncludeRunning`]. Writes.
 ///
 /// A RUNNING task moves at once, and the same statement records its running
 /// attempt with the outcome `CANCELLED`. The worker that runs it gets the
@@ -182,11 +181,11 @@ pub async fn list_schedules(app: &Horsies) -> MonitoringResult<Vec<ScheduleState
 pub async fn cancel_task(
     app: &Horsies,
     task_id: Uuid,
-    include_running: bool,
+    policy: CancelPolicy,
 ) -> TaskActionResult<TaskCancelled> {
     refuse_in_a_fork(format_args!("Task cancel of task {task_id}"));
     match app.reads_handle().broker().await {
-        Ok(broker) => core_monitoring::cancel_task(&broker, task_id, include_running).await,
+        Ok(broker) => core_monitoring::cancel_task(&broker, task_id, policy).await,
         Err(error) => Err(TaskActionError::cancel_failed(task_id, error)),
     }
 }
@@ -196,9 +195,9 @@ pub async fn cancel_task(
 pub async fn cancel_task_action(
     app: &Horsies,
     task_id: Uuid,
-    include_running: bool,
+    policy: CancelPolicy,
 ) -> ActionOutcome {
-    task_action_outcome(cancel_task(app, task_id, include_running).await)
+    task_action_outcome(cancel_task(app, task_id, policy).await)
 }
 
 /// Pause the workflow `workflow_id`, answered as the web route
@@ -333,7 +332,7 @@ mod tests {
             task_index: 0,
             child_depth: 1,
             definition_key: Some("tests.absent.v1".to_owned()),
-            params: horsies_core::SubWorkflowParams::NotGiven,
+            params: horsies_core::SubWorkflowParameters::NotGiven,
             node_input: "{}".to_owned(),
             args_from: None,
             sources: Vec::new(),

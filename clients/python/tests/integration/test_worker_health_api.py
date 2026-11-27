@@ -24,13 +24,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.boot_failure import ResourceShortage, ShortageErrno
 from horsies.core.models.health import (
-    AllSlotsServing,
+    SlotHealthAllServing,
     ExecutionClassBudget,
     ExecutionClassBudgets,
     DownSlot,
-    ProfileNamed,
-    ProfileNotRecorded,
-    SlotsDown,
+    SnapshotProfileNamed,
+    SnapshotProfileNotRecorded,
+    SlotHealthSlotsDown,
 )
 from horsies.core.models.health_reads import PingTargetWorker, WorkerHistoryLimitNewest
 from horsies.core.models.tasks import Execution
@@ -221,8 +221,8 @@ async def test_worker_state_reads_the_slot_health(
     broker: PostgresBroker,
     session: AsyncSession,
 ) -> None:
-    """A row with down slots reads as ``SlotsDown``, an empty list as
-    ``AllSlotsServing``."""
+    """A row with down slots reads as ``SlotHealthSlotsDown``, an empty list as
+    ``SlotHealthAllServing``."""
     prefix = f'itest-{uuid.uuid4().hex}'
     down = DownSlot(
         slot=1,
@@ -255,9 +255,9 @@ async def test_worker_state_reads_the_slot_health(
         serving = await broker.get_worker_state_async(f'{prefix}-serving')
 
         assert is_ok(degraded) and degraded.ok_value is not None
-        assert degraded.ok_value.slot_health == SlotsDown((down,))
+        assert degraded.ok_value.slot_health == SlotHealthSlotsDown((down,))
         assert is_ok(serving) and serving.ok_value is not None
-        assert serving.ok_value.slot_health == AllSlotsServing()
+        assert serving.ok_value.slot_health == SlotHealthAllServing()
     finally:
         await session.execute(
             text('DELETE FROM horsies_worker_states WHERE worker_id LIKE :p'),
@@ -318,9 +318,9 @@ async def test_worker_state_reads_the_profile(
     broker: PostgresBroker,
     session: AsyncSession,
 ) -> None:
-    """A row with a profile name reads as ``ProfileNamed``; a row with no
+    """A row with a profile name reads as ``SnapshotProfileNamed``; a row with no
     name (a worker of a build before schema migration 1004) reads as
-    ``ProfileNotRecorded``."""
+    ``SnapshotProfileNotRecorded``."""
     prefix = f'itest-{uuid.uuid4().hex}'
     for suffix, profile_name in (('named', 'batch'), ('unnamed', None)):
         await session.execute(
@@ -333,9 +333,9 @@ async def test_worker_state_reads_the_profile(
         unnamed = await broker.get_worker_state_async(f'{prefix}-unnamed')
 
         assert is_ok(named) and named.ok_value is not None
-        assert named.ok_value.profile == ProfileNamed(name='batch')
+        assert named.ok_value.profile == SnapshotProfileNamed(name='batch')
         assert is_ok(unnamed) and unnamed.ok_value is not None
-        assert unnamed.ok_value.profile == ProfileNotRecorded()
+        assert unnamed.ok_value.profile == SnapshotProfileNotRecorded()
     finally:
         await session.execute(
             text('DELETE FROM horsies_worker_states WHERE worker_id LIKE :p'),

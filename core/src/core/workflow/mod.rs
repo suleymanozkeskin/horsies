@@ -12,8 +12,8 @@ pub use context::{WorkflowContext, WORKFLOW_CTX_KWARG, WORKFLOW_META_KWARG};
 pub use handle_types::{
     HandleOperation, HandleResult, WorkflowHandleError, WorkflowHandleErrorCode,
 };
-pub use meta::WorkflowMeta;
-pub use node::{AnyNode, JoinType, NodeKey, SubWorkflowParams};
+pub use meta::WorkflowMetadata;
+pub use node::{AnyNode, JoinType, NodeKey, SubWorkflowParameters};
 pub use policy::{SuccessCase, SuccessPolicy};
 pub use spec::WorkflowSpec;
 pub use start_types::{
@@ -21,7 +21,7 @@ pub use start_types::{
     WorkflowStartResult,
 };
 pub use status::{
-    OnError, WorkflowStatus, WorkflowTaskStatus, WF_TASK_TERMINAL_VALUES,
-    WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
+    OnError, WorkflowNodeStatus, WorkflowStatus, WF_TASK_TERMINAL_VALUES,
+    WORKFLOW_NODE_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };
 pub use summary::SubWorkflowSummary;

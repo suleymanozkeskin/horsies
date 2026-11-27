@@ -24,7 +24,7 @@ from horsies.monitoring import (
     TaskActionNotCancellable,
     TaskActionNotFound,
     TaskActionStoredDataInvalid,
-    TaskActionWorkflowTask,
+    TaskActionIsWorkflowTask,
 )
 
 TASK_ID = UUID('0b1c2d3e-4f50-4a61-8b72-c3d4e5f60718')
@@ -71,7 +71,7 @@ def chain_a_task_action_cause_without_a_match(error: TaskActionError) -> None:
 def task_action_fields_on_their_variants(
     not_found: TaskActionNotFound,
     not_cancellable: TaskActionNotCancellable,
-    workflow_task: TaskActionWorkflowTask,
+    workflow_task: TaskActionIsWorkflowTask,
 ) -> None:
     _ = not_cancellable.current_status
     _ = workflow_task.current_status
@@ -89,7 +89,7 @@ def the_status_is_total() -> None:
         task_id=TASK_ID,
         current_status=None,  # pyright: ignore[reportArgumentType]
     )
-    _ = TaskActionWorkflowTask(
+    _ = TaskActionIsWorkflowTask(
         message='refused',
         task_id=TASK_ID,
         current_status=None,  # pyright: ignore[reportArgumentType]

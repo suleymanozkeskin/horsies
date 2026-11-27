@@ -1339,7 +1339,7 @@ class TestBuildWithBoundary:
         with pytest.raises(WorkflowValidationError) as refused:
             WorkflowSpec(
                 name='parent',
-                tasks=[SubWorkflowNode(workflow_def=_child(annotation, key=key))],
+                nodes=[SubWorkflowNode(workflow_definition=_child(annotation, key=key))],
             )
 
         assert refused.value.code is HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
@@ -1347,7 +1347,7 @@ class TestBuildWithBoundary:
     def test_a_valid_type_passes(self) -> None:
         WorkflowSpec(
             name='parent',
-            tasks=[SubWorkflowNode(workflow_def=_child(Optional[int], key='valid'))],
+            nodes=[SubWorkflowNode(workflow_definition=_child(Optional[int], key='valid'))],
         )
 
     def test_a_bad_default_is_refused_at_the_node(self) -> None:
@@ -1360,7 +1360,7 @@ class TestBuildWithBoundary:
                 raise AssertionError('not built')
 
         with pytest.raises(WorkflowValidationError):
-            WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
+            WorkflowSpec(name='parent', nodes=[SubWorkflowNode(workflow_definition=Child)])
 
     def test_variadics_and_positional_parameters_pass(self) -> None:
         class Child(WorkflowDefinition[int]):
@@ -1371,7 +1371,7 @@ class TestBuildWithBoundary:
             def build_with(cls, app: Any, value: int = 1, *args: Any, **params: Any) -> Any:
                 raise AssertionError('not built')
 
-        WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
+        WorkflowSpec(name='parent', nodes=[SubWorkflowNode(workflow_definition=Child)])
 
     def test_a_top_level_build_with_is_not_checked(self) -> None:
         class Client:
@@ -1399,7 +1399,7 @@ class TestBuildWithBoundary:
         with pytest.raises(WorkflowValidationError) as refused:
             WorkflowSpec(
                 name='parent',
-                tasks=[SubWorkflowNode(workflow_def=Child, kwargs={'when': 'x'})],
+                nodes=[SubWorkflowNode(workflow_definition=Child, kwargs={'when': 'x'})],
             )
 
         assert 'NotDefinedHere' in ' '.join(refused.value.notes)
@@ -1439,7 +1439,7 @@ class TestBuildWithBoundary:
             def build_with(cls, app: Any, *, value: int = 1) -> 'NotDefinedHere':  # type: ignore[name-defined]  # noqa: F821
                 raise AssertionError('not built')
 
-        WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
+        WorkflowSpec(name='parent', nodes=[SubWorkflowNode(workflow_definition=Child)])
 
     def test_a_decorator_from_another_module_is_followed(self) -> None:
         decorators = types.ModuleType('wire_shape_decorators')
@@ -1468,7 +1468,7 @@ class TestBuildWithBoundary:
             definition_key = 'tests.wire_shape.decorated'
             build_with = classmethod(source.build_with)
 
-        WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
+        WorkflowSpec(name='parent', nodes=[SubWorkflowNode(workflow_definition=Child)])
 
     def test_the_app_parameter_can_have_any_name(self) -> None:
         class Child(WorkflowDefinition[int]):
@@ -1479,7 +1479,7 @@ class TestBuildWithBoundary:
             def build_with(cls, horsies_app: Any, *, value: int = 1) -> Any:
                 raise AssertionError('not built')
 
-        WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
+        WorkflowSpec(name='parent', nodes=[SubWorkflowNode(workflow_definition=Child)])
 
     def test_the_first_parameter_can_have_any_name(self) -> None:
         class Child(WorkflowDefinition[int]):
@@ -1490,7 +1490,7 @@ class TestBuildWithBoundary:
             def build_with(klass, app: Any, *, value: int = 1) -> Any:
                 raise AssertionError('not built')
 
-        WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
+        WorkflowSpec(name='parent', nodes=[SubWorkflowNode(workflow_definition=Child)])
 
     def test_the_boot_check_finds_a_class_level_node(self) -> None:
         class Child(WorkflowDefinition[int]):
@@ -1502,7 +1502,7 @@ class TestBuildWithBoundary:
                 raise AssertionError('not built')
 
         class Parent:
-            child = SubWorkflowNode(workflow_def=Child)
+            child = SubWorkflowNode(workflow_definition=Child)
 
         app = _real_app()
         with patch.object(app, '_discovered_task_modules', ['boot_module']), patch.object(
@@ -1545,19 +1545,19 @@ class TestDefinitionOfAny:
                 case Failed(error=error):
                     return Err(error)
 
-        source = SubWorkflowNode(workflow_def=self._child('any_source'))
+        source = SubWorkflowNode(workflow_definition=self._child('any_source'))
         node = TaskNode(function=target, waits_for=[source], args_from={'value': source})
 
         with pytest.raises(WorkflowValidationError) as refused:
-            WorkflowSpec(name='parent', tasks=[source, node])
+            WorkflowSpec(name='parent', nodes=[source, node])
 
         assert refused.value.code is HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
     def test_it_cannot_be_an_output(self) -> None:
-        node = SubWorkflowNode(workflow_def=self._child('any_output'))
+        node = SubWorkflowNode(workflow_definition=self._child('any_output'))
 
         with pytest.raises(WorkflowValidationError) as refused:
-            WorkflowSpec(name='parent', tasks=[node], output=node)
+            WorkflowSpec(name='parent', nodes=[node], output=node)
 
         assert refused.value.code is HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
 
@@ -1580,22 +1580,22 @@ class TestDefinitionOfAny:
                 case Failed(error=error):
                     return Err(error)
 
-        source = SubWorkflowNode(workflow_def=Child)
+        source = SubWorkflowNode(workflow_definition=Child)
         node = TaskNode(function=target, waits_for=[source], args_from={'value': source})
 
         with pytest.raises(WorkflowValidationError) as refused:
-            WorkflowSpec(name='parent', tasks=[source, node])
+            WorkflowSpec(name='parent', nodes=[source, node])
         assert refused.value.code is HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
-        output = SubWorkflowNode(workflow_def=Child)
+        output = SubWorkflowNode(workflow_definition=Child)
         with pytest.raises(WorkflowValidationError) as refused:
-            WorkflowSpec(name='parent', tasks=[output], output=output)
+            WorkflowSpec(name='parent', nodes=[output], output=output)
         assert refused.value.code is HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
 
     def test_it_can_run_with_no_consumer(self) -> None:
         WorkflowSpec(
             name='parent',
-            tasks=[SubWorkflowNode(workflow_def=self._child('any_alone'))],
+            nodes=[SubWorkflowNode(workflow_definition=self._child('any_alone'))],
         )
 
 

@@ -95,7 +95,7 @@ fn phases(timing: &NodeTimingInfo) -> Vec<(SegmentPhaseInfo, i64, Option<i64>)> 
         .iter()
         .map(|segment| {
             let end = match segment.end {
-                SegmentEndInfo::Ended { at } => Some(seconds(at)),
+                SegmentEndInfo::Closed { at } => Some(seconds(at)),
                 SegmentEndInfo::Open => None,
             };
             (segment.phase, seconds(segment.started_at), end)
@@ -1617,7 +1617,7 @@ fn the_run_coverage_aggregates_the_nodes_and_the_pauses() {
     assert_eq!(
         coverage(vec![pruned], &[exact, partial, broken]),
         RunCoverageInfo::Inconsistent {
-            conflicts: vec![RunConflictInfo::Node { task_index: 2 }],
+            conflicts: vec![RunConflictInfo::Node { node_index: 2 }],
         }
     );
     assert_eq!(
@@ -1753,7 +1753,7 @@ fn ended_segment(
         phase,
         started_at: at(from),
         end: match to {
-            Some(seconds) => SegmentEndInfo::Ended { at: at(seconds) },
+            Some(seconds) => SegmentEndInfo::Closed { at: at(seconds) },
             None => SegmentEndInfo::Open,
         },
         source,
@@ -1925,7 +1925,7 @@ fn example_run_timings() -> Vec<RunTimingInfo> {
         composed(
             RunCoverageInfo::Inconsistent {
                 conflicts: vec![
-                    RunConflictInfo::Node { task_index: 2 },
+                    RunConflictInfo::Node { node_index: 2 },
                     RunConflictInfo::Pause {
                         conflict: TimingConflictInfo::UnexpectedEvent {
                             event_id: 4,

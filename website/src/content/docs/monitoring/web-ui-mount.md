@@ -35,7 +35,7 @@ from myapp.tasks import app as horsies_app
 api = FastAPI()
 api.mount(
     "/monitoring",
-    create_monitoring_app(horsies_app, auth_policy=AllowAll()),
+    create_monitoring_app(horsies_app, authorization_policy=AllowAll()),
 )
 ```
 
@@ -43,7 +43,7 @@ Mount it at any path. `AllowAll()` states that the host application's own authen
 
 ### Write a Policy
 
-A policy implements the `MonitoringAuthPolicy` protocol:
+A policy implements the `MonitoringAuthorizationPolicy` protocol:
 
 ```python
 from typing import Protocol
@@ -51,7 +51,7 @@ from typing import Protocol
 from fastapi import Request
 
 
-class MonitoringAuthPolicy(Protocol):
+class MonitoringAuthorizationPolicy(Protocol):
     async def can_view(self, request: Request) -> bool: ...
     async def can_act(self, request: Request) -> bool: ...
 ```
@@ -83,21 +83,21 @@ from myapp.tasks import app as horsies_app
 
 monitoring = create_monitoring_app(
     horsies_app,
-    auth_policy=ViewOnly(),
-    config=MonitoringUIConfig(custom_css_url="/static/horsies-theme.css"),
+    authorization_policy=ViewOnly(),
+    ui=MonitoringUIConfig(custom_css_url="/static/horsies-theme.css"),
 )
 ```
 
 ## API Reference
 
-### `create_monitoring_app(app, *, auth_policy, config=None, actions_enabled=True) -> FastAPI`
+### `create_monitoring_app(app, *, authorization_policy, ui=None, actions=Actions.ENABLED) -> FastAPI`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `app` | `Horsies` | Yes | The app whose broker the monitoring app uses |
-| `auth_policy` | `MonitoringAuthPolicy` | Yes | Keyword-only, no default |
-| `config` | `MonitoringUIConfig \| None` | No | The page customization |
-| `actions_enabled` | `bool` | No | `False` refuses every action, whatever the policy answers. Default `True` |
+| `authorization_policy` | `MonitoringAuthorizationPolicy` | Yes | Keyword-only, no default |
+| `ui` | `MonitoringUIConfig \| None` | No | The page customization |
+| `actions` | `Actions` | No | `Actions.DISABLED` refuses every action, whatever the policy answers. Default `Actions.ENABLED` |
 
 **Returns:** `FastAPI`, the sub-app to mount.
 
@@ -109,7 +109,9 @@ The sub-app also serves `GET /metrics`: the fleet metrics of the app's database,
 |-------------|--------|
 | `AllowAll()` | `AllowAll` |
 | `ViewOnly()` | `ViewOnly` |
-| `TrustedHeader(header_name: str, *, allow_actions: bool)` | `TrustedHeader` with that header |
+| `TrustedHeader(header_name: str, *, actions: Actions)` | `TrustedHeader` with that header |
+
+`Actions` (from `horsies.web`) is `Actions.ENABLED` or `Actions.DISABLED`. `GET /api/meta` reports it as `actions`: `"ENABLED"` only when the mount enables the actions and the schema is compatible.
 
 What each policy answers is in [Authorization policies](/horsies/monitoring/web-ui-deployment/#authorization-policies).
 
@@ -118,7 +120,7 @@ What each policy answers is in [Authorization policies](/horsies/monitoring/web-
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `custom_css_url` | `str \| None` | `None` | The URL of one stylesheet. Its link goes last in the served `index.html` |
-| `trace_link` | `TraceLinkTemplate \| NoTraceLink` | `NoTraceLink()` | The link of a task's trace id in the task detail. `TraceLinkTemplate(template=...)` takes an `http` or `https` URL with one `{trace_id}`, at most 2,048 bytes of printable ASCII with no space, for example `https://grafana.example.com/explore?traceId={trace_id}`; another template raises `ConfigurationError` (`HRS-221`) that names the rule. With `NoTraceLink()` the task detail shows the trace id as text. A task sent with no trace shows no trace row |
+| `trace_link` | `TraceLink`: `TraceLinkTemplate \| TraceLinkText` | `TraceLinkText()` | The link of a task's trace id in the task detail. `TraceLinkTemplate(template=...)` takes an `http` or `https` URL with one `{trace_id}`, at most 2,048 bytes of printable ASCII with no space, for example `https://grafana.example.com/explore?traceId={trace_id}`; another template raises `ConfigurationError` (`HRS-221`) that names the rule. With `TraceLinkText()` the task detail shows the trace id as text. A task sent with no trace shows no trace row |
 
 ### Static Assets
 

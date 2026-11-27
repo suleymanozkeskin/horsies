@@ -21,7 +21,7 @@ use std::pin::Pin;
 
 use uuid::Uuid;
 
-use crate::core::workflow::node::SubWorkflowParams;
+use crate::core::workflow::node::SubWorkflowParameters;
 use crate::core::{TaskError, WorkflowSpec};
 use crate::workflow_engine::error::WorkflowError;
 pub use crate::workflow_engine::steps::ChildStartSource;
@@ -60,7 +60,7 @@ pub struct ChildSpecRequest {
     /// stores none (the load then fails the node).
     pub definition_key: Option<String>,
     /// Whether the node gives the child params.
-    pub params: SubWorkflowParams,
+    pub params: SubWorkflowParameters,
     /// The node's stored input, as the client encoded it.
     pub node_input: String,
     /// The node's `args_from` as JSON text (member name to dependency

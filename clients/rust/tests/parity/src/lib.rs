@@ -16,9 +16,10 @@ use horsies::{
     blocking_task, task, AppConfig, ChildPreload, CustomErrorCode, Horsies, HorsiesError,
     IntervalSchedule, IsolatedChildren, IsolatedSetting, PingTarget, RetryPolicy, ScheduleConfig,
     SchedulePattern, SharedAsyncChildren, SharedAsyncSetting, SharedThreadChildren,
-    SharedThreadSetting, SubWorkflowParams, TaskError, TaskErrorCode, TaskOutcome, TaskRuntime,
+    SharedThreadSetting, SubWorkflowParameters, TaskError, TaskErrorCode, TaskOutcome, TaskRuntime,
     TaskSchedule, TaskSendError, TaskSendOptions, WaitLimit, WorkerPong, WorkerProfile,
-    WorkflowDefConfig, WorkflowDefinition, WorkflowFunction, WorkflowHandle, WorkflowSpecBuilder,
+    WorkflowDefinition, WorkflowDefinitionConfig, WorkflowFunction, WorkflowHandle,
+    WorkflowSpecBuilder,
 };
 use uuid::Uuid;
 
@@ -208,7 +209,7 @@ pub struct ParityChain;
 
 impl WorkflowDefinition for ParityChain {
     type Output = i64;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         CHAIN_NAME
@@ -218,7 +219,7 @@ impl WorkflowDefinition for ParityChain {
         CHAIN_DEFINITION_KEY
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let first = builder.task(
             add::node()
                 .node_id("add")
@@ -230,7 +231,7 @@ impl WorkflowDefinition for ParityChain {
                 .node_id("double")
                 .arg_from(double::fields::upstream(), first),
         )?;
-        Ok(WorkflowDefConfig::new().output(second))
+        Ok(WorkflowDefinitionConfig::new().output(second))
     }
 }
 
@@ -240,7 +241,7 @@ pub struct ParityChild;
 
 impl WorkflowDefinition for ParityChild {
     type Output = i64;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         CHILD_NAME
@@ -250,14 +251,14 @@ impl WorkflowDefinition for ParityChild {
         CHILD_DEFINITION_KEY
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let added = builder.task(
             add::node()
                 .node_id("add")
                 .set(add::fields::a(), 2)?
                 .set(add::fields::b(), 3)?,
         )?;
-        Ok(WorkflowDefConfig::new().output(added))
+        Ok(WorkflowDefinitionConfig::new().output(added))
     }
 }
 
@@ -267,7 +268,7 @@ pub struct ParityParent;
 
 impl WorkflowDefinition for ParityParent {
     type Output = i64;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         PARENT_NAME
@@ -277,15 +278,15 @@ impl WorkflowDefinition for ParityParent {
         PARENT_DEFINITION_KEY
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        let child =
-            builder.sub_workflow(ParityChild::node(SubWorkflowParams::NotGiven)?.node_id("child"));
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
+        let child = builder
+            .sub_workflow(ParityChild::node(SubWorkflowParameters::NotGiven)?.node_id("child"));
         let doubled = builder.task(
             double::node()
                 .node_id("double")
                 .arg_from(double::fields::upstream(), child),
         )?;
-        Ok(WorkflowDefConfig::new().output(doubled))
+        Ok(WorkflowDefinitionConfig::new().output(doubled))
     }
 }
 

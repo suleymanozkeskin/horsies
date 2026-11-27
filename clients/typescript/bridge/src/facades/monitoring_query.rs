@@ -17,8 +17,8 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use horsies_core::monitoring::{
-    resolve_monitoring_window, ErrorCategory, HistoryWindow, SortDirection, TaskBreakdownQuery,
-    TaskFacetsQuery, TaskFilters, TaskGroupBy, TaskListQuery, TaskSortField, TaskStatsQuery,
+    resolve_monitoring_window, ErrorCategory, MonitoringWindow, SortDirection, TaskBreakdownQuery,
+    TaskFacetsQuery, TaskFilters, TaskGroupBy, TaskListQuery, TaskSortField, TaskStatusCountsQuery,
     WorkflowRunsQuery,
 };
 use horsies_core::TaskStatus;
@@ -161,7 +161,7 @@ pub enum SortFieldArg {
     FailedAt,
     Status,
     TaskName,
-    QueueName,
+    Queue,
     Priority,
     RetryCount,
     QueueSeconds,
@@ -199,11 +199,11 @@ pub struct FiltersArg {
     pub retried: RetriedArg,
 }
 
-/// The task stats read: every filter but the statuses (the stats are the
-/// status selector).
+/// The task status counts read: every filter but the statuses (the counts
+/// are the status selector).
 #[napi(object, object_to_js = false)]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TaskStatsArg {
+pub struct TaskStatusCountsArg {
     pub window: WindowArg,
     pub task_names: Vec<String>,
     pub queues: Vec<String>,
@@ -252,11 +252,11 @@ pub struct TaskListArg {
     object_to_js = false
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RunNameArg {
+pub enum WorkflowNameArg {
     /// Runs of every workflow.
     AnyName,
-    /// Runs of the workflow `name`.
-    Named { name: String },
+    /// Runs of the workflow `workflow_name`.
+    Named { workflow_name: String },
 }
 
 /// The status filter of the workflow runs read.
@@ -277,14 +277,16 @@ pub enum RunStatusArg {
 #[napi(object, object_to_js = false)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkflowRunsArg {
-    pub name: RunNameArg,
+    pub workflow_name: WorkflowNameArg,
     pub status: RunStatusArg,
     pub limit: CountArg,
 }
 
-/// The core query of a task stats read. Pure.
-pub fn task_stats_query(arg: TaskStatsArg) -> Result<TaskStatsQuery, QueryStop> {
-    let window = history_window(&arg.window)?;
+/// The core query of a task status counts read. Pure.
+pub fn task_status_counts_query(
+    arg: TaskStatusCountsArg,
+) -> Result<TaskStatusCountsQuery, QueryStop> {
+    let window = monitoring_window(&arg.window)?;
     let filters = TaskFilters {
         statuses: Vec::new(),
         task_names: arg.task_names,
@@ -294,12 +296,12 @@ pub fn task_stats_query(arg: TaskStatsArg) -> Result<TaskStatsQuery, QueryStop> 
         error_categories: error_categories(&arg.error_categories),
         retried_only: retried_only(arg.retried),
     };
-    Ok(TaskStatsQuery::new(window).with_filters(filters))
+    Ok(TaskStatusCountsQuery::new(window).with_filters(filters))
 }
 
 /// The core query of a task facets read. Pure.
 pub fn task_facets_query(arg: &TaskFacetsArg) -> Result<TaskFacetsQuery, QueryStop> {
-    let window = history_window(&arg.window)?;
+    let window = monitoring_window(&arg.window)?;
     Ok(TaskFacetsQuery::new(window)
         .with_statuses(task_statuses(&arg.statuses)?)
         .with_error_categories(error_categories(&arg.error_categories))
@@ -308,7 +310,7 @@ pub fn task_facets_query(arg: &TaskFacetsArg) -> Result<TaskFacetsQuery, QuerySt
 
 /// The core query of a task breakdown read. Pure.
 pub fn task_breakdown_query(arg: TaskBreakdownArg) -> Result<TaskBreakdownQuery, QueryStop> {
-    let window = history_window(&arg.window)?;
+    let window = monitoring_window(&arg.window)?;
     let query = TaskBreakdownQuery::new(window, group_column(arg.group_by))
         .with_filters(task_filters(arg.filters)?);
     match set_count("limit", &arg.limit)? {
@@ -324,7 +326,7 @@ pub fn task_breakdown_query(arg: TaskBreakdownArg) -> Result<TaskBreakdownQuery,
 /// A count left at the core's default takes the value of
 /// `TaskListQuery::new`; the core checks the page as a whole.
 pub fn task_list_query(arg: TaskListArg) -> Result<TaskListQuery, QueryStop> {
-    let window = history_window(&arg.window)?;
+    let window = monitoring_window(&arg.window)?;
     let query = TaskListQuery::new(window).with_filters(task_filters(arg.filters)?);
     let query = match arg.sort {
         SortArg::CoreDefault => query,
@@ -349,15 +351,17 @@ pub fn task_list_query(arg: TaskListArg) -> Result<TaskListQuery, QueryStop> {
 /// The core query of a workflow runs read. Pure.
 pub fn workflow_runs_query(arg: WorkflowRunsArg) -> Result<WorkflowRunsQuery, QueryStop> {
     let limit = set_count("limit", &arg.limit)?;
-    let name = match arg.name {
-        RunNameArg::AnyName => None,
-        RunNameArg::Named { name } => Some(name),
+    let workflow_name = match arg.workflow_name {
+        WorkflowNameArg::AnyName => None,
+        WorkflowNameArg::Named { workflow_name } => Some(workflow_name),
     };
     let status = match arg.status {
         RunStatusArg::AnyStatus => None,
         RunStatusArg::Status { status } => Some(status),
     };
-    let query = WorkflowRunsQuery::new().with_name(name).with_status(status);
+    let query = WorkflowRunsQuery::new()
+        .with_workflow_name(workflow_name)
+        .with_status(status);
     match limit {
         None => Ok(query),
         Some(limit) => query.with_limit(limit).map_err(|refused| {
@@ -377,7 +381,7 @@ fn set_count(subject: &str, count: &CountArg) -> Result<Option<i64>, BoundaryRef
 
 /// The core's window of `arg`, or the refusal of the window. Pure, but for
 /// the clock: an unset `until` is the core's now.
-fn history_window(arg: &WindowArg) -> Result<HistoryWindow, QueryStop> {
+fn monitoring_window(arg: &WindowArg) -> Result<MonitoringWindow, QueryStop> {
     let since = window_bound("since", &arg.since)?;
     let until = window_bound("until", &arg.until)?;
     resolve_monitoring_window(since, until, None).map_err(|refused| {
@@ -458,7 +462,7 @@ const fn sort_field(value: SortFieldArg) -> TaskSortField {
         SortFieldArg::FailedAt => TaskSortField::FailedAt,
         SortFieldArg::Status => TaskSortField::Status,
         SortFieldArg::TaskName => TaskSortField::TaskName,
-        SortFieldArg::QueueName => TaskSortField::QueueName,
+        SortFieldArg::Queue => TaskSortField::Queue,
         SortFieldArg::Priority => TaskSortField::Priority,
         SortFieldArg::RetryCount => TaskSortField::RetryCount,
         SortFieldArg::QueueSeconds => TaskSortField::QueueSeconds,
@@ -564,7 +568,7 @@ mod tests {
     fn a_page_left_at_the_core_default_keeps_the_values_of_new() {
         let built = task_list_query(core_default_list()).expect("the core's default page");
         let new = TaskListQuery::new(
-            history_window(&window(
+            monitoring_window(&window(
                 WindowBoundArg::CoreDefault,
                 WindowBoundArg::CoreDefault,
             ))
@@ -594,13 +598,13 @@ mod tests {
 
     #[test]
     fn an_explicit_window_inside_the_bounds_builds() {
-        let built = history_window(&window(at(1), at(5)));
+        let built = monitoring_window(&window(at(1), at(5)));
         assert!(built.is_ok(), "{built:?}");
     }
 
     #[test]
     fn a_window_that_does_not_increase_is_refused_as_the_window() {
-        let built = history_window(&window(at(5), at(5)));
+        let built = monitoring_window(&window(at(5), at(5)));
         assert!(matches!(
             built,
             Err(QueryStop::Refused(QueryRefusal {
@@ -616,7 +620,7 @@ mod tests {
             epoch_micros: epoch_micros_of(instant(0) - chrono::Duration::days(31)),
         };
         assert!(matches!(
-            history_window(&window(since, at(0))),
+            monitoring_window(&window(since, at(0))),
             Err(QueryStop::Refused(QueryRefusal {
                 field: QueryField::Window,
                 ..
@@ -630,7 +634,7 @@ mod tests {
             epoch_micros: BigInt::from(i128::from(i64::MAX)),
         };
         assert!(matches!(
-            history_window(&window(WindowBoundArg::CoreDefault, far)),
+            monitoring_window(&window(WindowBoundArg::CoreDefault, far)),
             Err(QueryStop::Refused(QueryRefusal {
                 field: QueryField::Window,
                 ..
@@ -666,7 +670,7 @@ mod tests {
     fn a_runs_limit_outside_1_to_200_is_refused_as_the_limit() {
         for limit in [0.0, 201.0] {
             let arg = WorkflowRunsArg {
-                name: RunNameArg::AnyName,
+                workflow_name: WorkflowNameArg::AnyName,
                 status: RunStatusArg::AnyStatus,
                 limit: CountArg::Set { value: limit },
             };
@@ -714,7 +718,7 @@ mod tests {
             SortFieldArg::FailedAt,
             SortFieldArg::Status,
             SortFieldArg::TaskName,
-            SortFieldArg::QueueName,
+            SortFieldArg::Queue,
             SortFieldArg::Priority,
             SortFieldArg::RetryCount,
             SortFieldArg::QueueSeconds,

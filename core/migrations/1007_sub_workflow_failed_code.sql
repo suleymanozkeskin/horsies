@@ -133,10 +133,10 @@ BEGIN
             WHEN v_child.status = 'COMPLETED' AND v_kind = 'VALUE' THEN (v_child.result::json -> 'ok')::text
             ELSE 'null'
         END
-        || ',"total_tasks":' || v_child.total
-        || ',"completed_tasks":' || v_child.completed
-        || ',"failed_tasks":' || v_child.failed
-        || ',"skipped_tasks":' || v_child.skipped
+        || ',"total_nodes":' || v_child.total
+        || ',"completed_nodes":' || v_child.completed
+        || ',"failed_nodes":' || v_child.failed
+        || ',"skipped_nodes":' || v_child.skipped
         || ',"error_summary":' || coalesce(to_json(v_error_summary)::text, 'null') || '}';
     IF v_child.status <> 'COMPLETED' THEN
         node_status := 'FAILED';

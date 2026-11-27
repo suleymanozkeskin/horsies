@@ -54,14 +54,14 @@ function statusCountsText(counts: readonly StatusCount[]): string {
 }
 
 function failedRowText(row: TaskSummary): string {
-  return `  ${row.taskName} ${row.errorCode ?? "no code"} ${row.id} (retries ${String(row.retryCount)})`;
+  return `  ${row.taskName} ${row.errorCode ?? "no code"} ${row.taskId} (retries ${String(row.retryCount)})`;
 }
 
 function workflowRunsText(runs: readonly WorkflowRunSummary[]): string {
   const counts = new Map<string, number>();
 
   for (const run of runs) {
-    const key = `${run.name} ${run.status}`;
+    const key = `${run.workflowName} ${run.status}`;
 
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
@@ -85,7 +85,7 @@ export async function reportLines(app: Horsies, failedRows: number): Promise<rea
   const ping = await app.pingDatabase();
   const workers = await app.monitoring.listWorkerStates();
   const pongs = await app.pingWorkers({ waitMs: PING_WINDOW_MS });
-  const stats = await app.monitoring.taskStats();
+  const stats = await app.monitoring.taskStatusCounts();
   const failed = await app.monitoring.listTasks({ statuses: ["FAILED"], limit: failedRows });
   const runs = await app.monitoring.listWorkflowRuns({ limit: WORKFLOW_RUNS_READ });
 

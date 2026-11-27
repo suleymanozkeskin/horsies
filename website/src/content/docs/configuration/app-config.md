@@ -406,8 +406,8 @@ def check(self, *, live: bool = False) -> ValidationReport
 | 2. Task imports | Imports all discovered task modules, collects import/registration errors | Errors stop progression to Phases 4-6 |
 | 3. Workflows | `WorkflowSpec` DAG validation (triggered during module imports) | Collected alongside Phase 2 |
 | 3.1 Workflow definitions | Imported `WorkflowDefinition` subclasses declare a valid `definition_key` | Errors stop progression to Phases 3.2-6 |
-| 3.2 Workflow builders | Executes `@app.workflow_builder` functions, validates returned specs | Errors stop progression to Phases 3.3-6 |
-| 3.3 Undecorated builders | Detects top-level functions returning `WorkflowSpec` without `@app.workflow_builder` | Errors stop progression to Phases 5-6 |
+| 3.2 Workflow builders | Executes `@app.check_workflow_builder` functions, validates returned specs | Errors stop progression to Phases 3.3-6 |
+| 3.3 Undecorated builders | Detects top-level functions returning `WorkflowSpec` without `@app.check_workflow_builder` | Errors stop progression to Phases 5-6 |
 | 5. Runtime policy safety | Validates retry/exception-mapper policy metadata after imports | Errors stop progression to Phase 6 |
 | 6. Broker (if `live=True`) | Connects to PostgreSQL and runs `SELECT 1` | Only runs if Phases 2-5 pass |
 | 6.1 Worker connections (if `live=True`) | Compares each worker profile with the server connection limit (`HRS-219`). Skipped with no profiles or with `pgbouncer_transaction_mode=True`. See [Worker Profiles](../../workers/worker-profiles#connections) | Only runs if Phase 6 passes |
@@ -421,17 +421,17 @@ horsies check myapp.instance:app        # Phases 1-5
 horsies check myapp.instance:app --live  # Phases 1-6.1
 ```
 
-### `@app.workflow_builder`
+### `@app.check_workflow_builder`
 
-Register workflow builder functions for check-phase validation. For full API reference and examples, see [Workflow API — @app.workflow_builder](/horsies/concepts/workflows/workflow-api/#appworkflow_builder).
+Register workflow builder functions for check-phase validation. For full API reference and examples, see [Workflow API — @app.check_workflow_builder](/horsies/concepts/workflows/workflow-api/#appcheck_workflow_builder).
 
 ### Guarantee Model
 
 `horsies check` has two validation paths with different guarantee levels:
 
-**Strong guarantee (decorated builders):** Functions registered with `@app.workflow_builder` are executed during check. Every `WorkflowSpec` they produce is fully validated — DAG structure, kwargs against function signatures, `args_from` type compatibility, missing required params, `definition_key`, and more. For the exercised builder cases, this catches structural workflow validity errors before runtime.
+**Strong guarantee (decorated builders):** Functions registered with `@app.check_workflow_builder` are executed during check. Every `WorkflowSpec` they produce is fully validated — DAG structure, kwargs against function signatures, `args_from` type compatibility, missing required params, `definition_key`, and more. For the exercised builder cases, this catches structural workflow validity errors before runtime.
 
-**Best-effort (undecorated builder detection):** Check also scans discovered task modules for top-level functions whose return type annotation is `WorkflowSpec` but lack the `@app.workflow_builder` decorator. These produce HRS-030 check errors. This detection is heuristic:
+**Best-effort (undecorated builder detection):** Check also scans discovered task modules for top-level functions whose return type annotation is `WorkflowSpec` but lack the `@app.check_workflow_builder` decorator. These produce HRS-030 check errors. This detection is heuristic:
 
 - It only scans modules directly listed in `discover_tasks()`, not sub-modules of discovered packages.
 - Functions re-exported in `__init__.py` from sub-modules may not be detected.
@@ -442,7 +442,7 @@ HRS-030 is a safety net, not an absolute proof that no undecorated builders exis
 
 For deterministic, high-confidence workflow validity in CI:
 
-1. Decorate every workflow entrypoint with `@app.workflow_builder(...)`.
+1. Decorate every workflow entrypoint with `@app.check_workflow_builder(...)`.
 2. For parameterized builders, provide `cases=` that cover all meaningful branches and shapes.
 3. Ensure all builder modules are imported by the app used in `horsies check` (no hidden or dynamic registration paths).
 4. Run `horsies check` in CI and fail the pipeline on any errors.

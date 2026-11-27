@@ -137,7 +137,7 @@ def test_a_sync_start_with_a_sub_workflow_root_runs_build_with(
     registered_child: None,
 ) -> None:
     root: SubWorkflowNode[int] = SubWorkflowNode(
-        workflow_def=SyncStartChild, kwargs={'value': CHILD_VALUE},
+        workflow_definition=SyncStartChild, kwargs={'value': CHILD_VALUE},
     )
     spec = APP.workflow(
         'sync_start_subworkflow.parent',
@@ -159,7 +159,7 @@ def test_a_sync_start_with_a_sub_workflow_root_runs_build_with(
     assert [build.value for build in seen] == [CHILD_VALUE]
     assert seen[0].thread_id != caller_thread_id
     # The start wrote the pre-built child of the root.
-    tasks, _ = _on_a_thread(handle.tasks)
+    tasks, _ = _on_a_thread(handle.nodes)
     assert is_ok(tasks), tasks
     [node] = tasks.ok_value
     assert node.sub_workflow_id is not None

@@ -355,7 +355,7 @@ fn option_error(name: &str, message: String, help: &str) -> HorsiesError {
 mod tests {
     use std::sync::Arc;
 
-    use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMeta};
+    use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMetadata};
     use horsies_core::{
         CustomCode, RetryPolicy, TaskErrorCode, TaskResult, DEFAULT_CANCEL_GRACE_MS,
     };
@@ -387,7 +387,7 @@ mod tests {
     fn task(options: TaskOptions) -> RegisteredTask {
         RegisteredTask::Blocking {
             task: Arc::new(EchoTask),
-            meta: TaskMeta::default(),
+            metadata: TaskMetadata::default(),
         }
         .with_task_options(options)
     }
@@ -597,7 +597,7 @@ mod tests {
         .unwrap();
         let declaring = |codes: &'static [&'static str]| RegisteredTask::Blocking {
             task: Arc::new(EchoTask),
-            meta: TaskMeta::default().with_error_codes(codes),
+            metadata: TaskMetadata::default().with_error_codes(codes),
         };
         app.register("resize", declaring(&[])).unwrap();
         app.register("send_mail", declaring(&["BOUNCED"])).unwrap();

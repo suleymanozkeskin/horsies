@@ -38,12 +38,12 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import DatabaseErrorCode
 from horsies.core.models.class_coverage import (
     BudgetLoad,
-    NoneDue,
-    OldestWaiting,
+    StreamWaitNoneDue,
+    StreamWaitDue,
     StreamCoverage,
-    StreamServed,
-    StreamUnserved,
-    StreamWithoutCapacity,
+    StreamCoverageStateServed,
+    StreamCoverageStateUnserved,
+    StreamCoverageStateNoCapacity,
     WorkerExecutionClassLoad,
 )
 from horsies.core.models.health import WORKER_STATE_LIVE_WINDOW_SECONDS
@@ -190,9 +190,9 @@ class TestClassCoverage:
 
         assert coverage.live_workers == 2
         assert coverage.streams == (
-            StreamCoverage('a', ASYNC, StreamServed(workers=1, capacity=4)),
-            StreamCoverage('b', ISOLATED, StreamWithoutCapacity(workers=1)),
-            StreamCoverage('c', THREAD, StreamUnserved()),
+            StreamCoverage('a', ASYNC, StreamCoverageStateServed(workers=1, capacity=4)),
+            StreamCoverage('b', ISOLATED, StreamCoverageStateNoCapacity(workers=1)),
+            StreamCoverage('c', THREAD, StreamCoverageStateUnserved()),
         )
 
     async def test_a_snapshot_older_than_the_live_window_serves_nothing(
@@ -216,7 +216,7 @@ class TestClassCoverage:
                 raise AssertionError(error.message)
 
         assert coverage.live_workers == 0
-        assert coverage.streams == (StreamCoverage('a', ISOLATED, StreamUnserved()),)
+        assert coverage.streams == (StreamCoverage('a', ISOLATED, StreamCoverageStateUnserved()),)
 
     async def test_only_the_latest_snapshot_of_a_worker_counts(
         self,
@@ -241,7 +241,7 @@ class TestClassCoverage:
                 raise AssertionError(error.message)
 
         assert coverage.live_workers == 1
-        assert coverage.streams[0].coverage == StreamWithoutCapacity(workers=1)
+        assert coverage.streams[0].coverage == StreamCoverageStateNoCapacity(workers=1)
 
     async def test_an_isolated_retry_of_a_shared_task_is_unserved_without_isolated_children(
         self,
@@ -261,8 +261,8 @@ class TestClassCoverage:
                 raise AssertionError(error.message)
 
         assert coverage.streams == (
-            StreamCoverage('a', ISOLATED, StreamUnserved()),
-            StreamCoverage('a', ASYNC, StreamServed(workers=1, capacity=40)),
+            StreamCoverage('a', ISOLATED, StreamCoverageStateUnserved()),
+            StreamCoverage('a', ASYNC, StreamCoverageStateServed(workers=1, capacity=40)),
         )
 
     async def test_a_delayed_row_counts_as_pending(
@@ -279,7 +279,7 @@ class TestClassCoverage:
             case Err(error):
                 raise AssertionError(error.message)
 
-        assert coverage.streams == (StreamCoverage('a', ISOLATED, StreamUnserved()),)
+        assert coverage.streams == (StreamCoverage('a', ISOLATED, StreamCoverageStateUnserved()),)
 
     async def test_rows_that_are_not_pending_make_no_stream(
         self,
@@ -361,10 +361,10 @@ class TestClassReport:
         ).scalar_one()
         isolated, shared = report.streams
         assert (isolated.queue, isolated.execution) == ('a', ISOLATED)
-        assert isolated.wait == OldestWaiting(oldest, report.checked_at - oldest)
+        assert isolated.wait == StreamWaitDue(oldest, report.checked_at - oldest)
         assert report.checked_at - oldest >= timedelta(seconds=300)
-        assert isolated.coverage == StreamServed(workers=1, capacity=4)
-        assert shared.wait == NoneDue(next_due)
+        assert isolated.coverage == StreamCoverageStateServed(workers=1, capacity=4)
+        assert shared.wait == StreamWaitNoneDue(next_due)
 
     async def test_budget_load_counts_rows_as_the_claim_does(
         self,

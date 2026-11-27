@@ -947,47 +947,60 @@ def resolve_web_app(args: argparse.Namespace) -> Horsies:
             return _registryless_app(args)
 
 
-def resolve_web_auth_policy(args: argparse.Namespace) -> Any:
+def resolve_web_authorization_policy(args: argparse.Namespace) -> Any:
     """Build the authorization policy for a ``horsies web`` invocation.
 
     Binding beyond loopback without a proxy-supplied identity is refused: the
     default posture is that anyone who can reach the port can read the
     deployment's task data.
     """
-    from horsies.web.auth import AllowAll, TrustedHeader, ViewOnly
+    from horsies.web.authorization import AllowAll, TrustedHeader, ViewOnly
 
     host: str = args.host
     enable_actions: bool = args.enable_actions
 
-    match args.auth:
+    match args.authorization:
         case 'trusted-header':
             header: str = args.trusted_header
             if not header.strip():
                 _web_arg_error('--trusted-header requires a header name')
             print(_TRUSTED_HEADER_WARNING % header, file=sys.stderr)
-            return TrustedHeader(header, allow_actions=enable_actions)
+            return TrustedHeader(header, actions=web_actions(args))
         case 'none':
             if not _is_loopback(host):
                 _web_arg_error(
-                    f'--auth none is only allowed on a loopback host; '
+                    f'--authorization none is only allowed on a loopback host; '
                     f'{host!r} is reachable from the network. Use '
-                    f'--auth trusted-header with a proxy-set header.'
+                    f'--authorization trusted-header with a proxy-set header.'
                 )
             return AllowAll() if enable_actions else ViewOnly()
         case _:
-            _web_arg_error(f'unknown --auth value {args.auth!r}')
+            _web_arg_error(f'unknown --authorization value {args.authorization!r}')
+
+
+def web_actions(args: argparse.Namespace) -> Any:
+    """The actions switch of a ``horsies web`` invocation: ``ENABLED`` with
+    ``--enable-actions``, else ``DISABLED``. Pure."""
+    from horsies.web.authorization import Actions
+
+    enable_actions: bool = args.enable_actions
+    match enable_actions:
+        case True:
+            return Actions.ENABLED
+        case False:
+            return Actions.DISABLED
 
 
 def resolve_web_ui_config(args: argparse.Namespace) -> Any:
     """The page settings of a ``horsies web`` invocation: the trace link
     of ``--trace-link``, or none. A template that the core refuses is a bad
     invocation (exit 2) that names the rule."""
-    from horsies.web import MonitoringUIConfig, NoTraceLink, TraceLinkTemplate
+    from horsies.web import MonitoringUIConfig, TraceLinkTemplate, TraceLinkText
 
     template: str | None = args.trace_link
     match template:
         case None:
-            return MonitoringUIConfig(trace_link=NoTraceLink())
+            return MonitoringUIConfig(trace_link=TraceLinkText())
         case str():
             try:
                 return MonitoringUIConfig(
@@ -1039,12 +1052,12 @@ def web_command(args: argparse.Namespace) -> None:
             print(report.format_diagnostic(), file=sys.stderr)
             sys.exit(1)
 
-    policy = resolve_web_auth_policy(args)
+    policy = resolve_web_authorization_policy(args)
     monitoring_app = create_monitoring_app(
         app,
-        auth_policy=policy,
-        config=ui_config,
-        actions_enabled=args.enable_actions,
+        authorization_policy=policy,
+        ui=ui_config,
+        actions=web_actions(args),
     )
 
     try:
@@ -1322,7 +1335,7 @@ Examples:
 
   # Behind a proxy that authenticates callers and sets the header
   horsies web myapp.tasks:app --host 0.0.0.0 \\
-      --auth trusted-header --trusted-header X-Forwarded-User --enable-actions
+      --authorization trusted-header --trusted-header X-Forwarded-User --enable-actions
 """,
         )
         web_parser.add_argument(
@@ -1351,7 +1364,7 @@ Examples:
             '--port', type=int, default=8600, help='Bind port (default: 8600)'
         )
         web_parser.add_argument(
-            '--auth',
+            '--authorization',
             choices=['none', 'trusted-header'],
             default='none',
             help='Authorization mode (default: none, loopback only)',

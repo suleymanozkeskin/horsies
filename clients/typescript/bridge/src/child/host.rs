@@ -27,7 +27,7 @@ use std::ffi::OsString;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use horsies_core::core::task::fn_trait::{RegisteredTask, TaskMeta};
+use horsies_core::core::task::fn_trait::{RegisteredTask, TaskMetadata};
 use horsies_core::core::TaskRegistry;
 use horsies_core::manifest::parse_producer_manifest;
 use horsies_core::{
@@ -389,14 +389,14 @@ fn task_registry(
                     task_name: task.name.clone(),
                     bodies: Arc::clone(bodies),
                 }),
-                meta: TaskMeta::default(),
+                metadata: TaskMetadata::default(),
             },
             BodyForm::Blocking => RegisteredTask::Blocking {
                 task: Arc::new(JsBlockingBody {
                     task_name: task.name.clone(),
                     bodies: Arc::clone(bodies),
                 }),
-                meta: TaskMeta::default(),
+                metadata: TaskMetadata::default(),
             },
         };
         registry
@@ -449,7 +449,7 @@ mod tests {
     fn echo_task() -> RegisteredTask {
         RegisteredTask::Blocking {
             task: Arc::new(EchoBody),
-            meta: TaskMeta::default(),
+            metadata: TaskMetadata::default(),
         }
     }
 

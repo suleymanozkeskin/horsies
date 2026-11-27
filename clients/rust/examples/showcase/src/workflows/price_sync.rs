@@ -1,7 +1,7 @@
 //! The price sync: publish a price to the CDN and the origin, then warm the
 //! edge cache.
 
-use horsies::{HorsiesError, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder};
+use horsies::{HorsiesError, WorkflowDefinition, WorkflowDefinitionConfig, WorkflowSpecBuilder};
 
 use crate::domain::CacheWarm;
 use crate::tasks::promotions::{publish_cdn, publish_origin, warm_cache_edge};
@@ -16,7 +16,7 @@ pub struct PriceSync;
 
 impl WorkflowDefinition for PriceSync {
     type Output = CacheWarm;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "price_sync"
@@ -26,7 +26,7 @@ impl WorkflowDefinition for PriceSync {
         "acme.price_sync.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let cdn = builder.task(
             publish_cdn::node()
                 .node_id("publish_cdn")
@@ -52,6 +52,6 @@ impl WorkflowDefinition for PriceSync {
                 .waits_for(cdn)
                 .waits_for(origin),
         )?;
-        Ok(WorkflowDefConfig::new().output(warm))
+        Ok(WorkflowDefinitionConfig::new().output(warm))
     }
 }

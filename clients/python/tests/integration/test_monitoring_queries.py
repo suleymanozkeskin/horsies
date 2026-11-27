@@ -1,9 +1,9 @@
 """Integration tests for the horsies.monitoring query API.
 
-Every query runs against real rows through the ``broker`` fixture (which
-applies migrations). Coverage:
+Every query runs against real rows through the ``app`` fixture, whose
+broker applies the migrations. Coverage:
 
-1. task_stats — zero-fill, fixed order, per-dimension scoping
+1. task_status_counts — zero-fill, fixed order, per-dimension scoping
 2. task_facets — scoping, NULL/empty exclusion, caps, uncapped category rollup
 3. task_breakdown — rollup row, 'unknown' key, limit vs group_count
 4. list_tasks — filters, sorting, NULLS LAST, pagination envelope
@@ -63,7 +63,9 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
@@ -78,9 +80,10 @@ from horsies._catalog.monitoring_bounds import LIST_ROW_BOUND
 from horsies.monitoring import (
     Breakdown,
     BreakdownLimit,
-    BreakdownUnclaimedGroup,
-    BreakdownValueGroup,
+    BreakdownGroupUnclaimed,
+    BreakdownGroupValue,
     MonitoringResult,
+    SortDirection,
     TaskPage,
     WorkflowRunsLimit,
     ErrorCategory,
@@ -100,7 +103,7 @@ from horsies.monitoring import (
     categorize_error_code,
     task_breakdown,
     task_facets,
-    task_stats,
+    task_status_counts,
 )
 from tests.integration.history_seeding import stored_history_status
 from tests.integration.monitoring_seeding import (
@@ -372,17 +375,17 @@ def make_schedule(
 
 
 # --------------------------------------------------------------------------- #
-# task_stats
+# task_status_counts
 # --------------------------------------------------------------------------- #
 @pytest.mark.usefixtures('clean_monitoring_tables')
 class TestTaskStats:
     """Status cards: seven rows, fixed order, scoped by every filter but status."""
 
     async def test_zero_fills_all_statuses_in_fixed_order(
-        self, broker: PostgresBroker
+        self, app: Horsies
     ) -> None:
-        result = await task_stats(
-            broker,
+        result = await task_status_counts(
+            app,
             window=_test_window(),
             task_names=[],
             queues=[],
@@ -397,7 +400,7 @@ class TestTaskStats:
         assert [row.count for row in result.ok_value] == [0] * 7
 
     async def test_counts_each_status(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -406,8 +409,8 @@ class TestTaskStats:
             make_task(status=TaskStatus.FAILED, error_code='BOOM'),
         )
 
-        result = await task_stats(
-            broker,
+        result = await task_status_counts(
+            app,
             window=_test_window(),
             task_names=[],
             queues=[],
@@ -436,7 +439,7 @@ class TestTaskStats:
     )
     async def test_filters_scope_the_counts(
         self,
-        broker: PostgresBroker,
+        app: Horsies,
         session: AsyncSession,
         task_names: list[str],
         queues: list[str],
@@ -458,8 +461,8 @@ class TestTaskStats:
             ),
         )
 
-        result = await task_stats(
-            broker,
+        result = await task_status_counts(
+            app,
             window=_test_window(),
             task_names=task_names,
             queues=queues,
@@ -473,14 +476,14 @@ class TestTaskStats:
         assert sum(row.count for row in result.ok_value) == expected_total
 
     async def test_a_history_row_with_an_unknown_status_is_a_contract_violation(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         task = make_task(status=TaskStatus.FAILED)
         await insert_rows(session, task, make_task(status=TaskStatus.PENDING))
 
         async with stored_history_status(session, task.id, 'NOT_KNOWN'):
-            result = await task_stats(
-                broker,
+            result = await task_status_counts(
+                app,
                 window=_test_window(),
                 task_names=[],
                 queues=[],
@@ -512,7 +515,7 @@ class TestTaskFacets:
     """Filter options: coarse scoping only, NULLs excluded, caps applied."""
 
     async def test_reports_distinct_values_with_counts(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -522,7 +525,7 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker,
+            app,
         window=_test_window(), statuses=[], error_categories=[], retried_only=False
         )
 
@@ -546,8 +549,8 @@ class TestTaskFacets:
         turns = await _steady_read_turns(
             proxy,
             db_url,
-            lambda proxied: task_facets(
-                proxied,
+            lambda app: task_facets(
+                app,
                 window=_test_window(),
                 statuses=[],
                 error_categories=[],
@@ -558,7 +561,7 @@ class TestTaskFacets:
         assert len(turns) == 1, turns
 
     async def test_ties_follow_the_database_collation(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         names = ['b_task', 'B_task', 'a_task', 'A_task', '_task', 'Z_task']
         await insert_rows(
@@ -583,7 +586,7 @@ class TestTaskFacets:
         ).scalars().all()
 
         result = await task_facets(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             error_categories=[],
@@ -597,7 +600,7 @@ class TestTaskFacets:
         ]
 
     async def test_the_result_stays_bounded_with_many_distinct_codes(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         """An error code is a free string: the rows must not follow the codes."""
         distinct_codes = 1_000
@@ -631,7 +634,7 @@ class TestTaskFacets:
             )
         ).all()
         result = await task_facets(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             error_categories=[],
@@ -646,7 +649,7 @@ class TestTaskFacets:
         }
 
     async def test_a_live_and_a_history_row_sum_before_the_rank(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         """The sum decides the rank: neither side alone would put it first."""
         await insert_rows(
@@ -657,7 +660,7 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             error_categories=[],
@@ -671,7 +674,7 @@ class TestTaskFacets:
         ]
 
     async def test_unclaimed_tasks_are_absent_from_the_worker_facet(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -680,7 +683,7 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker,
+            app,
         window=_test_window(), statuses=[], error_categories=[], retried_only=False
         )
 
@@ -689,7 +692,7 @@ class TestTaskFacets:
         assert result.ok_value.workers[0].count == 1
 
     async def test_null_and_empty_error_codes_are_excluded(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -699,7 +702,7 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker,
+            app,
         window=_test_window(), statuses=[], error_categories=[], retried_only=False
         )
 
@@ -707,7 +710,7 @@ class TestTaskFacets:
         assert [f.value for f in result.ok_value.error_codes] == ['BOOM']
 
     async def test_error_codes_on_completed_tasks_are_counted(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         """The facet counts tasks carrying a code, not failures."""
         await insert_rows(
@@ -716,7 +719,7 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker,
+            app,
         window=_test_window(), statuses=[], error_categories=[], retried_only=False
         )
 
@@ -724,7 +727,7 @@ class TestTaskFacets:
         assert [f.value for f in result.ok_value.error_codes] == ['SOFT_FAIL']
 
     async def test_error_codes_carry_their_taxonomy_category(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -734,7 +737,7 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker,
+            app,
         window=_test_window(), statuses=[], error_categories=[], retried_only=False
         )
 
@@ -750,7 +753,7 @@ class TestTaskFacets:
         }
 
     async def test_scoped_by_status_and_retried_only(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -760,14 +763,14 @@ class TestTaskFacets:
         )
 
         by_status = await task_facets(
-            broker,
+            app,
             window=_test_window(),
             statuses=[TaskStatus.FAILED],
             error_categories=[],
             retried_only=False,
         )
         by_retried = await task_facets(
-            broker,
+            app,
         window=_test_window(), statuses=[], error_categories=[], retried_only=True
         )
 
@@ -780,7 +783,7 @@ class TestTaskFacets:
         assert {f.value for f in by_retried.ok_value.task_names} == {'alpha_task'}
 
     async def test_value_facets_cap_at_fifty(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -788,7 +791,7 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker,
+            app,
         window=_test_window(), statuses=[], error_categories=[], retried_only=False
         )
 
@@ -796,7 +799,7 @@ class TestTaskFacets:
         assert len(result.ok_value.task_names) == 50
 
     async def test_value_facets_sum_both_sides_before_the_global_cap(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         live_rows = [
             make_task(task_name=f'live_{index:03d}')
@@ -816,7 +819,7 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             error_categories=[],
@@ -831,7 +834,7 @@ class TestTaskFacets:
         assert counts['shared_target'] == 3
 
     async def test_selected_error_family_is_ranked_before_its_code_cap(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -849,7 +852,7 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             error_categories=[ErrorCategory.OUTCOME],
@@ -862,7 +865,7 @@ class TestTaskFacets:
         ]
 
     async def test_category_totals_cover_codes_the_list_drops(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         """The dropdown is capped at 30; the rollup still counts all 35 codes."""
         await insert_rows(
@@ -874,7 +877,7 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker,
+            app,
         window=_test_window(), statuses=[], error_categories=[], retried_only=False
         )
 
@@ -883,7 +886,7 @@ class TestTaskFacets:
         assert result.ok_value.error_category_totals == {ErrorCategory.CUSTOM.value: 35}
 
     async def test_history_category_totals_exceed_the_history_facet_cap(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -897,7 +900,7 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             error_categories=[],
@@ -919,7 +922,7 @@ class TestTaskBreakdown:
     """Group pivot: counts of every group, the unclaimed group, limit independent of the total."""
 
     async def test_groups_by_worker_with_rollup_total(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -929,7 +932,7 @@ class TestTaskBreakdown:
         )
 
         result = await task_breakdown(
-            broker,
+            app,
             window=_test_window(),
             group_by='worker',
             statuses=[],
@@ -945,19 +948,19 @@ class TestTaskBreakdown:
         assert is_ok(result)
         breakdown = result.ok_value
         rows = {row.group: row for row in breakdown.groups}
-        assert rows[BreakdownValueGroup(value='w1')].total == 2
-        assert rows[BreakdownValueGroup(value='w1')].completed == 1
-        assert rows[BreakdownValueGroup(value='w1')].failed == 1
-        assert rows[BreakdownValueGroup(value='w1')].retried == 1
-        assert rows[BreakdownValueGroup(value='w2')].running == 1
+        assert rows[BreakdownGroupValue(value='w1')].total == 2
+        assert rows[BreakdownGroupValue(value='w1')].completed == 1
+        assert rows[BreakdownGroupValue(value='w1')].failed == 1
+        assert rows[BreakdownGroupValue(value='w1')].retried == 1
+        assert rows[BreakdownGroupValue(value='w2')].running == 1
         assert breakdown.total.total == 3
         assert breakdown.group_count == 2
 
     async def test_empty_scope_yields_no_groups_and_a_zero_total(
-        self, broker: PostgresBroker
+        self, app: Horsies
     ) -> None:
         result = await task_breakdown(
-            broker,
+            app,
             window=_test_window(),
             group_by='worker',
             statuses=[],
@@ -976,7 +979,7 @@ class TestTaskBreakdown:
         assert result.ok_value.total.total == 0
 
     async def test_tasks_no_worker_claimed_are_the_unclaimed_group(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -984,15 +987,15 @@ class TestTaskBreakdown:
             make_task(worker_id=None, status=TaskStatus.CANCELLED),
         )
 
-        result = await _worker_breakdown(broker)
+        result = await _worker_breakdown(app)
 
         assert is_ok(result)
         assert [(row.group, row.total) for row in result.ok_value.groups] == [
-            (BreakdownUnclaimedGroup(), 2),
+            (BreakdownGroupUnclaimed(), 2),
         ]
 
     async def test_a_worker_named_unknown_is_a_group_apart_from_the_unclaimed_tasks(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -1001,19 +1004,19 @@ class TestTaskBreakdown:
             make_task(worker_id=None),
         )
 
-        result = await _worker_breakdown(broker)
+        result = await _worker_breakdown(app)
 
         assert is_ok(result)
         breakdown = result.ok_value
         assert [(row.group, row.total) for row in breakdown.groups] == [
-            (BreakdownValueGroup(value='unknown'), 2),
-            (BreakdownUnclaimedGroup(), 1),
+            (BreakdownGroupValue(value='unknown'), 2),
+            (BreakdownGroupUnclaimed(), 1),
         ]
         assert breakdown.group_count == 2
         assert breakdown.total.total == sum(row.total for row in breakdown.groups)
 
     async def test_with_one_total_a_worker_named_unknown_comes_before_the_unclaimed_group(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -1023,18 +1026,18 @@ class TestTaskBreakdown:
             make_task(worker_id='zz-worker', status=TaskStatus.RUNNING),
         )
 
-        result = await _worker_breakdown(broker)
+        result = await _worker_breakdown(app)
 
         assert is_ok(result)
         assert [row.group for row in result.ok_value.groups] == [
-            BreakdownValueGroup(value='a-worker'),
-            BreakdownValueGroup(value='unknown'),
-            BreakdownUnclaimedGroup(),
-            BreakdownValueGroup(value='zz-worker'),
+            BreakdownGroupValue(value='a-worker'),
+            BreakdownGroupValue(value='unknown'),
+            BreakdownGroupUnclaimed(),
+            BreakdownGroupValue(value='zz-worker'),
         ]
 
     async def test_limit_caps_groups_but_not_total_or_group_count(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -1042,7 +1045,7 @@ class TestTaskBreakdown:
         )
 
         result = await task_breakdown(
-            broker,
+            app,
             window=_test_window(),
             group_by='queue',
             statuses=[],
@@ -1061,7 +1064,7 @@ class TestTaskBreakdown:
         assert result.ok_value.total.total == 5
 
     async def test_groups_by_task_name(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -1071,7 +1074,7 @@ class TestTaskBreakdown:
         )
 
         result = await task_breakdown(
-            broker,
+            app,
             window=_test_window(),
             group_by='task_name',
             statuses=[],
@@ -1087,12 +1090,12 @@ class TestTaskBreakdown:
         assert is_ok(result)
         assert result.ok_value.group_by == 'task_name'
         assert [row.group for row in result.ok_value.groups] == [
-            BreakdownValueGroup(value='alpha_task'),
-            BreakdownValueGroup(value='beta_task'),
+            BreakdownGroupValue(value='alpha_task'),
+            BreakdownGroupValue(value='beta_task'),
         ]
 
     async def test_filters_apply_to_groups_and_total(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -1101,7 +1104,7 @@ class TestTaskBreakdown:
         )
 
         result = await task_breakdown(
-            broker,
+            app,
             window=_test_window(),
             group_by='worker',
             statuses=[],
@@ -1116,7 +1119,7 @@ class TestTaskBreakdown:
 
         assert is_ok(result)
         assert [row.group for row in result.ok_value.groups] == [
-            BreakdownValueGroup(value='w1'),
+            BreakdownGroupValue(value='w1'),
         ]
         assert result.ok_value.total.total == 1
 
@@ -1195,10 +1198,10 @@ def _builtin_category(code: str) -> str:
             raise AssertionError(f'built-in code {code!r} has no category')
 
 
-async def _worker_breakdown(broker: PostgresBroker) -> MonitoringResult[Breakdown]:
+async def _worker_breakdown(app: Horsies) -> MonitoringResult[Breakdown]:
     """The worker breakdown of every task in the test window, with no filter."""
     return await task_breakdown(
-        broker,
+        app,
         window=_test_window(),
         group_by='worker',
         statuses=[],
@@ -1220,7 +1223,7 @@ class TestListTasks:
     """Paginated slice: filters AND across dimensions, allowlisted sorting."""
 
     async def test_total_counts_matches_not_page_size(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(session, *[make_task() for _ in range(5)])
         # The unfiltered total is a planner estimate; sample explicitly so
@@ -1229,7 +1232,7 @@ class TestListTasks:
         await session.commit()
 
         result = await list_tasks(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             task_names=[],
@@ -1238,8 +1241,8 @@ class TestListTasks:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='enqueued_at',
-            sort_dir='desc',
+            sort_field='enqueued_at',
+            sort_direction=SortDirection.DESCENDING,
             page=TaskPage(offset=0, limit=2),
         )
 
@@ -1248,14 +1251,14 @@ class TestListTasks:
         assert result.ok_value.total == 5
 
     async def test_live_and_history_rows_carry_the_task_id_as_uuid(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         live = make_task(status=TaskStatus.PENDING)
         ended = make_task(status=TaskStatus.FAILED, error_code='TASK_EXCEPTION')
         await insert_rows(session, live, ended)
 
         result = await list_tasks(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             task_names=[],
@@ -1264,18 +1267,18 @@ class TestListTasks:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='enqueued_at',
-            sort_dir='desc',
+            sort_field='enqueued_at',
+            sort_direction=SortDirection.DESCENDING,
             page=TaskPage(offset=0, limit=10),
         )
 
         assert is_ok(result)
-        assert {row.id for row in result.ok_value.rows} == {
+        assert {row.task_id for row in result.ok_value.rows} == {
             uuid.UUID(live.id), uuid.UUID(ended.id),
         }
 
     async def test_offset_walks_the_sorted_result(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -1285,7 +1288,7 @@ class TestListTasks:
         )
 
         page = await list_tasks(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             task_names=[],
@@ -1294,8 +1297,8 @@ class TestListTasks:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='enqueued_at',
-            sort_dir='asc',
+            sort_field='enqueued_at',
+            sort_direction=SortDirection.ASCENDING,
             page=TaskPage(offset=1, limit=1),
         )
 
@@ -1303,17 +1306,17 @@ class TestListTasks:
         assert [row.task_name for row in page.ok_value.rows] == ['second']
 
     @pytest.mark.parametrize(
-        'sort_dir,expected',
+        'sort_direction,expected',
         [
-            ('desc', ['third', 'second', 'first']),
-            ('asc', ['first', 'second', 'third']),
+            (SortDirection.DESCENDING, ['third', 'second', 'first']),
+            (SortDirection.ASCENDING, ['first', 'second', 'third']),
         ],
     )
     async def test_sort_direction(
         self,
-        broker: PostgresBroker,
+        app: Horsies,
         session: AsyncSession,
-        sort_dir: Any,
+        sort_direction: SortDirection,
         expected: list[str],
     ) -> None:
         await insert_rows(
@@ -1324,7 +1327,7 @@ class TestListTasks:
         )
 
         result = await list_tasks(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             task_names=[],
@@ -1333,17 +1336,17 @@ class TestListTasks:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='enqueued_at',
-            sort_dir=sort_dir,
+            sort_field='enqueued_at',
+            sort_direction=sort_direction,
             page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
         assert [row.task_name for row in result.ok_value.rows] == expected
 
-    @pytest.mark.parametrize('sort_dir', ['asc', 'desc'])
+    @pytest.mark.parametrize('sort_direction', list(SortDirection))
     async def test_null_sort_keys_come_last_in_both_directions(
-        self, broker: PostgresBroker, session: AsyncSession, sort_dir: Any
+        self, app: Horsies, session: AsyncSession, sort_direction: SortDirection
     ) -> None:
         await insert_rows(
             session,
@@ -1357,7 +1360,7 @@ class TestListTasks:
         )
 
         result = await list_tasks(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             task_names=[],
@@ -1366,8 +1369,8 @@ class TestListTasks:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='completed_at',
-            sort_dir=sort_dir,
+            sort_field='completed_at',
+            sort_direction=sort_direction,
             page=TaskPage(offset=0, limit=50),
         )
 
@@ -1378,14 +1381,14 @@ class TestListTasks:
         ]
 
     @pytest.mark.parametrize(
-        'sort_dir,expected_priorities',
-        [('asc', [50, 50, 50, 100, 100, 100]), ('desc', [100, 100, 100, 50, 50, 50])],
+        'sort_direction,expected_priorities',
+        [(SortDirection.ASCENDING, [50, 50, 50, 100, 100, 100]), (SortDirection.DESCENDING, [100, 100, 100, 50, 50, 50])],
     )
     async def test_rows_of_one_side_and_one_sort_value_come_by_task_id(
         self,
-        broker: PostgresBroker,
+        app: Horsies,
         session: AsyncSession,
-        sort_dir: Any,
+        sort_direction: SortDirection,
         expected_priorities: list[int],
     ) -> None:
         """Each side's rows of one priority come by id, ascending in both directions.
@@ -1405,7 +1408,7 @@ class TestListTasks:
         )
 
         result = await list_tasks(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             task_names=[],
@@ -1414,8 +1417,8 @@ class TestListTasks:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='priority',
-            sort_dir=sort_dir,
+            sort_field='priority',
+            sort_direction=sort_direction,
             page=TaskPage(offset=0, limit=50),
         )
 
@@ -1423,14 +1426,14 @@ class TestListTasks:
         rows = result.ok_value.rows
         assert [row.priority for row in rows] == expected_priorities
         by_priority = {
-            priority: [row.id for row in rows if row.priority == priority]
+            priority: [row.task_id for row in rows if row.priority == priority]
             for priority in (50, 100)
         }
         assert by_priority == {50: sorted(history_ids), 100: sorted(live_ids)}
 
-    @pytest.mark.parametrize('sort_dir', ['asc', 'desc'])
+    @pytest.mark.parametrize('sort_direction', list(SortDirection))
     async def test_a_live_row_comes_before_a_history_row_of_one_sort_value(
-        self, broker: PostgresBroker, session: AsyncSession, sort_dir: Any
+        self, app: Horsies, session: AsyncSession, sort_direction: SortDirection
     ) -> None:
         """On one sort value the side decides before the id: the live row has the higher id."""
         lower_id, higher_id = sorted(uuid.uuid4() for _ in range(2))
@@ -1441,7 +1444,7 @@ class TestListTasks:
         )
 
         result = await list_tasks(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             task_names=[],
@@ -1450,21 +1453,21 @@ class TestListTasks:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='task_name',
-            sort_dir=sort_dir,
+            sort_field='task_name',
+            sort_direction=sort_direction,
             page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
-        assert [(row.id, row.status) for row in result.ok_value.rows] == [
+        assert [(row.task_id, row.status) for row in result.ok_value.rows] == [
             (higher_id, 'PENDING'),
             (lower_id, 'FAILED'),
         ]
 
     async def test_live_rows_sort_as_null_on_derived_spans(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
-        """A running row displays a growing exec_s but has no SQL-side span."""
+        """A running row displays a growing execution_seconds but has no SQL-side span."""
         await insert_rows(
             session,
             make_task(
@@ -1479,7 +1482,7 @@ class TestListTasks:
         )
 
         result = await list_tasks(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             task_names=[],
@@ -1488,8 +1491,8 @@ class TestListTasks:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='exec_s',
-            sort_dir='desc',
+            sort_field='execution_seconds',
+            sort_direction=SortDirection.DESCENDING,
             page=TaskPage(offset=0, limit=50),
         )
 
@@ -1500,7 +1503,7 @@ class TestListTasks:
         ]
 
     async def test_filters_combine_across_dimensions(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -1510,7 +1513,7 @@ class TestListTasks:
         )
 
         result = await list_tasks(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             task_names=['alpha_task'],
@@ -1519,17 +1522,17 @@ class TestListTasks:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='enqueued_at',
-            sort_dir='desc',
+            sort_field='enqueued_at',
+            sort_direction=SortDirection.DESCENDING,
             page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
         assert result.ok_value.total == 1
-        assert result.ok_value.rows[0].queue_name == 'fast'
+        assert result.ok_value.rows[0].queue == 'fast'
 
     async def test_multiple_values_within_a_dimension_are_or_combined(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -1539,7 +1542,7 @@ class TestListTasks:
         )
 
         result = await list_tasks(
-            broker,
+            app,
             window=_test_window(),
             statuses=[TaskStatus.FAILED, TaskStatus.CANCELLED],
             task_names=[],
@@ -1548,8 +1551,8 @@ class TestListTasks:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='enqueued_at',
-            sort_dir='desc',
+            sort_field='enqueued_at',
+            sort_direction=SortDirection.DESCENDING,
             page=TaskPage(offset=0, limit=50),
         )
 
@@ -1558,7 +1561,7 @@ class TestListTasks:
         assert {row.status for row in result.ok_value.rows} == {'FAILED', 'CANCELLED'}
 
     async def test_rows_carry_derived_error_category_and_worker_id(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -1571,7 +1574,7 @@ class TestListTasks:
         )
 
         result = await list_tasks(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             task_names=[],
@@ -1580,8 +1583,8 @@ class TestListTasks:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='enqueued_at',
-            sort_dir='desc',
+            sort_field='enqueued_at',
+            sort_direction=SortDirection.DESCENDING,
             page=TaskPage(offset=0, limit=50),
         )
 
@@ -1592,14 +1595,14 @@ class TestListTasks:
         assert row.worker_hostname == 'host-7'
 
     async def test_empty_error_code_is_reported_as_absent(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session, make_task(status=TaskStatus.FAILED, error_code='')
         )
 
         result = await list_tasks(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             task_names=[],
@@ -1608,8 +1611,8 @@ class TestListTasks:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='enqueued_at',
-            sort_dir='desc',
+            sort_field='enqueued_at',
+            sort_direction=SortDirection.DESCENDING,
             page=TaskPage(offset=0, limit=50),
         )
 
@@ -1618,7 +1621,7 @@ class TestListTasks:
         assert result.ok_value.rows[0].error_category is None
 
     async def test_unfiltered_total_uses_planner_estimate_once_sampled(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         """After ANALYZE, the unfiltered total is the sampled estimate.
 
@@ -1631,7 +1634,7 @@ class TestListTasks:
         await insert_rows(session, *[make_task() for _ in range(3)])
 
         result = await list_tasks(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             task_names=[],
@@ -1640,8 +1643,8 @@ class TestListTasks:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='enqueued_at',
-            sort_dir='desc',
+            sort_field='enqueued_at',
+            sort_direction=SortDirection.DESCENDING,
             page=TaskPage(offset=0, limit=50),
         )
 
@@ -1650,7 +1653,7 @@ class TestListTasks:
         assert len(result.ok_value.rows) == 8
 
     async def test_filtered_total_stays_exact_despite_stale_estimate(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(session, *[make_task() for _ in range(5)])
         await session.execute(text('ANALYZE horsies_tasks'))
@@ -1658,7 +1661,7 @@ class TestListTasks:
         await insert_rows(session, *[make_task() for _ in range(3)])
 
         result = await list_tasks(
-            broker,
+            app,
             window=_test_window(),
             statuses=[TaskStatus.PENDING],
             task_names=[],
@@ -1667,8 +1670,8 @@ class TestListTasks:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='enqueued_at',
-            sort_dir='desc',
+            sort_field='enqueued_at',
+            sort_direction=SortDirection.DESCENDING,
             page=TaskPage(offset=0, limit=50),
         )
 
@@ -1676,7 +1679,7 @@ class TestListTasks:
         assert result.ok_value.total == 8
 
     async def test_unsampled_table_falls_back_to_exact_total(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         """An unsampled table (``reltuples`` = -1) falls back to exact count.
 
@@ -1694,7 +1697,7 @@ class TestListTasks:
         await insert_rows(session, *[make_task() for _ in range(5)])
 
         result = await list_tasks(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             task_names=[],
@@ -1703,8 +1706,8 @@ class TestListTasks:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='enqueued_at',
-            sort_dir='desc',
+            sort_field='enqueued_at',
+            sort_direction=SortDirection.DESCENDING,
             page=TaskPage(offset=0, limit=50),
         )
 
@@ -1748,7 +1751,7 @@ class TestListTasks:
 # error-category filter
 # --------------------------------------------------------------------------- #
 async def rows_by_category(
-    broker: PostgresBroker,
+    app: Horsies,
     categories: list[ErrorCategory],
     *,
     queues: list[str] | None = None,
@@ -1756,7 +1759,7 @@ async def rows_by_category(
 ) -> list[TaskSummary]:
     """List the rows a category selection matches, other dimensions left open."""
     result = await list_tasks(
-        broker,
+        app,
             window=_test_window(),
         statuses=[],
         task_names=[],
@@ -1765,8 +1768,8 @@ async def rows_by_category(
         error_codes=error_codes or [],
         error_categories=categories,
         retried_only=False,
-        sort_by='enqueued_at',
-        sort_dir='desc',
+        sort_field='enqueued_at',
+        sort_direction=SortDirection.DESCENDING,
         page=TaskPage(offset=0, limit=200),
     )
     assert is_ok(result)
@@ -1807,33 +1810,33 @@ class TestErrorCategoryFilter:
     @pytest.mark.parametrize('category', list(_FAMILY_SAMPLES))
     async def test_a_family_selects_exactly_its_own_codes(
         self,
-        broker: PostgresBroker,
+        app: Horsies,
         session: AsyncSession,
         category: ErrorCategory,
     ) -> None:
         await self.seed_one_per_family(session)
 
-        rows = await rows_by_category(broker, [category])
+        rows = await rows_by_category(app, [category])
 
         assert [row.error_code for row in rows] == [_FAMILY_SAMPLES[category]]
 
     async def test_a_user_defined_code_is_custom_and_no_family_claims_it(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
             make_task(status=TaskStatus.FAILED, error_code='PAYMENT_DECLINED'),
         )
 
-        custom = await rows_by_category(broker, [ErrorCategory.CUSTOM])
+        custom = await rows_by_category(app, [ErrorCategory.CUSTOM])
 
         assert [row.error_code for row in custom] == ['PAYMENT_DECLINED']
         assert custom[0].error_category == ErrorCategory.CUSTOM.value
         for family in _BUILT_IN_FAMILIES:
-            assert await rows_by_category(broker, [family]) == []
+            assert await rows_by_category(app, [family]) == []
 
     async def test_absent_and_empty_codes_match_no_category(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         """CUSTOM means "carries a code the library does not define", not "no code"."""
         await insert_rows(
@@ -1843,15 +1846,15 @@ class TestErrorCategoryFilter:
         )
 
         for category in ErrorCategory:
-            assert await rows_by_category(broker, [category]) == []
+            assert await rows_by_category(app, [category]) == []
 
     async def test_categories_are_or_combined(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await self.seed_one_per_family(session)
 
         rows = await rows_by_category(
-            broker, [ErrorCategory.CONTRACT, ErrorCategory.CUSTOM]
+            app, [ErrorCategory.CONTRACT, ErrorCategory.CUSTOM]
         )
 
         assert {row.error_code for row in rows} == {
@@ -1860,7 +1863,7 @@ class TestErrorCategoryFilter:
         }
 
     async def test_the_category_dimension_ands_against_the_others(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -1877,28 +1880,28 @@ class TestErrorCategoryFilter:
         )
 
         scoped = await rows_by_category(
-            broker, [ErrorCategory.OPERATIONAL], queues=['fast']
+            app, [ErrorCategory.OPERATIONAL], queues=['fast']
         )
         # Same column, different dimensions: the code must also be in the family.
         disjoint = await rows_by_category(
-            broker, [ErrorCategory.OPERATIONAL], error_codes=['PAYMENT_DECLINED']
+            app, [ErrorCategory.OPERATIONAL], error_codes=['PAYMENT_DECLINED']
         )
 
         assert [row.error_code for row in scoped] == ['TASK_EXCEPTION']
         assert disjoint == []
 
     async def test_an_empty_selection_filters_nothing(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await self.seed_one_per_family(session)
         await insert_rows(session, make_task(error_code=None))
 
-        rows = await rows_by_category(broker, [])
+        rows = await rows_by_category(app, [])
 
         assert len(rows) == len(_FAMILY_SAMPLES) + 1
 
     async def test_every_built_in_code_is_reachable_from_the_category_it_reports(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         """The label and the filter must stay one mapping.
 
@@ -1917,12 +1920,12 @@ class TestErrorCategoryFilter:
 
         reported = {
             row.error_code: row.error_category
-            for row in await rows_by_category(broker, [])
+            for row in await rows_by_category(app, [])
         }
         assert len(reported) == len(BUILTIN_CODE_REGISTRY)
         for category in ErrorCategory:
             matched = {
-                row.error_code for row in await rows_by_category(broker, [category])
+                row.error_code for row in await rows_by_category(app, [category])
             }
             expected = {
                 code for code, value in reported.items() if value == category.value
@@ -1930,12 +1933,12 @@ class TestErrorCategoryFilter:
             assert matched == expected
 
     async def test_stats_and_breakdown_apply_the_same_expansion(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await self.seed_one_per_family(session)
 
-        stats = await task_stats(
-            broker,
+        stats = await task_status_counts(
+            app,
             window=_test_window(),
             task_names=[],
             queues=[],
@@ -1945,7 +1948,7 @@ class TestErrorCategoryFilter:
             retried_only=False,
         )
         breakdown = await task_breakdown(
-            broker,
+            app,
             window=_test_window(),
             group_by='task_name',
             statuses=[],
@@ -1964,7 +1967,7 @@ class TestErrorCategoryFilter:
         assert breakdown.ok_value.total.total == 1
 
     async def test_facets_narrow_the_code_list_and_keep_every_category_total(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         """The strip offers the categories, so its own totals ignore the selection.
 
@@ -1974,7 +1977,7 @@ class TestErrorCategoryFilter:
         await self.seed_one_per_family(session)
 
         result = await task_facets(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             error_categories=[ErrorCategory.OPERATIONAL],
@@ -1995,10 +1998,10 @@ class TestErrorCategoryFilter:
 class TestGetTaskDetail:
     """Single task plus attempt history; absence is data, not an error."""
 
-    async def test_missing_task_is_not_found(self, broker: PostgresBroker) -> None:
+    async def test_missing_task_is_not_found(self, app: Horsies) -> None:
         task_id = uuid.uuid4()
 
-        result = await get_task_detail(broker, task_id)
+        result = await get_task_detail(app, task_id)
 
         assert is_ok(result)
         # A UUIDv4 has no birth, so the history read cannot classify it.
@@ -2007,11 +2010,11 @@ class TestGetTaskDetail:
         )
 
     async def test_an_absent_v7_task_with_no_detached_leaf_is_within_retained_history(
-        self, broker: PostgresBroker
+        self, app: Horsies
     ) -> None:
         task_id = _uuid7_born_at(datetime.now(UTC) - timedelta(days=2))
 
-        result = await get_task_detail(broker, task_id)
+        result = await get_task_detail(app, task_id)
 
         assert result == Ok(
             TaskDetailNotFound(
@@ -2020,15 +2023,15 @@ class TestGetTaskDetail:
         )
 
     async def test_an_absent_v7_task_born_before_a_detached_leaf_predates_retained_history(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         detached_upper = datetime.now(UTC) - timedelta(days=1)
         before = _uuid7_born_at(detached_upper - timedelta(hours=1))
         after = _uuid7_born_at(detached_upper + timedelta(hours=1))
 
         async with _detached_period_leaf(session, upper_anchor=detached_upper):
-            before_result = await get_task_detail(broker, before)
-            after_result = await get_task_detail(broker, after)
+            before_result = await get_task_detail(app, before)
+            after_result = await get_task_detail(app, after)
 
         assert before_result == Ok(
             TaskDetailNotFound(
@@ -2042,7 +2045,7 @@ class TestGetTaskDetail:
         )
 
     async def test_returns_attempts_in_ascending_order(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         task = make_task(status=TaskStatus.FAILED, error_code='TASK_EXCEPTION')
         await insert_rows(
@@ -2052,7 +2055,7 @@ class TestGetTaskDetail:
             make_attempt(task_id=task.id, attempt=1, will_retry=True),
         )
 
-        result = await get_task_detail(broker, uuid.UUID(task.id))
+        result = await get_task_detail(app, uuid.UUID(task.id))
 
         assert is_ok(result)
         detail = result.ok_value
@@ -2062,13 +2065,13 @@ class TestGetTaskDetail:
         assert detail.error_category == ErrorCategory.OPERATIONAL.value
 
     async def test_history_row_with_an_unknown_status_is_a_contract_violation(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         task = make_task(status=TaskStatus.FAILED)
         await insert_rows(session, task)
 
         async with stored_history_status(session, task.id, 'NOT_KNOWN'):
-            result = await get_task_detail(broker, uuid.UUID(task.id))
+            result = await get_task_detail(app, uuid.UUID(task.id))
 
         assert is_err(result)
         error = result.err_value
@@ -2077,21 +2080,21 @@ class TestGetTaskDetail:
         assert "'NOT_KNOWN'" in error.message
 
     async def test_standalone_task_has_no_workflow_linkage(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         task = make_task()
         await insert_rows(session, task)
 
-        result = await get_task_detail(broker, uuid.UUID(task.id))
+        result = await get_task_detail(app, uuid.UUID(task.id))
 
         assert is_ok(result)
         detail = result.ok_value
         assert isinstance(detail, TaskDetail)
         assert detail.workflow_id is None
-        assert detail.workflow_task_index is None
+        assert detail.workflow_node_index is None
 
     async def test_workflow_bound_task_links_to_its_run_and_node(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         """The detail panel needs these to link out instead of offering actions."""
         run = make_workflow()
@@ -2103,17 +2106,17 @@ class TestGetTaskDetail:
             make_node(workflow_id=run.id, task_index=3, task_id=task.id),
         )
 
-        result = await get_task_detail(broker, uuid.UUID(task.id))
+        result = await get_task_detail(app, uuid.UUID(task.id))
 
         assert is_ok(result)
         detail = result.ok_value
         assert isinstance(detail, TaskDetail)
         assert detail.is_workflow_task is True
         assert detail.workflow_id == run.id
-        assert detail.workflow_task_index == 3
+        assert detail.workflow_node_index == 3
 
     async def test_a_node_row_pointing_elsewhere_does_not_leak_in(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         """The hop matches on task_id, not on membership in some workflow."""
         run = make_workflow()
@@ -2126,32 +2129,32 @@ class TestGetTaskDetail:
             make_node(workflow_id=run.id, task_index=0, task_id=linked.id),
         )
 
-        result = await get_task_detail(broker, uuid.UUID(unrelated.id))
+        result = await get_task_detail(app, uuid.UUID(unrelated.id))
 
         assert is_ok(result)
         detail = result.ok_value
         assert isinstance(detail, TaskDetail)
         assert detail.workflow_id is None
-        assert detail.workflow_task_index is None
+        assert detail.workflow_node_index is None
 
     async def test_reports_good_until_and_workflow_membership(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         expiry = datetime.now(UTC) + timedelta(hours=2)
         task = make_task(is_workflow_task=True, good_until=expiry)
         await insert_rows(session, task)
 
-        result = await get_task_detail(broker, uuid.UUID(task.id))
+        result = await get_task_detail(app, uuid.UUID(task.id))
 
         assert is_ok(result)
         detail = result.ok_value
         assert isinstance(detail, TaskDetail)
         assert detail.is_workflow_task is True
-        assert detail.leaf.good_until is not None
-        assert abs((detail.leaf.good_until - expiry).total_seconds()) < 1
+        assert detail.task_row.good_until is not None
+        assert abs((detail.task_row.good_until - expiry).total_seconds()) < 1
 
     async def test_empty_attempt_text_is_normalized_to_none(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         task = make_task(status=TaskStatus.FAILED, failed_reason='')
         await insert_rows(
@@ -2166,12 +2169,12 @@ class TestGetTaskDetail:
             ),
         )
 
-        result = await get_task_detail(broker, uuid.UUID(task.id))
+        result = await get_task_detail(app, uuid.UUID(task.id))
 
         assert is_ok(result)
         detail = result.ok_value
         assert isinstance(detail, TaskDetail)
-        assert detail.leaf.failed_reason is None
+        assert detail.task_row.failed_reason is None
         assert detail.attempts[0].error_code is None
         assert detail.attempts[0].error_message is None
         assert detail.attempts[0].failed_reason is None
@@ -2184,9 +2187,9 @@ class TestGetTaskDetail:
 class TestTaskDurations:
     """Which spans count up to now, and which report nothing at all."""
 
-    async def _only_row(self, broker: PostgresBroker) -> tuple[float | None, float | None]:
+    async def _only_row(self, app: Horsies) -> tuple[float | None, float | None]:
         result = await list_tasks(
-            broker,
+            app,
             window=_test_window(),
             statuses=[],
             task_names=[],
@@ -2195,29 +2198,29 @@ class TestTaskDurations:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='enqueued_at',
-            sort_dir='desc',
+            sort_field='enqueued_at',
+            sort_direction=SortDirection.DESCENDING,
             page=TaskPage(offset=0, limit=1),
         )
         assert is_ok(result)
         row = result.ok_value.rows[0]
-        return row.queue_s, row.exec_s
+        return row.queue_seconds, row.execution_seconds
 
     async def test_pending_task_queue_time_counts_up(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session, make_task(status=TaskStatus.PENDING, enqueued_at=ago(30))
         )
 
-        queue_s, exec_s = await self._only_row(broker)
+        queue_seconds, execution_seconds = await self._only_row(app)
 
-        assert queue_s is not None
-        assert 30 <= queue_s <= _LIVE_SPAN_CEILING_S
-        assert exec_s is None
+        assert queue_seconds is not None
+        assert 30 <= queue_seconds <= _LIVE_SPAN_CEILING_S
+        assert execution_seconds is None
 
     async def test_claimed_task_queue_time_counts_up(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -2226,14 +2229,14 @@ class TestTaskDurations:
             ),
         )
 
-        queue_s, exec_s = await self._only_row(broker)
+        queue_seconds, execution_seconds = await self._only_row(app)
 
-        assert queue_s is not None
-        assert 25 <= queue_s <= _LIVE_SPAN_CEILING_S
-        assert exec_s is None
+        assert queue_seconds is not None
+        assert 25 <= queue_seconds <= _LIVE_SPAN_CEILING_S
+        assert execution_seconds is None
 
     async def test_running_task_freezes_queue_time_and_counts_execution(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         now = datetime.now(UTC)
         await insert_rows(
@@ -2245,14 +2248,14 @@ class TestTaskDurations:
             ),
         )
 
-        queue_s, exec_s = await self._only_row(broker)
+        queue_seconds, execution_seconds = await self._only_row(app)
 
-        assert queue_s == 20.0
-        assert exec_s is not None
-        assert 40 <= exec_s <= _LIVE_SPAN_CEILING_S
+        assert queue_seconds == 20.0
+        assert execution_seconds is not None
+        assert 40 <= execution_seconds <= _LIVE_SPAN_CEILING_S
 
     async def test_completed_task_reports_both_closed_spans(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         now = datetime.now(UTC)
         await insert_rows(
@@ -2265,13 +2268,13 @@ class TestTaskDurations:
             ),
         )
 
-        queue_s, exec_s = await self._only_row(broker)
+        queue_seconds, execution_seconds = await self._only_row(app)
 
-        assert queue_s == 30.0
-        assert exec_s == 15.0
+        assert queue_seconds == 30.0
+        assert execution_seconds == 15.0
 
     async def test_failed_task_measures_execution_to_failed_at(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         now = datetime.now(UTC)
         await insert_rows(
@@ -2284,13 +2287,13 @@ class TestTaskDurations:
             ),
         )
 
-        queue_s, exec_s = await self._only_row(broker)
+        queue_seconds, execution_seconds = await self._only_row(app)
 
-        assert queue_s == 20.0
-        assert exec_s == 15.0
+        assert queue_seconds == 20.0
+        assert execution_seconds == 15.0
 
     async def test_cancelled_before_start_reports_the_closed_queue_span(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         """The terminal instant closes the queue span; nothing counts up.
 
@@ -2310,13 +2313,13 @@ class TestTaskDurations:
             ),
         )
 
-        queue_s, exec_s = await self._only_row(broker)
+        queue_seconds, execution_seconds = await self._only_row(app)
 
-        assert queue_s == 300.0
-        assert exec_s is None
+        assert queue_seconds == 300.0
+        assert execution_seconds is None
 
     async def test_expired_before_start_reports_the_closed_queue_span(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         now = datetime.now(UTC)
         await insert_rows(
@@ -2328,13 +2331,13 @@ class TestTaskDurations:
             ),
         )
 
-        queue_s, exec_s = await self._only_row(broker)
+        queue_seconds, execution_seconds = await self._only_row(app)
 
-        assert queue_s == 300.0
-        assert exec_s is None
+        assert queue_seconds == 300.0
+        assert execution_seconds is None
 
-    async def test_detail_leaf_uses_the_same_spans_as_the_list_row(
-        self, broker: PostgresBroker, session: AsyncSession
+    async def test_detail_task_row_uses_the_same_spans_as_the_list_row(
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         task = make_task(
             status=TaskStatus.CANCELLED,
@@ -2343,13 +2346,13 @@ class TestTaskDurations:
         )
         await insert_rows(session, task)
 
-        queue_s, exec_s = await self._only_row(broker)
-        detail = await get_task_detail(broker, uuid.UUID(task.id))
+        queue_seconds, execution_seconds = await self._only_row(app)
+        detail = await get_task_detail(app, uuid.UUID(task.id))
 
         assert is_ok(detail)
         assert isinstance(detail.ok_value, TaskDetail)
-        assert detail.ok_value.leaf.queue_s == queue_s
-        assert detail.ok_value.leaf.exec_s == exec_s
+        assert detail.ok_value.task_row.queue_seconds == queue_seconds
+        assert detail.ok_value.task_row.execution_seconds == execution_seconds
 
 
 # --------------------------------------------------------------------------- #
@@ -2360,7 +2363,7 @@ class TestWorkflowNames:
     """Only root runs feed the name picker."""
 
     async def test_returns_sorted_distinct_root_names(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         root = make_workflow(name='zeta_flow')
         await insert_rows(
@@ -2374,15 +2377,15 @@ class TestWorkflowNames:
             make_workflow(name='child_flow', parent_workflow_id=root.id),
         )
 
-        result = await list_workflow_names(broker)
+        result = await list_workflow_names(app)
 
         assert is_ok(result)
         assert result.ok_value == ['alpha_flow', 'zeta_flow']
 
     async def test_empty_database_yields_empty_list(
-        self, broker: PostgresBroker
+        self, app: Horsies
     ) -> None:
-        result = await list_workflow_names(broker)
+        result = await list_workflow_names(app)
 
         assert is_ok(result)
         assert result.ok_value == []
@@ -2393,7 +2396,7 @@ class TestListWorkflowRuns:
     """Recent root runs, newest first, with exact-match filters."""
 
     async def test_newest_first_and_children_excluded(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         root = make_workflow(name='alpha_flow', created_at=ago(300))
         await insert_rows(
@@ -2408,29 +2411,29 @@ class TestListWorkflowRuns:
             ),
         )
 
-        result = await list_workflow_runs(broker, name=None, status=None, limit=WorkflowRunsLimit(value=30))
+        result = await list_workflow_runs(app, workflow_name=None, status=None, limit=WorkflowRunsLimit(value=30))
 
         assert is_ok(result)
-        assert [run.name for run in result.ok_value] == ['beta_flow', 'alpha_flow']
+        assert [run.workflow_name for run in result.ok_value] == ['beta_flow', 'alpha_flow']
 
     async def test_runs_created_at_one_time_come_by_id_highest_first(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         created = ago(60)
         runs = [make_workflow(name=f'flow_{index}', created_at=created) for index in range(4)]
         await insert_rows(session, *runs)
 
         result = await list_workflow_runs(
-            broker, name=None, status=None, limit=WorkflowRunsLimit(value=30)
+            app, workflow_name=None, status=None, limit=WorkflowRunsLimit(value=30)
         )
 
         assert is_ok(result)
-        assert [run.id for run in result.ok_value] == sorted(
+        assert [run.workflow_id for run in result.ok_value] == sorted(
             (run.id for run in runs), key=uuid.UUID, reverse=True
         )
 
     async def test_name_and_status_filters_combine(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
@@ -2440,7 +2443,7 @@ class TestListWorkflowRuns:
         )
 
         result = await list_workflow_runs(
-            broker, name='alpha_flow', status='FAILED', limit=WorkflowRunsLimit(value=30)
+            app, workflow_name='alpha_flow', status='FAILED', limit=WorkflowRunsLimit(value=30)
         )
 
         assert is_ok(result)
@@ -2448,32 +2451,32 @@ class TestListWorkflowRuns:
         assert result.ok_value[0].status == 'FAILED'
 
     async def test_unknown_status_yields_empty_list(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(session, make_workflow(status='RUNNING'))
 
         result = await list_workflow_runs(
-            broker, name=None, status='NOT_A_STATUS', limit=WorkflowRunsLimit(value=30)
+            app, workflow_name=None, status='NOT_A_STATUS', limit=WorkflowRunsLimit(value=30)
         )
 
         assert is_ok(result)
         assert result.ok_value == []
 
     async def test_limit_truncates_the_result(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
             session,
             *[make_workflow(created_at=ago(index + 1)) for index in range(4)],
         )
 
-        result = await list_workflow_runs(broker, name=None, status=None, limit=WorkflowRunsLimit(value=2))
+        result = await list_workflow_runs(app, workflow_name=None, status=None, limit=WorkflowRunsLimit(value=2))
 
         assert is_ok(result)
         assert len(result.ok_value) == 2
 
     async def test_wall_time_counts_up_until_completion(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         now = datetime.now(UTC)
         await insert_rows(
@@ -2487,10 +2490,10 @@ class TestListWorkflowRuns:
             ),
         )
 
-        result = await list_workflow_runs(broker, name=None, status=None, limit=WorkflowRunsLimit(value=30))
+        result = await list_workflow_runs(app, workflow_name=None, status=None, limit=WorkflowRunsLimit(value=30))
 
         assert is_ok(result)
-        walls = {run.name: run.wall_s for run in result.ok_value}
+        walls = {run.workflow_name: run.wall_seconds for run in result.ok_value}
         assert walls['closed_flow'] == 60.0
         open_wall = walls['open_flow']
         assert open_wall is not None
@@ -2504,14 +2507,14 @@ class TestListWorkflowRuns:
 class TestGetWorkflowRun:
     """The DAG rebuilt from persisted node rows."""
 
-    async def test_missing_run_is_ok_none(self, broker: PostgresBroker) -> None:
-        result = await get_workflow_run(broker, str(uuid.uuid4()))
+    async def test_missing_run_is_ok_none(self, app: Horsies) -> None:
+        result = await get_workflow_run(app, str(uuid.uuid4()))
 
         assert is_ok(result)
         assert result.ok_value is None
 
     async def test_nodes_ordered_and_edges_derived_from_dependencies(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         run = make_workflow()
         await insert_rows(session, run)
@@ -2522,12 +2525,12 @@ class TestGetWorkflowRun:
             make_node(workflow_id=run.id, task_index=1, dependencies=[0]),
         )
 
-        result = await get_workflow_run(broker, run.id)
+        result = await get_workflow_run(app, run.id)
 
         assert is_ok(result)
         detail = result.ok_value
         assert detail is not None
-        assert [node.task_index for node in detail.nodes] == [0, 1, 2]
+        assert [node.node_index for node in detail.nodes] == [0, 1, 2]
         assert {(e.from_index, e.to_index) for e in detail.edges} == {
             (0, 1),
             (0, 2),
@@ -2535,7 +2538,7 @@ class TestGetWorkflowRun:
         }
 
     async def test_dependency_on_a_missing_index_is_dropped(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         run = make_workflow()
         await insert_rows(session, run)
@@ -2544,14 +2547,14 @@ class TestGetWorkflowRun:
             make_node(workflow_id=run.id, task_index=0, dependencies=[99]),
         )
 
-        result = await get_workflow_run(broker, run.id)
+        result = await get_workflow_run(app, run.id)
 
         assert is_ok(result)
         assert result.ok_value is not None
         assert result.ok_value.edges == []
 
     async def test_failed_nodes_are_indexed_in_ascending_order(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         run = make_workflow(status='FAILED')
         await insert_rows(session, run)
@@ -2562,7 +2565,7 @@ class TestGetWorkflowRun:
             make_node(workflow_id=run.id, task_index=2, status='FAILED'),
         )
 
-        result = await get_workflow_run(broker, run.id)
+        result = await get_workflow_run(app, run.id)
 
         assert is_ok(result)
         assert result.ok_value is not None
@@ -2570,7 +2573,7 @@ class TestGetWorkflowRun:
         assert result.ok_value.failed_count == 2
 
     async def test_subworkflow_node_rolls_up_its_child_run(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         run = make_workflow()
         child = make_workflow(name='child_flow', parent_workflow_id=run.id)
@@ -2596,18 +2599,18 @@ class TestGetWorkflowRun:
             make_node(workflow_id=child.id, task_index=1, status='FAILED'),
         )
 
-        result = await get_workflow_run(broker, run.id)
+        result = await get_workflow_run(app, run.id)
 
         assert is_ok(result)
         detail = result.ok_value
         assert detail is not None
-        nodes = {node.task_index: node for node in detail.nodes}
+        nodes = {node.node_index: node for node in detail.nodes}
         assert (nodes[0].child_total, nodes[0].child_failed) == (2, 1)
         assert (nodes[1].child_total, nodes[1].child_failed) == (None, None)
         assert (nodes[2].child_total, nodes[2].child_failed) == (None, None)
 
     async def test_child_run_is_reachable_by_the_same_query(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         run = make_workflow()
         child = make_workflow(name='child_flow', parent_workflow_id=run.id)
@@ -2615,15 +2618,15 @@ class TestGetWorkflowRun:
         await insert_rows(session, child)
         await insert_rows(session, make_node(workflow_id=child.id, task_index=0))
 
-        result = await get_workflow_run(broker, child.id)
+        result = await get_workflow_run(app, child.id)
 
         assert is_ok(result)
         assert result.ok_value is not None
-        assert result.ok_value.run.id == child.id
+        assert result.ok_value.run.workflow_id == child.id
         assert len(result.ok_value.nodes) == 1
 
     async def test_node_execution_time_per_status(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         run = make_workflow()
         await insert_rows(session, run)
@@ -2658,18 +2661,18 @@ class TestGetWorkflowRun:
             ),
         )
 
-        result = await get_workflow_run(broker, run.id)
+        result = await get_workflow_run(app, run.id)
 
         assert is_ok(result)
         detail = result.ok_value
         assert detail is not None
-        nodes = {node.task_index: node for node in detail.nodes}
-        running_exec = nodes[0].exec_s
+        nodes = {node.node_index: node for node in detail.nodes}
+        running_exec = nodes[0].execution_seconds
         assert running_exec is not None
         assert 35 <= running_exec <= _LIVE_SPAN_CEILING_S
-        assert nodes[1].exec_s == 30.0
-        assert nodes[2].exec_s is None
-        assert nodes[3].exec_s is None
+        assert nodes[1].execution_seconds == 30.0
+        assert nodes[2].execution_seconds is None
+        assert nodes[3].execution_seconds is None
 
 
 # --------------------------------------------------------------------------- #
@@ -2680,18 +2683,18 @@ class TestGetWorkflowNode:
     """Node detail: backing task and attempts when there are any."""
 
     async def test_missing_node_is_ok_none(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         run = make_workflow()
         await insert_rows(session, run)
 
-        result = await get_workflow_node(broker, run.id, 0)
+        result = await get_workflow_node(app, run.id, 0)
 
         assert is_ok(result)
         assert result.ok_value is None
 
     async def test_returns_backing_task_and_attempts(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         run = make_workflow()
         task = make_task(status=TaskStatus.FAILED, is_workflow_task=True)
@@ -2711,19 +2714,19 @@ class TestGetWorkflowNode:
             make_attempt(task_id=task.id, attempt=1, will_retry=True),
         )
 
-        result = await get_workflow_node(broker, run.id, 0)
+        result = await get_workflow_node(app, run.id, 0)
 
         assert is_ok(result)
         node = result.ok_value
         assert node is not None
         assert node.node_id == 'step-one'
         assert node.node_error == 'node blew up'
-        assert node.leaf is not None
-        assert node.leaf.task_id == uuid.UUID(task.id)
+        assert node.task_row is not None
+        assert node.task_row.task_id == uuid.UUID(task.id)
         assert [a.attempt for a in node.attempts] == [1, 2]
 
     async def test_backing_history_row_with_an_unknown_status_is_a_contract_violation(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         run = make_workflow()
         task = make_task(status=TaskStatus.FAILED, is_workflow_task=True)
@@ -2741,7 +2744,7 @@ class TestGetWorkflowNode:
         )
 
         async with stored_history_status(session, task.id, 'NOT_KNOWN'):
-            result = await get_workflow_node(broker, run.id, 0)
+            result = await get_workflow_node(app, run.id, 0)
 
         assert is_err(result)
         error = result.err_value
@@ -2750,7 +2753,7 @@ class TestGetWorkflowNode:
         assert "'NOT_KNOWN'" in error.message
 
     async def test_subworkflow_node_has_no_leaf_or_attempts(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         run = make_workflow()
         child = make_workflow(name='child_flow', parent_workflow_id=run.id)
@@ -2766,17 +2769,17 @@ class TestGetWorkflowNode:
             ),
         )
 
-        result = await get_workflow_node(broker, run.id, 0)
+        result = await get_workflow_node(app, run.id, 0)
 
         assert is_ok(result)
         node = result.ok_value
         assert node is not None
-        assert node.is_subworkflow is True
-        assert node.leaf is None
+        assert node.is_sub_workflow is True
+        assert node.task_row is None
         assert node.attempts == []
 
     async def test_vanished_backing_task_still_returns_the_node(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         """Retention can remove the task row while the node row survives."""
         run = make_workflow()
@@ -2791,16 +2794,16 @@ class TestGetWorkflowNode:
             ),
         )
 
-        result = await get_workflow_node(broker, run.id, 0)
+        result = await get_workflow_node(app, run.id, 0)
 
         assert is_ok(result)
         node = result.ok_value
         assert node is not None
-        assert node.leaf is None
+        assert node.task_row is None
         assert node.attempts == []
 
     async def test_empty_node_error_is_normalized_to_none(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         run = make_workflow()
         await insert_rows(session, run)
@@ -2811,14 +2814,14 @@ class TestGetWorkflowNode:
             ),
         )
 
-        result = await get_workflow_node(broker, run.id, 0)
+        result = await get_workflow_node(app, run.id, 0)
 
         assert is_ok(result)
         assert result.ok_value is not None
         assert result.ok_value.node_error is None
 
     async def test_a_node_whose_result_holds_a_value_has_no_error(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         run = make_workflow()
         await insert_rows(session, run)
@@ -2829,14 +2832,14 @@ class TestGetWorkflowNode:
             ),
         )
 
-        result = await get_workflow_node(broker, run.id, 0)
+        result = await get_workflow_node(app, run.id, 0)
 
         assert is_ok(result)
         assert result.ok_value is not None
         assert result.ok_value.node_error is None
 
     async def test_a_node_result_that_does_not_decode_is_a_contract_violation(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         run = make_workflow()
         await insert_rows(session, run)
@@ -2847,7 +2850,7 @@ class TestGetWorkflowNode:
             ),
         )
 
-        result = await get_workflow_node(broker, run.id, 0)
+        result = await get_workflow_node(app, run.id, 0)
 
         assert is_err(result)
         error = result.err_value
@@ -2862,14 +2865,14 @@ class TestGetWorkflowNode:
 class TestListSchedules:
     """Soonest next-run first. Every schedule state has a next run."""
 
-    async def test_empty_state_yields_empty_list(self, broker: PostgresBroker) -> None:
-        result = await list_schedules(broker)
+    async def test_empty_state_yields_empty_list(self, app: Horsies) -> None:
+        result = await list_schedules(app)
 
         assert is_ok(result)
         assert result.ok_value == []
 
     async def test_ordered_by_next_run(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         soon = datetime.now(UTC) + timedelta(minutes=5)
         later = datetime.now(UTC) + timedelta(hours=3)
@@ -2884,7 +2887,7 @@ class TestListSchedules:
             ),
         )
 
-        result = await list_schedules(broker)
+        result = await list_schedules(app)
 
         assert is_ok(result)
         assert [row.schedule_name for row in result.ok_value] == [
@@ -2896,7 +2899,7 @@ class TestListSchedules:
         assert result.ok_value[1].last_task_id is None
 
     async def test_schedules_due_at_one_time_come_by_name(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         due = datetime.now(UTC) + timedelta(minutes=5)
         await insert_rows(
@@ -2907,7 +2910,7 @@ class TestListSchedules:
             ],
         )
 
-        result = await list_schedules(broker)
+        result = await list_schedules(app)
 
         assert is_ok(result)
         assert [row.schedule_name for row in result.ok_value] == [
@@ -2938,14 +2941,14 @@ class TestListBounds:
 
     async def test_schedules_past_the_bound_are_cut_and_the_cut_is_logged(
         self,
-        broker: PostgresBroker,
+        app: Horsies,
         session: AsyncSession,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         await self._seed_schedules(session, LIST_ROW_BOUND + 1)
 
         with caplog.at_level(logging.WARNING, logger='horsies.monitoring'):
-            result = await list_schedules(broker)
+            result = await list_schedules(app)
             await _until_logged(caplog, 'the list is cut at')
 
         assert is_ok(result)
@@ -2959,14 +2962,14 @@ class TestListBounds:
 
     async def test_schedules_at_the_bound_are_complete_and_nothing_is_logged(
         self,
-        broker: PostgresBroker,
+        app: Horsies,
         session: AsyncSession,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         await self._seed_schedules(session, LIST_ROW_BOUND)
 
         with caplog.at_level(logging.WARNING, logger='horsies.monitoring'):
-            result = await list_schedules(broker)
+            result = await list_schedules(app)
             await asyncio.sleep(_FORWARD_WAIT_S)
 
         assert is_ok(result)
@@ -2975,7 +2978,7 @@ class TestListBounds:
 
     async def test_workflow_names_past_the_bound_are_cut_and_the_cut_is_logged(
         self,
-        broker: PostgresBroker,
+        app: Horsies,
         session: AsyncSession,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -2996,7 +2999,7 @@ class TestListBounds:
         await session.commit()
 
         with caplog.at_level(logging.WARNING, logger='horsies.monitoring'):
-            result = await list_workflow_names(broker)
+            result = await list_workflow_names(app)
             await _until_logged(caplog, 'the list is cut at')
 
         assert is_ok(result)
@@ -3009,7 +3012,7 @@ class TestListBounds:
 
     async def test_the_fields_of_the_cut_warning_are_attributes_of_the_record(
         self,
-        broker: PostgresBroker,
+        app: Horsies,
         session: AsyncSession,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -3020,7 +3023,7 @@ class TestListBounds:
         await self._seed_schedules(session, LIST_ROW_BOUND + 1)
 
         with caplog.at_level(logging.WARNING, logger='horsies.monitoring'):
-            result = await list_schedules(broker)
+            result = await list_schedules(app)
             await _until_logged(caplog, 'the list is cut at')
 
         assert is_ok(result)
@@ -3047,7 +3050,7 @@ class TestDatabaseFailure:
     """An unreachable database is an Err, never a raised exception."""
 
     @pytest_asyncio.fixture
-    async def unreachable_broker(self) -> AsyncGenerator[PostgresBroker, None]:
+    async def unreachable_app(self) -> AsyncGenerator[Horsies, None]:
         broken = PostgresBroker(
             PostgresConfig(
                 database_url=SecretStr(
@@ -3056,14 +3059,14 @@ class TestDatabaseFailure:
             ),
             schema_mode=SchemaMode.ASSUME_INITIALIZED,
         )
-        yield broken
+        yield _app_on(broken)
         await broken.close_async()
 
     async def test_list_tasks_reports_a_retryable_db_failure(
-        self, unreachable_broker: PostgresBroker
+        self, unreachable_app: Horsies
     ) -> None:
         result = await list_tasks(
-            unreachable_broker,
+            unreachable_app,
             window=_test_window(),
             statuses=[],
             task_names=[],
@@ -3072,8 +3075,8 @@ class TestDatabaseFailure:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='enqueued_at',
-            sort_dir='desc',
+            sort_field='enqueued_at',
+            sort_direction=SortDirection.DESCENDING,
             page=TaskPage(offset=0, limit=50),
         )
 
@@ -3100,18 +3103,18 @@ class TestDatabaseFailure:
                 pass
 
     async def test_detail_failure_is_not_confused_with_absence(
-        self, unreachable_broker: PostgresBroker
+        self, unreachable_app: Horsies
     ) -> None:
-        result = await get_task_detail(unreachable_broker, uuid.uuid4())
+        result = await get_task_detail(unreachable_app, uuid.uuid4())
 
         assert is_err(result)
         assert isinstance(result.err_value, MonitoringQueryDatabaseOperationFailed)
 
     async def test_aggregate_failure_is_reported(
-        self, unreachable_broker: PostgresBroker
+        self, unreachable_app: Horsies
     ) -> None:
-        result = await task_stats(
-            unreachable_broker,
+        result = await task_status_counts(
+            unreachable_app,
             window=_test_window(),
             task_names=[],
             queues=[],
@@ -3138,10 +3141,18 @@ def proxy(db_url: str) -> Generator[RoundTripProxy]:
     started.stop()
 
 
+def _app_on(broker: PostgresBroker) -> Horsies:
+    """An app whose broker is ``broker``, as the ``app`` fixture builds one:
+    the monitoring reads take the app."""
+    app = Horsies(AppConfig(database=broker.config))
+    app._broker = broker  # pyright: ignore[reportPrivateUsage]
+    return app
+
+
 async def _steady_read_turns(
     proxy: RoundTripProxy,
     db_url: str,
-    read: Callable[[PostgresBroker], Awaitable[object]],
+    read: Callable[[Horsies], Awaitable[object]],
 ) -> tuple[Turn, ...]:
     """The client turns of ``read`` in the steady state of prepared statements,
     on a broker that connects through ``proxy``. Python's read and the read on
@@ -3154,7 +3165,7 @@ async def _steady_read_turns(
         return None
 
     async def act(_case: None) -> None:
-        result = await read(proxied)
+        result = await read(_app_on(proxied))
         assert isinstance(result, Ok), result
 
     try:
@@ -3165,10 +3176,10 @@ async def _steady_read_turns(
 
 
 async def _unfiltered_list(
-    broker: PostgresBroker, window: MonitoringWindow | None = None,
+    app: Horsies, window: MonitoringWindow | None = None,
 ) -> Any:
     return await list_tasks(
-        broker,
+        app,
         window=window if window is not None else _test_window(),
         statuses=[],
         task_names=[],
@@ -3177,8 +3188,8 @@ async def _unfiltered_list(
         error_codes=[],
         error_categories=[],
         retried_only=False,
-        sort_by='enqueued_at',
-        sort_dir='desc',
+        sort_field='enqueued_at',
+        sort_direction=SortDirection.DESCENDING,
         page=TaskPage(offset=0, limit=50),
     )
 
@@ -3213,7 +3224,7 @@ class TestUnfilteredHistoryTotalContract:
 
     async def test_unfiltered_total_estimates_and_never_counts_history(
         self,
-        broker: PostgresBroker,
+        app: Horsies,
         session: AsyncSession,
     ) -> None:
         await insert_rows(
@@ -3230,7 +3241,7 @@ class TestUnfilteredHistoryTotalContract:
         await session.commit()
         window = _test_window()
 
-        result = await _unfiltered_list(broker, window)
+        result = await _unfiltered_list(app, window)
         totals = (
             await session.execute(
                 text(
@@ -3254,7 +3265,7 @@ class TestUnfilteredHistoryTotalContract:
 
     async def test_filtered_total_counts_history_exactly(
         self,
-        broker: PostgresBroker,
+        app: Horsies,
         session: AsyncSession,
     ) -> None:
         await insert_rows(
@@ -3266,7 +3277,7 @@ class TestUnfilteredHistoryTotalContract:
         )
 
         result = await list_tasks(
-            broker,
+            app,
             window=_test_window(),
             statuses=[TaskStatus.COMPLETED],
             task_names=[],
@@ -3275,8 +3286,8 @@ class TestUnfilteredHistoryTotalContract:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='enqueued_at',
-            sort_dir='desc',
+            sort_field='enqueued_at',
+            sort_direction=SortDirection.DESCENDING,
             page=TaskPage(offset=0, limit=50),
         )
 
@@ -3284,7 +3295,7 @@ class TestUnfilteredHistoryTotalContract:
         assert result.ok_value.total == 3
 
     async def test_truncated_history_reports_zero_not_stale_estimate(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         """An emptied history contributes zero, not leftover statistics.
 
@@ -3311,7 +3322,7 @@ class TestUnfilteredHistoryTotalContract:
         await session.execute(text('ANALYZE horsies_tasks'))
         await session.commit()
 
-        result = await _unfiltered_list(broker)
+        result = await _unfiltered_list(app)
 
         assert is_ok(result)
         assert result.ok_value.total == 2

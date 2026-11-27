@@ -24,10 +24,12 @@ from horsies._core import (
     IdMintRefused,
     mint_task_id as core_mint_task_id,
 )
+from horsies.core.app import Horsies
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.periods import RetentionDays, period_class_key
 from horsies.core.brokers.result_types import DatabaseErrorCode, DatabaseOperationFailed
+from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.models.retention import RetentionConfig
@@ -284,7 +286,8 @@ async def test_a_fresh_install_covers_a_cancel_and_an_expiry_with_no_worker(
     move to history) and a pending expiry (the batch move) find the leaf of
     the default class for the current UTC day. Without the pass, the cancel
     failed with 23514: no partition for the row."""
-    broker = PostgresBroker(PostgresConfig(database_url=SecretStr(database_url)))
+    app = Horsies(AppConfig(database=PostgresConfig(database_url=SecretStr(database_url))))
+    broker = app.get_broker()
     try:
         assert await broker.ensure_schema_initialized() == Ok(None)
         connection = await _connect(database_url)
@@ -306,7 +309,7 @@ async def test_a_fresh_install_covers_a_cancel_and_an_expiry_with_no_worker(
                 )
                 assert is_ok(sent), sent
 
-            cancel = await cancel_task(broker, cancelled)
+            cancel = await cancel_task(app, cancelled)
             assert is_ok(cancel), cancel
             assert cancel.ok_value.was_status is TaskStatus.PENDING
 
@@ -337,10 +340,13 @@ async def test_the_install_covers_the_declared_periods_of_the_retention_config(
     """A broker built with its app's retention covers each declared period
     at the install: with no worker ever started, the cancel of a task of the
     class of that period finds its leaf."""
-    broker = PostgresBroker(
-        PostgresConfig(database_url=SecretStr(database_url)),
-        retention=RetentionConfig(retention_periods=(timedelta(days=7),)),
+    app = Horsies(
+        AppConfig(
+            database=PostgresConfig(database_url=SecretStr(database_url)),
+            retention=RetentionConfig(retention_periods=(timedelta(days=7),)),
+        ),
     )
+    broker = app.get_broker()
     try:
         assert await broker.ensure_schema_initialized() == Ok(None)
         task_id = mint_task_id()
@@ -354,7 +360,7 @@ async def test_the_install_covers_the_declared_periods_of_the_retention_config(
         )
         assert is_ok(sent), sent
 
-        cancel = await cancel_task(broker, task_id)
+        cancel = await cancel_task(app, task_id)
         assert is_ok(cancel), cancel
 
         connection = await _connect(database_url)

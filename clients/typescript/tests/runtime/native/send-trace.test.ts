@@ -59,7 +59,7 @@ async function detailTraceId(app: Horsies, taskId: TaskId): Promise<string | nul
 
   assert.ok(read.ok && read.value.kind === "found", `the detail of task ${taskId}`);
 
-  return read.value.taskDetail.leaf.traceId;
+  return read.value.taskDetail.taskRow.traceId;
 }
 
 function tracedApp(): Horsies {

@@ -120,13 +120,13 @@ describe('mutating requests', () => {
     const fetchMock = vi.fn(async () => jsonResponse(200, { outcome: 'cancelled' }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await apiPost('/tasks/abc/cancel', { include_running: true });
+    await apiPost('/tasks/abc/cancel', { policy: 'INCLUDE_RUNNING' });
 
     const init = requestInit(fetchMock);
     const headers = init.headers as Record<string, string>;
     expect(headers['X-Horsies-Intent']).toBe('action');
     expect(init.method).toBe('POST');
-    expect(init.body).toBe(JSON.stringify({ include_running: true }));
+    expect(init.body).toBe(JSON.stringify({ policy: 'INCLUDE_RUNNING' }));
   });
 
   it('does not send the intent header on reads', async () => {

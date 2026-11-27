@@ -379,19 +379,19 @@ pub(super) async fn isolated_body(
 ) -> RawTaskResult {
     let span = body.span();
     let result = match task {
-        RegisteredTask::Async { task, meta } => joined_result(
+        RegisteredTask::Async { task, metadata } => joined_result(
             task_name,
-            meta.module,
+            metadata.module,
             scope
                 .spawn_body(task_name, async_body_in(task, input, span))
                 .await,
         ),
-        RegisteredTask::Blocking { task, meta } => {
+        RegisteredTask::Blocking { task, metadata } => {
             let name = task_name.to_owned();
             let token = scope.fencing_token();
             let cancel = scope.cancel_signal();
             let thread = tokio::task::spawn_blocking(move || {
-                run_blocking_body(&task, &input, &name, meta.module, &span, token, cancel)
+                run_blocking_body(&task, &input, &name, metadata.module, &span, token, cancel)
             });
             match thread.await {
                 Ok(result) => result,
@@ -887,7 +887,7 @@ async fn async_body(
         match prepare(&context.app, &facts.task_name, input) {
             Prepared::Ended(end) => return (SeatEnd::Finished(end), Marker::Write),
             Prepared::Body { task, input } => match *task {
-                RegisteredTask::Async { task, meta } => (task, meta.module, input),
+                RegisteredTask::Async { task, metadata } => (task, metadata.module, input),
                 RegisteredTask::Blocking { .. } => {
                     return (
                         SeatEnd::Finished(kind_mismatch_end(&facts.task_name, "shared async")),
@@ -1603,7 +1603,7 @@ fn thread_body(seat: &ThreadSeat, body: &ThreadBody<'_>) -> (SeatEnd, Marker) {
     let (task, module, input) = match prepare(&context.app, &facts.task_name, input) {
         Prepared::Ended(end) => return end_without_body(context, run_ref, &cancel.gate, end),
         Prepared::Body { task, input } => match *task {
-            RegisteredTask::Blocking { task, meta } => (task, meta.module, input),
+            RegisteredTask::Blocking { task, metadata } => (task, metadata.module, input),
             RegisteredTask::Async { .. } => {
                 let end = kind_mismatch_end(&facts.task_name, "shared thread");
                 return end_without_body(context, run_ref, &cancel.gate, end);

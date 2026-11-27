@@ -76,13 +76,13 @@ class ReturnsReview(WorkflowDefinition[RestockDecision]):
         )
         return app.workflow(
             name=cls.name,
-            tasks=[receive, inspect, settle],
+            nodes=[receive, inspect, settle],
             on_error=OnError.PAUSE,
             output=settle,
         )
 
 
-@app.workflow_builder(
+@app.check_workflow_builder(
     cases=[
         {
             'return_id': 'RET-CHECK',

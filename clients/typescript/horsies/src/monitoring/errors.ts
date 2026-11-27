@@ -43,11 +43,15 @@ export type QueryRefusedField =
   | "workflowName"
   | "nodeIndex";
 
-/** An argument that the call refuses before any connect: no statement ran. `reason` names the rule. */
+/**
+ * An argument that the call refuses before any connect: no statement ran. `reason` names the rule; `message` is
+ * `<field>: <reason>`.
+ */
 export interface QueryRefused {
   readonly kind: "invalidInput";
   readonly code: typeof MonitoringQueryRefusalCode.INVALID_INPUT;
   readonly retryable: false;
+  readonly message: string;
   readonly field: QueryRefusedField;
   readonly reason: string;
 }
@@ -57,12 +61,13 @@ export type HealthInputSubject = "pingWorkers" | "worker" | "workerHistory" | "s
 
 /**
  * An argument of a health read that the read refuses before any connect: no statement ran. `subject` names the read;
- * `cause` names the argument and the rule that it breaks.
+ * `cause` names the argument and the rule that it breaks; `message` is `<subject>: <cause>`.
  */
 export interface HealthInputRefused {
   readonly kind: "invalidInput";
   readonly code: "INVALID_INPUT";
   readonly retryable: false;
+  readonly message: string;
   readonly subject: HealthInputSubject;
   readonly cause: string;
 }
@@ -79,7 +84,10 @@ export type CancelTaskError = TaskActionCoreError | SeatRelayFull;
 /** The error of a database ping. */
 export type PingDatabaseError = DatabaseOperationFailed<"DATABASE_PING_FAILED"> | SeatRelayFull;
 
-/** The error of a worker ping. */
+/**
+ * The error of a worker ping. `LISTENER_DISABLED`: the app's `schemaMode` is `ASSUME_INITIALIZED`, so its handle has no
+ * listener to take the answers; the ping sent nothing.
+ */
 export type PingWorkersError =
   | HealthInputRefused
   | DatabaseListenerDisabled
@@ -104,6 +112,7 @@ export function queryRefused(field: QueryRefusedField, reason: string): QueryRef
     kind: "invalidInput",
     code: MonitoringQueryRefusalCode.INVALID_INPUT,
     retryable: false,
+    message: `${field}: ${reason}`,
     field,
     reason,
   });
@@ -111,7 +120,14 @@ export function queryRefused(field: QueryRefusedField, reason: string): QueryRef
 
 /** The frozen `invalidInput` refusal of the health read `subject`. Pure. */
 export function healthInputRefused(subject: HealthInputSubject, cause: string): HealthInputRefused {
-  return Object.freeze({ kind: "invalidInput", code: "INVALID_INPUT", retryable: false, subject, cause });
+  return Object.freeze({
+    kind: "invalidInput",
+    code: "INVALID_INPUT",
+    retryable: false,
+    message: `${subject}: ${cause}`,
+    subject,
+    cause,
+  });
 }
 
 /** The monitoring query error of a raw record of the core. */

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::core::workflow::status::WorkflowTaskStatus;
+use crate::core::workflow::status::WorkflowNodeStatus;
 
 /// A single success case: workflow succeeds if all required task indices completed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,14 +47,14 @@ impl SuccessPolicy {
     /// Returns `true` if any case with at least one required index has all its required indices in
     /// COMPLETED status. A case with no required index is skipped, as in Python
     /// (`core/workflows/engine.py:3511-3514`); a spec build refuses such a case.
-    /// `task_statuses` maps task index to its current `WorkflowTaskStatus`.
-    pub fn evaluate(&self, task_statuses: &[WorkflowTaskStatus]) -> bool {
+    /// `task_statuses` maps task index to its current `WorkflowNodeStatus`.
+    pub fn evaluate(&self, task_statuses: &[WorkflowNodeStatus]) -> bool {
         self.cases.iter().any(|case| {
             !case.required_indices.is_empty()
                 && case.required_indices.iter().all(|&idx| {
                     task_statuses
                         .get(idx)
-                        .is_some_and(|s| *s == WorkflowTaskStatus::Completed)
+                        .is_some_and(|s| *s == WorkflowNodeStatus::Completed)
                 })
         })
     }
@@ -119,9 +119,9 @@ mod tests {
             optional_indices: None,
         };
         let statuses = vec![
-            WorkflowTaskStatus::Completed, // 0
-            WorkflowTaskStatus::Completed, // 1
-            WorkflowTaskStatus::Failed,    // 2
+            WorkflowNodeStatus::Completed, // 0
+            WorkflowNodeStatus::Completed, // 1
+            WorkflowNodeStatus::Failed,    // 2
         ];
         assert!(policy.evaluate(&statuses));
     }
@@ -140,9 +140,9 @@ mod tests {
             optional_indices: None,
         };
         let statuses = vec![
-            WorkflowTaskStatus::Completed, // 0
-            WorkflowTaskStatus::Failed,    // 1
-            WorkflowTaskStatus::Completed, // 2
+            WorkflowNodeStatus::Completed, // 0
+            WorkflowNodeStatus::Failed,    // 1
+            WorkflowNodeStatus::Completed, // 2
         ];
         assert!(policy.evaluate(&statuses));
     }
@@ -161,9 +161,9 @@ mod tests {
             optional_indices: None,
         };
         let statuses = vec![
-            WorkflowTaskStatus::Failed,    // 0
-            WorkflowTaskStatus::Completed, // 1
-            WorkflowTaskStatus::Completed, // 2
+            WorkflowNodeStatus::Failed,    // 0
+            WorkflowNodeStatus::Completed, // 1
+            WorkflowNodeStatus::Completed, // 2
         ];
         assert!(!policy.evaluate(&statuses));
     }
@@ -174,7 +174,7 @@ mod tests {
             cases: vec![],
             optional_indices: None,
         };
-        let statuses = vec![WorkflowTaskStatus::Completed];
+        let statuses = vec![WorkflowNodeStatus::Completed];
         assert!(!policy.evaluate(&statuses));
     }
 
@@ -186,7 +186,7 @@ mod tests {
             }],
             optional_indices: None,
         };
-        assert!(!empty_only.evaluate(&[WorkflowTaskStatus::Completed]));
+        assert!(!empty_only.evaluate(&[WorkflowNodeStatus::Completed]));
         let empty_then_real = SuccessPolicy {
             cases: vec![
                 SuccessCase {
@@ -198,8 +198,8 @@ mod tests {
             ],
             optional_indices: None,
         };
-        assert!(!empty_then_real.evaluate(&[WorkflowTaskStatus::Failed]));
-        assert!(empty_then_real.evaluate(&[WorkflowTaskStatus::Completed]));
+        assert!(!empty_then_real.evaluate(&[WorkflowNodeStatus::Failed]));
+        assert!(empty_then_real.evaluate(&[WorkflowNodeStatus::Completed]));
     }
 
     #[test]
@@ -210,7 +210,7 @@ mod tests {
             }],
             optional_indices: None,
         };
-        let statuses = vec![WorkflowTaskStatus::Completed];
+        let statuses = vec![WorkflowNodeStatus::Completed];
         assert!(!policy.evaluate(&statuses));
     }
 
@@ -222,7 +222,7 @@ mod tests {
             }],
             optional_indices: None,
         };
-        let statuses = vec![WorkflowTaskStatus::Pending];
+        let statuses = vec![WorkflowNodeStatus::Pending];
         assert!(!policy.evaluate(&statuses));
     }
 
@@ -234,7 +234,7 @@ mod tests {
             }],
             optional_indices: None,
         };
-        let statuses = vec![WorkflowTaskStatus::Skipped];
+        let statuses = vec![WorkflowNodeStatus::Skipped];
         assert!(!policy.evaluate(&statuses));
     }
 }

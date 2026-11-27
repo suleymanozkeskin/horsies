@@ -17,7 +17,7 @@ directly passes `TaskRuntime.for_test(...)`, with an `AttemptNumber` that
 
 `TaskRuntime.cancel_state()` tells the body whether a cancel of its run was
 requested, and why: by an operator (`cancel_task` with
-`include_running=True`), or at the deadline of a `SHARED_ASYNC` or
+`policy=CancelPolicy.INCLUDE_RUNNING`), or at the deadline of a `SHARED_ASYNC` or
 `SHARED_THREAD` run. A `def` body reads it between steps and returns early.
 An `async def` body also gets `asyncio.CancelledError` at its next `await`.
 
@@ -141,8 +141,8 @@ class CancelCause(Enum):
 
     OPERATOR = 'OPERATOR'
     """An operator cancelled the task: `cancel_task` with
-    `include_running=True`. The task is `CANCELLED` already; what the body
-    returns is dropped."""
+    `policy=CancelPolicy.INCLUDE_RUNNING`. The task is `CANCELLED` already;
+    what the body returns is dropped."""
 
 
 @final

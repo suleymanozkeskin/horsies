@@ -386,7 +386,7 @@ impl ChildSpecSource for PythonChildSpecSource {
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::SubWorkflowParams;
+    use horsies_core::SubWorkflowParameters;
 
     use super::*;
 
@@ -397,7 +397,7 @@ mod tests {
             task_index: 2,
             child_depth: 1,
             definition_key: Some("tests.report.v1".to_owned()),
-            params: SubWorkflowParams::Given,
+            params: SubWorkflowParameters::Given,
             node_input: "{\"day\":1}".to_owned(),
             args_from: Some("{\"rows\":0}".to_owned()),
             sources: vec![ChildStartSource {

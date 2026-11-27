@@ -4,7 +4,7 @@
 //! fail.
 
 use horsies::{
-    HorsiesError, SuccessCase, SuccessPolicy, WorkflowDefConfig, WorkflowDefinition,
+    HorsiesError, SuccessCase, SuccessPolicy, WorkflowDefinition, WorkflowDefinitionConfig,
     WorkflowSpecBuilder,
 };
 
@@ -21,7 +21,7 @@ pub struct FlashSale;
 
 impl WorkflowDefinition for FlashSale {
     type Output = CacheWarm;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "flash_sale"
@@ -31,7 +31,7 @@ impl WorkflowDefinition for FlashSale {
         "acme.flash_sale.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let cdn = builder.task(
             publish_cdn::node()
                 .node_id("publish_cdn")
@@ -64,6 +64,8 @@ impl WorkflowDefinition for FlashSale {
         )?;
         let policy = SuccessPolicy::new(vec![SuccessCase::new([cdn]), SuccessCase::new([origin])])
             .optional([search]);
-        Ok(WorkflowDefConfig::new().output(warm).success_policy(policy))
+        Ok(WorkflowDefinitionConfig::new()
+            .output(warm)
+            .success_policy(policy))
     }
 }

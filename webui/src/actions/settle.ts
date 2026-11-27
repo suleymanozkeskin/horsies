@@ -23,7 +23,7 @@ export interface SettleContext {
 }
 
 const taskCancelSettled = (detail: TaskDetail): boolean =>
-  detail.leaf.status === 'CANCELLED';
+  detail.task_row.status === 'CANCELLED';
 
 const workflowCancelSettled = (detail: WorkflowRunDetail): boolean =>
   detail.run.status === 'CANCELLED' &&

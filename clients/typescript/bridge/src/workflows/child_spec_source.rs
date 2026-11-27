@@ -503,7 +503,7 @@ fn subject_of(request: &ChildSpecRequest) -> String {
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::{ChildStartSource, SubWorkflowParams};
+    use horsies_core::{ChildStartSource, SubWorkflowParameters};
     use uuid::Uuid;
 
     use super::*;
@@ -522,7 +522,7 @@ mod tests {
             task_index: 2,
             child_depth: 1,
             definition_key: definition_key.map(str::to_owned),
-            params: SubWorkflowParams::Given,
+            params: SubWorkflowParameters::Given,
             node_input: node_input.to_owned(),
             args_from: None,
             sources: Vec::new(),

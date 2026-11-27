@@ -400,16 +400,16 @@ class TestProducerPaths:
     def test_a_workflow_node_does_not_miss_the_runtime(self) -> None:
         spec: WorkflowSpec[Any] = WorkflowSpec(
             name='runtime_node',
-            tasks=[TaskNode(function=token_task, kwargs={'order_id': 'o-1'})],
+            nodes=[TaskNode(function=token_task, kwargs={'order_id': 'o-1'})],
         )
 
-        assert len(spec.tasks) == 1
+        assert len(spec.nodes) == 1
 
     def test_a_workflow_node_kwarg_that_names_the_runtime_is_refused(self) -> None:
         with pytest.raises(WorkflowValidationError) as refused:
             WorkflowSpec(
                 name='runtime_node_kwarg',
-                tasks=[
+                nodes=[
                     TaskNode(function=token_task, kwargs={'order_id': 'o-1', 'runtime': 1}),
                 ],
             )

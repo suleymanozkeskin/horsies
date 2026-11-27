@@ -46,7 +46,7 @@ def _workflow(
 ) -> Any:
     return app.workflow(
         name=name,
-        tasks=tasks,
+        nodes=tasks,
         definition_key=f'tests.integration.{name}.v1',
         **kwargs,
     )
@@ -74,7 +74,7 @@ class StaticKwargsChildWorkflow(WorkflowDefinition[int]):
         node = TaskNode(function=child_task, kwargs={'value': value})
         return app.workflow(
             name=cls.name,
-            tasks=[node],
+            nodes=[node],
             output=node,
             on_error=OnError.FAIL,
         )
@@ -147,7 +147,7 @@ class TestKwargsOnlyWrites:
         session, broker, app = setup
 
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StaticKwargsChildWorkflow,
+            workflow_definition=StaticKwargsChildWorkflow,
             kwargs={'value': 99},
         )
 

@@ -40,27 +40,27 @@ fn missing_web_feature_exits_one() {
 
 #[cfg(feature = "web")]
 #[test]
-fn auth_none_refuses_non_loopback_before_connecting() {
+fn authorization_none_refuses_non_loopback_before_connecting() {
     let output = run(&[
         "web",
         "--database-url",
         "postgresql://127.0.0.1:1/none",
         "--host",
         "0.0.0.0",
-        "--auth",
+        "--authorization",
         "none",
     ]);
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(
         stderr(&output),
-        "horsies web: error: --auth none is only allowed on a loopback host; \"0.0.0.0\" is reachable from the network. Use --auth trusted-header with a proxy-set header.\n"
+        "horsies web: error: --authorization none is only allowed on a loopback host; \"0.0.0.0\" is reachable from the network. Use --authorization trusted-header with a proxy-set header.\n"
     );
 
     let empty_header = run(&[
         "web",
         "--database-url",
         "postgresql://127.0.0.1:1/none",
-        "--auth",
+        "--authorization",
         "trusted-header",
         "--trusted-header",
         "",
@@ -76,7 +76,7 @@ fn auth_none_refuses_non_loopback_before_connecting() {
         "web",
         "--database-url",
         "postgresql://127.0.0.1:1/none",
-        "--auth",
+        "--authorization",
         "trusted-header",
         "--trusted-header",
         "X Bad Header",
@@ -116,7 +116,7 @@ fn trusted_header_warns_before_database_validation() {
         "web",
         "--database-url",
         "not-a-postgresql-url",
-        "--auth",
+        "--authorization",
         "trusted-header",
         "--trusted-header",
         "X-Operator",
