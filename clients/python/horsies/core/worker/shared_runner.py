@@ -1,7 +1,7 @@
 """The seat program of a shared async child: its start, and one task run.
 
 ``PostgresSeatProgram.start`` runs on the task loop of the child, after the
-sync boot (the app import, the ``on_child_process_start`` hooks and the core
+sync boot (the app import, the ``on_child_start`` hooks and the core
 handle of the child): it runs the ``on_shared_async_child_start`` hooks,
 each bounded. ``PostgresSeats.run`` runs one task as a coroutine on that
 loop: the RUNNING transition and the task body.

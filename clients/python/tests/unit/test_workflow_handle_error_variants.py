@@ -266,7 +266,7 @@ class TestCancelOutcome:
 
     @pytest.mark.asyncio
     async def test_a_core_boundary_error_is_db_operation_failed(self) -> None:
-        not_started = core.CoreStartFailed('the core runtime could not start')
+        not_started = core.RuntimeStartFailed('the core runtime could not start')
         handle = _handle_with_core_answer(raises=not_started)
 
         result = await handle.cancel_async()

@@ -87,7 +87,7 @@ TASK_ID = '0b6f2f0e-6c1d-7f7a-9a52-3d2b1c0e9f82'
 def app() -> Generator[Horsies, None, None]:
     """An app whose broker cannot connect, and whose core handle records each
     call it forwards."""
-    app = Horsies(AppConfig(broker=PostgresConfig(
+    app = Horsies(AppConfig(database=PostgresConfig(
         database_url=SecretStr(UNREACHABLE_URL),
     )))
     broker = app.get_broker()
@@ -168,8 +168,10 @@ APP_CALLS: dict[str, Callable[[Horsies], Any]] = {
     'list_worker_states': lambda app: app.list_worker_states(),
     'get_worker_state': lambda app: app.get_worker_state('worker-1'),
     'get_worker_state_history': lambda app: app.get_worker_state_history('worker-1'),
-    'get_class_coverage': lambda app: app.get_class_coverage(),
-    'get_class_report': lambda app: app.get_class_report(),
+    'get_execution_class_coverage': lambda app: app.get_execution_class_coverage(),
+    'get_execution_class_report': lambda app: app.get_execution_class_report(),
+    'get_stale_tasks': lambda app: app.get_stale_tasks(2),
+    'get_expired_tasks': lambda app: app.get_expired_tasks(),
     'get_raw_result': lambda app: app.get_raw_result(TASK_ID, 0),
 }
 
@@ -260,11 +262,11 @@ def _send_app(broker: MagicMock) -> MagicMock:
     app.config.custom_queues = None
     app.config.exception_mapper = {}
     app.config.default_unhandled_error_code = 'UNHANDLED_EXCEPTION'
-    app.config.resend_on_transient_err = False
+    app.config.resend_on_transient_error = False
     app.config.payload = PayloadPolicy()
     app.are_sends_suppressed.return_value = False
     app.send_telemetry.return_value = NO_SEND_TELEMETRY
-    app.validate_queue_name.return_value = 'default'
+    app.validate_queue.return_value = 'default'
     app.get_broker.return_value = broker
     return app
 
@@ -446,7 +448,7 @@ def test_result_read_mapping_asserts_on_async_context() -> None:
 
 
 def test_live_check_inside_loop_reports_its_own_code(app: Horsies) -> None:
-    errors = _inside_loop(lambda: app.check(live=True))
+    errors = _inside_loop(lambda: app.check(live=True).refusals)
 
     assert [error.code for error in errors] == [HorsiesErrorCode.CHECK_LIVE_ASYNC_CONTEXT]
     assert 'asyncio.to_thread' in (errors[0].help_text or '')
@@ -515,14 +517,24 @@ BLOCKING_SITES: dict[str, BlockingSite] = {
         'worker_state_history',
         DatabaseErrorCode.MONITORING_QUERY_FAILED,
     ),
-    'app.get_class_coverage': BlockingSite(
-        lambda app, broker: app.get_class_coverage(),
-        'class_coverage',
+    'app.get_execution_class_coverage': BlockingSite(
+        lambda app, broker: app.get_execution_class_coverage(),
+        'execution_class_coverage',
         DatabaseErrorCode.MONITORING_QUERY_FAILED,
     ),
-    'app.get_class_report': BlockingSite(
-        lambda app, broker: app.get_class_report(),
-        'class_report',
+    'app.get_execution_class_report': BlockingSite(
+        lambda app, broker: app.get_execution_class_report(),
+        'execution_class_report',
+        DatabaseErrorCode.MONITORING_QUERY_FAILED,
+    ),
+    'app.get_stale_tasks': BlockingSite(
+        lambda app, broker: app.get_stale_tasks(2),
+        'stale_tasks',
+        DatabaseErrorCode.MONITORING_QUERY_FAILED,
+    ),
+    'app.get_expired_tasks': BlockingSite(
+        lambda app, broker: app.get_expired_tasks(),
+        'expired_tasks',
         DatabaseErrorCode.MONITORING_QUERY_FAILED,
     ),
     'WorkflowHandle.status': BlockingSite(

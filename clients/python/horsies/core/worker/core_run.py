@@ -108,7 +108,7 @@ class WorkerLaunch:
     imports: tuple[str, ...]
     sys_path_roots: tuple[str, ...]
     profile: str
-    loglevel: str
+    log_level: str
     metrics_endpoint: wire.MetricsEndpoint
     """The `--metrics-listen` value: an address, or no endpoint."""
 
@@ -157,7 +157,7 @@ def worker_manifest_json(
         sys_path_roots=launch.sys_path_roots,
         parent_sys_path=sys_path,
         parent_argv=child_argv(tuple(sys.argv)),
-        log_level=log_level_of(launch.loglevel),
+        log_level=log_level_of(launch.log_level),
     )
     match launched:
         case Ok(child_launch):

@@ -106,7 +106,7 @@ async fn test_check_live_on_the_test_database_passes() {
 #[serial]
 async fn test_check_live_refuses_a_url_that_names_a_driver_before_any_connect() {
     let suite = Suite::start(BIN, Instance::Default).await;
-    let driver_named_url = with_driver_scheme(&suite.config().broker.database_url);
+    let driver_named_url = with_driver_scheme(&suite.config().database.database_url);
 
     let end = run_check_live(&env_with_database_url(&suite, &driver_named_url)).await;
 
@@ -137,7 +137,7 @@ async fn test_check_live_refuses_a_url_that_names_a_driver_before_any_connect() 
 async fn test_check_live_reports_a_refused_url_setting_as_a_connectivity_failure() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let refused_setting_url =
-        with_query_parameter(&suite.config().broker.database_url, "keepalives=1");
+        with_query_parameter(&suite.config().database.database_url, "keepalives=1");
 
     let end = run_check_live(&env_with_database_url(&suite, &refused_setting_url)).await;
 

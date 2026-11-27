@@ -16,9 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use horsies_core::{
-    BoundedTaskList, BrokerError, BrokerOperationSource, ClassCoverage, ClassReport,
-    DatabaseOperationError, DatabaseOperationFailedCode, DatabasePing, ExpiredTaskRow,
-    PostgresBroker, StaleMinutes, StaleTaskRow, WorkerPong, WorkerStateSnapshot,
+    BoundedTaskList, BrokerError, BrokerOperationSource, DatabaseOperationError,
+    DatabaseOperationFailedCode, DatabasePing, ExecutionClassCoverage, ExecutionClassReport,
+    ExpiredTaskRow, PostgresBroker, StaleMinutes, StaleTaskRow, WorkerPong, WorkerStateSnapshot,
 };
 
 use crate::process_state::refuse_in_a_fork;
@@ -31,6 +31,15 @@ pub enum PingTarget {
     EveryWorker,
     /// The worker with this id; the ping returns as soon as it replies.
     Worker(String),
+}
+
+/// When a ping returns before its wait ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MinResponses {
+    /// Wait the full window and list every worker that replied.
+    FullWindow,
+    /// Return as soon as this many distinct workers replied.
+    AtLeast(NonZeroUsize),
 }
 
 /// How many state snapshots of a worker a history read returns.
@@ -57,33 +66,33 @@ impl Horsies {
     }
 
     /// Ping the workers and collect the distinct replies by worker id,
-    /// until `target` replied, `min_responses` workers replied, or
-    /// `timeout` passed. A worker that is in `list_worker_states` and not
-    /// here did not answer.
+    /// until `target` replied, `min_responses` workers replied, or `wait`
+    /// passed. A worker that is in `list_worker_states` and not here did not
+    /// answer.
     ///
-    /// Errors: `INVALID_INPUT` for a zero `timeout`, with no statement;
+    /// Errors: `INVALID_INPUT` for a zero `wait`, with no statement;
     /// `LISTENER_DISABLED` for an app whose schema mode has no listener;
     /// `WORKER_PING_FAILED`.
     pub async fn ping_workers(
         &self,
         target: PingTarget,
-        timeout: Duration,
-        min_responses: Option<NonZeroUsize>,
+        wait: Duration,
+        min_responses: MinResponses,
     ) -> Result<Vec<WorkerPong>, DatabaseOperationError> {
         let target_worker_id = match &target {
             PingTarget::EveryWorker => None,
             PingTarget::Worker(worker_id) => Some(worker_id.as_str()),
+        };
+        let min_responses = match min_responses {
+            MinResponses::FullWindow => None,
+            MinResponses::AtLeast(count) => Some(count.get()),
         };
         self.health_broker(
             DatabaseOperationFailedCode::WorkerPingFailed,
             "ping_workers",
         )
         .await?
-        .ping_workers(
-            target_worker_id,
-            timeout,
-            min_responses.map(NonZeroUsize::get),
-        )
+        .ping_workers(target_worker_id, wait, min_responses)
         .await
     }
 
@@ -167,20 +176,24 @@ impl Horsies {
     /// can run it (the fleet check).
     ///
     /// Errors: `MONITORING_QUERY_FAILED`.
-    pub async fn get_class_coverage(&self) -> Result<ClassCoverage, DatabaseOperationError> {
-        self.monitoring_broker("get_class_coverage")
+    pub async fn get_execution_class_coverage(
+        &self,
+    ) -> Result<ExecutionClassCoverage, DatabaseOperationError> {
+        self.monitoring_broker("get_execution_class_coverage")
             .await?
-            .get_class_coverage()
+            .get_execution_class_coverage()
             .await
     }
 
     /// The load of each execution class over the live workers.
     ///
     /// Errors: `MONITORING_QUERY_FAILED`.
-    pub async fn get_class_report(&self) -> Result<ClassReport, DatabaseOperationError> {
-        self.monitoring_broker("get_class_report")
+    pub async fn get_execution_class_report(
+        &self,
+    ) -> Result<ExecutionClassReport, DatabaseOperationError> {
+        self.monitoring_broker("get_execution_class_report")
             .await?
-            .get_class_report()
+            .get_execution_class_report()
             .await
     }
 

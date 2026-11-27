@@ -162,7 +162,7 @@ struct StartRequest {
     workflow_id: Uuid,
     sent_at: DateTime<Utc>,
     trace: SendTrace,
-    resend_on_transient_err: bool,
+    resend_on_transient_error: bool,
     source: Arc<dyn ChildSpecSource>,
 }
 
@@ -181,14 +181,14 @@ pub fn start_workflow<'env>(
     workflow_id: String,
     sent_at_micros: BigInt,
     trace: TraceArgument,
-    resend_on_transient_err: bool,
+    resend_on_transient_error: bool,
 ) -> napi::Result<Object<'env>> {
     let start = StartCall {
         spec,
         workflow_id,
         sent_at_micros,
         trace,
-        resend_on_transient_err,
+        resend_on_transient_error,
     };
     start_workflow_on(env, ProducerHandle::of_process(handle), handle, start)
 }
@@ -199,7 +199,7 @@ pub struct StartCall<'call> {
     pub workflow_id: String,
     pub sent_at_micros: BigInt,
     pub trace: TraceArgument,
-    pub resend_on_transient_err: bool,
+    pub resend_on_transient_error: bool,
 }
 
 /// `startWorkflow` through `producer`, with the child spec source of
@@ -215,7 +215,7 @@ pub fn start_workflow_on<'env>(
         workflow_id,
         sent_at_micros,
         trace,
-        resend_on_transient_err,
+        resend_on_transient_error,
     } = call;
     spawn_checked(
         env,
@@ -228,7 +228,7 @@ pub fn start_workflow_on<'env>(
                 workflow_id: workflow_id_of(&workflow_id)?,
                 sent_at: instant_of_epoch_micros("sentAtMicros", &sent_at_micros)?,
                 trace: trace.send_trace()?,
-                resend_on_transient_err,
+                resend_on_transient_error,
                 source: registered_source(handle, "startWorkflow")?,
             })
         },
@@ -259,7 +259,7 @@ async fn start_operation(producer: ProducerHandle, request: StartRequest) -> Wor
         workflow_id,
         sent_at,
         trace,
-        resend_on_transient_err,
+        resend_on_transient_error,
         source,
     } = request;
     let workflow_name = spec.name();
@@ -279,7 +279,7 @@ async fn start_operation(producer: ProducerHandle, request: StartRequest) -> Wor
             workflow_id,
             sent_at,
             trace,
-            resend_on_transient_err,
+            resend_on_transient_error,
             &*source,
         )
         .await;

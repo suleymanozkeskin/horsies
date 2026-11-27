@@ -56,7 +56,7 @@ export function storedOptionsText(options: NativeTaskOptions): string {
 /**
  * The prepared facts of one send: a new task id, the options text, the retention and the priority, or the send error
  * of a refused fact. Mints a task id and starts the log forwarder of the process, so the payload warning reaches the
- * log sink; starts no core. Throws `CoreStopped` in a process whose core stopped, and `CoreStartFailed` when the log
+ * log sink; starts no core. Throws `CoreStopped` in a process whose core stopped, and `RuntimeStartFailed` when the log
  * forwarder cannot start.
  */
 export function prepareSendFacts(rules: NativeSendRules, facts: SendFacts, options: NativeTaskOptions): PreparedSend {
@@ -93,7 +93,7 @@ export function processRole(): ProcessRoleName {
 
 /**
  * The core's task error of a body, or the refusal of its custom code. Starts the log forwarder of the process, so the
- * record of data that the codec cannot write reaches the log sink; starts no core. Throws `CoreStartFailed` when the
+ * record of data that the codec cannot write reaches the log sink; starts no core. Throws `RuntimeStartFailed` when the
  * log forwarder cannot start.
  */
 export function buildTaskError(parts: TaskErrorParts): TaskErrorBuild {

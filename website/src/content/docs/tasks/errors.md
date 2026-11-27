@@ -85,7 +85,7 @@ Terminal outcome codes for tasks and workflows.
 | `TASK_EXPIRED` | Task's `good_until` deadline passed before execution started (PENDING or CLAIMED) | No |
 | `TASK_TIMEOUT` | Task exceeded its `timeout_ms` execution limit: the worker killed its child process, or, for a `SHARED_ASYNC` task on a shared async child, cancelled it and ended its work. `data` has `task_id` and `timeout_ms`; a `SHARED_ASYNC` task on a shared async child also has `cancel_end`: `RETURNED_AFTER_SIGNAL`, `DROPPED_AFTER_GRACE` or `KILLED_WITH_CHILD` ([The Timeout](/horsies/workers/shared-async-tasks/#the-timeout)) | Yes, if in `auto_retry_for` |
 | `WORKFLOW_PAUSED` | Workflow was paused | No |
-| `WORKFLOW_EXPIRED` | A paused workflow passed `paused_workflow_auto_cancel_after` and expired; `data` holds the policy name and the age | No |
+| `WORKFLOW_EXPIRED` | A paused workflow passed `paused_workflow_cancel_after` and expired; `data` holds the policy name and the age | No |
 | `WORKFLOW_FAILED` | Workflow failed | No |
 | `WORKFLOW_CANCELLED` | Workflow was cancelled | No |
 | `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped | No |
@@ -179,10 +179,10 @@ These startup and operator messages usually mean the deployment is using
 transaction-pooled PgBouncer without a direct/session-capable URL.
 
 ```text
-session_database_url required when pgbouncer_transaction_mode=True
+a separate session_database is required when pgbouncer_transaction_mode=True
 ```
 
-Set `PostgresConfig.session_database_url` to the direct/session-capable
+Set `PostgresConfig.session_database` to a separate direct/session-capable
 Postgres URL. Managed providers, such as PlanetScale Postgres, may expose
 separate pooled and direct connection strings; verify the current ports and URLs
 in your provider dashboard or docs.
@@ -202,12 +202,12 @@ Producer-side result waits can poll when notifications are unavailable. This is
 not the supported worker dispatch mode.
 
 ```text
-session_database_url appears to be transaction-pooled; LISTEN notification was not delivered
+the session_database URL appears to be transaction-pooled; LISTEN notification was not delivered
 ```
 
 `horsies check --live` accepted the session URL at the SQL level, but a
 `LISTEN` + `NOTIFY` behavior probe did not deliver a notification. Use a direct
-Postgres URL or a session-pooling URL for `session_database_url`.
+Postgres URL or a session-pooling URL for the separate `session_database`.
 
 See [PgBouncer Troubleshooting](/horsies/troubleshooting/pgbouncer/) for the full
 deployment pattern.
@@ -301,9 +301,9 @@ deployment pattern.
 | HRS-210 | `MODULE_IMPORT_ERROR` | Module raised an error during import |
 | HRS-211 | `DATABASE_INIT_FAILED` | Broker failed to initialize |
 | HRS-212 | `CHECK_RESERVED_CODE_COLLISION` | User config value collides with a reserved built-in error code, or a task declares a built-in code or a reserved name as its own error code |
-| HRS-213 | `CONFIG_INVALID_DATABASE_POOL` | A `PostgresConfig` pool value outside its range: `pool_size` outside 1 to 10,000, `max_overflow` outside 0 to 10,000, `pool_timeout` outside 0 to 4,294,967,295 s, or `pool_recycle` that is not -1 or 0 to 4,294,967,295 s. `pool_size=0` and `max_overflow=-1` (no limit in SQLAlchemy) are refused, and the help says to give a number. Also a `PostgresConfig` that sets a pool field removed in 0.7.0: `worker_pool_size` or `worker_max_overflow` (the help names `WorkerProfile.pool`), or `worker_child_pool_min_size`, `worker_child_pool_max_size` or `worker_child_pool_check` (the help names the `pool` field of each child kind that replaces it) |
-| HRS-214 | `CONFIG_INVALID_CHILD_HOOK` | `on_child_process_start` or `on_handler_child_start` received a value that is not callable, or an async function |
-| HRS-215 | `CONFIG_INVALID_KEEPALIVE` | A TCP value outside its range: while `tcp_keepalives` is on, `tcp_keepalives_idle` or `tcp_keepalives_interval` outside 1 to 32,767 s, or `tcp_keepalives_count` outside 1 to 127; or a `tcp_user_timeout_ms` that is not 0 or 1 to 2,147,483,647 ms. The first value out of range is refused, in field order |
+| HRS-213 | `CONFIG_INVALID_DATABASE_POOL` | A `PostgresConfig` pool value outside its range: `pool_size` outside 1 to 10,000, `max_overflow` outside 0 to 10,000, `pool_timeout_seconds` outside 0 to 4,294,967,295 s, or the `seconds` of `pool_recycle` outside 0 to 4,294,967,295 s. `pool_size=0` and `max_overflow=-1` (no limit in SQLAlchemy) are refused, and the help says to give a number. Also a `PostgresConfig` that sets a pool field removed in 0.7.0: `worker_pool_size` or `worker_max_overflow` (the help names `WorkerProfile.pool`), or `worker_child_pool_min_size`, `worker_child_pool_max_size` or `worker_child_pool_check` (the help names the `pool` field of each child kind that replaces it) |
+| HRS-214 | `CONFIG_INVALID_CHILD_HOOK` | `on_child_start` or `on_handler_child_start` received a value that is not callable, or an async function |
+| HRS-215 | `CONFIG_INVALID_KEEPALIVE` | A TCP value outside its range: with keepalives on, `tcp_keepalives.idle_seconds` or `tcp_keepalives.interval_seconds` outside 1 to 32,767 s, or `tcp_keepalives.probes` outside 1 to 127; or `tcp_user_timeout.milliseconds` outside 1 to 2,147,483,647 ms. The first value out of range is refused, in field order. Rust: `Horsies::new` refuses it |
 | HRS-216 | `CONFIG_INVALID_RETENTION` | Invalid retention configuration |
 | HRS-217 | `CHECK_LIVE_ASYNC_CONTEXT` | `check(live=True)` was called on a thread that runs an event loop; the live check did not run |
 | HRS-218 | `CONFIG_INVALID_WORKER_PROFILE` | A worker profile in `AppConfig.worker_profiles` is not valid: a name a `--profile` argument cannot carry, a profile with no children, a claim limit above the capacity of the worker, a child pool whose `min_size` is above its resolved `max_size`, or a `PoolSize` below 3 (`PARENT_POOL_MIN_CONNECTIONS`) for the pool of the worker process (`ParentPool.max_size`). The message names the profile and the field path |

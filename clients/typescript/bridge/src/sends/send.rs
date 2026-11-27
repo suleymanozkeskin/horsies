@@ -27,7 +27,7 @@ use horsies_core::core::config::payload::{enforce_payload_policy, PayloadKind};
 use horsies_core::core::task::send_types::{
     send_error_from_enqueue, send_failure_exception, SendFailureException,
 };
-use horsies_core::handle::CoreHandle as LazyHandle;
+use horsies_core::handle::CoreConnection as LazyHandle;
 use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
     BrokerError, CheckedSend, CustomQueueConfig, EnqueueRetention, FailureCause, PayloadPolicy,
@@ -272,7 +272,7 @@ impl SendRules {
     /// on its queue. Mints a task id; the fork and stop rules apply, as for
     /// every core call. Starts the log bridge of the process (the forwarder thread), so
     /// that the payload warning reaches the log sink; starts no core. A
-    /// forwarder thread that cannot start throws `CORE_START_FAILED`, as the
+    /// forwarder thread that cannot start throws `RUNTIME_START_FAILED`, as the
     /// first core call would.
     #[napi(ts_return_type = "NativeEnvelope<PreparedSend>")]
     #[allow(

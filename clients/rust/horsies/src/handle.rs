@@ -25,7 +25,7 @@ use horsies_core::core::task::result::{
     read_task_result_text, TaskResultText, TaskResultTextRefused,
 };
 use horsies_core::core::task::StoredErrorRefused;
-use horsies_core::handle::CoreHandle;
+use horsies_core::handle::CoreConnection;
 use horsies_core::{
     process_role, wait_inside_task_message, BoundedWait, BrokerError, BuiltInTaskCode,
     DatabaseErrorCode, DatabaseOperationError, JsonText, OperationalCode, OutcomeCode, ProcessRole,
@@ -227,7 +227,7 @@ pub struct TaskInfoParts {
 /// value of a call. Nothing ran.
 pub struct TaskHandle<T, E> {
     task_id: Uuid,
-    reads: Arc<CoreHandle>,
+    reads: Arc<CoreConnection>,
     kept: Arc<OnceLock<Result<TaskOutcome<T, E>, ReadError>>>,
     types: PhantomData<fn() -> (T, E)>,
 }
@@ -235,7 +235,7 @@ pub struct TaskHandle<T, E> {
 impl<T, E> TaskHandle<T, E> {
     /// The handle of `task_id`, read through `reads`: the handle that sent
     /// the task, or the app's handle for a read by id.
-    pub(crate) fn new(task_id: Uuid, reads: Arc<CoreHandle>) -> Self {
+    pub(crate) fn new(task_id: Uuid, reads: Arc<CoreConnection>) -> Self {
         Self {
             task_id,
             reads,
@@ -348,7 +348,7 @@ where
 /// In a fork, without `exec`, of the process that started the core's
 /// process runtime. Nothing ran.
 pub(crate) async fn read_task_info(
-    reads: &CoreHandle,
+    reads: &CoreConnection,
     task_id: Uuid,
     parts: TaskInfoParts,
 ) -> Result<TaskInfo, ReadError> {
@@ -1132,7 +1132,7 @@ mod tests {
     /// is kept.
     #[tokio::test]
     async fn a_get_above_the_bound_is_invalid_input_before_any_statement() {
-        let app = Horsies::new(AppConfig::for_database_url(
+        let app = Horsies::new(AppConfig::from_database_url(
             "postgresql://127.0.0.1:1/nothing",
         ))
         .unwrap();
@@ -1153,7 +1153,7 @@ mod tests {
     /// TypeScript; a later read within the bound returns the kept read.
     #[tokio::test]
     async fn a_kept_read_does_not_hide_a_limit_above_the_bound() {
-        let app = Horsies::new(AppConfig::for_database_url(
+        let app = Horsies::new(AppConfig::from_database_url(
             "postgresql://127.0.0.1:1/nothing",
         ))
         .unwrap();
@@ -1175,7 +1175,7 @@ mod tests {
     /// first, as `TaskHandle::get`.
     #[tokio::test]
     async fn the_reads_by_task_id_above_the_bound_are_invalid_input_before_any_statement() {
-        let app = Horsies::new(AppConfig::for_database_url(
+        let app = Horsies::new(AppConfig::from_database_url(
             "postgresql://127.0.0.1:1/nothing",
         ))
         .unwrap();
@@ -1205,7 +1205,7 @@ mod tests {
     /// connects to the address, which has no database.
     #[tokio::test]
     async fn a_kept_outcome_is_returned_again_and_clones_share_it() {
-        let app = Horsies::new(AppConfig::for_database_url(
+        let app = Horsies::new(AppConfig::from_database_url(
             "postgresql://127.0.0.1:1/nothing",
         ))
         .unwrap();

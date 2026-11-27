@@ -126,7 +126,7 @@ def _attempt_ended_text(attempt: int) -> str:
 def _make_app() -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr('postgresql://user:pass@localhost/db')
             ),
         ),
@@ -652,7 +652,7 @@ def _stats(frames: list[ChildFrame]) -> list[HandlerStatsFrame]:
 
 @pytest.fixture
 def fast_stats(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setattr(handler_child, 'HANDLER_STATS_INTERVAL_S', 0.02)
+    monkeypatch.setattr(handler_child, 'HANDLER_STATISTICS_INTERVAL_SECONDS', 0.02)
     yield
 
 
@@ -726,7 +726,7 @@ class TestServedChild:
         monkeypatch.setattr(handler_child, 'flush_ended_attempt_spans_at_stop', recording_flush)
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr('postgresql://user:pass@localhost/db')
                 ),
                 tracing=OtelTracing(),
@@ -784,7 +784,7 @@ class TestServedChild:
         monkeypatch.setattr(handler_child, 'AppNodeReader', held_reader)
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr('postgresql://user:pass@localhost/db')
                 ),
                 tracing=OtelTracing(),
@@ -1220,7 +1220,7 @@ def test_a_stats_frame_holds_each_handler_once_in_order() -> None:
 def test_a_refused_reader_thread_fails_the_boot(monkeypatch: pytest.MonkeyPatch) -> None:
     app = Horsies(
         config=AppConfig(
-            broker=PostgresConfig(database_url=SecretStr('postgresql://user:pass@localhost/db')),
+            database=PostgresConfig(database_url=SecretStr('postgresql://user:pass@localhost/db')),
             tracing=OtelTracing(),
         ),
     )

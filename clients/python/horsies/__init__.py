@@ -4,10 +4,26 @@ from importlib.metadata import version as _pkg_version
 
 __version__: str = _pkg_version("horsies")
 
-from .core.app import Horsies, ChildProcessStartHook, SharedAsyncChildStartHook
+from .core.app import Horsies, ChildStartHook, SharedAsyncChildStartHook
 from .core.event_handlers import HandlerChildStartHook
 from .core.models.app import AppConfig
-from .core.models.broker import PostgresConfig
+from .core.models.schema_mode import AppRole, SchemaMode
+from .core.models.broker import (
+    PoolRecycle,
+    PoolRecycleAfterSeconds,
+    PoolRecycleNever,
+    PostgresConfig,
+    SessionDatabase,
+    SessionDatabaseSameAsDatabaseUrl,
+    SessionDatabaseSeparate,
+    TcpKeepalives,
+    TcpKeepalivesOff,
+    TcpKeepalivesOn,
+    TcpUserTimeout,
+    TcpUserTimeoutAfter,
+    TcpUserTimeoutSystemDefault,
+)
+from .core.models.cluster_cap import ClusterCap, ClusterCapSetting, NoClusterCap
 from .core.models.tasks import (
     TaskError,
     OperationalCode,
@@ -132,7 +148,7 @@ from .core.models.tracing import (
     OtelTracing,
     WorkerEndedSpans,
 )
-from .core.models.log_format import JsonLogs, TextLogs
+from .core.models.log_format import JsonLogs, LogFormat, TextLogs
 from .core.logging import JsonLogsFormatter, TaskContextFilter
 from .core.task_runtime import (
     AttemptNumber,
@@ -199,7 +215,7 @@ from ._core import (
     CoreContractViolation,
     CorePreconditionFailed,
     CoreServerError,
-    CoreStartFailed,
+    RuntimeStartFailed,
     CoreStopped,
     ForkedAfterCoreStart,
     TooManyPendingCalls,
@@ -226,13 +242,13 @@ from .core.brokers.result_types import (
 )
 from .core.types.error_detail import NoCause
 from .core.models.health import (
-    WORKER_STATE_LIVE_WINDOW_S,
+    WORKER_STATE_LIVE_WINDOW_SECONDS,
     AllSlotsServing,
-    ClassBudget,
-    ClassBudgets,
-    ClassCapacity,
     DatabasePing,
+    DatabaseUnreachable,
     DownSlot,
+    ExecutionClassBudget,
+    ExecutionClassBudgets,
     ProfileNamed,
     ProfileNotRecorded,
     SlotHealth,
@@ -243,8 +259,8 @@ from .core.models.health import (
 )
 from .core.models.class_coverage import (
     BudgetLoad,
-    ClassCoverage,
-    ClassReport,
+    ExecutionClassCoverage,
+    ExecutionClassReport,
     NoneDue,
     OldestWaiting,
     PendingStream,
@@ -254,7 +270,23 @@ from .core.models.class_coverage import (
     StreamUnserved,
     StreamWait,
     StreamWithoutCapacity,
-    WorkerClassLoad,
+    WorkerExecutionClassLoad,
+)
+from .core.models.health_reads import (
+    BoundedTaskList,
+    BoundedTaskListComplete,
+    BoundedTaskListTruncated,
+    ExpiredTaskRow,
+    MinResponses,
+    MinResponsesAtLeast,
+    MinResponsesFullWindow,
+    PingTarget,
+    PingTargetEveryWorker,
+    PingTargetWorker,
+    StaleTaskRow,
+    WorkerHistoryLimit,
+    WorkerHistoryLimitAllRetained,
+    WorkerHistoryLimitNewest,
 )
 from .core.models.boot_failure import (
     ClearableBootCause,
@@ -290,11 +322,30 @@ __all__ = [
     '__version__',
     # Core
     'Horsies',
-    'ChildProcessStartHook',
+    'SchemaMode',
+    'AppRole',
+    'ChildStartHook',
     'SharedAsyncChildStartHook',
     'HandlerChildStartHook',
     'AppConfig',
     'PostgresConfig',
+    # Database connection settings
+    'SessionDatabase',
+    'SessionDatabaseSameAsDatabaseUrl',
+    'SessionDatabaseSeparate',
+    'TcpKeepalives',
+    'TcpKeepalivesOff',
+    'TcpKeepalivesOn',
+    'TcpUserTimeout',
+    'TcpUserTimeoutSystemDefault',
+    'TcpUserTimeoutAfter',
+    'PoolRecycle',
+    'PoolRecycleNever',
+    'PoolRecycleAfterSeconds',
+    # Cluster-wide cap
+    'ClusterCapSetting',
+    'ClusterCap',
+    'NoClusterCap',
     'TaskError',
     # Outcomes and reads
     'TaskOutcome',
@@ -428,6 +479,7 @@ __all__ = [
     'LinkedToSend',
     'WorkerEndedSpans',
     # Log format and task context of log records
+    'LogFormat',
     'TextLogs',
     'JsonLogs',
     'TaskContextFilter',
@@ -507,35 +559,50 @@ __all__ = [
     'CoreStopped',
     'TooManyPendingCalls',
     'CoreCallTimedOut',
-    'CoreStartFailed',
+    'RuntimeStartFailed',
     # Health / liveness API
     'DatabasePing',
+    'DatabaseUnreachable',
     'WorkerPong',
     'WorkerStateSnapshot',
     'SlotHealth',
     'AllSlotsServing',
     'SlotsDown',
     'DownSlot',
-    'ClassCapacity',
-    'ClassBudgets',
-    'ClassBudget',
+    'ExecutionClassBudgets',
+    'ExecutionClassBudget',
     'SnapshotProfile',
     'ProfileNamed',
     'ProfileNotRecorded',
-    'WORKER_STATE_LIVE_WINDOW_S',
-    'ClassCoverage',
+    'WORKER_STATE_LIVE_WINDOW_SECONDS',
+    'ExecutionClassCoverage',
     'StreamCoverage',
     'StreamCoverageState',
     'StreamServed',
     'StreamWithoutCapacity',
     'StreamUnserved',
-    'ClassReport',
+    'ExecutionClassReport',
     'PendingStream',
     'StreamWait',
     'OldestWaiting',
     'NoneDue',
-    'WorkerClassLoad',
+    'WorkerExecutionClassLoad',
     'BudgetLoad',
+    # Health read arguments and task list rows
+    'PingTarget',
+    'PingTargetEveryWorker',
+    'PingTargetWorker',
+    'MinResponses',
+    'MinResponsesFullWindow',
+    'MinResponsesAtLeast',
+    'WorkerHistoryLimit',
+    'WorkerHistoryLimitAllRetained',
+    'WorkerHistoryLimitNewest',
+    'BoundedTaskList',
+    'BoundedTaskListComplete',
+    'BoundedTaskListTruncated',
+    'StaleTaskRow',
+    'ExpiredTaskRow',
     'ClearableBootCause',
     'ResourceShortage',
     'ShortageErrno',

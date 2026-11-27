@@ -14,7 +14,7 @@ scrape_configs:
   - job_name: horsies-worker # horsies worker <app> --profile <name> --metrics-listen HOST:PORT
     static_configs:
       - targets: ['worker-1.internal:9464']
-  - job_name: horsies-fleet # horsies metrics <app> --listen HOST:PORT
+  - job_name: horsies-fleet # horsies metrics <app> --metrics-listen HOST:PORT
     static_configs:
       - targets: ['metrics.internal:9465']
 ```

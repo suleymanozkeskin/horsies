@@ -4,7 +4,10 @@
     "group_count": 2,
     "groups": [
       {
-        "group": { "kind": "value", "value": "emails" },
+        "group": {
+          "kind": "value",
+          "value": "emails"
+        },
         "total": 12,
         "pending": 3,
         "claimed": 1,
@@ -16,7 +19,9 @@
         "retried": 2
       },
       {
-        "group": { "kind": "unclaimed" },
+        "group": {
+          "kind": "unclaimed"
+        },
         "total": 5,
         "pending": 5,
         "claimed": 0,
@@ -51,57 +56,16 @@
     "expired": 1,
     "retried": 2
   },
-  "BudgetLoadInfo": {
+  "BudgetLoad": {
     "budget": "SHARED_ASYNC",
     "capacity": 32,
     "in_flight": 5,
-    "free": 27,
-    "serves": ["SHARED_ASYNC", "SHARED_THREAD"]
-  },
-  "ClassReportInfo": {
-    "checked_at": "2026-11-17T13:59:14.500000Z",
-    "live_window_s": 120,
-    "workers": [
-      {
-        "worker_id": "worker-a",
-        "snapshot_at": "2026-11-17T13:59:10Z",
-        "budgets": [
-          {
-            "budget": "ISOLATED",
-            "capacity": 4,
-            "in_flight": 4,
-            "free": 0,
-            "serves": ["ISOLATED"]
-          }
-        ]
-      }
-    ],
-    "streams": [
-      {
-        "queue_name": "emails",
-        "execution": "ISOLATED",
-        "wait": {
-          "kind": "waiting",
-          "oldest_due_at": "2026-11-17T13:58:44.189583Z",
-          "wait_s": 30.310417
-        },
-        "coverage": { "kind": "served", "workers": 1, "capacity": 4 }
-      },
-      {
-        "queue_name": "reports",
-        "execution": "SHARED_THREAD",
-        "wait": { "kind": "none_due", "next_due_at": "2026-11-17T14:30:00Z" },
-        "coverage": { "kind": "no_capacity", "workers": 2 }
-      },
-      {
-        "queue_name": "archive",
-        "execution": "SHARED_ASYNC",
-        "wait": { "kind": "none_due", "next_due_at": "2026-11-18T00:00:00Z" },
-        "coverage": { "kind": "unserved" }
-      }
+    "serves": [
+      "SHARED_ASYNC",
+      "SHARED_THREAD"
     ]
   },
-  "DownSlotInfo": {
+  "DownSlot": {
     "slot": 3,
     "down_since": "2026-11-17T13:50:00.000250Z",
     "cause": "BOOT_FAILED",
@@ -113,19 +77,101 @@
     "category": "timeout",
     "count": 7
   },
+  "ExecutionClassReport": {
+    "checked_at": "2026-11-17T13:59:14.500000Z",
+    "live_window_seconds": 120.0,
+    "workers": [
+      {
+        "worker_id": "worker-a",
+        "snapshot_at": "2026-11-17T13:59:10Z",
+        "budgets": [
+          {
+            "budget": "ISOLATED",
+            "capacity": 4,
+            "in_flight": 4,
+            "serves": [
+              "ISOLATED"
+            ]
+          }
+        ]
+      }
+    ],
+    "streams": [
+      {
+        "queue": "emails",
+        "execution": "ISOLATED",
+        "wait": {
+          "kind": "due",
+          "oldest_due_at": "2026-11-17T13:58:44.189583Z",
+          "wait_seconds": 30.310417
+        },
+        "coverage": {
+          "kind": "served",
+          "workers": 1,
+          "capacity": 4
+        }
+      },
+      {
+        "queue": "reports",
+        "execution": "SHARED_THREAD",
+        "wait": {
+          "kind": "none_due",
+          "next_due_at": "2026-11-17T14:30:00Z"
+        },
+        "coverage": {
+          "kind": "no_capacity",
+          "workers": 2
+        }
+      },
+      {
+        "queue": "archive",
+        "execution": "SHARED_ASYNC",
+        "wait": {
+          "kind": "none_due",
+          "next_due_at": "2026-11-18T00:00:00Z"
+        },
+        "coverage": {
+          "kind": "unserved"
+        }
+      }
+    ]
+  },
   "FacetValue": {
     "value": "emails",
     "count": 12
   },
   "Facets": {
-    "task_names": [{ "value": "send_email", "count": 10 }],
-    "queues": [{ "value": "emails", "count": 12 }],
+    "task_names": [
+      {
+        "value": "send_email",
+        "count": 10
+      }
+    ],
+    "queues": [
+      {
+        "value": "emails",
+        "count": 12
+      }
+    ],
     "workers": [],
-    "error_codes": [{ "value": "TASK_TIMEOUT", "category": "timeout", "count": 7 }],
-    "error_category_totals": { "timeout": 7, "user": 2, "library": 0 }
+    "error_codes": [
+      {
+        "value": "TASK_TIMEOUT",
+        "category": "timeout",
+        "count": 7
+      }
+    ],
+    "error_category_totals": {
+      "timeout": 7,
+      "user": 2,
+      "library": 0
+    }
   },
   "GroupRow": {
-    "group": { "kind": "value", "value": "worker-a" },
+    "group": {
+      "kind": "value",
+      "value": "worker-a"
+    },
     "total": 4,
     "pending": 0,
     "claimed": 0,
@@ -155,21 +201,32 @@
     "execution": "SHARED_ASYNC"
   },
   "LivenessReport": {
-    "db_reachable": true,
-    "db_latency_ms": 1.25,
+    "database": {
+      "kind": "ping",
+      "latency_ms": 1.25
+    },
     "workers": [
-      { "worker_id": "worker-a", "hostname": "host-1", "pid": 4242, "round_trip_ms": 3.5 }
+      {
+        "worker_id": "worker-a",
+        "hostname": "host-1",
+        "pid": 4242,
+        "round_trip_ms": 3.5
+      }
     ]
   },
-  "PendingStreamInfo": {
-    "queue_name": "emails",
+  "PendingStream": {
+    "queue": "emails",
     "execution": "ISOLATED",
     "wait": {
-      "kind": "waiting",
+      "kind": "due",
       "oldest_due_at": "2026-11-17T13:58:44.189583Z",
-      "wait_s": 30.0
+      "wait_seconds": 30.0
     },
-    "coverage": { "kind": "served", "workers": 1, "capacity": 4 }
+    "coverage": {
+      "kind": "served",
+      "workers": 1,
+      "capacity": 4
+    }
   },
   "ScheduleStateInfo": {
     "schedule_name": "nightly-report",
@@ -193,7 +250,9 @@
     "error_message": null,
     "failed_reason": null,
     "worker_hostname": "host-1",
-    "phases": { "kind": "not_captured" }
+    "phases": {
+      "kind": "not_captured"
+    }
   },
   "TaskDetail": {
     "leaf": {
@@ -241,10 +300,15 @@
             "count": 1,
             "first_claimed_at": "2026-11-22T12:00:02Z"
           },
-          "finalizing": { "kind": "not_marked" },
+          "finalizing": {
+            "kind": "not_marked"
+          },
           "recorded_by": {
             "kind": "worker",
-            "placement": { "kind": "placed", "placed_at": "2026-11-22T12:00:03Z" }
+            "placement": {
+              "kind": "placed",
+              "placed_at": "2026-11-22T12:00:03Z"
+            }
           }
         }
       }
@@ -295,7 +359,7 @@
     "error_category": null,
     "is_workflow_task": false
   },
-  "WorkerClassLoadInfo": {
+  "WorkerExecutionClassLoad": {
     "worker_id": "worker-a",
     "snapshot_at": "2026-11-17T13:59:10Z",
     "budgets": [
@@ -303,8 +367,9 @@
         "budget": "SHARED_THREAD",
         "capacity": 8,
         "in_flight": 0,
-        "free": 8,
-        "serves": ["SHARED_THREAD"]
+        "serves": [
+          "SHARED_THREAD"
+        ]
       }
     ]
   },
@@ -316,7 +381,7 @@
     "memory_usage_mb": null,
     "memory_percent": null
   },
-  "WorkerPingInfo": {
+  "WorkerPong": {
     "worker_id": "worker-a",
     "hostname": "host-1",
     "pid": 4242,
@@ -327,30 +392,40 @@
     "snapshot_at": "2026-11-17T13:59:10Z",
     "hostname": "host-1",
     "pid": 4242,
-    "processes": 4,
-    "profile": { "kind": "not_recorded" },
+    "child_count": 4,
+    "profile": {
+      "kind": "not_recorded"
+    },
     "worker_started_at": "2026-11-17T08:00:00Z",
     "uptime_s": 21550.0,
     "snapshot_age_s": 4.5,
     "stale": false,
     "tasks_running": 2,
     "tasks_claimed": 1,
-    "queues": ["emails", "reports"],
-    "queue_max_concurrency": { "emails": 4, "reports": 2 },
+    "queues": [
+      "emails",
+      "reports"
+    ],
+    "queue_max_concurrency": {
+      "emails": 4,
+      "reports": 2
+    },
     "cluster_wide_cap": null,
     "memory_usage_mb": 512.25,
     "memory_percent": 3.125,
     "cpu_percent": 12.5,
-    "slot_health": "slots_down",
-    "down_slots": [
-      {
-        "slot": 3,
-        "down_since": "2026-11-17T13:50:00Z",
-        "cause": "BOOT_FAILED",
-        "detail": "the child exited with code 173",
-        "failed_boots": 4
-      }
-    ]
+    "slot_health": {
+      "kind": "slots_down",
+      "slots": [
+        {
+          "slot": 3,
+          "down_since": "2026-11-17T13:50:00Z",
+          "cause": "BOOT_FAILED",
+          "detail": "the child exited with code 173",
+          "failed_boots": 4
+        }
+      ]
+    }
   },
   "WorkflowEdge": {
     "from_index": 0,
@@ -369,7 +444,10 @@
     "child_total": null,
     "child_failed": null,
     "allow_failed_dependencies": false,
-    "timing": { "kind": "unavailable", "reason": "RUN_BEFORE_CAPTURE" }
+    "timing": {
+      "kind": "unavailable",
+      "reason": "RUN_BEFORE_CAPTURE"
+    }
   },
   "WorkflowRunDetail": {
     "run": {
@@ -395,10 +473,18 @@
         "child_total": 3,
         "child_failed": 0,
         "allow_failed_dependencies": true,
-        "timing": { "kind": "unavailable", "reason": "TIMING_BOUND_EXCEEDED" }
+        "timing": {
+          "kind": "unavailable",
+          "reason": "TIMING_BOUND_EXCEEDED"
+        }
       }
     ],
-    "edges": [{ "from_index": 0, "to_index": 1 }],
+    "edges": [
+      {
+        "from_index": 0,
+        "to_index": 1
+      }
+    ],
     "failed_count": 0,
     "failed_indices": [],
     "trace_id": null,

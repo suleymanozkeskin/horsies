@@ -25,7 +25,7 @@ spec = app.workflow(
 - When `output` is provided: returns `WorkflowSpec[OutT]` typed to that node's ok-type.
 - When `output=None`: returns `WorkflowSpec[WorkflowTerminalResults]`. `WorkflowTerminalResults` is `dict[str, TaskOutcome[Any, TaskError] | None]`, keyed by `node_id`. On success `handle.get()` returns `Ok(Succeeded(terminal_results))`.
 - Resolves queue/priority for each `TaskNode` using app config. A queue that is not in app config raises HRS-103 (`CUSTOM` mode) or HRS-200 (`DEFAULT` mode).
-- Attaches broker and `resend_on_transient_err` from app config automatically.
+- Attaches broker and `resend_on_transient_error` from app config automatically.
 - `definition_key` is required for top-level workflows built with `app.workflow()` and is used for persistence/runtime lookup.
 
 Best for dynamic workflows where node kwargs depend on runtime inputs.
@@ -289,11 +289,11 @@ The core compares the start command of the start with the stored one:
 - A run started before this release (no stored start command): `Ok(handle)`, no compare.
 - A row that retention deleted: a new workflow starts.
 
-The start command is the workflow name, `definition_key`, `on_error`, output, success policy, and each top-level node: index, `node_id`, task name, kwargs (byte for byte), queue, priority, dependencies, `args_from`, `workflow_context_from`, `allow_failed_dependencies`, join, `min_success`, task options (with `good_until`), retention class, sub-workflow facts. Not in it: `workflow_id`, `sent_at`, trace, `resend_on_transient_err`, pre-built child workflows. A value that changes per call (a `good_until` from now, a timestamp kwarg, a changed spec after a deploy) makes each repeat a conflict. `retry_start` rebuilds the same spec, so a committed first attempt comes back as the existing handle. See `/horsies/guides/start-workflow-once/`.
+The start command is the workflow name, `definition_key`, `on_error`, output, success policy, and each top-level node: index, `node_id`, task name, kwargs (byte for byte), queue, priority, dependencies, `args_from`, `workflow_context_from`, `allow_failed_dependencies`, join, `min_success`, task options (with `good_until`), retention class, sub-workflow facts. Not in it: `workflow_id`, `sent_at`, trace, `resend_on_transient_error`, pre-built child workflows. A value that changes per call (a `good_until` from now, a timestamp kwarg, a changed spec after a deploy) makes each repeat a conflict. `retry_start` rebuilds the same spec, so a committed first attempt comes back as the existing handle. See `/horsies/guides/start-workflow-once/`.
 
 ### Auto-retry
 
-`resend_on_transient_err=True` on `AppConfig` retries transient `ENQUEUE_FAILED` up to 3 times with exponential backoff (200ms–2s cap). This is infra retry, not execution retry.
+`resend_on_transient_error=True` on `AppConfig` retries transient `ENQUEUE_FAILED` up to 3 times with exponential backoff (200ms–2s cap). This is infra retry, not execution retry.
 
 ## WorkflowHandle
 
@@ -449,7 +449,7 @@ PENDING → RUNNING → COMPLETED | FAILED | PAUSED | CANCELLED
 **`PAUSED` is NOT terminal** — workflow can resume.
 
 `CANCELLED` means someone decided; `EXPIRED` means time ran out. A workflow
-PAUSED longer than `AppConfig.retention.paused_workflow_auto_cancel_after`
+PAUSED longer than `AppConfig.retention.paused_workflow_cancel_after`
 (a `timedelta`, default `None` = disabled) is expired by policy, with the
 policy name and age recorded on the run's `error`. An expired child
 propagates to its parent exactly as a cancelled one. **Exhaustive matches
@@ -623,7 +623,7 @@ A recovery repair that raises rolls back, and the next reaper pass runs it again
 - The count is stored in `horsies_workflow_recovery_failures`, so a restart keeps it. The count has no reset, so a later unrelated raise after a repair reaches the limit sooner.
 - At the limit: the node that raised goes `FAILED`, other `PENDING` and `READY` nodes go `SKIPPED`, and a stored first error stays. Live nodes finish, and the workflow goes `FAILED` at the last one. A `success_policy` that nodes met can then end it `COMPLETED`. With no live node it goes `FAILED` at once, with no `success_policy` evaluation.
 - A child at the limit fails its parent node with `SUB_WORKFLOW_FAILED`.
-- A phase-2 row whose progression raises counts toward `phase2_quarantine_after_attempts`. At that bound the row moves to quarantine and the workflow fails the same way.
+- A phase-2 row whose progression raises counts toward `finalization_quarantine_after_attempts`. At that bound the row moves to quarantine and the workflow fails the same way.
 
 ### SKIPPED cascade
 

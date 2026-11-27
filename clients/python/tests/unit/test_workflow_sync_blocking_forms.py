@@ -69,7 +69,7 @@ CORE_REFUSAL: Final = core.TooManyPendingCalls('CoreHandle.call', 65_536)
 APP: Final = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
+        database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
     ),
 )
 
@@ -509,20 +509,20 @@ def test_start_workflow_gives_the_outcome_of_start_workflow_async(answer: str) -
 
     with patch('horsies._core.WorkflowStartRequest') as request_class:
         blocking = start_workflow(
-            _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_err=True,
+            _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_error=True,
         )
         blocking_request = request_class.call_args
         answers.handle.start_workflow_async.assert_not_called()
         awaited = asyncio.run(
             start_workflow_async(
-                _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_err=True,
+                _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_error=True,
             ),
         )
         awaited_request = request_class.call_args
 
     assert outcome_shape(blocking) == outcome_shape(awaited)
     assert blocking_request == awaited_request
-    assert blocking_request.kwargs['resend_on_transient_err'] is True
+    assert blocking_request.kwargs['resend_on_transient_error'] is True
     assert blocking_request.kwargs['workflow_id'] == WORKFLOW_KEY
     answers.handle.start_workflow.assert_called_once_with(request_class.return_value)
 

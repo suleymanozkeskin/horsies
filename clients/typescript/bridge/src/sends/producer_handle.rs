@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use horsies_core::handle::CoreHandle as LazyHandle;
+use horsies_core::handle::CoreConnection as LazyHandle;
 use horsies_core::{child_producer, ChildProducer};
 
 use crate::handle::core_handle::{BrokerConnection, CoreHandle};
@@ -69,7 +69,7 @@ mod tests {
             "pool_pre_ping": true,
             "pool_size": 5,
             "max_overflow": 10,
-            "pool_timeout": 30,
+            "pool_timeout_seconds": 30,
             "pool_recycle": {"kind": "AFTER_SECONDS", "seconds": 1800},
             "echo": false,
             "tcp_keepalives": {

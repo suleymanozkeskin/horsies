@@ -14,17 +14,15 @@ use chrono::{DateTime, NaiveDateTime, TimeDelta, Utc};
 use uuid::Uuid;
 
 use crate::broker::health::ListedWorkerState;
-use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
+use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_SECONDS;
 use crate::monitoring::{
     cancel_task_action, cancel_workflow_action, get_task_detail, get_workflow_node,
     get_workflow_run, list_schedules, list_tasks, list_workflow_names, list_workflow_runs,
     pause_workflow_action, resolve_monitoring_window, resume_workflow_action, task_breakdown,
-    task_facets, task_stats, CancelTaskBody, LivenessReport, TaskAbsenceReason, TaskBreakdownQuery,
-    TaskDetailNotFound, TaskDetailRead, TaskFacetsQuery, TaskFilters, TaskListQuery,
-    TaskStatsQuery, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo, WorkflowRunsQuery,
-};
-use crate::monitoring::{
-    class_report_info, slot_health_info, snapshot_profile_info, ClassReportInfo,
+    task_facets, task_stats, CancelTaskBody, DatabaseLiveness, ExecutionClassReport,
+    LivenessReport, TaskAbsenceReason, TaskBreakdownQuery, TaskDetailNotFound, TaskDetailRead,
+    TaskFacetsQuery, TaskFilters, TaskListQuery, TaskStatsQuery, WorkerHistoryPoint,
+    WorkerStateInfo, WorkflowRunsQuery,
 };
 use crate::monitoring::{ActionBody, ActionOutcome, INTERNAL_SERVER_ERROR_TEXT};
 
@@ -522,29 +520,18 @@ async fn read_worker_ping(
 ) -> Result<Json<LivenessReport>, ApiError> {
     let values = QueryValues::parse(raw.as_deref());
     let params = PingParams::from_values(&values)?;
-    let database = state.broker.ping_database().await;
-    let (db_reachable, db_latency_ms) = match database {
-        Ok(ping) => (true, Some(ping.latency_ms)),
-        Err(_) => (false, None),
+    let database = match state.broker.ping_database().await {
+        Ok(ping) => DatabaseLiveness::Ping {
+            latency_ms: ping.latency_ms,
+        },
+        Err(_) => DatabaseLiveness::Unreachable,
     };
     let workers = state
         .broker
         .ping_workers(None, Duration::from_secs_f64(params.timeout_seconds), None)
         .await
-        .map_err(|error| broker_read_failed("Worker ping", &error))?
-        .into_iter()
-        .map(|pong| WorkerPingInfo {
-            worker_id: pong.worker_id,
-            hostname: pong.hostname,
-            pid: pong.pid,
-            round_trip_ms: pong.round_trip_ms,
-        })
-        .collect();
-    Ok(Json(LivenessReport {
-        db_latency_ms,
-        db_reachable,
-        workers,
-    }))
+        .map_err(|error| broker_read_failed("Worker ping", &error))?;
+    Ok(Json(LivenessReport { database, workers }))
 }
 
 async fn read_schedules(
@@ -562,19 +549,20 @@ async fn read_schedules(
 /// ([`broker_read_failed`]).
 async fn read_class_report(
     State(state): State<WebState>,
-) -> Result<Json<ClassReportInfo>, ApiError> {
-    let report = state
+) -> Result<Json<ExecutionClassReport>, ApiError> {
+    state
         .broker
-        .get_class_report()
+        .get_execution_class_report()
         .await
-        .map_err(|error| broker_read_failed("Class report query", &error))?;
-    Ok(Json(class_report_info(&report)))
+        .map(Json)
+        .map_err(|error| broker_read_failed("Execution class report query", &error))
 }
 
 /// A snapshot older than this is stale: the worker stopped reporting. The
 /// fleet check counts the same workers as live (a snapshot at most this
 /// old).
-const STALE_SNAPSHOT_THRESHOLD: TimeDelta = TimeDelta::seconds(WORKER_STATE_LIVE_WINDOW_S as i64);
+const STALE_SNAPSHOT_THRESHOLD: TimeDelta =
+    TimeDelta::seconds(WORKER_STATE_LIVE_WINDOW_SECONDS as i64);
 
 /// One entry of the worker list.
 ///
@@ -585,8 +573,6 @@ const STALE_SNAPSHOT_THRESHOLD: TimeDelta = TimeDelta::seconds(WORKER_STATE_LIVE
 pub(super) fn worker_state(listed: ListedWorkerState) -> WorkerStateInfo {
     let ListedWorkerState { snapshot, read_at } = listed;
     let age = read_at - snapshot.snapshot_at;
-    let (slot_health, down_slots) = slot_health_info(&snapshot.slot_health);
-    let profile = snapshot_profile_info(&snapshot.profile);
     WorkerStateInfo {
         worker_id: snapshot.worker_id,
         hostname: snapshot.hostname,
@@ -596,18 +582,21 @@ pub(super) fn worker_state(listed: ListedWorkerState) -> WorkerStateInfo {
         stale: age > STALE_SNAPSHOT_THRESHOLD,
         worker_started_at: snapshot.worker_started_at,
         uptime_s: Some(read_at - snapshot.worker_started_at),
-        processes: snapshot.processes,
+        child_count: snapshot.child_count,
         queues: snapshot.queues,
         queue_max_concurrency: snapshot.queue_max_concurrency,
         tasks_running: snapshot.tasks_running,
         tasks_claimed: snapshot.tasks_claimed,
-        cluster_wide_cap: snapshot.cluster_wide_cap,
+        // The web JSON holds the cap as a number, or null for no cap.
+        cluster_wide_cap: snapshot
+            .cluster_wide_cap
+            .claim_parameter()
+            .map(|tasks| i32::try_from(tasks).expect("a stored cap came from an integer column")),
         memory_usage_mb: snapshot.memory_usage_mb,
         memory_percent: snapshot.memory_percent,
         cpu_percent: snapshot.cpu_percent,
-        slot_health,
-        down_slots,
-        profile,
+        slot_health: snapshot.slot_health,
+        profile: snapshot.profile,
     }
 }
 

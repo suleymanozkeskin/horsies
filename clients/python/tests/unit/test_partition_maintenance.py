@@ -25,8 +25,8 @@ class TestConfigBounds:
             ('history_leaf_horizon_days', 15),
             ('heartbeat_leaf_horizon_hours', 1),
             ('heartbeat_leaf_horizon_hours', 49),
-            ('partition_maintenance_interval_s', 59),
-            ('partition_maintenance_interval_s', 3_601),
+            ('partition_maintenance_interval_seconds', 59),
+            ('partition_maintenance_interval_seconds', 3_601),
         ],
     )
     def test_out_of_range_values_are_refused(
@@ -39,7 +39,7 @@ class TestConfigBounds:
         config = RetentionConfig()
         assert config.history_leaf_horizon_days == 3
         assert config.heartbeat_leaf_horizon_hours == 6
-        assert config.partition_maintenance_interval_s == 900
+        assert config.partition_maintenance_interval_seconds == 900
 
     def test_any_in_bounds_interval_refreshes_before_the_horizon_floor(
         self,

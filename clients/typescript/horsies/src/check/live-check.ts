@@ -12,7 +12,7 @@ import { unreachable } from "../native/call/never.ts";
 import { type CheckOutcome, type CheckPassed, checkReport } from "./report.ts";
 
 /** The place of a live check refusal. */
-const BROKER_PATH = "broker";
+const DATABASE_PATH = "database";
 
 /** The outcome of the live steps after a static check that passed with `passed`. Pure. */
 export function liveCheckOutcome(passed: CheckPassed, live: LiveCheckOutcome): CheckOutcome {
@@ -42,8 +42,8 @@ function refusedWith(first: HorsiesError, ...rest: readonly HorsiesError[]): Che
 
 /** A connect or a `SELECT 1` that failed (Python `_check_broker_connectivity`). Pure. */
 function connectivityRefusal(cause: string): HorsiesError {
-  return refusal(HorsiesErrorCode.DATABASE_INVALID_URL, BROKER_PATH, `broker connectivity check failed; ${cause}`, [
-    "check broker.databaseUrl in Horsies.create",
+  return refusal(HorsiesErrorCode.DATABASE_INVALID_URL, DATABASE_PATH, `broker connectivity check failed; ${cause}`, [
+    "check database.databaseUrl in Horsies.create",
   ]);
 }
 
@@ -51,8 +51,8 @@ function connectivityRefusal(cause: string): HorsiesError {
 function listenerRefusal(cause: string): HorsiesError {
   return refusal(
     HorsiesErrorCode.DATABASE_INVALID_URL,
-    BROKER_PATH,
+    DATABASE_PATH,
     `broker listener capability check failed; the session database URL appears to be transaction-pooled: a LISTEN notification was not delivered; ${cause}`,
-    ["use a direct or session-capable PostgreSQL URL for broker.sessionDatabase"],
+    ["use a direct or session-capable PostgreSQL URL for database.connection.sessionDatabaseUrl"],
   );
 }

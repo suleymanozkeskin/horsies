@@ -23,10 +23,10 @@ What a worker, a scheduler and a check do is on the shared pages: [Worker Archit
 ```rust
 use std::process::ExitCode;
 
-use horsies::{AppConfig, Horsies, HorsiesError};
+use horsies::{AppConfig, Horsies, ValidationReport};
 
-fn build_app() -> Result<Horsies, HorsiesError> {
-    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+fn build_app() -> Result<Horsies, ValidationReport> {
+    let config = AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies");
     Horsies::new(config)
 }
 
@@ -57,10 +57,10 @@ A binary with a command line of its own (for example a service that also runs ot
 ```rust
 use std::process::ExitCode;
 
-use horsies::{AppConfig, ChildHostExit, ChildMode, Horsies, HorsiesError, WorkerStart};
+use horsies::{AppConfig, ChildHostExit, ChildMode, Horsies, ValidationReport, WorkerRunOptions};
 
-fn build_app() -> Result<Horsies, HorsiesError> {
-    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+fn build_app() -> Result<Horsies, ValidationReport> {
+    let config = AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies");
     Horsies::new(config)
 }
 
@@ -76,7 +76,7 @@ fn main() -> ExitCode {
         ChildMode::Child(args) => app.serve_child(args),
         ChildMode::BadArguments(error) => {
             eprintln!("child mode cannot start: {error}");
-            ExitCode::from(u8::try_from(ChildHostExit::BadArguments.code()).unwrap_or(u8::MAX))
+            ExitCode::from(u8::try_from(ChildHostExit::BadArguments.exit_code()).unwrap_or(u8::MAX))
         }
         ChildMode::Worker => run_worker(app),
     }
@@ -90,7 +90,7 @@ fn run_worker(app: Horsies) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(app.run_worker(WorkerStart::profile("default"))) {
+    match runtime.block_on(app.run_worker(WorkerRunOptions::profile("default"))) {
         Ok(_stopped) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
@@ -106,10 +106,10 @@ fn run_worker(app: Horsies) -> ExitCode {
 | Command of `run` | Method |
 |------------------|--------|
 | child mode | `horsies::child_mode() -> ChildMode`, then `Horsies::serve_child(self, ChildArgs) -> ExitCode` |
-| `worker --profile <name>` | `Horsies::run_worker(self, WorkerStart) -> Result<WorkerStopped, WorkerRunError>` (async) |
+| `worker --profile <name>` | `Horsies::run_worker(self, WorkerRunOptions) -> Result<WorkerStopped, WorkerRunError>` (async) |
 | `scheduler` | `Horsies::run_scheduler(&self) -> Result<SchedulerStopped, SchedulerRunError>` (async), or `Horsies::scheduler(&self)` for a `PreparedScheduler` with `run()` and `stop_handle()` |
-| `check` | `Horsies::check(&self) -> Result<CheckPassed, CheckReport>` |
-| `check --live` | `Horsies::check_live(&self) -> Result<CheckPassed, CheckReport>` (async) |
+| `check` | `Horsies::check(&self) -> Result<CheckPassed, ValidationReport>` |
+| `check --live` | `Horsies::check_live(&self) -> Result<CheckPassed, ValidationReport>` (async) |
 
 `run_worker` and `run_scheduler` stop at `SIGTERM` or `SIGINT`, as the commands do.
 
@@ -117,10 +117,10 @@ fn run_worker(app: Horsies) -> ExitCode {
 
 | Command | Does | Python command |
 |---------|------|----------------|
-| `<binary> worker --profile <name> [--loglevel LEVEL] [--metrics-listen HOST:PORT]` | Starts a worker of one profile of `AppConfig.worker_profiles` | [`horsies worker`](/horsies/cli/#horsies-worker) |
-| `<binary> scheduler [--loglevel LEVEL]` | Starts the scheduler of `AppConfig.schedule` | [`horsies scheduler`](/horsies/cli/#horsies-scheduler) |
-| `<binary> check [--live] [--loglevel LEVEL]` | Checks the app without starting a service | [`horsies check`](/horsies/cli/#horsies-check) |
-| `<binary> metrics --listen HOST:PORT [--loglevel LEVEL]` | Serves the fleet metrics of the app's database at `GET /metrics` | [`horsies metrics`](/horsies/cli/#horsies-metrics) |
+| `<binary> worker --profile <name> [--log-level LEVEL] [--metrics-listen HOST:PORT]` | Starts a worker of one profile of `AppConfig.worker_profiles` | [`horsies worker`](/horsies/cli/#horsies-worker) |
+| `<binary> scheduler [--log-level LEVEL]` | Starts the scheduler of `AppConfig.schedule` | [`horsies scheduler`](/horsies/cli/#horsies-scheduler) |
+| `<binary> check [--live] [--log-level LEVEL]` | Checks the app without starting a service | [`horsies check`](/horsies/cli/#horsies-check) |
+| `<binary> metrics --metrics-listen HOST:PORT [--log-level LEVEL]` | Serves the fleet metrics of the app's database at `GET /metrics` | [`horsies metrics`](/horsies/cli/#horsies-metrics) |
 
 An unknown command, or no command, is an argument error: exit code 2.
 
@@ -128,17 +128,17 @@ An unknown command, or no command, is an argument error: exit code 2.
 
 ```bash
 ./myapp worker --profile default
-./myapp worker --profile batch --loglevel debug
+./myapp worker --profile batch --log-level debug
 ./myapp worker --profile default --metrics-listen 0.0.0.0:9464
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--profile NAME` | required | The profile of `AppConfig.worker_profiles` that holds the settings of the worker: children, recycling, claim limits, drain timeout |
-| `--loglevel LEVEL` | `INFO` | See [Logs](#logs) |
+| `--log-level LEVEL` | `INFO` | See [Logs](#logs) |
 | `--metrics-listen HOST:PORT` | none | Serve the worker metrics (`GET /metrics`) and the health probes (`GET /livez`, `GET /readyz`) on `HOST:PORT`, or `[IPV6]:PORT`. There is no default: without it the worker serves no endpoint. See [Metrics](/horsies/observability/metrics/) |
 
-- A `--metrics-listen` value that does not parse is an argument error: exit code 2. An address that does not bind does not stop the worker: the endpoint binds again with a backoff. `WorkerStart::with_metrics_endpoint(ListenAddress)` gives the address to `Horsies::run_worker` in a binary that owns its `main`.
+- A `--metrics-listen` value that does not parse is an argument error: exit code 2. An address that does not bind does not stop the worker: the endpoint binds again with a backoff. `WorkerRunOptions::with_metrics_listen(ListenAddress)` gives the address to `Horsies::run_worker` in a binary that owns its `main`.
 
 - A missing or unknown `--profile` exits with code 1, and nothing starts. The refusal lists the defined profile names.
 - The app check runs before the worker starts, without the schedules. A refused check prints its report on stderr and exits with code 1.
@@ -152,7 +152,7 @@ An unknown command, or no command, is an argument error: exit code 2.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--loglevel LEVEL` | `INFO` | See [Logs](#logs) |
+| `--log-level LEVEL` | `INFO` | See [Logs](#logs) |
 
 - The scheduler exits with code 1 when the app config has no `schedule` section, or when `schedule.enabled` is `false`.
 - The app check runs before the scheduler starts, with the schedules. A refused check prints its report on stderr and exits with code 1.
@@ -168,20 +168,20 @@ An unknown command, or no command, is an argument error: exit code 2.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--live` | off | Also connect to the database, and compare each worker profile with the connection limit of the server |
-| `--loglevel LEVEL` | `WARNING` | See [Logs](#logs) |
+| `--log-level LEVEL` | `WARNING` | See [Logs](#logs) |
 
 A check that passes prints its text on stdout and exits with code 0. A refused check prints its report on stderr and exits with code 1. `--live` installs no schema.
 
 ### `metrics`
 
 ```bash
-./myapp metrics --listen 0.0.0.0:9465
+./myapp metrics --metrics-listen 0.0.0.0:9465
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--listen HOST:PORT` | required | The address to serve on: `HOST:PORT`, or `[IPV6]:PORT`. The port is 1 to 65535. There is no default |
-| `--loglevel LEVEL` | `INFO` | See [Logs](#logs) |
+| `--metrics-listen HOST:PORT` | required | The address to serve on: `HOST:PORT`, or `[IPV6]:PORT`. The port is 1 to 65535. There is no default |
+| `--log-level LEVEL` | `INFO` | See [Logs](#logs) |
 
 - The command serves the fleet metrics of the app's database at `GET /metrics`, in the Prometheus text format. What the metrics hold and when the command reads them: [Fleet Collector](/horsies/observability/fleet-collector/).
 - The connection runs no schema step and opens no listener.
@@ -189,33 +189,33 @@ A check that passes prints its text on stdout and exits with code 0. A refused c
 
 ## Logs
 
-`--loglevel` takes `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, in any case.
+`--log-level` takes `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, in any case.
 
-- `run` installs one `tracing` subscriber that writes to stderr at the level of `--loglevel`. When `RUST_LOG` is set to a valid filter, it replaces the level.
+- `run` installs one `tracing` subscriber that writes to stderr at the level of `--log-level`. When `RUST_LOG` is set to a valid filter, it replaces the level.
 - `tracing` has no level above `error`, so `CRITICAL` logs errors.
 - A subscriber that the binary installed before `run` is kept.
-- Each worker child installs the same subscriber, at the `--loglevel` of the worker.
+- Each worker child installs the same subscriber, at the `--log-level` of the worker.
 - The logs have ANSI color on a terminal. `FORCE_COLOR` (set, not empty, not `0`) turns color on, and wins over `NO_COLOR`. `NO_COLOR` (set, any value) turns color off.
-- Each task body runs inside the `tracing` span `run` (target `horsies::attempt`) with the fields `horsies.task.id`, `horsies.task.name` and `horsies.task.attempt`, so each record of the body carries them. The filter of `run` passes this span at every `--loglevel`. The fields of the core's own records are on [Logs](/horsies/observability/logs/).
+- Each task body runs inside the `tracing` span `run` (target `horsies::attempt`) with the fields `horsies.task.id`, `horsies.task.name` and `horsies.task.attempt`, so each record of the body carries them. The filter of `run` passes this span at every `--log-level`. The fields of the core's own records are on [Logs](/horsies/observability/logs/).
 
 ### JSON Lines
 
-`run_with_log_format(app, LogFormat::Json)` runs the app as `run` does, with one JSON object per log record, in the runner and in each worker child:
+`run_with_log_format(app, LogFormat::JsonLogs)` runs the app as `run` does, with one JSON object per log record, in the runner and in each worker child:
 
 ```rust
 use std::process::ExitCode;
 
 use horsies::cli::LogFormat;
-use horsies::{AppConfig, Horsies, HorsiesError};
+use horsies::{AppConfig, Horsies, ValidationReport};
 
-fn build_app() -> Result<Horsies, HorsiesError> {
-    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+fn build_app() -> Result<Horsies, ValidationReport> {
+    let config = AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies");
     Horsies::new(config)
 }
 
 fn main() -> ExitCode {
     match build_app() {
-        Ok(app) => horsies::cli::run_with_log_format(app, LogFormat::Json),
+        Ok(app) => horsies::cli::run_with_log_format(app, LogFormat::JsonLogs),
         Err(refused) => {
             eprintln!("{refused}");
             ExitCode::FAILURE
@@ -233,7 +233,7 @@ fn main() -> ExitCode {
 | `span` | The innermost span of the record, with its name and fields |
 | `spans` | Every span of the record, outermost first |
 
-`run(app)` is `run_with_log_format(app, LogFormat::Text)`. With the feature `otel`, the subscriber of both also has the layer of `horsies::otel`: see [Tracing Setup](/horsies/rust/observability/tracing-setup/).
+`run(app)` is `run_with_log_format(app, LogFormat::TextLogs)`. With the feature `otel`, the subscriber of both also has the layer of `horsies::otel`: see [Tracing Setup](/horsies/rust/observability/tracing-setup/).
 
 ## Removed Flags
 
@@ -313,12 +313,12 @@ horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
 | `--enable-actions` | off | Allow task cancel and workflow pause, resume and cancel. Without it the UI is view only |
 | `--custom-css-url URL` | none | A stylesheet URL that the page loads after its own stylesheet |
 | `--trace-link TEMPLATE` | none | The link of a task's trace id in the task detail: an `http` or `https` URL with one `{trace_id}`. A template that breaks a rule exits 2 and names the rule |
-| `--loglevel LEVEL` | `INFO` | See [Logs](#logs) |
+| `--log-level LEVEL` | `INFO` | See [Logs](#logs) |
 
 A config file:
 
 ```toml
-[broker]
+[database]
 database_url = "postgresql://app:secret@db.example.com:5432/horsies"
 ```
 

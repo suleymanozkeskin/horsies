@@ -64,7 +64,7 @@ fn build_app() -> Result<Horsies, HorsiesError> {
     let config = AppConfig {
         schedule: Some(schedule),
         worker_profiles: BTreeMap::from([(DEFAULT_PROFILE.to_owned(), isolated_profile())]),
-        ..AppConfig::for_database_url(database_url())
+        ..AppConfig::from_database_url(database_url())
     };
     let mut app = Horsies::new(config)?;
     let _record_heartbeat = record_heartbeat::register(&mut app)?;

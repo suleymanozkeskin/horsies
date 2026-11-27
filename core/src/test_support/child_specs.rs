@@ -222,7 +222,7 @@ pub(crate) fn client_spec_of(spec: &WorkflowSpec, retention: &RetentionConfig) -
         .filter_map(|node| node.queue.as_deref())
         .map(|queue| {
             let class = retention
-                .resolve_queue_class(queue)
+                .resolve_queue_retention_class(queue)
                 .unwrap_or_else(|| FOREVER_CLASS_KEY.to_owned());
             (queue.to_owned(), class)
         })

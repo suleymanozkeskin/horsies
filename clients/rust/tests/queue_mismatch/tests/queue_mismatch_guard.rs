@@ -118,7 +118,7 @@ fn scenario_3_error_lists_valid_queues() {
     );
 }
 
-/// Python: `TestSendTimeValidation::test_validate_queue_name_custom_mode_rejects_unknown`.
+/// Python: `TestSendTimeValidation::test_validate_queue_custom_mode_rejects_unknown`.
 /// Registration by hand meets the same guard.
 #[test]
 fn scenario_3_check_also_catches_unknown_queue_via_raw_register() {
@@ -221,7 +221,7 @@ fn scenario_6_first_valid_second_invalid_poisons_startup() {
     assert!(refused.message.contains("analytics"));
 }
 
-/// Python: `TestSendTimeValidation::test_validate_queue_name_custom_mode_rejects_unknown`.
+/// Python: `TestSendTimeValidation::test_validate_queue_custom_mode_rejects_unknown`.
 /// The guard holds on the hand registration path too.
 #[test]
 fn scenario_6_check_fails_if_bad_task_bypassed_register() {

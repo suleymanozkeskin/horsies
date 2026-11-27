@@ -36,7 +36,7 @@ fn vector(name: &str) -> SpecVector {
 }
 
 fn config() -> AppConfig {
-    AppConfig::for_database_url("postgresql://localhost/horsies")
+    AppConfig::from_database_url("postgresql://localhost/horsies")
 }
 
 /// The node of `app.charge` with the input `{"order_id":7,"amount":9.5}`.

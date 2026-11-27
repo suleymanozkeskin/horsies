@@ -7,6 +7,7 @@
 
 mod actions;
 mod errors;
+#[cfg(test)]
 mod execution_classes;
 mod failure_status;
 pub mod fleet;
@@ -15,7 +16,7 @@ mod history_window;
 mod models;
 mod queries;
 mod task_actions;
-mod time_text;
+pub(crate) mod time_text;
 mod timing;
 mod timing_models;
 
@@ -25,6 +26,12 @@ pub use actions::{
     INTERNAL_SERVER_ERROR_TEXT, RESUME_RECOVERY_WARNING, STATE_CONFLICT,
 };
 
+/// The health records of the worker routes: one type per record, the
+/// broker's own (`crate::broker`).
+pub use crate::broker::{
+    BudgetLoad, DownSlot, DownSlots, ExecutionClassReport, PendingStream, SlotHealth,
+    SnapshotProfile, StreamCoverageState, StreamWait, WorkerExecutionClassLoad, WorkerPong,
+};
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
 /// The window that the list and aggregate queries take; the monitoring
 /// window resolver builds it.
@@ -33,21 +40,16 @@ pub use errors::{
     HistoryContractSource, MonitoringQueryError, MonitoringQueryErrorCode,
     MonitoringQueryErrorSource, MonitoringQueryRefusalCode, MonitoringResult,
 };
-pub use execution_classes::{class_report_info, slot_health_info, snapshot_profile_info};
 pub use failure_status::database_failure_status;
 pub use history_window::{
     resolve_monitoring_window, WindowRefused, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
 };
 pub use models::{
-    ActionResponse, Breakdown, BreakdownCounts, BreakdownGroup, CancelTaskBody, ErrorCategory,
-    ErrorFacet, FacetValue, Facets, GroupRow, LeafTaskInfo, LivenessReport, ScheduleStateInfo,
-    StatusCount, TaskAttemptInfo, TaskDetail, TaskDetailNotFound, TaskDetailRead, TaskListPage,
-    TaskSummary, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo, WorkflowEdge,
+    ActionResponse, Breakdown, BreakdownCounts, BreakdownGroup, CancelTaskBody, DatabaseLiveness,
+    ErrorCategory, ErrorFacet, FacetValue, Facets, GroupRow, LeafTaskInfo, LivenessReport,
+    ScheduleStateInfo, StatusCount, TaskAttemptInfo, TaskDetail, TaskDetailNotFound,
+    TaskDetailRead, TaskListPage, TaskSummary, WorkerHistoryPoint, WorkerStateInfo, WorkflowEdge,
     WorkflowNodeInfo, WorkflowRunDetail, WorkflowRunSummary, WorkflowTaskDetail,
-};
-pub use models::{
-    BudgetLoadInfo, ClassReportInfo, DownSlotInfo, PendingStreamInfo, SlotHealthKind,
-    SnapshotProfileInfo, StreamCoverageInfo, StreamWaitInfo, WorkerClassLoadInfo,
 };
 pub use queries::{
     categorize_error_code, elapsed, get_task_detail, get_workflow_node, get_workflow_run,

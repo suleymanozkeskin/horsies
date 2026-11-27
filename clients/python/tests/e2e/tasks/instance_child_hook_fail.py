@@ -1,4 +1,4 @@
-"""App instance whose on_child_process_start hook always fails.
+"""App instance whose on_child_start hook always fails.
 
 Used to assert the fail-closed contract: the worker must exit at boot
 with a legible message instead of restart-looping on the broken child.
@@ -23,7 +23,7 @@ DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=DB_URL,
         pool_size=5,
         max_overflow=5,
@@ -32,12 +32,12 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 
 
-@app.on_child_process_start
+@app.on_child_start
 def _always_fails() -> None:
     raise RuntimeError('deliberate hook failure for the fail-closed e2e test')
 

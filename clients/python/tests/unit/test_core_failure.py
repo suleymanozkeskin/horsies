@@ -69,7 +69,7 @@ class TestCoreErrorRetryable:
         'error',
         [
             core.CoreStopped('core task', 'panic'),
-            core.CoreStartFailed('the tokio runtime could not be built'),
+            core.RuntimeStartFailed('the tokio runtime could not be built'),
             core.ForkedAfterCoreStart(100, 101, 'use spawn'),
         ],
     )
@@ -85,7 +85,7 @@ class TestCallRefusalOrRaise:
         [
             core.TooManyPendingCalls('CoreHandle.task_info_async', 65_536),
             core.CoreCallTimedOut('CoreHandle.task_info', 1800, 'no_change'),
-            core.CoreStartFailed('the tokio runtime could not be built'),
+            core.RuntimeStartFailed('the tokio runtime could not be built'),
         ],
         ids=['too-many-pending-calls', 'call-timed-out', 'start-failed'],
     )

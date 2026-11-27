@@ -30,7 +30,7 @@ from horsies.core.types.result import Ok, Result
 def _make_app() -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://user:pass@localhost/db',
             ),
         )
@@ -145,7 +145,7 @@ class TestTaskDecoratorValidation:
                 return Ok('ok')
 
         assert exc_info.value.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
-        assert 'bad_option' not in app.list_tasks()
+        assert 'bad_option' not in app.registered_task_names()
 
     def test_default_unhandled_error_code_exception_name_rejected(self) -> None:
         """Exception class name as default_unhandled_error_code is rejected."""
@@ -282,7 +282,7 @@ class TestRetryCodeMembers:
             "auto_retry_for[0]='BROKR_ERROR' is a str, not a code member",
             'the task declares no Enum class with error_codes=',
         ]
-        assert 'plain_text_retry' not in app.list_tasks()
+        assert 'plain_text_retry' not in app.registered_task_names()
 
     def test_member_of_another_enum_refused(self) -> None:
         """A member of an Enum class that the task does not declare is
@@ -307,7 +307,7 @@ class TestRetryCodeMembers:
             'code nor a member of the declared Enum class',
             'the task declares error_codes=_TaskCode',
         ]
-        assert 'other_enum_retry' not in app.list_tasks()
+        assert 'other_enum_retry' not in app.registered_task_names()
 
     def test_custom_member_without_an_enum_declaration_refused(self) -> None:
         """A custom member of a task that declares no Enum class is
@@ -343,12 +343,12 @@ class TestRetryCodeMembers:
             def two_refused_entries() -> Result[str, TaskError]:
                 return Ok('ok')
 
-        messages = [error.message for error in exc_info.value.report.errors]
+        messages = [error.message for error in exc_info.value.report.refusals]
         assert messages == [
             'auto_retry_for[0] is not a code member',
             'auto_retry_for[2] is not a code of the task',
         ]
-        assert 'two_refused_entries' not in app.list_tasks()
+        assert 'two_refused_entries' not in app.registered_task_names()
 
 
 @pytest.mark.unit
@@ -367,7 +367,7 @@ class TestCheckRuntimePolicyValidation:
 
         setattr(app.tasks['malformed_task_options'], 'task_options_json', '{')
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
@@ -389,7 +389,7 @@ class TestCheckRuntimePolicyValidation:
             json.dumps(['not-an-object']),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
@@ -413,7 +413,7 @@ class TestCheckRuntimePolicyValidation:
             json.dumps({'retry_policy': 'bad-shape'}),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
@@ -443,7 +443,7 @@ class TestCheckRuntimePolicyValidation:
             }),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
@@ -465,7 +465,7 @@ class TestCheckRuntimePolicyValidation:
             json.dumps({'retry_policy': {'auto_retry_for': 'NOT_A_LIST'}}),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
@@ -487,7 +487,7 @@ class TestCheckRuntimePolicyValidation:
             json.dumps({'retry_policy': {'auto_retry_for': []}}),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
@@ -511,7 +511,7 @@ class TestCheckRuntimePolicyValidation:
             json.dumps({'retry_policy': {'auto_retry_for': ['RETRY_ME', 123]}}),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
@@ -533,7 +533,7 @@ class TestCheckRuntimePolicyValidation:
             json.dumps({'retry_policy': {'auto_retry_for': ['TimeoutError']}}),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
@@ -555,7 +555,7 @@ class TestCheckRuntimePolicyValidation:
             json.dumps({'retry_policy': {'auto_retry_for': ['lower_case']}}),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
@@ -587,7 +587,7 @@ class TestCheckRuntimePolicyValidation:
             }),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
@@ -603,7 +603,7 @@ class TestCheckRuntimePolicyValidation:
         # Bypass Pydantic frozen guard to simulate corruption
         object.__setattr__(app.config, 'exception_mapper', 'not_a_mapping')
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
@@ -619,7 +619,7 @@ class TestCheckRuntimePolicyValidation:
             app.config, 'default_unhandled_error_code', 'TimeoutError',
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
@@ -643,7 +643,7 @@ class TestCheckRuntimePolicyValidation:
             'TimeoutError',
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER

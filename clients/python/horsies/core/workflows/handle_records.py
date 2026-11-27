@@ -69,7 +69,7 @@ def core_call_error(
     operation: WorkflowOperation,
 ) -> WorkflowHandleDatabaseOperationFailed:
     """The handle error of a core boundary error raised by the call: nothing
-    ran (``TooManyPendingCalls``, ``CoreStartFailed``), or the outcome is
+    ran (``TooManyPendingCalls``, ``RuntimeStartFailed``), or the outcome is
     unknown (``CoreCallTimedOut``). Retryable by ``core_error_retryable``.
     The id in the message and in ``workflow_id`` is the canonical text of the
     UUID. Pure."""

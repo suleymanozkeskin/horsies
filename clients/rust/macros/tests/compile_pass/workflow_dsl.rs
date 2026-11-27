@@ -61,7 +61,7 @@ impl WorkflowDefinition for Pipeline {
 }
 
 fn main() {
-    let Ok(mut app) = Horsies::new(AppConfig::for_database_url(
+    let Ok(mut app) = Horsies::new(AppConfig::from_database_url(
         "postgresql://localhost/horsies",
     )) else {
         return;

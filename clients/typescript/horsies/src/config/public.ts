@@ -1,16 +1,16 @@
 // The public names of the config types. The app hub's export line of the main entry point names this module.
 
-export type { AppConfigInput, ClaimMode } from "./app-config.ts";
+export type { AppConfigInput, ClaimMode, ClusterCapSetting } from "./app-config.ts";
 
 export type {
-  BrokerConfigInput,
-  BrokerConnection,
+  DatabaseConfigInput,
+  DatabaseConnection,
   PoolRecycle,
   RerunInputDefault,
   SessionDatabase,
   TcpKeepalives,
   TcpUserTimeout,
-} from "./broker.ts";
+} from "./database.ts";
 
 export type { PayloadBound, PayloadPolicyInput } from "./payload.ts";
 

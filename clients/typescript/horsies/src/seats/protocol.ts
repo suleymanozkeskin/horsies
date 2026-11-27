@@ -505,7 +505,7 @@ function refusalOf(refusal: object): RelayedRefusal {
 
   switch (code) {
     case "CORE_STOPPED":
-    case "CORE_START_FAILED":
+    case "RUNTIME_START_FAILED":
     case "TOO_MANY_PENDING_CALLS":
     case "FORKED_AFTER_CORE_START":
       // SAFETY: the main thread built the refusal from the facts of the `CoreError` of this code.

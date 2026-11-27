@@ -1,4 +1,4 @@
-// A failed addon load inside a call wrapper caller throws its own error, `CoreStartFailed`, and not
+// A failed addon load inside a call wrapper caller throws its own error, `RuntimeStartFailed`, and not
 // `ClientDefect`: each caller takes the addon before the call wrapper. One case per caller.
 
 import assert from "node:assert/strict";
@@ -23,34 +23,34 @@ keptLoad(() => ({
 }));
 
 const LOAD_FAILED = {
-  name: "CoreStartFailed",
-  code: "CORE_START_FAILED",
+  name: "RuntimeStartFailed",
+  code: "RUNTIME_START_FAILED",
 };
 
 describe("a failed addon load in a caller of the call wrapper", () => {
-  test("buildCoreHandle throws CoreStartFailed", () => {
+  test("buildCoreHandle throws RuntimeStartFailed", () => {
     assert.throws(() => buildCoreHandle("{}", "PRODUCER"), LOAD_FAILED);
   });
 
-  test("coreState throws CoreStartFailed", () => {
+  test("coreState throws RuntimeStartFailed", () => {
     assert.throws(() => coreState(), LOAD_FAILED);
   });
 
-  test("setPanicRule throws CoreStartFailed", () => {
+  test("setPanicRule throws RuntimeStartFailed", () => {
     assert.throws(() => {
       setPanicRule("STOP_CORE");
     }, LOAD_FAILED);
   });
 
-  test("mintTaskId throws CoreStartFailed", () => {
+  test("mintTaskId throws RuntimeStartFailed", () => {
     assert.throws(() => mintTaskId(), LOAD_FAILED);
   });
 
-  test("migrationSqlFiles throws CoreStartFailed", () => {
+  test("migrationSqlFiles throws RuntimeStartFailed", () => {
     assert.throws(() => migrationSqlFiles(), LOAD_FAILED);
   });
 
-  test("environmentCount throws CoreStartFailed", () => {
+  test("environmentCount throws RuntimeStartFailed", () => {
     assert.throws(() => environmentCount(), LOAD_FAILED);
   });
 });

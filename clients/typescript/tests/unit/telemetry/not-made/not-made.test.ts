@@ -56,7 +56,7 @@ describe("the writer of a main thread", () => {
     const lines: string[] = [];
 
     const write = addonNotMadeWriter(
-      (): NativeEnvelope<undefined> => ({ kind: "thrown", thrown: { code: "CORE_START_FAILED", cause: "the OS refused a thread" } }),
+      (): NativeEnvelope<undefined> => ({ kind: "thrown", thrown: { code: "RUNTIME_START_FAILED", cause: "the OS refused a thread" } }),
       (line) => lines.push(line),
     );
 

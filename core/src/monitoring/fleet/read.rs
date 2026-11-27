@@ -13,9 +13,9 @@ use crate::db::{
     BoundStatement, CheckoutClass, RefusalCause, Row, StatementBound, StatementFailure, Transience,
     UnknownOutcomeCause,
 };
-use crate::handle::CoreHandle;
+use crate::handle::CoreConnection;
 use crate::telemetry::labels::FleetQuery;
-use crate::{BrokerError, ClassCoverage, PostgresBroker};
+use crate::{BrokerError, ExecutionClassCoverage, PostgresBroker};
 
 use super::decode::{
     fleet_class_coverage, fleet_workers, oldest_pending, oldest_pending_row, queue_tasks,
@@ -55,13 +55,13 @@ pub async fn read_fleet_state(broker: &PostgresBroker) -> FleetState {
 }
 
 /// The fleet state through `handle`: its broker, connected at the first
-/// call that succeeds ([`CoreHandle::broker`]), then [`read_fleet_state`].
+/// call that succeeds ([`CoreConnection::broker`]), then [`read_fleet_state`].
 ///
 /// When the connect fails, every part answers
 /// [`FleetQueryFailure::DatabaseFailed`] with the cause of the connect, and
 /// `took` of each part is the time of the connect; the next call connects
 /// again. The connect runs no schema step.
-pub async fn read_fleet_state_through(handle: &CoreHandle) -> FleetState {
+pub async fn read_fleet_state_through(handle: &CoreConnection) -> FleetState {
     let started = Instant::now();
     match handle.broker().await {
         Ok(broker) => read_fleet_state(&broker).await,
@@ -139,7 +139,9 @@ async fn read_workers(broker: &PostgresBroker) -> Result<FleetWorkers, FleetQuer
 
 /// The class coverage part, from the fleet check statement. Errors: as
 /// [`fleet_rows`]; `Refused` as the fleet check.
-async fn read_class_coverage(broker: &PostgresBroker) -> Result<ClassCoverage, FleetQueryFailure> {
+async fn read_class_coverage(
+    broker: &PostgresBroker,
+) -> Result<ExecutionClassCoverage, FleetQueryFailure> {
     let rows = fleet_rows(broker, &class_coverage_statement()).await?;
     let row = coverage_row_from(rows).map_err(|error| row_refused(&error))?;
     fleet_class_coverage(row).map_err(refused)

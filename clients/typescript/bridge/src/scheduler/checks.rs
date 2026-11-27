@@ -190,7 +190,7 @@ fn config_facts(text: &str, queue_names: &[String]) -> Result<SchedulerConfigFac
                 bytes: bigint_of_u64(bytes),
             },
         },
-        retain_rerun_input: config.broker.retain_rerun_input_default,
+        retain_rerun_input: config.database.retain_rerun_input_default,
         queues,
     })
 }
@@ -233,10 +233,10 @@ mod tests {
     use super::*;
 
     const DEFAULT_MODE: &str =
-        r#"{"broker": {"database_url": "postgresql://127.0.0.1:55432/horsies"}}"#;
+        r#"{"database": {"database_url": "postgresql://127.0.0.1:55432/horsies"}}"#;
 
     const CUSTOM_MODE: &str = r#"{
-        "broker": {"database_url": "postgresql://127.0.0.1:55432/horsies", "retain_rerun_input_default": true},
+        "database": {"database_url": "postgresql://127.0.0.1:55432/horsies", "retain_rerun_input_default": true},
         "queue_mode": "custom",
         "custom_queues": [{"name": "urgent", "priority": 20}, {"name": "bulk"}],
         "payload": {"reject_bytes": 4096},
@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn a_config_text_that_does_not_read_is_a_client_defect() {
         assert!(matches!(
-            facts(r#"{"broker": {}}"#, &[]),
+            facts(r#"{"database": {}}"#, &[]),
             Err(NativeThrown::ClientDefect { .. })
         ));
     }

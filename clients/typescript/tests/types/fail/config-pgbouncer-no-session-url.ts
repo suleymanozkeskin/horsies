@@ -4,7 +4,7 @@
 import type { AppConfigInput } from "../../../horsies/src/index.ts";
 
 export const config: AppConfigInput = {
-  broker: {
+  database: {
     databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" },
     connection: { kind: "pgbouncerTransaction" },
   },

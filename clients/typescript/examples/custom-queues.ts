@@ -38,7 +38,7 @@ const rebuildIndex = defineTask({
 });
 
 const created = Horsies.create({
-  broker: { databaseUrl: DATABASE_URL },
+  database: { databaseUrl: DATABASE_URL },
   queueMode: "custom",
   customQueues: [
     { name: "critical", priority: 1 },

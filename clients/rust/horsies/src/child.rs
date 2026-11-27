@@ -37,7 +37,7 @@ pub fn child_mode() -> ChildMode {
 
 impl Horsies {
     /// Run `hook` once in every worker child, a replacement child included
-    /// (Python `on_child_process_start`, `on_shared_async_child_start`).
+    /// (Python `on_child_start`, `on_shared_async_child_start`).
     ///
     /// - It runs on the child's runtime, after the child connected its pool
     ///   and before it takes its first task. Hooks run in registration
@@ -105,7 +105,7 @@ impl Horsies {
             // before.
             exit: ProcessExit::Standard,
         };
-        ExitCode::from(exit_byte(run_child_host(app, args).code()))
+        ExitCode::from(exit_byte(run_child_host(app, args).exit_code()))
     }
 }
 
@@ -160,7 +160,7 @@ mod tests {
     use crate::AppConfig;
 
     fn app() -> Horsies {
-        Horsies::new(AppConfig::for_database_url(
+        Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap()
@@ -250,8 +250,8 @@ mod tests {
             ChildHostExit::ProtocolMismatch,
             ChildHostExit::ChildHookFailed,
         ] {
-            assert_eq!(i32::from(exit_byte(exit.code())), exit.code());
+            assert_eq!(i32::from(exit_byte(exit.exit_code())), exit.exit_code());
         }
-        assert_eq!(exit_byte(ChildHostExit::ChildHookFailed.code()), 173);
+        assert_eq!(exit_byte(ChildHostExit::ChildHookFailed.exit_code()), 173);
     }
 }

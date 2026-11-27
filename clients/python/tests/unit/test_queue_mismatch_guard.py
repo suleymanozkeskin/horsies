@@ -6,7 +6,7 @@ Combinations tested:
   3. CUSTOM mode + task with non-existent queue → ConfigurationError
   4. CUSTOM mode + task with valid queue         → OK
   5. DEFAULT mode + task without queue_name      → OK
-  6. validate_queue_name called at send time too → ConfigurationError
+  6. validate_queue called at send time too → ConfigurationError
   7. check() catches queue mismatch from imports → error collected
 """
 
@@ -32,13 +32,13 @@ BROKER = PostgresConfig(
 
 
 def _default_app() -> Horsies:
-    return Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER))
+    return Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, database=BROKER))
 
 
 def _custom_app(*queue_names: str) -> Horsies:
     return Horsies(config=AppConfig(
         queue_mode=QueueMode.CUSTOM,
-        broker=BROKER,
+        database=BROKER,
         custom_queues=[CustomQueueConfig(name=n) for n in queue_names],
     ))
 
@@ -169,38 +169,38 @@ class TestDefaultModeAcceptsNoQueue:
 
 
 # ---------------------------------------------------------------------------
-# 6. validate_queue_name is also called at send time (defense in depth)
+# 6. validate_queue is also called at send time (defense in depth)
 # ---------------------------------------------------------------------------
 @pytest.mark.unit
 class TestSendTimeValidation:
 
-    def test_validate_queue_name_rejects_at_runtime(self) -> None:
-        """validate_queue_name called directly should also reject mismatches."""
+    def test_validate_queue_rejects_at_runtime(self) -> None:
+        """validate_queue called directly should also reject mismatches."""
         app = _default_app()
 
         # Simulate what _prepare_send does
         with pytest.raises(ConfigurationError):
-            app.validate_queue_name('some_queue')
+            app.validate_queue('some_queue')
 
-    def test_validate_queue_name_custom_mode_rejects_none(self) -> None:
-        """CUSTOM mode validate_queue_name(None) should fail."""
+    def test_validate_queue_custom_mode_rejects_none(self) -> None:
+        """CUSTOM mode validate_queue(None) should fail."""
         app = _custom_app('fast')
         with pytest.raises(ConfigurationError):
-            app.validate_queue_name(None)
+            app.validate_queue(None)
 
-    def test_validate_queue_name_custom_mode_rejects_unknown(self) -> None:
-        """CUSTOM mode validate_queue_name('missing') should fail."""
+    def test_validate_queue_custom_mode_rejects_unknown(self) -> None:
+        """CUSTOM mode validate_queue('missing') should fail."""
         app = _custom_app('fast')
         with pytest.raises(ConfigurationError):
-            app.validate_queue_name('missing')
+            app.validate_queue('missing')
 
-    def test_validate_queue_name_returns_validated_name(self) -> None:
+    def test_validate_queue_returns_validated_name(self) -> None:
         """Happy path: returns the validated queue name."""
         app = _custom_app('fast')
-        assert app.validate_queue_name('fast') == 'fast'
+        assert app.validate_queue('fast') == 'fast'
 
         default_app = _default_app()
-        assert default_app.validate_queue_name(None) == 'default'
+        assert default_app.validate_queue(None) == 'default'
 
 
 # ---------------------------------------------------------------------------
@@ -214,17 +214,17 @@ class TestCheckCollectsQueueMismatch:
 
         We simulate this by registering a task module path that, when imported,
         would trigger a queue mismatch. Since we can't easily create a real
-        module import scenario in a unit test, we verify the validate_queue_name
+        module import scenario in a unit test, we verify the validate_queue
         guard is called during the decorator — which is what check() relies on
-        (it imports modules, decorators fire, validate_queue_name raises).
+        (it imports modules, decorators fire, validate_queue raises).
         """
         # The chain is: check() → _check_task_imports() → import module
-        #   → @app.task fires → validate_queue_name → ConfigurationError
+        #   → @app.task fires → validate_queue → ConfigurationError
         #
         # We verify the guard itself here; e2e tests cover the full chain.
         app = _default_app()
         with pytest.raises(ConfigurationError) as exc_info:
-            app.validate_queue_name('custom_queue')
+            app.validate_queue('custom_queue')
 
         error = exc_info.value
         assert error.code == HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE
@@ -242,7 +242,7 @@ class TestErrorMessageQuality:
         """Error should suggest removing queue_name OR switching to CUSTOM."""
         app = _default_app()
         with pytest.raises(ConfigurationError) as exc_info:
-            app.validate_queue_name('oops')
+            app.validate_queue('oops')
 
         error = exc_info.value
         assert error.help_text is not None
@@ -253,7 +253,7 @@ class TestErrorMessageQuality:
         """Error should suggest specifying a queue_name."""
         app = _custom_app('fast')
         with pytest.raises(ConfigurationError) as exc_info:
-            app.validate_queue_name(None)
+            app.validate_queue(None)
 
         error = exc_info.value
         assert error.help_text is not None
@@ -263,7 +263,7 @@ class TestErrorMessageQuality:
         """Error notes should list the valid queue names."""
         app = _custom_app('fast', 'slow', 'batch')
         with pytest.raises(ConfigurationError) as exc_info:
-            app.validate_queue_name('nope')
+            app.validate_queue('nope')
 
         error = exc_info.value
         notes_str = ' '.join(error.notes or [])
@@ -310,7 +310,7 @@ class TestWorkflowValidatesFrozenNodes:
 
         err = exc_info.value
         codes = (
-            [e.code for e in err.report.errors]
+            [e.code for e in err.report.refusals]
             if isinstance(err, MultipleValidationErrors)
             else [err.code]
         )

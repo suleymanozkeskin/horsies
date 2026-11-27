@@ -70,7 +70,7 @@ export interface LoggingAddon {
   resetLogSink(): NativeEnvelope<undefined>;
   /**
    * Write the WARNING record of `span`, not made for `cause`, on `horsies.telemetry`, once per process and kind of span.
-   * Starts the log bridge; a forwarder that cannot start throws `CORE_START_FAILED`.
+   * Starts the log bridge; a forwarder that cannot start throws `RUNTIME_START_FAILED`.
    */
   logSpanNotMade(span: NotMadeSpan, cause: string): NativeEnvelope<undefined>;
 }

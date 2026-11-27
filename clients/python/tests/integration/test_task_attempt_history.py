@@ -214,7 +214,7 @@ async def test_stale_cleanup_writes_failed_attempt_worker_crashed(
     """mark_stale_tasks_as_failed writes one FAILED attempt with WORKER_CRASHED.
 
     No worker runs here, so no reaper runs the stale RUNNING pass, as with
-    ``auto_fail_stale_running=False``: the call runs the pass on demand.
+    ``fail_stale_running=False``: the call runs the pass on demand.
     """
     task_id = str(uuid.uuid4())
     sent_at, fingerprint = compute_test_command_fingerprint(task_name='stale_attempt_test')
@@ -288,7 +288,7 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
     """mark_stale_tasks_as_failed retries when WORKER_CRASHED is in auto_retry_for.
 
     No worker runs here, so no reaper runs the stale RUNNING pass, as with
-    ``auto_fail_stale_running=False``: the call runs the pass on demand.
+    ``fail_stale_running=False``: the call runs the pass on demand.
     """
     task_id = str(uuid.uuid4())
     sent_at, fingerprint = compute_test_command_fingerprint(task_name='stale_retry_test')

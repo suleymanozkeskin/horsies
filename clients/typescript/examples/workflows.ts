@@ -70,7 +70,7 @@ const orderSummary = defineWorkflow(
 );
 
 const created = Horsies.create({
-  broker: { databaseUrl: DATABASE_URL },
+  database: { databaseUrl: DATABASE_URL },
   workerProfiles: { [DEFAULT_PROFILE]: ISOLATED_PROFILE },
   tasks: [loadPrices, sumPrices, countItems, summarize],
   workflows: [orderSummary],

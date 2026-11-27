@@ -19,7 +19,7 @@ const listed = defineTask({ name: "listed", input: { n: h.int() }, output: h.int
 const unlisted = defineTask({ name: "unlisted", input: {}, output: h.null() });
 
 function app(): Horsies {
-  const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [listed] }, fakeEnvironment());
+  const created = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [listed] }, fakeEnvironment());
 
   if (!created.ok) {
     throw new Error("the app of the hub tests is refused");

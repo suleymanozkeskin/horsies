@@ -8,7 +8,7 @@
 //! read-back of the input (encode, decode with `A`, encode again, compare),
 //! the payload size limit, a new task id and the sent instant, then one
 //! enqueue through the core with `SendKind::First`. With
-//! `AppConfig.resend_on_transient_err`, a retryable `ENQUEUE_FAILED` is
+//! `AppConfig.resend_on_transient_error`, a retryable `ENQUEUE_FAILED` is
 //! sent again up to 3 times with the same task id and payload as
 //! `SendKind::Repeat`, after 200 ms, 400 ms and 800 ms (at most 2,000 ms):
 //! a send whose commit reply was lost answers with its task id, and a task
@@ -34,7 +34,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use horsies_core::core::config::payload::{enforce_payload_policy, PayloadKind};
 use horsies_core::core::task::send_types::send_error_from_enqueue;
-use horsies_core::handle::CoreHandle;
+use horsies_core::handle::CoreConnection;
 use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
     child_producer, mint_task_id, CheckedSend, ChildProducer, Execution, FailureCause,
@@ -62,9 +62,9 @@ const RESEND_LONGEST_WAIT: Duration = Duration::from_millis(2_000);
 /// What every function of one app sends with: the app's handle, the
 /// suppression of the process and the config values of a send.
 pub(crate) struct SendContext {
-    handle: Arc<CoreHandle>,
+    handle: Arc<CoreConnection>,
     suppression: SendSuppression,
-    resend_on_transient_err: bool,
+    resend_on_transient_error: bool,
     payload: PayloadPolicy,
     retention: RetentionConfig,
 }
@@ -75,7 +75,7 @@ impl SendContext {
         Self {
             handle: Arc::clone(app.handle()),
             suppression: app.send_suppression(),
-            resend_on_transient_err: app.config().resend_on_transient_err,
+            resend_on_transient_error: app.config().resend_on_transient_error,
             payload: app.config().payload.clone(),
             retention: app.config().retention.clone(),
         }
@@ -83,7 +83,7 @@ impl SendContext {
 
     /// The handle a send goes through: the child's producer handle in a
     /// worker child, else the app's.
-    fn send_handle(&self) -> Arc<CoreHandle> {
+    fn send_handle(&self) -> Arc<CoreConnection> {
         match child_producer() {
             ChildProducer::InChild(handle) => handle,
             ChildProducer::NotInAChild => Arc::clone(&self.handle),
@@ -400,7 +400,7 @@ where
         first: SendKind,
     ) -> Result<TaskHandle<T, E>, TaskSendError> {
         refuse_in_a_fork(format_args!("send of task '{}'", self.task_name));
-        let resends = match self.context.resend_on_transient_err {
+        let resends = match self.context.resend_on_transient_error {
             true => RESEND_COUNT,
             false => 0,
         };
@@ -411,7 +411,7 @@ where
             queue_name: &payload.queue_name,
         });
         let trace = span.trace();
-        let handle_ref: &CoreHandle = &handle;
+        let handle_ref: &CoreConnection = &handle;
         let payload_ref = &payload;
         let trace_ref = &trace;
         let sent = send_with_resends(resends, first, move |kind| {
@@ -478,7 +478,7 @@ fn resend_wait(resend: u32) -> Duration {
 /// error, maps to the send catalog by the core's one rule. A carrier that
 /// breaks a bound of the core is not stored and never refuses the send.
 async fn enqueue_once(
-    handle: &CoreHandle,
+    handle: &CoreConnection,
     task_id: Uuid,
     payload: &TaskSendPayload,
     trace: &SendTrace,
@@ -608,13 +608,13 @@ mod tests {
     }
 
     fn config() -> AppConfig {
-        AppConfig::for_database_url("postgresql://localhost/horsies")
+        AppConfig::from_database_url("postgresql://localhost/horsies")
     }
 
     /// A config whose address has no database: a send that a defect lets
     /// past its checks fails to connect, and writes to no local database.
     fn config_without_database() -> AppConfig {
-        AppConfig::for_database_url("postgresql://127.0.0.1:1/nothing")
+        AppConfig::from_database_url("postgresql://127.0.0.1:1/nothing")
     }
 
     fn function(app: &Horsies) -> TaskFunction<Invoice, u32, Infallible> {

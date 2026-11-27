@@ -17,7 +17,7 @@ import { parseWorkerStart, runWorkerCommand, type WorkerCommandDeps } from "../.
 import { type CheckOutcome, checkReport } from "../../../horsies/src/check/report.ts";
 import type { WorkerLogLevel } from "../../../horsies/src/_catalog/worker_manifest.ts";
 import type { ListenAddressCheck } from "../../../horsies/src/native/worker/addon.ts";
-import { CoreStartFailed } from "../../../horsies/src/thrown-errors.ts";
+import { RuntimeStartFailed } from "../../../horsies/src/thrown-errors.ts";
 import { err, ok } from "../../../horsies/src/wire/result.ts";
 import type { WorkerRunError, WorkerStart } from "../../../horsies/src/worker/run.ts";
 
@@ -180,17 +180,17 @@ describe("the check command", () => {
     assert.deepEqual(deps.levels, []);
   });
   test("a core that refuses the live steps gives 1 with its name and message", async () => {
-    const deps = checkDeps(PASSED, { kind: "coreRefused", error: new CoreStartFailed({ cause: "no threads" }) });
+    const deps = checkDeps(PASSED, { kind: "coreRefused", error: new RuntimeStartFailed({ cause: "no threads" }) });
 
     assert.equal(await runCheckCommand(["--live"], deps), 1);
     assert.deepEqual(deps.output.errors, [
-      "horsies check: the core refused the live check: CoreStartFailed: the core could not start: no threads",
+      "horsies check: the core refused the live check: RuntimeStartFailed: the core could not start: no threads",
     ]);
   });
 
   test("the live steps map a core refusal; a passing live check keeps the summary", async () => {
     const passed = { taskCount: 1, declaredErrorCodes: new Map() };
-    const refusedByCore = new CoreStartFailed({ cause: "no threads" });
+    const refusedByCore = new RuntimeStartFailed({ cause: "no threads" });
 
     assert.deepEqual(
       await liveSteps(passed, async () => {

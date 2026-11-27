@@ -8,7 +8,7 @@ tags: [configuration, PostgresConfig, psycopg, event loop, connections]
 
 # Broker Connections
 
-`PostgresConfig` is the `broker` field of `AppConfig`. The meaning, the default and the range of each field are on [Broker Config](/horsies/configuration/broker-config/).
+`PostgresConfig` is the `database` field of `AppConfig`. The meaning, the default and the range of each field are on [Database Config](/horsies/configuration/broker-config/).
 
 ## PostgresConfig
 
@@ -16,7 +16,7 @@ tags: [configuration, PostgresConfig, psycopg, event loop, connections]
 from pydantic import SecretStr
 from horsies import PostgresConfig
 
-broker = PostgresConfig(
+database = PostgresConfig(
     database_url=SecretStr("postgresql://user:password@localhost:5432/mydb"),
 )
 ```
@@ -26,25 +26,22 @@ broker = PostgresConfig(
 | Field | Type |
 |-------|------|
 | `database_url` | `SecretStr` |
-| `session_database_url` | `SecretStr \| None` |
+| `session_database` | `SessionDatabaseSameAsDatabaseUrl \| SessionDatabaseSeparate(url: SecretStr)` |
 | `pgbouncer_transaction_mode` | `bool` |
 | `pool_size` | `int` |
 | `max_overflow` | `int` |
-| `pool_timeout` | `int` |
+| `pool_timeout_seconds` | `int` |
 | `pool_pre_ping` | `bool` |
 | `worker_pool_pre_ping` | `bool` |
-| `tcp_keepalives` | `bool` |
-| `tcp_keepalives_idle` | `int` |
-| `tcp_keepalives_interval` | `int` |
-| `tcp_keepalives_count` | `int` |
-| `tcp_user_timeout_ms` | `int` |
+| `tcp_keepalives` | `TcpKeepalivesOn(idle_seconds: int, interval_seconds: int, probes: int) \| TcpKeepalivesOff` |
+| `tcp_user_timeout` | `TcpUserTimeoutAfter(milliseconds: int) \| TcpUserTimeoutSystemDefault` |
 | `retain_rerun_input_default` | `bool` |
 | `echo` | `bool` |
-| `pool_recycle` | `int` |
+| `pool_recycle` | `PoolRecycleAfterSeconds(seconds: int) \| PoolRecycleNever` |
 
 ### Refusals
 
-- A pool value outside its range is refused with `ConfigurationError` `HRS-213` (`CONFIG_INVALID_DATABASE_POOL`), and a TCP value outside its range with `HRS-215` (`CONFIG_INVALID_KEEPALIVE`). `pool_size=0` and `max_overflow=-1` mean no limit in SQLAlchemy; they are refused, because the core always bounds its connections. The three keepalive values are checked only when `tcp_keepalives` is `True`.
+- A pool value outside its range is refused with `ConfigurationError` `HRS-213` (`CONFIG_INVALID_DATABASE_POOL`), and a TCP value outside its range with `HRS-215` (`CONFIG_INVALID_KEEPALIVE`). `pool_size=0` and `max_overflow=-1` mean no limit in SQLAlchemy; they are refused, because the core always bounds its connections. The message of a refused value names its field, for example `tcp_keepalives.probes`.
 - A URL that names a driver, such as `postgresql+psycopg://`, is refused with `ConfigurationError` `HRS-203`, and the error names the fix. horsies opens the database with psycopg 3.
 - `worker_child_pool_min_size`, `worker_child_pool_max_size`, `worker_child_pool_check`, `worker_pool_size` and `worker_max_overflow` were removed in 0.7.0; a config that sets one fails with `HRS-213`, and the error names the profile field that replaces it. See [Connection Pools and the Default Executor](/horsies/workers/worker-profiles/#connection-pools-and-the-default-executor).
 
@@ -65,8 +62,8 @@ PostgresConfig(
     database_url=SecretStr("postgresql://app:secret@db.example.com:5432/production"),
     pool_size=10,
     max_overflow=20,
-    pool_timeout=30,
-    pool_recycle=3600,
+    pool_timeout_seconds=30,
+    pool_recycle=PoolRecycleAfterSeconds(seconds=3600),
 )
 ```
 
@@ -83,12 +80,14 @@ PostgresConfig(
 #### PgBouncer / Transaction Pooling
 
 ```python
-from horsies import AppConfig, PostgresConfig
+from horsies import AppConfig, PostgresConfig, SessionDatabaseSeparate
 
 config = AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr(os.environ["DATABASE_URL_POOLED"]),
-        session_database_url=SecretStr(os.environ["DATABASE_URL_DIRECT"]),
+        session_database=SessionDatabaseSeparate(
+            url=SecretStr(os.environ["DATABASE_URL_DIRECT"]),
+        ),
         pgbouncer_transaction_mode=True,
     ),
 )
@@ -98,7 +97,7 @@ The rules of the split configuration are on [PgBouncer / Transaction Pooling](/h
 
 #### Check Connections at Checkout
 
-`worker_pool_pre_ping` checks the pool of the worker process. `IsolatedPool(check=True)` and `SharedPool(check=True)` check the pool of each child of that kind. When to turn the checks on, and what each check costs, is on [Health Checks at High RTT](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt).
+`worker_pool_pre_ping` checks the pool of the worker process. `IsolatedPool(pre_ping=True)` and `SharedPool(pre_ping=True)` check the pool of each child of that kind. When to turn the checks on, and what each check costs, is on [Health Checks at High RTT](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt).
 
 ```python
 from horsies import (
@@ -112,17 +111,17 @@ from horsies import (
 )
 
 config = AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr(os.environ['DATABASE_URL']),
         worker_pool_pre_ping=True,
     ),
     worker_profiles={
         'idle_behind_nat': WorkerProfile(
-            isolated=IsolatedChildren(count=8, pool=IsolatedPool(check=True)),
+            isolated=IsolatedChildren(count=8, pool=IsolatedPool(pre_ping=True)),
             shared_async=SharedAsyncChildren(
                 count=2,
                 seats=50,
-                pool=SharedPool(check=True),
+                pool=SharedPool(pre_ping=True),
             ),
         ),
     },
@@ -135,10 +134,9 @@ For a pooler that reaps idle connections in less than 30 seconds. See [TCP Keepa
 
 ```python
 config = AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr(os.environ['DATABASE_URL']),
-        tcp_keepalives_idle=15,
-        tcp_keepalives_interval=5,
+        tcp_keepalives=TcpKeepalivesOn(idle_seconds=15, interval_seconds=5),
     ),
 )
 ```
@@ -186,7 +184,7 @@ that call. Nothing runs.
 | Sync call | Returns |
 |---|---|
 | `send()`, `schedule()`, `retry_send()`, `retry_schedule()` | `TaskSendAsyncContext` (`TaskSendErrorCode.ASYNC_CONTEXT`); the error keeps the payload for `retry_send_async()` / `retry_schedule_async()` |
-| `app.get_raw_result()`, `app.get_task_info()`, `app.ping_database()`, `app.ping_workers()`, `app.list_worker_states()`, `app.get_worker_state()`, `app.get_worker_state_history()`, `TaskHandle.info()`, `broker.enqueue()`, `broker.get_task_info()`, `broker.get_raw_result_record()`, `broker.close()` | `DatabaseAsyncContext` (`DatabaseErrorCode.ASYNC_CONTEXT`) |
+| `app.get_raw_result()`, `app.get_task_info()`, `app.ping_database()`, `app.ping_workers()`, `app.list_worker_states()`, `app.get_worker_state()`, `app.get_worker_state_history()`, `app.get_stale_tasks()`, `app.get_expired_tasks()`, `TaskHandle.info()`, `broker.enqueue()`, `broker.get_task_info()`, `broker.get_raw_result_record()`, `broker.close()` | `DatabaseAsyncContext` (`DatabaseErrorCode.ASYNC_CONTEXT`) |
 | `TaskHandle.get()`, `WorkflowHandle.get()`, `WorkflowHandle.result_for()`, `app.get_result()` | `Err(AsyncContext(...))` (`RetrievalCode.ASYNC_CONTEXT`), not kept by the handle |
 | `WorkflowHandle.status()`, `.results()`, `.tasks()`, `.cancel()`, `.pause()`, `.resume()`, `pause_workflow_sync()`, `resume_workflow_sync()` | `WorkflowHandleAsyncContext` (`WorkflowHandleErrorCode.ASYNC_CONTEXT`) |
 | `spec.start()`, `spec.retry_start()` | `WorkflowStartAsyncContext` (`WorkflowStartErrorCode.ASYNC_CONTEXT`); the error keeps the workflow id for `retry_start_async()` |
@@ -213,18 +211,18 @@ The core pools of a broker, for every thread and event loop, can open:
 
 ```text
 pool_size + max_overflow      # main pool on database_url
-+ pool_size + max_overflow    # session pool, only when session_database_url differs
++ pool_size + max_overflow    # session pool, only when the session database URL differs
 ```
 
 The core's listener is one connection per process on the session URL
-(`session_database_url`, else `database_url`). It opens at the first result
+(the URL of a separate `session_database`, else `database_url`). It opens at the first result
 wait or worker ping.
 
 ```text
 connections of one process = the core pools + the core listener
 ```
 
-At the defaults (`pool_size=5`, `max_overflow=10`, no `session_database_url`),
+At the defaults (`pool_size=5`, `max_overflow=10`, `SessionDatabaseSameAsDatabaseUrl()`),
 a process opens up to 15 connections, and 1 more when it waits for a result
 or pings the workers. Each pool opens a connection only when a call finds
 none free.

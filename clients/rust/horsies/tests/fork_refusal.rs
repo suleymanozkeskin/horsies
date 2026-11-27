@@ -179,7 +179,7 @@ fn run_child(mut app: Horsies, mut report: UnixStream) -> i32 {
 
 #[test]
 fn every_call_family_panics_in_a_fork() {
-    let app = Horsies::new(AppConfig::for_database_url(
+    let app = Horsies::new(AppConfig::from_database_url(
         "postgresql://127.0.0.1:1/fork_refusal",
     ))
     .expect("build the app");

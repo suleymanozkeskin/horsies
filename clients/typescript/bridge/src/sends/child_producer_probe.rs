@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use horsies_core::handle::{CoreHandle as LazyHandle, HandleClose};
+use horsies_core::handle::{CoreConnection as LazyHandle, HandleClose};
 use horsies_core::manifest::parse_producer_manifest;
 use horsies_core::{ChildProducer, ClientFamily, PoolProfile};
 use napi::bindgen_prelude::Object;

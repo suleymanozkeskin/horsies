@@ -66,7 +66,7 @@
     "running": "integer",
     "total": "integer"
   },
-  "BudgetLoadInfo": {
+  "BudgetLoad": {
     "budget": {
       "enum": {
         "name": "Execution",
@@ -78,7 +78,6 @@
       }
     },
     "capacity": "integer",
-    "free": "integer",
     "in_flight": "integer",
     "serves": {
       "list": {
@@ -93,34 +92,46 @@
       }
     }
   },
-  "ClassReportInfo": {
+  "DownSlot": {
+    "cause": "string",
+    "detail": "string",
+    "down_since": "date-time",
+    "failed_boots": "integer",
+    "slot": "integer"
+  },
+  "ErrorFacet": {
+    "category": "string",
+    "count": "integer",
+    "value": "string"
+  },
+  "ExecutionClassReport": {
     "checked_at": "date-time",
-    "live_window_s": "integer",
+    "live_window_seconds": "number",
     "streams": {
       "list": {
         "model": {
           "fields": {
             "coverage": {
               "union": {
-                "name": "StreamCoverageInfo",
+                "name": "StreamCoverageState",
                 "tag": "kind",
                 "variants": {
                   "no_capacity": {
                     "fields": {
                       "workers": "integer"
                     },
-                    "name": "StreamNoCapacityInfo"
+                    "name": "StreamWithoutCapacity"
                   },
                   "served": {
                     "fields": {
                       "capacity": "integer",
                       "workers": "integer"
                     },
-                    "name": "StreamServedInfo"
+                    "name": "StreamServed"
                   },
                   "unserved": {
                     "fields": {},
-                    "name": "StreamUnservedInfo"
+                    "name": "StreamUnserved"
                   }
                 }
               }
@@ -135,30 +146,30 @@
                 ]
               }
             },
-            "queue_name": "string",
+            "queue": "string",
             "wait": {
               "union": {
-                "name": "StreamWaitInfo",
+                "name": "StreamWait",
                 "tag": "kind",
                 "variants": {
+                  "due": {
+                    "fields": {
+                      "oldest_due_at": "date-time",
+                      "wait_seconds": "number"
+                    },
+                    "name": "OldestWaiting"
+                  },
                   "none_due": {
                     "fields": {
                       "next_due_at": "date-time"
                     },
-                    "name": "StreamNoneDueInfo"
-                  },
-                  "waiting": {
-                    "fields": {
-                      "oldest_due_at": "date-time",
-                      "wait_s": "number"
-                    },
-                    "name": "StreamWaitingInfo"
+                    "name": "NoneDue"
                   }
                 }
               }
             }
           },
-          "name": "PendingStreamInfo"
+          "name": "PendingStream"
         }
       }
     },
@@ -181,7 +192,6 @@
                       }
                     },
                     "capacity": "integer",
-                    "free": "integer",
                     "in_flight": "integer",
                     "serves": {
                       "list": {
@@ -196,29 +206,17 @@
                       }
                     }
                   },
-                  "name": "BudgetLoadInfo"
+                  "name": "BudgetLoad"
                 }
               }
             },
             "snapshot_at": "date-time",
             "worker_id": "string"
           },
-          "name": "WorkerClassLoadInfo"
+          "name": "WorkerExecutionClassLoad"
         }
       }
     }
-  },
-  "DownSlotInfo": {
-    "cause": "string",
-    "detail": "string",
-    "down_since": "date-time",
-    "failed_boots": "integer",
-    "slot": "integer"
-  },
-  "ErrorFacet": {
-    "category": "string",
-    "count": "integer",
-    "value": "string"
   },
   "FacetValue": {
     "count": "integer",
@@ -355,10 +353,24 @@
     }
   },
   "LivenessReport": {
-    "db_latency_ms": {
-      "nullable": "number"
+    "database": {
+      "union": {
+        "name": "DatabaseLiveness",
+        "tag": "kind",
+        "variants": {
+          "ping": {
+            "fields": {
+              "latency_ms": "number"
+            },
+            "name": "DatabasePing"
+          },
+          "unreachable": {
+            "fields": {},
+            "name": "DatabaseUnreachable"
+          }
+        }
+      }
     },
-    "db_reachable": "boolean",
     "workers": {
       "list": {
         "model": {
@@ -368,33 +380,33 @@
             "round_trip_ms": "number",
             "worker_id": "string"
           },
-          "name": "WorkerPingInfo"
+          "name": "WorkerPong"
         }
       }
     }
   },
-  "PendingStreamInfo": {
+  "PendingStream": {
     "coverage": {
       "union": {
-        "name": "StreamCoverageInfo",
+        "name": "StreamCoverageState",
         "tag": "kind",
         "variants": {
           "no_capacity": {
             "fields": {
               "workers": "integer"
             },
-            "name": "StreamNoCapacityInfo"
+            "name": "StreamWithoutCapacity"
           },
           "served": {
             "fields": {
               "capacity": "integer",
               "workers": "integer"
             },
-            "name": "StreamServedInfo"
+            "name": "StreamServed"
           },
           "unserved": {
             "fields": {},
-            "name": "StreamUnservedInfo"
+            "name": "StreamUnserved"
           }
         }
       }
@@ -409,24 +421,24 @@
         ]
       }
     },
-    "queue_name": "string",
+    "queue": "string",
     "wait": {
       "union": {
-        "name": "StreamWaitInfo",
+        "name": "StreamWait",
         "tag": "kind",
         "variants": {
+          "due": {
+            "fields": {
+              "oldest_due_at": "date-time",
+              "wait_seconds": "number"
+            },
+            "name": "OldestWaiting"
+          },
           "none_due": {
             "fields": {
               "next_due_at": "date-time"
             },
-            "name": "StreamNoneDueInfo"
-          },
-          "waiting": {
-            "fields": {
-              "oldest_due_at": "date-time",
-              "wait_s": "number"
-            },
-            "name": "StreamWaitingInfo"
+            "name": "NoneDue"
           }
         }
       }
@@ -858,7 +870,7 @@
       "nullable": "string"
     }
   },
-  "WorkerClassLoadInfo": {
+  "WorkerExecutionClassLoad": {
     "budgets": {
       "list": {
         "model": {
@@ -874,7 +886,6 @@
               }
             },
             "capacity": "integer",
-            "free": "integer",
             "in_flight": "integer",
             "serves": {
               "list": {
@@ -889,7 +900,7 @@
               }
             }
           },
-          "name": "BudgetLoadInfo"
+          "name": "BudgetLoad"
         }
       }
     },
@@ -910,32 +921,19 @@
     "tasks_claimed": "integer",
     "tasks_running": "integer"
   },
-  "WorkerPingInfo": {
+  "WorkerPong": {
     "hostname": "string",
     "pid": "integer",
     "round_trip_ms": "number",
     "worker_id": "string"
   },
   "WorkerStateInfo": {
+    "child_count": "integer",
     "cluster_wide_cap": {
       "nullable": "integer"
     },
     "cpu_percent": {
       "nullable": "number"
-    },
-    "down_slots": {
-      "list": {
-        "model": {
-          "fields": {
-            "cause": "string",
-            "detail": "string",
-            "down_since": "date-time",
-            "failed_boots": "integer",
-            "slot": "integer"
-          },
-          "name": "DownSlotInfo"
-        }
-      }
     },
     "hostname": "string",
     "memory_percent": {
@@ -945,21 +943,20 @@
       "nullable": "number"
     },
     "pid": "integer",
-    "processes": "integer",
     "profile": {
       "union": {
-        "name": "SnapshotProfileInfo",
+        "name": "SnapshotProfile",
         "tag": "kind",
         "variants": {
           "named": {
             "fields": {
               "name": "string"
             },
-            "name": "ProfileNamedInfo"
+            "name": "ProfileNamed"
           },
           "not_recorded": {
             "fields": {},
-            "name": "ProfileNotRecordedInfo"
+            "name": "ProfileNotRecorded"
           }
         }
       }
@@ -971,12 +968,34 @@
       "list": "string"
     },
     "slot_health": {
-      "enum": {
-        "name": "SlotHealthKind",
-        "values": [
-          "all_serving",
-          "slots_down"
-        ]
+      "union": {
+        "name": "SlotHealth",
+        "tag": "kind",
+        "variants": {
+          "all_serving": {
+            "fields": {},
+            "name": "AllSlotsServing"
+          },
+          "slots_down": {
+            "fields": {
+              "slots": {
+                "list": {
+                  "model": {
+                    "fields": {
+                      "cause": "string",
+                      "detail": "string",
+                      "down_since": "date-time",
+                      "failed_boots": "integer",
+                      "slot": "integer"
+                    },
+                    "name": "DownSlot"
+                  }
+                }
+              }
+            },
+            "name": "SlotsDown"
+          }
+        }
       }
     },
     "snapshot_age_s": {

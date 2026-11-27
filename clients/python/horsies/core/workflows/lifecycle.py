@@ -51,7 +51,7 @@ from horsies.core.telemetry.send_telemetry import (
 
 logger = get_logger('workflow.engine')
 
-# Internal retry constants for resend_on_transient_err.
+# Internal retry constants for resend_on_transient_error.
 
 
 if TYPE_CHECKING:
@@ -110,7 +110,7 @@ async def start_workflow_async(
     workflow_id: str | None = None,
     sent_at: datetime | None = None,
     *,
-    resend_on_transient_err: bool = False,
+    resend_on_transient_error: bool = False,
 ) -> WorkflowStartResult[WorkflowHandle[OutT]]:
     """Start a workflow asynchronously.
 
@@ -142,7 +142,7 @@ async def start_workflow_async(
         broker: PostgreSQL broker for database operations.
         workflow_id: Optional custom workflow ID.
         sent_at: Optional workflow call-site timestamp from Python.
-        resend_on_transient_err: When ``True``, the core sends the start
+        resend_on_transient_error: When ``True``, the core sends the start
             again up to 3 times on a transient failure (schema install and
             statement), after 200 ms, doubling up to 2 s.
 
@@ -191,7 +191,7 @@ async def start_workflow_async(
     async def start(trace: TraceArgument) -> WorkflowStartResult[WorkflowHandle[OutT]]:
         return await _start_async_with_trace(
             spec, broker, workflow_id, wf_id, workflow_sent_at,
-            resend_on_transient_err, trace,
+            resend_on_transient_error, trace,
         )
 
     match _start_telemetry(broker):
@@ -225,7 +225,7 @@ async def _start_async_with_trace(
     workflow_id: str | None,
     wf_id: str,
     sent_at: datetime,
-    resend_on_transient_err: bool,
+    resend_on_transient_error: bool,
     trace: TraceArgument,
 ) -> WorkflowStartResult[WorkflowHandle[OutT]]:
     """The start of ``start_workflow_async`` under ``wf_id``, with the trace
@@ -234,7 +234,7 @@ async def _start_async_with_trace(
     from horsies.core.types.core_failure import call_refusal_or_raise
 
     match _start_request(
-        spec, broker, workflow_id, wf_id, sent_at, resend_on_transient_err, trace,
+        spec, broker, workflow_id, wf_id, sent_at, resend_on_transient_error, trace,
     ):
         case Err(err_value=refused):
             return Err(refused)
@@ -255,7 +255,7 @@ def _start_request(
     workflow_id: str | None,
     wf_id: str,
     sent_at: datetime,
-    resend_on_transient_err: bool,
+    resend_on_transient_error: bool,
     trace: TraceArgument,
 ) -> Result[tuple[WorkflowStartRequest, uuid.UUID], WorkflowStartValidationFailed]:
     """The start request of ``spec`` under ``wf_id`` and the UUID that it
@@ -344,7 +344,7 @@ def _start_request(
             spec_json=spec_json,
             workflow_id=workflow_key,
             sent_at=sent_at,
-            resend_on_transient_err=resend_on_transient_err,
+            resend_on_transient_error=resend_on_transient_error,
             trace=trace,
         ),
         workflow_key,
@@ -428,7 +428,7 @@ def start_workflow(
     workflow_id: str | None = None,
     sent_at: datetime | None = None,
     *,
-    resend_on_transient_err: bool = False,
+    resend_on_transient_error: bool = False,
 ) -> WorkflowStartResult[WorkflowHandle[OutT]]:
     """Start a workflow synchronously.
 
@@ -454,7 +454,7 @@ def start_workflow(
         broker: PostgreSQL broker for database operations.
         workflow_id: Optional custom workflow ID.
         sent_at: Optional workflow call-site timestamp from Python.
-        resend_on_transient_err: As for ``start_workflow_async()``.
+        resend_on_transient_error: As for ``start_workflow_async()``.
 
     Returns:
         ``Ok(WorkflowHandle)`` on success, ``Err(WorkflowStartError)`` on failure.
@@ -466,7 +466,7 @@ def start_workflow(
 
     def start(trace: TraceArgument) -> WorkflowStartResult[WorkflowHandle[OutT]]:
         return _start_with_trace(
-            spec, broker, workflow_id, wf_id, sent_at, resend_on_transient_err, trace,
+            spec, broker, workflow_id, wf_id, sent_at, resend_on_transient_error, trace,
         )
 
     match _start_telemetry(broker):
@@ -490,7 +490,7 @@ def _start_with_trace(
     workflow_id: str | None,
     wf_id: str,
     sent_at: datetime | None,
-    resend_on_transient_err: bool,
+    resend_on_transient_error: bool,
     trace: TraceArgument,
 ) -> WorkflowStartResult[WorkflowHandle[OutT]]:
     """The start of ``start_workflow`` under ``wf_id``, with the trace
@@ -514,7 +514,7 @@ def _start_with_trace(
         ))
     workflow_sent_at = sent_at or datetime.now(timezone.utc)
     match _start_request(
-        spec, broker, workflow_id, wf_id, workflow_sent_at, resend_on_transient_err, trace,
+        spec, broker, workflow_id, wf_id, workflow_sent_at, resend_on_transient_error, trace,
     ):
         case Err(err_value=refused):
             return Err(refused)

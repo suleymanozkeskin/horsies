@@ -1299,17 +1299,20 @@ async fn worker_list_carries_the_slot_health() {
         .iter()
         .find(|entry| entry["worker_id"] == worker_id.as_str())
         .expect("the worker is listed");
-    assert_eq!(worker["slot_health"], "slots_down");
     assert_eq!(
-        worker["down_slots"],
-        serde_json::json!([{
-            "slot": 1,
-            "cause": "the OS ran short of a resource (EMFILE)",
-            "detail": "OSError: [Errno 24] Too many open files",
-            "down_since": "2026-11-10T12:00:00Z",
-            "failed_boots": 2,
-        }])
+        worker["slot_health"],
+        serde_json::json!({
+            "kind": "slots_down",
+            "slots": [{
+                "slot": 1,
+                "cause": "the OS ran short of a resource (EMFILE)",
+                "detail": "OSError: [Errno 24] Too many open files",
+                "down_since": "2026-11-10T12:00:00Z",
+                "failed_boots": 2,
+            }],
+        })
     );
+    assert!(worker.get("down_slots").is_none(), "{worker}");
     assert_eq!(
         worker["queue_max_concurrency"],
         serde_json::json!({"default": 3})
@@ -1368,7 +1371,7 @@ fn worker_list_ages_are_measured_to_the_read_time() {
         .expect("a valid instant");
     let started_at = snapshot_at - chrono::TimeDelta::hours(1);
     let threshold =
-        chrono::TimeDelta::seconds(crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S as i64);
+        chrono::TimeDelta::seconds(crate::core::defaults::WORKER_STATE_LIVE_WINDOW_SECONDS as i64);
     let one_microsecond = chrono::TimeDelta::microseconds(1);
     let fresh_age = chrono::TimeDelta::microseconds(30_000_250);
 
@@ -1621,20 +1624,20 @@ async fn class_report_answers_with_streams_and_budgets() {
         .unwrap();
 
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["live_window_s"], 120);
+    assert_eq!(body["live_window_seconds"], 120.0);
     assert!(body.get("not_recorded").is_none());
     let streams: Vec<&serde_json::Value> = body["streams"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|stream| stream["queue_name"] == queue.as_str())
+        .filter(|stream| stream["queue"] == queue.as_str())
         .collect();
     let [stream] = streams.as_slice() else {
         panic!("one stream of the test queue: {body}");
     };
     assert_eq!(stream["execution"], "ISOLATED");
     assert_eq!(stream["coverage"], serde_json::json!({"kind": "unserved"}));
-    assert_eq!(stream["wait"]["kind"], "waiting");
+    assert_eq!(stream["wait"]["kind"], "due");
     let worker = body["workers"]
         .as_array()
         .unwrap()
@@ -1648,7 +1651,6 @@ async fn class_report_answers_with_streams_and_budgets() {
             "capacity": 8,
             "serves": ["SHARED_ASYNC"],
             "in_flight": 0,
-            "free": 8,
         }])
     );
 }
@@ -1983,7 +1985,7 @@ async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
     let database = crate::test_support::TestDatabase::create_empty().await;
     let broker = Arc::new(
         PostgresBroker::connect_observe_only(
-            &AppConfig::for_database_url(database.url()).broker,
+            &AppConfig::from_database_url(database.url()).database,
             crate::ClientFamily::Rust,
         )
         .await
@@ -2256,7 +2258,10 @@ async fn a_task_detail_read_that_fails_is_not_a_not_found() {
 const FAILING_READS: [(&str, &str); 4] = [
     ("/api/workflows/names", "Workflow names query failed: "),
     ("/api/workers", "Worker state query failed: "),
-    ("/api/workers/classes", "Class report query failed: "),
+    (
+        "/api/workers/classes",
+        "Execution class report query failed: ",
+    ),
     ("/api/workers/w1/history", "Worker history query failed: "),
 ];
 
@@ -2884,7 +2889,7 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
     let url = database.url().to_owned();
     let broker = Arc::new(
         PostgresBroker::connect_observe_only(
-            &AppConfig::for_database_url(&url).broker,
+            &AppConfig::from_database_url(&url).database,
             crate::ClientFamily::Rust,
         )
         .await

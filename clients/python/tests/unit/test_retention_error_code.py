@@ -62,7 +62,7 @@ def _raised_codes(build: object) -> list[HorsiesErrorCode | None]:
         build()  # type: ignore[operator]
     error = raised.value
     if isinstance(error, MultipleValidationErrors):
-        return [item.code for item in error.report.errors]
+        return [item.code for item in error.report.refusals]
     return [error.code]
 
 
@@ -162,7 +162,7 @@ class TestEveryRefusalCarriesTheCode:
             ),
             pytest.param(
                 lambda: RetentionConfig(
-                    paused_workflow_auto_cancel_after=timedelta(days=365_001)
+                    paused_workflow_cancel_after=timedelta(days=365_001)
                 ),
                 id='paused-age-above-maximum',
             ),
@@ -192,7 +192,7 @@ class TestEveryRefusalCarriesTheCode:
         """
         codes = _raised_codes(
             lambda: AppConfig(
-                broker=PostgresConfig(database_url=SecretStr(_DB_URL)),
+                database=PostgresConfig(database_url=SecretStr(_DB_URL)),
                 retention=RetentionConfig(
                     queue_retention={'absent': timedelta(days=1)}
                 ),
@@ -206,7 +206,7 @@ class TestEveryRefusalCarriesTheCode:
         """Proves the case above reaches the cross-check, not a neighbour."""
         with pytest.raises(ConfigurationError) as raised:
             AppConfig(
-                broker=PostgresConfig(database_url=SecretStr(_DB_URL)),
+                database=PostgresConfig(database_url=SecretStr(_DB_URL)),
                 retention=RetentionConfig(
                     queue_retention={'absent': timedelta(days=1)}
                 ),

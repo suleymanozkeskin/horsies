@@ -48,7 +48,7 @@ const selfNesting: object = defineWorkflow(
 function workflowApp(): Horsies {
   const created = createHorsies(
     {
-      broker: { databaseUrl: DATABASE_URL },
+      database: { databaseUrl: DATABASE_URL },
       tasks: [ping, charge],
       // SAFETY: `selfNesting` is the workflow contract of `defineWorkflow`, typed `object` for its self reference.
       workflows: [throwingCase, selfNesting as AnyWorkflowContract],

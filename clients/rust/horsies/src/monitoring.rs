@@ -33,20 +33,21 @@ use crate::Horsies;
 pub use horsies_core::monitoring::resolve_monitoring_window;
 pub use horsies_core::monitoring::{
     categorize_error_code, elapsed, span, task_action_outcome, ActionBody, ActionConflictCode,
-    ActionOutcome, ActionResponse, Breakdown, BreakdownCounts, BreakdownGroup, BudgetLoadInfo,
-    CancelTaskBody, ClassReportInfo, DownSlotInfo, ErrorCategory, ErrorFacet, FacetValue, Facets,
-    GroupRow, HistoryContractSource, HistoryWindow, LeafTaskInfo, LivenessReport,
-    MonitoringQueryError, MonitoringQueryErrorCode, MonitoringQueryErrorSource, MonitoringResult,
-    PaginationRefused, PendingStreamInfo, ScheduleStateInfo, SlotHealthKind, SnapshotProfileInfo,
-    SortDirection, StatusCount, StreamCoverageInfo, StreamWaitInfo, TaskAbsenceReason,
-    TaskActionError, TaskActionErrorCode, TaskActionResult, TaskAttemptInfo, TaskBreakdownQuery,
-    TaskCancelled, TaskDetail, TaskDetailNotFound, TaskDetailRead, TaskFacetsQuery, TaskFilters,
-    TaskGroupBy, TaskListPage, TaskListQuery, TaskSortField, TaskStatsQuery, TaskSummary,
-    WindowRefused, WorkerClassLoadInfo, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo,
-    WorkflowEdge, WorkflowNodeInfo, WorkflowRunDetail, WorkflowRunSummary, WorkflowRunsQuery,
-    WorkflowTaskDetail, INTERNAL_SERVER_ERROR_TEXT, LIST_ROW_BOUND, MAX_BREAKDOWN_LIMIT,
-    MAX_TASK_PAGE_LIMIT, MAX_TASK_PAGE_REACH, MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT,
-    MONITORING_WINDOW_MAX, RESUME_RECOVERY_WARNING, STATE_CONFLICT,
+    ActionOutcome, ActionResponse, Breakdown, BreakdownCounts, BreakdownGroup, BudgetLoad,
+    CancelTaskBody, DatabaseLiveness, DownSlot, DownSlots, ErrorCategory, ErrorFacet,
+    ExecutionClassReport, FacetValue, Facets, GroupRow, HistoryContractSource, HistoryWindow,
+    LeafTaskInfo, LivenessReport, MonitoringQueryError, MonitoringQueryErrorCode,
+    MonitoringQueryErrorSource, MonitoringResult, PaginationRefused, PendingStream,
+    ScheduleStateInfo, SlotHealth, SnapshotProfile, SortDirection, StatusCount,
+    StreamCoverageState, StreamWait, TaskAbsenceReason, TaskActionError, TaskActionErrorCode,
+    TaskActionResult, TaskAttemptInfo, TaskBreakdownQuery, TaskCancelled, TaskDetail,
+    TaskDetailNotFound, TaskDetailRead, TaskFacetsQuery, TaskFilters, TaskGroupBy, TaskListPage,
+    TaskListQuery, TaskSortField, TaskStatsQuery, TaskSummary, WindowRefused,
+    WorkerExecutionClassLoad, WorkerHistoryPoint, WorkerPong, WorkerStateInfo, WorkflowEdge,
+    WorkflowNodeInfo, WorkflowRunDetail, WorkflowRunSummary, WorkflowRunsQuery, WorkflowTaskDetail,
+    INTERNAL_SERVER_ERROR_TEXT, LIST_ROW_BOUND, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT,
+    MAX_TASK_PAGE_REACH, MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
+    RESUME_RECOVERY_WARNING, STATE_CONFLICT,
 };
 pub use horsies_core::monitoring::{
     AttemptClaimsInfo, AttemptFinalizingInfo, AttemptPhasesInfo, AttemptPlacementInfo,
@@ -292,7 +293,7 @@ mod tests {
 
     /// An app with no task and no workflow. Building it does no I/O.
     fn app() -> Horsies {
-        Horsies::new(AppConfig::for_database_url(
+        Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap()

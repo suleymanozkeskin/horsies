@@ -250,7 +250,7 @@ fn a_task_with_no_carrier_gets_a_root_span() {
 /// turns them off; the handler child makes them only with `MakeSpans`.
 #[test]
 fn the_switch_of_the_app_chooses_the_scope_of_the_handler_child() {
-    let mut app = Horsies::new(crate::AppConfig::for_database_url(
+    let mut app = Horsies::new(crate::AppConfig::from_database_url(
         "postgresql://localhost/horsies",
     ))
     .unwrap();

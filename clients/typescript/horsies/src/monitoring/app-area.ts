@@ -38,8 +38,8 @@ import {
   expiredTasks,
   pingDatabase,
   pingWorkers,
-  readClassCoverage,
-  readClassReport,
+  readExecutionClassCoverage,
+  readExecutionClassReport,
   staleTasks,
   worker,
   workerHistory,
@@ -47,8 +47,8 @@ import {
 } from "./health.ts";
 import type {
   BoundedTaskList,
-  ClassCoverage,
-  ClassReport,
+  ExecutionClassCoverage,
+  ExecutionClassReport,
   DatabasePing,
   ExpiredTaskRow,
   PingWorkersOptions,
@@ -115,8 +115,8 @@ export interface Monitoring {
   ): Promise<Result<readonly WorkerStateSnapshot[], WorkerHistoryError>>;
   getStaleTasks(query: StaleTasksQuery): Promise<Result<BoundedTaskList<StaleTaskRow>, HealthInputError>>;
   getExpiredTasks(): Promise<Result<BoundedTaskList<ExpiredTaskRow>, HealthReadError>>;
-  getExecutionClassCoverage(): Promise<Result<ClassCoverage, HealthReadError>>;
-  getExecutionClassReport(): Promise<Result<ClassReport, HealthReadError>>;
+  getExecutionClassCoverage(): Promise<Result<ExecutionClassCoverage, HealthReadError>>;
+  getExecutionClassReport(): Promise<Result<ExecutionClassReport, HealthReadError>>;
   cancelTask(taskId: TaskId, options: CancelTaskOptions): Promise<Result<TaskCancelled, CancelTaskError>>;
 }
 
@@ -189,8 +189,8 @@ export function createMonitoringArea(core: CoreAccess, native: MonitoringAddons 
       workerHistory(health(), workerId, limit),
     getStaleTasks: async (query: StaleTasksQuery) => staleTasks(health(), query.thresholdMinutes),
     getExpiredTasks: async () => expiredTasks(health()),
-    getExecutionClassCoverage: async () => readClassCoverage(health()),
-    getExecutionClassReport: async () => readClassReport(health()),
+    getExecutionClassCoverage: async () => readExecutionClassCoverage(health()),
+    getExecutionClassReport: async () => readExecutionClassReport(health()),
     cancelTask: async (taskId: TaskId, options: CancelTaskOptions) =>
       cancelTask({ addon: addons.cancel(), handle: handle() }, taskId, options),
   });

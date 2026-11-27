@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn a_start_that_refuses_gives_its_thrown_code() {
-        let refused = NativeThrown::CoreStartFailed {
+        let refused = NativeThrown::RuntimeStartFailed {
             cause: "no threads".to_owned(),
         };
         assert_eq!(

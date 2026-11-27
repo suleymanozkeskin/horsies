@@ -35,7 +35,7 @@ pub use horsies_core::events::{
 };
 pub use horsies_core::{
     HandlerError, HANDLER_DRAIN, HANDLER_ERROR_LOG_EVERY, HANDLER_QUEUE_EVENTS,
-    HANDLER_STATS_INTERVAL,
+    HANDLER_STATISTICS_INTERVAL,
 };
 
 use crate::child::named_start_hook;
@@ -168,7 +168,7 @@ mod tests {
     use crate::{AppConfig, HorsiesErrorCode};
 
     fn app() -> Horsies {
-        Horsies::new(AppConfig::for_database_url(
+        Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap()

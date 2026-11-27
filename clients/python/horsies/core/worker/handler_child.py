@@ -42,8 +42,9 @@ After the ready frame:
   ``HANDLER_ERROR_LOG_EVERY`` failures. The thread goes on with the next
   event.
 - The main thread sends a ``handler_stats`` frame every
-  ``HANDLER_STATS_INTERVAL_S``: the totals of each handler since the child
-  started, the spans made with no workflow node, and the RSS of the child.
+  ``HANDLER_STATISTICS_INTERVAL_SECONDS``: the totals of each handler since
+  the child started, the spans made with no workflow node, and the RSS of the
+  child.
 
 At the stop frame each inbox closes, the handler threads and the reader
 thread get ``HANDLER_DRAIN_S`` together for the events and the spans left,
@@ -136,7 +137,7 @@ HANDLER_QUEUE_EVENTS: Final = 10_000
 """The most events that the inbox of one handler holds. An event that does
 not fit is dropped for that handler and counted in its ``dropped``."""
 
-HANDLER_STATS_INTERVAL_S: Final = 5.0
+HANDLER_STATISTICS_INTERVAL_SECONDS: Final = 5.0
 """The time between two ``handler_stats`` frames."""
 
 HANDLER_DRAIN_S: Final = 2.0
@@ -893,6 +894,6 @@ def serve_handler_child(
     logger.debug(
         'The handler child %s is ready with %d handlers', os.getpid(), len(running)
     )
-    while not stopped.wait(HANDLER_STATS_INTERVAL_S):
+    while not stopped.wait(HANDLER_STATISTICS_INTERVAL_SECONDS):
         _send_child_frame(sock, stats_frame(running, ended_spans))
     exit_after_handler_stop(sock, running, ended_spans)

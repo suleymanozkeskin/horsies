@@ -70,7 +70,7 @@ def _app(
     app = Horsies(
         AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr(_DATABASE_URL),
                 retain_rerun_input_default=retain_rerun_input,
             ),
@@ -283,7 +283,7 @@ class TestOptionsThatDoNotEncode:
         app = Horsies(
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=PostgresConfig(database_url=SecretStr(_DATABASE_URL)),
+                database=PostgresConfig(database_url=SecretStr(_DATABASE_URL)),
                 schedule=schedule_config,
             ),
         )
@@ -361,7 +361,7 @@ class TestInit:
         app = Horsies(
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=PostgresConfig(database_url=SecretStr(_DATABASE_URL)),
+                database=PostgresConfig(database_url=SecretStr(_DATABASE_URL)),
             ),
         )
 

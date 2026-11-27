@@ -13,11 +13,12 @@ import type { HorsiesError } from "../app/refusal.ts";
 import type { TracingConfigInput } from "../telemetry/tracing-config.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import { type BrokerConfigInput, brokerJson } from "./broker.ts";
+import { type DatabaseConfigInput, databaseJson } from "./database.ts";
 import {
   accepted,
   type Checked,
   checkedEntries,
+  type ConfigJson,
   checkedInteger,
   checkedObject,
   type ConfigObject,
@@ -30,7 +31,7 @@ import {
   u32Field,
 } from "./checked.ts";
 import { type PayloadPolicyInput, payloadJson } from "./payload.ts";
-import { type QueueConfigInput, queueEntries, type QueueSetup, queueSetupOf, type TaskCap, taskCapJson } from "./queues.ts";
+import { type QueueConfigInput, queueEntries, type QueueSetup, queueSetupOf } from "./queues.ts";
 import { type RecoveryConfigInput, recoveryJson } from "./recovery.ts";
 import { type ResilienceConfigInput, resilienceJson } from "./resilience.ts";
 import { type RetentionConfigInput, retentionJson } from "./retention.ts";
@@ -49,13 +50,21 @@ export type ClaimMode =
   | { readonly kind: "softCap"; readonly prefetchBuffer: number; readonly leaseMs: number };
 
 /**
- * The config of an app, without its task and workflow lists. Only `broker.databaseUrl` is required; every field left
+ * The cluster-wide cap of `RUNNING` tasks: at most `tasks` tasks (1 or more) run at once across every queue of the
+ * cluster, or no cluster-wide cap (only the queue and worker limits apply).
+ */
+export type ClusterCapSetting =
+  | { readonly kind: "clusterCap"; readonly tasks: number }
+  | { readonly kind: "noClusterCap" };
+
+/**
+ * The config of an app, without its task and workflow lists. Only `database.databaseUrl` is required; every field left
  * out has the core's default.
  */
 export type AppConfigInput = QueueConfigInput & {
-  readonly broker: BrokerConfigInput;
-  /** The most tasks that run at once in the whole cluster, or no cap. */
-  readonly clusterWideCap?: TaskCap;
+  readonly database: DatabaseConfigInput;
+  /** The most tasks that run at once in the whole cluster, or no cap. Left out: `{ kind: "noClusterCap" }`. */
+  readonly clusterWideCap?: ClusterCapSetting;
   readonly claim?: ClaimMode;
   /** The age of a claimed task past which a heartbeat no longer renews it, in milliseconds. */
   readonly maxClaimRenewAgeMs?: number;
@@ -134,10 +143,8 @@ export function resendOnTransientError(config: AppConfig): boolean {
 function coreConfigObject(input: AppConfigInput, environment: EnvironmentRead): Checked<ConfigObject> {
   return checkedObject([
     queueEntries(input),
-    entry("broker", brokerJson(input.broker, environment, "broker")),
-    optionalEntry("cluster_wide_cap", input.clusterWideCap, (cap) =>
-      taskCapJson(cap, CLUSTER_CAP_U32, "clusterWideCap.tasks"),
-    ),
+    entry("database", databaseJson(input.database, environment, "database")),
+    optionalEntry("cluster_wide_cap", input.clusterWideCap, (cap) => clusterCapJson(cap, "clusterWideCap")),
     claimEntries(input.claim, "claim"),
     optionalEntry("max_claim_renew_age_ms", input.maxClaimRenewAgeMs, (value) =>
       checkedInteger(value, PREFETCH_U32, "maxClaimRenewAgeMs"),
@@ -149,8 +156,23 @@ function coreConfigObject(input: AppConfigInput, environment: EnvironmentRead): 
     optionalEntry("worker_profiles", input.workerProfiles, (profiles) =>
       workerProfilesJson(profiles, "workerProfiles"),
     ),
-    entry("resend_on_transient_err", accepted(input.resendOnTransientError === true)),
+    entry("resend_on_transient_error", accepted(input.resendOnTransientError === true)),
   ]);
+}
+
+/** The core's tagged `cluster_wide_cap` value of a cap setting. Pure. */
+function clusterCapJson(cap: ClusterCapSetting, path: string): Checked<ConfigJson> {
+  switch (cap.kind) {
+    case "clusterCap":
+      return checkedObject([
+        accepted([["kind", "cluster_cap"]]),
+        entry("tasks", checkedInteger(cap.tasks, CLUSTER_CAP_U32, memberPath(path, "tasks"))),
+      ]);
+    case "noClusterCap":
+      return accepted({ kind: "no_cluster_cap" });
+    default:
+      return unreachable(cap, "clusterCapJson");
+  }
 }
 
 /**

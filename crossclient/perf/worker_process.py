@@ -1,6 +1,6 @@
 """A worker process started with the public CLI, as an operator starts it.
 
-``horsies worker <locator> --profile <name> --loglevel <level>`` is the same
+``horsies worker <locator> --profile <name> --log-level <level>`` is the same
 command in horsies 0.7.0 and in the current release. A telemetry level adds
 ``--metrics-listen HOST:PORT`` (``telemetry_levels.py``). The harness runs the
 ``horsies`` script of its own environment, with the working directory at the
@@ -134,14 +134,14 @@ def start_worker(
     script: Path,
     app_locator: str,
     profile: str,
-    loglevel: str,
+    log_level: str,
     extra_arguments: tuple[str, ...],
     environment: Mapping[str, str],
     working_directory: Path,
     clock_ns: Callable[[], int],
 ) -> StartedWorker | WorkerStartFailed:
-    """Start ``script worker <app_locator> --profile <profile> --loglevel
-    <loglevel> <extra_arguments>`` in a new session. Starts a process; writes
+    """Start ``script worker <app_locator> --profile <profile> --log-level
+    <log_level> <extra_arguments>`` in a new session. Starts a process; writes
     a log file.
 
     The process gets the environment of the harness with ``environment``
@@ -154,8 +154,8 @@ def start_worker(
         app_locator,
         '--profile',
         profile,
-        '--loglevel',
-        loglevel,
+        '--log-level',
+        log_level,
         *extra_arguments,
     )
     try:

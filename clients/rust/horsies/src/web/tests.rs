@@ -19,8 +19,8 @@ const UNREACHABLE_URL: &str = "postgresql://user:secret@127.0.0.1:1/none";
 const TASK_ID: &str = "0195c1b4-7a2e-7d2f-9d4e-3b1a2c4d5e6f";
 
 fn config() -> AppConfig {
-    let mut config = AppConfig::for_database_url(UNREACHABLE_URL);
-    config.broker.pool_timeout = 1;
+    let mut config = AppConfig::from_database_url(UNREACHABLE_URL);
+    config.database.pool_timeout_seconds = 1;
     config
 }
 

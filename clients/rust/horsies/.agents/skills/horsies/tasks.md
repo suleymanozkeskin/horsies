@@ -546,7 +546,7 @@ wrote answers with its id, also after it finished, and does not run again.
 It refuses with `ValidationFailed` an error with no payload and the error of
 another task.
 
-With `AppConfig.resend_on_transient_err`, a retryable `EnqueueFailed` is
+With `AppConfig.resend_on_transient_error`, a retryable `EnqueueFailed` is
 sent again up to 3 times, after 200, 400 and 800 ms, as a repeat.
 
 ## `TaskHandle<T, E>` — Reads
@@ -628,7 +628,7 @@ calling thread.
 |---|---|---|
 | `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `with_options(..).send`, `retry_send` |
 | `TaskHandleView` | `handle.blocking()` | `get`, `info` |
-| `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_class_coverage`, `get_class_report`, `check_live`, `start`, `start_with_id`, `start_workflow`, `start_workflow_with` |
+| `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_execution_class_coverage`, `get_execution_class_report`, `check_live`, `start`, `start_with_id`, `start_workflow`, `start_workflow_with` |
 | `WorkflowFunctionView` | `workflow_function.blocking()` | `start`, `start_with_id`, `retry_start` |
 | `WorkflowTemplateView` | `workflow_template.blocking()` | `start`, `start_with_id` |
 | `WorkflowHandleView` | `workflow_handle.blocking()` | `get`, `result_for`, `status`, `results`, `tasks`, `cancel`, `pause`, `resume` |
@@ -642,7 +642,7 @@ The starts of a definition by its type are methods of the app view:
   `TaskSendError::AsyncContext` (with the prepared task id and payload, so
   `retry_send(&error).await` completes the same send),
   `ReadError::AsyncContext`, `DatabaseOperationError::AsyncContext`, a
-  `CheckReport` with `HRS-217`,
+  `ValidationReport` with `HRS-217`,
   `WorkflowStartError::AsyncContext` (with the `workflow_id` of the
   start; `retry_start(&error).await` completes the same start from async
   code), `WorkflowHandleError::AsyncContext`, or

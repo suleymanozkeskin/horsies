@@ -36,7 +36,7 @@ impl StaleMinutes {
 }
 
 /// Why a stale threshold is refused, in Python's terms
-/// (`_stale_threshold_minutes`, `clients/python/horsies/core/brokers/postgres.py`).
+/// (`PostgresBroker.get_stale_tasks`, `clients/python/horsies/core/brokers/postgres.py`).
 /// A client that takes untyped values (Python) also refuses a `bool` and a
 /// value that is not an integer with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,8 +53,8 @@ pub enum StaleThresholdRefusal {
 
 impl StaleThresholdRefusal {
     /// The `INVALID_INPUT` error of the refusal, not retryable, with
-    /// Python's text: `stale_threshold_minutes <cause>; give whole minutes
-    /// from 0 to 525600`. The text holds no value.
+    /// Python's text: `threshold_minutes <cause>; give whole minutes from 0
+    /// to 525600`. The text holds no value.
     pub fn error(&self) -> DatabaseOperationError {
         let cause = match self {
             Self::Bool => "is a bool, not an int".to_owned(),
@@ -63,7 +63,7 @@ impl StaleThresholdRefusal {
             Self::AboveMaximum => format!("is above {MAX_STALE_THRESHOLD_MINUTES} (one year)"),
         };
         DatabaseOperationError::invalid_input(format!(
-            "stale_threshold_minutes {cause}; give whole minutes from 0 to \
+            "threshold_minutes {cause}; give whole minutes from 0 to \
              {MAX_STALE_THRESHOLD_MINUTES}"
         ))
     }
@@ -201,7 +201,7 @@ mod tests {
         ] {
             assert_eq!(
                 refusal.error().message(),
-                format!("stale_threshold_minutes {cause}; give whole minutes from 0 to 525600")
+                format!("threshold_minutes {cause}; give whole minutes from 0 to 525600")
             );
         }
     }

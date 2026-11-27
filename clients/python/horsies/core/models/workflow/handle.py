@@ -228,7 +228,7 @@ def _decode_stored_workflow_error(
     if is_err(loads_r):
         if (
             status is WorkflowStatus.EXPIRED
-            and stored_error.startswith('paused_workflow_auto_cancel_after:')
+            and stored_error.startswith('paused_workflow_cancel_after:')
         ):
             # 0.5.0/0.5.1 stored this policy outcome as plain text. Preserve
             # readability of already-expired workflows without treating

@@ -172,7 +172,7 @@ pub use crate::worker::executor::child_host::{
     ProcessRole, RunCancelSignal, RunCancelState, RunHandle, RunHandleRefused, RunSignalRefused,
     RunSpawnRefused, ThreadRole, WorkStopCause, CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND,
     HANDLER_DRAIN, HANDLER_ERROR_LOG_EVERY, HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS,
-    HANDLER_STATS_INTERVAL, HOST_LOOP_TURN_TICK, MAX_RUN_WORK, NODE_READER_STOP_BOUND,
+    HANDLER_STATISTICS_INTERVAL, HOST_LOOP_TURN_TICK, MAX_RUN_WORK, NODE_READER_STOP_BOUND,
     NODE_READ_QUEUE_SPANS,
 };
 // The fencing token of a run, which `run_fencing_token` gives.
@@ -227,16 +227,17 @@ pub use crate::worker::{
 
 // worker state snapshot values
 pub use crate::broker::{
-    checked_history_limit, ping_listener_disabled, ping_min_responses_refused,
-    ping_timeout_refused, worker_history_limit_refused, ClassBudget, ClassBudgets,
-    ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth, SnapshotProfile,
+    checked_history_limit, ping_listener_disabled, ping_min_responses_refused, ping_wait_refused,
+    worker_history_limit_refused, ClearableBootCause, DownSlot, DownSlots, ExecutionClassBudget,
+    ExecutionClassBudgets, ShortageErrno, SlotHealth, SnapshotProfile,
     MAX_BOOT_FAILURE_DETAIL_CHARS,
 };
 
 // fleet check and class report
 pub use crate::broker::{
-    BudgetLoad, ClassCoverage, ClassReport, PendingStream, StreamCoverage, StreamCoverageState,
-    StreamWait, WorkerClassLoad, LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT,
+    BudgetLoad, ExecutionClassCoverage, ExecutionClassReport, PendingStream, StreamCoverage,
+    StreamCoverageState, StreamWait, WorkerExecutionClassLoad, LIVE_SNAPSHOT_ROW_LIMIT,
+    PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT,
 };
 
 // the stale and expired task lists of a client handle

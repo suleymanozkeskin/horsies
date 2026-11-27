@@ -204,13 +204,13 @@ impl PoolSize {
 
 /// The connection pool of one child as it opens: from `min_size` to
 /// `max_size` connections, and a check of each connection on checkout when
-/// `check` is true. `min_size <= max_size` holds: only [`ResolvedPool::new`]
+/// `pre_ping` is true. `min_size <= max_size` holds: only [`ResolvedPool::new`]
 /// builds one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedPool {
     min_size: PoolMinSize,
     max_size: PoolConnectionCount,
-    check: bool,
+    pre_ping: bool,
 }
 
 /// A pool whose `min_size` is above its resolved `max_size`. AppConfig
@@ -226,13 +226,13 @@ impl ResolvedPool {
     pub fn new(
         min_size: PoolMinSize,
         max_size: PoolConnectionCount,
-        check: bool,
+        pre_ping: bool,
     ) -> Result<Self, PoolMinAboveMax> {
         match min_size.get() <= max_size.get() {
             true => Ok(Self {
                 min_size,
                 max_size,
-                check,
+                pre_ping,
             }),
             false => Err(PoolMinAboveMax { min_size, max_size }),
         }
@@ -246,8 +246,8 @@ impl ResolvedPool {
         self.max_size
     }
 
-    pub const fn check(self) -> bool {
-        self.check
+    pub const fn pre_ping(self) -> bool {
+        self.pre_ping
     }
 }
 
@@ -257,7 +257,7 @@ impl ResolvedPool {
 ///   opens at its first use.
 /// - `max_size`: the most connections. An isolated child has one seat, so no
 ///   size follows the seats.
-/// - `check`: check each connection when a write takes it from the pool. Off
+/// - `pre_ping`: check each connection when a write takes it from the pool. Off
 ///   by default: a write of the child is one statement in autocommit, so a
 ///   check doubles its round trips. With it off, a dead pooled connection
 ///   fails the write that takes it: the RUNNING update ends as
@@ -270,7 +270,7 @@ pub struct IsolatedPool {
     #[serde(default = "default_isolated_pool_size")]
     pub max_size: PoolSize,
     #[serde(default)]
-    pub check: bool,
+    pub pre_ping: bool,
 }
 
 impl Default for IsolatedPool {
@@ -278,7 +278,7 @@ impl Default for IsolatedPool {
         Self {
             min_size: no_open_connections(),
             max_size: default_isolated_pool_size(),
-            check: false,
+            pre_ping: false,
         }
     }
 }
@@ -286,7 +286,7 @@ impl Default for IsolatedPool {
 impl IsolatedPool {
     /// The pool as each isolated child opens it.
     pub fn resolved(&self) -> Result<ResolvedPool, PoolMinAboveMax> {
-        ResolvedPool::new(self.min_size, self.max_size.connections, self.check)
+        ResolvedPool::new(self.min_size, self.max_size.connections, self.pre_ping)
     }
 }
 
@@ -295,7 +295,7 @@ impl IsolatedPool {
 /// - `min_size`: connections that the pool keeps open.
 /// - `max_size`: the most connections: a set size, or one that follows the
 ///   seats of the child (the default).
-/// - `check`: as for [`IsolatedPool`].
+/// - `pre_ping`: as for [`IsolatedPool`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SharedPool {
@@ -304,7 +304,7 @@ pub struct SharedPool {
     #[serde(default = "pool_size_from_seats")]
     pub max_size: PoolSizeSetting,
     #[serde(default)]
-    pub check: bool,
+    pub pre_ping: bool,
 }
 
 impl Default for SharedPool {
@@ -312,7 +312,7 @@ impl Default for SharedPool {
         Self {
             min_size: no_open_connections(),
             max_size: pool_size_from_seats(),
-            check: false,
+            pre_ping: false,
         }
     }
 }
@@ -335,7 +335,7 @@ impl SharedPool {
         ResolvedPool::new(
             self.min_size,
             self.resolved_max_size(from_seats),
-            self.check,
+            self.pre_ping,
         )
     }
 }
@@ -734,7 +734,6 @@ pub enum ChildPreload {
     App,
     /// No preload parent. Every child starts with `exec`.
     #[default]
-    #[serde(rename = "none")]
     NoPreload,
 }
 
@@ -744,7 +743,7 @@ impl ChildPreload {
         match self {
             Self::Library => "library",
             Self::App => "app",
-            Self::NoPreload => "none",
+            Self::NoPreload => "no_preload",
         }
     }
 }
@@ -969,15 +968,15 @@ impl SizeOrigin {
 fn describe_pool(
     min_size: PoolMinSize,
     max_size: PoolConnectionCount,
-    check: bool,
+    pre_ping: bool,
     origin: SizeOrigin,
 ) -> String {
-    let check = match check {
+    let pre_ping = match pre_ping {
         true => "on",
         false => "off",
     };
     format!(
-        "pool {} to {} connections{}, check {check}",
+        "pool {} to {} connections{}, pre_ping {pre_ping}",
         min_size.get(),
         max_size.get(),
         origin.text(),
@@ -1001,7 +1000,7 @@ fn describe_isolated(isolated: IsolatedSetting) -> String {
             describe_pool(
                 children.pool.min_size,
                 children.pool.max_size.connections,
-                children.pool.check,
+                children.pool.pre_ping,
                 SizeOrigin::Profile,
             ),
             describe_task_send_pool(children.task_send_pool),
@@ -1022,7 +1021,7 @@ fn describe_shared_async(shared_async: SharedAsyncSetting) -> String {
             describe_pool(
                 children.pool.min_size,
                 children.resolved_max_pool_size(),
-                children.pool.check,
+                children.pool.pre_ping,
                 SizeOrigin::of_pool_size(children.pool.max_size),
             ),
             children.resolved_executor_threads().get(),
@@ -1044,7 +1043,7 @@ fn describe_shared_thread(shared_thread: SharedThreadSetting) -> String {
             describe_pool(
                 children.pool.min_size,
                 children.resolved_max_pool_size(),
-                children.pool.check,
+                children.pool.pre_ping,
                 SizeOrigin::of_pool_size(children.pool.max_size),
             ),
             describe_task_send_pool(children.task_send_pool),
@@ -1805,7 +1804,7 @@ mod tests {
         );
         assert_eq!(isolated_children.pool.min_size.get(), 0);
         assert_eq!(isolated_children.pool.max_size.connections.get(), 1);
-        assert!(!isolated_children.pool.check);
+        assert!(!isolated_children.pool.pre_ping);
         assert_eq!(isolated_children.task_send_pool.connections.get(), 2);
         assert_eq!(
             parsed(json!({"isolated": {"kind": "isolated_children", "count": 1}})).isolated,
@@ -1851,7 +1850,7 @@ mod tests {
             "shared_thread": {"kind": "no_shared_thread_children"},
             "pool": {"max_size": {"kind": "pool_size", "connections": 12}},
             "claim": {"per_queue_per_pass": {"kind": "task_limit", "tasks": 2}},
-            "preload": "none",
+            "preload": "no_preload",
             "parent_cpu": "OWN_CORE",
         }));
 
@@ -1975,7 +1974,7 @@ mod tests {
             let pool = children.resolved_pool().expect("min_size 0 fits");
             assert_eq!(pool.max_size(), derived, "{seats} seats");
             assert_eq!(pool.min_size().get(), 0);
-            assert!(!pool.check());
+            assert!(!pool.pre_ping());
         }
         for seats in [1, 3, 4, 5, 39, 256] {
             let children = SharedThreadChildren::new(bounded(1), bounded(seats));
@@ -2014,7 +2013,7 @@ mod tests {
         isolated_children.pool = IsolatedPool {
             min_size: bounded(2),
             max_size: PoolSize::new(bounded(5)),
-            check: false,
+            pre_ping: false,
         };
         let pool = isolated_children.resolved_pool().expect("2 is at most 5");
         assert_eq!((pool.min_size().get(), pool.max_size().get()), (2, 5));
@@ -2207,7 +2206,7 @@ mod tests {
             max_size: PoolSizeSetting::PoolSize {
                 connections: bounded(4),
             },
-            check: false,
+            pre_ping: false,
         };
         let profile = WorkerProfile {
             shared_thread: SharedThreadSetting::SharedThreadChildren(threads),
@@ -2229,7 +2228,7 @@ mod tests {
             max_size: PoolSizeSetting::PoolSize {
                 connections: bounded(5),
             },
-            check: false,
+            pre_ping: false,
         };
         let mut isolated_children = IsolatedChildren::new(bounded(1));
         isolated_children.pool.min_size = bounded(3);
@@ -2446,8 +2445,9 @@ mod tests {
 
         assert_eq!(
             describe_worker_profile(&profile),
-            "isolated=8 (recycle after no limit, above 1024 MB; pool 0 to 1 connections, check \
-             off; task_send_pool 2 connections), shared_async=none, shared_thread=none, pool=5 \
+            "isolated=8 (recycle after no limit, above 1024 MB; pool 0 to 1 connections, \
+             pre_ping off; task_send_pool 2 connections), shared_async=none, shared_thread=none, \
+             pool=5 \
              connections (derived from 8 seats), claim per queue per pass: 4 tasks, claimed per \
              worker: no limit, drain_timeout=90s, preload=app, parent_cpu=OWN_CORE",
         );
@@ -2472,7 +2472,7 @@ mod tests {
         assert!(
             described.contains(
                 "shared_async=3x25 seats (recycle after 40 tasks per seat, above 2048 MB; pool 0 \
-                 to 3 connections, derived from seats, check off; executor 25 threads, derived \
+                 to 3 connections, derived from seats, pre_ping off; executor 25 threads, derived \
                  from seats; task_send_pool 2 connections), "
             ),
             "{described}",
@@ -2491,7 +2491,8 @@ mod tests {
         assert!(
             described.contains(
                 "shared_thread=2x8 seats (recycle after no limit per seat, above 1024 MB; pool 0 \
-                 to 2 connections, derived from seats, check off; task_send_pool 2 connections), "
+                 to 2 connections, derived from seats, pre_ping off; task_send_pool 2 \
+                 connections), "
             ),
             "{described}",
         );
@@ -2518,7 +2519,7 @@ mod tests {
         isolated_children.pool = IsolatedPool {
             min_size: bounded(1),
             max_size: PoolSize::new(bounded(4)),
-            check: false,
+            pre_ping: false,
         };
         isolated_children.task_send_pool = PoolSize::new(bounded(3));
         let mut async_children = SharedAsyncChildren::new(bounded(1), bounded(50));
@@ -2527,7 +2528,7 @@ mod tests {
             max_size: PoolSizeSetting::PoolSize {
                 connections: bounded(9),
             },
-            check: true,
+            pre_ping: true,
         };
         async_children.executor = ExecutorThreadsSetting::ExecutorThreads {
             threads: bounded(7),
@@ -2551,12 +2552,12 @@ mod tests {
         let described = describe_worker_profile(&profile);
 
         for part in [
-            "isolated=1 (recycle after 100 tasks, above no limit; pool 1 to 4 connections, check \
-             off; task_send_pool 3 connections), ",
+            "isolated=1 (recycle after 100 tasks, above no limit; pool 1 to 4 connections, \
+             pre_ping off; task_send_pool 3 connections), ",
             "shared_async=1x50 seats (recycle after 100 tasks per seat, above no limit; pool 2 \
-             to 9 connections, check on; executor 7 threads; task_send_pool 5 connections), ",
+             to 9 connections, pre_ping on; executor 7 threads; task_send_pool 5 connections), ",
             "shared_thread=1x6 seats (recycle after 100 tasks per seat, above no limit; pool 0 \
-             to 3 connections, check off; task_send_pool 1 connections), ",
+             to 3 connections, pre_ping off; task_send_pool 1 connections), ",
             ", pool=11 connections, claim per queue per pass: ",
         ] {
             assert!(described.contains(part), "{described}");

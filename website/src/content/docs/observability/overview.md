@@ -13,11 +13,11 @@ horsies gives a worker fleet Prometheus metrics, OpenTelemetry traces, log recor
 | Need | What ships | Turn on |
 |------|------------|---------|
 | Metrics in Prometheus | The metrics endpoint of each worker: `GET /metrics`, `GET /livez`, `GET /readyz`. See [Metrics](/horsies/observability/metrics/) | `--metrics-listen HOST:PORT` on the worker command |
-| The state of the fleet | One fleet collector: queue depth, oldest pending age, live workers, seats, unserved classes, workflows, schedules. See [Fleet Collector](/horsies/observability/fleet-collector/) | `horsies metrics <app> --listen HOST:PORT`, or `GET /metrics` of the web UI |
+| The state of the fleet | One fleet collector: queue depth, oldest pending age, live workers, seats, unserved classes, workflows, schedules. See [Fleet Collector](/horsies/observability/fleet-collector/) | `horsies metrics <app> --metrics-listen HOST:PORT`, or `GET /metrics` of the web UI |
 | Metrics in OpenTelemetry | A Collector config that scrapes the endpoints and exports OTLP. See [OpenTelemetry Collector](/horsies/observability/opentelemetry-collector/) | `deploy/otel-collector/collector.yaml` |
 | Traces | One trace from the send of a task to each of its attempts, workflows included. See [Tracing](/horsies/observability/tracing/) | Python: `AppConfig(tracing=OtelTracing())` and the extra `horsies[otel]`. Rust: the feature `otel` |
 | Producer metrics | `horsies.task.sent` and `horsies.task.send.duration`, through your OpenTelemetry meter | With the traces |
-| Logs | `task_id`, `attempt` and `trace_id` on the records of the worker; the task on the records of a task body; JSON lines. See [Logs](/horsies/observability/logs/) | Python: `AppConfig(log_format=JsonLogs())`. Rust: `horsies::cli::run_with_log_format(app, LogFormat::Json)` |
+| Logs | `task_id`, `attempt` and `trace_id` on the records of the worker; the task on the records of a task body; JSON lines. See [Logs](/horsies/observability/logs/) | Python: `AppConfig(log_format=JsonLogs())`. Rust: `horsies::cli::run_with_log_format(app, LogFormat::JsonLogs)` |
 | Hooks for other systems | Typed lifecycle events, run in the handler child of the worker. See [Lifecycle Events](/horsies/observability/events/) | Python: `@app.on_event(EventType)`. Rust: `app.on_event::<E>(name, handler)` |
 | A trace link in the web UI | The trace id of a task in the task detail, as a link | `horsies web --trace-link TEMPLATE` |
 | Dashboards and alerts | A Grafana dashboard and Prometheus alert rules in `deploy/`. See [Dashboards and Alerts](/horsies/observability/dashboards-and-alerts/) | Import the files |

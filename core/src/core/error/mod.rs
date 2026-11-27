@@ -526,8 +526,8 @@ impl HorsiesError {
         self
     }
 
-    pub fn with_help(mut self, help: impl Into<String>) -> Self {
-        self.help_text = Some(help.into());
+    pub fn with_help(mut self, help_text: impl Into<String>) -> Self {
+        self.help_text = Some(help_text.into());
         self
     }
 
@@ -574,30 +574,58 @@ impl HorsiesError {
     }
 }
 
-/// Collects multiple HorsiesErrors within a validation phase.
+/// The refusals of one validation phase: the container that `check`,
+/// `check_live` and `Horsies::new` return on their error side.
 ///
-/// Formats all collected errors together with a summary line,
-/// similar to rustc's multi-error output.
+/// Formats all refusals together with a summary line, similar to rustc's
+/// multi-error output.
 #[derive(Debug, Clone)]
 pub struct ValidationReport {
-    pub phase_name: String,
-    pub errors: Vec<HorsiesError>,
+    phase_name: String,
+    refusals: Vec<HorsiesError>,
 }
 
 impl ValidationReport {
     pub fn new(phase_name: impl Into<String>) -> Self {
         Self {
             phase_name: phase_name.into(),
-            errors: Vec::new(),
+            refusals: Vec::new(),
+        }
+    }
+
+    /// A report of the phase `phase_name` that holds `refusals`.
+    pub fn of(phase_name: impl Into<String>, refusals: Vec<HorsiesError>) -> Self {
+        Self {
+            phase_name: phase_name.into(),
+            refusals,
         }
     }
 
     pub fn add(&mut self, error: HorsiesError) {
-        self.errors.push(error);
+        self.refusals.push(error);
     }
 
     pub fn has_errors(&self) -> bool {
-        !self.errors.is_empty()
+        !self.refusals.is_empty()
+    }
+
+    /// The refusals, in the order the phase found them.
+    pub fn refusals(&self) -> &[HorsiesError] {
+        &self.refusals
+    }
+
+    /// The phase that refused, for example `check`, `config`,
+    /// `worker-startup` or `scheduler-startup`.
+    pub fn phase_name(&self) -> &str {
+        &self.phase_name
+    }
+
+    /// `Ok` when the report holds no refusal, else the report itself.
+    pub fn into_checked(self) -> Result<(), ValidationReport> {
+        match self.refusals.is_empty() {
+            true => Ok(()),
+            false => Err(self),
+        }
     }
 
     /// Raise collected errors following the backward-compat rule:
@@ -605,19 +633,23 @@ impl ValidationReport {
     /// - 1 error: returns the original error
     /// - 2+ errors: returns a MultipleValidationErrors wrapping all
     pub fn into_result(self) -> Result<(), HorsiesError> {
-        match self.errors.len() {
+        match self.refusals.len() {
             0 => Ok(()),
-            1 => Err(self.errors.into_iter().next().expect("length checked as 1")),
+            1 => Err(self
+                .refusals
+                .into_iter()
+                .next()
+                .expect("length checked as 1")),
             n => {
                 let message = format!("aborting due to {} previous errors", n);
                 let mut combined = HorsiesError::new(message);
-                let common_code = self.errors.first().and_then(|first| {
+                let common_code = self.refusals.first().and_then(|first| {
                     first
                         .code
-                        .filter(|code| self.errors.iter().all(|error| error.code == Some(*code)))
+                        .filter(|code| self.refusals.iter().all(|error| error.code == Some(*code)))
                 });
                 combined.code = common_code;
-                for error in &self.errors {
+                for error in &self.refusals {
                     combined.notes.push(format!("{}", error));
                 }
                 Err(combined)
@@ -628,14 +660,32 @@ impl ValidationReport {
 
 impl std::fmt::Display for ValidationReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for error in &self.errors {
+        for error in &self.refusals {
             writeln!(f, "{}", error)?;
         }
         write!(
             f,
             "error: aborting due to {} previous errors",
-            self.errors.len()
+            self.refusals.len()
         )
+    }
+}
+
+impl std::error::Error for ValidationReport {}
+
+/// One error of a refused report, for a caller whose error type is
+/// [`HorsiesError`]: one refusal as it is, two or more as one error with
+/// each refusal as a note ([`ValidationReport::into_result`]).
+///
+/// # Panics
+///
+/// For a report with no refusal: a refused report always holds one.
+impl From<ValidationReport> for HorsiesError {
+    fn from(report: ValidationReport) -> Self {
+        match report.into_result() {
+            Err(error) => error,
+            Ok(()) => panic!("a refused validation report holds at least one refusal"),
+        }
     }
 }
 
@@ -1011,7 +1061,7 @@ mod tests {
     #[test]
     fn validation_report_stores_phase_name() {
         let report = ValidationReport::new("dag_validation");
-        assert_eq!(report.phase_name, "dag_validation");
+        assert_eq!(report.phase_name(), "dag_validation");
     }
 
     #[test]
@@ -1020,7 +1070,7 @@ mod tests {
         report.add(HorsiesError::new("err1"));
         report.add(HorsiesError::new("err2"));
         report.add(HorsiesError::new("err3"));
-        assert_eq!(report.errors.len(), 3);
+        assert_eq!(report.refusals().len(), 3);
         assert!(report.has_errors());
     }
 
@@ -1039,6 +1089,32 @@ mod tests {
         let report = ValidationReport::new("empty_phase");
         let s = report.to_string();
         assert!(s.contains("0") || s.is_empty() || s.contains("no errors"));
+    }
+
+    #[test]
+    fn into_checked_is_ok_with_no_refusal_and_the_report_with_one() {
+        assert!(ValidationReport::new("config").into_checked().is_ok());
+        let mut report = ValidationReport::new("config");
+        report.add(HorsiesError::new("bad").with_code(HorsiesErrorCode::ConfigInvalidQueueMode));
+        let refused = report.into_checked().unwrap_err();
+        assert_eq!(refused.phase_name(), "config");
+        assert_eq!(
+            refused.refusals()[0].code,
+            Some(HorsiesErrorCode::ConfigInvalidQueueMode)
+        );
+    }
+
+    #[test]
+    fn a_report_converts_into_one_error() {
+        let single = ValidationReport::of("config", vec![HorsiesError::new("only")]);
+        assert_eq!(HorsiesError::from(single).message, "only");
+        let two = ValidationReport::of(
+            "config",
+            vec![HorsiesError::new("first"), HorsiesError::new("second")],
+        );
+        let combined = HorsiesError::from(two);
+        assert!(combined.message.contains("2 previous errors"));
+        assert_eq!(combined.notes.len(), 2);
     }
 
     #[test]

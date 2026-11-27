@@ -2,25 +2,35 @@
 //!
 //! A pending stream is the `PENDING` rows of one queue and one execution
 //! class. A live worker serves a stream when the queue is one of its queues
-//! and one of its claim budgets serves the class ([`ClassBudget::serves`]). A
-//! worker is live while its latest state snapshot is at most
-//! `WORKER_STATE_LIVE_WINDOW_S` old.
+//! and one of its claim budgets serves the class
+//! ([`ExecutionClassBudget::serves`]). A worker is live while its latest
+//! state snapshot is at most `WORKER_STATE_LIVE_WINDOW_SECONDS` old.
 //!
 //! Python reference: `clients/python/horsies/core/models/class_coverage.py`. The types are
-//! frozen reports. The functions are pure; the database reads that feed them
-//! are in `broker::class_coverage_reads`.
+//! frozen reports. The class report and its parts are also the JSON of the
+//! monitoring route `GET /api/workers/classes` (`Serialize`). The functions
+//! are pure; the database reads that feed them are in
+//! `broker::class_coverage_reads`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, TimeDelta, Utc};
+use serde::Serialize;
 use serde_json::Value;
 
-use crate::broker::class_budgets::{parse_class_capacity, ClassBudget, ClassBudgets};
+use crate::broker::class_budgets::{
+    parse_class_capacity, ExecutionClassBudget, ExecutionClassBudgets,
+};
+use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_SECONDS;
 use crate::core::task::Execution;
 
 /// Whether live workers serve a pending stream (Python `StreamServed`,
 /// `StreamWithoutCapacity`, `StreamUnserved`, `class_coverage.py:29-58`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// JSON: tagged by `kind`: `served`, `no_capacity` or `unserved`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamCoverageState {
     /// Live workers serve the stream, and they have capacity in service for
     /// it. `workers` counts them, 1 or more. `capacity` sums, over those
@@ -31,7 +41,7 @@ pub enum StreamCoverageState {
     /// Live workers serve the stream, and none of them has capacity in
     /// service for it: every child or seat of the serving budgets was down at
     /// the worker's snapshot. `workers` counts them, 1 or more.
-    WithoutCapacity { workers: usize },
+    NoCapacity { workers: usize },
     /// No live worker serves the stream. Its rows wait until a worker that
     /// serves the class runs on the queue.
     Unserved,
@@ -40,9 +50,9 @@ pub enum StreamCoverageState {
 /// The coverage of one pending stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamCoverage {
-    pub queue_name: String,
+    pub queue: String,
     pub execution: Execution,
-    pub state: StreamCoverageState,
+    pub coverage: StreamCoverageState,
 }
 
 /// The fleet check: the coverage of every pending stream, read at
@@ -50,10 +60,10 @@ pub struct StreamCoverage {
 ///
 /// `live_workers` counts the workers whose latest snapshot was live.
 /// `streams` holds one entry per (queue, class) that has `PENDING` rows,
-/// ordered by queue name, then by [`Execution`] order. Empty when no row is
+/// ordered by queue, then by [`Execution`] order. Empty when no row is
 /// pending.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClassCoverage {
+pub struct ExecutionClassCoverage {
     pub checked_at: DateTime<Utc>,
     pub live_workers: usize,
     pub streams: Vec<StreamCoverage>,
@@ -61,28 +71,43 @@ pub struct ClassCoverage {
 
 /// How long the rows of a pending stream wait (Python `OldestWaiting`,
 /// `NoneDue`, `class_coverage.py:86-107`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// JSON: tagged by `kind`: `due` or `none_due`. The wait of `due` is
+/// `wait_seconds`, a number of seconds, exact to the microsecond.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamWait {
-    /// At least one row is due. `enqueued_at` is the due time of the oldest
-    /// due row: its send time, or the time its retry became due. `wait` is
-    /// how long that row has waited at `checked_at`, 0 or more.
-    OldestWaiting {
-        enqueued_at: DateTime<Utc>,
+    /// At least one row is due. `oldest_due_at` is the due time of the
+    /// oldest due row: its send time, or the time its retry became due.
+    /// `wait` is how long that row has waited at `checked_at`, 0 or more.
+    Due {
+        #[serde(serialize_with = "crate::monitoring::time_text::utc")]
+        oldest_due_at: DateTime<Utc>,
+        #[serde(
+            rename = "wait_seconds",
+            serialize_with = "crate::monitoring::time_text::seconds"
+        )]
+        #[cfg_attr(test, schemars(with = "f64"))]
         wait: TimeDelta,
     },
     /// Every row is due later: a delayed send, or a retry that waits for its
     /// interval. `next_due_at` is the earliest due time.
-    NoneDue { next_due_at: DateTime<Utc> },
+    NoneDue {
+        #[serde(serialize_with = "crate::monitoring::time_text::utc")]
+        next_due_at: DateTime<Utc>,
+    },
 }
 
-/// One pending stream: how long its rows wait, and whether a live worker
-/// serves it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One pending stream: whether a live worker serves it, and how long its
+/// rows wait.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct PendingStream {
-    pub queue_name: String,
+    pub queue: String,
     pub execution: Execution,
+    pub coverage: StreamCoverageState,
     pub wait: StreamWait,
-    pub state: StreamCoverageState,
 }
 
 /// One claim budget of a live worker.
@@ -90,8 +115,10 @@ pub struct PendingStream {
 /// `capacity` and `serves` come from the worker's latest snapshot.
 /// `in_flight` counts, at the read, the worker's `RUNNING` rows and its
 /// `CLAIMED` rows with a live lease whose class the budget serves. The claim
-/// counts the same rows against the budget.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// counts the same rows against the budget. The JSON holds these four
+/// fields; a reader computes [`BudgetLoad::free`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct BudgetLoad {
     pub budget: Execution,
     pub capacity: u64,
@@ -111,24 +138,42 @@ impl BudgetLoad {
 }
 
 /// The claim budgets of one live worker, in [`Execution`] order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkerClassLoad {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct WorkerExecutionClassLoad {
     pub worker_id: String,
+    #[serde(serialize_with = "crate::monitoring::time_text::utc")]
     pub snapshot_at: DateTime<Utc>,
     pub budgets: Vec<BudgetLoad>,
 }
 
-/// The class report: pending streams and the budget load of each live
-/// worker, read at `checked_at` (database time).
+/// The execution class report: pending streams and the budget load of each
+/// live worker, read at `checked_at` (database time).
 ///
-/// `streams` is ordered like [`ClassCoverage::streams`]; `workers` (the live
-/// workers) by worker id.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClassReport {
+/// A worker is live while its latest snapshot is at most `live_window` old
+/// (`WORKER_STATE_LIVE_WINDOW_SECONDS`). `streams` is ordered like
+/// [`ExecutionClassCoverage::streams`]; `workers` (the live workers) by
+/// worker id. JSON: `live_window` is `live_window_seconds`, a number of
+/// seconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct ExecutionClassReport {
+    #[serde(serialize_with = "crate::monitoring::time_text::utc")]
     pub checked_at: DateTime<Utc>,
+    #[serde(
+        rename = "live_window_seconds",
+        serialize_with = "crate::monitoring::time_text::seconds"
+    )]
+    #[cfg_attr(test, schemars(with = "f64"))]
+    pub live_window: TimeDelta,
     pub streams: Vec<PendingStream>,
-    pub workers: Vec<WorkerClassLoad>,
+    pub workers: Vec<WorkerExecutionClassLoad>,
 }
+
+/// How old the latest snapshot of a live worker may be:
+/// `WORKER_STATE_LIVE_WINDOW_SECONDS`.
+pub(crate) const LIVE_WINDOW: TimeDelta =
+    TimeDelta::seconds(WORKER_STATE_LIVE_WINDOW_SECONDS as i64);
 
 /// Stored data that the class reads cannot decide on, or a read bound that
 /// was reached (Python `ClassReadRefused`, `class_coverage.py:169-177`).
@@ -153,7 +198,7 @@ pub(crate) struct LiveWorker {
     pub(crate) worker_id: String,
     pub(crate) snapshot_at: DateTime<Utc>,
     pub(crate) queues: BTreeSet<String>,
-    pub(crate) budgets: ClassBudgets,
+    pub(crate) budgets: ExecutionClassBudgets,
 }
 
 /// The earliest `enqueued_at` of the pending rows of one (queue, class,
@@ -201,7 +246,7 @@ pub(crate) fn stream_coverage(
     execution: Execution,
     workers: &[LiveWorker],
 ) -> Result<StreamCoverageState, ClassReadRefused> {
-    let serving: Vec<&ClassBudget> = workers
+    let serving: Vec<&ExecutionClassBudget> = workers
         .iter()
         .filter(|worker| worker.queues.contains(queue_name))
         .filter_map(|worker| worker.budgets.serving(execution))
@@ -219,7 +264,7 @@ pub(crate) fn stream_coverage(
             ))
         })?;
     match capacity {
-        0 => Ok(StreamCoverageState::WithoutCapacity {
+        0 => Ok(StreamCoverageState::NoCapacity {
             workers: serving.len(),
         }),
         _ => Ok(StreamCoverageState::Served {
@@ -242,8 +287,8 @@ pub(crate) fn stream_wait(heads: &[DateTime<Utc>], checked_at: DateTime<Utc>) ->
         .filter(|head| *head <= checked_at)
         .min()
     {
-        Some(oldest) => StreamWait::OldestWaiting {
-            enqueued_at: oldest,
+        Some(oldest) => StreamWait::Due {
+            oldest_due_at: oldest,
             wait: checked_at - oldest,
         },
         None => StreamWait::NoneDue {
@@ -264,20 +309,20 @@ pub(crate) fn class_coverage(
     checked_at: DateTime<Utc>,
     workers: &[LiveWorker],
     mut streams: Vec<(String, Execution)>,
-) -> Result<ClassCoverage, ClassReadRefused> {
+) -> Result<ExecutionClassCoverage, ClassReadRefused> {
     streams.sort();
     let streams = streams
         .into_iter()
-        .map(|(queue_name, execution)| {
-            let state = stream_coverage(&queue_name, execution, workers)?;
+        .map(|(queue, execution)| {
+            let coverage = stream_coverage(&queue, execution, workers)?;
             Ok(StreamCoverage {
-                queue_name,
+                queue,
                 execution,
-                state,
+                coverage,
             })
         })
         .collect::<Result<Vec<_>, ClassReadRefused>>()?;
-    Ok(ClassCoverage {
+    Ok(ExecutionClassCoverage {
         checked_at,
         live_workers: workers.len(),
         streams,
@@ -295,7 +340,7 @@ pub(crate) fn class_report(
     workers: &[LiveWorker],
     heads: Vec<StreamHead>,
     in_flight: &BTreeMap<(String, Execution), u64>,
-) -> Result<ClassReport, ClassReadRefused> {
+) -> Result<ExecutionClassReport, ClassReadRefused> {
     let mut grouped: BTreeMap<(String, Execution), Vec<DateTime<Utc>>> = BTreeMap::new();
     for head in heads {
         grouped
@@ -305,12 +350,12 @@ pub(crate) fn class_report(
     }
     let streams = grouped
         .into_iter()
-        .map(|((queue_name, execution), stream_heads)| {
-            let state = stream_coverage(&queue_name, execution, workers)?;
+        .map(|((queue, execution), stream_heads)| {
+            let coverage = stream_coverage(&queue, execution, workers)?;
             Ok(PendingStream {
                 wait: stream_wait(&stream_heads, checked_at),
-                state,
-                queue_name,
+                coverage,
+                queue,
                 execution,
             })
         })
@@ -325,15 +370,16 @@ pub(crate) fn class_report(
                 .filter(|((worker_id, _), _)| *worker_id == worker.worker_id)
                 .map(|((_, execution), count)| (*execution, *count))
                 .collect();
-            Ok(WorkerClassLoad {
+            Ok(WorkerExecutionClassLoad {
                 worker_id: worker.worker_id.clone(),
                 snapshot_at: worker.snapshot_at,
                 budgets: budget_loads(worker, &held)?,
             })
         })
         .collect::<Result<Vec<_>, ClassReadRefused>>()?;
-    Ok(ClassReport {
+    Ok(ExecutionClassReport {
         checked_at,
+        live_window: LIVE_WINDOW,
         streams,
         workers: loads,
     })
@@ -442,7 +488,7 @@ mod tests {
         let workers = [isolated_worker("w1", 0, &["default"])];
         assert_eq!(
             coverage("default", ISOLATED, &workers),
-            StreamCoverageState::WithoutCapacity { workers: 1 }
+            StreamCoverageState::NoCapacity { workers: 1 }
         );
         let one_up = [
             isolated_worker("w1", 0, &["default"]),
@@ -510,15 +556,15 @@ mod tests {
         ];
         assert_eq!(
             stream_wait(&heads, at()),
-            StreamWait::OldestWaiting {
-                enqueued_at: at() - TimeDelta::seconds(90),
+            StreamWait::Due {
+                oldest_due_at: at() - TimeDelta::seconds(90),
                 wait: TimeDelta::seconds(90),
             }
         );
         assert_eq!(
             stream_wait(&[at()], at()),
-            StreamWait::OldestWaiting {
-                enqueued_at: at(),
+            StreamWait::Due {
+                oldest_due_at: at(),
                 wait: TimeDelta::zero(),
             }
         );
@@ -564,7 +610,7 @@ mod tests {
         );
         assert_eq!(
             live.budgets.as_slice(),
-            [ClassBudget {
+            [ExecutionClassBudget {
                 budget: ISOLATED,
                 capacity: 2,
                 serves: vec![ISOLATED],
@@ -682,19 +728,19 @@ mod tests {
             checked.streams,
             [
                 StreamCoverage {
-                    queue_name: "a".to_owned(),
+                    queue: "a".to_owned(),
                     execution: ISOLATED,
-                    state: served
+                    coverage: served
                 },
                 StreamCoverage {
-                    queue_name: "a".to_owned(),
+                    queue: "a".to_owned(),
                     execution: THREAD,
-                    state: served
+                    coverage: served
                 },
                 StreamCoverage {
-                    queue_name: "b".to_owned(),
+                    queue: "b".to_owned(),
                     execution: ISOLATED,
-                    state: served
+                    coverage: served
                 },
             ]
         );
@@ -726,25 +772,26 @@ mod tests {
 
         let report = class_report(at(), &workers, heads, &BTreeMap::new()).expect("report");
 
+        assert_eq!(report.live_window, TimeDelta::seconds(120));
         assert_eq!(
             report.streams,
             [
                 PendingStream {
-                    queue_name: "a".to_owned(),
+                    queue: "a".to_owned(),
                     execution: ISOLATED,
-                    wait: StreamWait::OldestWaiting {
-                        enqueued_at: at() - TimeDelta::seconds(50),
+                    wait: StreamWait::Due {
+                        oldest_due_at: at() - TimeDelta::seconds(50),
                         wait: TimeDelta::seconds(50),
                     },
-                    state: StreamCoverageState::Unserved,
+                    coverage: StreamCoverageState::Unserved,
                 },
                 PendingStream {
-                    queue_name: "a".to_owned(),
+                    queue: "a".to_owned(),
                     execution: ASYNC,
                     wait: StreamWait::NoneDue {
                         next_due_at: at() + TimeDelta::seconds(60)
                     },
-                    state: StreamCoverageState::Served {
+                    coverage: StreamCoverageState::Served {
                         workers: 1,
                         capacity: 3
                     },
@@ -766,7 +813,7 @@ mod tests {
 
         let report = class_report(at(), &workers, vec![], &in_flight).expect("report");
 
-        let load = |worker_id: &str, capacity: u64, in_flight: u64| WorkerClassLoad {
+        let load = |worker_id: &str, capacity: u64, in_flight: u64| WorkerExecutionClassLoad {
             worker_id: worker_id.to_owned(),
             snapshot_at: at(),
             budgets: vec![BudgetLoad {

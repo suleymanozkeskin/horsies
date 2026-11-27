@@ -40,6 +40,7 @@ from horsies.core.codec.json_io import SerializationError, loads_json
 from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import AppRole
 from horsies.core.models.log_format import TextLogs
 from horsies.core.models.tracing import NoTracing
 from horsies.core.models.tasks import (
@@ -446,7 +447,7 @@ class TestChildBoot:
         # Dropped, not closed: the boot calls no method of the import-time broker.
         assert inherited_broker.method_calls == []
         assert mocks['app']._broker is None
-        mocks['app'].set_role.assert_called_once_with('worker')
+        mocks['app'].set_role.assert_called_once_with(AppRole.WORKER)
 
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
@@ -468,7 +469,7 @@ class TestChildBoot:
         monkeypatch.delenv('HORSIES_CHILD_PROCESS', raising=False)
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr('postgresql://u:p@localhost/db'),
                     pool_size=30,
                     max_overflow=30,
@@ -665,7 +666,7 @@ class TestDiscardInheritedBroker:
     built in the child."""
 
     def test_without_a_broker_does_nothing(self) -> None:
-        app = Horsies(AppConfig(broker=PostgresConfig(
+        app = Horsies(AppConfig(database=PostgresConfig(
             database_url=SecretStr('postgresql://u:p@localhost:5432/db'),
         )))
         app._broker = None  # pyright: ignore[reportPrivateUsage]
@@ -944,7 +945,7 @@ class _Linked(BaseModel):
 def _registered_tasks() -> dict[str, Any]:
     """Registered tasks: the worker calls their wrapper, not a mock."""
     app = Horsies(AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://u:p@localhost:5432/db'),
         ),
     ))

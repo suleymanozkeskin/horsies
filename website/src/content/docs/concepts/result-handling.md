@@ -226,7 +226,7 @@ A read gives these codes as `read_error.code`, not inside a `TaskError`. Each co
 | `TASK_EXPIRED` | Task's `good_until` deadline passed before execution started |
 | `TASK_TIMEOUT` | Task exceeded its `timeout_ms` execution limit: the worker killed its child process, or, for a `SHARED_ASYNC` task on a shared async child, cancelled it and ended its work. `data` has `task_id` and `timeout_ms`; a `SHARED_ASYNC` task on a shared async child also has `cancel_end`: `RETURNED_AFTER_SIGNAL`, `DROPPED_AFTER_GRACE` or `KILLED_WITH_CHILD` ([The Timeout](/horsies/workers/shared-async-tasks/#the-timeout)) |
 | `WORKFLOW_PAUSED` | Workflow was paused |
-| `WORKFLOW_EXPIRED` | A paused workflow passed `paused_workflow_auto_cancel_after` and expired |
+| `WORKFLOW_EXPIRED` | A paused workflow passed `paused_workflow_cancel_after` and expired |
 | `WORKFLOW_FAILED` | Workflow failed |
 | `WORKFLOW_CANCELLED` | Workflow was cancelled |
 | `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped |
@@ -244,7 +244,7 @@ A task does not wait for the result of another task. In a worker child, these ca
 
 The raw result reads wait too. In a worker child they return `Err(DatabaseWaitInsideTask)` (`DatabaseErrorCode.WAIT_INSIDE_TASK`) at once: `app.get_raw_result()`, `app.get_raw_result_async()`, `broker.get_raw_result_record()` and `broker.get_raw_result_record_async()`.
 
-The refusal is the first check of each call. It comes before the check of `timeout_ms` (`InvalidInput`) and before the check of the event loop (`AsyncContext`). The rule covers the whole child process: the task body, the threads that it starts, and the `on_child_process_start` hooks.
+The refusal is the first check of each call. It comes before the check of `timeout_ms` (`InvalidInput`) and before the check of the event loop (`AsyncContext`). The rule covers the whole child process: the task body, the threads that it starts, and the `on_child_start` hooks.
 
 These calls do not wait, so they work in a task:
 

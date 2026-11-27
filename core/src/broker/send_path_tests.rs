@@ -574,7 +574,7 @@ async fn a_send_on_a_closed_pooled_connection_is_retryable_and_the_next_send_wri
     let pool = migrated_pool().await;
     let url = migrated_database_url().await;
     let application_name = format!("dead_send_{}", Uuid::new_v4().simple());
-    let mut config = PostgresConfig::from_url(with_query_parameter(
+    let mut config = PostgresConfig::from_database_url(with_query_parameter(
         &url,
         &format!("application_name={application_name}"),
     ));

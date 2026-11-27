@@ -1,9 +1,9 @@
-// The broker settings of the config: the database, the general pool and the socket settings of every connection
+// The database settings of the config: the database, the general pool and the socket settings of every connection
 // (the core's `PostgresConfig`, `core/src/core/config/broker.rs`). A field that the config leaves out is left out of
 // the core's config text, so the core's default applies.
 //
-// The code of a refusal: a database URL has the code of the broker URL (`HRS-203`), a pool setting the code of a
-// broker pool value (`HRS-213`), and a socket setting the code of a keepalive or user timeout value (`HRS-215`).
+// The code of a refusal: a database URL has the code of the database URL (`HRS-203`), a pool setting the code of a
+// database pool value (`HRS-213`), and a socket setting the code of a keepalive or user timeout value (`HRS-215`).
 
 import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import {
@@ -43,7 +43,7 @@ export type SessionDatabase =
  *   on (`max_prepared_statements > 0`). Transaction pooling keeps no session state, so schema installs, partition
  *   maintenance and LISTEN/NOTIFY connect to `sessionDatabaseUrl`, a URL that keeps session state.
  */
-export type BrokerConnection =
+export type DatabaseConnection =
   | { readonly kind: "direct"; readonly sessionDatabase?: SessionDatabase }
   | { readonly kind: "pgbouncerTransaction"; readonly sessionDatabaseUrl: Secret };
 
@@ -66,18 +66,18 @@ export type TcpUserTimeout = { readonly kind: "systemDefault" } | { readonly kin
 /** Whether a send keeps the input that a rerun needs, when the send does not choose. */
 export type RerunInputDefault = "keep" | "drop";
 
-/** The broker settings. Only `databaseUrl` is required; every other field has the core's default. */
-export interface BrokerConfigInput {
+/** The database settings. Only `databaseUrl` is required; every other field has the core's default. */
+export interface DatabaseConfigInput {
   /** The runtime connection URL. It names a PgBouncer transaction-pool endpoint in the `pgbouncerTransaction` mode. */
   readonly databaseUrl: Secret;
   /** How the runtime pool connects to `databaseUrl`: directly, or through a PgBouncer transaction pool. */
-  readonly connection?: BrokerConnection;
+  readonly connection?: DatabaseConnection;
   readonly poolPrePing?: boolean;
   /** Whether the pool of the worker process pings a connection before use. */
   readonly workerPoolPrePing?: boolean;
-  /** The persistent connections of the general broker pool. */
+  /** The persistent connections of the general pool. */
   readonly poolSize?: number;
-  /** The connections past `poolSize` that the general broker pool opens under load. */
+  /** The connections past `poolSize` that the general pool opens under load. */
   readonly maxOverflow?: number;
   readonly retainRerunInputDefault?: RerunInputDefault;
   /** The time to wait for a pool connection, in seconds. */
@@ -89,7 +89,7 @@ export interface BrokerConfigInput {
   readonly tcpUserTimeout?: TcpUserTimeout;
 }
 
-/** A pool setting of the broker: a `u32` field. */
+/** A pool setting of the database: a `u32` field. */
 const POOL_U32 = u32Field(HorsiesErrorCode.CONFIG_INVALID_DATABASE_POOL);
 
 /** A keepalive idle time or interval, in seconds (`KeepaliveSeconds` of the core). */
@@ -113,8 +113,8 @@ const TCP_USER_TIMEOUT_MS: IntegerBound = Object.freeze({
   code: HorsiesErrorCode.CONFIG_INVALID_KEEPALIVE,
 });
 
-/** The core's `broker` object of `input`, with each secret read through `environment`. */
-export function brokerJson(input: BrokerConfigInput, environment: EnvironmentRead, path: string): Checked<ConfigJson> {
+/** The core's `database` object of `input`, with each secret read through `environment`. */
+export function databaseJson(input: DatabaseConfigInput, environment: EnvironmentRead, path: string): Checked<ConfigJson> {
   return checkedObject([
     entry("database_url", resolvedSecret(input.databaseUrl, environment, memberPath(path, "databaseUrl"))),
     connectionEntries(input.connection, environment, memberPath(path, "connection")),
@@ -129,7 +129,7 @@ export function brokerJson(input: BrokerConfigInput, environment: EnvironmentRea
     optionalEntry("retain_rerun_input_default", input.retainRerunInputDefault, (value) =>
       accepted(retainsRerunInput(value)),
     ),
-    optionalEntry("pool_timeout", input.poolTimeoutSeconds, (value) =>
+    optionalEntry("pool_timeout_seconds", input.poolTimeoutSeconds, (value) =>
       checkedInteger(value, POOL_U32, memberPath(path, "poolTimeoutSeconds")),
     ),
     optionalEntry("pool_recycle", input.poolRecycle, (value) =>
@@ -146,11 +146,11 @@ export function brokerJson(input: BrokerConfigInput, environment: EnvironmentRea
 }
 
 /**
- * The core's members `session_database_url` and `pgbouncer_transaction_mode` of a connection mode, with the session
+ * The core's members `session_database` and `pgbouncer_transaction_mode` of a connection mode, with the session
  * secret read through `environment`; none when the config leaves the mode out.
  */
 function connectionEntries(
-  connection: BrokerConnection | undefined,
+  connection: DatabaseConnection | undefined,
   environment: EnvironmentRead,
   path: string,
 ): Checked<readonly JsonEntry[]> {
@@ -161,16 +161,16 @@ function connectionEntries(
   switch (connection.kind) {
     case "direct":
       return checkedEntries([
-        optionalEntry("session_database_url", sessionUrl(connection.sessionDatabase), (url) =>
-          resolvedSecret(url, environment, memberPath(path, "sessionDatabase.url")),
+        optionalEntry("session_database", connection.sessionDatabase, (session) =>
+          sessionDatabaseJson(session, environment, memberPath(path, "sessionDatabase.url")),
         ),
         accepted([["pgbouncer_transaction_mode", false]]),
       ]);
     case "pgbouncerTransaction":
       return checkedEntries([
         entry(
-          "session_database_url",
-          resolvedSecret(connection.sessionDatabaseUrl, environment, memberPath(path, "sessionDatabaseUrl")),
+          "session_database",
+          separateSessionJson(connection.sessionDatabaseUrl, environment, memberPath(path, "sessionDatabaseUrl")),
         ),
         accepted([["pgbouncer_transaction_mode", true]]),
       ]);
@@ -179,20 +179,21 @@ function connectionEntries(
   }
 }
 
-/** The secret of a separate session database; none when the session uses the database URL. Pure. */
-function sessionUrl(session: SessionDatabase | undefined): Secret | undefined {
-  if (session === undefined) {
-    return undefined;
-  }
-
+/** The core's `session_database` value of a session setting, with a separate URL read through `environment`. */
+function sessionDatabaseJson(session: SessionDatabase, environment: EnvironmentRead, urlPath: string): Checked<ConfigJson> {
   switch (session.kind) {
     case "sameAsDatabaseUrl":
-      return undefined;
+      return accepted({ kind: "SAME_AS_DATABASE_URL" });
     case "separate":
-      return session.url;
+      return separateSessionJson(session.url, environment, urlPath);
     default:
-      return unreachable(session, "sessionUrl");
+      return unreachable(session, "sessionDatabaseJson");
   }
+}
+
+/** The core's `session_database` value of a separate session URL, read through `environment`. */
+function separateSessionJson(url: Secret, environment: EnvironmentRead, urlPath: string): Checked<ConfigJson> {
+  return checkedObject([accepted([["kind", "SEPARATE"]]), entry("url", resolvedSecret(url, environment, urlPath))]);
 }
 
 /** The core's flag of a rerun-input default. Pure. */

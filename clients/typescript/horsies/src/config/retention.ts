@@ -93,7 +93,7 @@ export function retentionJson(input: RetentionConfigInput, path: string): Checke
     optionalEntry("terminal_record_retention_hours", input.terminalRecordRetention, (value) =>
       hoursJson(value, memberPath(path, "terminalRecordRetention.hours")),
     ),
-    optionalEntry("paused_workflow_auto_cancel_after", input.pausedWorkflowCancelAfter, (value) =>
+    optionalEntry("paused_workflow_cancel_after", input.pausedWorkflowCancelAfter, (value) =>
       pausedExpiryJson(value, memberPath(path, "pausedWorkflowCancelAfter.age")),
     ),
     optionalEntry(
@@ -113,12 +113,12 @@ export function retentionJson(input: RetentionConfigInput, path: string): Checke
       queueRetentionJson(mapping, memberPath(path, "queueRetention")),
     ),
     optionalEntry(
-      "partition_maintenance_interval_s",
+      "partition_maintenance_interval_seconds",
       input.partitionMaintenanceIntervalSeconds,
       integer("partitionMaintenanceIntervalSeconds", RETENTION_U64),
     ),
     optionalEntry(
-      "retention_sweep_interval_s",
+      "retention_sweep_interval_seconds",
       input.retentionSweepIntervalSeconds,
       integer("retentionSweepIntervalSeconds", RETENTION_U64),
     ),

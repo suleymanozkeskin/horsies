@@ -32,7 +32,7 @@ from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
 RUNNING_STALE_THRESHOLD_MS = 6_000
-"""The smallest threshold with auto_fail_stale_running on:
+"""The smallest threshold with fail_stale_running on:
 2 x (runner_heartbeat_interval_ms + 2 s)."""
 
 FINALIZING_STALE_THRESHOLD_MS = 2_000
@@ -40,7 +40,7 @@ FINALIZING_STALE_THRESHOLD_MS = 2_000
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr(DB_URL),
         pool_size=5,
         max_overflow=5,
@@ -55,7 +55,7 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 

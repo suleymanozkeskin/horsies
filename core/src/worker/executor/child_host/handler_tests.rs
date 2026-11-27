@@ -564,7 +564,7 @@ fn the_start_hooks_of_the_handler_child_run_in_order_and_a_failure_exits_173() {
         ProcessExit::Standard,
     );
     assert_eq!(exit, ChildHostExit::ChildHookFailed);
-    assert_eq!(exit.code(), 173);
+    assert_eq!(exit.exit_code(), 173);
     assert_eq!(*calls.lock().unwrap(), vec!["first"]);
     runtime.shutdown_background();
 }

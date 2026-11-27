@@ -75,7 +75,7 @@ use crate::events::{
     AttemptEnd, AttemptEnded, AttemptNumber, Event, RunTrace, WorkerDecision, WorkerIdText,
     WorkflowPlace,
 };
-use crate::handle::CoreHandle;
+use crate::handle::CoreConnection;
 use crate::worker::executor::protocol::SpanReadCounts;
 
 /// What the handler child does for an attempt that the worker ended.
@@ -166,7 +166,7 @@ pub(super) trait NodeReads: Send + Sync {
 /// child, or none when this process has no producer handle.
 pub(super) enum ChildNodeReads {
     /// `PostgresBroker::read_task_workflow_node` on the producer handle.
-    Handle(Arc<CoreHandle>),
+    Handle(Arc<CoreConnection>),
     /// The child host published no producer handle in this process: every
     /// read fails.
     NoHandle,

@@ -54,7 +54,7 @@ from horsies import (
 )
 
 config = AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr("postgresql://user:password@localhost:5432/mydb"),
     ),
 )
@@ -490,7 +490,7 @@ from horsies import (
 )
 
 config = AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr("postgresql://user:password@localhost:5432/mydb"),
     ),
 )
@@ -573,7 +573,7 @@ from horsies import (
 )
 
 config = AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr("postgresql://user:password@localhost:5432/mydb"),
     ),
 )

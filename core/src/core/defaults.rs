@@ -14,5 +14,5 @@ pub const MAX_CLAIM_RENEW_AGE_MS: u32 = 180_000; // 3 minutes
 
 /// A worker is live while its latest state snapshot is at most this many
 /// seconds old. `RecoveryConfig::worker_state_snapshot_interval_ms` is capped
-/// at half this window. Mirrors Python's `WORKER_STATE_LIVE_WINDOW_S`.
-pub const WORKER_STATE_LIVE_WINDOW_S: u64 = 120;
+/// at half this window. Mirrors Python's `WORKER_STATE_LIVE_WINDOW_SECONDS`.
+pub const WORKER_STATE_LIVE_WINDOW_SECONDS: u64 = 120;

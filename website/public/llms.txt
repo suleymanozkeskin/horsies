@@ -23,7 +23,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ## Quick Reference
 
 ### Horsies (app instance)
-- app = Horsies(config=AppConfig(...))
+- app = Horsies(config=AppConfig(...), schema_mode=SchemaMode.MIGRATE_AND_VALIDATE) (SchemaMode: MIGRATE_AND_VALIDATE, OBSERVE_ONLY, ASSUME_INITIALIZED)
 - @app.task("name", retry_policy=...) -> decorator (DEFAULT mode)
 - @app.task("name", queue_name="q", retry_policy=...) -> decorator (CUSTOM mode)
 - @app.task("name", exception_mapper={ValueError: "VALIDATION_ERROR"}) -> per-task exception mapping
@@ -34,8 +34,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - app.discover_tasks(["myapp.tasks", "myapp.workflows"]) -> register modules for import
 - app.expand_module_globs(["src/**/*_tasks.py"]) -> list[str] (resolve glob patterns)
 - app.import_task_modules() -> list[str] (import discovered modules)
-- app.list_tasks() -> list[str]
-- app.check(live=False) -> list[HorsiesError] (phased validation)
+- app.registered_task_names() -> list[str]
+- app.check(live=False) -> ValidationReport (phased validation; .refusals is empty when all passed)
 - app.get_broker() -> PostgresBroker
 - @app.on_event(AttemptEnded) -> registers a def or an async def handler of one event type of horsies.telemetry; the worker runs it in its handler child (refusals HRS-222 to HRS-226)
 - @app.on_handler_child_start -> sync hook, once at the boot of the handler child (HRS-214 for an async hook)
@@ -43,8 +43,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### AppConfig
 - queue_mode: QueueMode (DEFAULT or CUSTOM)
 - custom_queues: list[CustomQueueConfig] | None (required for CUSTOM)
-- broker: PostgresConfig
-- cluster_wide_cap: int | None (max RUNNING tasks across cluster)
+- database: PostgresConfig
+- cluster_wide_cap: ClusterCap(tasks) | NoClusterCap (default NoClusterCap(); max RUNNING tasks across cluster)
 - prefetch_buffer: int (0 = hard cap, >0 = soft cap with lease)
 - claim_lease_ms: int | None (required when prefetch_buffer > 0)
 - max_claim_renew_age_ms: int
@@ -55,9 +55,9 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - schedule: ScheduleConfig | None
 - exception_mapper: ExceptionMapper (global {ExceptionClass: "ERROR_CODE"})
 - default_unhandled_error_code: str (default "UNHANDLED_EXCEPTION")
-- resend_on_transient_err: bool (default False, auto-retry transient ENQUEUE_FAILED for both task send and workflow start)
+- resend_on_transient_error: bool (default False, auto-retry transient ENQUEUE_FAILED for both task send and workflow start)
 - tracing: OtelTracing(parentage: ChildOfSend() | LinkedToSend()) | NoTracing() (default NoTracing(); OtelTracing() traces the sends and each attempt that a worker runs with the OpenTelemetry API and records the producer metrics with its meter; the attempt span is a child of the send span with ChildOfSend() (default), or a new trace with a link to it with LinkedToSend(); needs the extra horsies[otel], else HRS-220; with NoTracing() horsies does not import opentelemetry)
-- log_format: TextLogs() | JsonLogs() (default TextLogs(); JsonLogs() writes one JSON object per line with the keys ts, level, logger, message, process, task_id, task_name, attempt, trace_id, span_id, exc)
+- log_format: LogFormat = TextLogs() | JsonLogs() (default TextLogs(); JsonLogs() writes one JSON object per line with the keys ts, level, logger, message, process, task_id, task_name, attempt, trace_id, span_id, exc)
 - worker_profiles: dict[str, WorkerProfile] (default {}; `horsies worker <app> --profile <name>` runs one; every profile is validated at construction, HRS-218)
 
 ### WorkerProfile
@@ -68,8 +68,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - shared_thread: SharedThreadChildren(count: int 1-1024, seats: int 1-256, recycle: SharedRecycle, pool: SharedPool, task_send_pool: PoolSize) | NoSharedThreadChildren (default NoSharedThreadChildren())
 - task_send_pool: PoolSize (default PoolSize(connections=2) for every kind): task code that sends through the app opens the app's broker in its child with exactly this many connections, no overflow, for each event loop that it sends from; PostgresConfig pool_size/max_overflow do not apply in a child
 - pool: ParentPool(max_size: PoolSize | PoolSizeFromSeats = PoolSizeFromSeats()): the pool of the worker process, which writes the outcome of each task; no overflow (pool_size = max_size, max_overflow = 0); derived from the seats of the whole profile: min(20, max(5, ceil(seat_count() / 10))); WorkerProfile.resolved_parent_pool() returns it
-- IsolatedPool(min_size: int 0-1000 = 0, max_size: PoolSize = PoolSize(connections=1), check: bool = False): the sync connection pool of each isolated child; it writes one statement at a time, so 1 is enough
-- SharedPool(min_size: int 0-1000 = 0, max_size: PoolSize | PoolSizeFromSeats = PoolSizeFromSeats(), check: bool = False): the pool of each shared child, shared by its seats
+- IsolatedPool(min_size: int 0-1000 = 0, max_size: PoolSize = PoolSize(connections=1), pre_ping: bool = False): the sync connection pool of each isolated child; it writes one statement at a time, so 1 is enough
+- SharedPool(min_size: int 0-1000 = 0, max_size: PoolSize | PoolSizeFromSeats = PoolSizeFromSeats(), pre_ping: bool = False): the pool of each shared child, shared by its seats
 - PoolSize(connections: int 1-1000); ExecutorThreads(threads: int 1-256): the threads of the default executor of the loop of each shared async child (default ExecutorThreadsFromSeats(); a start hook that sets its own default executor wins)
 - Derived from the seats: min(cap, max(floor, ceil(seats / seats_per_unit))); shared async pool 10 seats per connection, cap 40; shared thread pool 10 seats per connection, cap 26; pool floor 2; shared async executor 1 seat per thread, floor 2, cap 32; the pool sizes are the measured knees at 3.5 ms RTT (a child pool keeps about 2 x tasks per second x (RTT + server time) connections busy)
 - A pool min_size above its resolved max_size is refused (HRS-218), and so is a PoolSize below 3 (PARENT_POOL_MIN_CONNECTIONS) for the pool of the worker process (ParentPool.max_size); the worker start log line states the resolved pool and task_send_pool of each kind, the executor threads, and the resolved pool of the worker process
@@ -100,25 +100,22 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### PostgresConfig
 - database_url: SecretStr (must start with "postgresql://")
-- session_database_url: str | None (direct/session-capable URL for schema setup and LISTEN/NOTIFY)
+- session_database: SessionDatabaseSameAsDatabaseUrl | SessionDatabaseSeparate(url: SecretStr) (default same as database_url; a separate direct/session-capable URL for schema setup and LISTEN/NOTIFY)
 - pgbouncer_transaction_mode: bool (default False; disables prepared statements for transaction-pooled PgBouncer)
 - pool_size: int (default 5; 1 to 10,000, else HRS-213)
 - max_overflow: int (default 10; 0 to 10,000, else HRS-213)
 - worker_pool_size, worker_max_overflow: removed in 0.7.0; setting one fails with HRS-213 and names WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N))); task code in a child opens the task_send_pool of its kind
 - worker_child_pool_min_size, worker_child_pool_max_size, worker_child_pool_check: removed in 0.7.0; setting one fails with HRS-213 and names the pool field of each child kind (IsolatedPool, SharedPool)
-- tcp_keepalives: bool (default True)
-- tcp_keepalives_idle: int (default 30; 1 to 32,767 s while tcp_keepalives is True, else HRS-215)
-- tcp_keepalives_interval: int (default 10; 1 to 32,767 s while tcp_keepalives is True, else HRS-215)
-- tcp_keepalives_count: int (default 3; 1 to 127 while tcp_keepalives is True, else HRS-215)
-- tcp_user_timeout_ms: int (default 30000; 0 uses the operating system default, or 1 to 2,147,483,647 ms; else HRS-215)
+- tcp_keepalives: TcpKeepalivesOn(idle_seconds, interval_seconds, probes) | TcpKeepalivesOff (default TcpKeepalivesOn(): 30 s, 10 s, 3 probes; idle_seconds and interval_seconds 1 to 32,767 s, probes 1 to 127, else HRS-215)
+- tcp_user_timeout: TcpUserTimeoutAfter(milliseconds) | TcpUserTimeoutSystemDefault (default 30000 ms; milliseconds 1 to 2,147,483,647, else HRS-215)
 - psycopg >= 3.3.7 is required: after an interrupted query it sends a cancel request (at most 5 s) and waits for the query (at most 5 s), then closes the connection; the 5 s limit on the cancel request needs libpq 17+ (older libpq: no limit; horsies[pg-binary] bundles its own libpq; psycopg.pq.version() reads it, 170000 = 17.0)
 - retain_rerun_input_default: bool (default False)
-- pool_timeout: int (default 30; 0 to 4,294,967,295 s, 0 does not wait; else HRS-213)
-- pool_recycle: int (default 1800; -1 never, or 0 to 4,294,967,295 s; else HRS-213)
+- pool_timeout_seconds: int (default 30; 0 to 4,294,967,295 s, 0 does not wait; else HRS-213)
+- pool_recycle: PoolRecycleAfterSeconds(seconds) | PoolRecycleNever (default 1800 s; seconds 0 to 4,294,967,295, else HRS-213)
 - pool_pre_ping: bool (default True)
 - echo: bool (default False)
-- PgBouncer pattern: database_url -> pooled transaction URL, session_database_url -> direct/session-capable URL, pgbouncer_transaction_mode=True
-- PgBouncer pool size: each worker opens the resolved WorkerProfile.pool max_size + 1 runner heartbeat + children x resolved pool max_size per mode, plus task_send_pool per sending event loop in each child, as pooler clients (the 2 listener connections go to session_database_url); max_client_conn >= the sum over workers and other clients; default_pool_size equal to that sum never makes a transaction wait -> /horsies/troubleshooting/pgbouncer/#pool-size
+- PgBouncer pattern: database_url -> pooled transaction URL, session_database=SessionDatabaseSeparate(url=...) -> direct/session-capable URL, pgbouncer_transaction_mode=True
+- PgBouncer pool size: each worker opens the resolved WorkerProfile.pool max_size + 1 runner heartbeat + children x resolved pool max_size per mode, plus task_send_pool per sending event loop in each child, as pooler clients (the 2 listener connections go to the session database URL); max_client_conn >= the sum over workers and other clients; default_pool_size equal to that sum never makes a transaction wait -> /horsies/troubleshooting/pgbouncer/#pool-size
 - PgBouncer-only workers are unsupported because PostgreSQL LISTEN requires a persistent session
 
 ### QueueMode
@@ -174,7 +171,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Ok(value): operation succeeded
 - Err(DatabaseOperationError): operation failed
 - Use is_ok(result) / is_err(result) type guards, then access ok_value/err_value
-- DatabaseOperationError is a union of frozen variants; every variant has code (DatabaseErrorCode), message (str), retryable (bool). DatabaseOperationFailed (the nine operation codes SCHEMA_INIT_FAILED .. LISTENER_SUBSCRIBE_FAILED; cause: BaseException), DatabaseEnqueueFailed (ENQUEUE_FAILED; cause: BaseException | NoCause; the row may or may not exist), DatabasePayloadMismatch, DatabaseIdempotencyKeyConflict (owner_task_id), DatabaseNotAttached (NO_DATABASE), DatabaseNoTypeAvailable, DatabaseInvalidJsonPayload (cause), DatabaseInvalidTaskOptions (cause), DatabaseInvalidInput (INVALID_INPUT; cause; a refused argument, nothing written), DatabaseAsyncContext, DatabaseListenerDisabled (LISTENER_DISABLED; broker built with assume_initialized=True has no listener), DatabaseWaitInsideTask (WAIT_INSIDE_TASK; a raw result read in a worker child; nothing ran). Match on the variant; err.failure_cause() gives the exception of the cause or NoCause() before raise ... from
+- DatabaseOperationError is a union of frozen variants; every variant has code (DatabaseErrorCode), message (str), retryable (bool). DatabaseOperationFailed (the nine operation codes SCHEMA_INIT_FAILED .. LISTENER_SUBSCRIBE_FAILED; cause: BaseException), DatabaseEnqueueFailed (ENQUEUE_FAILED; cause: BaseException | NoCause; the row may or may not exist), DatabasePayloadMismatch, DatabaseIdempotencyKeyConflict (owner_task_id), DatabaseNotAttached (NO_DATABASE), DatabaseNoTypeAvailable, DatabaseInvalidJsonPayload (cause), DatabaseInvalidTaskOptions (cause), DatabaseInvalidInput (INVALID_INPUT; cause; a refused argument, nothing written), DatabaseAsyncContext, DatabaseListenerDisabled (LISTENER_DISABLED; a broker with the schema mode SchemaMode.ASSUME_INITIALIZED has no listener), DatabaseWaitInsideTask (WAIT_INSIDE_TASK; a raw result read in a worker child; nothing ran). Match on the variant; err.failure_cause() gives the exception of the cause or NoCause() before raise ... from
 - DatabaseEnqueueError = DatabaseEnqueueFailed | DatabasePayloadMismatch | DatabaseIdempotencyKeyConflict | DatabaseInvalidTaskOptions | DatabaseInvalidInput (every failure of enqueue_async); DatabaseSyncCallError = DatabaseAsyncContext (the failure that the sync enqueue adds; nothing ran)
 - enqueue_async and enqueue require sent_at and send_kind (from horsies import SendKind): SendKind.FIRST for the first send of a task id, SendKind.REPEAT for a resend (reads history first, so a finished task does not run again)
 - DatabaseErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, PAYLOAD_MISMATCH, IDEMPOTENCY_KEY_CONFLICT, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DATABASE_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED, LISTENER_START_FAILED, LISTENER_SUBSCRIBE_FAILED, NO_DATABASE, NO_TYPE_AVAILABLE, INVALID_JSON_PAYLOAD, INVALID_TASK_OPTIONS, ASYNC_CONTEXT, INVALID_INPUT, LISTENER_DISABLED, WAIT_INSIDE_TASK
@@ -182,17 +179,20 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Every call runs on the core of the process: one pool for every thread and event loop, so no call has an event loop limit. A sync call runs the core's blocking form on the calling thread; any exception from a sync call that is not a catalog error propagates, as from the *_async form
 - retryable=True: transient (connection blip), retryable=False: permanent (schema drift, code bug)
 - Broker methods: enqueue_async -> Result[str, DatabaseEnqueueError], enqueue (sync) -> Result[str, DatabaseEnqueueError | DatabaseSyncCallError], get_task_info_async -> DatabaseResult[TaskInfo | None],
-  ensure_schema_initialized -> Result[None, DatabaseOperationFailed], get_stale_tasks -> DatabaseResult[list[dict]],
-  get_expired_tasks -> DatabaseResult[list[dict]],
+  ensure_schema_initialized -> Result[None, DatabaseOperationFailed], get_stale_tasks(threshold_minutes=2) -> DatabaseResult[BoundedTaskList[StaleTaskRow]],
+  get_expired_tasks -> DatabaseResult[BoundedTaskList[ExpiredTaskRow]],
   mark_stale_tasks_as_failed -> DatabaseResult[int], requeue_stale_claimed -> DatabaseResult[int],
   terminate_orphaned_workflow_tasks -> DatabaseResult[int],
   close_async -> DatabaseResult[None]
 - Health/liveness API (app-level, async + sync; broker exposes the async forms):
   ping_database_async -> DatabaseResult[DatabasePing] (SELECT 1 + latency via live pool),
-  ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None) -> DatabaseResult[list[WorkerPong]] (active LISTEN/NOTIFY ping-pong; min_responses=1 returns on first reply = fast liveness gate),
+  ping_workers_async(target=PingTargetEveryWorker() | PingTargetWorker(worker_id), wait_ms=2000, min_responses=MinResponsesFullWindow() | MinResponsesAtLeast(count)) -> DatabaseResult[list[WorkerPong]] (active LISTEN/NOTIFY ping-pong; MinResponsesAtLeast(1) returns on first reply = fast liveness gate),
   list_worker_states_async -> DatabaseResult[list[WorkerStateSnapshot]] (latest per worker, includes idle workers),
   get_worker_state_async(worker_id) -> DatabaseResult[WorkerStateSnapshot | None],
-  get_worker_state_history_async(worker_id, limit=None) -> DatabaseResult[list[WorkerStateSnapshot]]
+  get_worker_state_history_async(worker_id, limit=WorkerHistoryLimitAllRetained() | WorkerHistoryLimitNewest(count)) -> DatabaseResult[list[WorkerStateSnapshot]],
+  get_stale_tasks_async(threshold_minutes) -> DatabaseResult[BoundedTaskList[StaleTaskRow]] (RUNNING tasks with no runner heartbeat within the threshold; StaleTaskRow: task_id, task_name, worker_hostname, worker_pid, worker_process_name, started_at, last_heartbeat_at),
+  get_expired_tasks_async -> DatabaseResult[BoundedTaskList[ExpiredTaskRow]] (PENDING tasks past good_until; ExpiredTaskRow: task_id, task_name, queue_name, priority, sent_at, enqueued_at, good_until, expired_for: timedelta),
+  BoundedTaskList = BoundedTaskListComplete(rows) | BoundedTaskListTruncated(rows, bound) (at most TASK_LIST_ROW_BOUND = 10,000 rows)
 - get_worker_stats was removed in 0.1.4; use list_worker_states_async (typed, includes idle workers)
 - Note: app.get_result_async / app.get_result return ReadResult[Any, TaskError], not a DatabaseResult: a database failure is Err(ReadDatabaseError(...)), a stored value that does not decode Err(ResultDeserializationError(...)), a task that is not registered in this process Err(NoTypeAvailable(...)), a sync call in a running event loop Err(AsyncContext(...)); the raw reads app.get_raw_result / broker.get_raw_result_record keep DatabaseResult
 
@@ -277,7 +277,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 <!-- members: TaskSendErrorCode -->
 - SEND_SUPPRESSED: send suppressed during worker import/discovery
 - VALIDATION_FAILED: argument serialization or validation failed
-- ENQUEUE_FAILED: broker/database failure during enqueue, or the core of the process could not run the send (cause is the core error: TooManyPendingCalls and CoreCallTimedOut are retryable; CoreStartFailed is not); the row may or may not exist; retryable is the core's classification
+- ENQUEUE_FAILED: broker/database failure during enqueue, or the core of the process could not run the send (cause is the core error: TooManyPendingCalls and CoreCallTimedOut are retryable; RuntimeStartFailed is not); the row may or may not exist; retryable is the core's classification
 - PAYLOAD_MISMATCH: the task id exists, and the command or the idempotency key differs from the original send (payload altered)
 - IDEMPOTENCY_KEY_CONFLICT: the idempotency key is reserved by another task with a different command; owner_task_id names the owner task; not retryable (send the same command as the owner task, or use another key); the retry methods refuse it
 - PAYLOAD_TOO_LARGE: the serialized input exceeds payload.reject_bytes bytes of UTF-8 text; nothing was enqueued
@@ -347,7 +347,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .on_error -> OnError (FAIL or PAUSE)
 - .output -> TaskNode | SubWorkflowNode | None
 - .success_policy -> SuccessPolicy | None
-- .resend_on_transient_err -> bool (auto-retry transient start errors, default False)
+- .resend_on_transient_error -> bool (auto-retry transient start errors, default False)
 - .start(workflow_id=None) -> WorkflowStartResult[WorkflowHandle[T]]
 - .start_async(workflow_id=None) -> WorkflowStartResult[WorkflowHandle[T]]
 - .retry_start(error: WorkflowStartRetryable) -> WorkflowStartResult[WorkflowHandle[T]] (retry failed start, sync)
@@ -370,7 +370,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - WorkflowHandleErrorCode: WORKFLOW_NOT_FOUND, DATABASE_OPERATION_FAILED, STORED_DATA_INVALID, RESUME_RECOVERY_FAILED, ASYNC_CONTEXT, INVALID_WORKFLOW_ID
 
 ### WorkflowStatus (enum)
-- PENDING -> RUNNING -> COMPLETED | FAILED | PAUSED | CANCELLED; PAUSED -> EXPIRED when paused_workflow_auto_cancel_after elapses
+- PENDING -> RUNNING -> COMPLETED | FAILED | PAUSED | CANCELLED; PAUSED -> EXPIRED when paused_workflow_cancel_after elapses
 - .is_terminal -> bool
 - WORKFLOW_TERMINAL_STATES: frozenset = {COMPLETED, FAILED, CANCELLED, EXPIRED}
 
@@ -446,11 +446,11 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - HRS-030: function returns WorkflowSpec but lacks @app.workflow_builder
 
 ### start_workflow / start_workflow_async
-- start_workflow(spec, broker, workflow_id=None, *, resend_on_transient_err=False) -> WorkflowStartResult[WorkflowHandle[T]]
-- start_workflow_async(spec, broker, workflow_id=None, *, resend_on_transient_err=False) -> WorkflowStartResult[WorkflowHandle[T]]
+- start_workflow(spec, broker, workflow_id=None, *, resend_on_transient_error=False) -> WorkflowStartResult[WorkflowHandle[T]]
+- start_workflow_async(spec, broker, workflow_id=None, *, resend_on_transient_error=False) -> WorkflowStartResult[WorkflowHandle[T]]
 - Standalone functions (alternative to spec.start())
 - Returns Ok(WorkflowHandle) on success, Err(WorkflowStartError) on failure
-- resend_on_transient_err: auto-retry up to 3 times on transient infra errors with exponential backoff
+- resend_on_transient_error: auto-retry up to 3 times on transient infra errors with exponential backoff
 
 ### WorkflowStartResult[T] (workflow start Result type)
 - spec.start() / start_async() / start_workflow() / start_workflow_async() return WorkflowStartResult[WorkflowHandle[T]]
@@ -484,43 +484,43 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Exponential: exactly one base interval, delay = base * 2^(attempt-1)
 
 ### RecoveryConfig
-- auto_requeue_stale_claimed: bool (default True)
+- requeue_stale_claimed: bool (default True)
 - claimed_stale_threshold_ms: int (default 120_000, range 1s-1hr)
-- auto_fail_stale_running: bool (default True)
+- fail_stale_running: bool (default True)
 - running_stale_threshold_ms: int (default 300_000, range 1s-2hr)
 - check_interval_ms: int (default 30_000, range 1s-10min)
 - runner_heartbeat_interval_ms: int (default 30_000, range 1s-2min)
 - claimer_heartbeat_interval_ms: int (default 30_000, range 1s-2min)
-- auto_terminate_orphaned_workflow_tasks: bool (default True)
+- terminate_orphaned_workflow_tasks: bool (default True)
 - finalizing_stale_threshold_ms: int (default 300_000, range 1s-2hr)
 - crashed_worker_recovery_grace_ms: int (default 10_000, range 0-1hr; 0 disables)
 - orphan_task_audit_interval_ms: int (default 60_000, range 1s-24hr)
-- worker_state_snapshot_interval_ms: int (default 30_000, range 1s-1min; the cap is half the 120 s live window WORKER_STATE_LIVE_WINDOW_S, so a running worker stays live when a snapshot write is late by up to half the window; a larger value fails with HRS-204)
-- phase2_quarantine_after_attempts: int (default 25, range 3-1000)
+- worker_state_snapshot_interval_ms: int (default 30_000, range 1s-1min; the cap is half the 120 s live window WORKER_STATE_LIVE_WINDOW_SECONDS, so a running worker stays live when a snapshot write is late by up to half the window; a larger value fails with HRS-204)
+- finalization_quarantine_after_attempts: int (default 25, range 3-1000)
 - workflow_recovery_failure_limit: int (default 25, range 3-1000; reaper passes in which the recovery of a workflow may raise a persistent error before the workflow fails with WORKFLOW_RECOVERY_LIMIT_REACHED)
-- Constraint: stale thresholds must be >= 2x heartbeat intervals; with auto_fail_stale_running=True, running_stale_threshold_ms >= 2 x (runner_heartbeat_interval_ms + 2000) (the worker stops when no runner heartbeat lands for half of it; HRS-204 below)
+- Constraint: stale thresholds must be >= 2x heartbeat intervals; with fail_stale_running=True, running_stale_threshold_ms >= 2 x (runner_heartbeat_interval_ms + 2000) (the worker stops when no runner heartbeat lands for half of it; HRS-204 below)
 - Retention fields are not on RecoveryConfig; setting heartbeat_retention_hours (removed in 0.5.0) or a retention field here fails at construction
 
 ### RetentionConfig
 - Reached as AppConfig.retention
-- paused_workflow_auto_cancel_after: timedelta | None (default None; a positive duration of at most 365,000 days, else HRS-216)
+- paused_workflow_cancel_after: timedelta | None (default None; a positive duration of at most 365,000 days, else HRS-216)
 - worker_state_retention_hours: int | None (default 168 / 7 days, range 1-8760, None disables pruning)
 - terminal_record_retention_hours: int | None (default 720 / 30 days, range 1-43800, None disables pruning; applies to terminal workflow rows)
 - history_leaf_horizon_days: int (default 3, range 2-14)
 - heartbeat_leaf_horizon_hours: int (default 6, range 2-48)
-- partition_maintenance_interval_s: int (default 900, range 60-3600)
-- retention_sweep_interval_s: int (default 300, range 30s-24h)
+- partition_maintenance_interval_seconds: int (default 900, range 60-3600)
+- retention_sweep_interval_seconds: int (default 300, range 30s-24h)
 - retention_delete_batch_size: int (default 500, range 50-10000)
 - retention_periods: tuple[timedelta, ...] (default (); whole days 1-1825; periods a send may choose explicitly)
 - queue_retention: dict[str, timedelta | None] (default {}; whole days 1-1825, or None for forever; the class key is standard_<days>d)
 - Terminal task records are removed by partition drop, not by row delete
 
 ### WorkerResilienceConfig
-- db_retry_initial_ms: int (default 500, range 100ms-60s)
-- db_retry_max_ms: int (default 30_000, range 500ms-5min)
-- db_retry_max_attempts: int (default 0 = infinite, range 0-10_000)
+- database_retry_initial_ms: int (default 500, range 100ms-60s)
+- database_retry_max_ms: int (default 30_000, range 500ms-5min)
+- database_retry_max_attempts: int (default 0 = infinite, range 0-10_000)
 - notify_poll_interval_ms: int (default 5_000, range 1s-5min)
-- Constraint: db_retry_max_ms >= db_retry_initial_ms
+- Constraint: database_retry_max_ms >= database_retry_initial_ms
 
 ### discover_tasks
 - app.discover_tasks(["myapp.tasks", "myapp.workflows"])
@@ -596,7 +596,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Guarantee model:
   - Strong: @app.workflow_builder decorated functions are fully executed and validated for exercised builder cases
   - Best-effort: undecorated builder detection (HRS-030) is heuristic — only scans directly discovered modules
-- Returns list[HorsiesError]; empty = all passed
+- Returns ValidationReport (phase_name 'check'); .refusals empty = all passed
 - Errors are collected within each phase; check returns early before later phases when earlier phases fail
 - Worker and scheduler also run check() at startup before accepting work
 - On success: prints "ok: all validations passed" with task count, then "declared error codes:" with one line per declaring task ("<task>: CODE, CODE"), or "declared error codes: none"
@@ -714,9 +714,9 @@ Registry (HRS-300-HRS-399):
 #### ValidationReport
 - Collects multiple HorsiesError instances within a validation phase
 - ValidationReport(phase_name: str)
-- .add(error: HorsiesError), .has_errors() -> bool, .errors -> list[HorsiesError]
+- .add(error: HorsiesError), .has_errors() -> bool, .refusals -> list[HorsiesError]
 - .format_diagnostic() -> str (formats all errors with "aborting due to N errors" summary)
-- Used by WorkflowSpec construction, AppConfig validation, and app.check()
+- Used by WorkflowSpec construction, AppConfig validation, and app.check() (its return value)
 
 #### raise_collected(report: ValidationReport) -> None
 - 0 errors: no-op (returns normally)
@@ -755,23 +755,23 @@ Registry (HRS-300-HRS-399):
 - WORKFLOW_TASK_TERMINAL_STATES: frozenset[WorkflowTaskStatus] = {COMPLETED, FAILED, SKIPPED}
 
 ### CLI Commands
-- `horsies worker <module> --profile NAME [--loglevel LEVEL] [--metrics-listen HOST:PORT]`
+- `horsies worker <module> --profile NAME [--log-level LEVEL] [--metrics-listen HOST:PORT]`
   - `--profile NAME` — required; a profile in AppConfig.worker_profiles; no default profile; a missing or unknown name exits 1 and lists the defined names
   - Worker settings live in the profile, not in flags: WorkerProfile(isolated=IsolatedChildren(count=N, recycle=IsolatedRecycle(after=TaskLimit(tasks=N) | NoTaskLimit(), above=MemoryLimit(mb=N) | NoMemoryLimit())), shared_async=SharedAsyncChildren(count=N, seats=K), shared_thread=SharedThreadChildren(count=N, seats=K), claim=ClaimLimits(per_queue_per_pass=..., claimed_per_worker=...), drain_timeout=timedelta, preload=ChildPreload.LIBRARY | APP | NONE)
-  - Removed PostgresConfig fields fail at config build (HRS-213): worker_child_pool_min_size -> IsolatedPool/SharedPool min_size; worker_child_pool_max_size -> max_size=PoolSize(connections=N); worker_child_pool_check -> check; worker_pool_size, worker_max_overflow -> WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N))) for the worker process and task_send_pool=PoolSize(connections=N) on a child kind for task code that sends
+  - Removed PostgresConfig fields fail at config build (HRS-213): worker_child_pool_min_size -> IsolatedPool/SharedPool min_size; worker_child_pool_max_size -> max_size=PoolSize(connections=N); worker_child_pool_check -> pre_ping; worker_pool_size, worker_max_overflow -> WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N))) for the worker process and task_send_pool=PoolSize(connections=N) on a child kind for task code that sends
   - Removed flags exit 2 and name the field: --processes -> IsolatedChildren.count; --max-tasks-per-child -> IsolatedRecycle.after; --max-memory-per-child-mb -> IsolatedRecycle.above; --max-claim-batch -> ClaimLimits.per_queue_per_pass; --max-claim-per-worker -> ClaimLimits.claimed_per_worker; --drain-timeout -> WorkerProfile.drain_timeout; --child-preload -> WorkerProfile.preload
   - Boot warns (never refuses) when count x MemoryLimit.mb is above the usable memory: the cgroup limit (the group that /proc/self/cgroup names, v1 memory group else v2 group; the smallest memory.limit_in_bytes / memory.max of the group and its parents, so a systemd MemoryMax or --cgroupns=host counts; without /proc/self/cgroup the files at the mount point; "max" or no file = no limit) when below the host RAM, else the host RAM; the warning names the source ("container limit" or "host RAM"), and when one worker opens more Postgres connections itself than the server has usable slots; a memory limit at or below the warmed child baseline still refuses to start
   - `--metrics-listen HOST:PORT` (or [IPV6]:PORT; no default, no config field) serves GET /metrics (Prometheus text 0.0.4), GET /livez (503 only when the claim loop is stuck) and GET /readyz (200 when the pools have no failure, a child serves and the liveness lock is held); a bad value exits 2; a bind failure does not stop the worker. See /horsies/observability/metrics/
-- `horsies scheduler <module> [--loglevel LEVEL]`
-- `horsies check <module> [--live] [--loglevel LEVEL]`
-- `horsies web <module> [--host HOST] [--port PORT] [--auth none|trusted-header] [--trusted-header HEADER] [--enable-actions] [--trace-link TEMPLATE] [--loglevel LEVEL]` — serve the monitoring web UI (requires the `horsies[web]` extra)
+- `horsies scheduler <module> [--log-level LEVEL]`
+- `horsies check <module> [--live] [--log-level LEVEL]`
+- `horsies web <module> [--host HOST] [--port PORT] [--auth none|trusted-header] [--trusted-header HEADER] [--enable-actions] [--trace-link TEMPLATE] [--log-level LEVEL]` — serve the monitoring web UI (requires the `horsies[web]` extra)
   - `horsies web --database-url URL [--session-database-url URL] [--pgbouncer-transaction-mode] [...]` — monitor a database without importing an app module (registry-less)
   - Pass either `<module>` or `--database-url`, not both
   - Defaults: `--host 127.0.0.1`, `--port 8600`, `--auth none`, `--trusted-header X-Forwarded-User`, actions off (view-only)
   - `--auth none` is allowed only on a loopback host; a non-loopback host requires `--auth trusted-header`
   - `--enable-actions` allows cancel/pause/resume
   - `--trace-link TEMPLATE` links a task's trace id in the task detail: an http or https URL with one {trace_id} (MonitoringUIConfig(trace_link=TraceLinkTemplate(template=...)) when mounting; a refused template is HRS-221 CONFIG_INVALID_TRACE_LINK)
-- `horsies metrics <module> --listen HOST:PORT [--loglevel LEVEL]` — serve the fleet metrics of the app's database at GET /metrics (Prometheus text 0.0.4); `--listen` is required (HOST:PORT or [IPV6]:PORT); reads at start, then at most once per 15 s, each statement within 2 s; a failed query has no series and sets horsies_exporter_collect_failed{query} 1; exit 2 bad address, 0 on SIGTERM/SIGINT, 1 when the app does not load or the address does not bind. `horsies web` and create_monitoring_app also serve GET /metrics behind can_view. See /horsies/observability/fleet-collector/
+- `horsies metrics <module> --metrics-listen HOST:PORT [--log-level LEVEL]` — serve the fleet metrics of the app's database at GET /metrics (Prometheus text 0.0.4); `--metrics-listen` is required (HOST:PORT or [IPV6]:PORT); reads at start, then at most once per 15 s, each statement within 2 s; a failed query has no series and sets horsies_exporter_collect_failed{query} 1; exit 2 bad address, 0 on SIGTERM/SIGINT, 1 when the app does not load or the address does not bind. `horsies web` and create_monitoring_app also serve GET /metrics behind can_view. See /horsies/observability/fleet-collector/
 - `horsies get-docs [--output DIR] [--ref main]` — fetch the docs of the installed version's release tag for AI agents (default: .horsies-docs/); a development version has no tag and fails unless `--ref main` is given
 - `horsies skills install --target DIR [--force]` — copy the packaged skill folder to `DIR/horsies/`; refuses to replace a changed copy without `--force`
 - Module format: `myapp.config:app` (dotted:attr) or `app/config.py:app` (file:attr)
@@ -837,12 +837,12 @@ Each entry: Title -- summary -> URL
 - Shared Thread Tasks -- SHARED_THREAD tasks on seat threads of a shared thread child, when threads help, the timeout and the kill, pool sizing -> /horsies/workers/shared-thread-tasks/
 - Concurrency -- worker/queue/cluster limits -> /horsies/workers/concurrency/
 - Heartbeats & Recovery -- crash detection -> /horsies/workers/heartbeats-recovery/
-- Child-Process Hooks -- per-child-process setup with @app.on_child_process_start -> /horsies/workers/child-process-hooks/
+- Child-Process Hooks -- per-child-process setup with @app.on_child_start -> /horsies/workers/child-process-hooks/
 - Event Handlers -- @app.on_event(EventType) runs a def or an async def function for each lifecycle event of one type in the handler child of the worker; @app.on_handler_child_start; delivery, counts and failures -> /horsies/workers/event-handlers/
 
 ### Monitoring
 - Worker & Database Health -- what the database ping, the worker ping, worker states, class coverage and the class report answer; snapshot fields; embedded health payloads -> /horsies/monitoring/worker-health/
-- Health Reads -- the Python health methods: ping_database_async, ping_workers_async, list_worker_states_async, get_class_coverage_async, get_class_report_async, result types -> /horsies/monitoring/health-reads/
+- Health Reads -- the Python health methods: ping_database_async, ping_workers_async, list_worker_states_async, get_stale_tasks_async, get_expired_tasks_async, get_execution_class_coverage_async, get_execution_class_report_async, result types -> /horsies/monitoring/health-reads/
 - Broker Methods -- async inspection APIs -> /horsies/monitoring/broker-methods/
 - Web UI Overview -- browser dashboard: surfaces, the run graph and timeline (node time, longest chain, linear and log scales), the attempt panel, durations, freshness, action outcomes, limits -> /horsies/monitoring/web-ui-overview/
 - Web UI Deployment & Authentication -- mounted and standalone modes, authorization policies, bind rules, identity, connection and schema contracts -> /horsies/monitoring/web-ui-deployment/
@@ -865,7 +865,7 @@ Each entry: Title -- summary -> URL
 
 ### Operations
 - Deployment Topology -- a dedicated PostgreSQL instance and why, the transaction boundary with the application, the connections of each URL and the pooler mode, what a failover under asynchronous replication can lose (a send, a workflow start, a claim, the end of a task, workflow progress, the liveness lock), the settings that lose no commit -> /horsies/operations/deployment-topology/
-- Atomic Enqueue and Topology -- send after commit, resend_on_transient_err, idempotency_key window and limits, no send API joins a caller transaction -> /horsies/operations/atomic-enqueue-and-topology/
+- Atomic Enqueue and Topology -- send after commit, resend_on_transient_error, idempotency_key window and limits, no send API joins a caller transaction -> /horsies/operations/atomic-enqueue-and-topology/
 - Deploying Code Changes -- renamed or removed tasks and parameters, in-flight rows, old and new workers, error codes per change -> /horsies/operations/deploying-code-changes/
 - Code Change Examples -- the Python code of the deploy steps: a parameter with a default, two names for one task, a model field with a default, a renamed field with AliasChoices -> /horsies/operations/code-change-examples/
 - Rerun in Your Transaction -- the Python rerun_task: re-execute a terminal task as a new task in the caller's transaction, RerunTask, RerunEnqueuePolicy, RerunOutcome, registered_task_codes (the stored retry list is checked against the app's declared codes: RETRY_CODE_NOT_DECLARED, TASK_NOT_REGISTERED) -> /horsies/operations/rerun-in-your-transaction/
@@ -909,7 +909,7 @@ keyword(s) -> page URL
 
 install, pip, setup, first task -> /horsies/quick-start/getting-started/
 Horsies, AppConfig, PostgresConfig, database_url, broker -> /horsies/configuration/app-config/
-pool_size, max_overflow, session_database_url, pgbouncer_transaction_mode, keepalives -> /horsies/configuration/broker-config/
+pool_size, max_overflow, session_database, pgbouncer_transaction_mode, keepalives -> /horsies/configuration/broker-config/
 PostgresConfig, psycopg, libpq, event loop, ASYNC_CONTEXT, connection ceiling -> /horsies/configuration/broker-connections/
 stale, requeue, crash recovery, recovery fields -> /horsies/configuration/recovery-config/
 RecoveryConfig, HRS-204 example, disable recovery -> /horsies/configuration/app-config/#recovery-configuration
@@ -943,7 +943,7 @@ TaskRuntime.for_test, AttemptNumber, direct call with a runtime -> /horsies/oper
 WorkflowDefinition, class-based workflow, build, build_with -> /horsies/concepts/workflows/subworkflows/
 ExceptionMapper, exception_mapper, error code mapping -> /horsies/tasks/error-handling/
 good_until, task expiry, deadline, with_options, TaskSendOptions -> /horsies/tasks/sending-tasks/
-schedule, delay, TaskFunction.schedule, resend_on_transient_err, idempotency_reservation_window -> /horsies/tasks/sending-tasks/
+schedule, delay, TaskFunction.schedule, resend_on_transient_error, idempotency_reservation_window -> /horsies/tasks/sending-tasks/
 worker, child process, claim, execute -> /horsies/workers/worker-architecture/
 concurrency, max_concurrency, cluster_wide_cap, prefetch -> /horsies/workers/concurrency/
 heartbeat, crash, stale, worker recovery -> /horsies/workers/heartbeats-recovery/
@@ -974,10 +974,10 @@ showcase, demo app, example application -> /horsies/quick-start/06-showcase/
 remote PostgreSQL, managed PostgreSQL, connection budget, PgBouncer pooling, health checks -> /horsies/configuration/remote-postgres/
 retention class, retention_class_key, queue_retention, retention_periods, partitions, dedupe horizon, audit horizon, heartbeat_leaf_horizon_hours -> /horsies/configuration/retention-config/
 RetentionConfig -> /horsies/configuration/app-config/#retention-configuration
-on_child_process_start, child-process hook, per-child setup -> /horsies/workers/child-process-hooks/
+on_child_start, child-process hook, per-child setup -> /horsies/workers/child-process-hooks/
 on_event, on_handler_child_start, event handler, handler child, horsies.telemetry, AttemptEnded -> /horsies/workers/event-handlers/
 liveness, worker ping, class coverage, slot health, snapshot fields -> /horsies/monitoring/worker-health/
-ping_database, ping_workers, WorkerPong, WorkerStateSnapshot, ClassCoverage, ClassReport -> /horsies/monitoring/health-reads/
+ping_database, ping_workers, WorkerPong, WorkerStateSnapshot, get_stale_tasks, get_expired_tasks, BoundedTaskList, ExecutionClassCoverage, ExecutionClassReport -> /horsies/monitoring/health-reads/
 web UI, dashboard -> /horsies/monitoring/web-ui-overview/
 horsies web, standalone dashboard -> /horsies/cli/
 trusted-header, authentication, mounted mode, standalone mode, schema state -> /horsies/monitoring/web-ui-deployment/
@@ -988,7 +988,7 @@ rerun_task, RerunTask, RerunEnqueuePolicy, RerunOutcome, RerunEnqueued -> /horsi
 AliasChoices, renamed model field, task alias, deploy -> /horsies/operations/code-change-examples/
 autovacuum, vacuum, high-churn tables -> /horsies/operations/autovacuum-tuning/
 deployment topology, dedicated instance, failover, asynchronous replication, synchronous replication, synchronous_commit, synchronous_standby_names, standby, lost commit -> /horsies/operations/deployment-topology/
-atomic enqueue, send after commit, transaction, topology, separate database, idempotency_key, idempotency window, IDEMPOTENCY_KEY_CONFLICT, resend_on_transient_err -> /horsies/operations/atomic-enqueue-and-topology/
+atomic enqueue, send after commit, transaction, topology, separate database, idempotency_key, idempotency window, IDEMPOTENCY_KEY_CONFLICT, resend_on_transient_error -> /horsies/operations/atomic-enqueue-and-topology/
 deploy, rolling deploy, rename task, remove task, rename parameter, in-flight rows, WORKER_SERIALIZATION_ERROR, WORKER_RESOLUTION_ERROR, SUBWORKFLOW_LOAD_FAILED, RESULT_DESERIALIZATION_ERROR, definition_key -> /horsies/operations/deploying-code-changes/
 testing, pytest, unit test, direct call, WorkflowContext.from_serialized, HORSIES_SUPPRESS_SENDS, TaskSendSuppressed, SEND_SUPPRESSED -> /horsies/operations/testing/
 PgBouncer, transaction pooling, pgbouncer_transaction_mode -> /horsies/troubleshooting/pgbouncer/

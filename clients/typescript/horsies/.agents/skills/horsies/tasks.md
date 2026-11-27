@@ -291,7 +291,7 @@ The worker entry builds the app and implements every listed contract:
 import { Horsies } from "horsies";
 
 const created = Horsies.create({
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
   tasks: [validateOrder, importFeed, recordShipment],
 });
 

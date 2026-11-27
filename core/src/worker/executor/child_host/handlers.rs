@@ -56,7 +56,7 @@ pub const HANDLER_ERROR_LOG_EVERY: u64 = 1_000;
 /// The interval of the `handler_stats` frames of a handler child. Each frame
 /// holds the totals since the child started, so a lost frame loses no
 /// count.
-pub const HANDLER_STATS_INTERVAL: Duration = Duration::from_secs(5);
+pub const HANDLER_STATISTICS_INTERVAL: Duration = Duration::from_secs(5);
 
 /// After the stop frame, the handlers get this long, together, to take the
 /// events of their queues. The events still in a queue then are not

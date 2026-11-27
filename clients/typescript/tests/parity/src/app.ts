@@ -286,7 +286,7 @@ export const SCHEDULE_SECTION: ScheduleSection = { checkIntervalSeconds: SCHEDUL
 /** The config of the parity app on `databaseUrl`. Pure. */
 export function parityConfig(databaseUrl: string): HorsiesConfig {
   return {
-    broker: {
+    database: {
       databaseUrl: { kind: "value", value: databaseUrl },
       poolSize: POOL_SIZE,
       maxOverflow: POOL_OVERFLOW,
@@ -305,7 +305,7 @@ export function parityConfig(databaseUrl: string): HorsiesConfig {
 export function refusedBrokerConfig(): HorsiesConfig {
   const config = parityConfig(REFUSED_BROKER_URL);
 
-  return { ...config, broker: { ...config.broker, poolTimeoutSeconds: REFUSED_BROKER_CHECKOUT_WAIT_S } };
+  return { ...config, database: { ...config.database, poolTimeoutSeconds: REFUSED_BROKER_CHECKOUT_WAIT_S } };
 }
 
 /**

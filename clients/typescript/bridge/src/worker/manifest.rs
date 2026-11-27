@@ -75,7 +75,7 @@ pub fn config_sections(
         max: refused.max,
     })?;
     Ok(ConfigSections {
-        database: database_manifest(producer, &config.broker),
+        database: database_manifest(producer, &config.database),
         send: producer.send,
         profiles,
         claim,
@@ -91,7 +91,7 @@ pub fn config_sections(
 /// process from the config. Pure.
 fn database_manifest(
     producer: &ProducerManifest,
-    broker: &PostgresConfig,
+    database_config: &PostgresConfig,
 ) -> wire::WorkerDatabaseManifest {
     let database = &producer.database;
     wire::WorkerDatabaseManifest {
@@ -99,8 +99,8 @@ fn database_manifest(
         session_database: database.session_database.clone(),
         pgbouncer_transaction_mode: database.pgbouncer_transaction_mode,
         pool_pre_ping: database.pool_pre_ping,
-        worker_pool_pre_ping: broker.worker_pool_pre_ping,
-        pool_timeout: database.pool_timeout,
+        worker_pool_pre_ping: database_config.worker_pool_pre_ping,
+        pool_timeout_seconds: database.pool_timeout_seconds,
         pool_recycle: database.pool_recycle,
         echo: database.echo,
         tcp_keepalives: database.tcp_keepalives,
@@ -139,7 +139,7 @@ fn recovery_member(field: RecoveryField) -> &'static str {
         RecoveryField::RunningStaleThresholdMs => "runningStaleThresholdMs",
         RecoveryField::FinalizingStaleThresholdMs => "finalizingStaleThresholdMs",
         RecoveryField::CrashedWorkerRecoveryGraceMs => "crashedWorkerRecoveryGraceMs",
-        RecoveryField::Phase2QuarantineAfterAttempts => "finalizationQuarantineAfterAttempts",
+        RecoveryField::FinalizationQuarantineAfterAttempts => "finalizationQuarantineAfterAttempts",
         RecoveryField::WorkflowRecoveryFailureLimit => "workflowRecoveryFailureLimit",
         RecoveryField::CheckIntervalMs => "checkIntervalMs",
         RecoveryField::OrphanTaskAuditIntervalMs => "orphanTaskAuditIntervalMs",
@@ -162,19 +162,19 @@ fn retention_member(field: &RetentionField) -> String {
             "queueRetention[{}].days",
             serde_json::Value::String(queue.clone())
         ),
-        RetentionField::PartitionMaintenanceIntervalS => {
+        RetentionField::PartitionMaintenanceIntervalSeconds => {
             "partitionMaintenanceIntervalSeconds".to_owned()
         }
-        RetentionField::RetentionSweepIntervalS => "retentionSweepIntervalSeconds".to_owned(),
+        RetentionField::RetentionSweepIntervalSeconds => "retentionSweepIntervalSeconds".to_owned(),
         RetentionField::RetentionDeleteBatchSize => "retentionDeleteBatchSize".to_owned(),
     }
 }
 
 fn resilience_member(field: ResilienceField) -> &'static str {
     match field {
-        ResilienceField::DbRetryInitialMs => "databaseRetryInitialMs",
-        ResilienceField::DbRetryMaxMs => "databaseRetryMaxMs",
-        ResilienceField::DbRetryMaxAttempts => "databaseRetryMaxAttempts.attempts",
+        ResilienceField::DatabaseRetryInitialMs => "databaseRetryInitialMs",
+        ResilienceField::DatabaseRetryMaxMs => "databaseRetryMaxMs",
+        ResilienceField::DatabaseRetryMaxAttempts => "databaseRetryMaxAttempts.attempts",
         ResilienceField::NotifyPollIntervalMs => "notifyPollIntervalMs",
     }
 }
@@ -197,7 +197,7 @@ mod tests {
 
     /// The JSON text of an app config with `rest` after its broker section.
     fn config_text(rest: &str) -> String {
-        format!(r#"{{"broker": {{"database_url": "postgres://127.0.0.1:55432/horsies"}}{rest}}}"#)
+        format!(r#"{{"database": {{"database_url": "postgres://127.0.0.1:55432/horsies"}}{rest}}}"#)
     }
 
     /// The config and the producer manifest of `text`, as `prepareWorker`
@@ -319,7 +319,10 @@ mod tests {
                 "claim.leaseMs",
             ),
             (
-                Box::new(|config: &mut AppConfig| config.cluster_wide_cap = Some(u32::MAX)),
+                Box::new(|config: &mut AppConfig| {
+                    config.cluster_wide_cap =
+                        horsies_core::core::ClusterCapSetting::ClusterCap { tasks: u32::MAX }
+                }),
                 "clusterWideCap.tasks",
             ),
             (
@@ -368,10 +371,10 @@ mod tests {
     #[test]
     fn no_retry_attempt_limit_is_its_own_variant() {
         let (mut config, producer) = read(&config_text(""));
-        config.resilience.db_retry_max_attempts = 0;
+        config.resilience.database_retry_max_attempts = 0;
         let built = config_sections(&config, &producer).expect("inside every bound");
         assert_eq!(
-            built.resilience.db_retry_max_attempts,
+            built.resilience.database_retry_max_attempts,
             wire::RetryAttemptLimit::NoLimit
         );
     }
@@ -391,7 +394,7 @@ mod tests {
                 "customQueues[2].maxConcurrency.tasks",
             ),
             (
-                ConfigField::Recovery(RecoveryField::Phase2QuarantineAfterAttempts),
+                ConfigField::Recovery(RecoveryField::FinalizationQuarantineAfterAttempts),
                 "recovery.finalizationQuarantineAfterAttempts",
             ),
             (
@@ -401,11 +404,11 @@ mod tests {
                 r#"retention.queueRetention["bulk \"low\""].days"#,
             ),
             (
-                ConfigField::Retention(RetentionField::PartitionMaintenanceIntervalS),
+                ConfigField::Retention(RetentionField::PartitionMaintenanceIntervalSeconds),
                 "retention.partitionMaintenanceIntervalSeconds",
             ),
             (
-                ConfigField::Resilience(ResilienceField::DbRetryMaxAttempts),
+                ConfigField::Resilience(ResilienceField::DatabaseRetryMaxAttempts),
                 "resilience.databaseRetryMaxAttempts.attempts",
             ),
             (

@@ -17,6 +17,17 @@ from typing import (
     get_origin,
 )
 from horsies.core.models.app import AppConfig
+from horsies.core.models.health_reads import (
+    BoundedTaskList,
+    ExpiredTaskRow,
+    MinResponses,
+    MinResponsesFullWindow,
+    PingTarget,
+    PingTargetEveryWorker,
+    StaleTaskRow,
+    WorkerHistoryLimit,
+    WorkerHistoryLimitAllRetained,
+)
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import (
     Execution,
@@ -128,6 +139,7 @@ from horsies.core.codec.validation_errors import ValueValidationError, exception
 from horsies.core.types.core_failure import call_refusal_or_raise
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import AppRole, SchemaMode
 from horsies._catalog.manifest import dump_producer_manifest
 from horsies._core import (
     ConnectivityPassed,
@@ -166,7 +178,7 @@ if TYPE_CHECKING:
     from horsies.core.models.tasks import TaskInfo, TaskError
     from horsies.core.models.outcome import ReadResult
     from horsies.core.brokers.result_types import DatabaseResult, RawResultRecord
-    from horsies.core.models.class_coverage import ClassCoverage, ClassReport
+    from horsies.core.models.class_coverage import ExecutionClassCoverage, ExecutionClassReport
     from horsies.core.models.health import (
         DatabasePing,
         WorkerPong,
@@ -179,11 +191,14 @@ C = TypeVar('C', default=str)
 """The type of the custom codes of a task (`TaskError[C]`)."""
 OutT = TypeVar('OutT')
 
+CHECK_PHASE: Final = 'check'
+"""The phase name of the report of ``Horsies.check()``."""
+
 _E = TypeVar('_E', bound=HorsiesError)
 _F = TypeVar('_F', bound=Callable[..., Any])
 
 # Sync, zero-argument callable run once per worker child process.
-ChildProcessStartHook = Callable[[], None]
+ChildStartHook = Callable[[], None]
 
 # Zero-argument coroutine function run once per shared async child, on the
 # event loop of that child, before its first task.
@@ -537,11 +552,16 @@ class Horsies:
     Requires an AppConfig instance for proper validation and type safety.
     """
 
-    def __init__(self, config: AppConfig, *, run_schema_migrations: bool = True):
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        schema_mode: SchemaMode = SchemaMode.MIGRATE_AND_VALIDATE,
+    ):
         self.config = config
         # Propagated to the broker this app constructs. See
-        # ``PostgresBroker.run_schema_migrations``.
-        self.run_schema_migrations = run_schema_migrations
+        # ``PostgresBroker.schema_mode``.
+        self.schema_mode: SchemaMode = schema_mode
         self._broker: Optional['PostgresBroker'] = None
         self._broker_init_lock = threading.Lock()
         # The spans and producer metrics of the sends and workflow starts,
@@ -559,11 +579,11 @@ class Horsies:
         self._workflow_builders: list[_WorkflowBuilderMeta] = []
         # When True, task sends/schedules are suppressed (used during import/discovery)
         self._suppress_sends: bool = False
-        # Role indicates context: 'producer', 'worker', or 'scheduler'
-        self._role: str = 'producer'
+        # What this process does: the CLI sets WORKER or SCHEDULER.
+        self._role: AppRole = AppRole.PRODUCER
         # Hooks run once per worker child process, after task imports and
         # before the child opens its own connection pool.
-        self._child_process_start_hooks: list[ChildProcessStartHook] = []
+        self._child_start_hooks: list[ChildStartHook] = []
         # Hooks run once per shared async child, on its event loop, before it
         # takes its first task.
         self._shared_async_child_start_hooks: list[SharedAsyncChildStartHook] = []
@@ -587,15 +607,15 @@ class Horsies:
                 f'horsies initialized with {config.queue_mode.name} mode'
             )
 
-    def set_role(self, role: str) -> None:
+    def set_role(self, role: AppRole) -> None:
         """Set the role and log it. Called by CLI after discovery."""
         self._role = role
-        # Worker children call set_role('worker') on every recycle; keep that
-        # at DEBUG. Parent/producer/scheduler set their role once -> INFO.
+        # Worker children call set_role(AppRole.WORKER) on every recycle; keep
+        # that at DEBUG. Parent/producer/scheduler set their role once -> INFO.
         if os.getenv('HORSIES_CHILD_PROCESS') == '1':
-            self.logger.debug(f'horsies running as {role}')
+            self.logger.debug(f'horsies running as {role.value}')
         else:
-            self.logger.info(f'horsies running as {role}')
+            self.logger.info(f'horsies running as {role.value}')
 
     def set_task_send_pool(self, connections: int) -> None:
         """Make ``get_broker()`` open a pool of up to ``connections``
@@ -612,10 +632,10 @@ class Horsies:
         assert connections >= 1, f'connections must be >= 1; got {connections}'
         self._broker_pool = _TaskSendBrokerPool(connections=connections)
 
-    def on_child_process_start(
+    def on_child_start(
         self,
-        fn: ChildProcessStartHook,
-    ) -> ChildProcessStartHook:
+        hook: ChildStartHook,
+    ) -> ChildStartHook:
         """Register a hook that runs once in every worker child process.
 
         Hooks run after task-module imports and before the child opens its
@@ -628,19 +648,19 @@ class Horsies:
         (`engine.dispose()`) and rebinds app-owned engines to a
         worker-appropriate pool.
         """
-        if not callable(fn):
+        if not callable(hook):
             raise ConfigurationError(
-                message='on_child_process_start requires a callable',
+                message='on_child_start requires a callable',
                 code=HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK,
-                notes=[f'got {type(fn).__name__!r}'],
+                notes=[f'got {type(hook).__name__!r}'],
                 help_text='register a zero-argument sync function',
             )
-        if inspect.iscoroutinefunction(fn):
+        if inspect.iscoroutinefunction(hook):
             raise ConfigurationError(
-                message='on_child_process_start hooks must be sync',
+                message='on_child_start hooks must be sync',
                 code=HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK,
                 notes=[
-                    f"hook '{getattr(fn, '__name__', repr(fn))}' is an async function",
+                    f"hook '{getattr(hook, '__name__', repr(hook))}' is an async function",
                     'hooks run during child-process boot, before any event loop exists',
                 ],
                 help_text=(
@@ -648,17 +668,17 @@ class Horsies:
                     'async_engine.sync_engine.dispose(close=False)'
                 ),
             )
-        if all(existing is not fn for existing in self._child_process_start_hooks):
-            self._child_process_start_hooks.append(fn)
-        return fn
+        if all(existing is not hook for existing in self._child_start_hooks):
+            self._child_start_hooks.append(hook)
+        return hook
 
-    def get_child_process_start_hooks(self) -> list[ChildProcessStartHook]:
-        """Snapshot of registered child-process start hooks, in order."""
-        return list(self._child_process_start_hooks)
+    def get_child_start_hooks(self) -> list[ChildStartHook]:
+        """Snapshot of registered child start hooks, in order."""
+        return list(self._child_start_hooks)
 
     def on_shared_async_child_start(
         self,
-        fn: SharedAsyncChildStartHook,
+        hook: SharedAsyncChildStartHook,
     ) -> SharedAsyncChildStartHook:
         """Register a hook that runs once in every shared async child.
 
@@ -668,10 +688,10 @@ class Horsies:
         is bound to the loop that every task of the child shares. Keep such
         a client in module state, and use it from the tasks.
 
-        Hooks run after the ``on_child_process_start`` hooks and after the
+        Hooks run after the ``on_child_start`` hooks and after the
         child opens its connection pool, in registration order, each for at
         most 10 seconds. A hook that raises or runs longer ends the child and
-        stops the worker, as an ``on_child_process_start`` hook does. They
+        stops the worker, as an ``on_child_start`` hook does. They
         run in every shared async child, also in a replacement child, so
         bodies must be idempotent. Work that a hook starts and leaves
         running, such as a background task of a client, belongs to no task.
@@ -684,14 +704,14 @@ class Horsies:
         hook fails when the child starts. Any other callable is refused with
         ``HRS-214``.
         """
-        if not callable(fn):
+        if not callable(hook):
             raise ConfigurationError(
                 message='on_shared_async_child_start requires a callable',
                 code=HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK,
-                notes=[f'got {type(fn).__name__!r}'],
+                notes=[f'got {type(hook).__name__!r}'],
                 help_text='register a zero-argument async def function',
             )
-        match _shared_async_hook_kind(fn):
+        match _shared_async_hook_kind(hook):
             case _HookReturnsCoroutine() | _HookIsLambda():
                 pass
             case _HookIsSync():
@@ -699,19 +719,19 @@ class Horsies:
                     message='on_shared_async_child_start hooks must be async def',
                     code=HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK,
                     notes=[
-                        f"hook '{getattr(fn, '__name__', repr(fn))}' is not an "
+                        f"hook '{getattr(hook, '__name__', repr(hook))}' is not an "
                         'async function, and its return annotation is not '
                         'awaitable',
                         'the hook runs on the event loop of the shared async child',
                     ],
                     help_text=(
                         'use an async def function; for setup with no event '
-                        'loop, use on_child_process_start'
+                        'loop, use on_child_start'
                     ),
                 )
-        if all(existing is not fn for existing in self._shared_async_child_start_hooks):
-            self._shared_async_child_start_hooks.append(fn)
-        return fn
+        if all(existing is not hook for existing in self._shared_async_child_start_hooks):
+            self._shared_async_child_start_hooks.append(hook)
+        return hook
 
     def get_shared_async_child_start_hooks(self) -> list[SharedAsyncChildStartHook]:
         """Snapshot of registered shared async child start hooks, in order."""
@@ -763,7 +783,7 @@ class Horsies:
 
     def on_handler_child_start(
         self,
-        fn: HandlerChildStartHook,
+        hook: HandlerChildStartHook,
     ) -> HandlerChildStartHook:
         """Register a hook that runs once in the handler child of a worker,
         after the app imports and before the child takes its first event.
@@ -776,33 +796,33 @@ class Horsies:
 
         A hook that raises or runs longer ends the handler child: it stays
         down until the worker restarts, and the worker runs its tasks on. The
-        `on_child_process_start` hooks do not run in the handler child.
+        `on_child_start` hooks do not run in the handler child.
 
         Raises:
             ConfigurationError: `HRS-214` for a value that is not callable
                 or for an `async def` function.
         """
-        if not callable(fn):
+        if not callable(hook):
             raise ConfigurationError(
                 message='on_handler_child_start requires a callable',
                 code=HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK,
-                notes=[f'got {type(fn).__name__!r}'],
+                notes=[f'got {type(hook).__name__!r}'],
                 help_text='register a zero-argument sync function',
             )
-        if inspect.iscoroutinefunction(fn):
+        if inspect.iscoroutinefunction(hook):
             raise ConfigurationError(
                 message='on_handler_child_start hooks must be sync',
                 code=HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK,
                 notes=[
-                    f"hook '{getattr(fn, '__name__', repr(fn))}' is an async function",
+                    f"hook '{getattr(hook, '__name__', repr(hook))}' is an async function",
                     'the hook runs at the boot of the handler child, before any '
                     'event loop exists',
                 ],
                 help_text='use a sync function',
             )
-        if all(existing is not fn for existing in self._handler_child_start_hooks):
-            self._handler_child_start_hooks.append(fn)
-        return fn
+        if all(existing is not hook for existing in self._handler_child_start_hooks):
+            self._handler_child_start_hooks.append(hook)
+        return hook
 
     def get_handler_child_start_hooks(self) -> list[HandlerChildStartHook]:
         """Snapshot of registered handler child start hooks, in order."""
@@ -815,22 +835,22 @@ class Horsies:
         else:  # CUSTOM mode
             return [queue.name for queue in (self.config.custom_queues or [])]
 
-    def validate_queue_name(self, queue_name: Optional[str]) -> str:
-        """Validate queue name against app configuration"""
+    def validate_queue(self, queue: Optional[str]) -> str:
+        """The queue of a task or a send, checked against the queue mode."""
         if self.config.queue_mode == QueueMode.DEFAULT:
-            if queue_name is not None:
+            if queue is not None:
                 raise ConfigurationError(
                     message='cannot specify queue_name in DEFAULT mode',
                     code=HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE,
                     notes=[
-                        f"queue_name='{queue_name}' was specified",
+                        f"queue_name='{queue}' was specified",
                         'but app is configured with QueueMode.DEFAULT',
                     ],
                     help_text='either remove queue_name or switch to QueueMode.CUSTOM',
                 )
             return 'default'
         else:  # CUSTOM mode
-            if queue_name is None:
+            if queue is None:
                 raise ConfigurationError(
                     message='queue_name is required in CUSTOM mode',
                     code=HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE,
@@ -838,14 +858,14 @@ class Horsies:
                     help_text='specify queue_name from configured queues',
                 )
             valid_queues = self.get_valid_queue_names()
-            if queue_name not in valid_queues:
+            if queue not in valid_queues:
                 raise ConfigurationError(
-                    message=f"invalid queue_name '{queue_name}'",
+                    message=f"invalid queue_name '{queue}'",
                     code=HorsiesErrorCode.TASK_INVALID_QUEUE,
                     notes=[f'valid queues: {valid_queues}'],
                     help_text='use one of the configured queue names',
                 )
-            return queue_name
+            return queue
 
     # The runtime forms come first: a function whose first parameter takes a
     # TaskRuntime also fits the plain forms, with the runtime in P.
@@ -1187,7 +1207,7 @@ class Horsies:
             # VALIDATION AT DEFINITION TIME
             # Validate queue_name against app configuration
             try:
-                self.validate_queue_name(task_options.queue_name)
+                self.validate_queue(task_options.queue_name)
             except ConfigurationError:
                 raise  # Re-raise with original formatting
 
@@ -1225,8 +1245,8 @@ class Horsies:
             # Called without arguments: @app.task
             return decorator(func)
 
-    def check(self, *, live: bool = False) -> list[HorsiesError]:
-        """Orchestrate phased validation and return all errors found.
+    def check(self, *, live: bool = False) -> ValidationReport:
+        """Orchestrate phased validation and return the report of the phases.
 
         Phase 1: Config — already validated at construction (implicit pass).
         Phase 2: Task module imports — import each module, collect errors.
@@ -1250,8 +1270,9 @@ class Horsies:
             live: If True, also run the live phases (Phase 4 and 4.1).
 
         Returns:
-            List of all HorsiesError instances found across phases.
-            Empty list means all validations passed.
+            A ``ValidationReport`` of the phase ``check``: its ``refusals``
+            are the errors of the first phase that refused. An empty report
+            means all validations passed.
 
         Raises:
             Exception: each phase contains its expected failures into the
@@ -1266,6 +1287,13 @@ class Horsies:
                 core started, or whose core stopped
                 (``call_refusal_or_raise``).
         """
+        report = ValidationReport(CHECK_PHASE)
+        for error in self._check_phases(live=live):
+            report.add(error)
+        return report
+
+    def _check_phases(self, *, live: bool) -> list[HorsiesError]:
+        """The errors of the first phase of ``check`` that refused, or none."""
         all_errors: list[HorsiesError] = []
 
         # Phase 2: task module imports (also triggers Phase 3 workflow validation)
@@ -1313,8 +1341,11 @@ class Horsies:
         command (producer role) still validate. Shares
         ``collect_schedule_errors`` with ``Scheduler._validate_schedules``.
         """
-        if self._role == 'worker':
-            return []
+        match self._role:
+            case AppRole.WORKER:
+                return []
+            case AppRole.PRODUCER | AppRole.SCHEDULER:
+                pass
         if self.config.schedule is None:
             return []
         from horsies.core.scheduler.validation import collect_schedule_errors
@@ -1351,7 +1382,7 @@ class Horsies:
                     else:
                         importlib.import_module(module_path)
                 except MultipleValidationErrors as exc:
-                    errors.extend(exc.report.errors)
+                    errors.extend(exc.report.refusals)
                 except HorsiesError as exc:
                     errors.append(exc)
                 except (ModuleNotFoundError, ImportError) as exc:
@@ -1752,7 +1783,7 @@ class Horsies:
         """Run the live phases on one core handle of their own: the
         connectivity check, then, when it passed, the worker connections.
 
-        The handle is built from ``config.broker`` with the schema mode
+        The handle is built from ``config.database`` with the schema mode
         ``OBSERVE_ONLY`` (no schema step) and closed at the end; the app's
         broker is not built. On a thread that runs an event loop the
         blocking core calls cannot run, so the check reports
@@ -1781,7 +1812,7 @@ class Horsies:
         handle = CoreHandle(
             dump_producer_manifest(
                 to_producer_manifest(
-                    self.config.broker,
+                    self.config.database,
                     schema='OBSERVE_ONLY',
                     idempotency_reservation_window=IDEMPOTENCY_WINDOW_DEFAULT,
                 ),
@@ -1801,7 +1832,7 @@ class Horsies:
         rule of both clients (``CoreHandle.check_connectivity``).
 
         In order, stopping at the first failure: ``SELECT 1`` on
-        ``database_url``; ``SELECT 1`` on ``session_database_url`` when it
+        ``database_url``; ``SELECT 1`` on the session database URL when it
         differs; in PgBouncer transaction mode, a LISTEN probe on the session
         URL that must receive a NOTIFY within 2 s. Runs on ``handle``, the
         live check's own handle.
@@ -1826,13 +1857,13 @@ class Horsies:
                             message='broker listener capability check failed',
                             code=HorsiesErrorCode.DATABASE_INVALID_URL,
                             notes=[
-                                'session_database_url appears to be transaction-pooled; '
+                                'the session_database URL appears to be transaction-pooled; '
                                 'LISTEN notification was not delivered',
                                 message,
                             ],
                             help_text=(
-                                'use a direct/session-capable Postgres URL for '
-                                'session_database_url'
+                                'set session_database to a separate '
+                                'direct/session-capable Postgres URL'
                             ),
                         )
                     )
@@ -1881,8 +1912,8 @@ class Horsies:
             return [_worker_connections_unchecked(str(call_refusal_or_raise(exc)))]
         return [_worker_connection_error(refusal) for refusal in refusals]
 
-    def list_tasks(self) -> list[str]:
-        """List tasks registered with this app"""
+    def registered_task_names(self) -> list[str]:
+        """The names of the tasks registered with this app. Pure."""
         return list(self.tasks.keys_list())
 
     def registered_task_codes(self) -> dict[str, tuple[str, ...]]:
@@ -1982,7 +2013,7 @@ class Horsies:
                         broker_config = self._broker_config()
                         broker = PostgresBroker(
                             broker_config,
-                            run_schema_migrations=self.run_schema_migrations,
+                            schema_mode=self.schema_mode,
                             retention=self.config.retention,
                         )
                         broker.app = self  # app ref for subworkflow support
@@ -2002,9 +2033,9 @@ class Horsies:
         """The config of the broker that ``get_broker()`` builds."""
         match self._broker_pool:
             case _ConfigBrokerPool():
-                return self.config.broker
+                return self.config.database
             case _TaskSendBrokerPool(connections=connections):
-                return self.config.broker.with_exact_pool(connections)
+                return self.config.database.with_exact_pool(connections)
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -2381,32 +2412,34 @@ class Horsies:
     async def ping_workers_async(
         self,
         *,
-        target_worker_id: str | None = None,
-        timeout_seconds: float = 2.0,
-        min_responses: int | None = None,
+        target: PingTarget = PingTargetEveryWorker(),
+        wait_ms: int = 2_000,
+        min_responses: MinResponses = MinResponsesFullWindow(),
     ) -> 'DatabaseResult[list[WorkerPong]]':
-        """Active ping-pong: collect live workers' replies within a window.
+        """Active ping-pong: collect live workers' replies within ``wait_ms``
+        milliseconds.
 
-        Pass ``min_responses=1`` for a fast fail-open liveness gate — returns on
-        the first reply rather than waiting the full ``timeout_seconds``.
+        Pass ``min_responses=MinResponsesAtLeast(1)`` for a fast fail-open
+        liveness gate — returns on the first reply rather than waiting the
+        full ``wait_ms``.
         """
         return await self.get_broker().ping_workers_async(
-            target_worker_id=target_worker_id,
-            timeout_seconds=timeout_seconds,
+            target=target,
+            wait_ms=wait_ms,
             min_responses=min_responses,
         )
 
     def ping_workers(
         self,
         *,
-        target_worker_id: str | None = None,
-        timeout_seconds: float = 2.0,
-        min_responses: int | None = None,
+        target: PingTarget = PingTargetEveryWorker(),
+        wait_ms: int = 2_000,
+        min_responses: MinResponses = MinResponsesFullWindow(),
     ) -> 'DatabaseResult[list[WorkerPong]]':
         """Synchronous version of ``ping_workers_async``: the core's blocking
         ping on the calling thread, with the GIL released, and the same
-        outcomes. The call is bounded by the window plus the core's bound of a
-        blocking call, and not bounded for an infinite ``timeout_seconds``.
+        outcomes. The call is bounded by ``wait_ms`` plus the core's bound of
+        a blocking call.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
@@ -2414,8 +2447,8 @@ class Horsies:
         if in_running_event_loop():
             return self._async_context_err('ping_workers')
         return self.get_broker()._ping_workers_blocking(  # pyright: ignore[reportPrivateUsage]
-            target_worker_id=target_worker_id,
-            timeout_seconds=timeout_seconds,
+            target=target,
+            wait_ms=wait_ms,
             min_responses=min_responses,
         )
 
@@ -2463,18 +2496,19 @@ class Horsies:
         self,
         worker_id: str,
         *,
-        limit: int | None = None,
+        limit: WorkerHistoryLimit = WorkerHistoryLimitAllRetained(),
     ) -> 'DatabaseResult[list[WorkerStateSnapshot]]':
-        """Timeseries snapshots for one worker, newest first."""
+        """Timeseries snapshots for one worker, newest first: every retained
+        snapshot, or the newest ``count`` of ``WorkerHistoryLimitNewest``."""
         return await self.get_broker().get_worker_state_history_async(
-            worker_id, limit=limit
+            worker_id, limit=limit,
         )
 
     def get_worker_state_history(
         self,
         worker_id: str,
         *,
-        limit: int | None = None,
+        limit: WorkerHistoryLimit = WorkerHistoryLimitAllRetained(),
     ) -> 'DatabaseResult[list[WorkerStateSnapshot]]':
         """Synchronous version of ``get_worker_state_history_async``: the core's blocking
         read on the calling thread, with the GIL released, and the same
@@ -2489,15 +2523,74 @@ class Horsies:
             worker_id, limit=limit,
         )
 
-    async def get_class_coverage_async(self) -> 'DatabaseResult[ClassCoverage]':
+    async def get_stale_tasks_async(
+        self,
+        threshold_minutes: int,
+    ) -> 'DatabaseResult[BoundedTaskList[StaleTaskRow]]':
+        """RUNNING tasks whose latest runner heartbeat, or their start when
+        they have no heartbeat, is older than ``threshold_minutes``. Reads
+        only: the reaper recovers stale tasks.
+
+        At most ``TASK_LIST_ROW_BOUND`` rows: ``BoundedTaskListComplete``, or
+        ``BoundedTaskListTruncated`` when more rows match.
+
+        - ``Err(INVALID_INPUT)``: ``threshold_minutes`` is not an int from 0
+          to ``MAX_STALE_THRESHOLD_MINUTES`` (525,600, one year). Nothing ran.
+        - ``Err(MONITORING_QUERY_FAILED)``: the read failed.
+        """
+        return await self.get_broker().get_stale_tasks(threshold_minutes)
+
+    def get_stale_tasks(
+        self,
+        threshold_minutes: int,
+    ) -> 'DatabaseResult[BoundedTaskList[StaleTaskRow]]':
+        """Synchronous version of ``get_stale_tasks_async``: the core's
+        blocking read on the calling thread, with the GIL released, and the
+        same outcomes.
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and does no I/O.
+        """
+        if in_running_event_loop():
+            return self._async_context_err('get_stale_tasks')
+        return self.get_broker()._get_stale_tasks_blocking(  # pyright: ignore[reportPrivateUsage]
+            threshold_minutes,
+        )
+
+    async def get_expired_tasks_async(
+        self,
+    ) -> 'DatabaseResult[BoundedTaskList[ExpiredTaskRow]]':
+        """PENDING tasks past their ``good_until``, oldest deadline first; no
+        worker claims them. ``expired_for`` is on the database clock.
+
+        At most ``TASK_LIST_ROW_BOUND`` rows: ``BoundedTaskListComplete``, or
+        ``BoundedTaskListTruncated`` when more rows match.
+
+        ``Err(MONITORING_QUERY_FAILED)``: the read failed.
+        """
+        return await self.get_broker().get_expired_tasks()
+
+    def get_expired_tasks(self) -> 'DatabaseResult[BoundedTaskList[ExpiredTaskRow]]':
+        """Synchronous version of ``get_expired_tasks_async``: the core's
+        blocking read on the calling thread, with the GIL released, and the
+        same outcomes.
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and does no I/O.
+        """
+        if in_running_event_loop():
+            return self._async_context_err('get_expired_tasks')
+        return self.get_broker()._get_expired_tasks_blocking()  # pyright: ignore[reportPrivateUsage]
+
+    async def get_execution_class_coverage_async(self) -> 'DatabaseResult[ExecutionClassCoverage]':
         """For each (queue, class) with PENDING rows, whether a live worker serves it.
 
-        See ``PostgresBroker.get_class_coverage_async``.
+        See ``PostgresBroker.get_execution_class_coverage_async``.
         """
-        return await self.get_broker().get_class_coverage_async()
+        return await self.get_broker().get_execution_class_coverage_async()
 
-    def get_class_coverage(self) -> 'DatabaseResult[ClassCoverage]':
-        """Synchronous version of ``get_class_coverage_async``: the core's blocking
+    def get_execution_class_coverage(self) -> 'DatabaseResult[ExecutionClassCoverage]':
+        """Synchronous version of ``get_execution_class_coverage_async``: the core's blocking
         read on the calling thread, with the GIL released, and the same
         outcomes.
 
@@ -2505,19 +2598,19 @@ class Horsies:
         and does no I/O.
         """
         if in_running_event_loop():
-            return self._async_context_err('get_class_coverage')
-        return self.get_broker()._get_class_coverage_blocking()  # pyright: ignore[reportPrivateUsage]
+            return self._async_context_err('get_execution_class_coverage')
+        return self.get_broker()._get_execution_class_coverage_blocking()  # pyright: ignore[reportPrivateUsage]
 
-    async def get_class_report_async(self) -> 'DatabaseResult[ClassReport]':
+    async def get_execution_class_report_async(self) -> 'DatabaseResult[ExecutionClassReport]':
         """Pending streams with their oldest wait and coverage, and the budget
         load of each live worker.
 
-        See ``PostgresBroker.get_class_report_async``.
+        See ``PostgresBroker.get_execution_class_report_async``.
         """
-        return await self.get_broker().get_class_report_async()
+        return await self.get_broker().get_execution_class_report_async()
 
-    def get_class_report(self) -> 'DatabaseResult[ClassReport]':
-        """Synchronous version of ``get_class_report_async``: the core's blocking
+    def get_execution_class_report(self) -> 'DatabaseResult[ExecutionClassReport]':
+        """Synchronous version of ``get_execution_class_report_async``: the core's blocking
         read on the calling thread, with the GIL released, and the same
         outcomes.
 
@@ -2525,8 +2618,8 @@ class Horsies:
         and does no I/O.
         """
         if in_running_event_loop():
-            return self._async_context_err('get_class_report')
-        return self.get_broker()._get_class_report_blocking()  # pyright: ignore[reportPrivateUsage]
+            return self._async_context_err('get_execution_class_report')
+        return self.get_broker()._get_execution_class_report_blocking()  # pyright: ignore[reportPrivateUsage]
 
     def discover_tasks(
         self,
@@ -2824,7 +2917,7 @@ class Horsies:
                 broker=self.get_broker(),
                 definition_key=definition_key,
                 workflow_def_cls=workflow_def_cls,
-                resend_on_transient_err=self.config.resend_on_transient_err,
+                resend_on_transient_error=self.config.resend_on_transient_error,
             )
             spec._require_definition_key()
         finally:
@@ -3027,7 +3120,7 @@ class Horsies:
                 result._require_definition_key()
                 self._validate_spec_bindings(result, errors, ())
         except MultipleValidationErrors as exc:
-            errors.extend(exc.report.errors)
+            errors.extend(exc.report.refusals)
         except HorsiesError as exc:
             errors.append(exc)
         except Exception as exc:
@@ -3155,7 +3248,7 @@ class Horsies:
         try:
             child_spec = node.workflow_def.build_with(self, **child_kwargs)
         except MultipleValidationErrors as exc:
-            errors.extend(exc.report.errors)
+            errors.extend(exc.report.refusals)
             return _ChildNotBuilt()
         except HorsiesError as exc:
             # Any horsies validation error building the child is a real check

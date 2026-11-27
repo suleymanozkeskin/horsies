@@ -19,7 +19,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use horsies_core::handle::CoreHandle as LazyHandle;
+use horsies_core::handle::CoreConnection as LazyHandle;
 use horsies_core::manifest::SchemaMode;
 use horsies_core::monitoring::fleet::{serve_fleet_metrics, FleetLabels};
 use horsies_core::telemetry::declared::{warn_folded_names, Folded};
@@ -155,7 +155,7 @@ fn server_of(
     Ok(FleetMetricsServer {
         handle: Arc::new(LazyHandle::new(
             manifest,
-            lazy.profile(),
+            lazy.pool_profile(),
             ClientFamily::TypeScript,
         )),
         listen,

@@ -60,7 +60,7 @@ REPRO_PROFILES = {
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=_DB_URL,
         pool_size=5,
         max_overflow=5,
@@ -69,7 +69,7 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 

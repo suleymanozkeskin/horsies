@@ -31,7 +31,7 @@ class CoreStopped(CoreError):
     """
 
 
-class CoreStartFailed(CoreError):
+class RuntimeStartFailed(CoreError):
     """The core runtime or its log forwarder could not start. args: (cause,)."""
 
 
@@ -370,22 +370,26 @@ class CoreHandle:
         """Every schedule state: the JSON text of the core's list of ScheduleStateInfo. Reads only,
         in one statement.
         """
-    def stale_tasks_async(self, threshold_minutes: object) -> asyncio.Future[TaskListComplete | TaskListTruncated | DatabaseOperationFailed | DatabaseInvalidInput]:
+    def stale_tasks(self, threshold_minutes: object) -> StaleTaskListComplete | StaleTaskListTruncated | DatabaseOperationFailed | DatabaseInvalidInput:
         """The RUNNING tasks whose latest runner beat, or their start, is older than the
         threshold. A bool, a value that is not an int, or one outside 0 to 525600 minutes is
         INVALID_INPUT before any core call. Reads only, in one statement.
         """
-    def expired_tasks_async(self) -> asyncio.Future[TaskListComplete | TaskListTruncated | DatabaseOperationFailed | DatabaseInvalidInput]:
+    def stale_tasks_async(self, threshold_minutes: object) -> asyncio.Future[StaleTaskListComplete | StaleTaskListTruncated | DatabaseOperationFailed | DatabaseInvalidInput]:
+        """The awaitable form of the method above. A cancelled await drops the read."""
+    def expired_tasks(self) -> ExpiredTaskListComplete | ExpiredTaskListTruncated | DatabaseOperationFailed | DatabaseInvalidInput:
         """The PENDING tasks whose good_until passed before a worker took them. Reads only, in
         one statement.
         """
-    def ping_workers(self, *, target_worker_id: str | None, timeout_seconds: float, min_responses: int | None) -> WorkerPongsRecord | DatabaseOperationFailed | DatabaseInvalidInput | DatabaseListenerDisabled:
+    def expired_tasks_async(self) -> asyncio.Future[ExpiredTaskListComplete | ExpiredTaskListTruncated | DatabaseOperationFailed | DatabaseInvalidInput]:
+        """The awaitable form of the method above. A cancelled await drops the read."""
+    def ping_workers(self, *, target_worker_id: str | None, wait_ms: int, min_responses: int | None) -> WorkerPongsRecord | DatabaseOperationFailed | DatabaseInvalidInput | DatabaseListenerDisabled:
         """Ping the workers and collect the distinct replies within the window, on the process
         listener. A refused argument is INVALID_INPUT before any core call; a handle with no
         listener is LISTENER_DISABLED. Sends one NOTIFY; writes no row. Bounded by the window plus
-        the bound of a blocking call; not bounded for an infinite window.
+        the bound of a blocking call.
         """
-    def ping_workers_async(self, *, target_worker_id: str | None, timeout_seconds: float, min_responses: int | None) -> asyncio.Future[WorkerPongsRecord | DatabaseOperationFailed | DatabaseInvalidInput | DatabaseListenerDisabled]:
+    def ping_workers_async(self, *, target_worker_id: str | None, wait_ms: int, min_responses: int | None) -> asyncio.Future[WorkerPongsRecord | DatabaseOperationFailed | DatabaseInvalidInput | DatabaseListenerDisabled]:
         """The awaitable form of the method above. A cancelled await drops the wait and the reply
         subscription.
         """
@@ -409,17 +413,17 @@ class CoreHandle:
         """
     def worker_state_history_async(self, worker_id: str, *, limit: int | None) -> asyncio.Future[WorkerStatesRecord | DatabaseOperationFailed | DatabaseInvalidInput]:
         """The awaitable form of the method above."""
-    def class_coverage(self) -> ClassCoverageRecord | DatabaseOperationFailed:
+    def execution_class_coverage(self) -> ExecutionClassCoverageRecord | DatabaseOperationFailed:
         """The fleet check: for each (queue, class) with PENDING rows, whether a live worker serves
         it. Reads only, in one statement.
         """
-    def class_coverage_async(self) -> asyncio.Future[ClassCoverageRecord | DatabaseOperationFailed]:
+    def execution_class_coverage_async(self) -> asyncio.Future[ExecutionClassCoverageRecord | DatabaseOperationFailed]:
         """The awaitable form of the method above."""
-    def class_report(self) -> ClassReportRecord | DatabaseOperationFailed:
-        """The pending streams with their oldest wait and coverage, and the budget load of each
-        live worker. Reads only, in one statement.
+    def execution_class_report(self) -> ExecutionClassReportRecord | DatabaseOperationFailed:
+        """The execution class report: the pending streams with their oldest wait and coverage,
+        and the budget load of each live worker. Reads only, in one statement.
         """
-    def class_report_async(self) -> asyncio.Future[ClassReportRecord | DatabaseOperationFailed]:
+    def execution_class_report_async(self) -> asyncio.Future[ExecutionClassReportRecord | DatabaseOperationFailed]:
         """The awaitable form of the method above."""
 
 
@@ -1554,17 +1558,75 @@ class TaskDetailAbsent:
 
 
 @final
-class TaskListComplete:
-    """Every matching row of a task list: one dict per row, with the task id as uuid.UUID."""
+class StaleTaskRecord:
+    """One RUNNING task of the stale list. last_heartbeat_at is None when the task has no
+    runner beat since its start.
+    """
     @property
-    def rows(self) -> list[dict[str, object]]: ...
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def task_name(self) -> str: ...
+    @property
+    def worker_hostname(self) -> str | None: ...
+    @property
+    def worker_pid(self) -> int | None: ...
+    @property
+    def worker_process_name(self) -> str | None: ...
+    @property
+    def started_at(self) -> datetime.datetime: ...
+    @property
+    def last_heartbeat_at(self) -> datetime.datetime | None: ...
 
 
 @final
-class TaskListTruncated:
-    """The first bound matching rows of a task list; more rows match."""
+class ExpiredTaskRecord:
+    """One PENDING task of the expired list."""
     @property
-    def rows(self) -> list[dict[str, object]]: ...
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def task_name(self) -> str: ...
+    @property
+    def queue_name(self) -> str: ...
+    @property
+    def priority(self) -> int: ...
+    @property
+    def sent_at(self) -> datetime.datetime: ...
+    @property
+    def enqueued_at(self) -> datetime.datetime: ...
+    @property
+    def good_until(self) -> datetime.datetime: ...
+    @property
+    def expired_for(self) -> datetime.timedelta: ...
+
+
+@final
+class StaleTaskListComplete:
+    """Every matching row of the stale list."""
+    @property
+    def rows(self) -> list[StaleTaskRecord]: ...
+
+
+@final
+class StaleTaskListTruncated:
+    """The first bound matching rows of the stale list; more rows match."""
+    @property
+    def rows(self) -> list[StaleTaskRecord]: ...
+    @property
+    def bound(self) -> int: ...
+
+
+@final
+class ExpiredTaskListComplete:
+    """Every matching row of the expired list."""
+    @property
+    def rows(self) -> list[ExpiredTaskRecord]: ...
+
+
+@final
+class ExpiredTaskListTruncated:
+    """The first bound matching rows of the expired list; more rows match."""
+    @property
+    def rows(self) -> list[ExpiredTaskRecord]: ...
     @property
     def bound(self) -> int: ...
 
@@ -1624,7 +1686,7 @@ class SlotsDownRecord:
 
 
 @final
-class ClassBudgetRecord:
+class ExecutionClassBudgetRecord:
     """One claim budget of a worker, as its snapshot recorded it; serves is in Execution order."""
     @property
     def budget(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']: ...
@@ -1658,11 +1720,11 @@ class WorkerStateRecord:
     @property
     def pid(self) -> int: ...
     @property
-    def processes(self) -> int: ...
+    def child_count(self) -> int: ...
     @property
-    def max_claim_batch(self) -> int: ...
+    def per_queue_per_pass(self) -> int | None: ...
     @property
-    def max_claim_per_worker(self) -> int: ...
+    def claimed_per_worker(self) -> int | None: ...
     @property
     def cluster_wide_cap(self) -> int | None: ...
     @property
@@ -1690,7 +1752,7 @@ class WorkerStateRecord:
     @property
     def slot_health(self) -> AllSlotsServingRecord | SlotsDownRecord: ...
     @property
-    def class_capacity(self) -> list[ClassBudgetRecord]: ...
+    def execution_class_budgets(self) -> list[ExecutionClassBudgetRecord]: ...
     @property
     def profile(self) -> ProfileNamedRecord | ProfileNotRecordedRecord: ...
 
@@ -1736,15 +1798,15 @@ class StreamUnservedRecord:
 class StreamCoverageRecord:
     """The coverage of one pending stream."""
     @property
-    def queue_name(self) -> str: ...
+    def queue(self) -> str: ...
     @property
     def execution(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']: ...
     @property
-    def state(self) -> StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord: ...
+    def coverage(self) -> StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord: ...
 
 
 @final
-class ClassCoverageRecord:
+class ExecutionClassCoverageRecord:
     """The fleet check, read at checked_at (database time)."""
     @property
     def checked_at(self) -> datetime.datetime: ...
@@ -1758,7 +1820,7 @@ class ClassCoverageRecord:
 class OldestWaitingRecord:
     """At least one row of the stream is due; wait is how long the oldest due row waited."""
     @property
-    def enqueued_at(self) -> datetime.datetime: ...
+    def oldest_due_at(self) -> datetime.datetime: ...
     @property
     def wait(self) -> datetime.timedelta: ...
 
@@ -1772,15 +1834,15 @@ class NoneDueRecord:
 
 @final
 class PendingStreamRecord:
-    """One pending stream of the class report."""
+    """One pending stream of the execution class report."""
     @property
-    def queue_name(self) -> str: ...
+    def queue(self) -> str: ...
     @property
     def execution(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']: ...
     @property
-    def wait(self) -> OldestWaitingRecord | NoneDueRecord: ...
+    def coverage(self) -> StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord: ...
     @property
-    def state(self) -> StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord: ...
+    def wait(self) -> OldestWaitingRecord | NoneDueRecord: ...
 
 
 @final
@@ -1797,7 +1859,7 @@ class BudgetLoadRecord:
 
 
 @final
-class WorkerClassLoadRecord:
+class WorkerExecutionClassLoadRecord:
     """The claim budgets of one live worker, in Execution order."""
     @property
     def worker_id(self) -> str: ...
@@ -1808,14 +1870,16 @@ class WorkerClassLoadRecord:
 
 
 @final
-class ClassReportRecord:
-    """The class report, read at checked_at (database time); workers by worker id."""
+class ExecutionClassReportRecord:
+    """The execution class report, read at checked_at (database time); workers by worker id."""
     @property
     def checked_at(self) -> datetime.datetime: ...
     @property
+    def live_window(self) -> datetime.timedelta: ...
+    @property
     def streams(self) -> list[PendingStreamRecord]: ...
     @property
-    def workers(self) -> list[WorkerClassLoadRecord]: ...
+    def workers(self) -> list[WorkerExecutionClassLoadRecord]: ...
 
 
 @final
@@ -2195,7 +2259,7 @@ class WorkflowStartRequest:
     TypeError. trace is NoTraceCarrier or the TraceCarrier of the start's span; every row of
     the tree stores it.
     """
-    def __init__(self, *, spec_json: str, workflow_id: uuid.UUID, sent_at: datetime.datetime, resend_on_transient_err: bool, trace: NoTraceCarrier | TraceCarrier) -> None: ...
+    def __init__(self, *, spec_json: str, workflow_id: uuid.UUID, sent_at: datetime.datetime, resend_on_transient_error: bool, trace: NoTraceCarrier | TraceCarrier) -> None: ...
 
 
 @final

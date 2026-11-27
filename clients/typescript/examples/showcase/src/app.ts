@@ -55,7 +55,7 @@ export type AppRefused = { readonly refusals: NonEmpty<HorsiesError> };
 export function appConfig(url: string): HorsiesConfig {
   return {
     // Each send keeps its input, so `rerun` can run a failed task again.
-    broker: { databaseUrl: { kind: "value", value: url }, retainRerunInputDefault: "keep" },
+    database: { databaseUrl: { kind: "value", value: url }, retainRerunInputDefault: "keep" },
     queueMode: "custom",
     customQueues: QUEUES,
     workerProfiles: { [WORKER_PROFILE]: ACME_PROFILE },

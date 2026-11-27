@@ -163,7 +163,7 @@ describe("the instances", () => {
   test("a transaction pool connection gives the PgBouncer mode with its session URL", () => {
     const config = instanceConfig("default", { kind: "transactionPool", poolUrl: "postgresql://p@h:6432/d", sessionUrl: SERVER });
 
-    assert.deepEqual(config.broker.connection, { kind: "pgbouncerTransaction", sessionDatabaseUrl: { kind: "value", value: SERVER } });
+    assert.deepEqual(config.database.connection, { kind: "pgbouncerTransaction", sessionDatabaseUrl: { kind: "value", value: SERVER } });
   });
 });
 

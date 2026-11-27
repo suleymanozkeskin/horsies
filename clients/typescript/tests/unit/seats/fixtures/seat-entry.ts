@@ -47,11 +47,11 @@ const foreignState = defineTask({ name: "foreign_state", input: {}, output: h.in
 const facadesProbe = defineTask({ name: "facades_probe", input: {}, output: h.string(), execution: "SHARED_THREAD", timeoutMs: 5000 });
 
 const created = Horsies.create({
-  broker: { databaseUrl },
+  database: { databaseUrl },
   tasks: [probe, spin, sendAndWait, exitNow, throwLater, rejectUnawaited, foreignState, facadesProbe],
 });
 
-const otherApp = Horsies.create({ broker: { databaseUrl }, tasks: [] });
+const otherApp = Horsies.create({ database: { databaseUrl }, tasks: [] });
 
 if (!otherApp.ok) {
   throw new Error("the second fixture app was refused");

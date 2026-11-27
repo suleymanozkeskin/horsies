@@ -24,7 +24,7 @@ from pydantic import ValidationError
 
 from horsies._core import (
     CoreConnectionError,
-    CoreStartFailed,
+    RuntimeStartFailed,
     MonitoringJson,
     TaskBreakdownQuery,
     TaskDetailAbsent,
@@ -311,7 +311,7 @@ class TestFailures:
         ('raised', 'retryable'),
         [
             (TooManyPendingCalls('CoreHandle.monitoring_list_tasks_async', 65_536), True),
-            (CoreStartFailed('the core runtime could not start'), False),
+            (RuntimeStartFailed('the core runtime could not start'), False),
         ],
         ids=['too-many-calls', 'start-failed'],
     )

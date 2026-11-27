@@ -2,7 +2,9 @@
 //!
 //! Mirrors Python's `clients/python/horsies/core/models/health.py`. These carry no behaviour,
 //! only observed data returned to callers from the broker's health methods,
-//! and the reading of a stored worker state row into a snapshot.
+//! and the reading of a stored worker state row into a snapshot. A
+//! [`WorkerPong`] and a [`SnapshotProfile`] are also the JSON of the
+//! monitoring routes (`Serialize`).
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -11,9 +13,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::broker::class_budgets::{parse_class_capacity, ClassBudgets};
+use crate::broker::class_budgets::{parse_class_capacity, ExecutionClassBudgets};
 use crate::broker::result_types::{BrokerOperationSource, DatabaseOperationError, DatabaseResult};
 use crate::broker::slot_health::{parse_slot_health, SlotHealth};
+use crate::core::config::worker_profile::input::{ClaimLimits, TaskLimitSetting};
+use crate::core::config::ClusterCapSetting;
 
 /// Shared inbound channel every worker subscribes to. A ping NOTIFY carries a
 /// [`WorkerPingRequest`]; each worker replies on the request's `reply_channel`.
@@ -54,7 +58,8 @@ pub struct WorkerPongPayload {
 }
 
 /// A single worker's reply to a ping, with measured round-trip latency.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkerPong {
     pub worker_id: String,
     pub hostname: String,
@@ -63,7 +68,11 @@ pub struct WorkerPong {
 }
 
 /// The worker profile that a snapshot names.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// JSON: tagged by `kind`: `named` with `name`, or `not_recorded`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SnapshotProfile {
     /// The worker ran the profile `name` of `AppConfig.worker_profiles`: 1
     /// to 64 characters, letters, digits, `_`, `.` and `-`, the first not
@@ -87,10 +96,15 @@ pub struct WorkerStateSnapshot {
     pub snapshot_at: DateTime<Utc>,
     pub hostname: String,
     pub pid: i32,
-    pub processes: i32,
-    pub max_claim_batch: i32,
-    pub max_claim_per_worker: i32,
-    pub cluster_wide_cap: Option<i32>,
+    /// The children of the worker (the stored column `processes`).
+    pub child_count: i32,
+    /// The claim limits of the worker (the stored columns `max_claim_batch`
+    /// and `max_claim_per_worker`; 0 is no limit). `claimed_per_worker` is
+    /// the limit that the worker resolved: the seat count of the worker when
+    /// its profile sets none.
+    pub claim_limits: ClaimLimits,
+    /// The cluster-wide cap that the worker ran with.
+    pub cluster_wide_cap: ClusterCapSetting,
     pub queues: Vec<String>,
     /// Queue name to priority. Empty when the worker had none set.
     pub queue_priorities: BTreeMap<String, i64>,
@@ -112,8 +126,9 @@ pub struct WorkerStateSnapshot {
     /// Whether any slot was down, and why.
     pub slot_health: SlotHealth,
     /// The claim budget of each execution class that the worker runs
-    /// children for: its capacity in service and the classes it claims.
-    pub class_capacity: ClassBudgets,
+    /// children for: its capacity in service and the classes it claims (the
+    /// stored column `class_capacity`).
+    pub execution_class_budgets: ExecutionClassBudgets,
     /// The worker profile that the worker ran.
     pub profile: SnapshotProfile,
 }
@@ -217,7 +232,7 @@ impl StoredWorkerState {
     pub(crate) fn into_snapshot(self) -> Result<WorkerStateSnapshot, WorkerStateUnreadable> {
         let slot_health = parse_slot_health(&self.slots_down, self.processes)
             .map_err(|cause| self.unreadable(WorkerStateColumn::SlotsDown, cause.reason))?;
-        let class_capacity = parse_class_capacity(&self.class_capacity)
+        let execution_class_budgets = parse_class_capacity(&self.class_capacity)
             .map_err(|cause| self.unreadable(WorkerStateColumn::ClassCapacity, cause.reason))?;
         let queue_priorities = queue_numbers(&self.queue_priorities)
             .map_err(|reason| self.unreadable(WorkerStateColumn::QueuePriorities, reason))?;
@@ -229,15 +244,24 @@ impl StoredWorkerState {
             Some(name) => SnapshotProfile::Named { name },
             None => SnapshotProfile::NotRecorded,
         };
+        // The column `cluster_wide_cap` holds the cap as a nullable integer:
+        // NULL is no cap, and the table CHECK keeps a cap above 0.
+        let cluster_wide_cap = match self.cluster_wide_cap {
+            None => ClusterCapSetting::NoClusterCap,
+            Some(tasks) => ClusterCapSetting::ClusterCap {
+                tasks: u32::try_from(tasks)
+                    .expect("the table CHECK keeps cluster_wide_cap above 0"),
+            },
+        };
         Ok(WorkerStateSnapshot {
             worker_id: self.worker_id,
             snapshot_at: self.snapshot_at,
             hostname: self.hostname,
             pid: self.pid,
-            processes: self.processes,
-            max_claim_batch: self.max_claim_batch,
-            max_claim_per_worker: self.max_claim_per_worker,
-            cluster_wide_cap: self.cluster_wide_cap,
+            // Row boundary: the columns keep their stored names.
+            child_count: self.processes,
+            claim_limits: stored_claim_limits(self.max_claim_batch, self.max_claim_per_worker),
+            cluster_wide_cap,
             queues: self.queues,
             queue_priorities,
             queue_max_concurrency,
@@ -250,7 +274,7 @@ impl StoredWorkerState {
             children_memory_mb: self.children_memory_mb,
             worker_started_at: self.worker_started_at,
             slot_health,
-            class_capacity,
+            execution_class_budgets,
             profile,
         })
     }
@@ -262,6 +286,35 @@ impl StoredWorkerState {
             column,
             reason,
         }
+    }
+}
+
+/// The claim limits of the stored claim columns, in the profile's input
+/// form. Pure.
+///
+/// - `max_claim_batch`: the per queue limit of one claim pass; 0 is
+///   `NoTaskLimit`.
+/// - `max_claim_per_worker`: the claimed limit that the worker resolved:
+///   the profile's limit, or the seat count of the worker when the profile
+///   sets none. 0 is `NoTaskLimit`.
+///
+/// The table CHECK holds both columns at 0 or more, and a column is an
+/// `integer`, so every positive value is at most `MAX_TASK_LIMIT` (the
+/// `integer` maximum).
+fn stored_claim_limits(max_claim_batch: i32, max_claim_per_worker: i32) -> ClaimLimits {
+    ClaimLimits {
+        per_queue_per_pass: stored_task_limit(max_claim_batch),
+        claimed_per_worker: stored_task_limit(max_claim_per_worker),
+    }
+}
+
+/// The task limit of one stored claim column: 0 is `NoTaskLimit`. Panics
+/// for a value that the table CHECK refuses (below 0). Pure.
+fn stored_task_limit(stored: i32) -> TaskLimitSetting {
+    match u32::try_from(stored) {
+        Ok(0) => TaskLimitSetting::NoTaskLimit {},
+        Ok(tasks) => TaskLimitSetting::TaskLimit { tasks },
+        Err(_) => panic!("the table CHECK holds a stored claim column at 0 or more, got {stored}"),
     }
 }
 
@@ -289,26 +342,22 @@ fn json_object(value: &Value) -> Result<Map<String, Value>, String> {
     }
 }
 
-/// The refusal of a worker ping on a handle with no listener (Python's
-/// `PostgresBroker(assume_initialized=True)`, the core's `AssumeInitialized`
-/// schema mode): `LISTENER_DISABLED`, not retryable, with Python's text
+/// The refusal of a worker ping on a handle with no listener (the schema
+/// mode `AssumeInitialized`): `LISTENER_DISABLED`, not retryable, with Python's text
 /// (`ping_workers_async`). Nothing ran.
 pub fn ping_listener_disabled() -> DatabaseOperationError {
     DatabaseOperationError::ListenerDisabled {
-        message: "ping_workers listener unavailable: this broker was built with \
-                  assume_initialized=True and has no listener"
+        message: "ping_workers listener unavailable: this broker has the schema mode \
+                  ASSUME_INITIALIZED and has no listener"
             .to_owned(),
     }
 }
 
-/// The refusal of a worker ping window of 0 seconds or less:
-/// `INVALID_INPUT`, not retryable, with Python's text
-/// (`ping_workers_async`). `timeout_seconds` is the given value as the
-/// caller wrote it. Nothing ran.
-pub fn ping_timeout_refused(timeout_seconds: &dyn std::fmt::Display) -> DatabaseOperationError {
-    DatabaseOperationError::invalid_input(format!(
-        "timeout_seconds must be positive, got {timeout_seconds}"
-    ))
+/// The refusal of a worker ping wait of 0 or less: `INVALID_INPUT`, not
+/// retryable, with Python's text (`ping_workers_async`). `wait_ms` is the
+/// given value as the caller wrote it. Nothing ran.
+pub fn ping_wait_refused(wait_ms: &dyn std::fmt::Display) -> DatabaseOperationError {
+    DatabaseOperationError::invalid_input(format!("wait_ms must be positive, got {wait_ms}"))
 }
 
 /// The refusal of a worker ping `min_responses` below 1: `INVALID_INPUT`,
@@ -571,8 +620,9 @@ mod tests {
     fn a_stored_row_reads_into_a_snapshot() {
         let snapshot = stored_row().into_snapshot().expect("readable row");
 
-        assert_eq!(snapshot.slot_health, SlotHealth::AllSlotsServing);
-        let budgets = snapshot.class_capacity.as_slice();
+        assert_eq!(snapshot.slot_health, SlotHealth::AllServing);
+        assert_eq!(snapshot.child_count, 2);
+        let budgets = snapshot.execution_class_budgets.as_slice();
         assert_eq!(budgets.len(), 1);
         assert_eq!(budgets[0].capacity, 2);
         assert_eq!(snapshot.children_memory_mb, Some(64.0));
@@ -598,8 +648,27 @@ mod tests {
         let snapshot = row.into_snapshot().expect("readable row");
 
         assert_eq!(snapshot.profile, SnapshotProfile::NotRecorded);
-        assert_eq!(snapshot.slot_health, SlotHealth::AllSlotsServing);
-        assert_eq!(snapshot.class_capacity.as_slice().len(), 1);
+        assert_eq!(snapshot.slot_health, SlotHealth::AllServing);
+        assert_eq!(snapshot.execution_class_budgets.as_slice().len(), 1);
+    }
+
+    /// The stored claim columns read as the claim limits of the profile: 0
+    /// is no limit; another value is a limit of that many tasks.
+    #[test]
+    fn stored_claim_columns_read_as_claim_limits() {
+        let mut row = stored_row();
+        row.max_claim_batch = 0;
+        row.max_claim_per_worker = 4;
+
+        let snapshot = row.into_snapshot().expect("readable row");
+
+        assert_eq!(
+            snapshot.claim_limits,
+            ClaimLimits {
+                per_queue_per_pass: TaskLimitSetting::NoTaskLimit {},
+                claimed_per_worker: TaskLimitSetting::TaskLimit { tasks: 4 },
+            }
+        );
     }
 
     /// Python `test_worker_health_api.py::test_an_unreadable_slot_health_fails_the_read`:
@@ -706,13 +775,10 @@ mod tests {
 
     #[test]
     fn the_ping_refusals_carry_python_text() {
-        let timeout = ping_timeout_refused(&"-1.5");
-        assert_eq!(timeout.code(), DatabaseErrorCode::InvalidInput);
-        assert_eq!(
-            timeout.message(),
-            "timeout_seconds must be positive, got -1.5"
-        );
-        assert!(!timeout.retryable());
+        let wait = ping_wait_refused(&-1);
+        assert_eq!(wait.code(), DatabaseErrorCode::InvalidInput);
+        assert_eq!(wait.message(), "wait_ms must be positive, got -1");
+        assert!(!wait.retryable());
 
         let minimum = ping_min_responses_refused(&0);
         assert_eq!(minimum.code(), DatabaseErrorCode::InvalidInput);

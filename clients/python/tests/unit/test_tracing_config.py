@@ -81,14 +81,14 @@ def _presence_is(
 
 class TestSetting:
     def test_an_app_config_traces_nothing_by_default(self) -> None:
-        assert AppConfig(broker=_BROKER).tracing == NoTracing()
+        assert AppConfig(database=_BROKER).tracing == NoTracing()
 
     def test_otel_tracing_with_the_api_installed_is_accepted(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _presence_is(monkeypatch, OtelApiInstalled())
-        assert AppConfig(broker=_BROKER, tracing=OtelTracing()).tracing == OtelTracing()
+        assert AppConfig(database=_BROKER, tracing=OtelTracing()).tracing == OtelTracing()
 
     def test_otel_tracing_without_the_api_is_hrs_220_and_names_the_extra(
         self,
@@ -96,7 +96,7 @@ class TestSetting:
     ) -> None:
         _presence_is(monkeypatch, OtelApiMissing(module='opentelemetry.trace'))
         with pytest.raises(ConfigurationError) as raised:
-            AppConfig(broker=_BROKER, tracing=OtelTracing())
+            AppConfig(database=_BROKER, tracing=OtelTracing())
         assert raised.value.code is HorsiesErrorCode.CONFIG_OTEL_API_MISSING
         assert raised.value.code.value == 'HRS-220'
         assert 'horsies[otel]' in raised.value.message
@@ -112,18 +112,18 @@ class TestSetting:
             raise AssertionError('NoTracing looked for the OpenTelemetry API')
 
         monkeypatch.setattr(tracing_module, 'otel_api_presence', presence_not_wanted)
-        assert AppConfig(broker=_BROKER, tracing=NoTracing()).tracing == NoTracing()
+        assert AppConfig(database=_BROKER, tracing=NoTracing()).tracing == NoTracing()
 
     def test_the_setting_is_read_from_its_kind(self) -> None:
         config = AppConfig.model_validate(
-            {'broker': _BROKER, 'tracing': {'kind': 'no_tracing'}},
+            {'database': _BROKER, 'tracing': {'kind': 'no_tracing'}},
         )
         assert config.tracing == NoTracing()
 
     def test_a_setting_of_another_kind_is_refused(self) -> None:
         with pytest.raises(ValidationError):
             AppConfig.model_validate(
-                {'broker': _BROKER, 'tracing': {'kind': 'zipkin'}},
+                {'database': _BROKER, 'tracing': {'kind': 'zipkin'}},
             )
 
     def test_an_attempt_span_is_a_child_of_the_send_span_by_default(self) -> None:
@@ -136,7 +136,7 @@ class TestSetting:
         _presence_is(monkeypatch, OtelApiInstalled())
         config = AppConfig.model_validate(
             {
-                'broker': _BROKER,
+                'database': _BROKER,
                 'tracing': {'kind': 'otel_tracing', 'parentage': {'kind': 'linked_to_send'}},
             },
         )
@@ -173,7 +173,7 @@ class TestWithoutTheApi:
             from horsies import AppConfig, NoTracing, PostgresConfig
 
             config = AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr('postgresql://u:p@127.0.0.1:1/none'),
                 ),
             )
@@ -200,7 +200,7 @@ class TestWithoutTheApi:
 
             app = Horsies(
                 AppConfig(
-                    broker=PostgresConfig(
+                    database=PostgresConfig(
                         database_url=SecretStr('postgresql://u:p@127.0.0.1:1/none'),
                     ),
                 ),
@@ -225,7 +225,7 @@ class TestWithoutTheApi:
 
             try:
                 AppConfig(
-                    broker=PostgresConfig(
+                    database=PostgresConfig(
                         database_url=SecretStr('postgresql://u:p@127.0.0.1:1/none'),
                     ),
                     tracing=OtelTracing(),

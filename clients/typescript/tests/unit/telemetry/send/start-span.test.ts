@@ -212,7 +212,7 @@ const hello = defineWorkflow(
 /** The app of `hello` on `core`, with the tracing `tracing`. A refused create fails the test. */
 function workflowApp(core: FakeCore, tracing: { readonly kind: "otelTracing" } | { readonly kind: "noTracing" }): Horsies {
   const created = createHorsies(
-    { broker: { databaseUrl: DATABASE_URL }, tracing, tasks: [greet], workflows: [hello] },
+    { database: { databaseUrl: DATABASE_URL }, tracing, tasks: [greet], workflows: [hello] },
     fakeEnvironment({ otelApi: () => ({ kind: "loaded", api: API }), producer: { ...fakeProducer(), workflows: core } }),
   );
 

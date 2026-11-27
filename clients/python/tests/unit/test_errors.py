@@ -607,21 +607,21 @@ class TestValidationReport:
     def test_empty_report(self) -> None:
         report = ValidationReport('test_phase')
         assert not report.has_errors()
-        assert len(report.errors) == 0
+        assert len(report.refusals) == 0
         assert report.phase_name == 'test_phase'
 
     def test_add_single_error(self) -> None:
         report = ValidationReport('config')
         report.add(ConfigurationError(message='bad config'))
         assert report.has_errors()
-        assert len(report.errors) == 1
+        assert len(report.refusals) == 1
 
     def test_add_multiple_errors(self) -> None:
         report = ValidationReport('config')
         report.add(ConfigurationError(message='error 1'))
         report.add(ConfigurationError(message='error 2'))
         report.add(ConfigurationError(message='error 3'))
-        assert len(report.errors) == 3
+        assert len(report.refusals) == 3
 
     def test_format_diagnostic_summary(self) -> None:
         report = ValidationReport('test')
@@ -748,7 +748,7 @@ class TestRaiseCollected:
         report.add(WorkflowValidationError(message='err2'))
         with pytest.raises(MultipleValidationErrors) as exc_info:
             raise_collected(report)
-        assert len(exc_info.value.report.errors) == 2
+        assert len(exc_info.value.report.refusals) == 2
 
     def test_multiple_errors_is_horsies_error(self) -> None:
         report = ValidationReport('test')
@@ -763,7 +763,7 @@ class TestRaiseCollected:
         report.add(ConfigurationError(message='config err'))
         with pytest.raises(MultipleValidationErrors) as exc_info:
             raise_collected(report)
-        errors = exc_info.value.report.errors
+        errors = exc_info.value.report.refusals
         assert isinstance(errors[0], WorkflowValidationError)
         assert isinstance(errors[1], ConfigurationError)
 

@@ -67,7 +67,7 @@ def _app(
 ) -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr('postgresql://user:pass@127.0.0.1:1/none'),
             ),
             exception_mapper=dict(exception_mapper or {}),
@@ -331,7 +331,7 @@ class TestDecorator:
     def test_several_refused_codes_come_in_one_report(self) -> None:
         with pytest.raises(MultipleValidationErrors) as raised:
             _declare(_app(), ('bad', 'DATABASE_ERROR', 'OK', 'OK'))
-        codes = [error.code for error in raised.value.report.errors]
+        codes = [error.code for error in raised.value.report.refusals]
         assert codes == [
             HorsiesErrorCode.TASK_INVALID_ERROR_CODE,
             HorsiesErrorCode.CHECK_RESERVED_CODE_COLLISION,

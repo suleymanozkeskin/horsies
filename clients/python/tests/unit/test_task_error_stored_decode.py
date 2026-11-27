@@ -117,7 +117,7 @@ def _envelope(err_slot: Json) -> dict[str, Json]:
 def _make_app() -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr('postgresql://u:p@localhost/db'),
             ),
         ),

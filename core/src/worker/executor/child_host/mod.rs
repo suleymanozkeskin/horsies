@@ -34,7 +34,7 @@
 //! own with a bounded queue; a full queue drops and counts, and a handler
 //! that fails or panics is counted and logged with its name while the
 //! child lives. The child sends `handler_stats` frames every
-//! [`HANDLER_STATS_INTERVAL`].
+//! [`HANDLER_STATISTICS_INTERVAL`].
 
 mod args;
 mod body_scope;
@@ -81,7 +81,7 @@ pub use handle_setup::{child_handle_setup, ChildHandleSetup, HandlerChildHasNoHa
 pub use handlers::{
     EventHandlerRefused, EventHandlerSet, HandlerChildApp, HandlerError, HANDLER_DRAIN,
     HANDLER_ERROR_LOG_EVERY, HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS,
-    HANDLER_STATS_INTERVAL,
+    HANDLER_STATISTICS_INTERVAL,
 };
 pub use host::{
     child_command, run_child_host, ChildApp, ChildHookFailure, ChildHostExit, ChildLogSetup,

@@ -23,11 +23,11 @@ const CHECK_LIMIT_MS = 60_000;
 const UNREACHABLE_DATABASE_URL = "postgresql://postgres:unused@127.0.0.1:1/horsies";
 
 /**
- * The head of the connectivity refusal: a refusal message starts with its config path (`broker`), so the text is
- * `broker: broker connectivity check failed; <cause>` (`tests/unit/check/report.test.ts`). Python and Rust print
+ * The head of the connectivity refusal: a refusal message starts with its config path (`database`), so the text is
+ * `database: broker connectivity check failed; <cause>` (`tests/unit/check/report.test.ts`). Python and Rust print
  * `error[HRS-203]: broker connectivity check failed`.
  */
-const CONNECTIVITY_FAILURE = "error[HRS-203]: broker: broker connectivity check failed; ";
+const CONNECTIVITY_FAILURE = "error[HRS-203]: database: broker connectivity check failed; ";
 
 /** The end of one `check --live` process: its exit code and every output line. */
 type CheckEnd = { readonly code: number; readonly output: string };

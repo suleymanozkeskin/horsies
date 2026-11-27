@@ -71,6 +71,7 @@ _ENGINE_KEY_WORKFLOW_CTX = '__h_workflow_ctx__'
 _ENGINE_KEY_WORKFLOW_META = '__h_workflow_meta__'
 _ENGINE_KEY_TASKRESULT_ENVELOPE = '__h_taskresult_envelope__'
 from horsies.core.models.boot_failure import ThreadStartRefusedError
+from horsies.core.models.schema_mode import AppRole
 from horsies.core.models.tasks import (
     MAX_CANCEL_GRACE_MS,
     MAX_TASK_TIMEOUT_MS,
@@ -463,7 +464,7 @@ def _discard_inherited_broker(app: Horsies) -> None:
         logger.warning('Failed to reset the import-time broker in child: %s', exc)
 
 
-# Exit code for a failed/hung on_child_process_start hook. Distinct from
+# Exit code for a failed/hung on_child_start hook. Distinct from
 # generic child crashes so the parent stops the worker instead of
 # restart-looping on an unfixable child boot.
 CHILD_HOOK_FAILURE_EXIT_CODE: Final = PROTOCOL_NUMBERS.child_hook_failed_exit_code
@@ -475,7 +476,7 @@ CHILD_HOOK_TIMEOUT_SECONDS = 10.0
 def _exit_for_hung_hook(hook_name: str) -> None:
     """Watchdog target: a hook exceeded its budget; terminate the child."""
     logger.critical(
-        "on_child_process_start hook '%s' exceeded %.0fs in child %s; "
+        "on_child_start hook '%s' exceeded %.0fs in child %s; "
         'terminating child',
         hook_name,
         CHILD_HOOK_TIMEOUT_SECONDS,
@@ -524,7 +525,7 @@ def _run_child_start_hooks(app: Horsies) -> None:
             before that hook ran. The boot names the cause
             ``ThreadStartRefused``.
     """
-    for hook in app.get_child_process_start_hooks():
+    for hook in app.get_child_start_hooks():
         hook_name = getattr(hook, '__qualname__', repr(hook))
         watchdog = start_hook_watchdog(hook_name)
         try:
@@ -532,7 +533,7 @@ def _run_child_start_hooks(app: Horsies) -> None:
         except BaseException as exc:
             watchdog.cancel()
             logger.critical(
-                "on_child_process_start hook '%s' failed in child %s: %s",
+                "on_child_start hook '%s' failed in child %s: %s",
                 hook_name,
                 os.getpid(),
                 exc,
@@ -540,7 +541,7 @@ def _run_child_start_hooks(app: Horsies) -> None:
             os._exit(CHILD_HOOK_FAILURE_EXIT_CODE)
         watchdog.cancel()
         logger.debug(
-            "[child %s] on_child_process_start hook '%s' completed",
+            "[child %s] on_child_start hook '%s' completed",
             os.getpid(),
             hook_name,
         )
@@ -566,7 +567,7 @@ def import_app_for_child(
     app_locator: str,
     imports: Sequence[str],
     sys_path_roots: Sequence[str],
-    loglevel: int,
+    log_level: int,
     task_send_pool: int,
 ) -> Horsies:
     """Locate the app and import its task modules. Opens no connection.
@@ -585,7 +586,7 @@ def import_app_for_child(
     # Configure logging for this child process before any logging
     from horsies.core.logging import configure_logging
 
-    configure_logging(loglevel)
+    configure_logging(log_level)
 
     # Mark child process to adjust logging behavior during module import
     os.environ['HORSIES_CHILD_PROCESS'] = '1'
@@ -605,9 +606,9 @@ def import_app_for_child(
 
     app = _locate_app(app_locator)  # uses import_by_path -> loads as 'instance'
     # The records from here on take the app's format.
-    configure_logging(loglevel, log_format=app.config.log_format)
+    configure_logging(log_level, log_format=app.config.log_format)
     _discard_inherited_broker(app)
-    app.set_role('worker')
+    app.set_role(AppRole.WORKER)
     app.set_task_send_pool(task_send_pool)
     set_current_app(app)
 
@@ -640,7 +641,7 @@ def finish_child_start(app: Horsies, init: core.InitFrame) -> None:
     these itself, after any fork.
 
     The process runs task bodies from here on, the
-    ``on_child_process_start`` hooks run, the child chooses its attempt
+    ``on_child_start`` hooks run, the child chooses its attempt
     spans from ``AppConfig.tracing`` (``use_attempt_spans``), and the core
     handle of the child is built from ``init``
     (``_initialize_child_core_handle``). Every write of the child goes
@@ -1788,7 +1789,7 @@ def run_isolated_task(
     the span and the log records of the body.
 
     ``orphan_self_heal`` comes with the run from the worker (the app's
-    ``RecoveryConfig.auto_terminate_orphaned_workflow_tasks``): with it, the
+    ``RecoveryConfig.terminate_orphaned_workflow_tasks``): with it, the
     stop of a workflow task whose node is not linked cancels the task
     (ORPHAN_CANCELLED).
 

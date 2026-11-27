@@ -624,13 +624,13 @@ fn transaction_mode_without_its_session_url_is_refused() {
 #[test]
 fn the_connection_of_a_config_is_its_tcp_settings_and_server_sessions() {
     assert_eq!(
-        ChildConnection::of_config(&PostgresConfig::from_url("postgresql://u@h/db")),
+        ChildConnection::of_config(&PostgresConfig::from_database_url("postgresql://u@h/db")),
         Ok(ChildConnection::default()),
     );
     let mut config =
         PostgresConfig::from_pgbouncer_urls("postgresql://u@pooler/db", "postgresql://u@direct/db");
-    config.tcp_keepalives = TcpKeepalivesConfig::Off;
-    config.tcp_user_timeout = TcpUserTimeoutConfig::SystemDefault;
+    config.tcp_keepalives = crate::core::config::TcpKeepalivesConfig::Off;
+    config.tcp_user_timeout = crate::core::config::TcpUserTimeoutConfig::SystemDefault;
     assert_eq!(
         ChildConnection::of_config(&config),
         Ok(transaction_mode_connection()),
@@ -639,11 +639,11 @@ fn the_connection_of_a_config_is_its_tcp_settings_and_server_sessions() {
 
 #[test]
 fn a_config_that_does_not_validate_has_no_child_connection() {
-    let mut config = PostgresConfig::from_url("postgresql://u@pooler/db");
+    let mut config = PostgresConfig::from_database_url("postgresql://u@pooler/db");
     config.pgbouncer_transaction_mode = true;
     assert_eq!(
         ChildConnection::of_config(&config),
-        Err(PostgresConfigError::MissingSessionDatabaseUrl),
+        Err(PostgresConfigError::MissingSessionDatabase),
     );
 }
 

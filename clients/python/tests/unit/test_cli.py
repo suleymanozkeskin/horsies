@@ -39,9 +39,11 @@ from horsies.core.errors import (
     ConfigurationError,
     HorsiesErrorCode,
     HorsiesError,
+    ValidationReport,
     WorkflowValidationError,
 )
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.cluster_cap import NoClusterCap
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.tracing import NoTracing, OtelTracing
@@ -121,25 +123,25 @@ class TestResolveModuleArgument:
     @staticmethod
     def _make_ns(
         module: str | None = None,
-        module_pos: str | None = None,
+        module_positional: str | None = None,
     ) -> argparse.Namespace:
-        return argparse.Namespace(module=module, module_pos=module_pos)
+        return argparse.Namespace(module=module, module_positional=module_positional)
 
     def test_module_flag_returned(self) -> None:
         assert _resolve_module_argument(self._make_ns(module='app:inst')) == 'app:inst'
 
     def test_positional_returned(self) -> None:
-        assert _resolve_module_argument(self._make_ns(module_pos='app:inst')) == 'app:inst'
+        assert _resolve_module_argument(self._make_ns(module_positional='app:inst')) == 'app:inst'
 
     def test_conflicting_flag_and_positional_raises(self) -> None:
-        ns = self._make_ns(module='flag_mod', module_pos='pos_mod')
+        ns = self._make_ns(module='flag_mod', module_positional='pos_mod')
         with pytest.raises(ConfigurationError) as exc_info:
             _resolve_module_argument(ns)
         assert exc_info.value.code == HorsiesErrorCode.CLI_INVALID_ARGS
         assert 'conflict' in exc_info.value.message.lower()
 
     def test_identical_flag_and_positional_accepted(self) -> None:
-        ns = self._make_ns(module='same:app', module_pos='same:app')
+        ns = self._make_ns(module='same:app', module_positional='same:app')
         assert _resolve_module_argument(ns) == 'same:app'
 
     def test_both_missing_raises_configuration_error(self) -> None:
@@ -149,7 +151,7 @@ class TestResolveModuleArgument:
 
     def test_empty_strings_treated_as_missing(self) -> None:
         with pytest.raises(ConfigurationError) as exc_info:
-            _resolve_module_argument(self._make_ns(module='', module_pos=''))
+            _resolve_module_argument(self._make_ns(module='', module_positional=''))
         assert exc_info.value.code == HorsiesErrorCode.CLI_INVALID_ARGS
 
     def test_error_includes_help_text(self) -> None:
@@ -357,7 +359,7 @@ class TestMainEntrypoint:
             main()
             mock_cmd.assert_called_once()
             args = mock_cmd.call_args[0][0]
-            assert args.module_pos == 'my.mod:app'
+            assert args.module_positional == 'my.mod:app'
 
     def test_check_subcommand_routes_to_check_command(self) -> None:
         with (
@@ -383,14 +385,33 @@ class TestMainEntrypoint:
             main()
             mock_cmd.assert_called_once()
 
-    def test_worker_loglevel_default_is_info(self) -> None:
+    def test_worker_log_level_default_is_info(self) -> None:
         with (
             patch('sys.argv', ['horsies', 'worker', 'my.mod:app']),
             patch('horsies.core.cli.worker_command', autospec=True) as mock_cmd,
         ):
             main()
             args = mock_cmd.call_args[0][0]
-            assert args.loglevel == 'INFO'
+            assert args.log_level == 'INFO'
+
+    def test_worker_takes_the_log_level_flag(self) -> None:
+        with (
+            patch('sys.argv', ['horsies', 'worker', 'my.mod:app', '--log-level', 'debug']),
+            patch('horsies.core.cli.worker_command', autospec=True) as mock_cmd,
+        ):
+            main()
+            args = mock_cmd.call_args[0][0]
+            assert args.log_level == 'DEBUG'
+
+    def test_the_old_loglevel_flag_is_a_usage_error(self) -> None:
+        with (
+            patch('sys.argv', ['horsies', 'worker', 'my.mod:app', '--loglevel', 'DEBUG']),
+            patch('horsies.core.cli.worker_command', autospec=True) as mock_cmd,
+            pytest.raises(SystemExit) as raised,
+        ):
+            main()
+        assert raised.value.code == 2
+        mock_cmd.assert_not_called()
 
     def test_worker_profile_is_none_when_not_passed(self) -> None:
         """argparse does not require --profile, so that the error after app
@@ -539,15 +560,15 @@ def _make_schema_err(
 def _make_worker_namespace(
     *,
     module: str = 'my.mod:app',
-    loglevel: str = 'INFO',
+    log_level: str = 'INFO',
     profile: str | None = 'default',
     metrics_listen: wire.MetricsEndpoint = wire.MetricsEndpointNoMetricsEndpoint(),
 ) -> argparse.Namespace:
     """Build a valid argparse.Namespace for worker_command."""
     return argparse.Namespace(
         module=module,
-        module_pos=None,
-        loglevel=loglevel,
+        module_positional=None,
+        log_level=log_level,
         profile=profile,
         metrics_listen=metrics_listen,
     )
@@ -556,40 +577,48 @@ def _make_worker_namespace(
 def _make_scheduler_namespace(
     *,
     module: str = 'my.mod:app',
-    loglevel: str = 'INFO',
+    log_level: str = 'INFO',
 ) -> argparse.Namespace:
     """Build a valid argparse.Namespace for scheduler_command."""
     return argparse.Namespace(
         module=module,
-        module_pos=None,
-        loglevel=loglevel,
+        module_positional=None,
+        log_level=log_level,
     )
 
 
 def _make_check_namespace(
     *,
     module: str = 'my.mod:app',
-    loglevel: str = 'WARNING',
+    log_level: str = 'WARNING',
     live: bool = False,
 ) -> argparse.Namespace:
     """Build a valid argparse.Namespace for check_command."""
     return argparse.Namespace(
         module=module,
-        module_pos=None,
-        loglevel=loglevel,
+        module_positional=None,
+        log_level=log_level,
         live=live,
     )
+
+
+def _check_report(*refusals: HorsiesError) -> ValidationReport:
+    """The report that ``Horsies.check()`` returns with ``refusals``."""
+    report = ValidationReport('check')
+    for refusal in refusals:
+        report.add(refusal)
+    return report
 
 
 def _make_mock_app() -> MagicMock:
     """Build a mock Horsies app with all attributes worker/scheduler/check need."""
     app = MagicMock(spec=Horsies)
     app.set_role = MagicMock()
-    app.check = MagicMock(return_value=[])
+    app.check = MagicMock(return_value=_check_report())
     app.get_valid_queue_names = MagicMock(return_value=['default'])
     app.get_discovered_task_modules = MagicMock(return_value=['my.tasks'])
     app.import_task_modules = MagicMock()
-    app.list_tasks = MagicMock(return_value=[])
+    app.registered_task_names = MagicMock(return_value=[])
 
     # Config sub-objects
     queue_mode = MagicMock()
@@ -602,14 +631,14 @@ def _make_mock_app() -> MagicMock:
     resilience = WorkerResilienceConfig()
 
     app.config = MagicMock()
-    app.config.broker = PostgresConfig(
+    app.config.database = PostgresConfig(
         database_url='postgresql://user:pass@localhost/db',
     )
     app.config.queue_mode = queue_mode
     app.config.custom_queues = None
     app.config.schedule = schedule_config
     app.config.resilience = resilience
-    app.config.cluster_wide_cap = 0
+    app.config.cluster_wide_cap = NoClusterCap()
     app.config.prefetch_buffer = 2
     app.config.claim_lease_ms = 30000
     app.config.max_claim_renew_age_ms = 120000
@@ -694,7 +723,7 @@ class TestEnsureSchemaWithRetry:
         err_obj = _make_schema_err(retryable=True, message='transient')
         broker = MagicMock()
         broker.ensure_schema_initialized = AsyncMock(return_value=Err(err_obj))
-        resilience = WorkerResilienceConfig(db_retry_max_attempts=2)
+        resilience = WorkerResilienceConfig(database_retry_max_attempts=2)
         logger = logging.getLogger('test')
 
         # Act / Assert
@@ -722,7 +751,7 @@ class TestEnsureSchemaWithRetry:
         broker.ensure_schema_initialized = AsyncMock(
             side_effect=[Err(err_obj), Ok(None)],
         )
-        resilience = WorkerResilienceConfig(db_retry_max_attempts=3)
+        resilience = WorkerResilienceConfig(database_retry_max_attempts=3)
         logger = logging.getLogger('test')
 
         # Act
@@ -745,7 +774,7 @@ class TestEnsureSchemaWithRetry:
         broker.ensure_schema_initialized = AsyncMock(
             side_effect=[Err(err_obj), Err(err_obj), Ok(None)],
         )
-        resilience = WorkerResilienceConfig(db_retry_max_attempts=0)
+        resilience = WorkerResilienceConfig(database_retry_max_attempts=0)
         logger = logging.getLogger('test')
 
         # Act
@@ -772,9 +801,9 @@ class TestEnsureSchemaWithRetry:
             side_effect=[Err(err_obj), Err(err_obj), Err(err_obj), Ok(None)],
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=500,
-            db_retry_max_ms=1000,
-            db_retry_max_attempts=0,
+            database_retry_initial_ms=500,
+            database_retry_max_ms=1000,
+            database_retry_max_attempts=0,
         )
         logger = logging.getLogger('test')
 
@@ -857,7 +886,7 @@ class TestWorkerCommand:
         # Arrange
         app = _make_mock_app()
         validation_error = HorsiesError(message='bad queue config')
-        app.check.return_value = [validation_error]
+        app.check.return_value = _check_report(validation_error)
         mock_discover.return_value = (app, 'app', 'my.mod', None)
         args = _make_worker_namespace()
 
@@ -921,7 +950,7 @@ class TestWorkerCommandCoreRun:
         app.config.worker_profiles = _two_profiles()
         mock_run = _run_worker_command(
             app,
-            _make_worker_namespace(profile='batch', loglevel='DEBUG'),
+            _make_worker_namespace(profile='batch', log_level='DEBUG'),
             EXIT_STOPPED,
         )
         launch = _launch_of(mock_run)
@@ -929,7 +958,7 @@ class TestWorkerCommandCoreRun:
         assert launch.app_locator == 'my.mod:app'
         assert launch.imports == ('my.tasks',)
         assert launch.sys_path_roots == ('/project',)
-        assert launch.loglevel == 'DEBUG'
+        assert launch.log_level == 'DEBUG'
         app.import_task_modules.assert_called_once()
 
     def test_the_metrics_endpoint_reaches_the_launch(self) -> None:
@@ -978,7 +1007,7 @@ class TestWorkerCommandCoreRun:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         app = _make_mock_app()
-        app.check.return_value = [HorsiesError(message='bad queue config')]
+        app.check.return_value = _check_report(HorsiesError(message='bad queue config'))
         with (
             patch('horsies.core.cli.setup_logging', autospec=True),
             patch(
@@ -1090,7 +1119,7 @@ class TestSchedulerCommand:
         # Arrange
         app = _make_mock_app()
         validation_error = HorsiesError(message='bad schedule config')
-        app.check.return_value = [validation_error]
+        app.check.return_value = _check_report(validation_error)
         mock_discover.return_value = (app, 'app', 'my.mod', None)
         args = _make_scheduler_namespace()
 
@@ -1176,7 +1205,7 @@ class TestCheckCommand:
         # Arrange
         app = _make_mock_app()
         validation_error = HorsiesError(message='queue config invalid')
-        app.check.return_value = [validation_error]
+        app.check.return_value = _check_report(validation_error)
         mock_discover.return_value = (app, 'app', 'my.mod', None)
         args = _make_check_namespace()
 
@@ -1198,8 +1227,8 @@ class TestCheckCommand:
     ) -> None:
         # Arrange
         app = _make_mock_app()
-        app.check.return_value = []
-        app.list_tasks.return_value = ['task1', 'task2']
+        app.check.return_value = _check_report()
+        app.registered_task_names.return_value = ['task1', 'task2']
         app.declared_error_codes.return_value = {}
         mock_discover.return_value = (app, 'app', 'my.mod', None)
         args = _make_check_namespace()
@@ -1226,8 +1255,8 @@ class TestCheckCommand:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         app = _make_mock_app()
-        app.check.return_value = []
-        app.list_tasks.return_value = ['resize', 'send_mail', 'charge']
+        app.check.return_value = _check_report()
+        app.registered_task_names.return_value = ['resize', 'send_mail', 'charge']
         app.declared_error_codes.return_value = {
             'send_mail': ('BOUNCED',),
             'charge': ('RATE_LIMITED', 'CARD_DECLINED'),
@@ -1258,8 +1287,8 @@ class TestCheckCommand:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         app = _make_mock_app()
-        app.check.return_value = []
-        app.list_tasks.return_value = ['resize']
+        app.check.return_value = _check_report()
+        app.registered_task_names.return_value = ['resize']
         app.declared_error_codes.return_value = {}
         app.config.tracing = OtelTracing()
         mock_discover.return_value = (app, 'app', 'my.mod', None)
@@ -1975,7 +2004,7 @@ class TestCheckCommandReportsEveryProfile:
             'from horsies import (AppConfig, ClaimLimits, Horsies, IsolatedChildren,\n'
             '    PostgresConfig, TaskLimit, WorkerProfile)\n'
             'app = Horsies(AppConfig(\n'
-            "    broker=PostgresConfig(database_url='postgresql://u:p@h/db'),\n"
+            "    database=PostgresConfig(database_url='postgresql://u:p@h/db'),\n"
             '    worker_profiles={\n'
             "        'empty': WorkerProfile(),\n"
             "        'greedy': WorkerProfile(\n"
@@ -2009,7 +2038,7 @@ SMALL_PARENT_POOL_APP: Final = (
     'from horsies import (AppConfig, Horsies, IsolatedChildren, ParentPool,\n'
     '    PoolSize, PostgresConfig, WorkerProfile)\n'
     'app = Horsies(AppConfig(\n'
-    "    broker=PostgresConfig(database_url='postgresql://u:p@h/db'),\n"
+    "    database=PostgresConfig(database_url='postgresql://u:p@h/db'),\n"
     '    worker_profiles={\n'
     "        'small': WorkerProfile(\n"
     '            isolated=IsolatedChildren(count=1),\n'

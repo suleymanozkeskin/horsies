@@ -29,7 +29,7 @@ config = AppConfig(
         CustomQueueConfig(name='default', priority=1, max_concurrency=5),
         CustomQueueConfig(name='recovery', priority=1, max_concurrency=1),
     ],
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=DB_URL,
         pool_size=5,
         max_overflow=5,
@@ -37,7 +37,7 @@ config = AppConfig(
     recovery=RecoveryConfig(
         runner_heartbeat_interval_ms=1_000,
         claimer_heartbeat_interval_ms=1_000,
-        # The smallest threshold with auto_fail_stale_running on:
+        # The smallest threshold with fail_stale_running on:
         # 2 x (runner_heartbeat_interval_ms + 2 s).
         running_stale_threshold_ms=6_000,
         claimed_stale_threshold_ms=2_000,
@@ -50,7 +50,7 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 

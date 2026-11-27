@@ -6,25 +6,25 @@ import type { DecodeResult, WireJson } from "./wire_json.ts";
 export type MonitoringModelName =
   | "Breakdown"
   | "BreakdownCounts"
-  | "BudgetLoadInfo"
-  | "ClassReportInfo"
-  | "DownSlotInfo"
+  | "BudgetLoad"
+  | "DownSlot"
   | "ErrorFacet"
+  | "ExecutionClassReport"
   | "FacetValue"
   | "Facets"
   | "GroupRow"
   | "LeafTaskInfo"
   | "LivenessReport"
-  | "PendingStreamInfo"
+  | "PendingStream"
   | "ScheduleStateInfo"
   | "StatusCount"
   | "TaskAttemptInfo"
   | "TaskDetail"
   | "TaskListPage"
   | "TaskSummary"
-  | "WorkerClassLoadInfo"
+  | "WorkerExecutionClassLoad"
   | "WorkerHistoryPoint"
-  | "WorkerPingInfo"
+  | "WorkerPong"
   | "WorkerStateInfo"
   | "WorkflowEdge"
   | "WorkflowNodeInfo"
@@ -137,10 +137,9 @@ export interface BreakdownCounts {
   readonly total: number;
 }
 
-export interface BudgetLoadInfo {
+export interface BudgetLoad {
   readonly budget: Execution;
   readonly capacity: number;
-  readonly free: number;
   readonly inFlight: number;
   readonly serves: ReadonlyArray<Execution>;
 }
@@ -150,14 +149,7 @@ export type Execution =
   | "SHARED_ASYNC"
   | "SHARED_THREAD";
 
-export interface ClassReportInfo {
-  readonly checkedAt: Temporal.Instant;
-  readonly liveWindowS: number;
-  readonly streams: ReadonlyArray<PendingStreamInfo>;
-  readonly workers: ReadonlyArray<WorkerClassLoadInfo>;
-}
-
-export interface DownSlotInfo {
+export interface DownSlot {
   readonly cause: string;
   readonly detail: string;
   readonly downSince: Temporal.Instant;
@@ -169,6 +161,13 @@ export interface ErrorFacet {
   readonly category: string;
   readonly count: number;
   readonly value: string;
+}
+
+export interface ExecutionClassReport {
+  readonly checkedAt: Temporal.Instant;
+  readonly liveWindowSeconds: number;
+  readonly streams: ReadonlyArray<PendingStream>;
+  readonly workers: ReadonlyArray<WorkerExecutionClassLoad>;
 }
 
 export interface FacetValue {
@@ -230,51 +229,63 @@ export interface LeafTaskInfo {
 }
 
 export interface LivenessReport {
-  readonly dbLatencyMs: number | null;
-  readonly dbReachable: boolean;
-  readonly workers: ReadonlyArray<WorkerPingInfo>;
+  readonly database: DatabaseLiveness;
+  readonly workers: ReadonlyArray<WorkerPong>;
 }
 
-export interface PendingStreamInfo {
-  readonly coverage: StreamCoverageInfo;
+export type DatabaseLiveness =
+  | DatabasePing
+  | DatabaseUnreachable;
+
+export interface DatabasePing {
+  readonly kind: "ping";
+  readonly latencyMs: number;
+}
+
+export interface DatabaseUnreachable {
+  readonly kind: "unreachable";
+}
+
+export interface PendingStream {
+  readonly coverage: StreamCoverageState;
   readonly execution: Execution;
-  readonly queueName: string;
-  readonly wait: StreamWaitInfo;
+  readonly queue: string;
+  readonly wait: StreamWait;
 }
 
-export type StreamCoverageInfo =
-  | StreamNoCapacityInfo
-  | StreamServedInfo
-  | StreamUnservedInfo;
+export type StreamCoverageState =
+  | StreamWithoutCapacity
+  | StreamServed
+  | StreamUnserved;
 
-export interface StreamNoCapacityInfo {
+export interface StreamWithoutCapacity {
   readonly kind: "noCapacity";
   readonly workers: number;
 }
 
-export interface StreamServedInfo {
+export interface StreamServed {
   readonly kind: "served";
   readonly capacity: number;
   readonly workers: number;
 }
 
-export interface StreamUnservedInfo {
+export interface StreamUnserved {
   readonly kind: "unserved";
 }
 
-export type StreamWaitInfo =
-  | StreamNoneDueInfo
-  | StreamWaitingInfo;
+export type StreamWait =
+  | OldestWaiting
+  | NoneDue;
 
-export interface StreamNoneDueInfo {
-  readonly kind: "noneDue";
-  readonly nextDueAt: Temporal.Instant;
+export interface OldestWaiting {
+  readonly kind: "due";
+  readonly oldestDueAt: Temporal.Instant;
+  readonly waitSeconds: number;
 }
 
-export interface StreamWaitingInfo {
-  readonly kind: "waiting";
-  readonly oldestDueAt: Temporal.Instant;
-  readonly waitS: number;
+export interface NoneDue {
+  readonly kind: "noneDue";
+  readonly nextDueAt: Temporal.Instant;
 }
 
 export interface ScheduleStateInfo {
@@ -418,8 +429,8 @@ export interface TaskSummary {
   readonly workerId: string | null;
 }
 
-export interface WorkerClassLoadInfo {
-  readonly budgets: ReadonlyArray<BudgetLoadInfo>;
+export interface WorkerExecutionClassLoad {
+  readonly budgets: ReadonlyArray<BudgetLoad>;
   readonly snapshotAt: Temporal.Instant;
   readonly workerId: string;
 }
@@ -433,7 +444,7 @@ export interface WorkerHistoryPoint {
   readonly tasksRunning: number;
 }
 
-export interface WorkerPingInfo {
+export interface WorkerPong {
   readonly hostname: string;
   readonly pid: number;
   readonly roundTripMs: number;
@@ -441,18 +452,17 @@ export interface WorkerPingInfo {
 }
 
 export interface WorkerStateInfo {
+  readonly childCount: number;
   readonly clusterWideCap: number | null;
   readonly cpuPercent: number | null;
-  readonly downSlots: ReadonlyArray<DownSlotInfo>;
   readonly hostname: string;
   readonly memoryPercent: number | null;
   readonly memoryUsageMb: number | null;
   readonly pid: number;
-  readonly processes: number;
-  readonly profile: SnapshotProfileInfo;
+  readonly profile: SnapshotProfile;
   readonly queueMaxConcurrency: ReadonlyMap<string, number>;
   readonly queues: ReadonlyArray<string>;
-  readonly slotHealth: SlotHealthKind;
+  readonly slotHealth: SlotHealth;
   readonly snapshotAgeS: number | null;
   readonly snapshotAt: Temporal.Instant;
   readonly stale: boolean;
@@ -463,22 +473,31 @@ export interface WorkerStateInfo {
   readonly workerStartedAt: Temporal.Instant;
 }
 
-export type SnapshotProfileInfo =
-  | ProfileNamedInfo
-  | ProfileNotRecordedInfo;
+export type SnapshotProfile =
+  | ProfileNamed
+  | ProfileNotRecorded;
 
-export interface ProfileNamedInfo {
+export interface ProfileNamed {
   readonly kind: "named";
   readonly name: string;
 }
 
-export interface ProfileNotRecordedInfo {
+export interface ProfileNotRecorded {
   readonly kind: "notRecorded";
 }
 
-export type SlotHealthKind =
-  | "all_serving"
-  | "slots_down";
+export type SlotHealth =
+  | AllSlotsServing
+  | SlotsDown;
+
+export interface AllSlotsServing {
+  readonly kind: "allServing";
+}
+
+export interface SlotsDown {
+  readonly kind: "slotsDown";
+  readonly slots: ReadonlyArray<DownSlot>;
+}
 
 export interface WorkflowEdge {
   readonly fromIndex: number;
@@ -1249,16 +1268,16 @@ function readBreakdownCounts(
   );
 }
 
-export function decodeBudgetLoadInfo(
+export function decodeBudgetLoad(
   value: WireJson,
-): DecodeResult<BudgetLoadInfo, MonitoringDecodeError> {
-  return readBudgetLoadInfo(value, { model: "BudgetLoadInfo", path: "$" });
+): DecodeResult<BudgetLoad, MonitoringDecodeError> {
+  return readBudgetLoad(value, { model: "BudgetLoad", path: "$" });
 }
 
-function readBudgetLoadInfo(
+function readBudgetLoad(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<BudgetLoadInfo, MonitoringDecodeError> {
+): DecodeResult<BudgetLoad, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -1268,7 +1287,6 @@ function readBudgetLoadInfo(
   const results = {
     budget: fields.value.read("budget", readExecution),
     capacity: fields.value.read("capacity", decodeInteger),
-    free: fields.value.read("free", decodeInteger),
     inFlight: fields.value.read("in_flight", decodeInteger),
     serves: fields.value.read("serves", listOf(readExecution)),
   };
@@ -1287,7 +1305,6 @@ function readBudgetLoadInfo(
     Object.freeze({
       budget: results.budget.value,
       capacity: results.capacity.value,
-      free: results.free.value,
       inFlight: results.inFlight.value,
       serves: results.serves.value,
     }),
@@ -1308,59 +1325,16 @@ function readExecution(
   }
 }
 
-export function decodeClassReportInfo(
+export function decodeDownSlot(
   value: WireJson,
-): DecodeResult<ClassReportInfo, MonitoringDecodeError> {
-  return readClassReportInfo(value, { model: "ClassReportInfo", path: "$" });
+): DecodeResult<DownSlot, MonitoringDecodeError> {
+  return readDownSlot(value, { model: "DownSlot", path: "$" });
 }
 
-function readClassReportInfo(
+function readDownSlot(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<ClassReportInfo, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    checkedAt: fields.value.read("checked_at", decodeDateTime),
-    liveWindowS: fields.value.read("live_window_s", decodeInteger),
-    streams: fields.value.read("streams", listOf(readPendingStreamInfo)),
-    workers: fields.value.read("workers", listOf(readWorkerClassLoadInfo)),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      checkedAt: results.checkedAt.value,
-      liveWindowS: results.liveWindowS.value,
-      streams: results.streams.value,
-      workers: results.workers.value,
-    }),
-  );
-}
-
-export function decodeDownSlotInfo(
-  value: WireJson,
-): DecodeResult<DownSlotInfo, MonitoringDecodeError> {
-  return readDownSlotInfo(value, { model: "DownSlotInfo", path: "$" });
-}
-
-function readDownSlotInfo(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<DownSlotInfo, MonitoringDecodeError> {
+): DecodeResult<DownSlot, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -1433,6 +1407,49 @@ function readErrorFacet(
       category: results.category.value,
       count: results.count.value,
       value: results.value.value,
+    }),
+  );
+}
+
+export function decodeExecutionClassReport(
+  value: WireJson,
+): DecodeResult<ExecutionClassReport, MonitoringDecodeError> {
+  return readExecutionClassReport(value, { model: "ExecutionClassReport", path: "$" });
+}
+
+function readExecutionClassReport(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<ExecutionClassReport, MonitoringDecodeError> {
+  const fields = readObject(value, place);
+
+  if (!fields.ok) {
+    return fields;
+  }
+
+  const results = {
+    checkedAt: fields.value.read("checked_at", decodeDateTime),
+    liveWindowSeconds: fields.value.read("live_window_seconds", decodeNumber),
+    streams: fields.value.read("streams", listOf(readPendingStream)),
+    workers: fields.value.read("workers", listOf(readWorkerExecutionClassLoad)),
+  };
+
+  if (!allDecoded(results)) {
+    return firstFailure(results);
+  }
+
+  const unread = fields.value.unread();
+
+  if (!unread.ok) {
+    return unread;
+  }
+
+  return ok(
+    Object.freeze({
+      checkedAt: results.checkedAt.value,
+      liveWindowSeconds: results.liveWindowSeconds.value,
+      streams: results.streams.value,
+      workers: results.workers.value,
     }),
   );
 }
@@ -1727,9 +1744,8 @@ function readLivenessReport(
   }
 
   const results = {
-    dbLatencyMs: fields.value.read("db_latency_ms", nullableOf(decodeNumber)),
-    dbReachable: fields.value.read("db_reachable", decodeBoolean),
-    workers: fields.value.read("workers", listOf(readWorkerPingInfo)),
+    database: fields.value.read("database", readDatabaseLiveness),
+    workers: fields.value.read("workers", listOf(readWorkerPong)),
   };
 
   if (!allDecoded(results)) {
@@ -1744,23 +1760,89 @@ function readLivenessReport(
 
   return ok(
     Object.freeze({
-      dbLatencyMs: results.dbLatencyMs.value,
-      dbReachable: results.dbReachable.value,
+      database: results.database.value,
       workers: results.workers.value,
     }),
   );
 }
 
-export function decodePendingStreamInfo(
-  value: WireJson,
-): DecodeResult<PendingStreamInfo, MonitoringDecodeError> {
-  return readPendingStreamInfo(value, { model: "PendingStreamInfo", path: "$" });
-}
-
-function readPendingStreamInfo(
+function readDatabaseLiveness(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<PendingStreamInfo, MonitoringDecodeError> {
+): DecodeResult<DatabaseLiveness, MonitoringDecodeError> {
+  const fields = readObject(value, place);
+
+  if (!fields.ok) {
+    return fields;
+  }
+
+  const tag = fields.value.read("kind", decodeString);
+
+  if (!tag.ok) {
+    return tag;
+  }
+
+  switch (tag.value) {
+    case "ping":
+      return readDatabasePing(fields.value);
+    case "unreachable":
+      return readDatabaseUnreachable(fields.value);
+    default:
+      return tagUnknown(fields.value, "kind", tag.value);
+  }
+}
+
+function readDatabasePing(
+  fields: FieldReader,
+): DecodeResult<DatabasePing, MonitoringDecodeError> {
+  const results = {
+    latencyMs: fields.read("latency_ms", decodeNumber),
+  };
+
+  if (!allDecoded(results)) {
+    return firstFailure(results);
+  }
+
+  const unread = fields.unread();
+
+  if (!unread.ok) {
+    return unread;
+  }
+
+  return ok(
+    Object.freeze({
+      kind: "ping",
+      latencyMs: results.latencyMs.value,
+    }),
+  );
+}
+
+function readDatabaseUnreachable(
+  fields: FieldReader,
+): DecodeResult<DatabaseUnreachable, MonitoringDecodeError> {
+  const unread = fields.unread();
+
+  if (!unread.ok) {
+    return unread;
+  }
+
+  return ok(
+    Object.freeze({
+      kind: "unreachable",
+    }),
+  );
+}
+
+export function decodePendingStream(
+  value: WireJson,
+): DecodeResult<PendingStream, MonitoringDecodeError> {
+  return readPendingStream(value, { model: "PendingStream", path: "$" });
+}
+
+function readPendingStream(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<PendingStream, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -1768,10 +1850,10 @@ function readPendingStreamInfo(
   }
 
   const results = {
-    coverage: fields.value.read("coverage", readStreamCoverageInfo),
+    coverage: fields.value.read("coverage", readStreamCoverageState),
     execution: fields.value.read("execution", readExecution),
-    queueName: fields.value.read("queue_name", decodeString),
-    wait: fields.value.read("wait", readStreamWaitInfo),
+    queue: fields.value.read("queue", decodeString),
+    wait: fields.value.read("wait", readStreamWait),
   };
 
   if (!allDecoded(results)) {
@@ -1788,16 +1870,16 @@ function readPendingStreamInfo(
     Object.freeze({
       coverage: results.coverage.value,
       execution: results.execution.value,
-      queueName: results.queueName.value,
+      queue: results.queue.value,
       wait: results.wait.value,
     }),
   );
 }
 
-function readStreamCoverageInfo(
+function readStreamCoverageState(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<StreamCoverageInfo, MonitoringDecodeError> {
+): DecodeResult<StreamCoverageState, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -1812,19 +1894,19 @@ function readStreamCoverageInfo(
 
   switch (tag.value) {
     case "no_capacity":
-      return readStreamNoCapacityInfo(fields.value);
+      return readStreamWithoutCapacity(fields.value);
     case "served":
-      return readStreamServedInfo(fields.value);
+      return readStreamServed(fields.value);
     case "unserved":
-      return readStreamUnservedInfo(fields.value);
+      return readStreamUnserved(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readStreamNoCapacityInfo(
+function readStreamWithoutCapacity(
   fields: FieldReader,
-): DecodeResult<StreamNoCapacityInfo, MonitoringDecodeError> {
+): DecodeResult<StreamWithoutCapacity, MonitoringDecodeError> {
   const results = {
     workers: fields.read("workers", decodeInteger),
   };
@@ -1847,9 +1929,9 @@ function readStreamNoCapacityInfo(
   );
 }
 
-function readStreamServedInfo(
+function readStreamServed(
   fields: FieldReader,
-): DecodeResult<StreamServedInfo, MonitoringDecodeError> {
+): DecodeResult<StreamServed, MonitoringDecodeError> {
   const results = {
     capacity: fields.read("capacity", decodeInteger),
     workers: fields.read("workers", decodeInteger),
@@ -1874,9 +1956,9 @@ function readStreamServedInfo(
   );
 }
 
-function readStreamUnservedInfo(
+function readStreamUnserved(
   fields: FieldReader,
-): DecodeResult<StreamUnservedInfo, MonitoringDecodeError> {
+): DecodeResult<StreamUnserved, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -1890,10 +1972,10 @@ function readStreamUnservedInfo(
   );
 }
 
-function readStreamWaitInfo(
+function readStreamWait(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<StreamWaitInfo, MonitoringDecodeError> {
+): DecodeResult<StreamWait, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -1907,18 +1989,45 @@ function readStreamWaitInfo(
   }
 
   switch (tag.value) {
+    case "due":
+      return readOldestWaiting(fields.value);
     case "none_due":
-      return readStreamNoneDueInfo(fields.value);
-    case "waiting":
-      return readStreamWaitingInfo(fields.value);
+      return readNoneDue(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readStreamNoneDueInfo(
+function readOldestWaiting(
   fields: FieldReader,
-): DecodeResult<StreamNoneDueInfo, MonitoringDecodeError> {
+): DecodeResult<OldestWaiting, MonitoringDecodeError> {
+  const results = {
+    oldestDueAt: fields.read("oldest_due_at", decodeDateTime),
+    waitSeconds: fields.read("wait_seconds", decodeNumber),
+  };
+
+  if (!allDecoded(results)) {
+    return firstFailure(results);
+  }
+
+  const unread = fields.unread();
+
+  if (!unread.ok) {
+    return unread;
+  }
+
+  return ok(
+    Object.freeze({
+      kind: "due",
+      oldestDueAt: results.oldestDueAt.value,
+      waitSeconds: results.waitSeconds.value,
+    }),
+  );
+}
+
+function readNoneDue(
+  fields: FieldReader,
+): DecodeResult<NoneDue, MonitoringDecodeError> {
   const results = {
     nextDueAt: fields.read("next_due_at", decodeDateTime),
   };
@@ -1937,33 +2046,6 @@ function readStreamNoneDueInfo(
     Object.freeze({
       kind: "noneDue",
       nextDueAt: results.nextDueAt.value,
-    }),
-  );
-}
-
-function readStreamWaitingInfo(
-  fields: FieldReader,
-): DecodeResult<StreamWaitingInfo, MonitoringDecodeError> {
-  const results = {
-    oldestDueAt: fields.read("oldest_due_at", decodeDateTime),
-    waitS: fields.read("wait_s", decodeNumber),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "waiting",
-      oldestDueAt: results.oldestDueAt.value,
-      waitS: results.waitS.value,
     }),
   );
 }
@@ -2644,16 +2726,16 @@ function readTaskSummary(
   );
 }
 
-export function decodeWorkerClassLoadInfo(
+export function decodeWorkerExecutionClassLoad(
   value: WireJson,
-): DecodeResult<WorkerClassLoadInfo, MonitoringDecodeError> {
-  return readWorkerClassLoadInfo(value, { model: "WorkerClassLoadInfo", path: "$" });
+): DecodeResult<WorkerExecutionClassLoad, MonitoringDecodeError> {
+  return readWorkerExecutionClassLoad(value, { model: "WorkerExecutionClassLoad", path: "$" });
 }
 
-function readWorkerClassLoadInfo(
+function readWorkerExecutionClassLoad(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkerClassLoadInfo, MonitoringDecodeError> {
+): DecodeResult<WorkerExecutionClassLoad, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -2661,7 +2743,7 @@ function readWorkerClassLoadInfo(
   }
 
   const results = {
-    budgets: fields.value.read("budgets", listOf(readBudgetLoadInfo)),
+    budgets: fields.value.read("budgets", listOf(readBudgetLoad)),
     snapshotAt: fields.value.read("snapshot_at", decodeDateTime),
     workerId: fields.value.read("worker_id", decodeString),
   };
@@ -2732,16 +2814,16 @@ function readWorkerHistoryPoint(
   );
 }
 
-export function decodeWorkerPingInfo(
+export function decodeWorkerPong(
   value: WireJson,
-): DecodeResult<WorkerPingInfo, MonitoringDecodeError> {
-  return readWorkerPingInfo(value, { model: "WorkerPingInfo", path: "$" });
+): DecodeResult<WorkerPong, MonitoringDecodeError> {
+  return readWorkerPong(value, { model: "WorkerPong", path: "$" });
 }
 
-function readWorkerPingInfo(
+function readWorkerPong(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkerPingInfo, MonitoringDecodeError> {
+): DecodeResult<WorkerPong, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -2792,18 +2874,17 @@ function readWorkerStateInfo(
   }
 
   const results = {
+    childCount: fields.value.read("child_count", decodeInteger),
     clusterWideCap: fields.value.read("cluster_wide_cap", nullableOf(decodeInteger)),
     cpuPercent: fields.value.read("cpu_percent", nullableOf(decodeNumber)),
-    downSlots: fields.value.read("down_slots", listOf(readDownSlotInfo)),
     hostname: fields.value.read("hostname", decodeString),
     memoryPercent: fields.value.read("memory_percent", nullableOf(decodeNumber)),
     memoryUsageMb: fields.value.read("memory_usage_mb", nullableOf(decodeNumber)),
     pid: fields.value.read("pid", decodeInteger),
-    processes: fields.value.read("processes", decodeInteger),
-    profile: fields.value.read("profile", readSnapshotProfileInfo),
+    profile: fields.value.read("profile", readSnapshotProfile),
     queueMaxConcurrency: fields.value.read("queue_max_concurrency", mapOf(decodeInteger)),
     queues: fields.value.read("queues", listOf(decodeString)),
-    slotHealth: fields.value.read("slot_health", readSlotHealthKind),
+    slotHealth: fields.value.read("slot_health", readSlotHealth),
     snapshotAgeS: fields.value.read("snapshot_age_s", nullableOf(decodeNumber)),
     snapshotAt: fields.value.read("snapshot_at", decodeDateTime),
     stale: fields.value.read("stale", decodeBoolean),
@@ -2826,14 +2907,13 @@ function readWorkerStateInfo(
 
   return ok(
     Object.freeze({
+      childCount: results.childCount.value,
       clusterWideCap: results.clusterWideCap.value,
       cpuPercent: results.cpuPercent.value,
-      downSlots: results.downSlots.value,
       hostname: results.hostname.value,
       memoryPercent: results.memoryPercent.value,
       memoryUsageMb: results.memoryUsageMb.value,
       pid: results.pid.value,
-      processes: results.processes.value,
       profile: results.profile.value,
       queueMaxConcurrency: results.queueMaxConcurrency.value,
       queues: results.queues.value,
@@ -2850,10 +2930,10 @@ function readWorkerStateInfo(
   );
 }
 
-function readSnapshotProfileInfo(
+function readSnapshotProfile(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<SnapshotProfileInfo, MonitoringDecodeError> {
+): DecodeResult<SnapshotProfile, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -2868,17 +2948,17 @@ function readSnapshotProfileInfo(
 
   switch (tag.value) {
     case "named":
-      return readProfileNamedInfo(fields.value);
+      return readProfileNamed(fields.value);
     case "not_recorded":
-      return readProfileNotRecordedInfo(fields.value);
+      return readProfileNotRecorded(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readProfileNamedInfo(
+function readProfileNamed(
   fields: FieldReader,
-): DecodeResult<ProfileNamedInfo, MonitoringDecodeError> {
+): DecodeResult<ProfileNamed, MonitoringDecodeError> {
   const results = {
     name: fields.read("name", decodeString),
   };
@@ -2901,9 +2981,9 @@ function readProfileNamedInfo(
   );
 }
 
-function readProfileNotRecordedInfo(
+function readProfileNotRecorded(
   fields: FieldReader,
-): DecodeResult<ProfileNotRecordedInfo, MonitoringDecodeError> {
+): DecodeResult<ProfileNotRecorded, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -2917,17 +2997,71 @@ function readProfileNotRecordedInfo(
   );
 }
 
-function readSlotHealthKind(
+function readSlotHealth(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<SlotHealthKind, MonitoringDecodeError> {
-  switch (value) {
-    case "all_serving":
-    case "slots_down":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
+): DecodeResult<SlotHealth, MonitoringDecodeError> {
+  const fields = readObject(value, place);
+
+  if (!fields.ok) {
+    return fields;
   }
+
+  const tag = fields.value.read("kind", decodeString);
+
+  if (!tag.ok) {
+    return tag;
+  }
+
+  switch (tag.value) {
+    case "all_serving":
+      return readAllSlotsServing(fields.value);
+    case "slots_down":
+      return readSlotsDown(fields.value);
+    default:
+      return tagUnknown(fields.value, "kind", tag.value);
+  }
+}
+
+function readAllSlotsServing(
+  fields: FieldReader,
+): DecodeResult<AllSlotsServing, MonitoringDecodeError> {
+  const unread = fields.unread();
+
+  if (!unread.ok) {
+    return unread;
+  }
+
+  return ok(
+    Object.freeze({
+      kind: "allServing",
+    }),
+  );
+}
+
+function readSlotsDown(
+  fields: FieldReader,
+): DecodeResult<SlotsDown, MonitoringDecodeError> {
+  const results = {
+    slots: fields.read("slots", listOf(readDownSlot)),
+  };
+
+  if (!allDecoded(results)) {
+    return firstFailure(results);
+  }
+
+  const unread = fields.unread();
+
+  if (!unread.ok) {
+    return unread;
+  }
+
+  return ok(
+    Object.freeze({
+      kind: "slotsDown",
+      slots: results.slots.value,
+    }),
+  );
 }
 
 export function decodeWorkflowEdge(

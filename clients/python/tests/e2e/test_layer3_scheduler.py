@@ -302,7 +302,7 @@ def test_scheduler_fails_with_nonexistent_task() -> None:
         'horsies',
         'scheduler',
         INVALID_SCHEDULER_INSTANCE,
-        '--loglevel=warning',
+        '--log-level=warning',
     ]
 
     env = os.environ.copy()

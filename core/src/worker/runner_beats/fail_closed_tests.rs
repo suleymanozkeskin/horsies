@@ -610,7 +610,7 @@ async fn with_recovery_off_a_dead_writer_is_logged_once_and_the_worker_runs() {
         line.message,
         "the runner heartbeat writer died: panicked: scripted defect in the beat writer. The \
          worker runs on without runner heartbeats, because no reaper fails a RUNNING row \
-         (auto_fail_stale_running is off, or no recovery config)"
+         (fail_stale_running is off, or no recovery config)"
     );
     assert_eq!(
         line.field("cause"),
@@ -950,7 +950,7 @@ fn a_worker_that_stopped_after_a_fail_closed_request_is_not_exited() {
 
 /// Python `test_only_a_reaper_that_fails_stale_running_rows_makes_beats_fail_closed`:
 /// the default config fails stale RUNNING rows at 300 s, so the beats fail
-/// closed; with `auto_fail_stale_running` off they only log.
+/// closed; with `fail_stale_running` off they only log.
 #[test]
 fn only_a_reaper_that_fails_stale_running_rows_makes_beats_fail_closed() {
     assert_eq!(
@@ -960,7 +960,7 @@ fn only_a_reaper_that_fails_stale_running_rows_makes_beats_fail_closed() {
         }
     );
     let off = RecoveryConfig {
-        auto_fail_stale_running: false,
+        fail_stale_running: false,
         ..RecoveryConfig::default()
     };
     assert_eq!(

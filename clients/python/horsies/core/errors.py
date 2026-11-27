@@ -283,23 +283,24 @@ class RegistryError(HorsiesError):
 
 
 class ValidationReport:
-    """Collects multiple HorsiesError instances within a validation phase.
+    """The refusals of one validation phase: the return of ``Horsies.check()``
+    and the report that ``MultipleValidationErrors`` carries.
 
-    Formats all collected errors together with a summary line,
-    similar to rustc's multi-error output.
+    An empty report is a pass. Formats all refusals together with a summary
+    line, similar to rustc's multi-error output.
     """
 
     def __init__(self, phase_name: str) -> None:
         self.phase_name: str = phase_name
-        self.errors: list[HorsiesError] = []
+        self.refusals: list[HorsiesError] = []
 
     def add(self, error: HorsiesError) -> None:
-        """Append an error to the report."""
-        self.errors.append(error)
+        """Append a refusal to the report."""
+        self.refusals.append(error)
 
     def has_errors(self) -> bool:
-        """Return True if any errors were collected."""
-        return len(self.errors) > 0
+        """Return True if any refusal was collected."""
+        return len(self.refusals) > 0
 
     def format_diagnostic(self, use_colors: bool | None = None) -> str:
         """Format all collected errors, then append an aborting summary."""
@@ -309,10 +310,10 @@ class ValidationReport:
         c = _Colors if use_colors else _NoColors
         parts: list[str] = []
 
-        for error in self.errors:
+        for error in self.refusals:
             parts.append(error.format_diagnostic(use_colors=use_colors))
 
-        count = len(self.errors)
+        count = len(self.refusals)
         parts.append(
             f'\n{c.BOLD}{c.RED}error{c.RESET}: aborting due to {count} previous errors'
         )
@@ -336,7 +337,7 @@ class MultipleValidationErrors(HorsiesError):
 
     def __post_init__(self) -> None:
         if not self.message:
-            count = len(self.report.errors)
+            count = len(self.report.refusals)
             self.message = f'aborting due to {count} previous errors'
         # Skip auto-location detection — location is per-error in the report
         super(HorsiesError, self).__init__(self.message)
@@ -356,11 +357,11 @@ def raise_collected(report: ValidationReport) -> None:
     - 1 error: raises the original error (preserves except clauses)
     - 2+ errors: raises MultipleValidationErrors wrapping the report
     """
-    count = len(report.errors)
+    count = len(report.refusals)
     if count == 0:
         return
     if count == 1:
-        raise report.errors[0]
+        raise report.refusals[0]
     raise MultipleValidationErrors(
         message=f'aborting due to {count} previous errors',
         report=report,

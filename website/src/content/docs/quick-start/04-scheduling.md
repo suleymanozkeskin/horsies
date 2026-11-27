@@ -83,7 +83,7 @@ config = AppConfig(
         CustomQueueConfig(name="standard", priority=50, max_concurrency=20),
         CustomQueueConfig(name="low", priority=100, max_concurrency=5),
     ],
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr("postgresql://user:password@localhost:5432/shipping_db"),
     ),
     schedule=schedule_config,
@@ -103,5 +103,5 @@ config = AppConfig(
 ## Running the Scheduler
 
 ```bash
-horsies scheduler myapp.config:app --loglevel=INFO
+horsies scheduler myapp.config:app --log-level=INFO
 ```

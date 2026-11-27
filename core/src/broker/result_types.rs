@@ -286,7 +286,7 @@ pub enum DatabaseOperationError {
     },
     /// The broker has no listener, so the operation cannot run. Nothing ran.
     ///
-    /// A broker built with ``assume_initialized=True`` has no listener. Every
+    /// A broker of ``SchemaMode.ASSUME_INITIALIZED`` has no listener. Every
     /// call that needs one returns this error for that broker.
     #[error_class(
         class = "DatabaseListenerDisabled",

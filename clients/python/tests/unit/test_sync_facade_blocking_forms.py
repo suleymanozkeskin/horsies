@@ -25,19 +25,23 @@ from horsies._catalog.error_detail import NoCause
 from horsies._core import (
     AllSlotsServingRecord,
     BudgetLoadRecord,
-    ClassCoverageRecord,
-    ClassReportRecord,
+    ExecutionClassCoverageRecord,
+    ExecutionClassReportRecord,
     CoreConnectionError,
-    CoreStartFailed,
+    RuntimeStartFailed,
     DatabasePingRecord,
+    ExpiredTaskListComplete,
+    ExpiredTaskListTruncated,
     HandleClosed,
     OldestWaitingRecord,
     PendingStreamRecord,
+    StaleTaskListComplete,
+    StaleTaskListTruncated,
     StreamCoverageRecord,
     StreamServedRecord,
     StreamUnservedRecord,
     TooManyPendingCalls,
-    WorkerClassLoadRecord,
+    WorkerExecutionClassLoadRecord,
     WorkerPongRecord,
     WorkerPongsRecord,
     WorkerStateAbsent,
@@ -56,6 +60,11 @@ from horsies.core.brokers.result_types import (
 from horsies.core.codec.json_io import Json
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.health_reads import (
+    MinResponsesAtLeast,
+    PingTargetWorker,
+    WorkerHistoryLimitNewest,
+)
 from horsies.core.models.tasks import TaskError, TaskInfo
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
@@ -93,7 +102,7 @@ def _returning(make_answer: Callable[[], _T]) -> Callable[..., _T]:
 
 def _app() -> Horsies:
     """An app whose broker cannot connect, with one task whose ok type is int."""
-    app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))))
+    app = Horsies(AppConfig(database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))))
 
     @app.task(REGISTERED_TASK)
     def number(*, value: int) -> Result[int, TaskError]:
@@ -383,7 +392,7 @@ def _closing_broker(core_answer: object) -> Any:
 CLOSE_CASES: Final[dict[str, Callable[[], Any]]] = {
     'closed': lambda: _closing_broker(MagicMock(spec=HandleClosed)),
     'core_cannot_run_the_close': lambda: _closing_broker(
-        CoreStartFailed('the core runtime could not start'),
+        RuntimeStartFailed('the core runtime could not start'),
     ),
 }
 
@@ -437,33 +446,34 @@ _STATES: Final = _core_record(
     ],
 )
 _COVERAGE: Final = _core_record(
-    ClassCoverageRecord,
+    ExecutionClassCoverageRecord,
     checked_at=_AT,
     live_workers=1,
     streams=[
         _core_record(
             StreamCoverageRecord,
-            queue_name='a',
+            queue='a',
             execution='ISOLATED',
-            state=_core_record(StreamServedRecord, workers=1, capacity=4),
+            coverage=_core_record(StreamServedRecord, workers=1, capacity=4),
         ),
     ],
 )
 _REPORT: Final = _core_record(
-    ClassReportRecord,
+    ExecutionClassReportRecord,
     checked_at=_AT,
+    live_window=timedelta(seconds=120),
     streams=[
         _core_record(
             PendingStreamRecord,
-            queue_name='a',
+            queue='a',
             execution='ISOLATED',
-            wait=_core_record(OldestWaitingRecord, enqueued_at=_AT, wait=timedelta(seconds=90)),
-            state=_core_record(StreamUnservedRecord),
+            coverage=_core_record(StreamUnservedRecord),
+            wait=_core_record(OldestWaitingRecord, oldest_due_at=_AT, wait=timedelta(seconds=90)),
         ),
     ],
     workers=[
         _core_record(
-            WorkerClassLoadRecord,
+            WorkerExecutionClassLoadRecord,
             worker_id='w1',
             snapshot_at=_AT,
             budgets=[
@@ -497,14 +507,18 @@ class MonitoringFacade:
 MONITORING_FACADES: Final[dict[str, MonitoringFacade]] = {
     'ping_workers': MonitoringFacade(
         blocking=lambda app: app.ping_workers(
-            target_worker_id='w1', timeout_seconds=0.5, min_responses=1,
+            target=PingTargetWorker(worker_id='w1'),
+            wait_ms=500,
+            min_responses=MinResponsesAtLeast(count=1),
         ),
         awaited=lambda app: app.ping_workers_async(
-            target_worker_id='w1', timeout_seconds=0.5, min_responses=1,
+            target=PingTargetWorker(worker_id='w1'),
+            wait_ms=500,
+            min_responses=MinResponsesAtLeast(count=1),
         ),
         blocking_form='ping_workers',
         arguments=(),
-        keywords={'target_worker_id': 'w1', 'timeout_seconds': 0.5, 'min_responses': 1},
+        keywords={'target_worker_id': 'w1', 'wait_ms': 500, 'min_responses': 1},
         answers={
             'pongs': _core_record(
                 WorkerPongsRecord,
@@ -550,8 +564,12 @@ MONITORING_FACADES: Final[dict[str, MonitoringFacade]] = {
         },
     ),
     'get_worker_state_history': MonitoringFacade(
-        blocking=lambda app: app.get_worker_state_history('w1', limit=5),
-        awaited=lambda app: app.get_worker_state_history_async('w1', limit=5),
+        blocking=lambda app: app.get_worker_state_history(
+            'w1', limit=WorkerHistoryLimitNewest(count=5),
+        ),
+        awaited=lambda app: app.get_worker_state_history_async(
+            'w1', limit=WorkerHistoryLimitNewest(count=5),
+        ),
         blocking_form='worker_state_history',
         arguments=('w1',),
         keywords={'limit': 5},
@@ -562,10 +580,10 @@ MONITORING_FACADES: Final[dict[str, MonitoringFacade]] = {
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
-    'get_class_coverage': MonitoringFacade(
-        blocking=lambda app: app.get_class_coverage(),
-        awaited=lambda app: app.get_class_coverage_async(),
-        blocking_form='class_coverage',
+    'get_execution_class_coverage': MonitoringFacade(
+        blocking=lambda app: app.get_execution_class_coverage(),
+        awaited=lambda app: app.get_execution_class_coverage_async(),
+        blocking_form='execution_class_coverage',
         arguments=(),
         keywords={},
         answers={
@@ -574,14 +592,41 @@ MONITORING_FACADES: Final[dict[str, MonitoringFacade]] = {
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
-    'get_class_report': MonitoringFacade(
-        blocking=lambda app: app.get_class_report(),
-        awaited=lambda app: app.get_class_report_async(),
-        blocking_form='class_report',
+    'get_execution_class_report': MonitoringFacade(
+        blocking=lambda app: app.get_execution_class_report(),
+        awaited=lambda app: app.get_execution_class_report_async(),
+        blocking_form='execution_class_report',
         arguments=(),
         keywords={},
         answers={
             'report': _REPORT,
+            'read_failed': _failure(DatabaseErrorCode.MONITORING_QUERY_FAILED),
+            'core_cannot_run_the_call': CORE_REFUSAL,
+        },
+    ),
+    'get_stale_tasks': MonitoringFacade(
+        blocking=lambda app: app.get_stale_tasks(7),
+        awaited=lambda app: app.get_stale_tasks_async(7),
+        blocking_form='stale_tasks',
+        arguments=(7,),
+        keywords={},
+        answers={
+            'complete': _core_record(StaleTaskListComplete, rows=[]),
+            'truncated': _core_record(StaleTaskListTruncated, rows=[], bound=10_000),
+            'invalid_input': _refused_input(),
+            'read_failed': _failure(DatabaseErrorCode.MONITORING_QUERY_FAILED),
+            'core_cannot_run_the_call': CORE_REFUSAL,
+        },
+    ),
+    'get_expired_tasks': MonitoringFacade(
+        blocking=lambda app: app.get_expired_tasks(),
+        awaited=lambda app: app.get_expired_tasks_async(),
+        blocking_form='expired_tasks',
+        arguments=(),
+        keywords={},
+        answers={
+            'complete': _core_record(ExpiredTaskListComplete, rows=[]),
+            'truncated': _core_record(ExpiredTaskListTruncated, rows=[], bound=10_000),
             'read_failed': _failure(DatabaseErrorCode.MONITORING_QUERY_FAILED),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },

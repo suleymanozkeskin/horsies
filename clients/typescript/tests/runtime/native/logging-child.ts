@@ -167,7 +167,7 @@ async function firstPayloadWarning(): Promise<string> {
 function warningRules(): NativeSendRules {
   const config = parseAppConfig(
     {
-      broker: { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } },
+      database: { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } },
       payload: { warnBytes: { kind: "bytes", bytes: WARN_BYTES } },
     },
     () => undefined,

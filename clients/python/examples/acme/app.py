@@ -346,7 +346,7 @@ app = Horsies(
     config=AppConfig(
         queue_mode=QueueMode.CUSTOM,
         custom_queues=QUEUES,
-        broker=PostgresConfig(database_url=SecretStr(DATABASE.url)),
+        database=PostgresConfig(database_url=SecretStr(DATABASE.url)),
         recovery=RECOVERY,
         retention=RETENTION,
         schedule=SCHEDULES,
@@ -357,7 +357,7 @@ app = Horsies(
         exception_mapper={KeyError: domain.DATA_CORRUPTION},
         # Infra retry for the send/start path only — execution retries are a
         # per-task RetryPolicy concern.
-        resend_on_transient_err=True,
+        resend_on_transient_error=True,
     ),
 )
 

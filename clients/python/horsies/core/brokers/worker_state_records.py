@@ -1,6 +1,7 @@
-"""The worker state and class records of the core, as the public dataclasses.
+"""The worker state and execution class records of the core, as the public
+dataclasses.
 
-The core answers the worker state reads and the class reads of
+The core answers the worker state reads and the execution class reads of
 ``PostgresBroker`` with one record class per type and per union member
 (``horsies._core``). The functions here build the frozen dataclasses of
 ``horsies.core.models.health`` and ``horsies.core.models.class_coverage``
@@ -18,10 +19,10 @@ from typing import Any, Literal, assert_never
 from horsies._core import (
     AllSlotsServingRecord,
     BudgetLoadRecord,
-    ClassBudgetRecord,
-    ClassCoverageRecord,
-    ClassReportRecord,
     DownSlotRecord,
+    ExecutionClassBudgetRecord,
+    ExecutionClassCoverageRecord,
+    ExecutionClassReportRecord,
     NoneDueRecord,
     OldestWaitingRecord,
     PendingStreamRecord,
@@ -33,7 +34,7 @@ from horsies._core import (
     StreamServedRecord,
     StreamUnservedRecord,
     StreamWithoutCapacityRecord,
-    WorkerClassLoadRecord,
+    WorkerExecutionClassLoadRecord,
     WorkerStateRecord,
 )
 from horsies.core.codec.json_io import loads_json
@@ -45,8 +46,8 @@ from horsies.core.models.boot_failure import (
 )
 from horsies.core.models.class_coverage import (
     BudgetLoad,
-    ClassCoverage,
-    ClassReport,
+    ExecutionClassCoverage,
+    ExecutionClassReport,
     NoneDue,
     OldestWaiting,
     PendingStream,
@@ -56,13 +57,14 @@ from horsies.core.models.class_coverage import (
     StreamUnserved,
     StreamWait,
     StreamWithoutCapacity,
-    WorkerClassLoad,
+    WorkerExecutionClassLoad,
 )
+from horsies.core.models.cluster_cap import ClusterCap, NoClusterCap
 from horsies.core.models.health import (
     AllSlotsServing,
-    ClassBudget,
-    ClassBudgets,
     DownSlot,
+    ExecutionClassBudget,
+    ExecutionClassBudgets,
     ProfileNamed,
     ProfileNotRecorded,
     SlotHealth,
@@ -71,6 +73,12 @@ from horsies.core.models.health import (
     WorkerStateSnapshot,
 )
 from horsies.core.models.tasks import Execution
+from horsies.core.models.worker_profile import (
+    ClaimLimits,
+    NoTaskLimit,
+    TaskLimit,
+    TaskLimitSetting,
+)
 from horsies.core.types.result import Err, Ok
 
 
@@ -118,12 +126,21 @@ def _snapshot_profile(
             assert_never(unreachable)
 
 
-def _class_budget(record: ClassBudgetRecord) -> ClassBudget:
-    return ClassBudget(
+def _execution_class_budget(record: ExecutionClassBudgetRecord) -> ExecutionClassBudget:
+    return ExecutionClassBudget(
         budget=Execution(record.budget),
         capacity=record.capacity,
         serves=tuple(Execution(served) for served in record.serves),
     )
+
+
+def _task_limit(limit: int | None) -> TaskLimitSetting:
+    """The task limit of a claim limit of the core: ``None`` is no limit."""
+    match limit:
+        case None:
+            return NoTaskLimit()
+        case int() as tasks:
+            return TaskLimit(tasks=tasks)
 
 
 def _recovery_config(text: str) -> dict[str, Any]:
@@ -136,6 +153,16 @@ def _recovery_config(text: str) -> dict[str, Any]:
             raise AssertionError(f'the core gave recovery settings that do not decode: {refused}')
 
 
+def _cluster_cap(tasks: int | None) -> ClusterCap | NoClusterCap:
+    """The cap of a record: the core gives the stored cap as an int, or
+    None for no cap."""
+    match tasks:
+        case None:
+            return NoClusterCap()
+        case int():
+            return ClusterCap(tasks=tasks)
+
+
 def worker_state_snapshot(record: WorkerStateRecord) -> WorkerStateSnapshot:
     """The snapshot of one worker state record."""
     return WorkerStateSnapshot(
@@ -143,10 +170,12 @@ def worker_state_snapshot(record: WorkerStateRecord) -> WorkerStateSnapshot:
         snapshot_at=record.snapshot_at,
         hostname=record.hostname,
         pid=record.pid,
-        processes=record.processes,
-        max_claim_batch=record.max_claim_batch,
-        max_claim_per_worker=record.max_claim_per_worker,
-        cluster_wide_cap=record.cluster_wide_cap,
+        child_count=record.child_count,
+        claim_limits=ClaimLimits(
+            per_queue_per_pass=_task_limit(record.per_queue_per_pass),
+            claimed_per_worker=_task_limit(record.claimed_per_worker),
+        ),
+        cluster_wide_cap=_cluster_cap(record.cluster_wide_cap),
         queues=list(record.queues),
         queue_priorities=dict(record.queue_priorities),
         queue_max_concurrency=dict(record.queue_max_concurrency),
@@ -159,8 +188,11 @@ def worker_state_snapshot(record: WorkerStateRecord) -> WorkerStateSnapshot:
         children_memory_mb=record.children_memory_mb,
         worker_started_at=record.worker_started_at,
         slot_health=_slot_health(record.slot_health),
-        class_capacity=ClassBudgets(
-            tuple(_class_budget(budget) for budget in record.class_capacity),
+        execution_class_budgets=ExecutionClassBudgets(
+            tuple(
+                _execution_class_budget(budget)
+                for budget in record.execution_class_budgets
+            ),
         ),
         profile=_snapshot_profile(record.profile),
     )
@@ -182,15 +214,17 @@ def _coverage_state(
 
 def _stream_coverage(record: StreamCoverageRecord) -> StreamCoverage:
     return StreamCoverage(
-        queue_name=record.queue_name,
+        queue=record.queue,
         execution=Execution(record.execution),
-        state=_coverage_state(record.state),
+        coverage=_coverage_state(record.coverage),
     )
 
 
-def class_coverage_of(record: ClassCoverageRecord) -> ClassCoverage:
+def execution_class_coverage_of(
+    record: ExecutionClassCoverageRecord,
+) -> ExecutionClassCoverage:
     """The fleet check of its record."""
-    return ClassCoverage(
+    return ExecutionClassCoverage(
         checked_at=record.checked_at,
         live_workers=record.live_workers,
         streams=tuple(_stream_coverage(stream) for stream in record.streams),
@@ -199,8 +233,8 @@ def class_coverage_of(record: ClassCoverageRecord) -> ClassCoverage:
 
 def _stream_wait(record: OldestWaitingRecord | NoneDueRecord) -> StreamWait:
     match record:
-        case OldestWaitingRecord(enqueued_at=enqueued_at, wait=wait):
-            return OldestWaiting(enqueued_at=enqueued_at, wait=wait)
+        case OldestWaitingRecord(oldest_due_at=oldest_due_at, wait=wait):
+            return OldestWaiting(oldest_due_at=oldest_due_at, wait=wait)
         case NoneDueRecord(next_due_at=next_due_at):
             return NoneDue(next_due_at=next_due_at)
         case _ as unreachable:
@@ -209,10 +243,10 @@ def _stream_wait(record: OldestWaitingRecord | NoneDueRecord) -> StreamWait:
 
 def _pending_stream(record: PendingStreamRecord) -> PendingStream:
     return PendingStream(
-        queue_name=record.queue_name,
+        queue=record.queue,
         execution=Execution(record.execution),
+        coverage=_coverage_state(record.coverage),
         wait=_stream_wait(record.wait),
-        state=_coverage_state(record.state),
     )
 
 
@@ -225,18 +259,25 @@ def _budget_load(record: BudgetLoadRecord) -> BudgetLoad:
     )
 
 
-def _worker_class_load(record: WorkerClassLoadRecord) -> WorkerClassLoad:
-    return WorkerClassLoad(
+def _worker_execution_class_load(
+    record: WorkerExecutionClassLoadRecord,
+) -> WorkerExecutionClassLoad:
+    return WorkerExecutionClassLoad(
         worker_id=record.worker_id,
         snapshot_at=record.snapshot_at,
         budgets=tuple(_budget_load(budget) for budget in record.budgets),
     )
 
 
-def class_report_of(record: ClassReportRecord) -> ClassReport:
-    """The class report of its record."""
-    return ClassReport(
+def execution_class_report_of(
+    record: ExecutionClassReportRecord,
+) -> ExecutionClassReport:
+    """The execution class report of its record."""
+    return ExecutionClassReport(
         checked_at=record.checked_at,
+        live_window=record.live_window,
         streams=tuple(_pending_stream(stream) for stream in record.streams),
-        workers=tuple(_worker_class_load(worker) for worker in record.workers),
+        workers=tuple(
+            _worker_execution_class_load(worker) for worker in record.workers
+        ),
     )

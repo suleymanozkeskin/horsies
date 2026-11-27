@@ -111,7 +111,7 @@ fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
     };
     let config = AppConfig {
         worker_profiles: BTreeMap::from([("default".to_owned(), profile)]),
-        ..AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies")
+        ..AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies")
     };
     let mut app = Horsies::new(config)?;
     let _add = add_numbers::register(&mut app)?;
@@ -163,7 +163,7 @@ async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = Horsies::new(AppConfig::for_database_url(
+    let mut app = Horsies::new(AppConfig::from_database_url(
         "postgresql://app:secret@db.example.com:5432/horsies",
     ))?;
     let add = add_numbers::register(&mut app)?;
@@ -212,7 +212,7 @@ async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = Horsies::new(AppConfig::for_database_url(
+    let mut app = Horsies::new(AppConfig::from_database_url(
         "postgresql://app:secret@db.example.com:5432/horsies",
     ))?;
     let add = add_numbers::register(&mut app)?;
@@ -305,7 +305,7 @@ impl WorkflowDefinition for DailyReport {
 | `WorkflowHandle::status`, `cancel`, `pause`, `resume` | `HandleResult<_>` (`Result<_, WorkflowHandleError>`) |
 | Health reads on the app | `Result<_, DatabaseOperationError>` |
 | Config, registration, `provide` | `Result<_, HorsiesError>` (`HRS-xxx` codes) |
-| `check`, `check_live` | `Result<CheckPassed, CheckReport>` |
+| `check`, `check_live` | `Result<CheckPassed, ValidationReport>` |
 
 Every error type is a closed catalog. Match on the variant or on the code.
 `retryable: true` means the cause may clear; it does not mean that a repeat
@@ -333,10 +333,10 @@ owns. See `tasks.md`, Rerun a Terminal Task.
 ## CLI
 
 ```bash
-./myapp worker --profile <name> [--loglevel LEVEL] [--metrics-listen HOST:PORT]   # the app's own binary
-./myapp scheduler [--loglevel LEVEL]
-./myapp check [--live] [--loglevel LEVEL]
-./myapp metrics --listen HOST:PORT [--loglevel LEVEL]   # the fleet metrics at GET /metrics
+./myapp worker --profile <name> [--log-level LEVEL] [--metrics-listen HOST:PORT]   # the app's own binary
+./myapp scheduler [--log-level LEVEL]
+./myapp check [--live] [--log-level LEVEL]
+./myapp metrics --metrics-listen HOST:PORT [--log-level LEVEL]   # the fleet metrics at GET /metrics
 horsies web --database-url URL                       # the shipped binary (feature web)
 horsies get-docs [--output DIR] [--ref main]
 horsies skills install --target DIR [--force]        # copy this skill folder to DIR/horsies/

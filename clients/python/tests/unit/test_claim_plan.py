@@ -66,7 +66,7 @@ class TestRegisteredClasses:
     def test_a_real_app_registers_each_declared_class(self) -> None:
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr('postgresql://u:p@localhost/db'),
                 ),
             ),

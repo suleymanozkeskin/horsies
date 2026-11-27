@@ -8,6 +8,7 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.cluster_cap import ClusterCap
 from horsies.core.models.queues import QueueMode
 
 from tests.e2e.helpers.env import e2e_database_url
@@ -20,8 +21,8 @@ CLUSTER_WIDE_CAP = 2
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    cluster_wide_cap=CLUSTER_WIDE_CAP,
-    broker=PostgresConfig(
+    cluster_wide_cap=ClusterCap(tasks=CLUSTER_WIDE_CAP),
+    database=PostgresConfig(
         database_url=DB_URL,
         pool_size=5,
         max_overflow=5,
@@ -30,7 +31,7 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 

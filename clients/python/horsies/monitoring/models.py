@@ -7,8 +7,13 @@ conventions hold across every model:
 * Optional text is normalized before it reaches a model: horsies stores ``''``
   for cleared text, and empty strings arrive here as ``None``.
 * A measured duration (``queue_s``, ``exec_s``, ``wall_s``,
-  ``snapshot_age_s``, ``uptime_s``, ``wait_s``) is a float of seconds,
-  exact to the microsecond.
+  ``snapshot_age_s``, ``uptime_s``, ``wait_seconds``) is a float of
+  seconds, exact to the microsecond.
+
+The worker and execution class routes answer with the health types of
+``horsies.core.models.health`` and ``horsies.core.models.class_coverage``
+(``WorkerPong``, ``DownSlot``, ``SlotHealth``, ``SnapshotProfile``,
+``ExecutionClassReport`` and its parts): one type per record.
 
 These models are unstable pre-1.0.
 """
@@ -24,6 +29,31 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from horsies._catalog.history import TaskAbsenceReason
+from horsies.core.models.class_coverage import (
+    BudgetLoad as BudgetLoad,
+    ExecutionClassReport as ExecutionClassReport,
+    NoneDue as NoneDue,
+    OldestWaiting as OldestWaiting,
+    PendingStream as PendingStream,
+    StreamCoverageState as StreamCoverageState,
+    StreamServed as StreamServed,
+    StreamUnserved as StreamUnserved,
+    StreamWait as StreamWait,
+    StreamWithoutCapacity as StreamWithoutCapacity,
+    WorkerExecutionClassLoad as WorkerExecutionClassLoad,
+)
+from horsies.core.models.health import (
+    AllSlotsServing as AllSlotsServing,
+    DatabasePing as DatabasePing,
+    DatabaseUnreachable as DatabaseUnreachable,
+    DownSlot as DownSlot,
+    ProfileNamed as ProfileNamed,
+    ProfileNotRecorded as ProfileNotRecorded,
+    SlotHealth as SlotHealth,
+    SlotsDown as SlotsDown,
+    SnapshotProfile as SnapshotProfile,
+    WorkerPong as WorkerPong,
+)
 from horsies.core.models.tasks import Execution
 
 
@@ -1037,45 +1067,6 @@ class WorkflowTaskDetail(BaseModel):
 # --------------------------------------------------------------------------- #
 # Workers and schedules
 # --------------------------------------------------------------------------- #
-class DownSlotInfo(BaseModel):
-    """One slot that was down when the worker wrote its snapshot.
-
-    ``cause`` describes the cause of the last failed child start, and
-    ``detail`` is its error text.
-    """
-
-    slot: int
-    cause: str
-    detail: str
-    down_since: datetime
-    failed_boots: int
-
-
-class ProfileNamedInfo(BaseModel):
-    """The worker ran the profile ``name`` of ``AppConfig.worker_profiles``."""
-
-    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
-
-    kind: Literal['named'] = 'named'
-    name: str
-
-
-class ProfileNotRecordedInfo(BaseModel):
-    """The snapshot holds no profile name: a worker of a build before schema
-    migration 1004 wrote it."""
-
-    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
-
-    kind: Literal['not_recorded'] = 'not_recorded'
-
-
-SnapshotProfileInfo = Annotated[
-    ProfileNamedInfo | ProfileNotRecordedInfo,
-    Field(discriminator='kind'),
-]
-"""The worker profile that a snapshot names."""
-
-
 class WorkerStateInfo(BaseModel):
     """Latest state snapshot for one worker (from horsies_worker_states).
 
@@ -1085,12 +1076,11 @@ class WorkerStateInfo(BaseModel):
     threshold, signalling a worker that stopped reporting. Liveness is proven
     separately by an active ping.
 
-    ``slot_health`` is ``all_serving`` or ``slots_down`` (``down_slots`` lists
-    them, in slot order). ``down_slots`` is empty unless ``slot_health`` is
-    ``slots_down``.
+    ``slot_health`` is ``AllSlotsServing`` or ``SlotsDown`` with the down
+    slots, in slot order.
 
     ``profile`` names the worker profile that the worker ran:
-    ``ProfileNamedInfo`` or ``ProfileNotRecordedInfo``.
+    ``ProfileNamed`` or ``ProfileNotRecorded``.
     """
 
     worker_id: str
@@ -1101,7 +1091,7 @@ class WorkerStateInfo(BaseModel):
     stale: bool
     worker_started_at: datetime
     uptime_s: float | None
-    processes: int
+    child_count: int
     queues: list[str]
     queue_max_concurrency: dict[str, int]
     tasks_running: int
@@ -1110,121 +1100,22 @@ class WorkerStateInfo(BaseModel):
     memory_usage_mb: float | None
     memory_percent: float | None
     cpu_percent: float | None
-    slot_health: Literal['all_serving', 'slots_down']
-    down_slots: list[DownSlotInfo]
-    profile: SnapshotProfileInfo
+    slot_health: SlotHealth
+    profile: SnapshotProfile
 
 
-class BudgetLoadInfo(BaseModel):
-    """One claim budget of a live worker.
-
-    ``capacity`` (children or seats in service) and ``serves`` come from the
-    worker's latest snapshot. ``in_flight`` counts, at the read, its RUNNING
-    rows and CLAIMED rows with a live lease of the classes in ``serves``.
-    ``free`` is ``capacity`` minus ``in_flight``, at least 0.
-    """
-
-    budget: Execution
-    capacity: int
-    serves: list[Execution]
-    in_flight: int
-    free: int
-
-
-class WorkerClassLoadInfo(BaseModel):
-    """The claim budgets of one live worker, in execution class order."""
-
-    worker_id: str
-    snapshot_at: datetime
-    budgets: list[BudgetLoadInfo]
-
-
-class StreamServedInfo(BaseModel):
-    """Live workers serve the stream with capacity in service.
-
-    ``workers`` counts them; ``capacity`` sums the capacity in service of
-    the budget that serves the class on each.
-    """
-
-    kind: Literal['served']
-    workers: int
-    capacity: int
-
-
-class StreamNoCapacityInfo(BaseModel):
-    """Live workers serve the stream, and none has capacity in service for it."""
-
-    kind: Literal['no_capacity']
-    workers: int
-
-
-class StreamUnservedInfo(BaseModel):
-    """No live worker serves the stream."""
-
-    kind: Literal['unserved']
-
-
-class StreamWaitingInfo(BaseModel):
-    """At least one row is due. ``wait_s`` is the wait of the oldest due row,
-    in seconds, exact to the microsecond."""
-
-    kind: Literal['waiting']
-    oldest_due_at: datetime
-    wait_s: float
-
-
-class StreamNoneDueInfo(BaseModel):
-    """Every row is due later; ``next_due_at`` is the earliest due time."""
-
-    kind: Literal['none_due']
-    next_due_at: datetime
-
-
-class PendingStreamInfo(BaseModel):
-    """The PENDING rows of one queue and one execution class."""
-
-    queue_name: str
-    execution: Execution
-    coverage: Annotated[
-        StreamServedInfo | StreamNoCapacityInfo | StreamUnservedInfo,
-        Field(discriminator='kind'),
-    ]
-    wait: Annotated[
-        StreamWaitingInfo | StreamNoneDueInfo,
-        Field(discriminator='kind'),
-    ]
-
-
-class ClassReportInfo(BaseModel):
-    """Pending streams and the budget load of each live worker.
-
-    ``checked_at`` is database time. A worker is live while its latest
-    snapshot is at most ``live_window_s`` old. ``streams`` is ordered by
-    queue name, then by execution class. ``workers`` holds the live workers,
-    by worker id.
-    """
-
-    checked_at: datetime
-    live_window_s: int
-    streams: list[PendingStreamInfo]
-    workers: list[WorkerClassLoadInfo]
-
-
-class WorkerPingInfo(BaseModel):
-    """One worker's reply to an active liveness ping."""
-
-    worker_id: str
-    hostname: str
-    pid: int
-    round_trip_ms: float
+DatabaseLiveness = Annotated[
+    DatabasePing | DatabaseUnreachable,
+    Field(discriminator='kind'),
+]
+"""The database part of a liveness report: the ping latency, or unreachable."""
 
 
 class LivenessReport(BaseModel):
     """Database reachability plus the workers that answered an active ping."""
 
-    db_latency_ms: float | None
-    db_reachable: bool
-    workers: list[WorkerPingInfo]
+    database: DatabaseLiveness
+    workers: list[WorkerPong]
 
 
 class WorkerHistoryPoint(BaseModel):

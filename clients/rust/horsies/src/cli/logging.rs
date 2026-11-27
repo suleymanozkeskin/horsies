@@ -1,8 +1,8 @@
 //! The logs of the runner: one `tracing` subscriber on stderr, at the
-//! `--loglevel` of the command, or at `RUST_LOG` when it is set, in the
+//! `--log-level` of the command, or at `RUST_LOG` when it is set, in the
 //! [`LogFormat`] of the runner. The core's `tracing` events reach it. A
 //! worker child installs the same subscriber at the level of its init
-//! frame, the worker's `--loglevel`, in the same format.
+//! frame, the worker's `--log-level`, in the same format.
 //!
 //! With the feature `otel`, the subscriber also has the layer of
 //! `horsies::otel`, and its filter passes the attempt span of each task
@@ -60,8 +60,8 @@ fn runner_filter(filter: EnvFilter) -> EnvFilter {
 }
 
 /// The layer that writes each record to `writer` in `format`:
-/// - [`LogFormat::Text`]: one line of text, with ANSI color when `color`;
-/// - [`LogFormat::Json`]: one JSON object per line, no color: `timestamp`,
+/// - [`LogFormat::TextLogs`]: one line of text, with ANSI color when `color`;
+/// - [`LogFormat::JsonLogs`]: one JSON object per line, no color: `timestamp`,
 ///   `level`, `target`, the fields of the event at the top level
 ///   (`message` among them), `span` (the innermost span, with its name and
 ///   fields) and `spans` (every span of the record, outermost first).
@@ -75,12 +75,12 @@ where
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
     match format {
-        LogFormat::Text => tracing_subscriber::fmt::layer()
+        LogFormat::TextLogs => tracing_subscriber::fmt::layer()
             .with_writer(writer)
             .with_ansi(color)
             .with_target(true)
             .boxed(),
-        LogFormat::Json => tracing_subscriber::fmt::layer()
+        LogFormat::JsonLogs => tracing_subscriber::fmt::layer()
             .json()
             .with_writer(writer)
             .with_ansi(false)
@@ -153,7 +153,7 @@ mod tests {
     fn json_lines() -> Vec<String> {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let writer_buffer = Arc::clone(&buffer);
-        let layer = format_layer(LogFormat::Json, true, move || {
+        let layer = format_layer(LogFormat::JsonLogs, true, move || {
             Captured(Arc::clone(&writer_buffer))
         });
         let subscriber = tracing_subscriber::registry().with(layer);
@@ -179,7 +179,7 @@ mod tests {
         text.lines().map(str::to_owned).collect()
     }
 
-    /// `LogFormat::Json` writes one JSON object per record, with the level,
+    /// `LogFormat::JsonLogs` writes one JSON object per record, with the level,
     /// the target, the fields of the event at the top level, the innermost
     /// span and every span of the record with their fields, and no color.
     #[test]

@@ -127,7 +127,7 @@ SCENARIO_TIMEOUT_S: Final = 5.0
 
 APP = Horsies(
     AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://u:p@localhost/unused'),
         ),
     ),

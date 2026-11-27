@@ -57,7 +57,7 @@ ACT_HEADERS = {INTENT_HEADER: INTENT_VALUE}
 def make_horsies_app() -> Horsies:
     """A horsies app whose broker can never connect."""
     return Horsies(
-        AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)))
+        AppConfig(database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)))
     )
 
 

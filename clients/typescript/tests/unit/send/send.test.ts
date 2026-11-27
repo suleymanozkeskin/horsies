@@ -463,7 +463,7 @@ describe("resend", () => {
 describe("the suppression of sends", () => {
   async function sendInProcess(start: ProcessStart, variables: Readonly<Record<string, string>> = {}): Promise<string> {
     const environment = fakeEnvironment({ start, variables });
-    const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [report] }, environment);
+    const created = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [report] }, environment);
 
     if (!created.ok) {
       throw new Error("the app is refused");
@@ -502,7 +502,7 @@ describe("the suppression of sends", () => {
 
   test("HORSIES_SUPPRESS_SENDS is read at each send: set after Horsies.create, it suppresses", async () => {
     const variables: Record<string, string> = {};
-    const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [report] }, fakeEnvironment({ variables }));
+    const created = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [report] }, fakeEnvironment({ variables }));
 
     if (!created.ok) {
       throw new Error("the app is refused");
@@ -541,7 +541,7 @@ describe("the suppression of sends", () => {
 
 describe("a send in a worker thread with no core", () => {
   test("throws AddonOutsideMainThread", async () => {
-    const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [report] }, fakeEnvironment({ mainThread: false }));
+    const created = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [report] }, fakeEnvironment({ mainThread: false }));
 
     if (!created.ok) {
       throw new Error("the app is refused");

@@ -1,4 +1,4 @@
-"""App instance with the documented on_child_process_start body.
+"""App instance with the documented on_child_start body.
 
 Owns a module-level SQLAlchemy engine (separate from horsies' broker),
 tagged with a distinct application_name for pg_stat_activity attribution.
@@ -57,7 +57,7 @@ def get_engine() -> Engine:
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=DB_URL,
         pool_size=5,
         max_overflow=5,
@@ -66,12 +66,12 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 
 
-@app.on_child_process_start
+@app.on_child_start
 def _reset_db_for_child() -> None:
     """The canonical documented body: dispose inherited FDs, rebind pool policy."""
     global _app_engine

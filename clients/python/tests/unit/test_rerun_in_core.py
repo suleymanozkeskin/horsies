@@ -242,7 +242,7 @@ def _app_with_charge(*, declares_transient: bool) -> Horsies:
     among its declared codes."""
     app = Horsies(
         config=AppConfig(
-            broker=PostgresConfig(database_url='postgresql://user:pass@localhost/db'),
+            database=PostgresConfig(database_url='postgresql://user:pass@localhost/db'),
         ),
     )
     error_codes: type[Enum] | tuple[str, ...] = _ChargeCode if declares_transient else ()

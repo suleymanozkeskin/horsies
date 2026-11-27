@@ -438,7 +438,7 @@ async def test_a_seat_that_gets_its_connection_after_the_deadline_leaves_the_row
     deadlines = threading.Thread(target=table.serve_deadlines, daemon=True)
     deadlines.start()
     seats = ThreadSeats(2, table, PostgresThreadSeats(), lambda: RssMb(1.0))
-    one_connection = ResolvedPool(min_size=0, max_size=1, check=False)
+    one_connection = ResolvedPool(min_size=0, max_size=1, pre_ping=False)
     with child_core_handle_for(broker.config.effective_session_database_url, one_connection):
         assert seats.start().is_ok()
         try:

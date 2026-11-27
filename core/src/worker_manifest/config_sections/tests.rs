@@ -28,7 +28,7 @@ fn fixture() -> wire::WorkerManifest {
 }
 
 fn config() -> AppConfig {
-    AppConfig::for_database_url("postgresql://app@db.example/horsies")
+    AppConfig::from_database_url("postgresql://app@db.example/horsies")
 }
 
 fn sections(config: &AppConfig) -> ConfigSections {
@@ -83,7 +83,7 @@ fn each_profile_of_the_config_is_its_manifest_profile() {
         "count": 1,
         "seats": 4,
         "recycle": {"after_per_seat": {"kind": "NO_LIMIT"}, "above": {"kind": "NO_LIMIT"}},
-        "pool": {"min_size": 0, "max_size": {"kind": "FROM_SEATS"}, "check": true},
+        "pool": {"min_size": 0, "max_size": {"kind": "FROM_SEATS"}, "pre_ping": true},
         "task_send_pool": 1
     });
     other["pool"] = json!({"max_size": {"kind": "CONNECTIONS", "connections": 5}});
@@ -131,7 +131,7 @@ fn the_claim_section_has_the_queues_and_the_claim_values_of_the_config() {
     config.prefetch_buffer = 0;
     config.claim_lease_ms = None;
     config.max_claim_renew_age_ms = 180_000;
-    config.cluster_wide_cap = Some(20);
+    config.cluster_wide_cap = crate::core::config::ClusterCapSetting::ClusterCap { tasks: 20 };
     assert_eq!(sections(&config).claim, fixture().claim);
 }
 
@@ -178,7 +178,7 @@ fn a_retention_rule_that_is_off_is_a_variant_of_its_own() {
     let mut config = config();
     config.retention.worker_state_retention_hours = None;
     config.retention.terminal_record_retention_hours = Some(43_800);
-    config.retention.paused_workflow_auto_cancel_after = None;
+    config.retention.paused_workflow_cancel_after = None;
     let retention = sections(&config).retention;
     assert_eq!(
         retention.worker_state_retention,
@@ -189,7 +189,7 @@ fn a_retention_rule_that_is_off_is_a_variant_of_its_own() {
     };
     assert_eq!(hours.0.get(), 43_800);
     assert_eq!(
-        retention.paused_workflow_auto_cancel_after,
+        retention.paused_workflow_cancel_after,
         wire::PausedWorkflowExpiry::NoExpiry
     );
 }
@@ -202,9 +202,9 @@ fn the_resilience_section_is_the_config_and_zero_attempts_is_no_limit() {
     let mut config = config();
     config.resilience = fixture.resilience.to_config();
     assert_eq!(sections(&config).resilience, fixture.resilience);
-    config.resilience.db_retry_max_attempts = 0;
+    config.resilience.database_retry_max_attempts = 0;
     assert_eq!(
-        sections(&config).resilience.db_retry_max_attempts,
+        sections(&config).resilience.database_retry_max_attempts,
         wire::RetryAttemptLimit::NoLimit
     );
 }
@@ -272,7 +272,10 @@ fn claim_cases() -> Vec<BoundCase> {
             bound_of!(wire::Milliseconds),
         ),
         (
-            Box::new(|config: &mut AppConfig| config.cluster_wide_cap = Some(u32::MAX)),
+            Box::new(|config: &mut AppConfig| {
+                config.cluster_wide_cap =
+                    crate::core::config::ClusterCapSetting::ClusterCap { tasks: u32::MAX }
+            }),
             ConfigField::ClusterWideCap,
             "cluster_wide_cap",
             bound_of!(wire::LimitTasks),
@@ -338,10 +341,10 @@ fn recovery_limit_cases() -> Vec<BoundCase> {
         ),
         recovery_case(
             Box::new(|config: &mut AppConfig| {
-                config.recovery.phase2_quarantine_after_attempts = 0;
+                config.recovery.finalization_quarantine_after_attempts = 0;
             }),
-            RecoveryField::Phase2QuarantineAfterAttempts,
-            "recovery.phase2_quarantine_after_attempts",
+            RecoveryField::FinalizationQuarantineAfterAttempts,
+            "recovery.finalization_quarantine_after_attempts",
             bound_of!(wire::RecoveryPassLimit),
         ),
         recovery_case(
@@ -451,16 +454,18 @@ fn retention_period_cases() -> Vec<BoundCase> {
         ),
         retention_case(
             Box::new(|config: &mut AppConfig| {
-                config.retention.partition_maintenance_interval_s = 0;
+                config.retention.partition_maintenance_interval_seconds = 0;
             }),
-            RetentionField::PartitionMaintenanceIntervalS,
-            "retention.partition_maintenance_interval_s",
+            RetentionField::PartitionMaintenanceIntervalSeconds,
+            "retention.partition_maintenance_interval_seconds",
             bound_of!(wire::MaintenanceIntervalSeconds),
         ),
         retention_case(
-            Box::new(|config: &mut AppConfig| config.retention.retention_sweep_interval_s = 0),
-            RetentionField::RetentionSweepIntervalS,
-            "retention.retention_sweep_interval_s",
+            Box::new(|config: &mut AppConfig| {
+                config.retention.retention_sweep_interval_seconds = 0;
+            }),
+            RetentionField::RetentionSweepIntervalSeconds,
+            "retention.retention_sweep_interval_seconds",
             bound_of!(wire::SweepIntervalSeconds),
         ),
         retention_case(
@@ -477,21 +482,23 @@ fn retention_period_cases() -> Vec<BoundCase> {
 fn resilience_and_payload_cases() -> Vec<BoundCase> {
     vec![
         (
-            Box::new(|config: &mut AppConfig| config.resilience.db_retry_initial_ms = 0),
-            ConfigField::Resilience(ResilienceField::DbRetryInitialMs),
-            "resilience.db_retry_initial_ms",
+            Box::new(|config: &mut AppConfig| config.resilience.database_retry_initial_ms = 0),
+            ConfigField::Resilience(ResilienceField::DatabaseRetryInitialMs),
+            "resilience.database_retry_initial_ms",
             bound_of!(wire::RetryInitialMs),
         ),
         (
-            Box::new(|config: &mut AppConfig| config.resilience.db_retry_max_ms = 0),
-            ConfigField::Resilience(ResilienceField::DbRetryMaxMs),
-            "resilience.db_retry_max_ms",
+            Box::new(|config: &mut AppConfig| config.resilience.database_retry_max_ms = 0),
+            ConfigField::Resilience(ResilienceField::DatabaseRetryMaxMs),
+            "resilience.database_retry_max_ms",
             bound_of!(wire::RetryMaxMs),
         ),
         (
-            Box::new(|config: &mut AppConfig| config.resilience.db_retry_max_attempts = u64::MAX),
-            ConfigField::Resilience(ResilienceField::DbRetryMaxAttempts),
-            "resilience.db_retry_max_attempts",
+            Box::new(|config: &mut AppConfig| {
+                config.resilience.database_retry_max_attempts = u64::MAX;
+            }),
+            ConfigField::Resilience(ResilienceField::DatabaseRetryMaxAttempts),
+            "resilience.database_retry_max_attempts",
             bound_of!(wire::RetryAttemptCount),
         ),
         (

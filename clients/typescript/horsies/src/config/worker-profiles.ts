@@ -267,7 +267,7 @@ function isolatedChildrenJson(children: IsolatedChildren, path: string): Checked
           checkedInteger(size, POOL_MIN_SIZE, memberPath(path, "pool.minSize")),
         ),
         optionalEntry("max_size", pool.maxSize, (size) => poolSizeJson(size, memberPath(path, "pool.maxSize"))),
-        optionalEntry("check", pool.prePing, accepted),
+        optionalEntry("pre_ping", pool.prePing, accepted),
       ]),
     ),
     optionalEntry("task_send_pool", children.taskSendPool, (size) =>
@@ -338,7 +338,7 @@ function sharedPoolJson(pool: SharedPoolInput, path: string): Checked<ConfigJson
   return checkedObject([
     optionalEntry("min_size", pool.minSize, (size) => checkedInteger(size, POOL_MIN_SIZE, memberPath(path, "minSize"))),
     optionalEntry("max_size", pool.maxSize, (size) => sharedPoolSizeJson(size, memberPath(path, "maxSize"))),
-    optionalEntry("check", pool.prePing, accepted),
+    optionalEntry("pre_ping", pool.prePing, accepted),
   ]);
 }
 

@@ -42,7 +42,7 @@ LEVEL_WHERE_THE_NESTING_ENDS = 3
 def _app() -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr('postgresql://user:pass@localhost/db'),
             ),
             queue_mode=QueueMode.CUSTOM,
@@ -102,7 +102,7 @@ class TestNestingFindingsInCheck:
 
         app.workflow_builder()(root)
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert [error.code for error in errors] == [
             HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT
@@ -133,7 +133,7 @@ class TestNestingFindingsInCheck:
 
         app.workflow_builder()(root)
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert [error.code for error in errors] == [
             HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING
@@ -165,7 +165,7 @@ class TestNestingFindingsInCheck:
 
         app.workflow_builder()(root)
 
-        assert app.check(live=False) == []
+        assert app.check(live=False).refusals == []
 
 
 class TestNestingBehindADependency:
@@ -197,7 +197,7 @@ class TestNestingBehindADependency:
 
         app.workflow_builder()(root)
 
-        assert app.check(live=False) == []
+        assert app.check(live=False).refusals == []
 
     def test_a_nesting_past_the_limit_behind_dependencies_passes(self) -> None:
         app = _app()
@@ -227,7 +227,7 @@ class TestNestingBehindADependency:
 
         app.workflow_builder()(root)
 
-        assert app.check(live=False) == []
+        assert app.check(live=False).refusals == []
 
     def test_a_dependency_before_a_self_nesting_does_not_hide_it(self) -> None:
         """Once the definition starts, nothing between its two occurrences waits."""
@@ -257,7 +257,7 @@ class TestNestingBehindADependency:
 
         app.workflow_builder()(root)
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert [error.code for error in errors] == [
             HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING
@@ -293,7 +293,7 @@ class TestNestingBehindADependency:
 
         app.workflow_builder()(root)
 
-        assert app.check(live=False) == []
+        assert app.check(live=False).refusals == []
 
 
 def _chain(length: int) -> NestingPath:

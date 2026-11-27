@@ -56,7 +56,7 @@ pytestmark = [pytest.mark.unit]
 def _app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr(
                     'postgresql://user:pass@127.0.0.1:1/none'
                 ),
@@ -332,7 +332,7 @@ class TestDeclarationsThatAreRefused:
                 from horsies import AppConfig, Execution, Horsies, PostgresConfig
                 from horsies import Ok, Result, TaskError
 
-                app = Horsies(AppConfig(broker=PostgresConfig(
+                app = Horsies(AppConfig(database=PostgresConfig(
                     database_url=SecretStr(
                         'postgresql://user:pass@127.0.0.1:1/none',
                     ),
@@ -348,7 +348,7 @@ class TestDeclarationsThatAreRefused:
         app = _app()
         app.discover_tasks([str(module)])
 
-        errors = app.check()
+        errors = app.check().refusals
 
         assert [error.code for error in errors] == [
             HorsiesErrorCode.TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF,

@@ -51,7 +51,7 @@ def _test_app(broker: PostgresBroker) -> Horsies:
     global _TEST_APP
     if _TEST_APP is None:
         cfg = AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://u:p@localhost/db',
             )
         )
@@ -80,7 +80,7 @@ def _declaring_app(broker: PostgresBroker) -> Horsies:
     global _DECLARING_APP
     if _DECLARING_APP is None:
         cfg = AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://u:p@localhost/db',
             ),
             retention=RetentionConfig(retention_periods=(DECLARED_PERIOD,)),

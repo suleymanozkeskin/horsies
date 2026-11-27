@@ -11,8 +11,8 @@ pub mod schedule;
 pub mod socket;
 pub mod worker_profile;
 
-pub use app::{mask_database_url, AppConfig, AppConfigError};
-pub use broker::{PostgresConfig, PostgresConfigError};
+pub use app::{mask_database_url, AppConfig, AppConfigError, ClusterCapSetting};
+pub use broker::{PostgresConfig, PostgresConfigError, SessionDatabase};
 pub use payload::PayloadPolicy;
 pub use queue::{CustomQueueConfig, CustomQueueConfigError, QueueMode};
 pub use recovery::{RecoveryConfig, RecoveryConfigError};
@@ -26,9 +26,7 @@ pub use schedule::{
     HourlySchedule, IntervalSchedule, Month, MonthlySchedule, ScheduleConfig, SchedulePattern,
     TaskSchedule, Weekday, WeeklySchedule,
 };
-pub use socket::{
-    KeepaliveProbes, KeepaliveSeconds, TcpKeepalivesConfig, TcpUserTimeoutConfig, TcpUserTimeoutMs,
-};
+pub use socket::input::{SocketValueRefused, TcpKeepalivesConfig, TcpUserTimeoutConfig};
 pub use worker_profile::{describe_worker_profile, ChildPreload, ParentCpu, WorkerProfile};
 
 /// The body of a unit variant of a tagged config enum: the members after
@@ -40,10 +38,11 @@ pub use worker_profile::{describe_worker_profile, ChildPreload, ParentCpu, Worke
 /// - [`CronNumericTerm::Every`], [`CronEnumTerm::Every`] and
 ///   [`DaySelector::EveryDay`]: Python's `CronEvery` and `EveryDay` refuse a
 ///   member (`extra='forbid'`).
-/// - [`TcpKeepalivesConfig::Off`], [`TcpUserTimeoutConfig::SystemDefault`]
-///   and [`crate::manifest::PoolRecycle::Never`]: Rust forms of Python's
-///   flat `PostgresConfig` fields, and `PostgresConfig` refuses an unknown
-///   key.
+/// - [`TcpKeepalivesConfig::Off`], [`TcpUserTimeoutConfig::SystemDefault`],
+///   [`SessionDatabase::SameAsDatabaseUrl`],
+///   [`crate::manifest::PoolRecycle::Never`] and
+///   [`ClusterCapSetting::NoClusterCap`]: Rust forms of Python's
+///   `PostgresConfig` and `AppConfig` unions, which refuse an unknown key.
 ///
 /// Errors: serde's unknown-field error, which names the first member.
 pub(crate) fn no_member_after_the_tag<'de, D>(deserializer: D) -> Result<(), D::Error>

@@ -49,7 +49,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, Ok, Result, TaskError
 
 app = Horsies(config=AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://...")),
 ))
 
 @app.task("add_numbers")
@@ -218,7 +218,7 @@ A start with an existing `workflow_id` compares its start command with the store
 
 ### Auto-retry ( this is not execution retry, only for sending tasks / starting workflows, for task execution retry see `RetryPolicy` )
 
-Set `resend_on_transient_err=True` on `AppConfig` to auto-retry transient
+Set `resend_on_transient_error=True` on `AppConfig` to auto-retry transient
 `ENQUEUE_FAILED` errors (up to 3 times, exponential backoff) for both
 task sends and workflow starts.
 
@@ -404,7 +404,7 @@ horsies scheduler myapp.config:app       # start scheduler
 horsies check myapp.config:app [--live]  # validate before deploy
 horsies web myapp.config:app             # serve the monitoring web UI (needs horsies[web])
 horsies web --database-url URL           # monitor a database without an app module
-horsies metrics myapp.config:app --listen 0.0.0.0:9465  # serve the fleet metrics at GET /metrics
+horsies metrics myapp.config:app --metrics-listen 0.0.0.0:9465  # serve the fleet metrics at GET /metrics
 horsies get-docs                         # download the docs of the installed version
 horsies get-docs --ref main              # download the main branch docs (needed for a development version)
 horsies skills install --target DIR      # copy this skill folder to DIR/horsies/ (--force replaces a changed copy)

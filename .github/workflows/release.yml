@@ -388,7 +388,7 @@ jobs:
           async def main() -> None:
               app = Horsies(
                   AppConfig(
-                      broker=PostgresConfig(
+                      database=PostgresConfig(
                           database_url=SecretStr('postgresql://check:none@127.0.0.1:1/none'),
                       ),
                   ),

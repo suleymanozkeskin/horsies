@@ -133,14 +133,14 @@ class TestBrokerAndApp:
         assert core_handle.mock_calls == []
 
     def test_app_get_raw_result_returns_the_broker_refusal(self) -> None:
-        app = Horsies(AppConfig(broker=PostgresConfig(database_url=_UNREACHABLE_URL)))
+        app = Horsies(AppConfig(database=PostgresConfig(database_url=_UNREACHABLE_URL)))
 
         result = asyncio.run(app.get_raw_result_async(uuid.uuid4(), timeout_ms=-1))
 
         assert isinstance(result.unwrap_err(), DatabaseInvalidInput)
 
     def test_app_get_result_refuses_before_any_read(self) -> None:
-        app = Horsies(AppConfig(broker=PostgresConfig(database_url=_UNREACHABLE_URL)))
+        app = Horsies(AppConfig(database=PostgresConfig(database_url=_UNREACHABLE_URL)))
 
         result = asyncio.run(app.get_result_async(uuid.uuid4(), timeout_ms=-1))
 

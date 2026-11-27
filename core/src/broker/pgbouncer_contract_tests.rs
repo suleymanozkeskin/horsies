@@ -350,7 +350,7 @@ async fn a_session_url_on_the_transaction_pool_fails_the_worker_session_check() 
 async fn a_session_pooled_url_installs_enqueues_and_delivers_a_notify() {
     let urls = PgbouncerUrls::create().await;
     let broker = PostgresBroker::connect_with(
-        &sized(PostgresConfig::from_url(urls.session.clone())),
+        &sized(PostgresConfig::from_database_url(urls.session.clone())),
         crate::ClientFamily::Rust,
     )
     .await

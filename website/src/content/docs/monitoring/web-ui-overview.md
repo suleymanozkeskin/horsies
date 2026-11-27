@@ -476,7 +476,7 @@ Every duration in the UI follows one rule:
 - Zero is `0ms`.
 - A time with no end yet has the suffix `so far` (`5m 43.9s so far`).
 - The monitoring API sends its durations (`queue_s`, `exec_s`, `wall_s`,
-  `uptime_s`, `snapshot_age_s`, `wait_s`) as seconds with microsecond
+  `uptime_s`, `snapshot_age_s`, `wait_seconds`) as seconds with microsecond
   detail. The digits that the UI shows come from the record.
 - An axis label is a round time: `0`, `0.1ms`, `100ms`, `1s`, `30s`,
   `1m 30s`, `1h`.
@@ -549,7 +549,7 @@ unfiltered view and exact under any active filter.
 When the listener loses its connection, it reconnects, and each stream then
 gets one event with no ids per topic: notifications sent during the gap may
 be lost, so the browser re-reads every surface. If the app's broker has no
-listener (a broker built with `assume_initialized=True`) or the listener
+listener (a broker of `SchemaMode.ASSUME_INITIALIZED`) or the listener
 stopped, the stream emits a `degraded` event and closes; the client falls
 back to polling and keeps retrying. The server never fabricates events.
 

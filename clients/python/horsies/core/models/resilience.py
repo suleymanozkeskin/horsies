@@ -16,15 +16,15 @@ class WorkerResilienceConfig(BaseModel):
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
-    db_retry_initial_ms: Annotated[int, Field(ge=100, le=60_000)] = Field(
+    database_retry_initial_ms: Annotated[int, Field(ge=100, le=60_000)] = Field(
         default=500,
         description='Initial backoff for retrying transient DB errors (100ms-60s)',
     )
-    db_retry_max_ms: Annotated[int, Field(ge=500, le=300_000)] = Field(
+    database_retry_max_ms: Annotated[int, Field(ge=500, le=300_000)] = Field(
         default=30_000,
         description='Maximum backoff for retrying transient DB errors (500ms-5min)',
     )
-    db_retry_max_attempts: Annotated[int, Field(ge=0, le=10_000)] = Field(
+    database_retry_max_attempts: Annotated[int, Field(ge=0, le=10_000)] = Field(
         default=0,
         description=(
             'Maximum retry attempts for transient DB errors; 0 means infinite'
@@ -38,16 +38,16 @@ class WorkerResilienceConfig(BaseModel):
     @model_validator(mode='after')
     def validate_backoff(self) -> Self:
         report = ValidationReport('resilience')
-        if self.db_retry_max_ms < self.db_retry_initial_ms:
+        if self.database_retry_max_ms < self.database_retry_initial_ms:
             report.add(
                 ConfigurationError(
-                    message='db_retry_max_ms must be >= db_retry_initial_ms',
+                    message='database_retry_max_ms must be >= database_retry_initial_ms',
                     code=HorsiesErrorCode.CONFIG_INVALID_RESILIENCE,
                     notes=[
-                        f'db_retry_initial_ms={self.db_retry_initial_ms}ms',
-                        f'db_retry_max_ms={self.db_retry_max_ms}ms',
+                        f'database_retry_initial_ms={self.database_retry_initial_ms}ms',
+                        f'database_retry_max_ms={self.database_retry_max_ms}ms',
                     ],
-                    help_text='increase db_retry_max_ms or reduce db_retry_initial_ms',
+                    help_text='increase database_retry_max_ms or reduce database_retry_initial_ms',
                 )
             )
 

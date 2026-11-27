@@ -23,7 +23,7 @@ fn main() {
 }
 
 fn app() -> Horsies {
-    Horsies::new(AppConfig::for_database_url(
+    Horsies::new(AppConfig::from_database_url(
         "postgresql://localhost/horsies",
     ))
     .unwrap()

@@ -28,7 +28,7 @@ export const unlisted = defineTask({ name: "unlisted", input: {}, output: h.null
 
 /** The app of `ping` and `charge`, built with the fakes; a failed create fails the test. */
 export function testApp(): Horsies {
-  const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [ping, charge] }, fakeEnvironment());
+  const created = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [ping, charge] }, fakeEnvironment());
 
   if (!created.ok) {
     assert.fail(`the test app was refused: ${created.error.refusals.map((refused) => refused.message).join("; ")}`);

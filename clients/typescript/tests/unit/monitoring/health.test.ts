@@ -6,8 +6,8 @@ import { describe, test } from "node:test";
 
 import type { NativeEnvelope } from "../../../horsies/src/native/call/envelope.ts";
 import type {
-  ClassCoverageRecord,
-  ClassReportRecord,
+  ExecutionClassCoverageRecord,
+  ExecutionClassReportRecord,
   ExpiredTaskList,
   HealthAddon,
   StaleTaskList,
@@ -20,8 +20,8 @@ import {
   type HealthTarget,
   pingDatabase,
   pingWorkers,
-  readClassCoverage,
-  readClassReport,
+  readExecutionClassCoverage,
+  readExecutionClassReport,
   staleTasks,
   worker,
   workerHistory,
@@ -43,10 +43,9 @@ const SNAPSHOT: WorkerStateRecord = {
   snapshotAtMicros: MICROS,
   hostname: "host",
   pid: 41,
-  processes: 4,
-  maxClaimBatch: 2,
-  maxClaimPerWorker: 0,
-  clusterWideCap: { kind: "uncapped" },
+  childCount: 4,
+  claimLimits: { perQueuePerPass: { kind: "taskLimit", tasks: 2 }, claimedPerWorker: { kind: "noTaskLimit" } },
+  clusterWideCap: { kind: "noClusterCap" },
   queues: ["default"],
   queuePriorities: [{ queue: "default", value: 100n }],
   queueMaxConcurrency: [{ queue: "default", value: 9_007_199_254_740_993n }],
@@ -70,7 +69,7 @@ const SNAPSHOT: WorkerStateRecord = {
       },
     ],
   },
-  classCapacity: [{ budget: "ISOLATED", capacity: 4n, serves: ["ISOLATED"] }],
+  executionClassBudgets: [{ budget: "ISOLATED", capacity: 4n, serves: ["ISOLATED"] }],
   profile: { kind: "named", name: "default" },
 };
 
@@ -92,8 +91,10 @@ function fakeTarget(answers: Partial<HealthAddon> = {}): HealthTarget {
     getWorkerStateHistory: async () => done([SNAPSHOT]),
     getStaleTasks: async () => done<StaleTaskList>({ kind: "complete", rows: [] }),
     getExpiredTasks: async () => done<ExpiredTaskList>({ kind: "complete", rows: [] }),
-    getClassCoverage: async () => done<ClassCoverageRecord>({ checkedAtMicros: MICROS, liveWorkers: 1n, streams: [] }),
-    getClassReport: async () => done<ClassReportRecord>({ checkedAtMicros: MICROS, streams: [], workers: [] }),
+    getExecutionClassCoverage: async () =>
+      done<ExecutionClassCoverageRecord>({ checkedAtMicros: MICROS, liveWorkers: 1n, streams: [] }),
+    getExecutionClassReport: async () =>
+      done<ExecutionClassReportRecord>({ checkedAtMicros: MICROS, liveWindowMicros: 60_000_000n, streams: [], workers: [] }),
   };
 
   return { addon: { ...base, ...answers }, handle: fakeHandle() };
@@ -114,6 +115,13 @@ describe("the worker state reads", () => {
     assert.deepEqual(snapshot.profile, { kind: "named", name: "default" });
     assert.ok(snapshot.slotHealth.kind === "slotsDown" && snapshot.slotHealth.slots[0]?.downSince.toString() === INSTANT);
     assert.deepEqual(snapshot.memoryPercent, { kind: "notMeasured" });
+    assert.equal(snapshot.childCount, 4);
+    assert.deepEqual(snapshot.claimLimits, {
+      perQueuePerPass: { kind: "taskLimit", tasks: 2 },
+      claimedPerWorker: { kind: "noTaskLimit" },
+    });
+    assert.deepEqual(snapshot.clusterWideCap, { kind: "noClusterCap" });
+    assert.deepEqual(snapshot.executionClassBudgets, [{ budget: "ISOLATED", capacity: 4n, serves: ["ISOLATED"] }]);
   });
 
   test("a recovery config that is not a JSON object is a defect", async () => {
@@ -134,7 +142,9 @@ describe("the worker state reads", () => {
     const target = fakeTarget({ getWorkerState: async () => assert.fail("the addon is not called") });
     const read = await worker(target, "w\uDC00");
 
-    assert.ok(!read.ok && read.error.kind === "invalidInput" && "field" in read.error && read.error.field === "workerId");
+    assert.ok(!read.ok && read.error.kind === "invalidInput");
+    assert.equal(read.error.subject, "worker");
+    assert.match(read.error.cause, /^workerId: /);
   });
 
   test("workerHistory passes its limit and gives INVALID_INPUT of the core", async () => {
@@ -151,7 +161,25 @@ describe("the worker state reads", () => {
     const read = await workerHistory(target, "w1", { kind: "newest", count: 0 });
 
     assert.deepEqual(seen, [{ kind: "newest", count: 0 }]);
-    assert.ok(!read.ok && read.error.code === "INVALID_INPUT");
+    assert.deepEqual(read, {
+      ok: false,
+      error: {
+        kind: "invalidInput",
+        code: "INVALID_INPUT",
+        retryable: false,
+        subject: "workerHistory",
+        cause: "limit must be positive when set, got 0",
+      },
+    });
+  });
+
+  test("a history worker id that is not well-formed text is the same invalidInput variant", async () => {
+    const target = fakeTarget({ getWorkerStateHistory: async () => assert.fail("the addon is not called") });
+    const read = await workerHistory(target, "w\uD800", { kind: "allRetained" });
+
+    assert.ok(!read.ok && read.error.kind === "invalidInput" && read.error.code === "INVALID_INPUT");
+    assert.equal(read.error.subject, "workerHistory");
+    assert.match(read.error.cause, /^workerId: /);
   });
 });
 
@@ -172,7 +200,7 @@ describe("each read gives only its broker codes", () => {
     const target = fakeTarget({ getStaleTasks: async () => failed(brokerInvalidInput("stale_threshold_minutes is below 0")) });
     const read = await staleTasks(target, -1);
 
-    assert.ok(!read.ok && read.error.code === "INVALID_INPUT");
+    assert.ok(!read.ok && read.error.kind === "invalidInput" && read.error.subject === "staleTasks");
   });
 });
 
@@ -185,13 +213,13 @@ describe("the task lists", () => {
           bound: 10_000n,
           rows: [
             {
-              id: "01890a5d-ac96-774b-bcce-b302099a8057",
+              taskId: "01890a5d-ac96-774b-bcce-b302099a8057",
               taskName: "resize",
               workerHostname: { kind: "notRecorded" },
               workerPid: { kind: "recorded", value: 7 },
               workerProcessName: { kind: "recorded", value: "child" },
               startedAtMicros: MICROS,
-              lastHeartbeat: { kind: "noBeatSinceStart" },
+              lastHeartbeatAt: { kind: "noBeatSinceStart" },
             },
           ],
         }),
@@ -202,7 +230,8 @@ describe("the task lists", () => {
     assert.ok(read.ok && read.value.kind === "truncated");
     assert.equal(read.value.bound, 10_000);
     assert.deepEqual(read.value.rows[0]?.workerHostname, { kind: "notRecorded" });
-    assert.deepEqual(read.value.rows[0]?.lastHeartbeat, { kind: "noBeatSinceStart" });
+    assert.deepEqual(read.value.rows[0]?.lastHeartbeatAt, { kind: "noBeatSinceStart" });
+    assert.equal(read.value.rows[0]?.taskId, "01890a5d-ac96-774b-bcce-b302099a8057");
   });
 
   test("an expired row gives its interval as a duration with every microsecond", async () => {
@@ -212,7 +241,7 @@ describe("the task lists", () => {
           kind: "complete",
           rows: [
             {
-              id: "01890a5d-ac96-774b-bcce-b302099a8058",
+              taskId: "01890a5d-ac96-774b-bcce-b302099a8058",
               taskName: "send",
               queueName: "default",
               priority: 100,
@@ -232,40 +261,43 @@ describe("the task lists", () => {
   });
 });
 
-describe("the class reads", () => {
-  test("the coverage and the report give their instants and states", async () => {
+describe("the execution class reads", () => {
+  test("the coverage and the report give their instants, states and live window", async () => {
     const target = fakeTarget({
-      getClassCoverage: async () =>
-        done<ClassCoverageRecord>({
+      getExecutionClassCoverage: async () =>
+        done<ExecutionClassCoverageRecord>({
           checkedAtMicros: MICROS,
           liveWorkers: 2n,
-          streams: [{ queueName: "q", execution: "SHARED_ASYNC", state: { kind: "served", workers: 2n, capacity: 8n } }],
+          streams: [{ queue: "q", execution: "SHARED_ASYNC", coverage: { kind: "served", workers: 2n, capacity: 8n } }],
         }),
-      getClassReport: async () =>
-        done<ClassReportRecord>({
+      getExecutionClassReport: async () =>
+        done<ExecutionClassReportRecord>({
           checkedAtMicros: MICROS,
+          liveWindowMicros: 60_000_000n,
           streams: [
             {
-              queueName: "q",
+              queue: "q",
               execution: "ISOLATED",
-              wait: { kind: "oldestWaiting", enqueuedAtMicros: MICROS, waitMicros: 1_500_000n },
-              state: { kind: "unserved" },
+              wait: { kind: "due", oldestDueAtMicros: MICROS, waitMicros: 1_500_000n },
+              coverage: { kind: "unserved" },
             },
           ],
           workers: [{ workerId: "w1", snapshotAtMicros: MICROS, budgets: [{ budget: "ISOLATED", capacity: 4n, serves: ["ISOLATED"], inFlight: 1n }] }],
         }),
     });
 
-    const coverage = await readClassCoverage(target);
-    const report = await readClassReport(target);
+    const coverage = await readExecutionClassCoverage(target);
+    const report = await readExecutionClassReport(target);
 
     assert.ok(coverage.ok && coverage.value.checkedAt.toString() === INSTANT);
-    assert.deepEqual(coverage.value.streams[0]?.state, { kind: "served", workers: 2n, capacity: 8n });
+    assert.deepEqual(coverage.value.streams[0]?.coverage, { kind: "served", workers: 2n, capacity: 8n });
     assert.ok(report.ok);
+    assert.equal(report.value.liveWindow.total({ unit: "seconds" }), 60);
 
     const wait = report.value.streams[0]?.wait;
 
-    assert.ok(wait?.kind === "oldestWaiting" && wait.wait.total({ unit: "milliseconds" }) === 1_500);
+    assert.ok(wait?.kind === "due" && wait.oldestDueAt.toString() === INSTANT);
+    assert.equal(wait.wait.total({ unit: "milliseconds" }), 1_500);
     assert.equal(report.value.workers[0]?.budgets[0]?.inFlight, 1n);
   });
 });
@@ -316,12 +348,27 @@ describe("the pings", () => {
 
       assert.ok(!read.ok && read.error.code === code, code);
     }
+
+    const refused = await pingWorkers(fakeTarget({ pingWorkers: async () => failed(answers[0]![0]) }), { waitMs: 0 });
+
+    assert.deepEqual(refused, {
+      ok: false,
+      error: {
+        kind: "invalidInput",
+        code: "INVALID_INPUT",
+        retryable: false,
+        subject: "pingWorkers",
+        cause: "waitMs must be a whole number from 1",
+      },
+    });
   });
 
-  test("a target worker id that is not well-formed text is invalidInput before the call", async () => {
+  test("a target worker id that is not well-formed text is the same invalidInput variant, before the call", async () => {
     const target = fakeTarget({ pingWorkers: async () => assert.fail("the addon is not called") });
     const read = await pingWorkers(target, { target: { kind: "worker", workerId: "\uD800" } });
 
-    assert.ok(!read.ok && read.error.kind === "invalidInput" && "field" in read.error && read.error.field === "workerId");
+    assert.ok(!read.ok && read.error.kind === "invalidInput" && read.error.code === "INVALID_INPUT");
+    assert.equal(read.error.subject, "pingWorkers");
+    assert.match(read.error.cause, /^workerId: /);
   });
 });

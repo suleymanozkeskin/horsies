@@ -102,7 +102,7 @@ def app_config() -> AppConfig:
     """App configuration for tests."""
     return AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(database_url=DB_URL),
+        database=PostgresConfig(database_url=DB_URL),
     )
 
 

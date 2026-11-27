@@ -232,7 +232,7 @@ where
 /// An app on the database of `url` with the tasks `echo` and `answer`, and
 /// the function of `echo`. No I/O.
 fn app_on(url: &str) -> (Horsies, TaskFunction<echo::Input, u32, Infallible>) {
-    let mut app = Horsies::new(AppConfig::for_database_url(url)).expect("the app");
+    let mut app = Horsies::new(AppConfig::from_database_url(url)).expect("the app");
     let echo_function = echo::register(&mut app).expect("register echo");
     let _answer_function = answer::register(&mut app).expect("register answer");
     (app, echo_function)
@@ -653,22 +653,25 @@ async fn blocking_reads_of_a_pending_task_time_out_and_report_it_pending() {
 
         let coverage = app
             .blocking()
-            .get_class_coverage()
+            .get_execution_class_coverage()
             .expect("the class coverage");
         assert_eq!(coverage.live_workers, 0);
         match coverage.streams.as_slice() {
             [stream] => {
-                assert_eq!(stream.queue_name, info.queue_name);
-                assert_eq!(stream.state, StreamCoverageState::Unserved);
+                assert_eq!(stream.queue, info.queue_name);
+                assert_eq!(stream.coverage, StreamCoverageState::Unserved);
             }
             other => panic!("expected the one pending stream, got {other:?}"),
         }
-        let report = app.blocking().get_class_report().expect("the class report");
+        let report = app
+            .blocking()
+            .get_execution_class_report()
+            .expect("the class report");
         assert!(report.workers.is_empty(), "{report:?}");
         match report.streams.as_slice() {
             [stream] => {
-                assert_eq!(stream.queue_name, info.queue_name);
-                assert_eq!(stream.state, StreamCoverageState::Unserved);
+                assert_eq!(stream.queue, info.queue_name);
+                assert_eq!(stream.coverage, StreamCoverageState::Unserved);
             }
             other => panic!("expected the one pending stream, got {other:?}"),
         }
@@ -793,7 +796,11 @@ async fn blocking_health_reads_and_the_live_check_answer_from_the_database() {
         assert!(history.is_empty(), "{history:?}");
         let pongs = app
             .blocking()
-            .ping_workers(PingTarget::EveryWorker, PING_WINDOW, None)
+            .ping_workers(
+                PingTarget::EveryWorker,
+                PING_WINDOW,
+                horsies::MinResponses::FullWindow,
+            )
             .expect("the worker ping");
         assert!(pongs.is_empty(), "{pongs:?}");
         let passed = app.blocking().check_live().expect("the live check passes");

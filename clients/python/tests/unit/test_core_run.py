@@ -40,7 +40,7 @@ LOGGER = logging.getLogger('tests.core_run')
 def _app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr('postgresql://user:secret@localhost:5432/db'),
             ),
             worker_profiles={
@@ -56,7 +56,7 @@ def _launch(profile: str) -> WorkerLaunch:
         imports=(),
         sys_path_roots=(),
         profile=profile,
-        loglevel='INFO',
+        log_level='INFO',
         metrics_endpoint=wire.MetricsEndpointNoMetricsEndpoint(),
     )
 

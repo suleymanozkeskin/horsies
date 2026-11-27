@@ -32,7 +32,7 @@ async fn send_with_one_options_value(app: &Horsies) -> Result<SumHandle, TaskSen
 }
 
 fn main() {
-    let Ok(app) = Horsies::new(AppConfig::for_database_url(
+    let Ok(app) = Horsies::new(AppConfig::from_database_url(
         "postgresql://localhost/horsies",
     )) else {
         return;

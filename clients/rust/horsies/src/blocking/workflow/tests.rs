@@ -12,7 +12,7 @@ use crate::{AppConfig, Horsies, HorsiesError, WorkflowDefConfig, WorkflowSpecBui
 use horsies_core::WorkflowStartErrorCode;
 
 fn app() -> Horsies {
-    Horsies::new(AppConfig::for_database_url(
+    Horsies::new(AppConfig::from_database_url(
         "postgresql://127.0.0.1:1/nothing",
     ))
     .unwrap()

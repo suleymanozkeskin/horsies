@@ -399,12 +399,12 @@ class TestFlattenException:
 def _make_app() -> Any:
     app = MagicMock()
     app.config.queue_mode.name = 'DEFAULT'
-    app.config.resend_on_transient_err = False
+    app.config.resend_on_transient_error = False
     app.config.payload = PayloadPolicy()
     app.config.exception_mapper = {}
     app.config.default_unhandled_error_code = 'UNHANDLED_EXCEPTION'
     app.are_sends_suppressed.return_value = False
-    app.validate_queue_name.return_value = 'default'
+    app.validate_queue.return_value = 'default'
     return app
 
 
@@ -511,7 +511,7 @@ class TestDefinitionTimeOptions:
     def test_refused_retry_policy_metadata_holds_no_value(self) -> None:
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(database_url=SecretStr('postgresql://x/y')),
+                database=PostgresConfig(database_url=SecretStr('postgresql://x/y')),
             ),
         )
         app.tasks['test.metadata'] = cast(Any, SimpleNamespace(

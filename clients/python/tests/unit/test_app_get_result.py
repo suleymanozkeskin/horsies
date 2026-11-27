@@ -44,7 +44,7 @@ def _make_app() -> Horsies:
     """Build a minimal Horsies (no real broker connection used in tests)."""
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://u:p@localhost/db',
             ),
         ),

@@ -77,7 +77,7 @@ pub struct IsolatedPoolConfig {
     pub init: InitFrame,
     pub worker_id: String,
     /// The orphan self-heal that each run frame carries (the app's
-    /// `auto_terminate_orphaned_workflow_tasks`).
+    /// `terminate_orphaned_workflow_tasks`).
     pub orphan_self_heal: OrphanSelfHeal,
     /// Tasks that wait for a slot, at most (Python: `2 * max(seats +
     /// prefetch, max_claim_per_worker)`).

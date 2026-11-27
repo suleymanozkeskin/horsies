@@ -133,7 +133,7 @@ def inside_caller_span() -> Generator[None]:
 def app_with(tracing: OtelTracing | NoTracing) -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_BROKER_URL)),
+            database=PostgresConfig(database_url=SecretStr(UNREACHABLE_BROKER_URL)),
             tracing=tracing,
         ),
     )
@@ -299,7 +299,7 @@ _NO_TRACING_RERUN = textwrap.dedent(
 
     app = Horsies(
         AppConfig(
-            broker=PostgresConfig(database_url=SecretStr(os.environ['RERUN_BROKER_URL'])),
+            database=PostgresConfig(database_url=SecretStr(os.environ['RERUN_BROKER_URL'])),
         ),
     )
     engine = create_engine(

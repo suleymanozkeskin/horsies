@@ -92,7 +92,7 @@ of a run frame. The core codec refuses a smaller one, as the stored
 
 APP = Horsies(
     AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://u:p@localhost/unused'),
         ),
     ),

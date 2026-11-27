@@ -21,9 +21,9 @@ from horsies._core import (
     AllSlotsServingRecord,
     CoreConnectionError,
     BudgetLoadRecord,
-    ClassBudgetRecord,
-    ClassCoverageRecord,
-    ClassReportRecord,
+    ExecutionClassBudgetRecord,
+    ExecutionClassCoverageRecord,
+    ExecutionClassReportRecord,
     DownSlotRecord,
     NoneDueRecord,
     OldestWaitingRecord,
@@ -37,7 +37,7 @@ from horsies._core import (
     StreamUnservedRecord,
     StreamWithoutCapacityRecord,
     TooManyPendingCalls,
-    WorkerClassLoadRecord,
+    WorkerExecutionClassLoadRecord,
     WorkerPongRecord,
     WorkerPongsRecord,
     WorkerStateAbsent,
@@ -59,8 +59,8 @@ from horsies.core.models.boot_failure import (
 )
 from horsies.core.models.class_coverage import (
     BudgetLoad,
-    ClassCoverage,
-    ClassReport,
+    ExecutionClassCoverage,
+    ExecutionClassReport,
     NoneDue,
     OldestWaiting,
     PendingStream,
@@ -68,12 +68,13 @@ from horsies.core.models.class_coverage import (
     StreamServed,
     StreamUnserved,
     StreamWithoutCapacity,
-    WorkerClassLoad,
+    WorkerExecutionClassLoad,
 )
+from horsies.core.models.cluster_cap import ClusterCap, NoClusterCap
 from horsies.core.models.health import (
     AllSlotsServing,
-    ClassBudget,
-    ClassBudgets,
+    ExecutionClassBudget,
+    ExecutionClassBudgets,
     DownSlot,
     ProfileNamed,
     ProfileNotRecorded,
@@ -82,7 +83,17 @@ from horsies.core.models.health import (
     WorkerPong,
     WorkerStateSnapshot,
 )
+from horsies.core.models.health_reads import (
+    MinResponses,
+    MinResponsesAtLeast,
+    MinResponsesFullWindow,
+    PingTargetWorker,
+    WorkerHistoryLimit,
+    WorkerHistoryLimitAllRetained,
+    WorkerHistoryLimitNewest,
+)
 from horsies.core.models.tasks import Execution
+from horsies.core.models.worker_profile import ClaimLimits, NoTaskLimit, TaskLimit
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok
 from tests.unit.test_broker_postgres import _make_broker  # pyright: ignore[reportPrivateUsage]
@@ -123,6 +134,7 @@ def _state_record(
     worker_id: str,
     slot_health: object,
     profile: object = _PROFILE_NAMED_RECORD,
+    cluster_wide_cap: int | None = None,
 ) -> MagicMock:
     return _record(
         WorkerStateRecord,
@@ -130,14 +142,14 @@ def _state_record(
         snapshot_at=_AT,
         hostname='host-1',
         pid=4242,
-        processes=4,
-        max_claim_batch=8,
-        max_claim_per_worker=4,
-        cluster_wide_cap=None,
+        child_count=4,
+        per_queue_per_pass=8,
+        claimed_per_worker=None,
+        cluster_wide_cap=cluster_wide_cap,
         queues=['default', 'priority'],
         queue_priorities={'default': 10},
         queue_max_concurrency={},
-        recovery_config_json='{"auto_requeue_stale_claimed": true, "check_interval_ms": 30000}',
+        recovery_config_json='{"requeue_stale_claimed": true, "check_interval_ms": 30000}',
         tasks_running=3,
         tasks_claimed=1,
         memory_usage_mb=120.5,
@@ -146,9 +158,9 @@ def _state_record(
         children_memory_mb=None,
         worker_started_at=_STARTED,
         slot_health=slot_health,
-        class_capacity=[
+        execution_class_budgets=[
             _record(
-                ClassBudgetRecord,
+                ExecutionClassBudgetRecord,
                 budget='ISOLATED',
                 capacity=2,
                 serves=['ISOLATED', 'SHARED_ASYNC'],
@@ -185,20 +197,23 @@ def _snapshot(
     worker_id: str,
     slot_health: AllSlotsServing | SlotsDown,
     profile: SnapshotProfile = ProfileNamed(name='batch'),
+    cluster_wide_cap: ClusterCap | NoClusterCap = NoClusterCap(),
 ) -> WorkerStateSnapshot:
     return WorkerStateSnapshot(
         worker_id=worker_id,
         snapshot_at=_AT,
         hostname='host-1',
         pid=4242,
-        processes=4,
-        max_claim_batch=8,
-        max_claim_per_worker=4,
-        cluster_wide_cap=None,
+        child_count=4,
+        claim_limits=ClaimLimits(
+            per_queue_per_pass=TaskLimit(tasks=8),
+            claimed_per_worker=NoTaskLimit(),
+        ),
+        cluster_wide_cap=cluster_wide_cap,
         queues=['default', 'priority'],
         queue_priorities={'default': 10},
         queue_max_concurrency={},
-        recovery_config={'auto_requeue_stale_claimed': True, 'check_interval_ms': 30000},
+        recovery_config={'requeue_stale_claimed': True, 'check_interval_ms': 30000},
         tasks_running=3,
         tasks_claimed=1,
         memory_usage_mb=120.5,
@@ -207,9 +222,9 @@ def _snapshot(
         children_memory_mb=None,
         worker_started_at=_STARTED,
         slot_health=slot_health,
-        class_capacity=ClassBudgets(
+        execution_class_budgets=ExecutionClassBudgets(
             (
-                ClassBudget(
+                ExecutionClassBudget(
                     budget=Execution.ISOLATED,
                     capacity=2,
                     serves=(Execution.ISOLATED, Execution.SHARED_ASYNC),
@@ -286,6 +301,26 @@ class TestWorkerStates:
         ])
 
     @pytest.mark.asyncio
+    async def test_a_stored_cap_is_a_cluster_cap_and_none_is_no_cap(self) -> None:
+        broker = _broker_answering(
+            'worker_states_async',
+            _record(
+                WorkerStatesRecord,
+                states=[
+                    _state_record('w1', _record(AllSlotsServingRecord), cluster_wide_cap=20),
+                    _state_record('w2', _record(AllSlotsServingRecord)),
+                ],
+            ),
+        )
+
+        result = await broker.list_worker_states_async()
+
+        assert result == Ok([
+            _snapshot('w1', AllSlotsServing(), cluster_wide_cap=ClusterCap(tasks=20)),
+            _snapshot('w2', AllSlotsServing(), cluster_wide_cap=NoClusterCap()),
+        ])
+
+    @pytest.mark.asyncio
     async def test_a_worker_with_no_snapshot_is_none(self) -> None:
         broker = _broker_answering(
             'worker_state_async', _record(WorkerStateAbsent, worker_id='missing'),
@@ -307,9 +342,15 @@ class TestWorkerStates:
 
         assert result == Ok(_snapshot('w9', AllSlotsServing()))
 
-    @pytest.mark.parametrize('limit', [None, 7])
+    @pytest.mark.parametrize(
+        ('limit', 'handle_limit'),
+        [(WorkerHistoryLimitAllRetained(), None), (WorkerHistoryLimitNewest(count=7), 7)],
+        ids=['all-retained', 'newest'],
+    )
     @pytest.mark.asyncio
-    async def test_the_history_limit_reaches_the_handle_as_given(self, limit: int | None) -> None:
+    async def test_the_history_limit_reaches_the_handle_as_its_count(
+        self, limit: WorkerHistoryLimit, handle_limit: int | None,
+    ) -> None:
         broker = _broker_answering(
             'worker_state_history_async', _record(WorkerStatesRecord, states=[]),
         )
@@ -318,7 +359,7 @@ class TestWorkerStates:
 
         assert result == Ok([])
         handle: Any = broker._core_handle  # pyright: ignore[reportPrivateUsage]
-        handle.worker_state_history_async.assert_awaited_once_with('w1', limit=limit)
+        handle.worker_state_history_async.assert_awaited_once_with('w1', limit=handle_limit)
 
 
 class TestHistoryLimit:
@@ -335,7 +376,9 @@ class TestHistoryLimit:
         the refusal of a value outside 64 bits or of ``False`` needs none."""
         broker = cast(PostgresBroker, _make_broker())
 
-        result = await broker.get_worker_state_history_async('w1', limit=limit)
+        result = await broker.get_worker_state_history_async(
+            'w1', limit=WorkerHistoryLimitNewest(count=limit),
+        )
 
         match result:
             case Err(DatabaseInvalidInput(message=message, cause=NoCause())):
@@ -350,7 +393,9 @@ class TestHistoryLimit:
     ) -> None:
         broker = cast(PostgresBroker, _make_broker())
 
-        result = await broker.get_worker_state_history_async('w1', limit=limit)
+        result = await broker.get_worker_state_history_async(
+            'w1', limit=WorkerHistoryLimitNewest(count=limit),
+        )
 
         match result:
             case Err(DatabaseOperationFailed() as error):
@@ -365,38 +410,38 @@ class TestClassReads:
     @pytest.mark.asyncio
     async def test_the_coverage_record_becomes_the_fleet_check(self) -> None:
         broker = _broker_answering(
-            'class_coverage_async',
+            'execution_class_coverage_async',
             _record(
-                ClassCoverageRecord,
+                ExecutionClassCoverageRecord,
                 checked_at=_AT,
                 live_workers=2,
                 streams=[
                     _record(
                         StreamCoverageRecord,
-                        queue_name='a',
+                        queue='a',
                         execution='ISOLATED',
-                        state=_record(StreamServedRecord, workers=2, capacity=4),
+                        coverage=_record(StreamServedRecord, workers=2, capacity=4),
                     ),
                     _record(
                         StreamCoverageRecord,
-                        queue_name='a',
+                        queue='a',
                         execution='SHARED_ASYNC',
-                        state=_record(StreamWithoutCapacityRecord, workers=1),
+                        coverage=_record(StreamWithoutCapacityRecord, workers=1),
                     ),
                     _record(
                         StreamCoverageRecord,
-                        queue_name='b',
+                        queue='b',
                         execution='SHARED_THREAD',
-                        state=_record(StreamUnservedRecord),
+                        coverage=_record(StreamUnservedRecord),
                     ),
                 ],
             ),
         )
 
-        result = await broker.get_class_coverage_async()
+        result = await broker.get_execution_class_coverage_async()
 
         assert result == Ok(
-            ClassCoverage(
+            ExecutionClassCoverage(
                 checked_at=_AT,
                 live_workers=2,
                 streams=(
@@ -410,33 +455,34 @@ class TestClassReads:
     @pytest.mark.asyncio
     async def test_the_report_record_becomes_the_class_report(self) -> None:
         broker = _broker_answering(
-            'class_report_async',
+            'execution_class_report_async',
             _record(
-                ClassReportRecord,
+                ExecutionClassReportRecord,
                 checked_at=_AT,
+                live_window=timedelta(seconds=120),
                 streams=[
                     _record(
                         PendingStreamRecord,
-                        queue_name='a',
+                        queue='a',
                         execution='ISOLATED',
+                        coverage=_record(StreamUnservedRecord),
                         wait=_record(
                             OldestWaitingRecord,
-                            enqueued_at=_STARTED,
+                            oldest_due_at=_STARTED,
                             wait=timedelta(seconds=90),
                         ),
-                        state=_record(StreamUnservedRecord),
                     ),
                     _record(
                         PendingStreamRecord,
-                        queue_name='b',
+                        queue='b',
                         execution='SHARED_ASYNC',
+                        coverage=_record(StreamServedRecord, workers=1, capacity=8),
                         wait=_record(NoneDueRecord, next_due_at=_AT),
-                        state=_record(StreamServedRecord, workers=1, capacity=8),
                     ),
                 ],
                 workers=[
                     _record(
-                        WorkerClassLoadRecord,
+                        WorkerExecutionClassLoadRecord,
                         worker_id='w1',
                         snapshot_at=_AT,
                         budgets=[
@@ -453,27 +499,28 @@ class TestClassReads:
             ),
         )
 
-        result = await broker.get_class_report_async()
+        result = await broker.get_execution_class_report_async()
 
         assert result == Ok(
-            ClassReport(
+            ExecutionClassReport(
                 checked_at=_AT,
+                live_window=timedelta(seconds=120),
                 streams=(
                     PendingStream(
                         'a',
                         Execution.ISOLATED,
-                        OldestWaiting(enqueued_at=_STARTED, wait=timedelta(seconds=90)),
                         StreamUnserved(),
+                        OldestWaiting(oldest_due_at=_STARTED, wait=timedelta(seconds=90)),
                     ),
                     PendingStream(
                         'b',
                         Execution.SHARED_ASYNC,
-                        NoneDue(next_due_at=_AT),
                         StreamServed(workers=1, capacity=8),
+                        NoneDue(next_due_at=_AT),
                     ),
                 ),
                 workers=(
-                    WorkerClassLoad(
+                    WorkerExecutionClassLoad(
                         worker_id='w1',
                         snapshot_at=_AT,
                         budgets=(
@@ -502,23 +549,25 @@ async def _one(broker: PostgresBroker) -> DatabaseResult[Any]:
 
 
 async def _history(broker: PostgresBroker) -> DatabaseResult[Any]:
-    return await broker.get_worker_state_history_async('w1', limit=5)
+    return await broker.get_worker_state_history_async(
+        'w1', limit=WorkerHistoryLimitNewest(count=5),
+    )
 
 
 async def _coverage(broker: PostgresBroker) -> DatabaseResult[Any]:
-    return await broker.get_class_coverage_async()
+    return await broker.get_execution_class_coverage_async()
 
 
 async def _report(broker: PostgresBroker) -> DatabaseResult[Any]:
-    return await broker.get_class_report_async()
+    return await broker.get_execution_class_report_async()
 
 
 _READS: Final[list[tuple[str, str, _Read]]] = [
     ('worker_states_async', 'list_worker_states', _list),
     ('worker_state_async', 'get_worker_state', _one),
     ('worker_state_history_async', 'get_worker_state_history', _history),
-    ('class_coverage_async', 'get_class_coverage', _coverage),
-    ('class_report_async', 'get_class_report', _report),
+    ('execution_class_coverage_async', 'get_execution_class_coverage', _coverage),
+    ('execution_class_report_async', 'get_execution_class_report', _report),
 ]
 _READ_IDS: Final = [read for _, read, _ in _READS]
 
@@ -556,7 +605,9 @@ class TestFailures:
             DatabaseInvalidInput(message=message, cause=NoCause()),
         )
 
-        result = await broker.get_worker_state_history_async('w1', limit=0)
+        result = await broker.get_worker_state_history_async(
+            'w1', limit=WorkerHistoryLimitNewest(count=0),
+        )
 
         assert result == Err(DatabaseInvalidInput(message=message, cause=NoCause()))
 
@@ -612,7 +663,9 @@ class TestWorkerPing:
         )
 
         result = await broker.ping_workers_async(
-            target_worker_id='w1', timeout_seconds=0.5, min_responses=1,
+            target=PingTargetWorker(worker_id='w1'),
+            wait_ms=500,
+            min_responses=MinResponsesAtLeast(count=1),
         )
 
         assert result == Ok(
@@ -620,28 +673,54 @@ class TestWorkerPing:
         )
         handle: Any = broker._core_handle  # pyright: ignore[reportPrivateUsage]
         handle.ping_workers_async.assert_awaited_once_with(
-            target_worker_id='w1', timeout_seconds=0.5, min_responses=1,
+            target_worker_id='w1', wait_ms=500, min_responses=1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_defaults_ask_every_worker_for_the_full_window(self) -> None:
+        broker = _broker_answering('ping_workers_async', _record(WorkerPongsRecord, pongs=[]))
+
+        result = await broker.ping_workers_async()
+
+        assert result == Ok([])
+        handle: Any = broker._core_handle  # pyright: ignore[reportPrivateUsage]
+        handle.ping_workers_async.assert_awaited_once_with(
+            target_worker_id=None, wait_ms=2_000, min_responses=None,
         )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ('timeout_seconds', 'min_responses', 'message'),
+        ('wait_ms', 'min_responses', 'message'),
         [
-            (0, None, 'timeout_seconds must be positive, got 0'),
-            (-1.5, None, 'timeout_seconds must be positive, got -1.5'),
-            (float('nan'), None, 'timeout_seconds must be positive, got nan'),
-            (1.0, 0, 'min_responses must be >= 1 when set, got 0'),
+            (0, MinResponsesFullWindow(), 'wait_ms must be positive, got 0'),
+            (-1, MinResponsesFullWindow(), 'wait_ms must be positive, got -1'),
+            (
+                1.5,
+                MinResponsesFullWindow(),
+                'ping_workers request refused: wait_ms must be an int, not float',
+            ),
+            (
+                True,
+                MinResponsesFullWindow(),
+                'ping_workers request refused: wait_ms must be an int, not bool',
+            ),
+            (
+                2 ** 64,
+                MinResponsesFullWindow(),
+                f'wait_ms must be at most {2 ** 64 - 1}, got {2 ** 64}',
+            ),
+            (1_000, MinResponsesAtLeast(count=0), 'min_responses must be >= 1 when set, got 0'),
         ],
-        ids=['zero', 'negative', 'nan', 'no-replies'],
+        ids=['zero', 'negative', 'float', 'bool', 'above-the-range', 'no-replies'],
     )
     async def test_a_refused_argument_is_invalid_input_before_any_core_call(
-        self, timeout_seconds: float, min_responses: int | None, message: str,
+        self, wait_ms: object, min_responses: MinResponses, message: str,
     ) -> None:
         """The handle refuses with Python's text; no database is reachable here."""
         broker = cast(PostgresBroker, _make_broker())
 
         result = await broker.ping_workers_async(
-            timeout_seconds=timeout_seconds, min_responses=min_responses,
+            wait_ms=cast(int, wait_ms), min_responses=min_responses,
         )
 
         assert result == Err(DatabaseInvalidInput(message=message, cause=NoCause()))

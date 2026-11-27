@@ -216,7 +216,7 @@ the locator of its history record, and its node writes `NODE_READY`. A resume wr
 for each workflow that it resumes. A pause that a cancel or a paused expiry ends has no end event: the completion
 time of the run ends it. See [horsies_workflow_events](/horsies/internals/database-schema/#horsies_workflow_events).
 
-**Never-resumed pauses can be bounded by policy.** `paused_workflow_auto_cancel_after`
+**Never-resumed pauses can be bounded by policy.** `paused_workflow_cancel_after`
 (a `timedelta` on `AppConfig.retention`, default `None` = disabled) expires a
 workflow that has been PAUSED longer than the configured age, recording the
 policy name and age on the run's `error` column. No deployment changes

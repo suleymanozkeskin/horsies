@@ -32,7 +32,7 @@ use crate::broker::enqueue_task::{
 };
 use crate::broker::error::{BrokerError, EnqueueRefusal};
 use crate::broker::health::{
-    checked_history_limit, ping_min_responses_refused, ping_timeout_refused,
+    checked_history_limit, ping_min_responses_refused, ping_wait_refused,
     read_listed_worker_states, read_worker_snapshot, read_worker_snapshots, DatabasePing,
     ListedWorkerState, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
     WORKER_PING_CHANNEL,
@@ -640,7 +640,7 @@ static GET_WORKER_STATE_HISTORY: TypedStatement = TypedStatement::new(
 
 /// The expired list: `horsies_list_expired_tasks` (baseline `0007`), task
 /// rows in list order, then its `LIST_END` row. `expired_for` is read as
-/// whole milliseconds, as the list row carries it.
+/// whole microseconds, in the column `expired_for_us`.
 static LIST_EXPIRED_TASKS: TypedStatement = TypedStatement::new(
     "list_expired_tasks",
     "SELECT row_kind, task_id, task_name, queue_name, priority, sent_at, enqueued_at, good_until,
@@ -692,7 +692,7 @@ pub enum SchemaInitializationMode {
     MigrateAndValidate,
     /// Connect for monitoring reads without executing schema DDL or fleet
     /// gates. The broker keeps its listener, as Python's web tool, which runs
-    /// with `run_schema_migrations=False`.
+    /// with `SchemaMode.OBSERVE_ONLY`.
     ObserveOnly,
 }
 
@@ -839,7 +839,7 @@ impl<'a> CheckedSend<'a> {
         {
             return Err(BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
                 SendPart::Input,
-                "sent_at is in the future without enqueued_at or enqueue_delay_seconds; sent_at is a call-site timestamp".to_owned(),
+                "sent_at is in the future without enqueued_at or delay_seconds; sent_at is a call-site timestamp".to_owned(),
             )));
         }
         check_sent_input(input)?;
@@ -1051,7 +1051,7 @@ impl PostgresBroker {
     /// A URL whose scheme is not `postgresql://` or `postgres://` is refused
     /// with [`BrokerError::InvalidConnectionSettings`] before any connection.
     pub async fn connect(database_url: &str, family: ClientFamily) -> Result<Self, BrokerError> {
-        Self::connect_with(&PostgresConfig::from_url(database_url), family).await
+        Self::connect_with(&PostgresConfig::from_database_url(database_url), family).await
     }
 
     /// Connect using a `PostgresConfig` from horsies-core, for a client of
@@ -1244,8 +1244,8 @@ impl PostgresBroker {
         self
     }
 
-    /// The same handle with no listener (Python's
-    /// `PostgresBroker(assume_initialized=True)`): a result wait reads again
+    /// The same handle with no listener (the schema mode
+    /// `ASSUME_INITIALIZED`): a result wait reads again
     /// every 200 ms (`TASK_RESULT_REPOLL_POLLING`), and an operation that
     /// needs a listener answers `LISTENER_DISABLED`. Opens and closes
     /// nothing: the listener of a connected broker opens its connection at
@@ -2197,7 +2197,7 @@ impl PostgresBroker {
     /// - `min_responses` set: returns as soon as that many distinct workers
     ///   reply (fast fail-open liveness, e.g. `Some(1)` for a `/health` gate — a
     ///   healthy fleet answers in milliseconds; only a degraded fleet pays the
-    ///   full `timeout`).
+    ///   full `wait`).
     /// - neither set: waits the full window and enumerates every responder.
     ///
     /// A pong proves the replying worker's event loop is responsive *and* that
@@ -2216,11 +2216,11 @@ impl PostgresBroker {
     pub async fn ping_workers(
         &self,
         target_worker_id: Option<&str>,
-        timeout: std::time::Duration,
+        wait: std::time::Duration,
         min_responses: Option<usize>,
     ) -> DatabaseResult<Vec<WorkerPong>> {
-        if timeout.is_zero() {
-            return Err(ping_timeout_refused(&0));
+        if wait.is_zero() {
+            return Err(ping_wait_refused(&0));
         }
         if min_responses == Some(0) {
             return Err(ping_min_responses_refused(&0));
@@ -2265,7 +2265,7 @@ impl PostgresBroker {
         let mut pongs: Vec<WorkerPong> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         loop {
-            let Some(remaining) = timeout.checked_sub(start.elapsed()) else {
+            let Some(remaining) = wait.checked_sub(start.elapsed()) else {
                 break;
             };
             if remaining.is_zero() {
@@ -2365,8 +2365,8 @@ impl PostgresBroker {
     }
 
     /// RUNNING tasks whose latest runner beat, or their start when they have
-    /// no beat, is older than `stale_threshold_minutes`. Read-only: the
-    /// reaper recovers stale tasks.
+    /// no beat, is older than `threshold_minutes`. Read-only: the reaper
+    /// recovers stale tasks.
     ///
     /// A threshold outside 0 to one year is `INVALID_INPUT` with no database
     /// call. At most [`TASK_LIST_BOUND`](crate::broker::task_lists::TASK_LIST_BOUND)
@@ -2376,10 +2376,10 @@ impl PostgresBroker {
     /// Mirrors `PostgresBroker.get_stale_tasks()` in the Python library.
     pub async fn get_stale_tasks(
         &self,
-        stale_threshold_minutes: i32,
+        threshold_minutes: i32,
     ) -> DatabaseResult<BoundedTaskList<StaleTaskRow>> {
-        let threshold = StaleMinutes::parse(i64::from(stale_threshold_minutes))
-            .map_err(|refused| refused.error())?;
+        let threshold =
+            StaleMinutes::parse(i64::from(threshold_minutes)).map_err(|refused| refused.error())?;
         let minutes = threshold.minutes();
         let rows = self
             .read_main(
@@ -4394,7 +4394,7 @@ mod broker_operation_error_tests {
 
     #[tokio::test]
     async fn connect_with_refuses_a_config_rule_as_not_retryable() {
-        let config = PostgresConfig::from_url("mysql://horsies@127.0.0.1:1/horsies");
+        let config = PostgresConfig::from_database_url("mysql://horsies@127.0.0.1:1/horsies");
 
         let refused = PostgresBroker::connect_with(&config, crate::ClientFamily::Rust)
             .await
@@ -4436,11 +4436,11 @@ mod broker_operation_error_tests {
     }
 
     #[tokio::test]
-    async fn ping_workers_refuses_a_zero_timeout_as_invalid_input() {
+    async fn ping_workers_refuses_a_zero_wait_as_invalid_input() {
         let broker = unreachable_broker();
 
         let Err(refused) = broker.ping_workers(None, Duration::ZERO, None).await else {
-            panic!("a zero timeout must be refused");
+            panic!("a zero wait must be refused");
         };
 
         assert_eq!(refused.code(), DatabaseErrorCode::InvalidInput);
@@ -4578,8 +4578,10 @@ mod connect_tests {
 
     #[tokio::test]
     async fn a_worker_connect_with_a_split_session_url_opens_no_connection() {
-        let mut config = PostgresConfig::from_url(UNREACHABLE_URL);
-        config.session_database_url = Some("postgresql://horsies@127.0.0.1:2/horsies".to_owned());
+        let mut config = PostgresConfig::from_database_url(UNREACHABLE_URL);
+        config.session_database = crate::core::config::SessionDatabase::Separate {
+            url: "postgresql://horsies@127.0.0.1:2/horsies".to_owned(),
+        };
 
         let broker = PostgresBroker::connect_worker_with(&config, crate::ClientFamily::Rust)
             .await
@@ -4743,19 +4745,19 @@ mod result_wait_tests {
     }
 
     /// An observe-only broker keeps its listener, as Python's web tool
-    /// (`run_schema_migrations=False`): its waits subscribe and it can ping.
+    /// (`SchemaMode.OBSERVE_ONLY`): its waits subscribe and it can ping.
     #[tokio::test]
     async fn an_observe_only_broker_keeps_its_listener() {
         let config = PostgresConfig {
             database_url: crate::test_support::migrated_database_url().await,
-            session_database_url: None,
+            session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
             pgbouncer_transaction_mode: false,
             pool_pre_ping: true,
             worker_pool_pre_ping: false,
             pool_size: 2,
             max_overflow: 0,
             retain_rerun_input_default: false,
-            pool_timeout: 30,
+            pool_timeout_seconds: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
             tcp_keepalives: Default::default(),
@@ -4931,11 +4933,11 @@ mod stale_and_expired_list_tests {
             .filter(|row| row.task_name == task_name)
             .collect();
         assert_eq!(
-            ours.iter().map(|row| row.id).collect::<Vec<_>>(),
+            ours.iter().map(|row| row.task_id).collect::<Vec<_>>(),
             vec![beatless, old_beat]
         );
-        assert_eq!(ours[0].last_heartbeat, None);
-        assert!(ours[1].last_heartbeat.is_some());
+        assert_eq!(ours[0].last_heartbeat_at, None);
+        assert!(ours[1].last_heartbeat_at.is_some());
         clean(&pool, &task_name).await;
     }
 
@@ -4957,11 +4959,11 @@ mod stale_and_expired_list_tests {
             .filter(|row| row.task_name == task_name)
             .collect();
         assert_eq!(ours.len(), 1);
-        assert_eq!(ours[0].id, expired);
+        assert_eq!(ours[0].task_id, expired);
         assert!(
-            ours[0].expired_for_us >= 120_000_000,
-            "{}",
-            ours[0].expired_for_us
+            ours[0].expired_for >= std::time::Duration::from_secs(120),
+            "{:?}",
+            ours[0].expired_for
         );
         assert!(ours[0].enqueued_at < ours[0].good_until);
         clean(&pool, &task_name).await;

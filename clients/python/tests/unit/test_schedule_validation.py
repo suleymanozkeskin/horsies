@@ -23,6 +23,7 @@ from horsies.core.errors import (
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import AppRole
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.schedule import (
     IntervalSchedule,
@@ -60,7 +61,7 @@ def _make_mock_app(tasks: dict[str, MagicMock] | None = None) -> MagicMock:
     app = MagicMock()
     app.tasks = tasks or {}
     app.config.payload = PayloadPolicy()
-    app.validate_queue_name = MagicMock(return_value='default')
+    app.validate_queue = MagicMock(return_value='default')
     return app
 
 
@@ -365,12 +366,12 @@ class TestCollectScheduleErrors:
         assert errors[0].code == HorsiesErrorCode.TASK_NOT_REGISTERED
 
     def test_invalid_queue(self) -> None:
-        """A queue that fails validate_queue_name is rejected."""
+        """A queue that fails validate_queue is rejected."""
         def fn() -> str:
             return 'ok'
 
         app = _make_mock_app(tasks={'task_a': _make_task_mock(fn)})
-        app.validate_queue_name = MagicMock(side_effect=ValueError('bad queue'))
+        app.validate_queue = MagicMock(side_effect=ValueError('bad queue'))
 
         errors = self._collect([_schedule()], app=app)
         assert len(errors) == 1
@@ -449,7 +450,7 @@ class TestCollectScheduleErrors:
 def _make_real_app(schedule: ScheduleConfig | None) -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://user:pass@localhost/db',
             ),
             schedule=schedule,
@@ -492,12 +493,12 @@ class TestCheckValidatesSchedules:
     def test_valid_schedule_passes_check(self) -> None:
         """A valid schedule yields no check errors."""
         app = self._valid_schedule_app()
-        assert app.check() == []
+        assert app.check().refusals == []
 
     def test_bad_schedule_surfaced_by_check(self) -> None:
         """check() (producer role) reports the invalid schedule."""
         app = self._bad_schedule_app()
-        errors = app.check()
+        errors = app.check().refusals
         assert len(errors) == 1
         assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'invalid timezone' in errors[0].message
@@ -507,7 +508,7 @@ class TestCheckValidatesSchedules:
         schedule = _schedule(task_name='my_task', kwargs={'blob': 'x' * 2048})
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://user:pass@localhost/db',
                 ),
                 schedule=ScheduleConfig(schedules=[schedule]),
@@ -519,7 +520,7 @@ class TestCheckValidatesSchedules:
         def my_task(*, blob: str) -> Result[int, TaskError]:
             return Ok(len(blob))
 
-        errors = app.check()
+        errors = app.check().refusals
 
         assert len(errors) == 1
         assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
@@ -528,10 +529,10 @@ class TestCheckValidatesSchedules:
     def test_worker_role_skips_schedule_validation(self) -> None:
         """Workers never act on schedules; check() skips them."""
         app = self._bad_schedule_app()
-        app.set_role('worker')
-        assert app.check() == []
+        app.set_role(AppRole.WORKER)
+        assert app.check().refusals == []
 
     def test_no_schedule_config_returns_empty(self) -> None:
         """An app without schedule config produces no schedule errors."""
         app = _make_real_app(None)
-        assert app.check() == []
+        assert app.check().refusals == []

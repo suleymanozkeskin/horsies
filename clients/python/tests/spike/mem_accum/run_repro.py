@@ -89,7 +89,7 @@ def _run_mode(mode: str) -> Result:
     worker = subprocess.Popen(
         [
             *worker_cmd, 'worker', LOCATOR,
-            f'--profile={mode}', '--loglevel=warning',
+            f'--profile={mode}', '--log-level=warning',
         ],
         start_new_session=True,
     )

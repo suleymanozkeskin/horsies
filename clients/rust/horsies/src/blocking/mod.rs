@@ -25,7 +25,7 @@
 //!   `TaskSendError::AsyncContext` (with the prepared task id and payload,
 //!   so `retry_send(&error).await` completes the same send),
 //!   `ReadError::AsyncContext`, `DatabaseOperationError::AsyncContext`, a
-//!   `CheckReport` with `HRS-217`,
+//!   `ValidationReport` with `HRS-217`,
 //!   `WorkflowStartErrorCode::AsyncContext` with the workflow id of the
 //!   start, `WorkflowHandleErrorCode::AsyncContext`, or
 //!   `WorkflowReadError::AsyncContext`.
@@ -49,15 +49,14 @@ pub use workflow::{WorkflowFunctionView, WorkflowHandleView, WorkflowTemplateVie
 
 use std::fmt;
 use std::future::Future;
-use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use horsies_core::process_runtime::ProcessRuntimeRefusal;
 use horsies_core::{
-    process_role, thread_role, BrokerError, BrokerOperationSource, ClassCoverage, ClassReport,
-    DatabaseErrorCode, DatabaseOperationError, DatabaseOperationFailedCode, DatabasePing,
-    FailureCause, ProcessRole, SendKind, TaskSendError, ThreadRole, WorkerPong,
-    WorkerStateSnapshot,
+    process_role, thread_role, BrokerError, BrokerOperationSource, DatabaseErrorCode,
+    DatabaseOperationError, DatabaseOperationFailedCode, DatabasePing, ExecutionClassCoverage,
+    ExecutionClassReport, FailureCause, ProcessRole, SendKind, TaskSendError, ThreadRole,
+    WorkerPong, WorkerStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -68,9 +67,9 @@ use crate::check::{connectivity_report, CHECK};
 use crate::handle::checked_task_wait;
 use crate::process_state::{runtime_for, RuntimeStartFailed};
 use crate::{
-    CheckPassed, CheckReport, Horsies, HorsiesError, HorsiesErrorCode, PingTarget, ReadError,
+    CheckPassed, Horsies, HorsiesError, HorsiesErrorCode, MinResponses, PingTarget, ReadError,
     StoredResult, TaskFunction, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome, TaskSendOptions,
-    UserErrorCode, WaitLimit, WorkerHistoryLimit,
+    UserErrorCode, ValidationReport, WaitLimit, WorkerHistoryLimit,
 };
 
 /// Where a blocking call can run.
@@ -432,14 +431,14 @@ impl HorsiesView<'_> {
     pub fn ping_workers(
         &self,
         target: PingTarget,
-        timeout: Duration,
-        min_responses: Option<NonZeroUsize>,
+        wait: Duration,
+        min_responses: MinResponses,
     ) -> Result<Vec<WorkerPong>, DatabaseOperationError> {
         block_health(
-            self.app.ping_workers(target, timeout, min_responses),
+            self.app.ping_workers(target, wait, min_responses),
             DatabaseOperationFailedCode::WorkerPingFailed,
             "Horsies::ping_workers()",
-            "app.ping_workers(target, timeout, min_responses)",
+            "app.ping_workers(target, wait, min_responses)",
         )
     }
 
@@ -480,30 +479,34 @@ impl HorsiesView<'_> {
         )
     }
 
-    /// `Horsies::get_class_coverage`, blocking.
-    pub fn get_class_coverage(&self) -> Result<ClassCoverage, DatabaseOperationError> {
+    /// `Horsies::get_execution_class_coverage`, blocking.
+    pub fn get_execution_class_coverage(
+        &self,
+    ) -> Result<ExecutionClassCoverage, DatabaseOperationError> {
         block_health(
-            self.app.get_class_coverage(),
+            self.app.get_execution_class_coverage(),
             DatabaseOperationFailedCode::MonitoringQueryFailed,
-            "Horsies::get_class_coverage()",
-            "app.get_class_coverage()",
+            "Horsies::get_execution_class_coverage()",
+            "app.get_execution_class_coverage()",
         )
     }
 
-    /// `Horsies::get_class_report`, blocking.
-    pub fn get_class_report(&self) -> Result<ClassReport, DatabaseOperationError> {
+    /// `Horsies::get_execution_class_report`, blocking.
+    pub fn get_execution_class_report(
+        &self,
+    ) -> Result<ExecutionClassReport, DatabaseOperationError> {
         block_health(
-            self.app.get_class_report(),
+            self.app.get_execution_class_report(),
             DatabaseOperationFailedCode::MonitoringQueryFailed,
-            "Horsies::get_class_report()",
-            "app.get_class_report()",
+            "Horsies::get_execution_class_report()",
+            "app.get_execution_class_report()",
         )
     }
 
     /// `Horsies::check_live`, blocking. The static check runs anywhere; on
     /// a runtime thread the live phases do not run, and the report holds
     /// `HRS-217` (Python `CHECK_LIVE_ASYNC_CONTEXT`).
-    pub fn check_live(&self) -> Result<CheckPassed, CheckReport> {
+    pub fn check_live(&self) -> Result<CheckPassed, ValidationReport> {
         let _static_passed = self.app.check()?;
         match place(format_args!("blocking Horsies::check_live()")) {
             Place::Runs(runtime) => runtime.block_on(self.app.check_live()),
@@ -517,8 +520,8 @@ impl HorsiesView<'_> {
 
 /// The report of a blocking live check on a runtime thread (Python
 /// `_check_broker_connectivity` in a running event loop). Pure.
-fn live_check_in_async_context() -> CheckReport {
-    CheckReport::of(
+fn live_check_in_async_context() -> ValidationReport {
+    ValidationReport::of(
         CHECK,
         vec![HorsiesError::new(
             "live broker check cannot run on a thread that runs a tokio runtime",
@@ -555,7 +558,7 @@ mod tests {
     }
 
     fn app() -> Horsies {
-        let mut app = Horsies::new(AppConfig::for_database_url(
+        let mut app = Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap();
@@ -663,7 +666,7 @@ mod tests {
     async fn a_blocking_live_check_on_a_runtime_thread_runs_the_static_check_only() {
         let report = app().blocking().check_live().unwrap_err();
         assert_eq!(
-            report.errors()[0].code,
+            report.refusals()[0].code,
             Some(HorsiesErrorCode::CheckLiveAsyncContext)
         );
     }

@@ -3,7 +3,8 @@
 `clients/python/horsies/_catalog/manifest.py` and `clients/python/horsies/_catalog/worker_manifest.py` are
 generated as two modules, so each has its own classes for the same Rust types
 (`manifest.PoolRecycleNever` is not `worker_manifest.PoolRecycleNever`). The
-rules that turn the validated `PostgresConfig` values into these types are
+rules that turn the validated `PostgresConfig` values (the session database,
+`pool_recycle`, `tcp_keepalives`, `tcp_user_timeout`) into these types are
 written once here. Each function takes the constructors of the target module
 as keyword arguments and returns that module's type; the builders pass their
 generated classes (`clients/python/horsies/core/manifest.py`, `clients/python/horsies/core/worker_manifest.py`).
@@ -15,9 +16,18 @@ a defect: it raises `AssertionError`. Every function is pure.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Final, Protocol
+from typing import Final, Protocol, assert_never
 
-from horsies.core.models.broker import SQLALCHEMY_NEVER_RECYCLE, PostgresConfig
+from horsies.core.models.broker import (
+    PoolRecycleAfterSeconds,
+    PoolRecycleNever,
+    SessionDatabaseSameAsDatabaseUrl,
+    SessionDatabaseSeparate,
+    TcpKeepalivesOff,
+    TcpKeepalivesOn,
+    TcpUserTimeoutAfter,
+    TcpUserTimeoutSystemDefault,
+)
 from horsies.core.types.result import Err, Ok
 from horsies.core.utils.url import check_database_url_scheme
 
@@ -72,95 +82,100 @@ class UserTimeoutAfterClass[T](Protocol):
 
 
 def session_database_with[S](
-    config: PostgresConfig,
+    session_database: SessionDatabaseSameAsDatabaseUrl | SessionDatabaseSeparate,
     *,
     same_as_database_url: Callable[[], S],
     separate: SeparateSessionClass[S],
 ) -> S:
-    """No `session_database_url` is the main URL; a URL is the separate
-    variant with the scheme that the core reads (`core_database_url`)."""
-    match config.session_database_url:
-        case None:
+    """`SessionDatabaseSameAsDatabaseUrl` is the main URL; a separate session
+    database is the separate variant with the scheme that the core reads
+    (`core_database_url`)."""
+    match session_database:
+        case SessionDatabaseSameAsDatabaseUrl():
             return same_as_database_url()
-        case session_url:
-            return separate(url=core_database_url(session_url.get_secret_value()))
+        case SessionDatabaseSeparate(url=url):
+            return separate(url=core_database_url(url.get_secret_value()))
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def pool_recycle_with[R](
-    value: int,
+    pool_recycle: PoolRecycleNever | PoolRecycleAfterSeconds,
     *,
     never: Callable[[], R],
     after_seconds: PoolRecycleAfterSecondsClass[R],
 ) -> R:
-    """The typed form of a validated `pool_recycle`: `-1` (SQLAlchemy's
-    "never") is the never variant, any other value a number of seconds.
+    """The manifest form of a validated `pool_recycle`.
 
-    The `PostgresConfig` validator admits only these, so another value is a
-    defect and raises `AssertionError`.
+    The `PostgresConfig` validator admits only an age of at least 0, so
+    another value is a defect and raises `AssertionError`.
     """
-    match value:
-        case _ if value == SQLALCHEMY_NEVER_RECYCLE:
+    match pool_recycle:
+        case PoolRecycleNever():
             return never()
-        case _:
-            assert value >= 0, (
-                f'pool_recycle={value} passed the PostgresConfig validator, which '
-                'admits only -1 and a number of seconds'
+        case PoolRecycleAfterSeconds(seconds=seconds):
+            assert seconds >= 0, (
+                f'pool_recycle.seconds={seconds} passed the PostgresConfig '
+                'validator, which admits only a number of seconds of at least 0'
             )
-            return after_seconds(seconds=value)
+            return after_seconds(seconds=seconds)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def tcp_keepalives_with[K](
-    config: PostgresConfig,
+    keepalives: TcpKeepalivesOff | TcpKeepalivesOn,
     *,
     off: Callable[[], K],
     on: KeepalivesOnClass[K],
 ) -> K:
-    """The typed form of the validated keepalive settings: off, or on with
-    the idle time, the interval and the probe count. The three values are
-    not read when `tcp_keepalives` is False.
+    """The manifest form of the validated keepalive settings: off, or on
+    with the idle time, the interval and the probe count.
 
-    The `PostgresConfig` validator admits only values of at least 1 when
-    keepalives are on, so another value is a defect and raises
-    `AssertionError`.
+    The `PostgresConfig` validator admits only values of at least 1, so
+    another value is a defect and raises `AssertionError`.
     """
-    match config.tcp_keepalives:
-        case False:
+    match keepalives:
+        case TcpKeepalivesOff():
             return off()
-        case True:
-            values = (
-                config.tcp_keepalives_idle,
-                config.tcp_keepalives_interval,
-                config.tcp_keepalives_count,
-            )
+        case TcpKeepalivesOn(
+            idle_seconds=idle_seconds,
+            interval_seconds=interval_seconds,
+            probes=probes,
+        ):
+            values = (idle_seconds, interval_seconds, probes)
             assert min(values) >= 1, (
                 f'keepalive values {values} passed the PostgresConfig validator, '
-                'which admits only values of at least 1 when tcp_keepalives is True'
+                'which admits only values of at least 1'
             )
             return on(
-                idle_seconds=config.tcp_keepalives_idle,
-                interval_seconds=config.tcp_keepalives_interval,
-                probes=config.tcp_keepalives_count,
+                idle_seconds=idle_seconds,
+                interval_seconds=interval_seconds,
+                probes=probes,
             )
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def tcp_user_timeout_with[T](
-    milliseconds: int,
+    tcp_user_timeout: TcpUserTimeoutSystemDefault | TcpUserTimeoutAfter,
     *,
     system_default: Callable[[], T],
     after: UserTimeoutAfterClass[T],
 ) -> T:
-    """The typed form of a validated `tcp_user_timeout_ms`: `0` is the
-    operating system's timeout, any other value a number of milliseconds.
+    """The manifest form of a validated `tcp_user_timeout`.
 
-    The `PostgresConfig` validator admits only values of at least 0, so
-    another value is a defect and raises `AssertionError`.
+    The `PostgresConfig` validator admits only milliseconds of at least 1,
+    so another value is a defect and raises `AssertionError`.
     """
-    match milliseconds:
-        case 0:
+    match tcp_user_timeout:
+        case TcpUserTimeoutSystemDefault():
             return system_default()
-        case _:
+        case TcpUserTimeoutAfter(milliseconds=milliseconds):
             assert milliseconds > 0, (
-                f'tcp_user_timeout_ms={milliseconds} passed the PostgresConfig '
-                'validator, which admits only values of at least 0'
+                f'tcp_user_timeout.milliseconds={milliseconds} passed the '
+                'PostgresConfig validator, which admits only values of at least 1'
             )
             return after(milliseconds=milliseconds)
+        case _ as unreachable:
+            assert_never(unreachable)

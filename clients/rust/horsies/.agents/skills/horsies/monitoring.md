@@ -12,12 +12,13 @@ web UI, so the Python app and the Rust app answer alike.
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use horsies::{DatabaseOperationError, Horsies, PingTarget};
+use horsies::{DatabaseOperationError, Horsies, MinResponses, PingTarget};
 
 async fn check_health(app: &Horsies) -> Result<(), DatabaseOperationError> {
     let ping = app.ping_database().await?;
+    let one_reply = MinResponses::AtLeast(NonZeroUsize::MIN);
     let pongs = app
-        .ping_workers(PingTarget::EveryWorker, Duration::from_secs(2), NonZeroUsize::new(1))
+        .ping_workers(PingTarget::EveryWorker, Duration::from_secs(2), one_reply)
         .await?;
     println!("database {} ms, {} workers answered", ping.latency_ms, pongs.len());
     Ok(())
@@ -27,14 +28,14 @@ async fn check_health(app: &Horsies) -> Result<(), DatabaseOperationError> {
 | Method | Returns |
 |---|---|
 | `ping_database()` | `DatabasePing` (`latency_ms`) |
-| `ping_workers(target, timeout, min_responses)` | `Vec<WorkerPong>` (`worker_id`, `hostname`, `pid`, `round_trip_ms`). `target` is `PingTarget::EveryWorker` or `PingTarget::Worker(worker_id)` |
+| `ping_workers(target, wait, min_responses)` | `Vec<WorkerPong>` (`worker_id`, `hostname`, `pid`, `round_trip_ms`). `target` is `PingTarget::EveryWorker` or `PingTarget::Worker(worker_id)`; `min_responses` is `MinResponses::FullWindow` or `MinResponses::AtLeast(NonZeroUsize)` |
 | `list_worker_states()` | `Vec<WorkerStateSnapshot>`: the latest snapshot of each worker |
 | `get_worker_state(worker_id)` | `Option<WorkerStateSnapshot>` |
 | `get_worker_state_history(worker_id, limit)` | `Vec<WorkerStateSnapshot>`, newest first. `WorkerHistoryLimit::AllRetained` or `Newest(NonZeroU32)` |
-| `get_stale_tasks(StaleMinutes)` | `BoundedTaskList<StaleTaskRow>`. `StaleMinutes::parse(0..=525_600)` |
-| `get_expired_tasks()` | `BoundedTaskList<ExpiredTaskRow>`: PENDING tasks past their `good_until` |
-| `get_class_coverage()` | `ClassCoverage`: whether a live worker can run each pending execution class |
-| `get_class_report()` | `ClassReport`: the load of each execution class |
+| `get_stale_tasks(StaleMinutes)` | `BoundedTaskList<StaleTaskRow>` (`task_id`, ..., `last_heartbeat_at: Option<DateTime<Utc>>`). `StaleMinutes::parse(0..=525_600)` |
+| `get_expired_tasks()` | `BoundedTaskList<ExpiredTaskRow>` (`task_id`, ..., `expired_for: Duration`): PENDING tasks past their `good_until` |
+| `get_execution_class_coverage()` | `ExecutionClassCoverage`: whether a live worker can run each pending execution class |
+| `get_execution_class_report()` | `ExecutionClassReport`: the load of each execution class |
 
 - Every read returns `Result<_, DatabaseOperationError>`: one variant per
   state, with `code()`, `message()` and `retryable()`. A failed read is
@@ -48,15 +49,24 @@ async fn check_health(app: &Horsies) -> Result<(), DatabaseOperationError> {
   Each read connects the app's handle and installs the schema once per
   handle, as a send does.
 - `ping_workers` stops at the first of: the target worker replied,
-  `min_responses` workers replied, `timeout` passed. A zero `timeout` is
+  `MinResponses::AtLeast(n)` workers replied, `wait` passed. A zero `wait` is
   `INVALID_INPUT`. An app with no listener (`SchemaMode::AssumeInitialized`)
   gets `LISTENER_DISABLED`.
 - `BoundedTaskList` is `Complete(rows)` or `Truncated { rows, bound }`, at
   most `TASK_LIST_BOUND` (10,000) rows.
 - `WorkerStateSnapshot::profile` is `SnapshotProfile::Named { name }` (the
   worker profile that the worker runs) or `SnapshotProfile::NotRecorded` (a
-  worker of a build before schema migration 1004 wrote the snapshot). The web
-  model `WorkerStateInfo::profile` is `SnapshotProfileInfo`.
+  worker of a build before schema migration 1004 wrote the snapshot).
+  `child_count` counts its children; `claim_limits` is a `ClaimLimits`
+  (`claimed_per_worker` is the limit that the worker resolved, its seat count
+  when its profile sets none); `slot_health` is `SlotHealth::AllServing` or
+  `SlotHealth::SlotsDown { slots }`; `execution_class_budgets` is
+  `ExecutionClassBudgets`.
+- One type per health record: the web models `WorkerStateInfo::slot_health`
+  and `WorkerStateInfo::profile` hold `SlotHealth` and `SnapshotProfile`, the
+  route of the execution class report answers `ExecutionClassReport`, and
+  `LivenessReport` holds `database: DatabaseLiveness` (`Ping { latency_ms }`
+  or `Unreachable`) and `workers: Vec<WorkerPong>`.
 - `app.blocking()` has the same reads, except `get_stale_tasks` and
   `get_expired_tasks`.
 - The meaning of each read is on the shared docs page
@@ -324,7 +334,7 @@ horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
 
 | Option | Default | Description |
 |---|---|---|
-| `CONFIG` | none | A TOML file of `AppConfig`; its `[broker]` section names the database. Give exactly one of `CONFIG` and `--database-url` |
+| `CONFIG` | none | A TOML file of `AppConfig`; its `[database]` section names the database. Give exactly one of `CONFIG` and `--database-url` |
 | `--database-url URL` | none | Monitor this database, with the default of every other setting |
 | `--session-database-url URL` | none | A direct or session-capable URL when `--database-url` is pooled |
 | `--pgbouncer-transaction-mode` | off | `--database-url` is a PgBouncer transaction-pool endpoint. Needs `--session-database-url` |
@@ -334,7 +344,7 @@ horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
 | `--trusted-header NAME` | `X-Forwarded-User` | The identity header that the proxy sets |
 | `--enable-actions` | off | Allow task cancel and workflow pause, resume and cancel |
 | `--custom-css-url URL` | none | A stylesheet that the page loads after its own |
-| `--loglevel LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
+| `--log-level LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
 
 - The server never installs or migrates the schema (`ObserveOnly`).
 - `--auth none` on a host that is not a loopback address exits with code 2.
@@ -484,9 +494,9 @@ allows every read and every action.
 ```rust
 use horsies::{
     // Health reads
-    PingTarget, WorkerHistoryLimit, DatabasePing, WorkerPong, WorkerStateSnapshot,
+    PingTarget, MinResponses, WorkerHistoryLimit, DatabasePing, WorkerPong, WorkerStateSnapshot,
     SnapshotProfile, StaleMinutes, StaleThresholdRefusal, StaleTaskRow, ExpiredTaskRow,
-    BoundedTaskList, ClassCoverage, ClassReport, DatabaseOperationError, DatabaseErrorCode,
+    BoundedTaskList, ExecutionClassCoverage, ExecutionClassReport, DatabaseOperationError, DatabaseErrorCode,
     TASK_LIST_BOUND, MAX_STALE_THRESHOLD_MINUTES,
 };
 use horsies::monitoring::{
@@ -516,7 +526,7 @@ use horsies::events::{
     // Event handlers
     TaskClaimed, ClaimReleased, AttemptPlaced, AttemptNotStarted, AttemptEnded,
     AttemptRecorded, TaskRecovered, ChildStarted, ChildReplaced, SlotDown, SlotRecovered,
-    AttemptEnd, AttemptRecord, HandlerError, HANDLER_QUEUE_EVENTS, HANDLER_STATS_INTERVAL,
+    AttemptEnd, AttemptRecord, HandlerError, HANDLER_QUEUE_EVENTS, HANDLER_STATISTICS_INTERVAL,
 };
 use horsies::web::{  // feature `web`
     router, Actions, MonitoringConfig, MonitoringUiConfig, MonitoringAuthPolicy,

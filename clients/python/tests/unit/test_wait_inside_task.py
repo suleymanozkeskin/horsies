@@ -68,7 +68,7 @@ def app() -> Generator[Horsies, None, None]:
     """An app whose broker cannot connect, and whose core handle records each
     call it forwards."""
     app = Horsies(
-        AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)))
+        AppConfig(database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)))
     )
     broker = app.get_broker()
     broker._core_handle = MagicMock(wraps=broker._core_handle)

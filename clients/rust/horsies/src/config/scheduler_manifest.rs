@@ -30,7 +30,7 @@ pub(crate) enum ScheduleManifestRefused {
     #[error("schedule.schedules[{position}].task_name: task '{task_name}' is not registered")]
     TaskNotRegistered { position: usize, task_name: String },
     /// The queue of an enabled schedule is not a queue of the app (Python
-    /// `Horsies.validate_queue_name`).
+    /// `Horsies.validate_queue`).
     #[error("schedule.schedules[{position}].queue_name: {cause}")]
     QueueNotAdmitted {
         position: usize,
@@ -129,7 +129,7 @@ fn send_document(
         "input_json": schedule_input_text(schedule),
         "task_options": task_options,
         "retention_class_key": config.retention.resolve_queue_retention(&queue).class_key(),
-        "retain_rerun_input": config.broker.retain_rerun_input_default,
+        "retain_rerun_input": config.database.retain_rerun_input_default,
     }))
 }
 
@@ -224,7 +224,7 @@ mod tests {
     }
 
     fn config() -> AppConfig {
-        AppConfig::for_database_url("postgresql://app@db.example/horsies")
+        AppConfig::from_database_url("postgresql://app@db.example/horsies")
     }
 
     fn registry(config: &AppConfig, queue: Option<&str>) -> TaskRegistry {

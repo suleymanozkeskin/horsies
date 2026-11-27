@@ -36,7 +36,7 @@ const broken = defineWorkflow(
 );
 
 function config(workflows: readonly AnyWorkflowContract[], tasks: HorsiesConfig["tasks"] = [greet]): HorsiesConfig {
-  return { broker: { databaseUrl: DATABASE_URL }, tasks, workflows };
+  return { database: { databaseUrl: DATABASE_URL }, tasks, workflows };
 }
 
 function appWith(core: FakeCore): Horsies {

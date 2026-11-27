@@ -375,7 +375,7 @@ async fn run_checkout(
   an app that does not register `D` in that form return `VALIDATION_FAILED`
   with the cause `PreconditionFailed`. Nothing is written. A registration
   on another app of the process does not count.
-- With `AppConfig.resend_on_transient_err`, the core runs a retryable start
+- With `AppConfig.resend_on_transient_error`, the core runs a retryable start
   failure again with the same workflow id, up to 3 times.
 - In a worker child a start goes through the child's producer handle. A
   task that starts a workflow does not wait for it: a wait in a worker

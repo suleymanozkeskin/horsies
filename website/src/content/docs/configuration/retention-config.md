@@ -212,7 +212,7 @@ another number of days for that period.
 |---|---|---|
 | `history_leaf_horizon_days` | 3 | complete future daily history partitions kept ahead of writes (2–14) |
 | `heartbeat_leaf_horizon_hours` | 6 | complete future hourly heartbeat partitions kept ahead, and the hours that a heartbeat partition is kept after its hour ends (2–48) |
-| `partition_maintenance_interval_s` | 900 | seconds between coverage and pruning passes (60–3600) |
+| `partition_maintenance_interval_seconds` | 900 | seconds between coverage and pruning passes (60–3600) |
 
 `history_leaf_horizon_days` decides how far **ahead** storage is
 prepared, not how long records live. Raising `history_leaf_horizon_days`
@@ -299,7 +299,7 @@ rows first, let the readers republish, and drop the relations last.
 |---|---|---|
 | `terminal_record_retention_hours` | 720 | terminal **workflow** rows; `None` disables |
 | `worker_state_retention_hours` | 168 | worker-state snapshots; `None` disables |
-| `retention_sweep_interval_s` | 300 | seconds between sweeps (30–86400) |
+| `retention_sweep_interval_seconds` | 300 | seconds between sweeps (30–86400) |
 | `retention_delete_batch_size` | 500 | rows per DELETE batch (50–10000), one commit each |
 
 Deleting a workflow also removes any unconsumed crashed-worker
@@ -326,7 +326,7 @@ record that no longer exists.
 
 | Setting | Default | Controls |
 |---|---|---|
-| `paused_workflow_auto_cancel_after` | `None` | age past which a PAUSED workflow is expired by policy (`WorkflowStatus.EXPIRED`); a positive duration of at most 365,000 days |
+| `paused_workflow_cancel_after` | `None` | age past which a PAUSED workflow is expired by policy (`WorkflowStatus.EXPIRED`); a positive duration of at most 365,000 days |
 
 `None` disables the sweep, so no deployment changes behaviour without
 declaring the rule.

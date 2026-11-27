@@ -19,7 +19,7 @@ const placeOrder = defineTask({
 /** The outcome of the producer, as one JSON line: the task info, or the step that failed. */
 async function outcome(): Promise<string> {
   const created = Horsies.create({
-    broker: { databaseUrl: { kind: "value", value: testDatabaseUrl() } },
+    database: { databaseUrl: { kind: "value", value: testDatabaseUrl() } },
     tasks: [placeOrder],
   });
 

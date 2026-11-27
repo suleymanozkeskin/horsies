@@ -294,12 +294,12 @@ class WorkflowSpec(Generic[OutT]):
     - Set automatically by app.workflow()
     """
 
-    resend_on_transient_err: bool = False
+    resend_on_transient_error: bool = False
     """
     - When True, start()/start_async() automatically retry transient
       infra failures (ENQUEUE_FAILED with retryable=True) up to 3 times
       with exponential backoff.
-    - Set automatically by app.workflow() from AppConfig.resend_on_transient_err.
+    - Set automatically by app.workflow() from AppConfig.resend_on_transient_error.
     """
 
     _frozen: bool = field(default=False, init=False, repr=False, compare=False)
@@ -1787,7 +1787,7 @@ class WorkflowSpec(Generic[OutT]):
             self.broker,
             workflow_id,
             workflow_sent_at,
-            resend_on_transient_err=self.resend_on_transient_err,
+            resend_on_transient_error=self.resend_on_transient_error,
         )
 
     async def start_async(
@@ -1824,7 +1824,7 @@ class WorkflowSpec(Generic[OutT]):
             self.broker,
             workflow_id,
             workflow_sent_at,
-            resend_on_transient_err=self.resend_on_transient_err,
+            resend_on_transient_error=self.resend_on_transient_error,
         )
 
     def _async_context_start_err(

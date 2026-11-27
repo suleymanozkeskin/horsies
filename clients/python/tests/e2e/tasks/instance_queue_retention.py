@@ -35,22 +35,22 @@ PERIOD_CLASS_KEY = 'standard_7d'
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=DB_URL,
         pool_size=5,
         max_overflow=5,
     ),
     recovery=RecoveryConfig(check_interval_ms=1_000),
     retention=RetentionConfig(
-        partition_maintenance_interval_s=60,
-        retention_sweep_interval_s=30,
+        partition_maintenance_interval_seconds=60,
+        retention_sweep_interval_seconds=30,
         queue_retention={MAPPED_QUEUE: MAPPED_DURATION},
     ),
     worker_profiles=E2E_WORKER_PROFILES,
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 

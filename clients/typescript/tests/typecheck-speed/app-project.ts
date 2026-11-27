@@ -277,7 +277,7 @@ function appFile(): string {
     ...workflowImportLines,
     "",
     "const created = Horsies.create({",
-    `  broker: { databaseUrl: ${databaseSecret} },`,
+    `  database: { databaseUrl: ${databaseSecret} },`,
     '  workerProfiles: { default: { isolated: { kind: "isolatedChildren", count: 2 } } },',
     `  tasks: [${taskNames.join(", ")}],`,
     `  workflows: [${workflowNames.join(", ")}],`,

@@ -13,18 +13,18 @@ from unittest import mock
 
 import pytest
 
-from horsies._core import CoreStartFailed
+from horsies._core import RuntimeStartFailed
 from horsies.core.app import Horsies
 from horsies.core.cli import discover_app
 from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.models.app import AppConfig
-from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.broker import PostgresConfig, SessionDatabaseSeparate
 
 
 def _make_app() -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(database_url="postgresql://test:test@localhost/test"),
+            database=PostgresConfig(database_url="postgresql://test:test@localhost/test"),
         )
     )
 
@@ -369,7 +369,7 @@ class TestCheckTaskImportsErrorClassification:
         app = _make_app()
         app.discover_tasks(['nonexistent.module.path.xyzzy'])
 
-        errors = app.check()
+        errors = app.check().refusals
 
         assert len(errors) == 1
         assert errors[0].code == HorsiesErrorCode.CLI_INVALID_ARGS
@@ -381,7 +381,7 @@ class TestCheckTaskImportsErrorClassification:
         missing = str(tmp_path / 'does_not_exist.py')
         app.discover_tasks([missing])
 
-        errors = app.check()
+        errors = app.check().refusals
 
         assert len(errors) == 1
         assert errors[0].code == HorsiesErrorCode.CLI_INVALID_ARGS
@@ -395,7 +395,7 @@ class TestCheckTaskImportsErrorClassification:
         app = _make_app()
         app.discover_tasks([str(bad_module)])
 
-        errors = app.check()
+        errors = app.check().refusals
 
         assert len(errors) == 1
         assert errors[0].code == HorsiesErrorCode.MODULE_IMPORT_ERROR
@@ -411,7 +411,7 @@ class TestCheckTaskImportsErrorClassification:
         app = _make_app()
         app.discover_tasks([str(bad_module)])
 
-        errors = app.check()
+        errors = app.check().refusals
 
         assert len(errors) == 1
         assert errors[0].code == HorsiesErrorCode.MODULE_IMPORT_ERROR
@@ -425,7 +425,7 @@ class TestCheckTaskImportsErrorClassification:
         app = _make_app()
         app.discover_tasks([str(bad_module)])
 
-        errors = app.check()
+        errors = app.check().refusals
 
         assert len(errors) == 1
         assert errors[0].code == HorsiesErrorCode.CLI_INVALID_ARGS
@@ -439,7 +439,7 @@ class TestCheckTaskImportsErrorClassification:
         app = _make_app()
         app.discover_tasks([str(bad_module)])
 
-        errors = app.check()
+        errors = app.check().refusals
 
         assert len(errors) == 1
         assert errors[0].code == HorsiesErrorCode.MODULE_IMPORT_ERROR
@@ -453,7 +453,7 @@ class TestCheckTaskImportsErrorClassification:
         app = _make_app()
         app.discover_tasks(['nonexistent.module.xyzzy', str(exec_module)])
 
-        errors = app.check()
+        errors = app.check().refusals
 
         # check() early-returns on first phase errors, so both should appear
         assert len(errors) == 2
@@ -524,9 +524,9 @@ def _core_check(answer: object) -> Generator[list[_CheckHandle], None, None]:
 def _pgbouncer_app() -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url="postgresql://test:test@pooler/test",
-                session_database_url="postgresql://test:test@direct/test",
+                session_database=SessionDatabaseSeparate(url="postgresql://test:test@direct/test"),
                 pgbouncer_transaction_mode=True,
             ),
         )
@@ -549,7 +549,7 @@ class TestLiveBrokerConnectivityCheck:
                 app, 'get_broker', side_effect=AssertionError('must not call get_broker')
             ),
         ):
-            errors = app.check(live=True)
+            errors = app.check(live=True).refusals
 
         assert errors == []
         assert app._broker is None
@@ -567,7 +567,7 @@ class TestLiveBrokerConnectivityCheck:
         for step in ('CONNECT', 'POOL_SETTINGS', 'MAIN_URL', 'SESSION_URL'):
             app = _make_app()
             with _core_check(_Refused(step=step, message='db down')) as built:
-                errors = app.check(live=True)
+                errors = app.check(live=True).refusals
 
             assert len(errors) == 1, step
             assert errors[0].code == HorsiesErrorCode.DATABASE_INVALID_URL
@@ -578,8 +578,8 @@ class TestLiveBrokerConnectivityCheck:
     def test_a_core_that_cannot_run_the_call_is_the_connectivity_refusal(self) -> None:
         app = _make_app()
 
-        with _core_check(CoreStartFailed('the core runtime could not start')) as built:
-            errors = app.check(live=True)
+        with _core_check(RuntimeStartFailed('the core runtime could not start')) as built:
+            errors = app.check(live=True).refusals
 
         assert [error.code for error in errors] == [HorsiesErrorCode.DATABASE_INVALID_URL]
         assert errors[0].notes == ['the core runtime could not start']
@@ -591,7 +591,7 @@ class TestLiveBrokerConnectivityCheck:
         app = _pgbouncer_app()
 
         with _core_check(_Passed()) as built:
-            errors = app.check(live=True)
+            errors = app.check(live=True).refusals
 
         assert errors == []
         database = built[0].manifest['database']
@@ -607,14 +607,14 @@ class TestLiveBrokerConnectivityCheck:
         app = _pgbouncer_app()
 
         with _core_check(_Refused(step='LISTENER', message='no NOTIFY within 2000 ms')):
-            errors = app.check(live=True)
+            errors = app.check(live=True).refusals
 
         assert len(errors) == 1
         assert errors[0].code == HorsiesErrorCode.DATABASE_INVALID_URL
         assert errors[0].message == 'broker listener capability check failed'
         assert errors[0].notes is not None
         assert (
-            "session_database_url appears to be transaction-pooled" in errors[0].notes[0]
+            "the session_database URL appears to be transaction-pooled" in errors[0].notes[0]
         )
         assert errors[0].notes[1] == 'no NOTIFY within 2000 ms'
 

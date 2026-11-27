@@ -216,7 +216,7 @@ async fn the_app_rerun_stores_the_carrier_of_the_current_span() {
     global::set_text_map_propagator(TraceContextPropagator::new());
     let database = TestDatabase::create().await;
     let source = seed_failed_source(&database).await;
-    let app = Horsies::new(AppConfig::for_database_url(database.url())).unwrap();
+    let app = Horsies::new(AppConfig::from_database_url(database.url())).unwrap();
 
     let outcome = app
         .rerun_task(RerunTask::new(source, None, None), policy())

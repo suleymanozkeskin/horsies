@@ -40,6 +40,7 @@ broker_config = PostgresConfig(
 
 0.8.0:
 
+<!-- check: skip elided -- the 0.8.0 names; a later release renames them -->
 ```python
 from pydantic import SecretStr
 
@@ -52,7 +53,7 @@ broker_config = PostgresConfig(
 )
 ```
 
-A URL that names a driver fails when `PostgresConfig` is built. It raises `ConfigurationError` with `HRS-203` (`BROKER_INVALID_URL`). The error names the scheme, not the rest of the URL. Its help names the fix: `replace 'postgresql+psycopg://' with 'postgresql://'`. A URL with another scheme, or with no scheme, also gets `HRS-203`.
+A URL that names a driver fails when `PostgresConfig` is built. It raises `ConfigurationError` with `HRS-203` (`DATABASE_INVALID_URL`). The error names the scheme, not the rest of the URL. Its help names the fix: `replace 'postgresql+psycopg://' with 'postgresql://'`. A URL with another scheme, or with no scheme, also gets `HRS-203`.
 
 Change the URL where the deployment keeps it: in the code, in an environment variable or in a secret store. `horsies web --database-url` and `--session-database-url` take the same schemes.
 

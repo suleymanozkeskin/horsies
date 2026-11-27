@@ -11,7 +11,7 @@
 //!
 //! Two families of codes:
 //! - Process-state refusals: the call could not use the core in this
-//!   process (`CORE_STOPPED`, `CORE_START_FAILED`, `TOO_MANY_PENDING_CALLS`,
+//!   process (`CORE_STOPPED`, `RUNTIME_START_FAILED`, `TOO_MANY_PENDING_CALLS`,
 //!   `FORKED_AFTER_CORE_START`).
 //! - Client defects: the package sent a value or made a call that the bridge
 //!   refuses, or the bridge itself panicked (`MANIFEST_REFUSED`,
@@ -50,7 +50,7 @@ pub enum NativeThrown {
         state_after: StateAfter,
     },
     /// The core runtime or its log forwarder could not start.
-    CoreStartFailed { cause: String },
+    RuntimeStartFailed { cause: String },
     /// The process already has the most core calls in flight that it may
     /// have.
     TooManyPendingCalls { subject: String, bound: u32 },

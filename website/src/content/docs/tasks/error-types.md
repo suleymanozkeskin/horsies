@@ -126,7 +126,7 @@ When the core of the process cannot run the call, the call returns its failure c
 | ---------- | ---- | ----------- | ----------------- |
 | `TooManyPendingCalls` | 65,536 core calls are in flight on the calling event loop | `True` | Nothing ran |
 | `CoreCallTimedOut` | A sync form did not end within 30 minutes. For `get_raw_result_record()` with a `timeout_ms`, the bound is `timeout_ms` plus 30 minutes; with no `timeout_ms`, the call has no bound | `True` | A read changed nothing. After `enqueue()` or a sync send, the row may or may not exist |
-| `CoreStartFailed` | The core runtime could not start | `False` | Nothing ran |
+| `RuntimeStartFailed` | The core runtime could not start | `False` | Nothing ran |
 
 Two more core errors are never a result: see [Process-State Refusals](#process-state-refusals).
 
@@ -180,8 +180,8 @@ When the core ran the call and the call failed, `cause` is the core's class of t
 | `NO_TYPE_AVAILABLE` | Typed decode at the `app` layer needs an `ok_type`, but `task_name` is not in the local task registry | No |
 | `INVALID_JSON_PAYLOAD` | Stored result JSON is malformed, not a JSON object, has an invalid strict-serde envelope, or fails app-level typed slot decode | No |
 | `INVALID_TASK_OPTIONS` | `enqueue_async` received task options that are not valid JSON or not a JSON object, a `retry_policy` that does not validate as `RetryPolicy` (strict types, no unknown fields), an `execution` that is not an `Execution` value, or a `cancel_grace_ms` that does not fit the class (100 to 10,000 ms for `SHARED_ASYNC`; absent, null, or 100 to 10,000 ms for `ISOLATED`; absent or null for `SHARED_THREAD`), or a `SHARED_ASYNC` or `SHARED_THREAD` class with no `timeout_ms` (absent or null). The message names each failing field. Nothing was written | No |
-| `INVALID_INPUT` | An argument was refused before anything ran: a non-positive `timeout_seconds`, `min_responses` or history `limit`, a `target_worker_id` that is not a string, both `enqueued_at` and `enqueue_delay_seconds`, a future `sent_at` without either, a naive `sent_at`, `enqueued_at` or `good_until`, an `input_json` that does not parse, that repeats a key in an object, or that is not a JSON object or null, an empty task or queue name, a priority outside 1..100, a negative `enqueue_delay_seconds`, an empty `retention_class_key`, or an idempotency key that is empty or over 255 bytes. Nothing was written | No |
-| `LISTENER_DISABLED` | The broker was built with `assume_initialized=True` and has no listener, so `ping_workers` cannot run. Nothing ran | No |
+| `INVALID_INPUT` | An argument was refused before anything ran: a ping `wait_ms` that is not a positive `int`, a non-positive `MinResponsesAtLeast` or `WorkerHistoryLimitNewest` count, a `PingTargetWorker` whose `worker_id` is not a string, a stale `threshold_minutes` that is not an `int` from 0 to 525,600, both `enqueued_at` and `delay_seconds`, a future `sent_at` without either, a naive `sent_at`, `enqueued_at` or `good_until`, an `input_json` that does not parse, that repeats a key in an object, or that is not a JSON object or null, an empty task or queue name, a priority outside 1..100, a negative `delay_seconds`, an empty `retention_class_key`, or an idempotency key that is empty or over 255 bytes. Nothing was written | No |
+| `LISTENER_DISABLED` | The broker has the schema mode `SchemaMode.ASSUME_INITIALIZED` and has no listener, so `ping_workers` cannot run. Nothing ran | No |
 | `WAIT_INSIDE_TASK` | A raw result read (`app.get_raw_result()`, `broker.get_raw_result_record()` or an `*_async` form) was called in a worker child, where task bodies run. Nothing ran. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task) | No |
 
 ### DatabaseOperationError
@@ -417,7 +417,7 @@ from pydantic import SecretStr
 
 app = Horsies(
     config=AppConfig(
-        broker=PostgresConfig(database_url=SecretStr('postgresql://...')),
+        database=PostgresConfig(database_url=SecretStr('postgresql://...')),
         # HRS-212: 'DATABASE_ERROR' collides with OperationalCode.DATABASE_ERROR
         exception_mapper={ValueError: 'DATABASE_ERROR'},
     ),
