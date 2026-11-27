@@ -1,7 +1,7 @@
 // Tasks of the custom queue instance (Rust `clients/rust/tests/worker/src/tasks/custom.rs`, Python
 // `clients/python/tests/e2e/tasks/queues_custom.py`). In the custom queue mode every task names a configured queue.
 
-import { defineTask, h, type Horsies } from "../../../../horsies/src/index.ts";
+import { defineTask, h, type Horsies } from "#horsies";
 import { holdThread } from "./waits.ts";
 
 /** The readiness task of a worker of the custom queue instance. */

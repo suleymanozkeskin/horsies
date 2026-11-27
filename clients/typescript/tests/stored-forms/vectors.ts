@@ -7,7 +7,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { BUILT_IN_TASK_CODES, WORKFLOW_STATUSES } from "../../horsies/src/codec/bounds.ts";
+import { BUILT_IN_TASK_CODES } from "../../horsies/src/_catalog/task_code.ts";
+import { WORKFLOW_STATUSES } from "../../horsies/src/wire/task-error.ts";
 import { isArray, isPlainObject, isString } from "../../horsies/src/codec/values.ts";
 import { h } from "../../horsies/src/wire/builders.ts";
 import { Decimal } from "../../horsies/src/wire/decimal.ts";

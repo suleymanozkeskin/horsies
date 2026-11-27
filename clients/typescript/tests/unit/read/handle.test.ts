@@ -7,7 +7,7 @@ import { describe, test } from "node:test";
 import { defineTask } from "../../../horsies/src/contract/public.ts";
 import type { ReadError } from "../../../horsies/src/read/errors.ts";
 import { readFormOf, taskHandleOf, waitBound } from "../../../horsies/src/read/handle.ts";
-import { MAX_WAIT_LIMIT_MS } from "../../../horsies/src/send/bounds.ts";
+import { MAX_WAIT_LIMIT_MS } from "../../../horsies/src/_catalog/send_bounds.ts";
 import { AddonOutsideMainThread } from "../../../horsies/src/thrown-errors.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 import {

@@ -15,8 +15,8 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { describe } from "node:test";
 
-import type { TaskAttempt, TaskHandle } from "../../../horsies/src/index.ts";
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import type { TaskAttempt, TaskHandle } from "#horsies";
+import { loadAddon } from "#horsies";
 import { abortLine } from "../src/forwarder-panic.ts";
 import * as basic from "../src/tasks/basic.ts";
 import * as panic from "../src/tasks/core-panic.ts";
@@ -25,8 +25,8 @@ import { processAlive, type TestProcess } from "../support/process.ts";
 import { pollUntil } from "../support/rows.ts";
 import { e2eTest, type Suite } from "../support/suite.ts";
 
-// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
-void requireDevAddon();
+// The addon of these tests is the one that the entry of the lane loads (`entry/`).
+void loadAddon();
 
 /** The longest wait for the outcome of a task that a running worker runs. */
 const RESULT_WAIT_MS = 30_000;

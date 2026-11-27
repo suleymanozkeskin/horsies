@@ -1,15 +1,12 @@
-// The bounds of a send and of a result wait.
+// The bounds of a send. The longest result wait is in the generated catalog (`_catalog/send_bounds.ts`).
 //
-// - The core's bounds below have no constant in the generated catalog yet; each names its core source, and issue
-//   #2425 moves them to the codegen output.
+// - The core's bound and the default queue priority below have no exported core constant yet; each names its source,
+//   and issue #2425 moves them to the codegen output.
 // - The resend numbers are the client's policy, the same as the Python and Rust clients' (Python `_SEND_RETRY_COUNT`,
 //   `_SEND_RETRY_INITIAL_MS`, `_SEND_RETRY_MAX_MS`; Rust `send/function.rs`).
 
 /** The most UTF-8 bytes of an idempotency key (core `IDEMPOTENCY_KEY_MAX_BYTES`, `core/src/core/history/identity/keys.rs`). */
 export const IDEMPOTENCY_KEY_MAX_BYTES = 255;
-
-/** The longest result wait, in milliseconds (core `MAX_WAIT_LIMIT_MS`, `core/src/broker/wait_limit.rs`). */
-export const MAX_WAIT_LIMIT_MS = 4_294_967_295;
 
 /**
  * The priority of the one queue of the default queue mode. The Python and Rust clients hold the same value

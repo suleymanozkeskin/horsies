@@ -1,4 +1,4 @@
-// Child mode: bad arguments, the panic rule, the plan, the start hooks (the child's own, the providers before the
+// Child mode: bad arguments, the panic rule, the log format, the schema mode of the task sends, the plan, the start hooks (the child's own, the providers before the
 // `onChildStart` hooks, a throw), the culprit method of a shared async child, the turns, and the exit rule.
 
 import assert from "node:assert/strict";
@@ -132,7 +132,8 @@ describe("child mode", () => {
     const running = runChildMode(app, CHILD_ARGUMENTS, fakeDeps(native));
 
     await settled();
-    assert.deepEqual(native.calls.slice(0, 3), ["childArguments", "setPanicRule ABORT_PROCESS", "serveChild"]);
+    assert.deepEqual(native.calls.slice(0, 4), ["childArguments", "setPanicRule ABORT_PROCESS", "applyLogFormat textLogs", "serveChild"]);
+    assert.deepEqual(native.schemaModes, ["MIGRATE_AND_VALIDATE"]);
     assert.deepEqual(native.serves[0]?.plan, {
       tasks: [
         { name: "ping", form: "ASYNC", context: "NO_CONTEXT" },
@@ -145,6 +146,17 @@ describe("child mode", () => {
       exitFlushBoundMs: CHILD_EXIT_FLUSH_BOUND_MS,
       processArguments: [...CHILD_ARGUMENTS],
     });
+    native.endServe(0);
+    assert.equal(await endedCode(running), 0);
+  });
+
+  test("the task sends take the app's schema mode, and the stderr lines take the app's log format", async () => {
+    const native = new FakeChildNative();
+    const running = runChildMode(implementedApp({ schemaMode: "OBSERVE_ONLY", logFormat: { kind: "jsonLogs" } }), CHILD_ARGUMENTS, fakeDeps(native));
+
+    await settled();
+    assert.deepEqual(native.calls.slice(0, 4), ["childArguments", "setPanicRule ABORT_PROCESS", "applyLogFormat jsonLogs", "serveChild"]);
+    assert.deepEqual(native.schemaModes, ["OBSERVE_ONLY"]);
     native.endServe(0);
     assert.equal(await endedCode(running), 0);
   });

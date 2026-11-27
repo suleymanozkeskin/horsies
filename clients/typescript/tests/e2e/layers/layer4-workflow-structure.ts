@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { describe } from "node:test";
 
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import { loadAddon } from "#horsies";
 import { FAST_RECOVERY } from "../src/instances.ts";
 import * as structure from "../src/workflows/structure.ts";
 import { pause } from "../support/process.ts";
@@ -28,8 +28,8 @@ import {
   workflowStatus,
 } from "../support/workflow-rows.ts";
 
-// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
-void requireDevAddon();
+// The addon of these tests is the one that the entry of the lane loads (`entry/`).
+void loadAddon();
 
 /** How long the test reads the nodes of a fan-out for RUNNING branches: the root and the branches run within it. */
 const FANOUT_WATCH_MS = 3_000;

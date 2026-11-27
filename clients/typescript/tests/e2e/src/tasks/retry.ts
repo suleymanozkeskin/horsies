@@ -1,7 +1,7 @@
 // Retry tasks (Rust `clients/rust/tests/worker/src/tasks/retry.rs`, Python `clients/python/tests/e2e/tasks/retry.py`).
 // The attempts are counted with marker files, which every child of the worker sees.
 
-import { defineTask, h, type Horsies } from "../../../../horsies/src/index.ts";
+import { defineTask, h, type Horsies } from "#horsies";
 import { markerErrorText, nextAttempt } from "../markers.ts";
 
 /** The retry codes of this module. */
@@ -28,13 +28,19 @@ export const retrySuccess = defineTask({
   retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1, 1], jitter: false, retryFor: ["TRANSIENT"] },
 });
 
-/** Always `TRANSIENT`; three retries 1 s, 2 s and 4 s apart. */
+/** The base of the exponential policy of `exponential`: the delay of the first retry. */
+export const EXPONENTIAL_BASE_SECONDS = 1;
+
+/** The retries of the exponential policy of `exponential`. */
+export const EXPONENTIAL_MAX_RETRIES = 3;
+
+/** Always `TRANSIENT`; the retry delays are the base, twice the base and four times the base. */
 export const exponential = defineTask({
   name: "e2e_exponential",
   input: {},
   output: h.string(),
   errorCodes: RETRY_CODES,
-  retryPolicy: { kind: "exponential", baseSeconds: 1, maxRetries: 3, jitter: false, retryFor: ["TRANSIENT"] },
+  retryPolicy: { kind: "exponential", baseSeconds: EXPONENTIAL_BASE_SECONDS, maxRetries: EXPONENTIAL_MAX_RETRIES, jitter: false, retryFor: ["TRANSIENT"] },
 });
 
 /** Always `RETRYABLE_ERROR`; one retry. */

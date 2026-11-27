@@ -8,9 +8,10 @@
 //!   refusal never throws.
 //! - The app config check also gives what the accepted config resolves to:
 //!   the send rules of each send (retention, payload bounds and the priority
-//!   of each queue), the producer manifest of its broker settings (the
-//!   resolution of the Rust client, `config::producer_manifest`) and the
-//!   coverage values of its retention (`CoverageRequest::of_retention`).
+//!   of each queue), the producer manifest of its broker settings and of the
+//!   schema mode that the caller names (the resolution of the Rust client,
+//!   `config::producer_manifest`) and the coverage values of its retention
+//!   (`CoverageRequest::of_retention`).
 
 use horsies_core::core::config::SessionDatabase as CoreSessionDatabase;
 use horsies_core::manifest::{
@@ -40,10 +41,31 @@ const CORE_URL_SCHEME: &str = "postgresql://";
 /// The short form of [`CORE_URL_SCHEME`] that the config also admits.
 const SHORT_URL_SCHEME: &str = "postgres://";
 
-/// The schema mode of the producer manifest of an app: the migrations run
-/// at the first operation that needs the schema, as the Python and Rust
-/// clients do for an app (`SchemaMode::MigrateAndValidate`).
-const APP_SCHEMA_MODE: SchemaMode = SchemaMode::MigrateAndValidate;
+/// What the core handle of a producer manifest does with the schema: the
+/// three members of the core's `SchemaMode`, with the manifest texts as the
+/// JavaScript values (`HorsiesConfig.schemaMode`).
+#[napi(string_enum = "UPPER_SNAKE")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppSchemaMode {
+    /// The first operation that needs the schema applies the migrations and
+    /// checks the schema version.
+    MigrateAndValidate,
+    /// The handle never runs schema statements.
+    ObserveOnly,
+    /// The handle never runs schema statements and uses no listener.
+    AssumeInitialized,
+}
+
+impl AppSchemaMode {
+    /// The core's mode of this value. Pure.
+    const fn core_mode(self) -> SchemaMode {
+        match self {
+            Self::MigrateAndValidate => SchemaMode::MigrateAndValidate,
+            Self::ObserveOnly => SchemaMode::ObserveOnly,
+            Self::AssumeInitialized => SchemaMode::AssumeInitialized,
+        }
+    }
+}
 
 /// The values of the coverage pass of a schema install: the history and the
 /// heartbeat horizons and the registrable retention periods of the config.
@@ -93,17 +115,21 @@ pub enum DeclaredCodesCheck {
 
 /// Check the JSON text of the core's `AppConfig`: every rule of
 /// `AppConfig::validate`, the manifest bounds of the broker settings and the
-/// coverage bounds of the retention. A text that the core's config reader
-/// refuses throws `CLIENT_DEFECT` ([`read_app_config`]). Starts nothing.
+/// coverage bounds of the retention. The producer manifest of an accepted
+/// config has `schema_mode`. A text that the core's config reader refuses
+/// throws `CLIENT_DEFECT` ([`read_app_config`]). Starts nothing.
 #[napi(ts_return_type = "NativeEnvelope<AppConfigCheck>")]
 #[allow(
     clippy::needless_pass_by_value,
     reason = "napi-rs passes the arguments of a JavaScript call by value"
 )]
-pub fn check_app_config(app_config_json: String) -> Envelope<AppConfigCheck> {
+pub fn check_app_config(
+    app_config_json: String,
+    schema_mode: AppSchemaMode,
+) -> Envelope<AppConfigCheck> {
     sync_call("check_app_config", || {
         match read_app_config(&app_config_json) {
-            Ok(config) => Envelope::Value(app_config_check(config)),
+            Ok(config) => Envelope::Value(app_config_check(config, schema_mode.core_mode())),
             Err(defect) => Envelope::Thrown(defect),
         }
     })
@@ -174,15 +200,16 @@ impl CoverageCheck {
     }
 }
 
-/// The check of an app config. Pure.
+/// The check of an app config, with `schema` as the schema mode of its
+/// producer manifest. Pure.
 ///
 /// Order of the refusals: the rules of `AppConfig::validate` in its order,
 /// then the manifest bounds of the broker settings, then the coverage
 /// bounds of the retention.
-fn app_config_check(config: AppConfig) -> AppConfigCheck {
+fn app_config_check(config: AppConfig, schema: SchemaMode) -> AppConfigCheck {
     let errors = config.validate();
     let mut refusals: Vec<CoreRefusal> = errors.iter().map(CoreRefusal::of_config_error).collect();
-    let manifest = producer_manifest(&config.database);
+    let manifest = producer_manifest(&config.database, schema);
     let coverage = match errors
         .iter()
         .any(|error| matches!(error, AppConfigError::Retention(_)))
@@ -242,16 +269,19 @@ fn coverage_check(retention: &RetentionConfig) -> CoverageCheck {
     }
 }
 
-/// The producer manifest of the broker settings `config`, or every refusal
-/// of a pool size outside 1 to 10,000 and of an overflow above 10,000, which
-/// the manifest bounds and `PostgresConfig::validate` does not. Each refusal
-/// has the code of a broker pool value (`HRS-213`), as Python's pool field
-/// checks. Pure.
-fn producer_manifest(config: &PostgresConfig) -> Result<ProducerManifest, Vec<CoreRefusal>> {
+/// The producer manifest of the broker settings `config` with the schema
+/// mode `schema`, or every refusal of a pool size outside 1 to 10,000 and of
+/// an overflow above 10,000, which the manifest bounds and
+/// `PostgresConfig::validate` does not. Each refusal has the code of a
+/// broker pool value (`HRS-213`), as Python's pool field checks. Pure.
+fn producer_manifest(
+    config: &PostgresConfig,
+    schema: SchemaMode,
+) -> Result<ProducerManifest, Vec<CoreRefusal>> {
     Ok(ProducerManifest {
         manifest_version: ManifestVersion::CURRENT,
         database: database_manifest(config)?,
-        schema: APP_SCHEMA_MODE,
+        schema,
         send: SendManifest {
             retain_rerun_input_default: config.retain_rerun_input_default,
             idempotency_reservation_window: ReservationWindowMicros::try_from(
@@ -339,9 +369,23 @@ mod tests {
 
     const BROKER: &str = r#"{"database_url": "postgres://user:secret@127.0.0.1:55432/horsies"}"#;
 
-    /// The check of a config text that the core's config reader reads.
+    /// The check of a config text that the core's config reader reads, with
+    /// the default schema mode of an app.
     fn check_of(text: &str) -> AppConfigCheck {
-        app_config_check(read_app_config(text).expect("the config text reads"))
+        app_config_check(
+            read_app_config(text).expect("the config text reads"),
+            SchemaMode::MigrateAndValidate,
+        )
+    }
+
+    /// The schema mode of the producer manifest of an accepted check.
+    fn manifest_schema_of(check: AppConfigCheck) -> SchemaMode {
+        let AppConfigCheck::Accepted { manifest_json, .. } = check else {
+            panic!("the config is accepted");
+        };
+        horsies_core::manifest::parse_producer_manifest(&manifest_json)
+            .expect("the manifest reads back")
+            .schema
     }
 
     fn refusals_of(check: AppConfigCheck) -> Vec<CoreRefusal> {
@@ -373,6 +417,27 @@ mod tests {
             install_coverage.history_horizon_days,
             f64::from(defaults.history_leaf_horizon_days)
         );
+    }
+
+    #[test]
+    fn the_producer_manifest_has_the_schema_mode_that_the_caller_names() {
+        for (mode, core) in [
+            (
+                AppSchemaMode::MigrateAndValidate,
+                SchemaMode::MigrateAndValidate,
+            ),
+            (AppSchemaMode::ObserveOnly, SchemaMode::ObserveOnly),
+            (
+                AppSchemaMode::AssumeInitialized,
+                SchemaMode::AssumeInitialized,
+            ),
+        ] {
+            let config = read_app_config(&config_text(BROKER)).expect("the config text reads");
+            assert_eq!(
+                manifest_schema_of(app_config_check(config, mode.core_mode())),
+                core
+            );
+        }
     }
 
     #[test]

@@ -13,8 +13,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { type AnyTaskContract, type AnyWorkflowContract, Horsies, type TaskHandle } from "../../../horsies/src/index.ts";
-import { appInternals } from "../../../horsies/src/app/internals.ts";
+import { type AnyTaskContract, type AnyWorkflowContract, Horsies, type TaskHandle } from "#horsies";
+import { appInternals } from "#horsies";
 import { buildApp } from "../src/app.ts";
 import { connectionEnv } from "../src/connection.ts";
 import { type Instance, INSTANCE_ENV, instanceConfig, type Profile, readyClass, type ReadyClass, type ThreadProfile } from "../src/instances.ts";
@@ -273,6 +273,8 @@ function instanceReadinessTask(
     case "scheduler_invalid_rules":
     case "scheduler_invalid_task":
     case "handlers":
+    case "handler_hook_throws":
+    case "handler_hook_past_bound":
     case "worker_ended_spans":
       return readinessTask(readyClass(profile));
   }

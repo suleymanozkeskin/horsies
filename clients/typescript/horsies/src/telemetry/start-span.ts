@@ -29,7 +29,7 @@ import {
 } from "./attributes.ts";
 import { NO_CARRIER, sendTraceOf } from "./carrier.ts";
 import type { SpansNotMade } from "./not-made.ts";
-import { INSTRUMENTATION_SCOPE, type OtelApi, type OtelSpan } from "./otel-api.ts";
+import { INSTRUMENTATION_SCOPE, INSTRUMENTATION_SCOPE_VERSION, type OtelApi, type OtelSpan } from "./otel-api.ts";
 import { markError } from "./send-span.ts";
 
 /** What the start observer reads. */
@@ -95,7 +95,7 @@ function openStartSpan(deps: StartTelemetryDeps, facts: StartSpanFacts): OpenedS
   try {
     const parent = api.context.active();
 
-    const span = api.trace.getTracer(INSTRUMENTATION_SCOPE).startSpan(
+    const span = api.trace.getTracer(INSTRUMENTATION_SCOPE, INSTRUMENTATION_SCOPE_VERSION).startSpan(
       `${START_OPERATION} ${facts.workflowName}`,
       {
         kind: api.SpanKind.PRODUCER,

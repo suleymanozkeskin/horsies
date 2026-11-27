@@ -1,7 +1,10 @@
 // The recorded baselines of the typecheck-speed check and the verdict of a measurement against
 // one of them. A baseline is a ratio of the app time to the control time, so the speed of the CPU
 // cancels; the ratio still differs per operating system and CPU architecture, so a baseline compares
-// only with the platform, the architecture, the Bun binary and the two projects that recorded it.
+// only with the platform, the architecture and the Bun binary that recorded it (plus the run and session counts).
+// The two projects are not part of the key: a change of the public API changes the projects, and a slower
+// type-check of the changed projects is what this check exists to find. The fingerprints of the projects that
+// recorded a baseline are stored with it and printed next to the current ones; they never refuse a verdict.
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { availableParallelism, cpus } from "node:os";
@@ -22,7 +25,7 @@ export interface MachineIdentity {
 
 /**
  * What a measurement must match to compare with a stored baseline. The ratio depends on the operating system, the CPU
- * architecture, the Bun binary that runs `bun check` and the two projects; it does not depend on the CPU speed.
+ * architecture and the Bun binary that runs `bun check`; it does not depend on the CPU speed.
  */
 export interface BaselineKey {
   /** The operating system of the measuring process (`process.platform`). */
@@ -31,14 +34,21 @@ export interface BaselineKey {
   readonly arch: string;
   /** The Bun binary: version and revision. */
   readonly bun: string;
-  /** SHA-256 of the control project (`projectSha256`). */
-  readonly controlSha256: string;
-  /** SHA-256 of the app project (`projectSha256`). */
-  readonly appSha256: string;
   readonly runsPerSession: number;
   /** The count of session ratios. */
   readonly sessions: number;
 }
+
+/** The fingerprints of the two projects of a measurement. Information only: they are not part of `BaselineKey`. */
+export interface ProjectFingerprints {
+  /** SHA-256 of the control project (`projectSha256`). */
+  readonly controlSha256: string;
+  /** SHA-256 of the app project (`projectSha256`). */
+  readonly appSha256: string;
+}
+
+/** Whether the projects of a measurement are the projects that recorded a baseline. */
+export type ProjectsComparison = "same" | "changed";
 
 /** One baseline as `baseline.json` stores it. */
 export interface StoredBaseline {
@@ -130,8 +140,8 @@ export function projectSha256(files: ReadonlyMap<string, string>): string {
 }
 
 /**
- * The stored baseline with the platform, the architecture, the Bun binary, the two projects, the run count and the
- * session count of `key`. A platform with no recorded baseline is `noMatch`: the check gives no verdict there.
+ * The stored baseline with the platform, the architecture, the Bun binary, the run count and the
+ * session count of `key`. The projects do not decide. A platform with no recorded baseline is `noMatch`: the check gives no verdict there.
  */
 export function findBaseline(file: StoredBaselineFile, key: BaselineKey): BaselineLookup {
   const stored = file.entries.find(
@@ -139,8 +149,6 @@ export function findBaseline(file: StoredBaselineFile, key: BaselineKey): Baseli
       entry.recordedOn.platform === key.platform &&
       entry.recordedOn.arch === key.arch &&
       entry.bun === key.bun &&
-      entry.controlSha256 === key.controlSha256 &&
-      entry.appSha256 === key.appSha256 &&
       entry.runsPerSession === key.runsPerSession &&
       entry.sessionRatios.length === key.sessions,
   );
@@ -174,12 +182,22 @@ export function judge(baseline: Baseline, measured: Ratio): Verdict {
   return measured.appPerControl > limit.appPerControl ? { kind: "slower", measured, limit } : { kind: "withinNoise", measured, limit };
 }
 
-/** A stored baseline of `key` with the given session ratios, one per session of `key`. */
-export function storedBaselineOf(key: BaselineKey, recordedOn: MachineIdentity, sessionRatios: readonly Ratio[]): StoredBaseline {
+/** Whether `projects` are the projects that recorded `stored`. */
+export function compareProjects(stored: StoredBaseline, projects: ProjectFingerprints): ProjectsComparison {
+  return stored.controlSha256 === projects.controlSha256 && stored.appSha256 === projects.appSha256 ? "same" : "changed";
+}
+
+/** A stored baseline of `key` with the given session ratios, one per session of `key`, and the fingerprints of its projects. */
+export function storedBaselineOf(
+  key: BaselineKey,
+  projects: ProjectFingerprints,
+  recordedOn: MachineIdentity,
+  sessionRatios: readonly Ratio[],
+): StoredBaseline {
   return {
     bun: key.bun,
-    controlSha256: key.controlSha256,
-    appSha256: key.appSha256,
+    controlSha256: projects.controlSha256,
+    appSha256: projects.appSha256,
     runsPerSession: key.runsPerSession,
     recordedOn,
     sessionRatios: sessionRatios.map((ratio) => ratio.appPerControl),

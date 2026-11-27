@@ -1,12 +1,14 @@
 // The parts that every command of `cli.run` shares: the exit codes, the output lines, the `--log-level` values, the
-// flag parse with `node:util` `parseArgs`, and the usage error.
+// flag parse, and the usage error. The flag parse and the usage error type are those of `src/tools/command-line.ts`,
+// which imports no module that loads the native addon: the `horsies` tool and `cli.run` share one parse.
 
-import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
+import type { ParseArgsOptionsConfig } from "node:util";
 
 import type { WorkerLogLevel } from "../_catalog/worker_manifest.ts";
 import { raiseDefect } from "../native/call/defect.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
+import { parseToolFlags, type ToolFlagValues, type ToolUsageError } from "../tools/command-line.ts";
 
 /** The exit code of a command: 0 after an operator stop or a passing check, 1 for a failure, 2 for a usage error. */
 export type CommandExitCode = 0 | 1 | 2;
@@ -41,7 +43,7 @@ export function processOutput(): CommandOutput {
 }
 
 /** Arguments that do not parse: `message` names the flag or the command and the rule. */
-export type UsageError = { readonly kind: "usageError"; readonly message: string };
+export type UsageError = ToolUsageError;
 
 /** A usage error with `message`. Pure. */
 export function usageError(message: string): UsageError {
@@ -76,7 +78,7 @@ export function parseLogLevel(text: string): Result<WorkerLogLevel, UsageError> 
 }
 
 /** The values of the flags of one command, by flag name, as `parseArgs` gives them. */
-export type FlagValues = { readonly [name: string]: string | boolean | (string | boolean)[] | undefined };
+export type FlagValues = ToolFlagValues;
 
 /**
  * The flags of `args` by the flag table `options`: `--flag value` and `--flag=value` for a text flag, `--flag` for a
@@ -84,24 +86,8 @@ export type FlagValues = { readonly [name: string]: string | boolean | (string |
  * errors. Pure.
  */
 export function parseFlags(args: readonly string[], options: ParseArgsOptionsConfig): Result<FlagValues, UsageError> {
-  try {
-    return ok(parseArgs({ args: [...args], options, strict: true, allowPositionals: false }).values);
-  } catch (cause) {
-    // A refusal of `parseArgs` is a `TypeError` with one of its error codes; any other throw passes on.
-    if (cause instanceof TypeError && "code" in cause && PARSE_ARGS_ERROR_CODES.some((code) => code === cause.code)) {
-      return err(usageError(cause.message));
-    }
-
-    throw cause;
-  }
+  return parseToolFlags(args, options);
 }
-
-/** The error codes of `parseArgs` for arguments that do not parse. */
-const PARSE_ARGS_ERROR_CODES: readonly string[] = [
-  "ERR_PARSE_ARGS_UNKNOWN_OPTION",
-  "ERR_PARSE_ARGS_INVALID_OPTION_VALUE",
-  "ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL",
-];
 
 /** The text value of `name`, or none. A non-text value is a defect of the flag table: `ClientDefect`. Pure. */
 export function textFlag(values: FlagValues, name: string): string | undefined {

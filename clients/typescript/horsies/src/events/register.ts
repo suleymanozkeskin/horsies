@@ -27,7 +27,7 @@ import type { RaiseDefect } from "../child/state.ts";
 import { raiseDefect } from "../native/call/defect.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import { MAX_EVENT_HANDLERS, MAX_HANDLER_NAME_CHARS, UNKNOWN_HANDLER_NAME } from "./bounds.ts";
+import { MAX_EVENT_HANDLERS, MAX_HANDLER_NAME_CHARS, UNKNOWN_HANDLER_NAME } from "../_catalog/event_bounds.ts";
 import type { HandlerChildStartHook } from "./types.ts";
 
 /** A handler with the event type erased: the dispatch gives it only events of its type. */

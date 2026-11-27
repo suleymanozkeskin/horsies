@@ -94,41 +94,57 @@ fn built_in_code_type(union: &CodeUnion) -> String {
     union_alias(code_union_alias_name(union), &members)
 }
 
-/// The frozen array of every member of the catalogs of `union`, catalogs in
-/// its order and members in catalog order. Pure.
+/// The frozen tuple of every member of the catalogs of `union`, catalogs in
+/// its order and members in catalog order. The type is the readonly tuple of
+/// the member values (the module has isolated declarations, so the type is
+/// written out); the elements are the catalog members. Pure.
 fn built_in_code_values(union: &CodeUnion) -> String {
-    let mut text = format!(
-        "export const {BUILT_IN_CODES_CONSTANT}: ReadonlyArray<{}> = Object.freeze([\n",
-        code_union_alias_name(union)
-    );
+    let mut values = Vec::new();
+    let mut elements = Vec::new();
     for catalog in union.catalogs {
         let (_module, type_name) = catalog_type_reference(catalog);
         for member in catalog.members {
-            text.push_str(&format!("  {},\n", property_access(type_name, member.name)));
+            values.push(string_literal(member.value));
+            elements.push(property_access(type_name, member.name));
         }
     }
-    text.push_str("]);");
-    text
+    format!(
+        "/** The built-in task error codes of horsies: the members of the core's built-in code \
+         catalogs, in order. */\n{}",
+        frozen_tuple(BUILT_IN_CODES_CONSTANT, &values, &elements)
+    )
 }
 
-/// The frozen array of the reserved names, typed by their literals. No
-/// reserved name gives `ReadonlyArray<never>`. Pure.
+/// The frozen readonly tuple of the reserved names, typed by their literals.
+/// No reserved name gives the empty tuple. Pure.
 fn reserved_codes(reserved: &[&str]) -> String {
     let literals: Vec<String> = reserved.iter().map(|name| string_literal(name)).collect();
-    match literals.as_slice() {
-        [] => format!(
-            "export const {RESERVED_CODES_CONSTANT}: ReadonlyArray<never> = Object.freeze([]);"
-        ),
-        names => {
-            let mut text = format!(
-                "export const {RESERVED_CODES_CONSTANT}: ReadonlyArray<{}> = Object.freeze([\n",
-                names.join(" | ")
-            );
-            for name in names {
-                text.push_str(&format!("  {name},\n"));
-            }
-            text.push_str("]);");
-            text
+    format!(
+        "/** Code texts that are reserved and are not task codes. */\n{}",
+        frozen_tuple(RESERVED_CODES_CONSTANT, &literals, &literals)
+    )
+}
+
+/// `export const NAME: readonly [<types>] = Object.freeze([<elements>] as
+/// const);`: the types on one line, as the declaration file writes them;
+/// the elements one per line; an empty list is `readonly []` and `[]`.
+/// Pure.
+fn frozen_tuple(name: &str, types: &[String], elements: &[String]) -> String {
+    format!(
+        "export const {name}: readonly [{}] = Object.freeze({} as const);",
+        types.join(", "),
+        bracket_list(elements)
+    )
+}
+
+/// `[]`, or `[` then one item per line with a trailing comma, then `]`.
+/// Pure.
+fn bracket_list(items: &[String]) -> String {
+    match items {
+        [] => "[]".to_owned(),
+        several => {
+            let lines: String = several.iter().map(|item| format!("  {item},\n")).collect();
+            format!("[\n{lines}]")
         }
     }
 }
@@ -195,12 +211,16 @@ mod tests {
                  \n\
                  export type SampleCode =\n  | OutcomeCode\n  | WaitCode\n  | ContractCode;\n\
                  \n\
-                 export const BUILT_IN_TASK_CODES: ReadonlyArray<SampleCode> = Object.freeze([\n  \
+                 /** The built-in task error codes of horsies: the members of the core's \
+                 built-in code catalogs, in order. */\n\
+                 export const BUILT_IN_TASK_CODES: readonly [\"TASK_TIMEOUT\", \
+                 \"ASYNC_CONTEXT\", \"NO_TYPE_AVAILABLE\"] = Object.freeze([\n  \
                  OutcomeCode.TASK_TIMEOUT,\n  WaitCode.ASYNC_CONTEXT,\n  \
-                 ContractCode.NO_TYPE_AVAILABLE,\n]);\n\
+                 ContractCode.NO_TYPE_AVAILABLE,\n] as const);\n\
                  \n\
-                 export const RESERVED_NON_TASK_CODES: ReadonlyArray<\"STOPPED\"> = \
-                 Object.freeze([\n  \"STOPPED\",\n]);\n\
+                 /** Code texts that are reserved and are not task codes. */\n\
+                 export const RESERVED_NON_TASK_CODES: readonly [\"STOPPED\"] = \
+                 Object.freeze([\n  \"STOPPED\",\n] as const);\n\
                  \n\
                  export const UNDECLARED_LABEL = \"undeclared\";\n"
             )
@@ -208,19 +228,21 @@ mod tests {
     }
 
     #[test]
-    fn several_reserved_names_type_the_array_by_their_union() {
+    fn several_reserved_names_are_a_tuple_of_their_literals() {
         assert_eq!(
             reserved_codes(&["A", "B"]),
-            "export const RESERVED_NON_TASK_CODES: ReadonlyArray<\"A\" | \"B\"> = \
-             Object.freeze([\n  \"A\",\n  \"B\",\n]);"
+            "/** Code texts that are reserved and are not task codes. */\n\
+             export const RESERVED_NON_TASK_CODES: readonly [\"A\", \"B\"] = \
+             Object.freeze([\n  \"A\",\n  \"B\",\n] as const);"
         );
     }
 
     #[test]
-    fn no_reserved_name_is_an_empty_array_of_never() {
+    fn no_reserved_name_is_the_empty_tuple() {
         assert_eq!(
             reserved_codes(&[]),
-            "export const RESERVED_NON_TASK_CODES: ReadonlyArray<never> = Object.freeze([]);"
+            "/** Code texts that are reserved and are not task codes. */\n\
+             export const RESERVED_NON_TASK_CODES: readonly [] = Object.freeze([] as const);"
         );
     }
 
@@ -251,11 +273,13 @@ mod tests {
             .map(|catalog| catalog.members.len())
             .sum();
         assert_eq!(members, 37);
-        assert_eq!(text.lines().count(), members + 2);
+        assert_eq!(text.lines().count(), members + 3);
+        assert!(text.contains(" \"ASYNC_CONTEXT\", "));
         assert!(text.contains("\n  RetrievalCode.ASYNC_CONTEXT,\n"));
-        assert!(
-            text.starts_with("export const BUILT_IN_TASK_CODES: ReadonlyArray<BuiltInTaskCode> = ")
-        );
+        assert!(text
+            .contains("\nexport const BUILT_IN_TASK_CODES: readonly [\"UNHANDLED_EXCEPTION\", "));
+        assert!(text.contains(" \"WORKFLOW_OUTPUT_SKIPPED\"] = Object.freeze([\n"));
+        assert!(text.ends_with("\n] as const);"));
     }
 
     #[test]
@@ -269,8 +293,8 @@ mod tests {
             "src/_catalog/task_code.ts"
         );
         assert!(file.text().contains(
-            "\nexport const RESERVED_NON_TASK_CODES: ReadonlyArray<\"WORKFLOW_STOPPED\"> = \
-             Object.freeze([\n  \"WORKFLOW_STOPPED\",\n]);\n"
+            "\nexport const RESERVED_NON_TASK_CODES: readonly [\"WORKFLOW_STOPPED\"] = \
+             Object.freeze([\n  \"WORKFLOW_STOPPED\",\n] as const);\n"
         ));
         assert!(file
             .text()

@@ -2,7 +2,7 @@
 // Python `clients/python/tests/e2e/test_layer7_subworkflows.py`). Their children are the definitions of `children.ts`.
 // The node ids are the ones of the Python tests.
 
-import { defineWorkflow, h } from "../../../../horsies/src/index.ts";
+import { defineWorkflow, h } from "#horsies";
 import {
   CompletedChildProbe,
   FailedChildProbe,

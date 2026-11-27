@@ -3,7 +3,7 @@
 // bounds is refused before any connect. The cases that need a sent task or a running worker are end-to-end cases.
 
 import assert from "node:assert/strict";
-import { describe, test } from "node:test";
+import { after, before, describe, test } from "node:test";
 
 import type { CoreAccess } from "../../../horsies/src/app/core-access.ts";
 import { TaskId, WorkflowId } from "../../../horsies/src/contract/ids.ts";
@@ -13,7 +13,8 @@ import { buildCoreHandle, type CoreHandle } from "../../../horsies/src/native/ha
 import { processCoreAddon } from "../../../horsies/src/native/process-core/addon.ts";
 import { nativeValue } from "../../../horsies/src/native/call/envelope.ts";
 import { noWorkflowCore } from "../../../horsies/src/workflow/core.ts";
-import { manifestJson, manifestJsonWithSchema, testDatabaseUrl } from "./manifest.ts";
+import { createFreshDatabase, type FreshDatabase } from "./fresh-database.ts";
+import { manifestJson, manifestJsonWithSchema } from "./manifest.ts";
 
 // The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
 void requireDevAddon();
@@ -60,9 +61,14 @@ function area(databaseUrl: string): MonitoringArea {
   return createMonitoringArea(access(buildCoreHandle(manifestJson(databaseUrl, false), "PRODUCER")));
 }
 
-/** The area of an installed test database. */
+/** The new empty database of this file: the rows of other test files are not in it. */
+let freshDatabase: FreshDatabase | undefined;
+
+/** The area of the installed database of this file. */
 async function installedArea(): Promise<MonitoringArea> {
-  const handle = buildCoreHandle(manifestJson(testDatabaseUrl(), false), "PRODUCER");
+  assert.ok(freshDatabase !== undefined, "the database of this file is created before the tests");
+
+  const handle = buildCoreHandle(manifestJson(freshDatabase.url, false), "PRODUCER");
   const installed = await handle.installSchema();
 
   assert.equal(installed.kind, "installed");
@@ -71,6 +77,15 @@ async function installedArea(): Promise<MonitoringArea> {
 }
 
 describe("the reads of an installed database", () => {
+  before(async () => {
+    freshDatabase = await createFreshDatabase();
+  });
+
+  after(async () => {
+    await freshDatabase?.drop();
+    freshDatabase = undefined;
+  });
+
   test("each monitoring read answers its model", async () => {
     const { monitoring } = await installedArea();
     const stats = await monitoring.taskStats();

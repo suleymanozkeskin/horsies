@@ -6,3 +6,7 @@ root = "tests"
 # a build exists, through `bun run --cwd bridge test:native`, which sets its
 # own ignore patterns.
 pathIgnorePatterns = ["**/runtime/native/**"]
+
+[install]
+# A version is used only when it is at least 10 days old (864000 seconds).
+minimumReleaseAge = 864000

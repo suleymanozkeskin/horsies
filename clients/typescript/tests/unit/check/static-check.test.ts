@@ -5,7 +5,10 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
+import { HorsiesErrorCode } from "../../../horsies/src/_catalog/error_codes.ts";
 import { createHorsies, type Horsies } from "../../../horsies/src/app.ts";
+import { refusal } from "../../../horsies/src/app/refusal.ts";
+import type { RefusalArea } from "../../../horsies/src/app/refusals.ts";
 import type { CheckOutcome, CheckPhaseName, CheckReport } from "../../../horsies/src/check/report.ts";
 import { areaScopes, type CheckScope, staticCheck } from "../../../horsies/src/check/static-check.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
@@ -69,6 +72,33 @@ const EACH_CHECK: readonly (readonly [CheckScope, CheckPhaseName])[] = [
   ["withoutSchedules", "worker-startup"],
   ["withSchedules", "scheduler-startup"],
 ];
+
+/**
+ * Records one refusal in the list of `area` of a fully implemented app, then checks it in each scope: the check
+ * refuses with that refusal where the area counts (`counted`), and passes where it does not.
+ */
+function assertAreaRefusal(area: RefusalArea, counted: readonly CheckScope[]): void {
+  const path = `${area} entry`;
+
+  for (const [scope, phase] of EACH_CHECK) {
+    const app = implementedApp();
+    const context = contextOf(app);
+
+    context.refusals.record(area, refusal(HorsiesErrorCode.TASK_NOT_REGISTERED, path, "the area refuses", []));
+
+    const outcome = staticCheck(context, fakeChecks(), scope, phase);
+
+    if (counted.includes(scope)) {
+      assert.deepEqual(
+        report(outcome).refusals.map((refused) => [refused.code, refused.path]),
+        [["HRS-300", path]],
+        `${area} in ${scope}`,
+      );
+    } else {
+      assert.equal(outcome.kind, "passed", `${area} in ${scope}`);
+    }
+  }
+}
 
 describe("the static check", () => {
   test("a passing app: the listed tasks and the declared codes by task name", () => {
@@ -175,5 +205,17 @@ describe("the static check", () => {
 
   test("the refusals of the contracts area count in both scopes", () => {
     assert.deepEqual(areaScopes("contracts"), ["withSchedules", "withoutSchedules"]);
+  });
+
+  test("a refusal in the contracts list is refused in both scopes", () => {
+    assertAreaRefusal("contracts", ["withSchedules", "withoutSchedules"]);
+  });
+
+  test("a refusal in the schedules list is refused with the schedules and passes without them", () => {
+    assertAreaRefusal("schedules", ["withSchedules"]);
+  });
+
+  test("a refusal in the events list is refused in both scopes", () => {
+    assertAreaRefusal("events", ["withSchedules", "withoutSchedules"]);
   });
 });

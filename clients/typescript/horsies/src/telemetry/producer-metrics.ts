@@ -16,7 +16,14 @@ import {
   TASK_SENT_NAME,
   TASK_SENT_UNIT,
 } from "../_catalog/producer_metrics.ts";
-import { INSTRUMENTATION_SCOPE, type OtelApi, type OtelCounter, type OtelHistogram, type OtelMeter } from "./otel-api.ts";
+import {
+  INSTRUMENTATION_SCOPE,
+  INSTRUMENTATION_SCOPE_VERSION,
+  type OtelApi,
+  type OtelCounter,
+  type OtelHistogram,
+  type OtelMeter,
+} from "./otel-api.ts";
 
 /** How one send call ended, as the `result` label names it: `ok`, or the code of the send error. */
 export type SendResultLabel = { readonly kind: "sent" } | { readonly kind: "failed"; readonly code: string };
@@ -74,7 +81,7 @@ export function resultLabelText(result: SendResultLabel): string {
 
 /** Record one point of each producer metric with the global meter provider. May throw what the user's SDK throws. */
 export function recordSendPoint(api: OtelApi, point: SendPoint): void {
-  const instruments = instrumentsOf(api.metrics.getMeter(INSTRUMENTATION_SCOPE), api.ValueType.INT);
+  const instruments = instrumentsOf(api.metrics.getMeter(INSTRUMENTATION_SCOPE, INSTRUMENTATION_SCOPE_VERSION), api.ValueType.INT);
 
   instruments.sent.add(1, {
     [TASK_ATTRIBUTE]: point.taskName,

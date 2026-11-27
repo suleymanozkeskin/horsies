@@ -15,7 +15,7 @@ import {
 
 describe("task codes", () => {
   test("the built-in codes are the members of the four catalogs, in order", () => {
-    expect(BUILT_IN_TASK_CODES).toEqual([
+    expect([...BUILT_IN_TASK_CODES]).toEqual([
       ...Object.values(OperationalCode),
       ...Object.values(ContractCode),
       ...Object.values(RetrievalCode),

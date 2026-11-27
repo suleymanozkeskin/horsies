@@ -63,9 +63,19 @@ export type NotMadeSpan =
  */
 export type NativeLogSink = (records: LogRecordOut[]) => boolean;
 
+/** The format of the stderr lines of the core log records: the `kind` of the app's `logFormat`. */
+export type LogFormatKind = "textLogs" | "jsonLogs";
+
 /** The functions of the `logging` area. None of them starts the core. */
 export interface LoggingAddon {
   setLogLevels(levels: LogLevelsArg): NativeEnvelope<undefined>;
+  /** Set the format of the stderr lines of later core log records. */
+  setLogFormat(format: LogFormatKind): NativeEnvelope<undefined>;
+  /**
+   * Write `message` as a WARNING record of `logger`, at the threshold of that logger. Starts the log bridge; a forwarder
+   * that cannot start throws `RUNTIME_START_FAILED`.
+   */
+  logClientWarning(logger: LoggerName, message: string): NativeEnvelope<undefined>;
   setLogSink(sink: NativeLogSink): NativeEnvelope<undefined>;
   resetLogSink(): NativeEnvelope<undefined>;
   /**

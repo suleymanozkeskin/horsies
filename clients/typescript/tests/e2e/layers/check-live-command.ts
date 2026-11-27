@@ -8,13 +8,13 @@
 import assert from "node:assert/strict";
 import { describe } from "node:test";
 
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import { loadAddon } from "#horsies";
 import { DATABASE_URL_ENV, pooledUrl } from "../src/connection.ts";
 import { exitText } from "../support/process.ts";
 import { e2eTest, type Suite } from "../support/suite.ts";
 
-// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
-void requireDevAddon();
+// The addon of these tests is the one that the entry of the lane loads (`entry/`).
+void loadAddon();
 
 /** The longest run of one `check --live` process: the build of the app, one connect and the live reads. */
 const CHECK_LIMIT_MS = 60_000;

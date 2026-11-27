@@ -172,6 +172,13 @@ type_check_workspace_projects
 print_step_title "Public API report and the no-any check"
 bun tests/public-api/run.ts check
 
+# The CLI report: the commands of `cli.run` and their flags, from the flag
+# tables of the command parsers, against tests/public-api/report/cli.txt. The
+# report runs code, so it runs on Bun and on Node.
+print_step_title "CLI report on Bun and on Node"
+bun tests/public-api/cli-report.ts check
+node tests/public-api/cli-report.ts check
+
 # The type tests (tests/types/pass/, tests/types/fail/) and the consumer
 # project (tests/types/consumer/), with tsc of TypeScript 7, bun check, and
 # tsc of TypeScript 6.0 (the floor compiler of the install step).

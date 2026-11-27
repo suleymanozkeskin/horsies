@@ -6,9 +6,9 @@ import type { CancelAddon, CancelPolicy, TaskCancelledRecord } from "../../horsi
 import type {
   BootCauseRecord,
   BudgetLoadRecord,
-  ClassBudgetRecord,
-  ClassCoverageRecord,
-  ClassReportRecord,
+  ExecutionClassBudgetRecord,
+  ExecutionClassCoverageRecord,
+  ExecutionClassReportRecord,
   ClusterCapRecord,
   DownSlotRecord,
   ExecutionName,
@@ -32,7 +32,7 @@ import type {
   StreamCoverageRecord,
   StreamStateRecord,
   StreamWaitRecord,
-  WorkerClassLoadRecord,
+  WorkerExecutionClassLoadRecord,
   WorkerPongRecord,
   WorkerStateRead,
   WorkerStateRecord,
@@ -99,10 +99,10 @@ export const getStaleTasksMatches: SameFunction<typeof Generated.getStaleTasks, 
 export const getExpiredTasksMatches: SameFunction<typeof Generated.getExpiredTasks, HealthAddon["getExpiredTasks"]> =
   true;
 
-export const getClassCoverageMatches: SameFunction<typeof Generated.getClassCoverage, HealthAddon["getClassCoverage"]> =
+export const getClassCoverageMatches: SameFunction<typeof Generated.getExecutionClassCoverage, HealthAddon["getExecutionClassCoverage"]> =
   true;
 
-export const getClassReportMatches: SameFunction<typeof Generated.getClassReport, HealthAddon["getClassReport"]> = true;
+export const getClassReportMatches: SameFunction<typeof Generated.getExecutionClassReport, HealthAddon["getExecutionClassReport"]> = true;
 
 export const cancelTaskMatches: SameFunction<typeof Generated.cancelTask, CancelAddon["cancelTask"]> = true;
 
@@ -140,7 +140,7 @@ export const errnoMatches: Mutual<Generated.ShortageErrnoName, ShortageErrnoName
 export const bootCauseMatches: Mutual<Generated.BootCauseRecord, BootCauseRecord> = true;
 export const downSlotMatches: Mutual<Generated.DownSlotRecord, DownSlotRecord> = true;
 export const slotHealthMatches: Mutual<Generated.SlotHealthRecord, SlotHealthRecord> = true;
-export const classBudgetMatches: Mutual<Generated.ClassBudgetRecord, ClassBudgetRecord> = true;
+export const classBudgetMatches: Mutual<Generated.ExecutionClassBudgetRecord, ExecutionClassBudgetRecord> = true;
 export const queueNumberMatches: Mutual<Generated.QueueNumberRecord, QueueNumberRecord> = true;
 export const measureMatches: Mutual<Generated.MeasureRecord, MeasureRecord> = true;
 export const clusterCapMatches: Mutual<Generated.ClusterCapRecord, ClusterCapRecord> = true;
@@ -155,12 +155,12 @@ export const staleListMatches: Mutual<Generated.StaleTaskList, StaleTaskList> = 
 export const expiredListMatches: Mutual<Generated.ExpiredTaskList, ExpiredTaskList> = true;
 export const streamStateMatches: Mutual<Generated.StreamStateRecord, StreamStateRecord> = true;
 export const streamCoverageMatches: Mutual<Generated.StreamCoverageRecord, StreamCoverageRecord> = true;
-export const classCoverageMatches: Mutual<Generated.ClassCoverageRecord, ClassCoverageRecord> = true;
+export const classCoverageMatches: Mutual<Generated.ExecutionClassCoverageRecord, ExecutionClassCoverageRecord> = true;
 export const streamWaitMatches: Mutual<Generated.StreamWaitRecord, StreamWaitRecord> = true;
 export const pendingStreamMatches: Mutual<Generated.PendingStreamRecord, PendingStreamRecord> = true;
 export const budgetLoadMatches: Mutual<Generated.BudgetLoadRecord, BudgetLoadRecord> = true;
-export const workerClassLoadMatches: Mutual<Generated.WorkerClassLoadRecord, WorkerClassLoadRecord> = true;
-export const classReportMatches: Mutual<Generated.ClassReportRecord, ClassReportRecord> = true;
+export const workerClassLoadMatches: Mutual<Generated.WorkerExecutionClassLoadRecord, WorkerExecutionClassLoadRecord> = true;
+export const classReportMatches: Mutual<Generated.ExecutionClassReportRecord, ExecutionClassReportRecord> = true;
 
 export const cancelPolicyMatches: Mutual<Generated.CancelPolicy, CancelPolicy> = true;
 export const cancelledMatches: Mutual<Generated.TaskCancelledRecord, TaskCancelledRecord> = true;

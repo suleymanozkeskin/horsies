@@ -4,12 +4,12 @@
 // Every process of the showcase builds the same app: the producer scenarios, the worker, each worker child, the
 // monitoring server and the check. Building it connects nothing: the app connects at its first operation.
 
-import { Horsies, type HorsiesConfig, type NonEmpty, type HorsiesError, type Result, type WorkerProfileInput } from "horsies";
+import { Horsies, type HorsiesConfig, type NonEmpty, type HorsiesError, type Result, type ScheduleSection, type WorkerProfileInput } from "horsies";
 
 import { ALL_TASKS } from "./contracts/index.ts";
 import { QUEUES } from "./contracts/policies.ts";
 import { err, ok } from "./result.ts";
-import { declareAcmeSchedules, type DeclareSchedules } from "./schedules.ts";
+import { ACME_SCHEDULE_SECTION } from "./schedules.ts";
 import type { DatabaseSettings } from "./settings.ts";
 import { openStore } from "./store/connection.ts";
 import { implementAnalyticsTasks } from "./tasks/analytics.ts";
@@ -51,8 +51,8 @@ export type ShowcaseApp = { readonly app: Horsies; readonly store: StoreKey };
 /** Why the app was not built: every refusal of `Horsies.create`. */
 export type AppRefused = { readonly refusals: NonEmpty<HorsiesError> };
 
-/** The config of the app on the database `url`. Pure. */
-export function appConfig(url: string): HorsiesConfig {
+/** The config of the app on the database `url`, with the schedules of `schedule` (the schedule table when left out). Pure. */
+export function appConfig(url: string, schedule: ScheduleSection = ACME_SCHEDULE_SECTION): HorsiesConfig {
   return {
     // Each send keeps its input, so `rerun` can run a failed task again.
     database: { databaseUrl: { kind: "value", value: url }, retainRerunInputDefault: "keep" },
@@ -71,18 +71,16 @@ export function appConfig(url: string): HorsiesConfig {
     resendOnTransientError: true,
     tasks: ALL_TASKS,
     workflows: ALL_WORKFLOWS,
+    schedule,
   };
 }
 
 /**
- * The app of the showcase database of `settings`, with the schedules that `declareSchedules` declares (the schedule
- * table of the app when left out): the provider opens one Acme store in each task child. No I/O.
+ * The app of the showcase database of `settings`, with the schedules of `schedule` (the schedule table of the app when
+ * left out): the provider opens one Acme store in each task child. No I/O.
  */
-export function buildShowcase(
-  settings: DatabaseSettings,
-  declareSchedules: DeclareSchedules = declareAcmeSchedules,
-): Result<ShowcaseApp, AppRefused> {
-  const created = Horsies.create(appConfig(settings.url));
+export function buildShowcase(settings: DatabaseSettings, schedule: ScheduleSection = ACME_SCHEDULE_SECTION): Result<ShowcaseApp, AppRefused> {
+  const created = Horsies.create(appConfig(settings.url, schedule));
 
   if (!created.ok) {
     return err({ refusals: created.error.refusals });
@@ -99,7 +97,6 @@ export function buildShowcase(
   implementPromotionTasks(app, store);
   implementNotifyTasks(app);
   implementAnalyticsTasks(app);
-  declareSchedules(app);
 
   return ok({ app, store });
 }

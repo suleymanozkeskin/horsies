@@ -5,6 +5,7 @@
 // lower-case hyphenated form, and numbers in the bounds that the declarations name. A value that breaks such a rule
 // is a `ClientDefect` of the addon.
 
+import type { SchemaMode } from "../../_catalog/manifest.ts";
 import { nativeValue, nativeValueAsync } from "../call/envelope.ts";
 import type { CoreHandle } from "../handle/core-handle.ts";
 import type { TraceArgument } from "../values/records.ts";
@@ -31,11 +32,11 @@ import type {
 } from "./addon.ts";
 
 /**
- * The check of the JSON text of the core's `AppConfig`: the send rules, the producer manifest text and the coverage
- * values of an accepted config, or every refusal. Pure: starts no core.
+ * The check of the JSON text of the core's `AppConfig`: the send rules, the producer manifest text (with the schema
+ * mode `schemaMode`) and the coverage values of an accepted config, or every refusal. Pure: starts no core.
  */
-export function checkAppConfig(appConfigJson: string): AppConfigCheck {
-  return nativeValue("checkAppConfig", () => sendsAddon().checkAppConfig(appConfigJson));
+export function checkAppConfig(appConfigJson: string, schemaMode: SchemaMode): AppConfigCheck {
+  return nativeValue("checkAppConfig", () => sendsAddon().checkAppConfig(appConfigJson, schemaMode));
 }
 
 /** The check of a declared error code list: one refusal per refused entry, in list order. Pure. */

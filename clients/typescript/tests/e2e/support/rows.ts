@@ -8,7 +8,7 @@
 
 import assert from "node:assert/strict";
 
-import type { TaskId } from "../../../horsies/src/index.ts";
+import type { TaskId } from "#horsies";
 import { postgresErrorText, type PostgresSession, type QueryRows } from "./postgres/client.ts";
 import { POLL_INTERVAL_MS, pause } from "./process.ts";
 

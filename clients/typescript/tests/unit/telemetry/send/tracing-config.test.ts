@@ -137,7 +137,7 @@ describe("the tracing step", () => {
       const loaded = requireOtelApi();
       const api = loaded.kind === "loaded" ? loaded.api : assert.fail("the API does not load");
 
-      api.trace.getTracer("test").startSpan("probe", { kind: api.SpanKind.CONSUMER, attributes: {} }, api.ROOT_CONTEXT).end();
+      api.trace.getTracer("test", "1.0.0").startSpan("probe", { kind: api.SpanKind.CONSUMER, attributes: {} }, api.ROOT_CONTEXT).end();
       assert.deepEqual(
         sdk.spans().map((span) => span.name),
         ["probe"],

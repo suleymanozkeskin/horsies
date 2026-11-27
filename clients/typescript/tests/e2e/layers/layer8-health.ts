@@ -7,8 +7,8 @@
 import assert from "node:assert/strict";
 import { describe } from "node:test";
 
-import type { PingWorkersOptions, TaskId, WorkerPong, WorkerStateSnapshot } from "../../../horsies/src/index.ts";
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import type { PingWorkersOptions, TaskId, WorkerPong, WorkerStateSnapshot } from "#horsies";
+import { loadAddon } from "#horsies";
 import * as basic from "../src/tasks/basic.ts";
 import * as shared from "../src/tasks/shared.ts";
 import { sentHandle } from "../support/outcome.ts";
@@ -16,8 +16,8 @@ import { found, NOT_YET, pollFor } from "../support/poll.ts";
 import { sqlText } from "../support/rows.ts";
 import { e2eTest, type Suite } from "../support/suite.ts";
 
-// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
-void requireDevAddon();
+// The addon of these tests is the one that the entry of the lane loads (`entry/`).
+void loadAddon();
 
 /** The longest wait for the snapshots of a test. The `recovery` instance writes one each second. */
 const SNAPSHOT_WAIT_MS = 20_000;

@@ -35,7 +35,7 @@ serde_json = "1"
 uuid = "1"
 chrono = "0.4"
 # The zone data of the core's scheduler (`horsies-core` reads zones with the
-# same version), so the zone check of `app.schedules` and the scheduler start
+# same version), so the zone check of the `schedule` section and the scheduler start
 # read one zone table.
 chrono-tz = "0.10"
 # `fcntl` of the child's socket: the duplicate that the host thread keeps

@@ -14,7 +14,7 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import type { Result } from "../../horsies/src/wire/result.ts";
-import { horsiesProblems, lintProblems, platformProblems, unpackedManifest } from "./checks.ts";
+import { horsiesFacts, horsiesProblems, lintProblems, platformFacts, platformProblems, unpackedManifest } from "./checks.ts";
 import { commandFailedText, runCommand } from "./command.ts";
 import { platformExpectationOf } from "./content.ts";
 import { manifestRefusedText, optionalDependenciesOf, readHorsiesManifest } from "./manifest.ts";
@@ -197,6 +197,12 @@ function checkAndIndex(inputs: Inputs, packed: PackedPackages, stageDir: string)
   }));
 
   writeFileSync(join(inputs.outDir, "index.json"), `${JSON.stringify(entries, null, 2)}\n`);
+
+  console.log(horsiesFacts(packed.horsies.tarball));
+
+  for (const [row, unpacked] of packed.platforms) {
+    console.log(platformFacts(unpacked.tarball, unpacked.packageDir, platformExpectationOf(row, version)));
+  }
 
   for (const entry of entries) {
     console.log(`packed ${entry.filename}: ${entry.name}@${entry.version}, ${entry.files.length} files, ${entry.integrity}`);

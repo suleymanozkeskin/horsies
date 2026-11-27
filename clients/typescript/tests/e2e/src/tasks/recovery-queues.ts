@@ -2,7 +2,7 @@
 // Python `clients/python/tests/e2e/tasks/instance_recovery.py` and `priority_binding.py`). In the custom queue mode
 // every task names one of the queues `default` and `recovery`; `recovery` runs one task at a time.
 
-import { defineTask, defineWorkflow, h, type Horsies } from "../../../../horsies/src/index.ts";
+import { defineTask, defineWorkflow, h, type Horsies } from "#horsies";
 import { SERIAL_QUEUE } from "../instances.ts";
 import { named } from "../workflows/naming.ts";
 import { holdThread } from "./waits.ts";

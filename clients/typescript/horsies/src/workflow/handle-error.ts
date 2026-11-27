@@ -13,7 +13,7 @@ import {
 import type { RawCatalogError } from "../native/values/records.ts";
 import type { SeatRelayFull } from "../seats/relay-full.ts";
 import { nativeCatalogValue } from "../send/catalog-value.ts";
-import { MAX_WAIT_LIMIT_MS } from "../send/bounds.ts";
+import { MAX_WAIT_LIMIT_MS } from "../_catalog/send_bounds.ts";
 import type { WaitBound } from "../native/sends/addon.ts";
 import type { ReadErrorTag } from "../read/errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";

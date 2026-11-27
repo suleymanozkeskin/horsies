@@ -9,7 +9,7 @@
 
 import { BroadcastChannel, isMainThread, threadId } from "node:worker_threads";
 
-import { defineTask, h, type Horsies } from "../../../../horsies/src/index.ts";
+import { defineTask, h, type Horsies } from "#horsies";
 import { addonLoads } from "../addon-loads.ts";
 import { entryThread } from "../entry-thread.ts";
 import { appendLine, createOnce, markerErrorText, nextAttempt, unixMillis } from "../markers.ts";
