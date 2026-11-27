@@ -687,7 +687,8 @@ async fn handle_operation(
     request: RequestParts,
     grant: AccessGrant,
 ) -> MonitoringResponseRecord {
-    if let Some(refusal) = refusal_by_policy(grant).await {
+    let need = core_route_access(state.config.actions, &request.method, &request.path).need;
+    if let Some(refusal) = refusal_by_policy(need, grant).await {
         return ResponseFacts::of(refusal).into_record();
     }
     let facts = match state.built().await {

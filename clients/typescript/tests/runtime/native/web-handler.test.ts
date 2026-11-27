@@ -156,6 +156,38 @@ describe("the monitoring handler with a built addon and a database", () => {
     assert.equal((await refused(request("/api/tasks"))).status, 403);
   });
 
+  test("a refused act reports can_act false on /api/meta with status 200", async () => {
+    const viewing = monitoringHandlerOf(testApp(probedHandle(manifestJson(testDatabaseUrl(), false))), {
+      authorizationPolicy: viewOnly(),
+    });
+
+    try {
+      const response = await viewing(request("/api/meta"));
+      const meta: unknown = await response.json();
+
+      assert.equal(response.status, 200);
+      assert.ok(meta instanceof Object);
+      assert.equal(Reflect.get(meta, "can_act"), false);
+    } finally {
+      await viewing.close();
+    }
+  });
+
+  test("a public route is served under a policy that refuses the view", async () => {
+    const refusing: MonitoringAuthorizationPolicy = { canView: () => false, canAct: () => false };
+
+    const closed =monitoringHandlerOf(testApp(probedHandle(manifestJson(testDatabaseUrl(), false))), {
+      authorizationPolicy: refusing,
+    });
+
+    try {
+      assert.equal((await closed(request("/"))).status, 200);
+      assert.equal((await closed(request("/api/meta"))).status, 403);
+    } finally {
+      await closed.close();
+    }
+  });
+
   test("a route refuses an unknown query parameter with 422 extra_forbidden and the parameter's name", async () => {
     const response = await handler(request("/api/tasks?no_such_parameter=1"));
     const body: unknown = await response.json();
@@ -295,6 +327,18 @@ describe("the refusals of the build and of the broker", () => {
     });
 
     const response = await refused(request("/api/tasks"));
+    const body: unknown = await response.json();
+
+    assert.equal(response.status, 403);
+    assert.deepEqual(body, { detail: "Not authorized." });
+  });
+
+  test("a refused act on an action route answers 403 before a database error", async () => {
+    const refused = monitoringHandlerOf(testApp(probedHandle(manifestJson(REFUSED_DATABASE_URL, false))), {
+      authorizationPolicy: viewOnly(),
+    });
+
+    const response = await refused(request(`/api/tasks/${TASK_ID}/cancel`, { method: "POST" }));
     const body: unknown = await response.json();
 
     assert.equal(response.status, 403);
