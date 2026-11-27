@@ -27,7 +27,9 @@ use crate::monitoring::fleet::FleetLabels;
 use crate::workflow_engine::child_spec::ChildSpecSource;
 
 use super::app::{build_router, MountPath, WebState};
-use super::auth::{MonitoringAuthorizationPolicy, MonitoringRequest, INTENT_HEADER};
+use super::auth::{
+    MonitoringAuthorizationPolicy, MonitoringRequest, INTENT_HEADER, NOT_AUTHORIZED,
+};
 use super::common::ApiError;
 use super::events::{EventBroadcaster, EventFrames};
 use super::fleet_metrics::WebFleetMetrics;
@@ -324,6 +326,24 @@ impl MonitoringHandler {
             Err(never) => match never {},
         };
         response_parts(response).await
+    }
+}
+
+/// The answer to a request that a verdict of the user's policy refused: 403
+/// `Not authorized.`, the answer of the router's guards. `None` when no
+/// verdict refused the request.
+///
+/// A host that builds its [`MonitoringHandler`] on demand (a broker that
+/// connects at the first request) calls it before the build: a refused
+/// caller gets this answer and learns nothing about the database. Pure: it
+/// reads no request body and no broker.
+pub async fn refusal_by_policy(grant: AccessGrant) -> Option<ResponseParts> {
+    match (grant.view, grant.act) {
+        (Verdict::Refused, _) | (_, Verdict::Refused) => {
+            let refused = ApiError::detail(StatusCode::FORBIDDEN, NOT_AUTHORIZED);
+            Some(response_parts(refused.into_response()).await)
+        }
+        (Verdict::Allowed | Verdict::NotAsked, Verdict::Allowed | Verdict::NotAsked) => None,
     }
 }
 

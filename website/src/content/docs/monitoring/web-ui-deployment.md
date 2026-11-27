@@ -50,6 +50,11 @@ not-authorized state. Every mutating route additionally requires `can_act` and
 the header `X-Horsies-Intent: action`; a POST without that header is rejected
 with 403.
 
+The access check runs before anything that needs the database. A caller that
+the policy refuses gets the 403 whatever the state of the database: the answer
+never carries a connect error. This holds in the Python mount and in the Rust
+mount.
+
 A custom policy answers the two questions itself, for example from the host
 app's session, JWT, or RBAC layer.
 

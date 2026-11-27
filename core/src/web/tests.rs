@@ -32,8 +32,8 @@ use super::events::{
 };
 use super::fleet_metrics::WebFleetMetrics;
 use super::handler::{
-    AccessGrant, AccessNeed, Actions, GrantedAccess, MonitoringHandler, MonitoringHandlerConfig,
-    RequestParts, ResponseForm, ResponseParts, Verdict,
+    refusal_by_policy, AccessGrant, AccessNeed, Actions, GrantedAccess, MonitoringHandler,
+    MonitoringHandlerConfig, RequestParts, ResponseForm, ResponseParts, Verdict,
 };
 use super::request_body::WorkflowActionBody;
 use super::routes::task_not_found_text;
@@ -3474,4 +3474,265 @@ async fn an_event_stream_without_a_listener_degrades_and_ends() {
         super::events::EventStreamItem::Frame("data: {\"topic\": \"degraded\"}\n\n".to_owned())
     );
     assert_eq!(frames.next().await, super::events::EventStreamItem::Ended);
+}
+
+/// The 422 body of the unknown query parameter `name` with the value
+/// `input`, on a route that declares `known`.
+fn unknown_parameter_refusal(name: &str, input: &str, known: &[&str]) -> serde_json::Value {
+    let listed = known
+        .iter()
+        .map(|parameter| format!("\"{parameter}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    serde_json::json!({"detail": [{
+        "type": "extra_forbidden",
+        "loc": ["query", name],
+        "msg": format!("Unknown parameter \"{name}\". Known parameters: {listed}."),
+        "input": input,
+        "ctx": {"known_keys": known},
+    }]})
+}
+
+/// A route that reads a query refuses a parameter that it does not declare
+/// with 422 `extra_forbidden` naming the parameter and the known ones, and
+/// still accepts every known parameter: the answer then comes from the
+/// first statement (503, the pool is lazy and unreachable), not from the
+/// validation. `query` holds one value for each known parameter.
+async fn assert_unknown_parameter_refused_and_known_accepted(
+    path: &str,
+    known: &[&str],
+    query: &str,
+) {
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Match, Some(crate::expected_schema_version())),
+        Actions::Enabled,
+    );
+
+    let refused = router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("{path}?{query}&misspelled=1"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY, "{path}");
+    assert_eq!(
+        json(refused).await,
+        unknown_parameter_refusal("misspelled", "1", known),
+        "{path}"
+    );
+
+    let accepted = router
+        .oneshot(request(Method::GET, &format!("{path}?{query}")))
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+}
+
+#[tokio::test]
+async fn the_task_stats_route_refuses_an_unknown_query_parameter() {
+    assert_unknown_parameter_refused_and_known_accepted(
+        "/api/tasks/status-counts",
+        &[
+            "since",
+            "until",
+            "task_name",
+            "queue",
+            "worker",
+            "error_code",
+            "error_category",
+            "retried_only",
+        ],
+        "since=2026-08-13T12%3A00%3A00Z&until=2026-08-14T12%3A00%3A00Z&task_name=a&queue=b&worker=c&error_code=d&error_category=TASK_ERROR&retried_only=true",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_task_facets_route_refuses_an_unknown_query_parameter() {
+    assert_unknown_parameter_refused_and_known_accepted(
+        "/api/tasks/facets",
+        &["since", "until", "status", "error_category", "retried_only"],
+        "since=2026-08-13T12%3A00%3A00Z&until=2026-08-14T12%3A00%3A00Z&status=FAILED&error_category=TASK_ERROR&retried_only=true",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_task_breakdown_route_refuses_an_unknown_query_parameter() {
+    assert_unknown_parameter_refused_and_known_accepted(
+        "/api/tasks/breakdown",
+        &[
+            "since",
+            "until",
+            "group_by",
+            "status",
+            "task_name",
+            "queue",
+            "worker",
+            "error_code",
+            "error_category",
+            "retried_only",
+            "limit",
+        ],
+        "since=2026-08-13T12%3A00%3A00Z&until=2026-08-14T12%3A00%3A00Z&group_by=queue&status=FAILED&task_name=a&queue=b&worker=c&error_code=d&error_category=TASK_ERROR&retried_only=true&limit=10",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_task_list_route_refuses_an_unknown_query_parameter() {
+    assert_unknown_parameter_refused_and_known_accepted(
+        "/api/tasks",
+        &[
+            "since",
+            "until",
+            "status",
+            "task_name",
+            "queue",
+            "worker",
+            "error_code",
+            "error_category",
+            "retried_only",
+            "sort_field",
+            "sort_direction",
+            "offset",
+            "limit",
+        ],
+        "since=2026-08-13T12%3A00%3A00Z&until=2026-08-14T12%3A00%3A00Z&status=FAILED&task_name=a&queue=b&worker=c&error_code=d&error_category=TASK_ERROR&retried_only=true&sort_field=enqueued_at&sort_direction=ASCENDING&offset=0&limit=10",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_workflow_list_route_refuses_an_unknown_query_parameter() {
+    assert_unknown_parameter_refused_and_known_accepted(
+        "/api/workflows",
+        &["workflow_name", "status", "limit"],
+        "workflow_name=a&status=RUNNING&limit=10",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_worker_ping_route_refuses_an_unknown_query_parameter() {
+    assert_unknown_parameter_refused_and_known_accepted(
+        "/api/workers/ping",
+        &["timeout_seconds"],
+        "timeout_seconds=1.5",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_worker_history_route_refuses_an_unknown_query_parameter() {
+    assert_unknown_parameter_refused_and_known_accepted(
+        "/api/workers/worker-1/history",
+        &["limit"],
+        "limit=10",
+    )
+    .await;
+}
+
+/// The refusal names the first unknown parameter in query order, with the
+/// value of its first occurrence and its percent-decoded name, and comes
+/// before the refusal of a known parameter's value.
+#[tokio::test]
+async fn the_first_unknown_parameter_is_refused_before_any_value() {
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Match, Some(crate::expected_schema_version())),
+        Actions::Enabled,
+    );
+    let refused = router
+        .oneshot(request(
+            Method::GET,
+            "/api/workers/worker-1/history?limit=many&lim%69t_=1&limit_=2&other=3",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        json(refused).await,
+        unknown_parameter_refusal("limit_", "1", &["limit"])
+    );
+}
+
+/// A route that reads no query ignores a parameter, as before.
+#[tokio::test]
+async fn a_route_that_reads_no_query_ignores_a_parameter() {
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Match, Some(crate::expected_schema_version())),
+        Actions::Enabled,
+    );
+    let answered = router
+        .oneshot(request(Method::GET, "/api/workers?misspelled=1"))
+        .await
+        .unwrap();
+    assert_eq!(answered.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// A refused view is the 403 of the guards, with no body to read and no
+/// broker.
+#[tokio::test]
+async fn a_refused_view_has_a_refusal_before_any_broker() {
+    let refusal = refusal_by_policy(grant(Verdict::Refused, Verdict::NotAsked))
+        .await
+        .expect("a refusal");
+    assert_eq!(refusal.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body_json(&refusal),
+        serde_json::json!({"detail": "Not authorized."})
+    );
+}
+
+/// A refused act, after an allowed view, has the same refusal.
+#[tokio::test]
+async fn a_refused_act_has_a_refusal_before_any_broker() {
+    let refusal = refusal_by_policy(grant(Verdict::Allowed, Verdict::Refused))
+        .await
+        .expect("a refusal");
+    assert_eq!(refusal.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body_json(&refusal),
+        serde_json::json!({"detail": "Not authorized."})
+    );
+}
+
+/// An allowed request, and a public one that no verdict covers, have no
+/// refusal.
+#[tokio::test]
+async fn an_allowed_or_public_request_has_no_refusal_before_the_broker() {
+    for allowed in [
+        grant(Verdict::Allowed, Verdict::NotAsked),
+        grant(Verdict::Allowed, Verdict::Allowed),
+        grant(Verdict::NotAsked, Verdict::NotAsked),
+    ] {
+        assert!(refusal_by_policy(allowed).await.is_none(), "{allowed:?}");
+    }
+}
+
+/// The refusal before the broker is the answer that the handler gives to the
+/// same grant: status, headers and body.
+#[tokio::test]
+async fn the_refusal_before_the_broker_is_the_answer_of_the_handler() {
+    let handler = granted_handler(Actions::Enabled);
+    for refused in [
+        grant(Verdict::Refused, Verdict::NotAsked),
+        grant(Verdict::Allowed, Verdict::Refused),
+    ] {
+        let answer = handler
+            .handle(
+                action_parts(&format!("/api/tasks/{}/cancel", Uuid::nil())),
+                refused,
+            )
+            .await;
+        let early = refusal_by_policy(refused).await.expect("a refusal");
+        assert_eq!(early.status, answer.status, "{refused:?}");
+        assert_eq!(early.headers, answer.headers, "{refused:?}");
+        assert_eq!(early.body, answer.body, "{refused:?}");
+    }
 }

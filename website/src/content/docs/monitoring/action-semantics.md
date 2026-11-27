@@ -315,6 +315,35 @@ statement of the action. The body is optional.
   value of the wrong type or a value that is not one of its texts are refused
   with 422 `value_error` at `["body"]`.
 
+## Query parameters
+
+A read route that takes query parameters refuses a parameter that it does not
+know with 422, before it reads any parameter. A misspelled filter therefore
+never reads as "not given". The response names the first unknown parameter in
+query order, the value of its first occurrence, and the known parameters:
+
+```json
+{"detail": [{
+  "type": "extra_forbidden",
+  "loc": ["query", "retried_onyl"],
+  "msg": "Unknown parameter \"retried_onyl\". Known parameters: \"since\", \"until\", \"task_name\", \"queue\", \"worker\", \"error_code\", \"error_category\", \"retried_only\".",
+  "input": "true",
+  "ctx": {"known_keys": ["since", "until", "task_name", "queue", "worker", "error_code", "error_category", "retried_only"]}
+}]}
+```
+
+| Route | Known parameters |
+|---|---|
+| `GET /api/tasks` | `since`, `until`, `status`, `task_name`, `queue`, `worker`, `error_code`, `error_category`, `retried_only`, `sort_field`, `sort_direction`, `offset`, `limit` |
+| `GET /api/tasks/status-counts` | `since`, `until`, `task_name`, `queue`, `worker`, `error_code`, `error_category`, `retried_only` |
+| `GET /api/tasks/facets` | `since`, `until`, `status`, `error_category`, `retried_only` |
+| `GET /api/tasks/breakdown` | `since`, `until`, `group_by`, `status`, `task_name`, `queue`, `worker`, `error_code`, `error_category`, `retried_only`, `limit` |
+| `GET /api/workflows` | `workflow_name`, `status`, `limit` |
+| `GET /api/workers/ping` | `timeout_seconds` |
+| `GET /api/workers/{worker_id}/history` | `limit` |
+
+A route that is not in the table reads no query parameter and ignores any.
+
 ## Conflict handling
 
 There is no optimistic-concurrency token on any action. The CAS is the
@@ -328,7 +357,7 @@ concurrency control.
 | 404 | The row no longer exists. On the workflow read routes also a workflow id that is not a UUID, and a node index outside the 32-bit node index column; nothing was read | Retention may have removed it |
 | 409 | Another change won the race, or the schema does not match this build | Re-read the entity; the body carries `current_status` |
 | 413 | The request body is over 1 MiB; the action did not run | Send a smaller body |
-| 422 | The request body is not valid: not JSON, not a JSON object, a known key with a value of the wrong type, or an unknown key (`extra_forbidden`, with the key and the known keys). The action did not run | Send only the keys of [Request bodies](#request-bodies) |
+| 422 | A query parameter that the route does not know (`extra_forbidden`, with the parameter and the known parameters; see [Query parameters](#query-parameters)). Or the request body is not valid: not JSON, not a JSON object, a known key with a value of the wrong type, or an unknown key (`extra_forbidden`, with the key and the known keys). The action did not run | Send only the keys of [Request bodies](#request-bodies) |
 | 500 | Stored data that does not parse (`STORED_DATA_INVALID`): a stored value of the workflow run, or, on a task cancel, a history status that is not a task status. Or a database failure that stays (see below). Or a server defect | Check the server logs and re-read the entity. A repeat gets the same answer until the stored row, the schema or the connection settings change. For `STORED_DATA_INVALID`, nothing was committed |
 | 503 | A database failure that may clear (see below) | The action may or may not have committed; re-read before retrying |
 

@@ -27,9 +27,9 @@ pub use events::{
     DEBOUNCE, DEGRADED_FRAME, HEARTBEAT, HEARTBEAT_FRAME, MAX_IDS_PER_EVENT, TOPIC_DEGRADED,
 };
 pub use handler::{
-    route_access, AccessGrant, AccessNeed, Actions, MonitoringHandler, MonitoringHandlerConfig,
-    RequestParts, ResponseForm, ResponseParts, RouteAccess, Verdict, MAX_REQUEST_BODY_BYTES,
-    MAX_RESPONSE_BYTES,
+    refusal_by_policy, route_access, AccessGrant, AccessNeed, Actions, MonitoringHandler,
+    MonitoringHandlerConfig, RequestParts, ResponseForm, ResponseParts, RouteAccess, Verdict,
+    MAX_REQUEST_BODY_BYTES, MAX_RESPONSE_BYTES,
 };
 /// The HTTP types of the handler's request and response parts, from the
 /// `http` crate: no web framework's own type.
