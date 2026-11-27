@@ -16,6 +16,7 @@ workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 start_module="$workspace/examples/dev/source-package.ts"
 demo_wall_seconds=180
 worker_stop_seconds=30
+schema_wait_seconds=60
 
 # The examples that have a demo, and the worker profile of each. `worker-profiles` names its profile `mixed`.
 examples=(quick-start basic-tasks custom-queues dynamic-start retries runtime-state schedules web-mount workflows worker-profiles zod-models)
@@ -54,6 +55,17 @@ run_example() {
   printf '\n==> %s on %s (profile %s)\n' "$example" "${runtime[0]}" "$profile"
   "${runtime[@]}" "$workspace/examples/$example.ts" worker --profile "$profile" &
   worker_pid=$!
+
+  # The worker installs the schema at its start; a demo that only reads (the schedules demo) needs it installed.
+  local waited=0
+  until [ "$(psql "$server/$database" -tAc "SELECT to_regproc('horsies_monitoring_schedules') IS NOT NULL")" = t ]; do
+    waited=$((waited + 1))
+    if [ "$waited" -ge "$schema_wait_seconds" ]; then
+      echo "$example: the worker installed no schema within $schema_wait_seconds seconds" >&2
+      break
+    fi
+    sleep 1
+  done
 
   local demo_status=0
   python3 "$workspace/examples/showcase/scripts/watchdog.py" --max-mb 2048 --max-seconds "$demo_wall_seconds" -- \

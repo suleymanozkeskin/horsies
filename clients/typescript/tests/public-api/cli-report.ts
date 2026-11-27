@@ -55,10 +55,18 @@ export function cliReportText(): string {
   return `${blocks.join("\n\n")}\n`;
 }
 
-function main(command: string | undefined): number {
+/** The commands of this script. */
+type ReportCommand = "write" | "check" | "unknown";
+
+/** The command of the first argument. Pure. */
+function commandOf(argument: string | undefined): ReportCommand {
+  return argument === "write" || argument === "check" ? argument : "unknown";
+}
+
+function main(argument: string | undefined): number {
   const report = cliReportText();
 
-  switch (command) {
+  switch (commandOf(argument)) {
     case "write":
       writeFileSync(CLI_REPORT_FILE, report);
       console.log("wrote tests/public-api/report/cli.txt");
@@ -86,7 +94,7 @@ function main(command: string | undefined): number {
       return 1;
     }
 
-    default:
+    case "unknown":
       console.error("usage: bun tests/public-api/cli-report.ts check|write");
 
       return 2;
