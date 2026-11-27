@@ -58,8 +58,9 @@ async fn check_health(app: &Horsies) -> Result<(), DatabaseOperationError> {
   worker profile that the worker runs) or `SnapshotProfile::NotRecorded` (a
   worker of a build before schema migration 1004 wrote the snapshot).
   `child_count` counts its children; `claim_limits` is a `ClaimLimits`
-  (`claimed_per_worker` is the limit that the worker resolved, its seat count
-  when its profile sets none); `slot_health` is `SlotHealth::AllServing` or
+  (`claimed_per_worker` is `NoTaskLimit` when the profile sets none; the
+  effective limit is then the seat count, the sum of the capacities in
+  `execution_class_budgets`); `slot_health` is `SlotHealth::AllServing` or
   `SlotHealth::SlotsDown { slots }`; `execution_class_budgets` is
   `ExecutionClassBudgets`.
 - One type per health record: the web models `WorkerStateInfo::slot_health`

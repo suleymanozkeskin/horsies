@@ -99,9 +99,10 @@ pub struct WorkerStateSnapshot {
     /// The children of the worker (the stored column `processes`).
     pub child_count: i32,
     /// The claim limits of the worker (the stored columns `max_claim_batch`
-    /// and `max_claim_per_worker`; 0 is no limit). `claimed_per_worker` is
-    /// the limit that the worker resolved: the seat count of the worker when
-    /// its profile sets none.
+    /// and `max_claim_per_worker`; 0 is no limit). The limits are the ones
+    /// of the profile: `claimed_per_worker` is `NoTaskLimit` when the profile
+    /// sets none. The effective limit is then the seat count of the worker,
+    /// the sum of the capacities in `execution_class_budgets`.
     pub claim_limits: ClaimLimits,
     /// The cluster-wide cap that the worker ran with.
     pub cluster_wide_cap: ClusterCapSetting,
@@ -294,9 +295,8 @@ impl StoredWorkerState {
 ///
 /// - `max_claim_batch`: the per queue limit of one claim pass; 0 is
 ///   `NoTaskLimit`.
-/// - `max_claim_per_worker`: the claimed limit that the worker resolved:
-///   the profile's limit, or the seat count of the worker when the profile
-///   sets none. 0 is `NoTaskLimit`.
+/// - `max_claim_per_worker`: the claimed limit of the profile. 0 is
+///   `NoTaskLimit`.
 ///
 /// The table CHECK holds both columns at 0 or more, and a column is an
 /// `integer`, so every positive value is at most `MAX_TASK_LIMIT` (the
@@ -667,6 +667,25 @@ mod tests {
             ClaimLimits {
                 per_queue_per_pass: TaskLimitSetting::NoTaskLimit {},
                 claimed_per_worker: TaskLimitSetting::TaskLimit { tasks: 4 },
+            }
+        );
+    }
+
+    /// A claimed limit of 0 reads as no limit, the state of a profile that
+    /// sets none; the seat count is not read into it.
+    #[test]
+    fn a_stored_claimed_limit_of_zero_reads_as_no_limit() {
+        let mut row = stored_row();
+        row.max_claim_batch = 3;
+        row.max_claim_per_worker = 0;
+
+        let snapshot = row.into_snapshot().expect("readable row");
+
+        assert_eq!(
+            snapshot.claim_limits,
+            ClaimLimits {
+                per_queue_per_pass: TaskLimitSetting::TaskLimit { tasks: 3 },
+                claimed_per_worker: TaskLimitSetting::NoTaskLimit {},
             }
         );
     }

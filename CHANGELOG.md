@@ -10,6 +10,15 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- **Worker snapshot: the claimed limit of the profile, not the seat count.**
+  A worker whose profile sets no `claimed_per_worker` limit writes
+  `max_claim_per_worker = 0` to its snapshot (it wrote the seat count).
+  `WorkerStateSnapshot.claim_limits.claimed_per_worker` reads as
+  `NoTaskLimit` for that worker and as `TaskLimit(tasks)` for a set limit, so
+  "no limit, N seats" and "a limit of N" read apart. The effective limit with
+  no limit is the seat count: the sum of the `capacity` values in
+  `execution_class_budgets`. No schema change. Snapshots that a worker of an
+  earlier build wrote keep the seat count and read as a limit.
 - **Core: public constants for the client checks.**
   `horsies_core` exports the idempotency key bound
   (`IDEMPOTENCY_KEY_MAX_BYTES`, 255 UTF-8 bytes), the route of
