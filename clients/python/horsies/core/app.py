@@ -178,7 +178,8 @@ if TYPE_CHECKING:
     )
     from horsies.core.task_runtime import TaskRuntime
     from horsies.core.models.tasks import TaskInfo, TaskError
-    from horsies.core.models.outcome import ReadResult
+    from horsies.core.models.outcome import ReadResult, TaskOutcome
+    from horsies.core.codec.json_io import Json
     from horsies.core.brokers.result_types import DatabaseResult, StoredResult
     from horsies.core.models.class_coverage import ExecutionClassCoverage, ExecutionClassReport
     from horsies.core.models.health import (
@@ -2110,7 +2111,7 @@ class Horsies:
         record = record_result.ok_value
         if record is None:
             return Ok(None)
-        return Ok(record.raw_result)
+        return Ok(record.envelope)
 
     def get_raw_result(
         self,
@@ -2140,7 +2141,7 @@ class Horsies:
         record = record_result.ok_value
         if record is None:
             return Ok(None)
-        return Ok(record.raw_result)
+        return Ok(record.envelope)
 
     async def get_result_async(
         self,
@@ -2237,12 +2238,16 @@ class Horsies:
         include_result: bool = False,
         include_failed_reason: bool = False,
         include_attempts: bool = False,
-    ) -> 'DatabaseResult[TaskInfo | None]':
-        """Fetch task metadata, including typed-decoded result when possible.
+    ) -> 'DatabaseResult[TaskInfo[TaskOutcome[Any, TaskError]] | None]':
+        """Fetch task metadata, with the stored result decoded to a
+        ``TaskOutcome``.
 
-        Wraps ``broker.get_task_info_async`` and adds the
-        ``decoded_result`` / ``result_decoded`` fields when the task is
-        registered locally and decode succeeds.
+        Wraps ``broker.get_task_info_async``. The ``result`` slot is
+        ``ResultSlotNotRequested`` without ``include_result``,
+        ``ResultSlotNotStored`` for a task that stored no result, and
+        ``ResultSlotStored(outcome)`` for a stored one. An ok value decodes
+        with the task's ``ok_type`` when the task is registered in this
+        process, and stays plain JSON when it is not.
         """
         info_result = await self.get_broker().get_task_info_async(
             task_id,
@@ -2250,28 +2255,28 @@ class Horsies:
             include_failed_reason=include_failed_reason,
             include_attempts=include_attempts,
         )
-        return self._decoded_task_info(task_id, include_result, info_result)
+        return self._decoded_task_info(task_id, info_result)
 
     def _decoded_task_info(
         self,
         task_id: UUID,
-        include_result: bool,
-        info_result: 'DatabaseResult[TaskInfo | None]',
-    ) -> 'DatabaseResult[TaskInfo | None]':
+        info_result: 'DatabaseResult[TaskInfo[dict[str, Json]] | None]',
+    ) -> 'DatabaseResult[TaskInfo[TaskOutcome[Any, TaskError]] | None]':
         """The answer of ``get_task_info`` and ``get_task_info_async`` for the
-        broker's task info read: the info with its result decoded when
-        ``include_result`` asked for it. Sets ``decoded_result`` and
-        ``result_decoded`` on the broker's new ``TaskInfo``; otherwise pure
-        apart from the lookup of the task's ``task_ok_type`` in the registry.
+        broker's task info read: the info with the stored envelope of its
+        result slot decoded to a ``TaskOutcome``. The slots without a stored
+        result pass unchanged. Pure apart from the lookup of the task's
+        ``task_ok_type`` in the registry.
+
+        Errors: ``INVALID_JSON_PAYLOAD`` for an envelope that does not read.
         """
-        from horsies.core.brokers.result_types import (
-            DatabaseInvalidJsonPayload,
-        )
-        from horsies.core.codec.json_value import StrictJsonError
-        from horsies.core.codec.typed import (
-            decode_task_error,
-            decode_task_result,
-            validate_task_result_envelope,
+        from dataclasses import replace
+
+        from horsies.core.models.tasks import (
+            ResultSlot,
+            ResultSlotNotRequested,
+            ResultSlotNotStored,
+            ResultSlotStored,
         )
         from horsies.core.types.result import Err, Ok, is_err
 
@@ -2280,61 +2285,64 @@ class Horsies:
         info = info_result.ok_value
         if info is None:
             return Ok(None)
-        if not include_result or info.raw_result is None:
-            return Ok(info)
+        slot: ResultSlot[TaskOutcome[Any, TaskError]]
+        match info.result:
+            case ResultSlotNotRequested():
+                slot = ResultSlotNotRequested()
+            case ResultSlotNotStored():
+                slot = ResultSlotNotStored()
+            case ResultSlotStored(value=envelope):
+                match self._decoded_task_outcome(task_id, info.task_name, envelope):
+                    case Ok(ok_value=outcome):
+                        slot = ResultSlotStored(outcome)
+                    case Err() as refused:
+                        return refused
+            case _ as unreachable:
+                assert_never(unreachable)
+        return Ok(replace(info, result=slot))
 
-        # Validate envelope shape before either fast-path or full
-        # decode — mirrors ``get_result_async``. A malformed envelope
-        # (missing marker, both slots populated, extras) must fail
-        # closed rather than being silently returned undecoded.
+    def _decoded_task_outcome(
+        self,
+        task_id: UUID,
+        task_name: str,
+        envelope: 'dict[str, Json]',
+    ) -> 'DatabaseResult[TaskOutcome[Any, TaskError]]':
+        """The ``TaskOutcome`` of a stored result envelope. Pure apart from
+        the lookup of the task's ``task_ok_type`` in the registry.
+
+        The envelope shape is checked before either slot is read, so a
+        malformed envelope (missing marker, both slots populated, extras)
+        fails closed. An err slot decodes without ``ok_type``: ``TaskError``
+        has a fixed schema. An ok value of a task that is not registered in
+        this process decodes as plain JSON (``Any``).
+
+        Errors: ``INVALID_JSON_PAYLOAD``.
+        """
+        from horsies.core.brokers.result_types import (
+            DatabaseInvalidJsonPayload,
+        )
+        from horsies.core.codec.typed import (
+            decode_task_result,
+            validate_task_result_envelope,
+        )
+        from horsies.core.types.result import Err, Ok
+
         try:
-            envelope = validate_task_result_envelope(info.raw_result)
+            validate_task_result_envelope(envelope)
         except StrictJsonError as exc:
             return Err(DatabaseInvalidJsonPayload(
-                message=(
-                    f'TaskResult envelope invalid for {task_id}: {exc}'
-                ),
+                message=f'TaskResult envelope invalid for {task_id}: {exc}',
                 cause=exc,
             ))
-        err_slot = envelope.get('err')
-        # Err-fast-path: TaskError is fixed-schema; decodable without
-        # ok_type, so unregistered tasks still surface their real err
-        # via ``decoded_result`` instead of being downgraded to
-        # ``decoded_result=None``.
-        if err_slot is not None:
-            try:
-                err_value = decode_task_error(err_slot)
-            except (StrictJsonError, ValueValidationError) as exc:
-                return Err(DatabaseInvalidJsonPayload(
-                    message=(
-                        f'TaskError decode failed for {task_id}: {exc}'
-                    ),
-                    cause=exc,
-                ))
-            from horsies.core.models.outcome import Failed
-            info.decoded_result = Failed(err_value)
-            info.result_decoded = True
-            return Ok(info)
-
-        # Ok slot — needs ok_type from local registry.
-        task = self.tasks.get(info.task_name)
+        task = self.tasks.get(task_name)
         ok_type = getattr(task, 'task_ok_type', None) if task is not None else None
-        if ok_type is None:
-            # Task not registered locally — leave decoded_result=None,
-            # result_decoded=False (already the broker's default).
-            return Ok(info)
         try:
-            decoded = decode_task_result(info.raw_result, ok_type)
+            return Ok(decode_task_result(envelope, Any if ok_type is None else ok_type))
         except (StrictJsonError, ValueValidationError) as exc:
             return Err(DatabaseInvalidJsonPayload(
-                message=(
-                    f'get_task_info decode failed for {task_id}: {exc}'
-                ),
+                message=f'get_task_info decode failed for {task_id}: {exc}',
                 cause=exc,
             ))
-        info.decoded_result = decoded
-        info.result_decoded = True
-        return Ok(info)
 
     def get_task_info(
         self,
@@ -2343,7 +2351,7 @@ class Horsies:
         include_result: bool = False,
         include_failed_reason: bool = False,
         include_attempts: bool = False,
-    ) -> 'DatabaseResult[TaskInfo | None]':
+    ) -> 'DatabaseResult[TaskInfo[TaskOutcome[Any, TaskError]] | None]':
         """Synchronous version of ``get_task_info_async``: the broker's
         blocking read (``PostgresBroker.get_task_info``) on the calling
         thread, with the GIL released.
@@ -2359,7 +2367,7 @@ class Horsies:
             include_failed_reason=include_failed_reason,
             include_attempts=include_attempts,
         )
-        return self._decoded_task_info(task_id, include_result, info_result)
+        return self._decoded_task_info(task_id, info_result)
 
     # ------------- Health / liveness API -------------
 

@@ -56,7 +56,7 @@ pub use crate::core::{
     HourlySchedule, IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, OnError,
     OperationalCode, OutcomeCode, PausedAgeRefused, PausedWorkflowAge, PayloadPolicy,
     PostgresConfig, PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
-    ResilienceConfigError, RetentionChoice, RetentionClassKeyRefused, RetentionConfig,
+    ResilienceConfigError, ResultSlot, RetentionChoice, RetentionClassKeyRefused, RetentionConfig,
     RetentionConfigError, RetrievalCode, RetryPolicy, RetryPolicyError, ScheduleConfig,
     SchedulePattern, StartRefusalCause, SubWorkflowFailure, SubWorkflowParameters,
     SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError,

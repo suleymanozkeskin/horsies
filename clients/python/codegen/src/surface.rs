@@ -1530,7 +1530,7 @@ const RECORD_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "TaskInfoRecord",
-        doc: "The metadata of one task, with the fields of TaskInfo. result_json is the\nstored result envelope as JSON text; execution is None for a task read from history.",
+        doc: "The metadata of one task, with the fields of TaskInfo. result is the stored result:\nTaskInfoResultNotRequested, TaskInfoResultNotStored, or TaskInfoResultStored with the envelope as\nJSON text; execution is None for a task read from history.",
         constructor: Constructor::NoConstructor,
         properties: &[
             property("task_id", "uuid.UUID"),
@@ -1555,13 +1555,37 @@ const RECORD_CLASSES: &[StubClass] = &[
             property("worker_process_name", "str | None"),
             property("error_code", "str | None"),
             property("failed_reason", "str | None"),
-            property("result_json", "str | None"),
+            property(
+                "result",
+                "TaskInfoResultNotRequested | TaskInfoResultNotStored | TaskInfoResultStored",
+            ),
             property("attempts", "list[TaskAttemptRecord] | None"),
             property(
                 "execution",
                 "Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'] | None",
             ),
         ],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskInfoResultNotRequested",
+        doc: "The read did not ask for the result of the task.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskInfoResultNotStored",
+        doc: "The read asked for the result, and the task stored none.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskInfoResultStored",
+        doc: "The read asked for the result, and the task stored one: the envelope as JSON text, as stored.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("envelope_json", "str")],
         methods: &[],
     },
     StubClass {

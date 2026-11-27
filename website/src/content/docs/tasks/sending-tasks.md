@@ -464,5 +464,5 @@ The codes, and which of them the resend methods accept, are in the [Errors Refer
 | `.task_id` | `uuid.UUID` | Unique task identifier |
 | `.get(wait_ms=None)` | `ReadResult[T, TaskError]` | Wait for result (blocking) |
 | `.get_async(wait_ms=None)` | `ReadResult[T, TaskError]` | Wait for result (async) |
-| `.info(include_result=False, include_failed_reason=False, include_attempts=False)` | `DatabaseResult[TaskInfo \| None]` | Fetch task metadata from broker |
-| `.info_async(include_result=False, include_failed_reason=False, include_attempts=False)` | `DatabaseResult[TaskInfo \| None]` | Async variant of `.info()` |
+| `.info(include_result=False, include_failed_reason=False, include_attempts=False)` | `DatabaseResult[TaskInfo[TaskOutcome[Any, TaskError]] \| None]` | Fetch task metadata from broker |
+| `.info_async(include_result=False, include_failed_reason=False, include_attempts=False)` | `DatabaseResult[TaskInfo[TaskOutcome[Any, TaskError]] \| None]` | Async variant of `.info()` |

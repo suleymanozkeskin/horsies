@@ -25,7 +25,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use horsies::{
     task, AppConfig, HandleResult, Horsies, HorsiesError, NodeKey, NodeResult, PingTarget,
-    ReadError, TaskError, TaskFunction, TaskInfoParts, TaskOutcome, TaskSendErrorCode,
+    ReadError, ResultSlot, TaskError, TaskFunction, TaskInfoParts, TaskOutcome, TaskSendErrorCode,
     TaskSendOptions, TaskStatus, WaitLimit, WholeSeconds, WorkerHistoryLimit, WorkflowDefinition,
     WorkflowDefinitionConfig, WorkflowHandleError, WorkflowReadError, WorkflowSpec,
     WorkflowSpecBuilder, WorkflowStartErrorCode, WorkflowStatus,
@@ -598,10 +598,21 @@ async fn blocking_reads_of_a_completed_task_answer_its_result() {
             assert_eq!(info.task_id, task_id);
             assert_eq!(info.status, TaskStatus::Completed);
             match &info.result {
-                Some(TaskResult::Ok(text)) => assert_eq!(text.get(), SENT_VALUE.to_string()),
+                ResultSlot::Stored(TaskResult::Ok(text)) => {
+                    assert_eq!(text.get(), SENT_VALUE.to_string())
+                }
                 other => panic!("expected the stored value {SENT_VALUE}, got {other:?}"),
             }
         }
+        let without_result = handle
+            .blocking()
+            .info(TaskInfoParts::default())
+            .expect("the info of the completed task, without the result");
+        assert!(
+            matches!(without_result.result, ResultSlot::NotRequested),
+            "{:?}",
+            without_result.result
+        );
     })
     .await;
     worker.close().await;

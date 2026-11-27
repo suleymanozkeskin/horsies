@@ -135,6 +135,7 @@ if TYPE_CHECKING:
     from horsies.core.models.tasks import TaskOptions
     from horsies.core.models.tasks import TaskError
     from horsies.core.models.tasks import TaskInfo
+    from horsies.core.models.outcome import TaskOutcome
     from horsies.core.models.workflow import (
         TaskNode,
         SubWorkflowNode,
@@ -623,7 +624,7 @@ class TaskHandle(Generic[T, C]):
         include_result: bool = False,
         include_failed_reason: bool = False,
         include_attempts: bool = False,
-    ) -> 'DatabaseResult[TaskInfo | None]':
+    ) -> 'DatabaseResult[TaskInfo[TaskOutcome[Any, TaskError]] | None]':
         """Fetch metadata for this task from the broker.
 
         Returns Ok(TaskInfo) if found, Ok(None) if not found,
@@ -645,11 +646,9 @@ class TaskHandle(Generic[T, C]):
                 ),
             ))
 
-        # Strict-serde phase 6: route through the app-level typed
-        # decode so ``include_result=True`` populates
-        # ``decoded_result`` / ``result_decoded`` whenever the task is
-        # locally registered. The broker-level ``get_task_info`` returns
-        # raw_result only.
+        # Route through the app-level typed decode: the ``result`` slot
+        # holds a ``TaskOutcome``. The broker-level ``get_task_info``
+        # holds the stored envelope.
         return self._app.get_task_info(
             self.task_id,
             include_result=include_result,
@@ -663,7 +662,7 @@ class TaskHandle(Generic[T, C]):
         include_result: bool = False,
         include_failed_reason: bool = False,
         include_attempts: bool = False,
-    ) -> 'DatabaseResult[TaskInfo | None]':
+    ) -> 'DatabaseResult[TaskInfo[TaskOutcome[Any, TaskError]] | None]':
         """Async version of info().
 
         Returns Ok(TaskInfo) if found, Ok(None) if not found,
@@ -677,7 +676,7 @@ class TaskHandle(Generic[T, C]):
                 ),
             ))
 
-        # Strict-serde phase 6: same routing as the sync variant.
+        # The same routing as the sync variant.
         return await self._app.get_task_info_async(
             self.task_id,
             include_result=include_result,

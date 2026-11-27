@@ -250,7 +250,7 @@ class TestErrorWithNoMessage:
                     task_id='task-1',
                     task_name='t',
                     status=TaskStatus.FAILED,
-                    raw_result=_envelope(err_slot),
+                    envelope=_envelope(err_slot),
                 ),
             ),
         )
@@ -275,7 +275,7 @@ class TestErrorWithNoMessage:
                     task_id='task-1',
                     task_name='t',
                     status=TaskStatus.FAILED,
-                    raw_result=_envelope(err_slot),
+                    envelope=_envelope(err_slot),
                 ),
             ),
         )
@@ -511,7 +511,7 @@ class TestClientReaders:
                     task_id='task-1',
                     task_name='t',
                     status=TaskStatus.FAILED,
-                    raw_result=_envelope(err_slot),
+                    envelope=_envelope(err_slot),
                 ),
             ),
         )
@@ -536,7 +536,7 @@ class TestClientReaders:
                     task_id='task-1',
                     task_name='t',
                     status=TaskStatus.FAILED,
-                    raw_result=_envelope(err_slot),
+                    envelope=_envelope(err_slot),
                 ),
             ),
         )
@@ -555,7 +555,7 @@ class TestClientReaders:
         broker = MagicMock()
         info = MagicMock(spec=TaskInfo)
         info.task_name = 't'
-        info.raw_result = _envelope(err_slot)
+        info.result = ResultSlotStored(_envelope(err_slot))
         broker.get_task_info_async = AsyncMock(return_value=Ok(info))
         app.get_broker = MagicMock(return_value=broker)  # type: ignore[method-assign]
 

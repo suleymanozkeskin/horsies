@@ -604,8 +604,10 @@ async fn print_outcome(
 
 `handle.info(TaskInfoParts { result, failed_reason, attempts })` returns the
 `TaskInfo`: status and times, plus the parts asked for (attempts newest
-first). Its `result` is a `TaskResult<JsonText>`: the value as its stored
-text, read with `decode::<T>()`. The info is not kept. Its errors are `TaskNotFound`,
+first). Its `result` is a `ResultSlot<TaskResult<JsonText>>`:
+`NotRequested` (`parts.result` was `false`), `NotStored` (it was `true` and
+the task stored no result) or `Stored(result)`, where `result` holds the value
+as its stored text, read with `decode::<T>()`. The info is not kept. Its errors are `TaskNotFound`,
 `ResultDeserializationError` and `DatabaseError`.
 
 Reads by task id, on the app:

@@ -30,10 +30,14 @@ from horsies.core.models.outcome import (
     ReadResultDeserializationError,
     ReadResultNotAvailable,
     ReadWaitTimeout,
+    Succeeded,
 )
 from horsies.core.models.tasks import (
     OperationalCode,
     OutcomeCode,
+    ResultSlotNotRequested,
+    ResultSlotNotStored,
+    ResultSlotStored,
     SubWorkflowFailure,
 )
 from horsies.core.task_read import is_final_read
@@ -93,7 +97,7 @@ class TestHorsiesGetResultEnvelopeGuards:
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.FAILED,
-            raw_result=cast(Any, malformed),
+            envelope=cast(Any, malformed),
         )
         _patch_broker(app, Ok(record))
 
@@ -124,7 +128,7 @@ class TestHorsiesGetResultEnvelopeGuards:
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.FAILED,
-            raw_result=cast(Any, malformed),
+            envelope=cast(Any, malformed),
         )
         _patch_broker(app, Ok(record))
 
@@ -141,7 +145,7 @@ class TestHorsiesGetResultEnvelopeGuards:
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.COMPLETED,
-            raw_result=cast(Any, {'ok': 1, 'err': None}),
+            envelope=cast(Any, {'ok': 1, 'err': None}),
         )
         _patch_broker(app, Ok(record))
 
@@ -172,7 +176,7 @@ class TestHorsiesGetResultEnvelopeGuards:
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.FAILED,
-            raw_result=cast(Any, stored),
+            envelope=cast(Any, stored),
         )
         _patch_broker(app, Ok(record))
 
@@ -202,7 +206,7 @@ class TestHorsiesGetResultEnvelopeGuards:
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.COMPLETED,
-            raw_result=None,
+            envelope=None,
         )
         _patch_broker(app, Ok(record))
 
@@ -217,13 +221,13 @@ class TestHorsiesGetResultEnvelopeGuards:
     async def test_non_terminal_status_with_none_payload_is_wait_timeout(
         self,
     ) -> None:
-        """Non-terminal + raw_result=None → ``ReadWaitTimeout``."""
+        """Non-terminal + envelope=None → ``ReadWaitTimeout``."""
         app = _make_app()
         record = StoredResult(
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.RUNNING,
-            raw_result=None,
+            envelope=None,
         )
         _patch_broker(app, Ok(record))
 
@@ -240,7 +244,7 @@ class TestHorsiesGetResultEnvelopeGuards:
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.CANCELLED,
-            raw_result=None,
+            envelope=None,
         )
         _patch_broker(app, Ok(record))
 
@@ -284,7 +288,7 @@ class TestHorsiesGetResultEnvelopeGuards:
             task_id='parent-task',
             task_name='unknown',
             status=TaskStatus.FAILED,
-            raw_result=cast(Any, wire),
+            envelope=cast(Any, wire),
         )
         _patch_broker(app, Ok(record))
 
@@ -309,7 +313,7 @@ def _patch_broker_task_info(app: Horsies, task_info_result: Any) -> MagicMock:
 def _make_task_info(
     task_id: str,
     task_name: str,
-    raw_result: Any,
+    result: Any,
 ) -> 'Any':
     """Build a minimal TaskInfo for tests; defaults satisfy required fields."""
     import datetime
@@ -335,7 +339,7 @@ def _make_task_info(
         worker_hostname=None,
         worker_pid=None,
         worker_process_name=None,
-        raw_result=raw_result,
+        result=result,
     )
 
 
@@ -346,14 +350,14 @@ class TestHorsiesGetTaskInfoErrFastPath:
 
     Pre-fix the function gated all decode on `ok_type` lookup. An
     err-only payload from an unregistered task came back with
-    `decoded_result=None`, hiding the real failure from any cross-process
+    no decoded outcome, hiding the real failure from any cross-process
     monitoring caller that didn't import the task module.
     """
 
     @pytest.mark.asyncio
     async def test_err_only_decoded_for_unregistered_task(self) -> None:
-        """Unregistered task + err-only envelope → ``decoded_result``
-        populated via err-fast-path (no ok_type needed)."""
+        """Unregistered task + err-only envelope → a stored ``Failed``
+        outcome via err-fast-path (no ok_type needed)."""
         app = _make_app()
         wire = {
             '__h_task_result__': True,
@@ -366,7 +370,7 @@ class TestHorsiesGetTaskInfoErrFastPath:
             },
         }
         info = _make_task_info(
-            task_id='task-1', task_name='not.registered', raw_result=wire,
+            task_id='task-1', task_name='not.registered', result=ResultSlotStored(wire),
         )
         _patch_broker_task_info(app, Ok(info))
 
@@ -375,9 +379,8 @@ class TestHorsiesGetTaskInfoErrFastPath:
         assert is_ok(result)
         decoded_info = result.unwrap()
         assert decoded_info is not None
-        assert decoded_info.result_decoded is True
-        match decoded_info.decoded_result:
-            case Failed(task_error):
+        match decoded_info.result:
+            case ResultSlotStored(value=Failed(task_error)):
                 assert task_error.message == 'boom'
             case other:
                 pytest.fail(f'expected a failed outcome, got {other!r}')
@@ -410,7 +413,7 @@ class TestHorsiesGetTaskInfoErrFastPath:
             'err': encode_task_error(original),
         }
         info = _make_task_info(
-            task_id='task-2', task_name='not.registered', raw_result=wire,
+            task_id='task-2', task_name='not.registered', result=ResultSlotStored(wire),
         )
         _patch_broker_task_info(app, Ok(info))
 
@@ -419,18 +422,18 @@ class TestHorsiesGetTaskInfoErrFastPath:
         assert is_ok(result)
         decoded_info = result.unwrap()
         assert decoded_info is not None
-        assert decoded_info.result_decoded is True
-        match decoded_info.decoded_result:
-            case Failed(SubWorkflowFailure() as sub):
+        match decoded_info.result:
+            case ResultSlotStored(value=Failed(SubWorkflowFailure() as sub)):
                 assert sub.sub_workflow_id == 'wf-xyz'
             case other:
                 pytest.fail(f'expected Failed(SubWorkflowFailure), got {other!r}')
 
     @pytest.mark.asyncio
-    async def test_ok_only_unregistered_task_leaves_decoded_result_none(
+    async def test_ok_only_unregistered_task_gives_the_plain_json_value(
         self,
     ) -> None:
-        """Ok-only path still requires ok_type. Unregistered → undecoded."""
+        """Ok-only path of a task that is not registered: no ok_type, so
+        the ok value stays plain JSON."""
         app = _make_app()
         wire = {
             '__h_task_result__': True,
@@ -438,7 +441,8 @@ class TestHorsiesGetTaskInfoErrFastPath:
             'err': None,
         }
         info = _make_task_info(
-            task_id='task-3', task_name='not.registered', raw_result=wire,
+            task_id='task-3', task_name='not.registered',
+            result=ResultSlotStored(wire),
         )
         _patch_broker_task_info(app, Ok(info))
 
@@ -447,9 +451,41 @@ class TestHorsiesGetTaskInfoErrFastPath:
         assert is_ok(result)
         decoded_info = result.unwrap()
         assert decoded_info is not None
-        # No ok_type → decoded_result stays None, result_decoded False.
-        assert decoded_info.decoded_result is None
-        assert decoded_info.result_decoded is False
+        assert decoded_info.result == ResultSlotStored(Succeeded(42))
+
+    @pytest.mark.asyncio
+    async def test_a_result_that_was_not_requested_stays_not_requested(
+        self,
+    ) -> None:
+        app = _make_app()
+        info = _make_task_info(
+            task_id='task-5', task_name='not.registered',
+            result=ResultSlotNotRequested(),
+        )
+        _patch_broker_task_info(app, Ok(info))
+
+        result = await app.get_task_info_async('task-5')
+
+        assert is_ok(result)
+        decoded_info = result.unwrap()
+        assert decoded_info is not None
+        assert decoded_info.result == ResultSlotNotRequested()
+
+    @pytest.mark.asyncio
+    async def test_a_result_that_is_not_stored_stays_not_stored(self) -> None:
+        app = _make_app()
+        info = _make_task_info(
+            task_id='task-6', task_name='not.registered',
+            result=ResultSlotNotStored(),
+        )
+        _patch_broker_task_info(app, Ok(info))
+
+        result = await app.get_task_info_async('task-6', include_result=True)
+
+        assert is_ok(result)
+        decoded_info = result.unwrap()
+        assert decoded_info is not None
+        assert decoded_info.result == ResultSlotNotStored()
 
     @pytest.mark.asyncio
     async def test_malformed_envelope_returns_invalid_json_payload(
@@ -469,7 +505,7 @@ class TestHorsiesGetTaskInfoErrFastPath:
             },
         }
         info = _make_task_info(
-            task_id='task-4', task_name='not.registered', raw_result=malformed,
+            task_id='task-4', task_name='not.registered', result=ResultSlotStored(malformed),
         )
         _patch_broker_task_info(app, Ok(info))
 

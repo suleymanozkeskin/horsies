@@ -65,7 +65,14 @@ from horsies.core.models.health_reads import (
     PingTargetWorker,
     WorkerHistoryLimitNewest,
 )
-from horsies.core.models.tasks import TaskError, TaskInfo
+from horsies.core.models.tasks import (
+    ResultSlot,
+    ResultSlotNotRequested,
+    ResultSlotNotStored,
+    ResultSlotStored,
+    TaskError,
+    TaskInfo,
+)
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
 from tests.sync_facade_support import outcome_shape
@@ -174,13 +181,13 @@ def _read_failed() -> DatabaseResult[Any]:
 
 
 def _record(
-    status: TaskStatus, raw_result: dict[str, Json] | None, task_name: str,
+    status: TaskStatus, envelope: dict[str, Json] | None, task_name: str,
 ) -> StoredResult:
     return StoredResult(
         task_id=TASK_ID,
         task_name=task_name,
         status=status,
-        raw_result=raw_result,
+        envelope=envelope,
     )
 
 
@@ -236,7 +243,7 @@ def test_get_result_gives_the_outcome_of_get_result_async(answer: str) -> None:
 # =============================================================================
 
 
-def _task_info(task_name: str, raw_result: dict[str, Json] | None) -> TaskInfo:
+def _task_info(task_name: str, result: ResultSlot[dict[str, Json]]) -> TaskInfo[dict[str, Json]]:
     return TaskInfo(
         task_id=TASK_ID,
         task_name=task_name,
@@ -255,25 +262,28 @@ def _task_info(task_name: str, raw_result: dict[str, Json] | None) -> TaskInfo:
         worker_hostname=None,
         worker_pid=None,
         worker_process_name=None,
-        raw_result=raw_result,
+        result=result,
     )
 
 
-TASK_INFO_ANSWERS: Final[dict[str, Callable[[], DatabaseResult[TaskInfo | None]]]] = {
+TASK_INFO_ANSWERS: Final[dict[str, Callable[[], DatabaseResult[TaskInfo[dict[str, Json]] | None]]]] = {
     'read_failed': _read_failed,
     'task_absent': lambda: Ok(None),
-    'no_stored_result': lambda: Ok(_task_info(REGISTERED_TASK, None)),
-    'malformed_envelope': lambda: Ok(_task_info(REGISTERED_TASK, _malformed_envelope())),
-    'err_slot': lambda: Ok(_task_info(UNREGISTERED_TASK, _err_envelope())),
+    'result_not_requested': lambda: Ok(_task_info(REGISTERED_TASK, ResultSlotNotRequested())),
+    'no_stored_result': lambda: Ok(_task_info(REGISTERED_TASK, ResultSlotNotStored())),
+    'malformed_envelope': lambda: Ok(
+        _task_info(REGISTERED_TASK, ResultSlotStored(_malformed_envelope())),
+    ),
+    'err_slot': lambda: Ok(_task_info(UNREGISTERED_TASK, ResultSlotStored(_err_envelope()))),
     'err_slot_that_does_not_decode': lambda: Ok(
-        _task_info(REGISTERED_TASK, _undecodable_err_envelope()),
+        _task_info(REGISTERED_TASK, ResultSlotStored(_undecodable_err_envelope())),
     ),
     'ok_slot_of_an_unregistered_task': lambda: Ok(
-        _task_info(UNREGISTERED_TASK, _ok_envelope(5)),
+        _task_info(UNREGISTERED_TASK, ResultSlotStored(_ok_envelope(5))),
     ),
-    'ok_slot': lambda: Ok(_task_info(REGISTERED_TASK, _ok_envelope(5))),
+    'ok_slot': lambda: Ok(_task_info(REGISTERED_TASK, ResultSlotStored(_ok_envelope(5)))),
     'ok_slot_that_does_not_decode': lambda: Ok(
-        _task_info(REGISTERED_TASK, _ok_envelope('five')),
+        _task_info(REGISTERED_TASK, ResultSlotStored(_ok_envelope('five'))),
     ),
 }
 

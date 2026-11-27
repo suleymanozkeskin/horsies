@@ -107,6 +107,26 @@ if is_ok(info_result) and info_result.ok_value is not None:
     print(f"Error code: {task_info.error_code}")  # final error_code (None if not failed)
 ```
 
+`TaskInfo.result` is one of three states:
+
+| `TaskInfo.result` | Meaning |
+|---|---|
+| `ResultSlotNotRequested()` | The read did not pass `include_result=True` |
+| `ResultSlotNotStored()` | The read passed `include_result=True`, and the task stored no result. A live task has none |
+| `ResultSlotStored(outcome)` | The read passed `include_result=True`, and the task stored a result. `outcome` is a `TaskOutcome`: `Succeeded(value)` or `Failed(error)` |
+
+```python
+from horsies import ResultSlotStored, Succeeded
+
+match task_info.result:
+    case ResultSlotStored(value=Succeeded(value)):
+        print(f"Returned: {value}")
+    case _:
+        print("No stored value")
+```
+
+`handle.info` and `app.get_task_info` decode an ok value with the task's type when the task is registered in this process. They leave it plain JSON when it is not.
+
 To inspect per-attempt execution history, pass `include_attempts=True`:
 
 ```python
