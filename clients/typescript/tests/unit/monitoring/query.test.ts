@@ -57,17 +57,17 @@ describe("taskListArg", () => {
     assert.deepEqual(arg.value.limit, { kind: "set", value: 20 });
   });
 
-  test("an offset or a limit that is not a whole number is QUERY_REFUSED for the page", () => {
+  test("an offset or a limit that is not a whole number is invalidInput for the page", () => {
     for (const page of [{ offset: 1.5 }, { limit: Number.NaN }, { limit: 2 ** 53 }]) {
       const arg = taskListArg(page);
 
       assert.ok(!arg.ok);
-      assert.equal(arg.error.code, "QUERY_REFUSED");
+      assert.equal(arg.error.kind, "invalidInput");
       assert.equal(arg.error.field, "page");
     }
   });
 
-  test("a filter value that is not well-formed text is QUERY_REFUSED for its field", () => {
+  test("a filter value that is not well-formed text is invalidInput for its field", () => {
     for (const field of ["taskNames", "queues", "workers", "errorCodes"] as const) {
       const arg = taskListArg({ [field]: ["ok", LONE_SURROGATE] });
 
@@ -95,7 +95,7 @@ describe("the other queries", () => {
     });
   });
 
-  test("the breakdown limit is left at the core's default, and a fraction is QUERY_REFUSED for the limit", () => {
+  test("the breakdown limit is left at the core's default, and a fraction is invalidInput for the limit", () => {
     const arg = taskBreakdownArg({ groupBy: "worker" });
 
     assert.ok(arg.ok);
@@ -122,7 +122,7 @@ describe("the other queries", () => {
     });
   });
 
-  test("a workflow name that is not well-formed text is QUERY_REFUSED", () => {
+  test("a workflow name that is not well-formed text is invalidInput", () => {
     const arg = workflowRunsArg({ workflowName: LONE_SURROGATE });
 
     assert.ok(!arg.ok);

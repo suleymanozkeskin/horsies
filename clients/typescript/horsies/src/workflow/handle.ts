@@ -8,7 +8,7 @@
 // the outcome of each terminal node (`terminal-results.ts`).
 
 import { WorkflowTaskStatus } from "../_catalog/status.ts";
-import { ContractCode, OperationalErrorCode, RetrievalCode } from "../_catalog/task_codes.ts";
+import { ContractCode, OperationalCode, RetrievalCode } from "../_catalog/task_codes.ts";
 import type { HandleCoreError } from "../_catalog/workflow_handle_errors.ts";
 import { jsonTextCheckedByCore } from "../codec/json-text.ts";
 import { readStoredError } from "../codec/envelope.ts";
@@ -334,7 +334,7 @@ function completedOutcome(workflowId: string, result: StoredTextFact, reading: R
 /**
  * The outcome of the stored result tree of a COMPLETED workflow. The outputless marker of the stored envelope and the
  * reading must agree (Python and Rust fail a mismatch closed): a workflow with no `outputType` reads the outputless
- * envelope, any other its declared output. A mismatch is `resultDeserializationError`. Pure.
+ * envelope, any other its declared output. A mismatch is `storedResultUnreadable`. Pure.
  */
 function completedTreeOutcome(workflowId: string, tree: TreeValue, reading: ResultReading): ReadOutcome {
   const storedOutputless = isOutputlessEnvelope(tree);
@@ -443,7 +443,13 @@ function envelopeOutcome(tree: TreeValue, form: ReadForm, codes: CodeRule): Read
 
       return form.codes.codes.includes(outcome.error.code)
         ? ok(outcome)
-        : err(Object.freeze({ kind: "unknownCustomCode", code: outcome.error.code }));
+        : err(
+            Object.freeze({
+              kind: "unknownCustomCode",
+              code: RetrievalCode.UNKNOWN_CUSTOM_CODE,
+              storedCode: outcome.error.code,
+            }),
+          );
     }
 
     default:
@@ -476,7 +482,7 @@ function checkedOutcome(result: CheckedText, form: ReadForm): ReadOutcome {
 }
 
 function unreadable(cause: string): ReadOutcome {
-  return err(Object.freeze({ kind: "resultDeserializationError", code: OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, cause }));
+  return err(Object.freeze({ kind: "storedResultUnreadable", code: OperationalCode.RESULT_DESERIALIZATION_ERROR, cause }));
 }
 
 /** The result of one node with open codes and a JSON value. Pure. */

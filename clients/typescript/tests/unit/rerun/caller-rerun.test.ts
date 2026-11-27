@@ -44,6 +44,8 @@ async function rerunIn(
 /** The `kind` of each refusal code of the rerun steps. */
 const STEP_REFUSAL_KINDS: Readonly<Record<CallerStepRefusal["code"], CallerRerunError["kind"]>> = {
   CLASS_NOT_REGISTERED: "classNotRegistered",
+  RETRY_CODE_NOT_DECLARED: "retryCodeNotDeclared",
+  TASK_NOT_REGISTERED: "taskNotRegistered",
   CALLER_KEY_REFUSED: "callerKeyRefused",
   ID_MINT_REFUSED: "idMintRefused",
   CLIENT_FAMILY_MISMATCH: "clientFamilyMismatch",
@@ -166,7 +168,7 @@ describe("app.rerunTaskIn errors", () => {
 
     const { answer, ran } = await rerunIn({ ...ENQUEUED_ANSWERS, preparation: { kind: "refused", error: refusal } }, [rowOf("t")]);
 
-    assert.deepEqual(answer, { ok: false, error: { ...refusal, retryable: false } });
+    assert.deepEqual(answer, { ok: false, error: { kind: "retryCodeNotDeclared", ...refusal, retryable: false } });
     assert.deepEqual(ran, ["rerun_source_read"]);
   });
 
@@ -174,7 +176,7 @@ describe("app.rerunTaskIn errors", () => {
     const refusal: CallerStepRefusal = { code: "TASK_NOT_REGISTERED", message: "rerun refused: unlisted", taskName: "charge" };
     const { answer, ran } = await rerunIn({ ...ENQUEUED_ANSWERS, preparation: { kind: "refused", error: refusal } }, [rowOf("t")]);
 
-    assert.deepEqual(answer, { ok: false, error: { ...refusal, retryable: false } });
+    assert.deepEqual(answer, { ok: false, error: { kind: "taskNotRegistered", ...refusal, retryable: false } });
     assert.deepEqual(ran, ["rerun_source_read"]);
   });
 

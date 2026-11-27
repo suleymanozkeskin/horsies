@@ -18,7 +18,7 @@
 //   end) is a span not made: one WARNING record per process on `horsies.telemetry` (`not-made.ts`; the isolate sends
 //   it to the main thread of its child).
 
-import { OperationalErrorCode } from "../_catalog/task_codes.ts";
+import { OperationalCode } from "../_catalog/task_codes.ts";
 import type { BodyEnd } from "../child/body-observer.ts";
 import type { BodyFactsRecord, CancelCauseName } from "../native/child/addon.ts";
 import { type EndedSeatRun, NO_SEAT_OBSERVATION, type SeatBodyObservation, type SeatBodyObserver } from "../seats/body-observer.ts";
@@ -101,7 +101,7 @@ function makeIsolateEndedSpan(deps: SeatSpanDeps, run: EndedSeatRun): void {
             endAttemptSpan(
               deps.api,
               opened.open.span,
-              { kind: "failed", code: OperationalErrorCode.WORKER_CRASHED },
+              { kind: "failed", code: OperationalCode.WORKER_CRASHED },
               { kind: "at", time: highResolutionTimeOfInstant(run.endedAt) },
             );
           }, notMade);

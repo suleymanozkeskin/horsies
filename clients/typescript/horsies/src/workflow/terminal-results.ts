@@ -6,7 +6,7 @@
 // "task_name_by_id": {...}, "definition_key_by_id": {...}}, "err": null}`, or a non-null `err` with the workflow's
 // error. Each entry of `results_by_id` is the stored result envelope of one terminal node.
 
-import { OperationalErrorCode } from "../_catalog/task_codes.ts";
+import { OperationalCode } from "../_catalog/task_codes.ts";
 import { TASK_RESULT_ENVELOPE_KEY } from "../codec/bounds.ts";
 import { readErrorNode } from "../codec/envelope.ts";
 import type { JsonValue } from "../codec/json-value.ts";
@@ -122,7 +122,7 @@ function entryNotRead(nodeId: string, message: string): TaskOutcome<JsonValue, s
     kind: "failed",
     error: Object.freeze({
       kind: "builtIn",
-      code: OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+      code: OperationalCode.RESULT_DESERIALIZATION_ERROR,
       message,
       data: Object.freeze({ node_id: nodeId }),
       exception: null,
