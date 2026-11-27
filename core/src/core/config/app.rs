@@ -1855,7 +1855,7 @@ database_url = \"postgresql://localhost/db\"
 [[schedule.schedules]]
 name = \"a\"
 task_name = \"t\"
-pattern = { type = \"interval\", seconds = 5 }
+pattern = { kind = \"interval\", every = \"PT5S\" }
 EXTRA
 ",
         ),
