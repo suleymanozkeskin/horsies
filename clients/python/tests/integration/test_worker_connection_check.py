@@ -96,7 +96,8 @@ async def test_each_child_kind_counts_its_own_pool_against_the_server(
         ),
     )
 
-    errors = await asyncio.to_thread(app.check, live=True)
+    report = await asyncio.to_thread(app.check, live=True)
+    errors = report.refusals
 
     parent_pool = big.resolved_parent_pool()
     isolated_pool = DEFAULT_ISOLATED_POOL_CONNECTIONS
@@ -159,7 +160,8 @@ async def test_the_parent_pool_of_the_profile_is_counted_against_the_server(
         ),
     )
 
-    errors = await asyncio.to_thread(app.check, live=True)
+    report = await asyncio.to_thread(app.check, live=True)
+    errors = report.refusals
 
     isolated_pool = DEFAULT_ISOLATED_POOL_CONNECTIONS
     total = parent_pool + 1 + 1 + 1 + 1 * isolated_pool

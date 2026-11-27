@@ -40,6 +40,7 @@ broker_config = PostgresConfig(
 
 0.8.0:
 
+<!-- check: skip elided -- the 0.8.0 names; a later release renames them -->
 ```python
 from pydantic import SecretStr
 

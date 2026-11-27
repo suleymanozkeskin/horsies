@@ -692,7 +692,7 @@ The capacity of a worker is its number of seats (`seat_count()`) plus `AppConfig
 |--------|-------|-------------------------------------------------------|
 | `LIBRARY` | `library` | Library code. Each child imports the app itself |
 | `APP` | `app` | Library and app. Children share module state from the app's import |
-| `NONE` | `none` | Nothing. Every child starts with `exec` |
+| `NO_PRELOAD` | `no_preload` | Nothing. Every child starts with `exec` |
 
 Other platforms start every child with `exec`.
 

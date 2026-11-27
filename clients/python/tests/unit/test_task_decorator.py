@@ -2366,11 +2366,11 @@ class TestCreateTaskWrapperSchedule:
         handle = result.ok_value
         assert handle.task_id == 'sched-1'
         assert handle._broker_mode is True
-        # Verify enqueue was called with sent_at and enqueue_delay_seconds
+        # Verify enqueue was called with sent_at and delay_seconds
         call_kwargs = broker.enqueue.call_args
         assert call_kwargs.kwargs.get('sent_at') is not None
         assert call_kwargs.kwargs['send_kind'] is SendKind.FIRST
-        assert call_kwargs.kwargs.get('enqueue_delay_seconds') == 60
+        assert call_kwargs.kwargs.get('delay_seconds') == 60
 
     def test_with_options_schedule_sets_good_until(self) -> None:
         """with_options(good_until=...) is honored by schedule()."""
@@ -2394,7 +2394,7 @@ class TestCreateTaskWrapperSchedule:
         assert is_ok(result)
         call_kwargs = broker.enqueue.call_args.kwargs
         assert call_kwargs['good_until'] == deadline
-        assert call_kwargs['enqueue_delay_seconds'] == 60
+        assert call_kwargs['delay_seconds'] == 60
         assert json.loads(call_kwargs['task_options'])['good_until'] == deadline.isoformat()
 
     def test_schedule_broker_exception_returns_enqueue_failed(self) -> None:
@@ -2465,7 +2465,7 @@ class TestCreateTaskWrapperSchedule:
         result = wrapper.schedule(0, x=1)
 
         assert is_ok(result)
-        assert broker.enqueue.call_args.kwargs.get('enqueue_delay_seconds') == 0
+        assert broker.enqueue.call_args.kwargs.get('delay_seconds') == 0
 
     def test_schedule_none_delay_rejected(self) -> None:
         """A None delay returns Err(VALIDATION_FAILED), not a raw TypeError."""
@@ -2662,7 +2662,7 @@ class TestRetrySend:
         assert is_ok(result)
         call_kwargs = broker.enqueue.call_args.kwargs
         assert call_kwargs['task_id'] == 'retry-id-1'
-        assert call_kwargs['enqueue_delay_seconds'] == 60
+        assert call_kwargs['delay_seconds'] == 60
         assert call_kwargs['send_kind'] is SendKind.REPEAT
 
     def test_retry_schedule_without_delay_returns_validation_error(self) -> None:
@@ -3577,7 +3577,7 @@ class TestAsyncContextGuard:
             broker.enqueue_async.call_args.kwargs['task_id']
             == guarded.err_value.task_id
         )
-        assert broker.enqueue_async.call_args.kwargs['enqueue_delay_seconds'] == 7
+        assert broker.enqueue_async.call_args.kwargs['delay_seconds'] == 7
 
     def test_sync_send_outside_loop_unaffected(self) -> None:
         broker = _ok_broker()
@@ -3594,7 +3594,7 @@ class TestAsyncContextGuard:
         res = task.schedule(5, value=1)
         assert is_ok(res)
         broker.enqueue.assert_called_once()
-        assert broker.enqueue.call_args.kwargs['enqueue_delay_seconds'] == 5
+        assert broker.enqueue.call_args.kwargs['delay_seconds'] == 5
 
     def test_send_async_inside_loop_unaffected(self) -> None:
         broker = _ok_broker()
@@ -3616,7 +3616,7 @@ class TestScheduleAsync:
         res = asyncio.run(task.schedule_async(9, value=1))
         assert is_ok(res)
         broker.enqueue_async.assert_awaited_once()
-        assert broker.enqueue_async.call_args.kwargs['enqueue_delay_seconds'] == 9
+        assert broker.enqueue_async.call_args.kwargs['delay_seconds'] == 9
 
     def test_schedule_async_rejects_negative_delay(self) -> None:
         broker = _ok_broker()
@@ -3651,7 +3651,7 @@ class TestScheduleAsync:
             task.with_options(good_until=None).schedule_async(3, value=1)
         )
         assert is_ok(res)
-        assert broker.enqueue_async.call_args.kwargs['enqueue_delay_seconds'] == 3
+        assert broker.enqueue_async.call_args.kwargs['delay_seconds'] == 3
 
     def test_retry_schedule_async_reuses_payload(self) -> None:
         broker = _ok_broker()
@@ -3661,7 +3661,7 @@ class TestScheduleAsync:
         res = asyncio.run(task.retry_schedule_async(failed))
         assert is_ok(res)
         broker.enqueue_async.assert_awaited_once()
-        assert broker.enqueue_async.call_args.kwargs['enqueue_delay_seconds'] == 7
+        assert broker.enqueue_async.call_args.kwargs['delay_seconds'] == 7
         assert broker.enqueue_async.call_args.kwargs['task_id'] == failed.task_id
 
     def test_retry_schedule_async_rejects_sendless_error(self) -> None:

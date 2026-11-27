@@ -317,7 +317,7 @@ class TestEnqueueAsync:
 
     @pytest.mark.asyncio
     async def test_future_sent_at_with_enqueue_delay_accepted(self) -> None:
-        """Future sent_at is allowed when enqueue_delay_seconds is provided."""
+        """Future sent_at is allowed when delay_seconds is provided."""
         broker = self._broker_answering_enqueued()
         future = datetime.now(timezone.utc) + timedelta(minutes=10)
 
@@ -327,7 +327,7 @@ class TestEnqueueAsync:
                 task_id=SEND_TASK_ID,
                 send_kind=SendKind.FIRST,
                 sent_at=future,
-                enqueue_delay_seconds=600,
+                delay_seconds=600,
             )
 
         assert result == Ok(SEND_TASK_ID)
@@ -402,7 +402,7 @@ class TestEnqueueThroughCore:
             result = await self._send(
                 broker,
                 send_kind=SendKind.REPEAT,
-                enqueue_delay_seconds=30,
+                delay_seconds=30,
                 idempotency_key='order-17',
                 retain_rerun_input=False,
                 priority=50,
@@ -482,7 +482,7 @@ class TestEnqueueThroughCore:
             pytest.param(
                 {
                     'enqueued_at': datetime.now(timezone.utc),
-                    'enqueue_delay_seconds': 5,
+                    'delay_seconds': 5,
                 },
                 'Cannot specify both',
                 id='both-starts',
@@ -499,7 +499,7 @@ class TestEnqueueThroughCore:
                 {'priority': 2**31}, 'priority must be between 1 and 100', id='priority-range',
             ),
             pytest.param(
-                {'enqueue_delay_seconds': 2**63}, 'not a 64-bit integer', id='delay-range',
+                {'delay_seconds': 2**63}, 'not a 64-bit integer', id='delay-range',
             ),
         ],
     )
@@ -2009,15 +2009,15 @@ class TestEnqueueInputRefusal:
                 id='naive-good-until',
             ),
             pytest.param(
-                {'enqueue_delay_seconds': -1},
+                {'delay_seconds': -1},
                 'enqueue input refused for my_task: enqueue_delay_seconds must be non-negative',
                 'enqueue_delay_seconds must be non-negative',
                 id='negative-delay',
             ),
             pytest.param(
-                {'enqueue_delay_seconds': SIGNED_64_BIT_MIN - 1},
-                'enqueue input refused for my_task: enqueue_delay_seconds must be non-negative',
-                'enqueue_delay_seconds must be non-negative',
+                {'delay_seconds': SIGNED_64_BIT_MIN - 1},
+                'enqueue input refused for my_task: delay_seconds must be non-negative',
+                'delay_seconds must be non-negative',
                 id='delay-below-64-bits',
             ),
             pytest.param(
