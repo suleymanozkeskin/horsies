@@ -147,7 +147,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### BuiltInTaskCode (type alias = OperationalCode | ContractCode | RetrievalCode | OutcomeCode)
 - OperationalCode: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED, DATABASE_ERROR, WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR, RESULT_DESERIALIZATION_ERROR, WORKFLOW_ENQUEUE_FAILED, SUBWORKFLOW_LOAD_FAILED, WORKFLOW_RECOVERY_LIMIT_REACHED, SUBWORKFLOW_DEPTH_LIMIT_REACHED, TASK_BLOCKED_LOOP, NEIGHBOUR_BLOCKED_LOOP, WORKFLOW_START_INCOMPLETE
-- ContractCode: RETURN_TYPE_MISMATCH, WORKFLOW_CONTEXT_MISSING_ID, NO_TYPE_AVAILABLE
+- ContractCode: RETURN_TYPE_MISMATCH, WORKFLOW_CONTEXT_MISSING_ID, NODE_NOT_IN_CONTEXT, NO_TYPE_AVAILABLE
 - RetrievalCode: WAIT_TIMEOUT, TASK_NOT_FOUND, WORKFLOW_NOT_FOUND, RESULT_NOT_AVAILABLE, RESULT_NOT_READY, ASYNC_CONTEXT, INVALID_INPUT, WAIT_INSIDE_TASK, UNKNOWN_CUSTOM_CODE
 - A read gives a RetrievalCode value as read_error.code of its ReadError class (Err(ReadWaitTimeout(...)) has code WAIT_TIMEOUT), not inside a TaskError
 - A result wait inside a worker child (get(), get_async(), app.get_result(), WorkflowHandle.get()) returns Err(ReadWaitInsideTask(...)) at once, as its first check; the raw reads (app.get_raw_result(), broker.get_raw_result_record()) return Err(DatabaseWaitInsideTask); compose tasks with a workflow instead
@@ -216,7 +216,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Returns TaskFunction[P, T] for a def function, AsyncTaskFunction[P, T] for an async def function; with a first parameter runtime: TaskRuntime, RuntimeTaskFunction[P, T] / AsyncRuntimeTaskFunction[P, T] (P = the parameters after the runtime)
 
 ### TaskRuntime (first task parameter) and FencingToken
-- def f(runtime: TaskRuntime, *, x: int) -> Result[T, TaskError]: the worker passes the runtime of each run as the first argument; the runtime gives fencing_token and cancel_state()
+- def f(runtime: TaskRuntime, *, x: int) -> Result[T, TaskError]: the worker passes the runtime of each run as the first argument; the runtime gives task_id, attempt (AttemptNumber, 1 = first run), max_retries (MaxRetries, 0 to 20), retries_left (RetriesLeft = max_retries - (attempt - 1), 0 past the budget), fencing_token and cancel_state()
 - Rules: first parameter, before the *; annotation exactly TaskRuntime (not | None); no default; any name; TaskRuntime in any other place raises HRS-105 at definition
 - Not part of the wire contract: .send(), .node()(), schedules and workflow nodes do not supply it; a kwarg with its name is refused
 - runtime.fencing_token -> FencingToken(task_id: uuid.UUID, value: int), frozen; same token for two reads in one attempt; strictly greater value for each later attempt of the task; no clock; today value = attempt number (1 to 21)
@@ -396,7 +396,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .has_result(node: TaskNode | SubWorkflowNode) -> bool
 - .summary_for(node: SubWorkflowNode[T]) -> SubWorkflowSummary[T]
 - .has_summary(node: SubWorkflowNode) -> bool
-- Only nodes in workflow_context_from are accessible (KeyError otherwise)
+- Only nodes in workflow_context_from are accessible (NodeNotInContext, code NODE_NOT_IN_CONTEXT, otherwise; WorkflowContextMissingId, code WORKFLOW_CONTEXT_MISSING_ID, for a node with no node_id)
 
 ### WorkflowMetadata
 - Auto-injected when task declares workflow_meta: WorkflowMetadata | None = None

@@ -83,7 +83,12 @@ impl OperationalCode {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ContractCode {
     ReturnTypeMismatch,
+    /// A workflow context read was asked for a node that has no `node_id`.
     WorkflowContextMissingId,
+    /// A workflow context read was asked for a node that has an id, but the
+    /// context holds no entry for it: the node is not named in the task
+    /// node's `workflow_context_from`, or its dependency did not finish.
+    NodeNotInContext,
     /// A handle-level read (`TaskHandle.get`, `WorkflowHandle.get`) asked for a typed value, but the ok
     /// type cannot be obtained, for example on a handle rebuilt by id without the task or workflow
     /// registered in this process. The result-returning form is `DatabaseErrorCode.NO_TYPE_AVAILABLE`.
@@ -91,9 +96,10 @@ pub enum ContractCode {
 }
 
 impl ContractCode {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::ReturnTypeMismatch,
         Self::WorkflowContextMissingId,
+        Self::NodeNotInContext,
         Self::NoTypeAvailable,
     ];
 }

@@ -198,7 +198,8 @@ When the library itself encounters an error (not your task code), it uses one of
 | ---- | ---- |
 | `RETURN_TYPE_MISMATCH` | The returned value does not fit the declared type, or it is not an `Ok` or an `Err`, including `None` |
 | `NO_TYPE_AVAILABLE` | A successful result could not be decoded because the caller does not have the task's declared success type locally registered |
-| `WORKFLOW_CONTEXT_MISSING_ID` | Workflow context is missing required ID |
+| `WORKFLOW_CONTEXT_MISSING_ID` | A workflow context read got a node that has no `node_id` |
+| `NODE_NOT_IN_CONTEXT` | A workflow context read got a node that has an id, but the context holds no entry for it |
 
 ### RetrievalCode
 

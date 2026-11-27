@@ -21,6 +21,7 @@ from horsies.core.types.result import Err, Ok, Result
 from horsies.core.errors import HorsiesErrorCode
 from horsies.core.models.workflow import (
     NodeKey,
+    NodeNotInContext,
     TaskNode,
     WorkflowContext,
     WorkflowMetadata,
@@ -728,11 +729,11 @@ class TestWorkflowCtx:
             )
         assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_CONTEXT_FROM
 
-    async def test_ctx_result_for_unknown_node_raises_key_error(
+    async def test_ctx_result_for_unknown_node_raises_node_not_in_context(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """result_for() with a valid node_id not in context raises KeyError."""
+        """result_for() with a valid node_id not in context raises NodeNotInContext."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'key_err_a')
 
@@ -761,10 +762,10 @@ class TestWorkflowCtx:
         # node_c was never part of this workflow — its node_id won't be in context
         task_c = make_simple_task(app, 'key_err_c')
         node_c: TaskNode[int] = TaskNode(function=task_c, kwargs={'value': 1})
-        # Manually assign a node_id so result_for reaches the KeyError branch
+        # Manually assign a node_id so result_for reaches the not-in-context branch
         node_c.node_id = 'nonexistent-node-id'
 
-        with pytest.raises(KeyError, match='not in workflow context'):
+        with pytest.raises(NodeNotInContext, match='not in workflow context'):
             ctx.result_for(node_c)
 
     async def test_ctx_has_result_true_for_present_node(

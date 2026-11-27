@@ -127,6 +127,8 @@ pub struct RunFrameRecord {
     queue_name: String,
     /// The attempt that the claim runs, from 1: the retry count plus 1.
     attempt: u32,
+    /// The retry budget of the task row, from 0.
+    max_retries: u32,
     worker_id: String,
     /// The claim generation; each write of the attempt is fenced on it.
     claimed_at: DateTime<Utc>,
@@ -167,6 +169,8 @@ pub struct SharedRunFrameRecord {
     queue_name: String,
     /// As `RunFrame.attempt`.
     attempt: u32,
+    /// As `RunFrame.max_retries`.
+    max_retries: u32,
     worker_id: String,
     claimed_at: DateTime<Utc>,
     /// As `RunFrame.orphan_self_heal`.
@@ -438,6 +442,7 @@ fn run_object(py: Python<'_>, run: RunFrame) -> PyResult<Py<PyAny>> {
         task_name: run.task_name,
         queue_name: run.queue_name.into_string(),
         attempt: run.attempt.get(),
+        max_retries: run.max_retries.get(),
         worker_id: run.worker_id,
         claimed_at: run.claimed_at,
         orphan_self_heal: self_heal_flag(run.orphan_self_heal),
@@ -456,6 +461,7 @@ fn shared_run_object(py: Python<'_>, run: SharedRunFrame) -> PyResult<Py<PyAny>>
         task_name: run.task_name,
         queue_name: run.queue_name.into_string(),
         attempt: run.attempt.get(),
+        max_retries: run.max_retries.get(),
         worker_id: run.worker_id,
         claimed_at: run.claimed_at,
         orphan_self_heal: self_heal_flag(run.orphan_self_heal),

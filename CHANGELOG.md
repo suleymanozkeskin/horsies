@@ -10,6 +10,40 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- **`TaskRuntime` gives the attempt facts of the run.** `task_id` is the
+  same on every attempt of a task. `attempt` is the attempt number: 1 is the
+  first run, 2 the first retry. `max_retries` is the retry budget of the task
+  (0 to 20). `retries_left` is `max_retries - (attempt - 1)`, and 0 past the
+  budget; a non-retryable error code or `good_until` can end the retries
+  before it reaches 0. They add no database round trip: the parent sends
+  `max_retries` in the run frame, beside the attempt that it already sent
+  (`max_retries` is a new field of the `run` and `shared_run` frames).
+  - Python: `runtime.task_id` (`uuid.UUID`), `runtime.attempt`
+    (`AttemptNumber`), `runtime.max_retries` (`MaxRetries`),
+    `runtime.retries_left` (`RetriesLeft`). `MaxRetries.parse(number)` gives
+    `Ok(MaxRetries)` for 0 to 20 or `Err(MaxRetriesRefused)`.
+    `TaskRuntime.for_test(task_id=..., attempt=..., max_retries=...)` takes
+    the facts (default 1 and 0). `run_task_runtime` takes the task id, the
+    attempt number and the retry budget in place of a `FencingToken`;
+    `runtime.fencing_token` is built from the task id and the attempt number.
+  - Rust: `TaskRuntime::task_id()`, `attempt()` (`AttemptNumber`),
+    `max_retries()` (`MaxRetries`) and `retries_left()` (`RetriesLeft`), each
+    `Result<_, TaskAttemptRefused>`; outside a run they give
+    `TaskAttemptRefused::NotInARun`. `horsies_core::run_task_attempt()` gives
+    the `TaskAttempt` of a run. `RunFrame` and `SharedRunFrame` carry
+    `max_retries`.
+  - There is no global `current_attempt()`: the injected runtime is the only
+    way to read the facts.
+- **A named code for a node that is not in the workflow context.** The new
+  `ContractCode` member `NODE_NOT_IN_CONTEXT` (Rust `NodeNotInContext`)
+  means: the node has an id, but the context holds no entry for it (it is not
+  in `workflow_context_from`, or its dependency did not finish). Python
+  `WorkflowContext.result_for` and `summary_for` raise `NodeNotInContext`
+  (a `RuntimeError` with `code`) in place of a bare `KeyError`.
+  `WORKFLOW_CONTEXT_MISSING_ID` now means only "the node has no `node_id`";
+  Python `WorkflowContextMissingId` carries that `code`. The core's
+  `WorkflowContext::result_for`, `summary_for` and `output_for` give
+  `NODE_NOT_IN_CONTEXT` for an id that is not in the context.
 - **Codegen model: the schema of the schedule pattern.**
   `horsies_core::manifest_schema::SCHEDULE_PATTERN` lists the types of the
   `pattern_json` text of the scheduler manifest, in render order: `Weekday`,

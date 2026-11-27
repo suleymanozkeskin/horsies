@@ -32,6 +32,14 @@ pub use horsies_core::{CustomCode, CustomCodeRefused};
 /// gave none.
 pub use horsies_core::{FencingToken, FencingTokenRefused};
 
+/// Why the attempt facts of a run (`TaskRuntime::task_id`, `attempt`,
+/// `max_retries`, `retries_left`) were not read.
+pub use horsies_core::TaskAttemptRefused;
+
+/// The retry budget of a task and the retries left after a run
+/// (`TaskRuntime::max_retries`, `TaskRuntime::retries_left`), each from 0 to 20.
+pub use horsies_core::events::{MaxRetries, RetriesLeft};
+
 /// The cancel state of a run (`TaskRuntime::cancel_state`), and why a cancel
 /// was requested.
 pub use horsies_core::{CancelCause, RunCancelState};

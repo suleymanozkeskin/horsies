@@ -212,6 +212,7 @@ fn register_mail(app: &mut Horsies) -> Result<(), HorsiesError> {
 | `cancel_state()` | `RunCancelState`: `NotRequested`, `Requested { cause: CancelCause::Operator \| CancelCause::Deadline }`, or `NotInARun` |
 | `spawn(name, future)` | `Result<tokio::task::JoinHandle<_>, RunSpawnRefused>`: starts `future` as work of the run |
 | `fencing_token()` | `Result<FencingToken, FencingTokenRefused>`: the task id (`task_id()`) and the value (`value().get()`) of the run |
+| `task_id()`, `attempt()`, `max_retries()`, `retries_left()` | `Result<_, TaskAttemptRefused>`: the task id (the same on every attempt: an idempotency key), the attempt number (`AttemptNumber`, 1 = first run), the retry budget (`MaxRetries`, 0 to 20), and `max_retries - (attempt - 1)` (`RetriesLeft`, 0 past the budget); each number via `.get()`; outside a run `Err(TaskAttemptRefused::NotInARun)` |
 | `task_function::<A, T, E>(task_name)` | `Result<TaskFunction<A, T, E>, TaskFunctionNotFound>` |
 | `workflow_builder(name)` | A `WorkflowSpecBuilder` of the app of the runtime; its task nodes resolve against that app |
 | `start::<T>(&spec)`, `start_with_id::<T>(&spec, workflow_id)` | Starts a workflow that the task built (see `workflows.md`) |

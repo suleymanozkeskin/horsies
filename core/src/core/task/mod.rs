@@ -17,7 +17,7 @@ pub use error::{
     UNDECLARED_LABEL,
 };
 pub use execution::{Execution, ExecutionClass, GraceUse, InvalidExecution, TimeoutUse};
-pub use fencing::{FencingToken, FencingTokenRefused};
+pub use fencing::{FencingToken, FencingTokenRefused, TaskAttempt, TaskAttemptRefused};
 pub use fn_trait::{AsyncTaskFn, BlockingTaskFn, RawTaskResult, RegisteredTask};
 pub use info::{TaskAttemptInfo, TaskInfo};
 pub use options::{

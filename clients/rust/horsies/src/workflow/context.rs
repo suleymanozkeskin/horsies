@@ -58,7 +58,9 @@ impl PartialEq for StoredResultText {
 pub enum WorkflowContextError {
     /// The context holds no entry for the node: the node is not in the
     /// task node's `workflow_context_from`, or the dependency did not end
-    /// (Python `KeyError`; the core's `WORKFLOW_CONTEXT_MISSING_ID`).
+    /// (Python `NodeNotInContext`; the core's `NODE_NOT_IN_CONTEXT`). A
+    /// `NodeKey` always has a node id, so this client has no read of a node
+    /// without an id (`WORKFLOW_CONTEXT_MISSING_ID`).
     #[error("node '{node_id}' is not in the workflow context; name it in workflow_context_from")]
     NotInContext { node_id: String },
     /// The stored value does not read as the asked type

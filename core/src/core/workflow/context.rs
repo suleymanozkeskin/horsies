@@ -76,7 +76,7 @@ impl WorkflowContext {
     ) -> Result<TaskResult<T>, TaskError> {
         let value = self.results_by_id.get(key.node_id()).ok_or_else(|| {
             TaskError::built_in(
-                crate::core::task::error::ContractCode::WorkflowContextMissingId,
+                crate::core::task::error::ContractCode::NodeNotInContext,
                 format!(
                     "no result found for node_id '{}' in workflow context",
                     key.node_id(),
@@ -111,7 +111,7 @@ impl WorkflowContext {
     pub fn summary_for<T>(&self, key: &NodeKey<T>) -> Result<SubWorkflowSummary, TaskError> {
         let summary = self.summaries_by_id.get(key.node_id()).ok_or_else(|| {
             TaskError::built_in(
-                crate::core::task::error::ContractCode::WorkflowContextMissingId,
+                crate::core::task::error::ContractCode::NodeNotInContext,
                 format!(
                     "no summary found for node_id '{}' in workflow context",
                     key.node_id(),
@@ -126,7 +126,7 @@ impl WorkflowContext {
     /// Mirrors [`Self::result_for`]: uses `T` from the `NodeKey` to decode the
     /// child workflow's stored `output` slot. Returns `Ok(None)` when the
     /// summary has no output (no `output_index` was set on the child), a
-    /// `WorkflowContextMissingId` error when the node_id is absent, or a
+    /// `NodeNotInContext` error when the node id is not in the context, or a
     /// `ResultDeserializationError` when the stored output fails to decode
     /// into `T`.
     pub fn output_for<T: DeserializeOwned>(
@@ -135,7 +135,7 @@ impl WorkflowContext {
     ) -> Result<Option<T>, TaskError> {
         let summary = self.summaries_by_id.get(key.node_id()).ok_or_else(|| {
             TaskError::built_in(
-                crate::core::task::error::ContractCode::WorkflowContextMissingId,
+                crate::core::task::error::ContractCode::NodeNotInContext,
                 format!(
                     "no summary found for node_id '{}' in workflow context",
                     key.node_id(),
@@ -170,6 +170,7 @@ impl WorkflowContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::task::error::{BuiltInTaskCode, TaskErrorCode};
     use crate::core::workflow::status::WorkflowStatus;
 
     fn make_ctx() -> WorkflowContext {
@@ -224,6 +225,12 @@ mod tests {
         let key: NodeKey<String> = NodeKey::new("nonexistent".to_owned());
         let err = ctx.result_for(&key).unwrap_err();
         assert!(err.message.as_ref().unwrap().contains("nonexistent"));
+        assert_eq!(
+            err.error_code,
+            TaskErrorCode::BuiltIn(BuiltInTaskCode::Contract(
+                crate::core::task::error::ContractCode::NodeNotInContext
+            ))
+        );
     }
 
     #[test]

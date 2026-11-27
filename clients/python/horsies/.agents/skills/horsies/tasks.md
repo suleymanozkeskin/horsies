@@ -119,7 +119,7 @@ def import_batches(runtime: TaskRuntime, *, batch_ids: list[str]) -> Result[int,
 
 ## `TaskRuntime` and the fencing token
 
-A task whose first parameter is `runtime: TaskRuntime` gets the runtime of its run. The worker builds one for each run and passes it as the first argument. The runtime gives `runtime.fencing_token` and `runtime.cancel_state()` (see Cancellation above).
+A task whose first parameter is `runtime: TaskRuntime` gets the runtime of its run. The worker builds one for each run and passes it as the first argument. The runtime gives `runtime.task_id` (the same on every attempt: an idempotency key), `runtime.attempt` (`AttemptNumber`, 1 = first run), `runtime.max_retries` (`MaxRetries`, 0 to 20), `runtime.retries_left` (`RetriesLeft`: `max_retries - (attempt - 1)`, 0 past the budget; a non-retryable code or `good_until` can end retries earlier), `runtime.fencing_token` and `runtime.cancel_state()` (see Cancellation above). Each number is in its `.value`. There is no global `current_attempt()`.
 
 ```python
 from horsies import FencingToken, TaskRuntime
@@ -132,7 +132,7 @@ def read_fence(runtime: TaskRuntime, *, order_id: str) -> Result[FencingToken, T
 
 - Rules: the first parameter, before the `*`; the annotation is exactly `TaskRuntime` (not `TaskRuntime | None`); no default; any name. `TaskRuntime` in any other place (keyword-only, a second positional parameter, a model field, the ok type) raises `HRS-105`.
 - Not part of the wire contract: `.send()`, `.node()()`, a schedule and a workflow node do not supply it. A kwarg with its name is refused (`TaskSendValidationFailed`, `HRS-205` for a schedule, `WORKFLOW_KWARGS_NOT_SERIALIZABLE` for a node).
-- Direct call (tests): `read_fence(TaskRuntime.for_test(task_id=uuid.uuid4(), attempt=second_attempt), order_id='o-1')`. `attempt` is an `AttemptNumber` (default the first attempt). `cancel_state` is a `RunCancelState` (default `CancelNotRequested()`). `AttemptNumber.parse(2)` returns `Ok(AttemptNumber)`, or `Err(AttemptNumberRefused)` for a number outside 1 to `2**31`. `for_test` cannot fail.
+- Direct call (tests): `read_fence(TaskRuntime.for_test(task_id=uuid.uuid4(), attempt=second_attempt), order_id='o-1')`. `attempt` is an `AttemptNumber` (default the first attempt). `max_retries` is a `MaxRetries` (default 0; `MaxRetries.parse(3)` returns `Ok(MaxRetries)`, or `Err(MaxRetriesRefused)` outside 0 to 20). `cancel_state` is a `RunCancelState` (default `CancelNotRequested()`). `AttemptNumber.parse(2)` returns `Ok(AttemptNumber)`, or `Err(AttemptNumberRefused)` for a number outside 1 to `2**31`. `for_test` cannot fail.
 - `runtime.fencing_token` is a frozen `FencingToken(task_id: uuid.UUID, value: int)`. Two reads in one attempt give the same token. An attempt that runs after another attempt of the same task gives a strictly greater `value`. No clock. Today `value` is the attempt number (1 to 21); compare values of one task id, do not depend on the number.
 - Pattern: use the task id in the fence key; at the start of the body take the fence (write the token when the stored value is lower or equal; no row changed means a later attempt holds it: stop); make each later write conditional on the stored value (one conditional statement, or a transaction that locks the fence row `FOR SHARE`). A read with no lock, then a write, is not enough.
 - Limits: a rerun and a workflow node that a resume starts again get a new task id, value from 1; a stale attempt with no later attempt (failed, cancelled, expired) is not refused; a write before the later attempt took the fence is not refused; two writes in one attempt have the same token (use an idempotency key); not exactly-once; work that the body starts reads the token only when the body passes it on.
@@ -294,7 +294,8 @@ Violations of the declared API contract between task author and library:
 
 <!-- members: ContractCode -->
 - `RETURN_TYPE_MISMATCH` — returned value doesn't fit the declared type, or is not `Ok` or `Err`, including `None`
-- `WORKFLOW_CONTEXT_MISSING_ID` — workflow context missing required ID (`read_error.code` of `ReadWorkflowContextMissingId`)
+- `WORKFLOW_CONTEXT_MISSING_ID` — a context read got a node with no `node_id` (`read_error.code` of `ReadWorkflowContextMissingId`; the code of `WorkflowContextMissingId`)
+- `NODE_NOT_IN_CONTEXT` — a context read got a node with an id that is not in the context (the code of `NodeNotInContext`)
 - `NO_TYPE_AVAILABLE` — a typed decode needs the success type, but the task or workflow is not registered locally (for example a handle built from an id) (`read_error.code` of `ReadNoTypeAvailable`)
 
 ### `RetrievalCode`

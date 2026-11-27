@@ -84,7 +84,6 @@ use super::run_work::{
     RunCancelSignal, RunPolls, RunScope, SignalState, WorkWait, ISOLATED_LEFTOVER_GRACE,
 };
 use crate::core::task::error::{OperationalCode, TaskError};
-use crate::core::task::fencing::FencingToken;
 use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskModule};
 use crate::core::task::result::TaskResult;
 use crate::events::AttemptStart;
@@ -195,7 +194,7 @@ async fn serve_isolated_run(
     frames: &mut mpsc::Receiver<ParentFrame>,
 ) -> AfterIsolatedRun {
     let task_id = run.task_id;
-    let scope = RunScope::new(FencingToken::new(run.task_id, run.attempt));
+    let scope = RunScope::new(run.task_attempt());
     let ran = run_isolated(context, run, &scope);
     tokio::pin!(ran);
     loop {
@@ -273,6 +272,7 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame, scope: &R
         task_name,
         queue_name,
         attempt,
+        max_retries,
         worker_id,
         claimed_at,
         orphan_self_heal,
@@ -285,6 +285,7 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame, scope: &R
         task_name,
         queue_name,
         attempt,
+        max_retries,
         worker_id,
         claimed_at,
         orphan_self_heal,
@@ -388,10 +389,18 @@ pub(super) async fn isolated_body(
         ),
         RegisteredTask::Blocking { task, metadata } => {
             let name = task_name.to_owned();
-            let token = scope.fencing_token();
+            let attempt = scope.task_attempt();
             let cancel = scope.cancel_signal();
             let thread = tokio::task::spawn_blocking(move || {
-                run_blocking_body(&task, &input, &name, metadata.module, &span, token, cancel)
+                run_blocking_body(
+                    &task,
+                    &input,
+                    &name,
+                    metadata.module,
+                    &span,
+                    attempt,
+                    cancel,
+                )
             });
             match thread.await {
                 Ok(result) => result,
@@ -523,6 +532,7 @@ fn facts_of(run: &SharedRunFrame) -> RunFacts {
         task_name: run.task_name.clone(),
         queue_name: run.queue_name.clone(),
         attempt: run.attempt,
+        max_retries: run.max_retries,
         worker_id: run.worker_id.clone(),
         claimed_at: run.claimed_at,
         orphan_self_heal: run.orphan_self_heal,
@@ -896,7 +906,7 @@ async fn async_body(
                 }
             },
         };
-    let scope = RunScope::timed(watch.register(run_ref), facts.fencing_token(), signal);
+    let scope = RunScope::timed(watch.register(run_ref), facts.task_attempt(), signal);
     let open = context
         .app
         .body_scope
@@ -1639,7 +1649,7 @@ fn thread_body(seat: &ThreadSeat, body: &ThreadBody<'_>) -> (SeatEnd, Marker) {
         &facts.task_name,
         module,
         &open.span(),
-        facts.fencing_token(),
+        facts.task_attempt(),
         cancel.signal.clone(),
     );
     match cancel.gate.finish() {

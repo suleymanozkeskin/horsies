@@ -1309,6 +1309,7 @@ def run_child_task(
         orphan_self_heal=frame.orphan_self_heal,
         queue_name=frame.queue_name,
         attempt=frame.attempt,
+        max_retries=frame.max_retries,
         trace=run_trace_of(frame.trace),
         cancel=cancel,
     )

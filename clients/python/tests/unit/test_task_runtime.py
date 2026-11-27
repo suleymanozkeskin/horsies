@@ -32,6 +32,9 @@ from horsies import (
     CancelRequested,
     Failed,
     FencingToken,
+    MaxRetries,
+    MaxRetriesRefused,
+    RetriesLeft,
     Succeeded,
     TaskRuntime,
 )
@@ -59,6 +62,7 @@ from horsies.core.scheduler.validation import _signature_error
 from horsies.core.task_runtime import (
     FIRST_ATTEMPT,
     MAX_ATTEMPT,
+    MAX_TASK_RETRIES,
     CancelAlreadySet,
     CancelSet,
     RunCancelCell,
@@ -114,6 +118,18 @@ async def token_async_task(runtime: TaskRuntime) -> Result[FencingToken, TaskErr
     return Ok(runtime.fencing_token)
 
 
+@APP.task('runtime.facts')
+def facts_task(runtime: TaskRuntime) -> Result[list[str], TaskError]:
+    return Ok(
+        [
+            str(runtime.task_id),
+            str(runtime.attempt.value),
+            str(runtime.max_retries.value),
+            str(runtime.retries_left.value),
+        ],
+    )
+
+
 @APP.task('runtime.reads_twice')
 def reads_twice_task(runtime: TaskRuntime) -> Result[list[FencingToken], TaskError]:
     return Ok([runtime.fencing_token, runtime.fencing_token])
@@ -148,6 +164,15 @@ def task_loop() -> Iterator[TaskLoop]:
 # =============================================================================
 
 
+def _budget(number: int) -> MaxRetries:
+    """The retry budget `number`, which the test states is in bounds."""
+    match MaxRetries.parse(number):
+        case Ok(ok_value=budget):
+            return budget
+        case Err(err_value=refused):
+            raise AssertionError(f'the test passes a budget in bounds: {refused.reason}')
+
+
 def _attempt(number: int) -> AttemptNumber:
     """The attempt number `number`, which the test states is in bounds."""
     match AttemptNumber.parse(number):
@@ -179,6 +204,80 @@ class TestAttemptNumber:
 
     def test_the_first_attempt_is_1(self) -> None:
         assert FIRST_ATTEMPT == AttemptNumber(value=1)
+
+
+class TestMaxRetries:
+    @pytest.mark.parametrize('number', [0, 3, MAX_TASK_RETRIES])
+    def test_a_budget_in_bounds_parses(self, number: int) -> None:
+        assert MaxRetries.parse(number) == Ok(MaxRetries(value=number))
+
+    @pytest.mark.parametrize('number', [-1, MAX_TASK_RETRIES + 1])
+    def test_a_budget_outside_the_bounds_is_refused(self, number: int) -> None:
+        refused = MaxRetries.parse(number)
+
+        assert refused == Err(MaxRetriesRefused(number=number))
+        assert isinstance(refused, Err)
+        assert str(number) in refused.err_value.reason
+
+    @pytest.mark.parametrize('number', [-1, MAX_TASK_RETRIES + 1])
+    def test_a_direct_construction_outside_the_bound_is_a_defect(self, number: int) -> None:
+        with pytest.raises(AssertionError, match=f'illegal retry budget {number}'):
+            MaxRetries(value=number)
+
+
+class TestAttemptFacts:
+    """`task_id`, `attempt`, `max_retries` and `retries_left` of a runtime
+    that `for_test` builds."""
+
+    def test_the_runtime_gives_the_facts_it_was_built_with(self) -> None:
+        runtime = TaskRuntime.for_test(
+            task_id=TASK_ID,
+            attempt=_attempt(2),
+            max_retries=_budget(3),
+        )
+
+        assert runtime.task_id == TASK_ID
+        assert runtime.attempt == _attempt(2)
+        assert runtime.max_retries == _budget(3)
+
+    def test_a_first_attempt_has_all_its_retries_left(self) -> None:
+        runtime = TaskRuntime.for_test(task_id=TASK_ID, max_retries=_budget(3))
+
+        assert runtime.attempt == FIRST_ATTEMPT
+        assert runtime.retries_left == RetriesLeft(value=3)
+
+    def test_a_retry_is_the_next_attempt_with_one_retry_less(self) -> None:
+        runtime = TaskRuntime.for_test(
+            task_id=TASK_ID,
+            attempt=_attempt(2),
+            max_retries=_budget(3),
+        )
+
+        assert runtime.retries_left == RetriesLeft(value=2)
+
+    def test_the_last_attempt_has_no_retries_left(self) -> None:
+        runtime = TaskRuntime.for_test(
+            task_id=TASK_ID,
+            attempt=_attempt(4),
+            max_retries=_budget(3),
+        )
+
+        assert runtime.retries_left == RetriesLeft(value=0)
+
+    def test_an_attempt_past_the_budget_has_no_retries_left(self) -> None:
+        runtime = TaskRuntime.for_test(
+            task_id=TASK_ID,
+            attempt=_attempt(9),
+            max_retries=_budget(3),
+        )
+
+        assert runtime.retries_left == RetriesLeft(value=0)
+
+    def test_the_default_task_is_not_retried(self) -> None:
+        runtime = TaskRuntime.for_test(task_id=TASK_ID)
+
+        assert runtime.max_retries == _budget(0)
+        assert runtime.retries_left == RetriesLeft(value=0)
 
 
 class TestForTest:
@@ -266,7 +365,7 @@ class TestRunCancelCell:
 
     def test_the_runtime_of_a_run_reads_its_cell_as_it_changes(self) -> None:
         cell = RunCancelCell()
-        runtime = run_task_runtime(FencingToken(task_id=TASK_ID, value=1), cell)
+        runtime = run_task_runtime(TASK_ID, FIRST_ATTEMPT, _budget(0), cell)
 
         assert runtime.cancel_state() == CancelNotRequested()
         _ = cell.request(CancelCause.OPERATOR)
@@ -458,6 +557,7 @@ def _run_isolated(
     task_loop: TaskLoop,
     *,
     attempt: int,
+    max_retries: int = 0,
     input_json: str = '{}',
 ) -> str:
     with (
@@ -480,6 +580,7 @@ def _run_isolated(
                 orphan_self_heal=True,
                 queue_name='default',
                 attempt=attempt,
+                max_retries=max_retries,
                 trace=NoTraceCarrier(),
             ),
         )
@@ -511,6 +612,19 @@ class TestInjection:
         envelope = _run_isolated('runtime.token_async', task_loop, attempt=1)
 
         assert _ok_of(envelope, FencingToken) == FencingToken(task_id=TASK_ID, value=1)
+
+    def test_a_first_isolated_run_reads_attempt_1_and_all_its_retries(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        envelope = _run_isolated('runtime.facts', task_loop, attempt=1, max_retries=3)
+
+        assert _ok_of(envelope, list[str]) == [str(TASK_ID), '1', '3', '3']
+
+    def test_an_isolated_retry_reads_attempt_2(self, task_loop: TaskLoop) -> None:
+        envelope = _run_isolated('runtime.facts', task_loop, attempt=2, max_retries=3)
+
+        assert _ok_of(envelope, list[str]) == [str(TASK_ID), '2', '3', '2']
 
     def test_a_later_attempt_gets_a_greater_value(self, task_loop: TaskLoop) -> None:
         first = _ok_of(
