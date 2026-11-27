@@ -7,7 +7,7 @@ import type { AnyTaskContract, contractTypes } from "../contract/define-task.ts"
 import type { SchemaValue } from "../contract/schema.ts";
 import type { AnyWorkflowContract, workflowTypes } from "../workflow/define.ts";
 import type { SubWorkflowOutput } from "../workflow/node.ts";
-import type { Kind, TaskOutcomeKind, UpstreamOutput } from "./kinds.ts";
+import type { Kind, TaskOutcomeKind, UpstreamCodes, UpstreamOutput } from "./kinds.ts";
 import { unreachable } from "./unreachable.ts";
 import type { TaskOutcome } from "./task-error.ts";
 import type { Wire } from "./wire-type.ts";
@@ -15,8 +15,10 @@ import type { Wire } from "./wire-type.ts";
 /**
  * The wire type of the outcome of the upstream `C`: for a task contract, its output value and its codes; for a
  * workflow contract, the success value of a sub-workflow node of it (its output value, or `NoWorkflowOutput` for a
- * workflow with no `outputType`) and any code (a workflow holds the codes of many tasks). A sender never gives it (its sent type is `never`). The input decode does not check a stored custom code
- * against the contract's codes (#2557).
+ * workflow with no `outputType`) and any code (a workflow holds the codes of many tasks). A sender never gives it (its sent type is `never`).
+ *
+ * The input decode refuses a stored custom code that a task contract with `errorCodes` does not declare. A task
+ * contract with no `errorCodes` and a workflow contract allow every custom code (their code type is `string`).
  */
 export type TaskOutcomeWire<C extends AnyTaskContract | AnyWorkflowContract> = Wire<
   C extends AnyTaskContract
@@ -30,8 +32,8 @@ export type TaskOutcomeWire<C extends AnyTaskContract | AnyWorkflowContract> = W
 >;
 
 /** The kind of an upstream outcome whose success value has the output `output`. Pure. */
-export function taskOutcomeKind(output: UpstreamOutput): TaskOutcomeKind {
-  return Object.freeze({ node: "taskOutcome", output });
+export function taskOutcomeKind(output: UpstreamOutput, codes: UpstreamCodes): TaskOutcomeKind {
+  return Object.freeze({ node: "taskOutcome", output, codes });
 }
 
 /**
