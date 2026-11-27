@@ -17,16 +17,10 @@
 use horsies_core::core::task::error::CodeTextRefusal;
 use horsies_core::{
     check_cancel_grace_ms, DeclaredCodeRefusal, DeclaredErrorCodes, RegisteredTask, TaskRegistry,
+    DEFAULT_QUEUE_NAME, DEFAULT_QUEUE_PRIORITY,
 };
 
 use crate::{AppConfig, HorsiesError, HorsiesErrorCode, QueueMode, ValidationReport};
-
-/// The one queue of `Default` mode.
-pub(crate) const DEFAULT_QUEUE: &str = "default";
-
-/// The priority of the default queue, and of a task that resolves no queue
-/// priority (Python's `100`).
-pub(crate) const DEFAULT_PRIORITY: u32 = 100;
 
 /// Where a registration takes the queue of its task from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +77,7 @@ pub(crate) fn resolve_task_queue(
     requested: Option<&str>,
 ) -> Result<String, HorsiesError> {
     match (config.queue_mode, requested) {
-        (QueueMode::Default, None) => Ok(DEFAULT_QUEUE.to_owned()),
+        (QueueMode::Default, None) => Ok(DEFAULT_QUEUE_NAME.to_owned()),
         (QueueMode::Default, Some(queue)) => Err(HorsiesError::new(
             "cannot specify a queue in Default queue mode",
         )
@@ -108,7 +102,7 @@ pub(crate) fn resolve_task_queue(
 /// configured queues in `Custom` mode.
 pub(crate) fn valid_queue_names(config: &AppConfig) -> Vec<String> {
     match config.queue_mode {
-        QueueMode::Default => vec![DEFAULT_QUEUE.to_owned()],
+        QueueMode::Default => vec![DEFAULT_QUEUE_NAME.to_owned()],
         QueueMode::Custom => configured_queues(config)
             .map(|queue| queue.name.clone())
             .collect(),
@@ -119,7 +113,7 @@ pub(crate) fn valid_queue_names(config: &AppConfig) -> Vec<String> {
 /// `TaskInvalidQueue` and the valid names.
 pub(crate) fn check_queue(config: &AppConfig, queue: &str) -> Result<(), HorsiesError> {
     let admitted = match config.queue_mode {
-        QueueMode::Default => queue == DEFAULT_QUEUE,
+        QueueMode::Default => queue == DEFAULT_QUEUE_NAME,
         QueueMode::Custom => is_configured_queue(config, queue),
     };
     match admitted {
@@ -129,11 +123,11 @@ pub(crate) fn check_queue(config: &AppConfig, queue: &str) -> Result<(), Horsies
 }
 
 /// The priority of `queue`: its configured priority in `Custom` mode, else
-/// [`DEFAULT_PRIORITY`].
+/// [`DEFAULT_QUEUE_PRIORITY`].
 pub(crate) fn queue_priority(config: &AppConfig, queue: &str) -> u32 {
     configured_queues(config)
         .find(|configured| configured.name == queue)
-        .map_or(DEFAULT_PRIORITY, |configured| configured.priority)
+        .map_or(DEFAULT_QUEUE_PRIORITY, |configured| configured.priority)
 }
 
 fn configured_queues(config: &AppConfig) -> impl Iterator<Item = &crate::CustomQueueConfig> {
@@ -311,8 +305,8 @@ mod tests {
         )
         .unwrap();
         let task = tasks.get("echo").unwrap();
-        assert_eq!(task.queue(), Some(DEFAULT_QUEUE));
-        assert_eq!(task.priority(), Some(DEFAULT_PRIORITY));
+        assert_eq!(task.queue(), Some(DEFAULT_QUEUE_NAME));
+        assert_eq!(task.priority(), Some(DEFAULT_QUEUE_PRIORITY));
     }
 
     #[test]
@@ -598,11 +592,11 @@ mod tests {
         assert_eq!(queue_priority(&custom_config(), "bulk"), 90);
         assert_eq!(
             queue_priority(&custom_config(), "unknown"),
-            DEFAULT_PRIORITY
+            DEFAULT_QUEUE_PRIORITY
         );
         assert_eq!(
             queue_priority(&default_config(), "default"),
-            DEFAULT_PRIORITY
+            DEFAULT_QUEUE_PRIORITY
         );
     }
 }

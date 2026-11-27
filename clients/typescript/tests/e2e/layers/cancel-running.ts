@@ -118,6 +118,19 @@ async function assertCancelledWithOneAttempt<O, E extends string>(suite: Suite, 
   assert.equal(attempt.phases.kind === "captured" ? attempt.phases.recordedBy.kind : attempt.phases.kind, "cancel");
 }
 
+/**
+ * The cancel with `pendingOrClaimedOnly` of the RUNNING task `taskId` is `TASK_NOT_CANCELLABLE` with the status
+ * `RUNNING`; the task then still runs. Then the operator cancel with `includeRunning` ends it.
+ */
+async function assertRunningRefusedByTheNarrowPolicy(suite: Suite, taskId: TaskId): Promise<void> {
+  const refused = await suite.app.monitoring.cancelTask(taskId, { policy: "pendingOrClaimedOnly" });
+
+  assert.ok(!refused.ok && refused.error.code === "TASK_NOT_CANCELLABLE", JSON.stringify(refused));
+  assert.equal(refused.error.currentStatus, "RUNNING");
+  assert.equal(await suite.rows.taskStatus(taskId), "RUNNING");
+  await cancelRunning(suite, taskId);
+}
+
 /** The process id of the isolated child that runs the next task. */
 async function isolatedPid(suite: Suite): Promise<number> {
   return succeeded(await sentHandle("e2e_pid", suite.app.send(basic.pid, { sleepMs: 0 })), RESULT_WAIT_MS);
@@ -134,6 +147,40 @@ function threadSeatTest(name: string, body: (suite: Suite) => Promise<void>): vo
       test(name, { skip: THREAD_SEATS_ON_NODE_ONLY }, () => undefined);
   }
 }
+
+describe("the cancel of a running task with the policy pendingOrClaimedOnly", () => {
+  e2eTest("an isolated task is TASK_NOT_CANCELLABLE with RUNNING, and keeps running", "default", async (suite) => {
+    await suite.worker("isolated-1");
+
+    const token = newToken();
+    const handle = await sentHandle("e2e_cancel_isolated_async", suite.app.send(cancel.cancelIsolatedAsync, { token }));
+
+    await startedPid(suite, token);
+    await assertRunningRefusedByTheNarrowPolicy(suite, handle.taskId);
+  });
+
+  e2eTest("a shared async task is TASK_NOT_CANCELLABLE with RUNNING, and keeps running", "default", async (suite) => {
+    await suite.worker("shared-only-1x4");
+
+    const token = newToken();
+    const handle = await sentHandle("e2e_cancel_shared_async", suite.app.send(cancel.cancelSharedAsync, { token }));
+
+    await startedPid(suite, token);
+    await assertRunningRefusedByTheNarrowPolicy(suite, handle.taskId);
+  });
+
+  threadSeatTest("a shared thread task is TASK_NOT_CANCELLABLE with RUNNING, and keeps running", async (suite) => {
+    const worker = suite.spawnWorker("thread-only-1x4");
+
+    await worker.waitForLog(WORKER_READY_LINE, READY_LIMIT_MS);
+
+    const token = newToken();
+    const handle = await sentHandle("e2e_cancel_shared_thread", suite.app.send(cancel.cancelSharedThread, { token }));
+
+    await startedPid(suite, token);
+    await assertRunningRefusedByTheNarrowPolicy(suite, handle.taskId);
+  });
+});
 
 describe("the operator cancel of a running task", () => {
   e2eTest("an isolated async body sees the cancel through runtime.signal with the cause OPERATOR", "default", async (suite) => {

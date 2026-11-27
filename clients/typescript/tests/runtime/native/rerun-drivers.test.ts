@@ -5,7 +5,8 @@
 // Each case runs in a transaction that the test owns. The test, not the rerun, ends it.
 
 import assert from "node:assert/strict";
-import { before, describe, test } from "node:test";
+import { randomUUID } from "node:crypto";
+import { after, before, describe, test } from "node:test";
 
 import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
@@ -19,8 +20,10 @@ import type { PgTextQuery, PgTextResult } from "../../../horsies/src/rerun/pg.ts
 import { postgresTransaction } from "../../../horsies/src/rerun/postgres.ts";
 import type { PostgresTransactionSql } from "../../../horsies/src/rerun/postgres.ts";
 import type { RerunCommand, RerunOutcome, RerunEnqueuePolicy } from "../../../horsies/src/rerun/types.ts";
+import type { Horsies } from "../../../horsies/src/index.ts";
 import type { Result } from "../../../horsies/src/wire/result.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
+import { closeApp, KEEP_POLICY, sendCancelled, sentApp } from "./sent-support.ts";
 
 // The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
 void requireDevAddon();
@@ -268,4 +271,144 @@ describe("app.rerunTaskIn with a database", () => {
     assert.ok(!answer.ok && answer.error.code === "DRIVER_FAILED", JSON.stringify(answer));
     assert.equal(answer.error.statement, "rerun_source_read");
   });
+});
+
+/** How the caller ends the transaction after the rerun: commit it, or roll it back. */
+type Ending = "commit" | "rollback";
+
+/** A rerun in a transaction that the test ends as `ending` says (an error of the rerun always rolls back). */
+type EndedRun = (
+  app: Horsies,
+  command: RerunCommand,
+  ending: Ending,
+) => Promise<Result<RerunOutcome, CallerRerunError>>;
+
+/** Whether the caller commits after `answer`: only an `ending` of commit after a rerun with no error. */
+function commits(ending: Ending, answer: Result<RerunOutcome, CallerRerunError>): boolean {
+  return ending === "commit" && answer.ok;
+}
+
+/** The rerun of `command` on a `pg` client in a transaction that ends as `ending` says. */
+const endedPgRun: EndedRun = async (app, command, ending) => {
+  const client = new (await pg()).Client({ connectionString: testDatabaseUrl() });
+
+  await client.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const answer = await app.rerunTaskIn(pgTransaction(client), command, KEEP_POLICY);
+
+    await client.query(commits(ending, answer) ? "COMMIT" : "ROLLBACK");
+
+    return answer;
+  } finally {
+    await client.end();
+  }
+};
+
+/** The answer of a rerun that a `postgres.js` transaction rolled back. */
+class RolledBack extends Error {
+  readonly answer: Result<RerunOutcome, CallerRerunError>;
+
+  constructor(answer: Result<RerunOutcome, CallerRerunError>) {
+    super("the test rolls the transaction back");
+    this.answer = answer;
+  }
+}
+
+/** The rerun of `command` on a `postgres.js` transaction that ends as `ending` says. */
+const endedPostgresRun: EndedRun = async (app, command, ending) => {
+  const sql = (await postgres())(testDatabaseUrl(), { onnotice: () => undefined });
+
+  try {
+    return await sql.begin(async (transactionSql) => {
+      const answer = await app.rerunTaskIn(postgresTransaction(transactionSql), command, KEEP_POLICY);
+
+      if (!commits(ending, answer)) {
+        throw new RolledBack(answer);
+      }
+
+      return answer;
+    });
+  } catch (cause) {
+    if (cause instanceof RolledBack) {
+      return cause.answer;
+    }
+
+    throw cause;
+  } finally {
+    await sql.end();
+  }
+};
+
+/** The id of the new task of an `enqueued` answer, or the failed test. */
+function enqueuedIdOf(answer: Result<RerunOutcome, unknown>): string {
+  assert.ok(answer.ok && answer.value.kind === "enqueued", JSON.stringify(answer));
+
+  return answer.value.newTaskId;
+}
+
+/** A deadline with every microsecond digit set, a year ahead: it holds a value in each part of the stored time. */
+function microsecondDeadline(): Temporal.Instant {
+  return Temporal.Instant.from(`${String(Temporal.Now.plainDateISO().year + 1)}-03-04T05:06:07.123456Z`);
+}
+
+const ENDED_DRIVERS: readonly { readonly name: string; readonly run: EndedRun }[] = [
+  { name: "pg", run: endedPgRun },
+  { name: "postgres.js", run: endedPostgresRun },
+];
+
+describe("app.rerunTaskIn with a keyed rerun of a sent task", () => {
+  let app: Horsies;
+
+  before(() => {
+    app = sentApp(testDatabaseUrl(), "keep");
+  });
+
+  after(async () => {
+    await closeApp(app);
+  });
+
+  for (const driver of ENDED_DRIVERS) {
+    test(`${driver.name}: after the caller commits, the same command in the app's transaction answers keyReplay with the new task`, async () => {
+      const source = await sendCancelled(app, 20);
+      const command: RerunCommand = { sourceTaskId: source, goodUntil: { kind: "none" }, idempotencyKey: `commit-${randomUUID()}` };
+      const created = enqueuedIdOf(await driver.run(app, command, "commit"));
+      const replay = await app.rerunTask(command, KEEP_POLICY);
+
+      assert.deepEqual(replay, { ok: true, value: { kind: "keyReplay", existingTaskId: created } });
+    });
+
+    test(`${driver.name}: after the caller rolls back, the same command in the app's transaction answers enqueued with another task`, async () => {
+      const source = await sendCancelled(app, 21);
+      const command: RerunCommand = { sourceTaskId: source, goodUntil: { kind: "none" }, idempotencyKey: `rollback-${randomUUID()}` };
+      const rolledBack = enqueuedIdOf(await driver.run(app, command, "rollback"));
+      const again = await app.rerunTask(command, KEEP_POLICY);
+
+      assert.ok(again.ok && again.value.kind === "enqueued", JSON.stringify(again));
+      assert.notEqual(again.value.newTaskId, rolledBack);
+    });
+
+    test(`${driver.name}: a keyed rerun with a deadline sends each parameter type, and the detail read gives the deadline to the microsecond`, async () => {
+      const source = await sendCancelled(app, 22);
+      const goodUntil = microsecondDeadline();
+
+      const command: RerunCommand = {
+        sourceTaskId: source,
+        goodUntil: { kind: "until", at: goodUntil },
+        idempotencyKey: `types-${randomUUID()}`,
+      };
+
+      const created = enqueuedIdOf(await driver.run(app, command, "commit"));
+      const parsed = TaskId.parse(created);
+
+      assert.ok(parsed.ok, "the new task id is a canonical UUID");
+
+      const detail = await app.monitoring.getTaskDetail(parsed.value);
+
+      assert.ok(detail.ok && detail.value.kind === "found", JSON.stringify(detail));
+      assert.equal(detail.value.taskDetail.taskRow.goodUntil?.epochNanoseconds, goodUntil.epochNanoseconds);
+    });
+  }
 });
