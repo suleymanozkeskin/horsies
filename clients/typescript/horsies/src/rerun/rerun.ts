@@ -4,7 +4,7 @@
 
 import { RerunErrorCode } from "../_catalog/history.ts";
 import { unreachable } from "../native/call/never.ts";
-import type { CallerStatementRecord } from "../native/facades/rerun.ts";
+import type { CallerStatementRecord, RegisteredTaskCodesArg } from "../native/facades/rerun.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
 import type { TraceArgument } from "../native/values/records.ts";
 import type { Result } from "../wire/result.ts";
@@ -25,7 +25,7 @@ import type {
 } from "./errors.ts";
 import { parseRerunRequest } from "./parse.ts";
 import type { RerunRequest } from "./parse.ts";
-import type { RerunCommand, RerunOutcome, RerunPolicy } from "./types.ts";
+import type { RerunCommand, RerunOutcome, RerunEnqueuePolicy } from "./types.ts";
 
 /** The outcome of a rerun in the app's transaction. */
 export type AppRerunResult = Result<RerunOutcome, RerunError>;
@@ -34,15 +34,17 @@ export type AppRerunResult = Result<RerunOutcome, RerunError>;
 export type CallerRerunResult = Result<RerunOutcome, CallerRerunError>;
 
 /**
- * Rerun `command` in a transaction of `handle`, and commit it. The new task stores `trace`. A refused
+ * Rerun `command` in a transaction of `handle`, and commit it. The new task stores `trace`. `codes` are the declared
+ * custom codes of the app's listed tasks: the core checks the stored retry list of the source against them. A refused
  * command or policy answers before any call.
  */
 export async function rerunInApp(
   bridge: RerunBridge,
   handle: CoreHandle,
   trace: TraceArgument,
+  codes: RegisteredTaskCodesArg,
   command: RerunCommand,
-  policy: RerunPolicy,
+  policy: RerunEnqueuePolicy,
 ): Promise<AppRerunResult> {
   const request = parseRerunRequest(command, policy);
 
@@ -50,7 +52,7 @@ export async function rerunInApp(
     return request;
   }
 
-  const answer = await bridge.rerunTask(handle, request.value, trace);
+  const answer = await bridge.rerunTask(handle, request.value, trace, codes);
 
   switch (answer.kind) {
     case "done":
@@ -66,15 +68,17 @@ export async function rerunInApp(
 
 /**
  * Rerun `command` in `transaction`, which the caller owns: the source read, then for an eligible source
- * the write. Nothing commits here. The new task stores `trace`. A refused command or policy answers
+ * the write. Nothing commits here. The new task stores `trace`. `codes` are the declared custom codes of the app's
+ * listed tasks: the core checks the stored retry list of the source against them. A refused command or policy answers
  * before any statement.
  */
 export async function rerunInCaller(
   bridge: RerunBridge,
   trace: TraceArgument,
+  codes: RegisteredTaskCodesArg,
   transaction: CallerTransaction,
   command: RerunCommand,
-  policy: RerunPolicy,
+  policy: RerunEnqueuePolicy,
 ): Promise<CallerRerunResult> {
   const request = parseRerunRequest(command, policy);
 
@@ -88,7 +92,7 @@ export async function rerunInCaller(
     return readRow;
   }
 
-  return finishPreparation(transaction, preparationOf(bridge, request.value, trace, readRow.value));
+  return finishPreparation(transaction, preparationOf(bridge, request.value, trace, codes, readRow.value));
 }
 
 /** What the source read's row decides. */
@@ -96,9 +100,10 @@ function preparationOf(
   bridge: RerunBridge,
   request: RerunRequest,
   trace: TraceArgument,
+  codes: RegisteredTaskCodesArg,
   readRow: CallerRow,
 ): BridgePreparation {
-  return bridge.prepareWrite(request, trace, callerRowArg(readRow));
+  return bridge.prepareWrite(request, trace, callerRowArg(readRow), codes);
 }
 
 /** The outcome of a preparation: its answer, its refusal, or the outcome of its write. */

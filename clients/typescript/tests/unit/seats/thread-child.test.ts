@@ -12,6 +12,12 @@ import { LOOP_TURN_TICK_MS } from "../../../horsies/src/child/loop-marks.ts";
 import { thrownError } from "../../../horsies/src/native/call/envelope.ts";
 import type { ChildPost } from "../../../horsies/src/native/child/addon.ts";
 import type { EnqueueRequest } from "../../../horsies/src/native/sends/addon.ts";
+import {
+  type EndedSeatRun,
+  NO_SEAT_BODY_OBSERVER,
+  type SeatBodyObserver,
+  setSeatBodyObserver,
+} from "../../../horsies/src/seats/body-observer.ts";
 import { relayedRefusal, serveSeatOperation } from "../../../horsies/src/seats/operations.ts";
 import type { IsolateEvents, SeatHost } from "../../../horsies/src/seats/pool.ts";
 import { type MainToSeat, SEAT_PROTOCOL_VERSION, type SeatMarker } from "../../../horsies/src/seats/protocol.ts";
@@ -101,10 +107,11 @@ function runBodyPost(runKey: bigint): ChildPost {
 }
 
 /** A served thread child of `seats` seats whose hook 0 ran with every isolate ready. */
-async function servedThreadChild(seats: number): Promise<{ readonly native: FakeChildNative; readonly deps: ChildModeDeps & Recorded }> {
+async function servedThreadChild(seats: number, observer: SeatBodyObserver = NO_SEAT_BODY_OBSERVER): Promise<{ readonly native: FakeChildNative; readonly deps: ChildModeDeps & Recorded }> {
   const app = seatApp();
 
   app.implement(crunch, ({ n }, { ok }) => ok(n));
+  setSeatBodyObserver(contextOf(app), observer);
 
   const native = new FakeChildNative();
   const deps = threadDeps(native);
@@ -186,6 +193,23 @@ describe("a SHARED_THREAD child", () => {
       end: { kind: "timedOut" },
       endedAtEpochNanoseconds: ENDED_AT.epochNanoseconds,
     });
+  });
+
+  test("an isolate that ends during a run gives the seat body observer of the app that run, at the isolate's exit", async () => {
+    const ended: EndedSeatRun[] = [];
+
+    const observer: SeatBodyObserver = {
+      ...NO_SEAT_BODY_OBSERVER,
+      isolateEnded: (run) => {
+        ended.push(run);
+      },
+    };
+
+    const { native, deps } = await servedThreadChild(1, observer);
+
+    native.serves[0]?.post(runBodyPost(5n));
+    deps.isolates[0]?.events.exit(1);
+    assert.deepEqual(ended, [{ facts: { kind: "notRecorded" }, startedAt: ENDED_AT, endedAt: ENDED_AT }]);
   });
 
   test("a post before the start facts is a defect", async () => {

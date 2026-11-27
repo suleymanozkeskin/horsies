@@ -14,7 +14,7 @@ export type {
   RerunNotEligible,
   RerunNotEligibleReason,
   RerunOutcome,
-  RerunPolicy,
+  RerunEnqueuePolicy,
   RerunRetention,
   RerunSourceAbsent,
   RerunSourceCorrupt,
@@ -38,10 +38,12 @@ export type {
   RerunNoOpenTransaction,
   RerunRequestRefused,
   RerunResultNotText,
+  RerunRetryCodeNotDeclared,
   RerunStatementFailed,
   RerunStatementOutcome,
   RerunStepRefused,
   RerunStoredFamily,
+  RerunTaskNotRegistered,
   RerunUnknownStoredFamily,
 } from "./errors.ts";
 

@@ -67,15 +67,15 @@ import {
   workflowRunsArg,
 } from "./query.ts";
 
-/** The smallest task index of a workflow node: the core reads it as a 32-bit integer. */
-const MIN_TASK_INDEX = -2_147_483_648;
+/** The smallest node index of a workflow run: the core reads it as a 32-bit integer. */
+const MIN_NODE_INDEX = -2_147_483_648;
 
-/** The largest task index of a workflow node. */
-const MAX_TASK_INDEX = 2_147_483_647;
+/** The largest node index of a workflow run. */
+const MAX_NODE_INDEX = 2_147_483_647;
 
 /** A task by id: its detail, or why no table holds it. */
 export type TaskDetailRead =
-  | { readonly kind: "found"; readonly detail: TaskDetail }
+  | { readonly kind: "found"; readonly taskDetail: TaskDetail }
   | { readonly kind: "notFound"; readonly taskId: TaskId; readonly reason: TaskAbsenceReason };
 
 /** A workflow run by id, or no run. */
@@ -83,10 +83,10 @@ export type WorkflowRunRead =
   | { readonly kind: "found"; readonly run: WorkflowRunDetail }
   | { readonly kind: "notFound"; readonly workflowId: WorkflowId };
 
-/** A node of a workflow run by its task index, or no node. */
+/** A node of a workflow run by its node index, or no node. */
 export type WorkflowNodeRead =
   | { readonly kind: "found"; readonly node: WorkflowTaskDetail }
-  | { readonly kind: "notFound"; readonly workflowId: WorkflowId; readonly taskIndex: number };
+  | { readonly kind: "notFound"; readonly workflowId: WorkflowId; readonly nodeIndex: number };
 
 /** The addon and the handle that the reads call. */
 export interface ReadTarget {
@@ -202,13 +202,13 @@ export async function workflowRun(
   });
 }
 
-/** One node of a workflow run by its task index, or `notFound`. */
+/** One node of a workflow run by its node index, or `notFound`. */
 export async function workflowNode(
   target: ReadTarget,
   workflowId: WorkflowId,
-  taskIndex: number,
+  nodeIndex: number,
 ): Promise<Result<WorkflowNodeRead, MonitoringReadError>> {
-  const index = taskIndexOf(taskIndex);
+  const index = nodeIndexOf(nodeIndex);
 
   if (!index.ok) {
     return index;
@@ -220,7 +220,7 @@ export async function workflowNode(
     const value = wireJsonOfCoreText("workflowNode", text);
 
     return value === null
-      ? Object.freeze({ kind: "notFound", workflowId, taskIndex: index.value })
+      ? Object.freeze({ kind: "notFound", workflowId, nodeIndex: index.value })
       : Object.freeze({ kind: "found", node: decodedOrDefect("workflowNode", decodeWorkflowTaskDetail(value)) });
   });
 }
@@ -235,7 +235,7 @@ export async function taskDetail(
   switch (outcome.kind) {
     case "json":
       return ok(
-        Object.freeze({ kind: "found", detail: decodeCoreModel("taskDetail", outcome.text, decodeTaskDetail) }),
+        Object.freeze({ kind: "found", taskDetail: decodeCoreModel("taskDetail", outcome.text, decodeTaskDetail) }),
       );
     case "absent":
       return ok(Object.freeze({ kind: "notFound", taskId, reason: outcome.reason }));
@@ -249,16 +249,16 @@ export async function taskDetail(
 }
 
 /** A task index that the core reads as a 32-bit integer, or the refusal. Pure. */
-function taskIndexOf(taskIndex: number): Result<number, QueryRefused> {
-  const whole = wholeNumber("taskIndex", taskIndex);
+function nodeIndexOf(nodeIndex: number): Result<number, QueryRefused> {
+  const whole = wholeNumber("nodeIndex", nodeIndex);
 
   if (!whole.ok) {
     return whole;
   }
 
-  return whole.value >= MIN_TASK_INDEX && whole.value <= MAX_TASK_INDEX
+  return whole.value >= MIN_NODE_INDEX && whole.value <= MAX_NODE_INDEX
     ? whole
-    : err(queryRefused("taskIndex", `taskIndex must be from ${MIN_TASK_INDEX} to ${MAX_TASK_INDEX}; got ${taskIndex}`));
+    : err(queryRefused("nodeIndex", `nodeIndex must be from ${MIN_NODE_INDEX} to ${MAX_NODE_INDEX}; got ${nodeIndex}`));
 }
 
 /** Call the addon once and give the decoded model, the refusal of the query, or the core's error. */

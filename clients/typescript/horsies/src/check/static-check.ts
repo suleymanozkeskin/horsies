@@ -20,7 +20,7 @@ import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import type { AppContext } from "../app/context.ts";
 import type { CoreChecks } from "../app/core-checks.ts";
 import { exceptionCodeRefusals } from "../app/implement.ts";
-import { refusal, type Refusal } from "../app/refusal.ts";
+import { refusal, type HorsiesError } from "../app/refusal.ts";
 import type { RefusalArea } from "../app/refusals.ts";
 import { unreachable } from "../native/call/never.ts";
 import { checkWorkflows } from "../workflow/check-cases.ts";
@@ -53,7 +53,7 @@ export function staticCheck(
   scope: CheckScope,
   phase: CheckPhaseName,
 ): CheckOutcome {
-  const phases: readonly (() => readonly Refusal[])[] = [
+  const phases: readonly (() => readonly HorsiesError[])[] = [
     () => registrationRefusals(context, scope),
     () => checkWorkflows(context.workflows),
     ...implementationPhases(context, checks, phase),
@@ -78,7 +78,7 @@ function implementationPhases(
   context: AppContext,
   checks: CoreChecks,
   phase: CheckPhaseName,
-): readonly (() => readonly Refusal[])[] {
+): readonly (() => readonly HorsiesError[])[] {
   switch (phase) {
     case "check":
     case "worker-startup":
@@ -91,7 +91,7 @@ function implementationPhases(
 }
 
 /** The refusals of the sink whose area counts in `scope`, in registration order. Pure. */
-export function registrationRefusals(context: AppContext, scope: CheckScope): readonly Refusal[] {
+export function registrationRefusals(context: AppContext, scope: CheckScope): readonly HorsiesError[] {
   return context.refusals
     .recorded()
     .filter((recorded) => areaScopes(recorded.area).includes(scope))
@@ -99,7 +99,7 @@ export function registrationRefusals(context: AppContext, scope: CheckScope): re
 }
 
 /** One refusal per listed contract with no implementation in this entry, in list order. Pure. */
-export function implementationRefusals(context: AppContext): readonly Refusal[] {
+export function implementationRefusals(context: AppContext): readonly HorsiesError[] {
   return context.listed
     .filter((entry) => !context.implementations.has(entry.task.compiled.record.name))
     .map((entry) =>

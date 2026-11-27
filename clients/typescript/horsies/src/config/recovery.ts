@@ -18,15 +18,15 @@ import {
 
 /** The recovery settings. Each field left out has the core's default; the core checks each range. */
 export interface RecoveryConfigInput {
-  readonly autoRequeueStaleClaimed?: boolean;
+  readonly requeueStaleClaimed?: boolean;
   readonly claimedStaleThresholdMs?: number;
-  readonly autoFailStaleRunning?: boolean;
-  readonly autoTerminateOrphanedWorkflowTasks?: boolean;
+  readonly failStaleRunning?: boolean;
+  readonly terminateOrphanedWorkflowTasks?: boolean;
   readonly orphanTaskAuditIntervalMs?: number;
   readonly runningStaleThresholdMs?: number;
   readonly finalizingStaleThresholdMs?: number;
   readonly crashedWorkerRecoveryGraceMs?: number;
-  readonly phase2QuarantineAfterAttempts?: number;
+  readonly finalizationQuarantineAfterAttempts?: number;
   readonly workflowRecoveryFailureLimit?: number;
   readonly checkIntervalMs?: number;
   readonly runnerHeartbeatIntervalMs?: number;
@@ -48,14 +48,14 @@ export function recoveryJson(input: RecoveryConfigInput, path: string): Checked<
       checkedInteger(value, bound, memberPath(path, name));
 
   return checkedObject([
-    optionalEntry("auto_requeue_stale_claimed", input.autoRequeueStaleClaimed, accepted),
+    optionalEntry("auto_requeue_stale_claimed", input.requeueStaleClaimed, accepted),
     optionalEntry(
       "claimed_stale_threshold_ms",
       input.claimedStaleThresholdMs,
       integer("claimedStaleThresholdMs", RECOVERY_U64),
     ),
-    optionalEntry("auto_fail_stale_running", input.autoFailStaleRunning, accepted),
-    optionalEntry("auto_terminate_orphaned_workflow_tasks", input.autoTerminateOrphanedWorkflowTasks, accepted),
+    optionalEntry("auto_fail_stale_running", input.failStaleRunning, accepted),
+    optionalEntry("auto_terminate_orphaned_workflow_tasks", input.terminateOrphanedWorkflowTasks, accepted),
     optionalEntry(
       "orphan_task_audit_interval_ms",
       input.orphanTaskAuditIntervalMs,
@@ -78,8 +78,8 @@ export function recoveryJson(input: RecoveryConfigInput, path: string): Checked<
     ),
     optionalEntry(
       "phase2_quarantine_after_attempts",
-      input.phase2QuarantineAfterAttempts,
-      integer("phase2QuarantineAfterAttempts", RECOVERY_U32),
+      input.finalizationQuarantineAfterAttempts,
+      integer("finalizationQuarantineAfterAttempts", RECOVERY_U32),
     ),
     optionalEntry(
       "workflow_recovery_failure_limit",

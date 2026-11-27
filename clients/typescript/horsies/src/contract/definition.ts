@@ -47,13 +47,13 @@ export type RetrySetting =
       readonly maxRetries: number;
       readonly jitter: boolean;
       readonly maxDelay: MaxDelaySetting;
-      readonly autoRetryFor: readonly string[];
+      readonly retryFor: readonly string[];
     }
   | {
       readonly kind: "fixed";
       readonly intervalsSeconds: readonly number[];
       readonly jitter: boolean;
-      readonly autoRetryFor: readonly string[];
+      readonly retryFor: readonly string[];
     };
 
 /** The longest wait between two retries of an exponential policy: no cap, or a number of seconds. */
@@ -107,13 +107,13 @@ type RetryFields =
       readonly maxRetries: number;
       readonly jitter?: boolean;
       readonly maxDelaySeconds?: number;
-      readonly autoRetryFor: readonly string[];
+      readonly retryFor: readonly string[];
     }
   | {
       readonly kind: "fixed";
       readonly intervalsSeconds: readonly number[];
       readonly jitter?: boolean;
-      readonly autoRetryFor: readonly string[];
+      readonly retryFor: readonly string[];
     };
 
 /** `jitter` of a retry policy that leaves it out (the Python client's `RetryPolicy.jitter` default). */
@@ -253,14 +253,14 @@ function retrySetting(retry: RetryFields | undefined): RetrySetting {
         maxRetries: retry.maxRetries,
         jitter: retry.jitter ?? DEFAULT_JITTER,
         maxDelay: maxDelaySetting(retry.maxDelaySeconds),
-        autoRetryFor: Object.freeze([...retry.autoRetryFor]),
+        retryFor: Object.freeze([...retry.retryFor]),
       });
     case "fixed":
       return Object.freeze({
         kind: "fixed",
         intervalsSeconds: Object.freeze([...retry.intervalsSeconds]),
         jitter: retry.jitter ?? DEFAULT_JITTER,
-        autoRetryFor: Object.freeze([...retry.autoRetryFor]),
+        retryFor: Object.freeze([...retry.retryFor]),
       });
     default: {
       const unexpected: never = retry;

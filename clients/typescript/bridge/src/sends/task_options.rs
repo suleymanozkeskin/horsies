@@ -7,7 +7,7 @@
 //!   a whole number from 0 to 4294967295 is refused with `HRS-102`, one
 //!   refusal per field, and then the core's rules do not run.
 //! - The core's rules give every refusal in one list, in the core's order:
-//!   the retry policy and its `autoRetryFor` codes (`HRS-102`), a timeout
+//!   the retry policy and its `retryFor` codes (`HRS-102`), a timeout
 //!   below its minimum (`HRS-102`), a shared class with no timeout
 //!   (`HRS-109`), a grace with `SHARED_THREAD` (`HRS-110`), a grace outside
 //!   its range (`HRS-111`). The code of each refusal is the core's
@@ -40,7 +40,7 @@ const TIMEOUT_FIELD: &str = "timeoutMs";
 const GRACE_FIELD: &str = "cancelGraceMs";
 
 /// The field name of the retry codes in the refusal texts.
-const AUTO_RETRY_FOR_FIELD: &str = "retryPolicy.autoRetryFor";
+const AUTO_RETRY_FOR_FIELD: &str = "retryPolicy.retryFor";
 
 /// The help line of a refusal with `HRS-102`.
 const OPTIONS_HELP: &str = "check the options of defineTask";

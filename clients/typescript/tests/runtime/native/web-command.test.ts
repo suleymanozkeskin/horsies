@@ -42,7 +42,7 @@ describe("the servers of the web command with a built addon and a database", () 
 
   test("it serves the page on Node's server", async () => {
     const handler = monitoringHandlerOf(testApp(probedHandle(manifestJson(testDatabaseUrl(), false))), {
-      auth: allowAll(),
+      authorizationPolicy: allowAll(),
     });
 
     const server = serving(await serveOnNode(handler, { host: "127.0.0.1", port: 0 }, noReport));
@@ -60,7 +60,7 @@ describe("the servers of the web command with a built addon and a database", () 
 
   test("on Bun an idle event stream lives past one heartbeat", { skip: notOnBun, timeout: IDLE_STREAM_TEST_MS }, async () => {
     const handler = monitoringHandlerOf(testApp(probedHandle(manifestJson(testDatabaseUrl(), false))), {
-      auth: allowAll(),
+      authorizationPolicy: allowAll(),
     });
 
     const server = serving(await serveOnBun(handler, { host: "127.0.0.1", port: 0 }, noReport));

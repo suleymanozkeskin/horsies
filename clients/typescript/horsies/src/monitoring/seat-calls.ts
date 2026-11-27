@@ -104,8 +104,8 @@ export function relayedFacades(relay: SeatRelay): RelayedFacades {
       cancelTask: async (_handle, taskId, policy) => relayed(relay, { part: "cancel", call: { method: "cancelTask", args: [taskId, policy] } }),
     } satisfies RelayedAddon<CancelAddon>),
     rerun: Object.freeze({
-      rerunTask: async (_handle, command, policy, trace) =>
-        relayed(relay, { part: "rerun", call: { method: "rerunTask", args: [command, policy, trace] } }),
+      rerunTask: async (_handle, command, policy, trace, codes) =>
+        relayed(relay, { part: "rerun", call: { method: "rerunTask", args: [command, policy, trace, codes] } }),
     } satisfies RelayedAddon<Pick<RerunAddon, "rerunTask">>),
     ping: async () => relayed<NativeOutcome<DatabasePingRecord>>(relay, { part: "database", call: { method: "pingDatabase", args: [] } }),
     handle: relayedHandle(),
@@ -135,8 +135,8 @@ function relayedHealth(relay: SeatRelay): RelayedAddon<HealthAddon> {
     relayed<V>(relay, { part: "health", call });
 
   return Object.freeze({
-    pingWorkers: async (_handle, target, timeoutMs, minResponses) =>
-      health({ method: "pingWorkers", args: [target, timeoutMs, minResponses] }),
+    pingWorkers: async (_handle, target, waitMs, minResponses) =>
+      health({ method: "pingWorkers", args: [target, waitMs, minResponses] }),
     listWorkerStates: async () => health({ method: "listWorkerStates", args: [] }),
     getWorkerState: async (_handle, workerId) => health({ method: "getWorkerState", args: [workerId] }),
     getWorkerStateHistory: async (_handle, workerId, limit) => health({ method: "getWorkerStateHistory", args: [workerId, limit] }),

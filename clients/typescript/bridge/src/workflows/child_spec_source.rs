@@ -335,6 +335,10 @@ fn unavailable_of(request: &ChildSpecRequest, failure: CallbackFailure) -> Child
             subject: subject_of(request),
             cause: not_run_text(cause).to_owned(),
         },
+        CallbackFailure::NoAnswer { bound } => package_defect(
+            request,
+            &format!("the call ended with no answer within {bound:?}, a bound it does not set"),
+        ),
         CallbackFailure::Threw {
             call_id,
             name,
@@ -849,6 +853,9 @@ mod tests {
     fn every_other_call_failure_is_a_defect_of_the_package() {
         let (request, input) = called();
         for failure in [
+            CallbackFailure::NoAnswer {
+                bound: Duration::from_secs(3),
+            },
             CallbackFailure::Threw {
                 call_id: 4,
                 name: "TypeError".to_owned(),

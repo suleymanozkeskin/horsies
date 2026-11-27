@@ -1,4 +1,4 @@
-// The send path: `app.send` and `app.retrySend`.
+// The send path: `app.send` and `app.resend`.
 //
 // A send: the contract is listed; sends are not suppressed; the options and the input pass their checks (the input
 // with a read-back); the core prepares the facts (task id, options text, retention, payload bound, the priority of the
@@ -31,7 +31,7 @@ import {
   type TaskSendError,
   validationFailed,
 } from "./errors.ts";
-import { checkSendOptions, epochMicrosTowardPast, type SendOptions } from "./options.ts";
+import { checkSendOptions, epochMicrosTowardPast, type TaskSendOptions } from "./options.ts";
 
 /** The queue that each send of a task carries. The priority of the queue comes from the core's accepted config. */
 export type QueueRoute = { readonly queueName: string };
@@ -70,7 +70,7 @@ export async function sendTask<O, E extends string>(
   context: SendContext,
   contract: object,
   input: object,
-  options: SendOptions,
+  options: TaskSendOptions,
 ): Promise<SendOutcome<O, E>> {
   const taskName = contractRecord(contract).name;
   const listed = context.contracts.byContract(contract);
@@ -91,18 +91,18 @@ export async function sendTask<O, E extends string>(
 }
 
 /**
- * Send again the payload of a retryable error (`ENQUEUE_FAILED`, `IDEMPOTENCY_KEY_CONFLICT`), under the same task id,
- * with `REPEAT`. A key conflict before the reservation ends gives the same conflict again.
+ * Send again the payload of an `ENQUEUE_FAILED` error, under the same task id, with `REPEAT`. An
+ * `IDEMPOTENCY_KEY_CONFLICT` is not retryable: the type refuses it, and untyped code gets `VALIDATION_FAILED`.
  */
-export async function retrySend<O, E extends string>(
+export async function resend<O, E extends string>(
   context: SendContext,
   error: RetryableSendError<O, E>,
 ): Promise<SendOutcome<O, E>> {
   // A JavaScript caller can pass another error than the type allows.
   const code: string = error.code;
 
-  if (!isRetrySendCode(code)) {
-    const message = `retrySend takes ENQUEUE_FAILED and IDEMPOTENCY_KEY_CONFLICT only; ${code} is not retryable`;
+  if (!isResendCode(code)) {
+    const message = `resend takes ENQUEUE_FAILED only; ${code} is not retryable`;
 
     return err(validationFailed(message, ruleRefused(message)));
   }
@@ -122,11 +122,10 @@ export async function retrySend<O, E extends string>(
   return sentHandle<O, E>(context, listed.task, requestOfPayload(error.taskId, error.payload), "REPEAT");
 }
 
-/** Whether `retrySend` takes an error of the code `code`, a text that a JavaScript caller can give. Pure. */
-function isRetrySendCode(code: string): boolean {
+/** Whether `resend` takes an error of the code `code`, a text that a JavaScript caller can give. Pure. */
+function isResendCode(code: string): boolean {
   switch (code) {
     case "ENQUEUE_FAILED":
-    case "IDEMPOTENCY_KEY_CONFLICT":
       return true;
     default:
       return false;
@@ -162,7 +161,7 @@ async function preparedRequest(
   context: SendContext,
   task: ListedTask,
   input: object,
-  options: SendOptions,
+  options: TaskSendOptions,
 ): Promise<Result<EnqueueRequest, SendFailure>> {
   const { compiled, route } = task;
   const taskName = compiled.record.name;
@@ -301,8 +300,8 @@ export async function enqueueWithResends(
 ): Promise<Result<TaskId, SendFailure>> {
   let sent = await enqueueOnce(context, request, firstKind, trace);
 
-  for (let resend = 0; resend < RESEND_COUNT && context.resendOnTransientError && isTransient(sent); resend += 1) {
-    await context.pause(Math.min(RESEND_FIRST_WAIT_MS * 2 ** resend, RESEND_LONGEST_WAIT_MS));
+  for (let resends = 0; resends < RESEND_COUNT && context.resendOnTransientError && isTransient(sent); resends += 1) {
+    await context.pause(Math.min(RESEND_FIRST_WAIT_MS * 2 ** resends, RESEND_LONGEST_WAIT_MS));
     sent = await enqueueOnce(context, request, "REPEAT", trace);
   }
 

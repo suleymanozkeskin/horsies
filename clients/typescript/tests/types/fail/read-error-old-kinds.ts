@@ -1,21 +1,11 @@
-// expect: TS2678 at 10, TS2678 at 12, TS2678 at 14, TS2678 at 16
-// Read error kinds are named after their catalog codes: `waitTimedOut`, `invalidWait`, `database`, `unknownUserCode`.
+// expect: TS2367 at 8, TS2367 at 10
+// A read error that does not decode is `resultDeserializationError` (its code), and a stored code that the contract
+// does not list is `unknownCustomCode`; `storedResultUnreadable` and `unknownUserCode` are no read error kinds.
 
 import type { ReadError } from "../../../horsies/src/index.ts";
 
-export function retryableOf(error: ReadError): boolean {
-  switch (error.kind) {
-    case "databaseError":
-      return error.retryable;
-    case "waitTimedOut":
-      return true;
-    case "invalidWait":
-      return false;
-    case "database":
-      return true;
-    case "unknownUserCode":
-      return false;
-    default:
-      return false;
-  }
+export function isUnreadable(error: ReadError): boolean {
+  return error.kind === "storedResultUnreadable"
+    || error.kind === "resultDeserializationError"
+    || error.kind === "unknownUserCode";
 }

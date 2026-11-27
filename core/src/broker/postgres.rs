@@ -17,8 +17,8 @@ use crate::core::history::reads::result::{
     HistoryResultPayload, HistoryTaskResult, TaskResultRead,
 };
 use crate::core::history::rerun::operations::{
-    rerun_first_statement, rerun_task_in_transaction, RerunEnqueuePolicy, RerunError, RerunOutcome,
-    RerunTask,
+    rerun_first_statement, rerun_task_in_transaction, RegisteredTaskCodes, RerunEnqueuePolicy,
+    RerunError, RerunOutcome, RerunTask,
 };
 use crate::core::{EnqueueRetention, PostgresConfig, TaskInfo};
 
@@ -1473,7 +1473,9 @@ impl PostgresBroker {
     /// `RerunError::ClientFamilyMismatch`; a family row whose value is not a
     /// client family is `RerunError::UnknownStoredFamily`; a family row that
     /// could not be read is `RerunError::FamilyCheckFailed`. In each case
-    /// nothing is written.
+    /// nothing is written. `codes` are the declared custom codes of the
+    /// calling app's tasks: the stored retry list of the source is checked
+    /// against them before the write.
     ///
     /// Errors: as the rerun in its transaction, and
     /// [`RerunError::PoolSettings`] when a closed handle cannot open its
@@ -1483,6 +1485,7 @@ impl PostgresBroker {
         &self,
         command: RerunTask,
         policy: RerunEnqueuePolicy,
+        codes: &RegisteredTaskCodes,
     ) -> Result<RerunOutcome, RerunError> {
         self.check_client_family_for_write()
             .await
@@ -1502,6 +1505,7 @@ impl PostgresBroker {
             self.statement_log,
             &command,
             &policy,
+            codes,
             self.client_family,
         )
         .await?;

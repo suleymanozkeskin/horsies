@@ -12,10 +12,10 @@ export function describeReadError(error: ReadError): string {
     case "waitTimeout":
     case "taskNotFound":
     case "resultNotAvailable":
-    case "storedResultUnreadable":
+    case "resultDeserializationError":
     case "unknownCustomCode":
     case "waitInsideTask":
-    case "databaseError":
+    case "database":
       return error.kind;
     default:
       return assertNever(error);

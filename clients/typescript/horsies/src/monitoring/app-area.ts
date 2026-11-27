@@ -27,7 +27,7 @@ import type {
   CancelTaskError,
   HealthInputError,
   HealthReadError,
-  MonitoringQueryError,
+  MonitoringCoreReadError,
   MonitoringReadError,
   PingDatabaseError,
   PingWorkersError,
@@ -101,22 +101,22 @@ export interface Monitoring {
   taskFacets(query?: TaskFacetsQuery): Promise<Result<Facets, MonitoringReadError>>;
   taskBreakdown(query: TaskBreakdownQuery): Promise<Result<Breakdown, MonitoringReadError>>;
   listTasks(query?: TaskListQuery): Promise<Result<TaskListPage, MonitoringReadError>>;
-  taskDetail(taskId: TaskId): Promise<Result<TaskDetailRead, MonitoringQueryError>>;
-  workflowNames(): Promise<Result<readonly string[], MonitoringQueryError>>;
-  workflowRuns(query?: WorkflowRunsQuery): Promise<Result<readonly WorkflowRunSummary[], MonitoringReadError>>;
-  workflowRun(workflowId: WorkflowId): Promise<Result<WorkflowRunRead, MonitoringQueryError>>;
-  workflowNode(workflowId: WorkflowId, taskIndex: number): Promise<Result<WorkflowNodeRead, MonitoringReadError>>;
-  schedules(): Promise<Result<readonly ScheduleStateInfo[], MonitoringQueryError>>;
-  workers(): Promise<Result<readonly WorkerStateSnapshot[], HealthReadError>>;
-  worker(workerId: string): Promise<Result<WorkerStateRead, WorkerReadError>>;
-  workerHistory(
+  getTaskDetail(taskId: TaskId): Promise<Result<TaskDetailRead, MonitoringCoreReadError>>;
+  listWorkflowNames(): Promise<Result<readonly string[], MonitoringCoreReadError>>;
+  listWorkflowRuns(query?: WorkflowRunsQuery): Promise<Result<readonly WorkflowRunSummary[], MonitoringReadError>>;
+  getWorkflowRun(workflowId: WorkflowId): Promise<Result<WorkflowRunRead, MonitoringCoreReadError>>;
+  getWorkflowNode(workflowId: WorkflowId, nodeIndex: number): Promise<Result<WorkflowNodeRead, MonitoringReadError>>;
+  listSchedules(): Promise<Result<readonly ScheduleStateInfo[], MonitoringCoreReadError>>;
+  listWorkerStates(): Promise<Result<readonly WorkerStateSnapshot[], HealthReadError>>;
+  getWorkerState(workerId: string): Promise<Result<WorkerStateRead, WorkerReadError>>;
+  getWorkerStateHistory(
     workerId: string,
     limit?: WorkerHistoryLimit,
   ): Promise<Result<readonly WorkerStateSnapshot[], WorkerHistoryError>>;
-  staleTasks(query: StaleTasksQuery): Promise<Result<BoundedTaskList<StaleTaskRow>, HealthInputError>>;
-  expiredTasks(): Promise<Result<BoundedTaskList<ExpiredTaskRow>, HealthReadError>>;
-  classCoverage(): Promise<Result<ClassCoverage, HealthReadError>>;
-  classReport(): Promise<Result<ClassReport, HealthReadError>>;
+  getStaleTasks(query: StaleTasksQuery): Promise<Result<BoundedTaskList<StaleTaskRow>, HealthInputError>>;
+  getExpiredTasks(): Promise<Result<BoundedTaskList<ExpiredTaskRow>, HealthReadError>>;
+  getExecutionClassCoverage(): Promise<Result<ClassCoverage, HealthReadError>>;
+  getExecutionClassReport(): Promise<Result<ClassReport, HealthReadError>>;
   cancelTask(taskId: TaskId, options: CancelTaskOptions): Promise<Result<TaskCancelled, CancelTaskError>>;
 }
 
@@ -177,20 +177,20 @@ export function createMonitoringArea(core: CoreAccess, native: MonitoringAddons 
     taskFacets: async (query: TaskFacetsQuery = {}) => taskFacets(reads(), query),
     taskBreakdown: async (query: TaskBreakdownQuery) => taskBreakdown(reads(), query),
     listTasks: async (query: TaskListQuery = {}) => listTasks(reads(), query),
-    taskDetail: async (taskId: TaskId) => taskDetail(reads(), taskId),
-    workflowNames: async () => workflowNames(reads()),
-    workflowRuns: async (query: WorkflowRunsQuery = {}) => workflowRuns(reads(), query),
-    workflowRun: async (workflowId: WorkflowId) => workflowRun(reads(), workflowId),
-    workflowNode: async (workflowId: WorkflowId, taskIndex: number) => workflowNode(reads(), workflowId, taskIndex),
-    schedules: async () => schedules(reads()),
-    workers: async () => workers(health()),
-    worker: async (workerId: string) => worker(health(), workerId),
-    workerHistory: async (workerId: string, limit: WorkerHistoryLimit = { kind: "allRetained" }) =>
+    getTaskDetail: async (taskId: TaskId) => taskDetail(reads(), taskId),
+    listWorkflowNames: async () => workflowNames(reads()),
+    listWorkflowRuns: async (query: WorkflowRunsQuery = {}) => workflowRuns(reads(), query),
+    getWorkflowRun: async (workflowId: WorkflowId) => workflowRun(reads(), workflowId),
+    getWorkflowNode: async (workflowId: WorkflowId, nodeIndex: number) => workflowNode(reads(), workflowId, nodeIndex),
+    listSchedules: async () => schedules(reads()),
+    listWorkerStates: async () => workers(health()),
+    getWorkerState: async (workerId: string) => worker(health(), workerId),
+    getWorkerStateHistory: async (workerId: string, limit: WorkerHistoryLimit = { kind: "allRetained" }) =>
       workerHistory(health(), workerId, limit),
-    staleTasks: async (query: StaleTasksQuery) => staleTasks(health(), query.thresholdMinutes),
-    expiredTasks: async () => expiredTasks(health()),
-    classCoverage: async () => readClassCoverage(health()),
-    classReport: async () => readClassReport(health()),
+    getStaleTasks: async (query: StaleTasksQuery) => staleTasks(health(), query.thresholdMinutes),
+    getExpiredTasks: async () => expiredTasks(health()),
+    getExecutionClassCoverage: async () => readClassCoverage(health()),
+    getExecutionClassReport: async () => readClassReport(health()),
     cancelTask: async (taskId: TaskId, options: CancelTaskOptions) =>
       cancelTask({ addon: addons.cancel(), handle: handle() }, taskId, options),
   });

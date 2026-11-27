@@ -15,8 +15,8 @@
 //!   `code_subset = "Name"`: `code` is the field `field`, a `Literal`
 //!   subset `Name` that converts into the code enum (`From`);
 //! - `never_retryable`: `retryable: ClassVar[bool] = False`; or
-//!   `always_retryable`: `retryable: ClassVar[bool] = True`, for a state
-//!   that may clear. A variant takes at most one of the two;
+//!   `always_retryable`: `retryable: ClassVar[bool] = True`, for a class whose
+//!   same call, unchanged, can succeed later. A variant takes at most one of the two;
 //! - `exception = "BaseException"` or `exception = "BaseException | NoCause"`:
 //!   the type of the last slot, `cause`, the core's exception class of the
 //!   cause.

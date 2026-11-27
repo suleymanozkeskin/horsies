@@ -1,7 +1,7 @@
 // The OpenTelemetry API as the package uses it, and its load.
 //
 // - The API is `@opentelemetry/api` 1.x, an optional peer dependency. The package loads it only for an app with
-//   `tracing: { kind: "otel" }`, with a synchronous `require` from this module, because `Horsies.create` is sync.
+//   `tracing: { kind: "otelTracing" }`, with a synchronous `require` from this module, because `Horsies.create` is sync.
 // - The package never names a type of the API module: the interfaces below hold the members that it calls, so the
 //   published types do not need the API. A test checks that the API module fits them.
 // - The tracer, the meter and the propagator are the global ones, taken at each use, so a provider that the user sets
@@ -88,6 +88,7 @@ export interface OtelTraceApi {
   getTracerProvider(): OtelTracerProvider;
   setSpan(context: OtelContext, span: OtelSpan): OtelContext;
   getSpan(context: OtelContext): OtelSpan | undefined;
+  deleteSpan(context: OtelContext): OtelContext;
   isSpanContextValid(spanContext: OtelSpanContext): boolean;
 }
 
@@ -120,6 +121,11 @@ export interface OtelInstrumentOptions {
   readonly description: string;
 }
 
+/** The options of a counter: the value type of its points. */
+export interface OtelCounterOptions extends OtelInstrumentOptions {
+  readonly valueType: number;
+}
+
 /** The options of a histogram: its bucket bounds as advice. */
 export interface OtelHistogramOptions extends OtelInstrumentOptions {
   readonly advice: { readonly explicitBucketBoundaries: number[] };
@@ -137,7 +143,7 @@ export interface OtelHistogram {
 
 /** A meter of the global meter provider. */
 export interface OtelMeter {
-  createCounter(name: string, options: OtelInstrumentOptions): OtelCounter;
+  createCounter(name: string, options: OtelCounterOptions): OtelCounter;
   createHistogram(name: string, options: OtelHistogramOptions): OtelHistogram;
 }
 
@@ -155,6 +161,7 @@ export interface OtelApi {
   readonly ROOT_CONTEXT: OtelContext;
   readonly SpanKind: { readonly PRODUCER: number; readonly CONSUMER: number };
   readonly SpanStatusCode: { readonly OK: number; readonly ERROR: number };
+  readonly ValueType: { readonly INT: number };
 }
 
 /** Why the API did not load: the cause of the failed `require`. */

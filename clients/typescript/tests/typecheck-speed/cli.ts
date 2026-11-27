@@ -1,22 +1,27 @@
-// The typecheck-speed check. Each command runs `sessionsPerMeasurement` sessions of
-// `runsPerSession` runs of `bun check` on the control project.
-//   bun tests/typecheck-speed/cli.ts check   exit 1 when the median of the session medians is
+// The typecheck-speed check. Each command runs `sessionsPerMeasurement` sessions. A session runs `runsPerSession`
+// runs of `bun check` on the control project, then the same on the app project, and takes the ratio of the app
+// median to the control median. The machine speed cancels in the ratio, so a baseline gives a verdict on any machine.
+//   bun tests/typecheck-speed/cli.ts check   exit 1 when the median of the session ratios is
 //                                            above the baseline median plus the baseline noise
-//   bun tests/typecheck-speed/cli.ts record  writes the baseline of this machine
-// Exit 2: no verdict (no baseline for this machine, a failed run, a file error, a wrong argument).
-// The project is written to a new folder in the temporary directory and removed after the runs.
-// The check measures the control project only. The app project on the horsies API joins in #2376.
+//   bun tests/typecheck-speed/cli.ts record  writes the baseline of this Bun binary
+// Exit 2: no verdict (no baseline for this Bun binary and these projects, a failed run, a file error, a wrong argument).
+// The control project is written to a new folder in the temporary directory. The app project is written to a new
+// folder next to this file, because its tsconfig refers to the package by a relative path. Both folders are removed
+// after the runs.
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
+import { appProjectFiles } from "./app-project.ts";
 import storedFile from "./baseline.json" with { type: "json" };
 import {
   type BaselineKey,
+  currentBun,
   currentMachine,
   describeBaseline,
   describeMachine,
   findBaseline,
   judge,
+  type MachineIdentity,
   parseBaseline,
   projectSha256,
   type StoredBaselineFile,
@@ -30,15 +35,14 @@ import {
   checkRunTimeout,
   createProjectFolder,
   describeRunFailure,
-  medianOf,
   millisecondsText,
   removeProjectFolder,
   runSession,
   runsPerSession,
   sessionsPerMeasurement,
-  spreadOf,
   writeProjectFiles,
 } from "./measure.ts";
+import { medianOfRatios, type Ratio, ratioOf, ratioText, spreadOfRatios } from "./ratio.ts";
 
 const exitCodes = { success: 0, slower: 1, noVerdict: 2 } as const;
 
@@ -48,7 +52,7 @@ const recordedFile: StoredBaselineFile = storedFile;
 type Command = "check" | "record";
 
 type Measurement =
-  | { readonly kind: "measured"; readonly sessionMedians: readonly Temporal.Duration[] }
+  | { readonly kind: "measured"; readonly sessionRatios: readonly Ratio[] }
   | { readonly kind: "notMeasured"; readonly reason: string };
 
 function assertNever(value: never): never {
@@ -67,58 +71,110 @@ function parseCommand(argument: string | undefined): { readonly kind: "command";
   }
 }
 
-/** Writes the project to `folder` and runs `sessionsPerMeasurement` sessions there. */
-function measureInFolder(folder: string, files: ReadonlyMap<string, string>): Measurement {
-  const write = writeProjectFiles(folder, files);
+/** The folder of this file: the parent of the app project folder. */
+const appProjectParent = fileURLToPath(new URL(".", import.meta.url));
 
-  if (write.kind === "notWritten") {
-    return { kind: "notMeasured", reason: `${write.file} was not written: ${write.cause}` };
-  }
-
-  const sessionMedians: Temporal.Duration[] = [];
-
-  for (let session = 1; session <= sessionsPerMeasurement; session += 1) {
-    const result = runSession(bunCheckCommand, folder, runsPerSession, checkRunTimeout);
-
-    if (result.kind === "runFailed") {
-      return { kind: "notMeasured", reason: describeRunFailure(result.failure) };
-    }
-
-    console.log(`session ${session}: median ${millisecondsText(result.median)}; runs ${result.runs.map(millisecondsText).join(", ")}`);
-    sessionMedians.push(result.median);
-  }
-
-  return { kind: "measured", sessionMedians };
+/** The two project folders of a measurement, both written. */
+interface ProjectFolders {
+  readonly control: string;
+  readonly app: string;
 }
 
-/** Measures in a new temporary folder, then removes the folder. A folder left behind does not change the outcome. */
-function measureProject(files: ReadonlyMap<string, string>): Measurement {
-  const folder = createProjectFolder(tmpdir());
+/** One session on each project, and the ratio of the app median to the control median. */
+function measureSession(folders: ProjectFolders, session: number): { readonly kind: "measured"; readonly ratio: Ratio } | { readonly kind: "notMeasured"; readonly reason: string } {
+  const control = runSession(bunCheckCommand, folders.control, runsPerSession, checkRunTimeout);
 
-  if (folder.kind === "notCreated") {
-    return { kind: "notMeasured", reason: `no project folder: ${folder.cause}` };
+  if (control.kind === "runFailed") {
+    return { kind: "notMeasured", reason: `control project: ${describeRunFailure(control.failure)}` };
   }
 
-  const measurement = measureInFolder(folder.path, files);
-  const removal = removeProjectFolder(folder.path);
+  const app = runSession(bunCheckCommand, folders.app, runsPerSession, checkRunTimeout);
+
+  if (app.kind === "runFailed") {
+    return { kind: "notMeasured", reason: `app project: ${describeRunFailure(app.failure)}` };
+  }
+
+  const ratio = ratioOf(app.median, control.median);
+
+  if (ratio.kind === "controlTimeZero") {
+    return { kind: "notMeasured", reason: "the control median is zero, so the ratio is not defined" };
+  }
+
+  console.log(`session ${session}: control ${millisecondsText(control.median)}, app ${millisecondsText(app.median)}, ratio ${ratioText(ratio.ratio)}`);
+
+  return { kind: "measured", ratio: ratio.ratio };
+}
+
+function measureInFolders(folders: ProjectFolders, controlFiles: ReadonlyMap<string, string>, appFiles: ReadonlyMap<string, string>): Measurement {
+  for (const [folder, files] of [
+    [folders.control, controlFiles],
+    [folders.app, appFiles],
+  ] as const) {
+    const write = writeProjectFiles(folder, files);
+
+    if (write.kind === "notWritten") {
+      return { kind: "notMeasured", reason: `${write.file} was not written: ${write.cause}` };
+    }
+  }
+
+  const sessionRatios: Ratio[] = [];
+
+  for (let session = 1; session <= sessionsPerMeasurement; session += 1) {
+    const result = measureSession(folders, session);
+
+    if (result.kind === "notMeasured") {
+      return result;
+    }
+
+    sessionRatios.push(result.ratio);
+  }
+
+  return { kind: "measured", sessionRatios };
+}
+
+function removeFolder(folder: string): void {
+  const removal = removeProjectFolder(folder);
 
   if (removal.kind === "notRemoved") {
     console.error(`the project folder ${removal.path} was not removed: ${removal.cause}`);
   }
+}
+
+/** Measures in two new folders, then removes them. A folder left behind does not change the outcome. */
+function measureProjects(controlFiles: ReadonlyMap<string, string>, appFiles: ReadonlyMap<string, string>): Measurement {
+  const control = createProjectFolder(tmpdir());
+
+  if (control.kind === "notCreated") {
+    return { kind: "notMeasured", reason: `no control project folder: ${control.cause}` };
+  }
+
+  const app = createProjectFolder(appProjectParent);
+
+  if (app.kind === "notCreated") {
+    removeFolder(control.path);
+
+    return { kind: "notMeasured", reason: `no app project folder: ${app.cause}` };
+  }
+
+  const measurement = measureInFolders({ control: control.path, app: app.path }, controlFiles, appFiles);
+  removeFolder(control.path);
+  removeFolder(app.path);
 
   return measurement;
 }
 
-function recordedMachines(): string {
-  return recordedFile.entries.length === 0 ? "none" : recordedFile.entries.map((entry) => describeMachine(entry.machine)).join("; ");
+function recordedBaselines(): string {
+  return recordedFile.entries.length === 0
+    ? "none"
+    : recordedFile.entries.map((entry) => `bun ${entry.bun}, recorded on ${describeMachine(entry.recordedOn)}`).join("; ");
 }
 
-function check(key: BaselineKey, files: ReadonlyMap<string, string>): number {
+function check(key: BaselineKey, controlFiles: ReadonlyMap<string, string>, appFiles: ReadonlyMap<string, string>): number {
   const lookup = findBaseline(recordedFile, key);
 
   if (lookup.kind === "noMatch") {
-    console.error("no baseline for this machine, project and procedure; record one with `bun run typecheck-speed:record`");
-    console.error(`recorded machines: ${recordedMachines()}`);
+    console.error("no baseline for this Bun binary and these projects; record one with `bun run typecheck-speed:record`");
+    console.error(`recorded baselines: ${recordedBaselines()}`);
 
     return exitCodes.noVerdict;
   }
@@ -131,7 +187,7 @@ function check(key: BaselineKey, files: ReadonlyMap<string, string>): number {
     return exitCodes.noVerdict;
   }
 
-  const measurement = measureProject(files);
+  const measurement = measureProjects(controlFiles, appFiles);
 
   if (measurement.kind === "notMeasured") {
     console.error(measurement.reason);
@@ -140,15 +196,15 @@ function check(key: BaselineKey, files: ReadonlyMap<string, string>): number {
   }
 
   console.log(`baseline: ${describeBaseline(parsed.baseline)}`);
-  const verdict = judge(parsed.baseline, medianOf(measurement.sessionMedians));
+  const verdict = judge(parsed.baseline, medianOfRatios(measurement.sessionRatios));
 
   switch (verdict.kind) {
     case "withinNoise":
-      console.log(`within the noise: median ${millisecondsText(verdict.measured)}, limit ${millisecondsText(verdict.limit)}`);
+      console.log(`within the noise: ratio ${ratioText(verdict.measured)}, limit ${ratioText(verdict.limit)}`);
 
       return exitCodes.success;
     case "slower":
-      console.error(`slower than the baseline: median ${millisecondsText(verdict.measured)}, limit ${millisecondsText(verdict.limit)}`);
+      console.error(`slower than the baseline: ratio ${ratioText(verdict.measured)}, limit ${ratioText(verdict.limit)}`);
 
       return exitCodes.slower;
     default:
@@ -156,8 +212,13 @@ function check(key: BaselineKey, files: ReadonlyMap<string, string>): number {
   }
 }
 
-function record(key: BaselineKey, files: ReadonlyMap<string, string>): number {
-  const measurement = measureProject(files);
+function record(
+  key: BaselineKey,
+  machine: MachineIdentity,
+  controlFiles: ReadonlyMap<string, string>,
+  appFiles: ReadonlyMap<string, string>,
+): number {
+  const measurement = measureProjects(controlFiles, appFiles);
 
   if (measurement.kind === "notMeasured") {
     console.error(measurement.reason);
@@ -165,7 +226,7 @@ function record(key: BaselineKey, files: ReadonlyMap<string, string>): number {
     return exitCodes.noVerdict;
   }
 
-  const entry = storedBaselineOf(key, measurement.sessionMedians);
+  const entry = storedBaselineOf(key, machine, measurement.sessionRatios);
   const write = writeBaselineFile(baselinePath, withRecordedBaseline(recordedFile, entry));
 
   if (write.kind === "notWritten") {
@@ -174,8 +235,8 @@ function record(key: BaselineKey, files: ReadonlyMap<string, string>): number {
     return exitCodes.noVerdict;
   }
 
-  const median = millisecondsText(medianOf(measurement.sessionMedians));
-  console.log(`recorded in ${baselinePath}: median ${median}, noise ${millisecondsText(spreadOf(measurement.sessionMedians))}`);
+  const median = ratioText(medianOfRatios(measurement.sessionRatios));
+  console.log(`recorded in ${baselinePath}: median ${median}, noise ${ratioText(spreadOfRatios(measurement.sessionRatios))}`);
 
   return exitCodes.success;
 }
@@ -189,34 +250,44 @@ function main(argument: string | undefined): number {
     return exitCodes.noVerdict;
   }
 
-  const machine = currentMachine();
-
-  if (machine.kind === "cpuModelNotReported") {
-    console.error("the operating system reports no CPU model, so no baseline can match this machine");
-
-    return exitCodes.noVerdict;
-  }
-
-  const files = controlProjectFiles();
+  const controlFiles = controlProjectFiles();
+  const appFiles = appProjectFiles();
 
   const key: BaselineKey = {
-    machine: machine.machine,
-    projectSha256: projectSha256(files),
+    bun: currentBun(),
+    controlSha256: projectSha256(controlFiles),
+    appSha256: projectSha256(appFiles),
     runsPerSession,
     sessions: sessionsPerMeasurement,
   };
 
-  console.log(`control project: ${files.size} files, sha256 ${key.projectSha256}`);
-  console.log(`machine: ${describeMachine(key.machine)}`);
+  console.log(`control project: ${controlFiles.size} files, sha256 ${key.controlSha256}`);
+  console.log(`app project: ${appFiles.size} files, sha256 ${key.appSha256}`);
+  console.log(`bun: ${key.bun}`);
 
   switch (parsedCommand.command) {
     case "check":
-      return check(key, files);
+      return check(key, controlFiles, appFiles);
     case "record":
-      return record(key, files);
+      return recordOnThisMachine(key, controlFiles, appFiles);
     default:
       return assertNever(parsedCommand.command);
   }
+}
+
+/** Records on this machine. Refused when the system reports no CPU model: the entry names the machine. */
+function recordOnThisMachine(key: BaselineKey, controlFiles: ReadonlyMap<string, string>, appFiles: ReadonlyMap<string, string>): number {
+  const machine = currentMachine();
+
+  if (machine.kind === "cpuModelNotReported") {
+    console.error("the operating system reports no CPU model, so the baseline cannot name the machine that records it");
+
+    return exitCodes.noVerdict;
+  }
+
+  console.log(`machine: ${describeMachine(machine.machine)}`);
+
+  return record(key, machine.machine, controlFiles, appFiles);
 }
 
 process.exitCode = main(process.argv[2]);

@@ -16,7 +16,8 @@
 
 use chrono::Utc;
 use horsies::rerun::{
-    rerun_task_in, RerunEnqueuePolicy, RerunOutcome, RerunTask, TokioPostgresCaller,
+    rerun_task_in, RegisteredTaskCodes, RerunEnqueuePolicy, RerunOutcome, RerunTask,
+    TokioPostgresCaller,
 };
 use horsies::{AppConfig, Horsies};
 use horsies_core::{OperationalCode, TaskError, TaskResult};
@@ -174,6 +175,7 @@ async fn a_rerun_in_the_caller_transaction_stores_the_carrier_of_the_current_spa
         &mut TokioPostgresCaller::new(&mut transaction),
         &command,
         &policy(),
+        &RegisteredTaskCodes::NONE,
         Utc::now(),
     )
     .with_context(caller_context())
@@ -194,6 +196,7 @@ async fn a_rerun_in_the_caller_transaction_stores_the_carrier_of_the_current_spa
         &mut TokioPostgresCaller::new(&mut transaction),
         &command,
         &policy(),
+        &RegisteredTaskCodes::NONE,
         Utc::now(),
     )
     .await

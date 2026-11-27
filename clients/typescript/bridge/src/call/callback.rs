@@ -21,6 +21,11 @@
 //!   `settleCallbackThrew(callId, name, message)`. A table of pending call
 //!   ids, bounded by [`MAX_PENDING_CALLBACKS`], holds the senders; the end of
 //!   a call (an answer, a drop of its future) removes its entry.
+//! - The wait of [`JsCallback::call`] is stated by its caller in a
+//!   [`CallbackWait`]: `Within(bound)` ends with `NoAnswer { bound }` at the
+//!   bound and removes the pending entry, so a late settle call finds
+//!   `unknownCall`; `NoBound` ends at the answer or at the end of the
+//!   environment.
 //! - The wrapper never throws into Node-API: with `CalleeHandled = false` a
 //!   throw there ends the process. A thrown value stays in the package's
 //!   table under its call id; Rust gets `Threw { call_id, name, message }`.
@@ -40,6 +45,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, PoisonError};
 use std::thread::ThreadId;
+use std::time::Duration;
 
 use napi::bindgen_prelude::{sys, BigInt, FnArgs, FromNapiValue, Function, ToNapiValue};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -70,12 +76,26 @@ pub enum NotRunCause {
     EnvClosing,
 }
 
+/// How long [`JsCallback::call`] waits for the settle call. The caller states
+/// it: the type has no default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallbackWait {
+    /// The call ends with [`CallbackFailure::NoAnswer`] at `Duration`.
+    Within(Duration),
+    /// The call ends at the answer or at the end of the environment.
+    NoBound,
+}
+
 /// Why a call into JavaScript gave no answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallbackFailure {
     /// The call did not reach JavaScript, or its answer cannot come. It
     /// clears.
     NotRun { cause: NotRunCause },
+    /// No settle call came within `bound` ([`CallbackWait::Within`]). The
+    /// call is removed: a late settle call finds no pending call. The
+    /// function may still run, or may have run.
+    NoAnswer { bound: Duration },
     /// The JavaScript function threw. The thrown value stays in the
     /// package's table under `call_id`.
     Threw {
@@ -172,11 +192,20 @@ where
         ))
     }
 
-    /// Call the function with `argument` and wait for its settle call. On a
-    /// core thread. The wait has no bound of its own: a caller that needs one
-    /// drops the future at its bound, and a late settle call then finds no
-    /// pending call.
-    pub async fn call(&self, argument: Argument) -> Result<Answer, CallbackFailure> {
+    /// Call the function with `argument` and wait for its settle call, as
+    /// `wait` says. On a core thread. The drop of the future ends the call
+    /// too: a late settle call then finds no pending call.
+    ///
+    /// Failure exits: the `CallbackFailure` of a call that is not admitted or
+    /// not queued (`NotRun`, `OnJavaScriptThread`, `NodeApiRefused`), of a
+    /// call that ends with no answer (`NoAnswer` at the bound of `Within`,
+    /// `NotRun { envClosing }`), and of an answer that is a throw or does not
+    /// read. After `NoAnswer` the function may still run in JavaScript.
+    pub async fn call(
+        &self,
+        argument: Argument,
+        wait: CallbackWait,
+    ) -> Result<Answer, CallbackFailure> {
         admit(self.javascript_thread, std::thread::current().id())?;
         let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
@@ -185,7 +214,22 @@ where
             FnArgs::from((bigint_of_u64(call_id), argument)),
             ThreadsafeFunctionCallMode::NonBlocking,
         ))?;
-        answer_of(receiver.await)
+        answer_within(receiver, wait).await
+    }
+}
+
+/// The answer of a call from its channel, within `wait`. The caller keeps the
+/// pending entry until this returns, so the end of this future removes it.
+async fn answer_within<Answer>(
+    receiver: oneshot::Receiver<Result<Answer, CallbackFailure>>,
+    wait: CallbackWait,
+) -> Result<Answer, CallbackFailure> {
+    match wait {
+        CallbackWait::NoBound => answer_of(receiver.await),
+        CallbackWait::Within(bound) => match tokio::time::timeout(bound, receiver).await {
+            Ok(received) => answer_of(received),
+            Err(_elapsed) => Err(CallbackFailure::NoAnswer { bound }),
+        },
     }
 }
 
@@ -601,6 +645,69 @@ mod tests {
             Err(oneshot::error::TryRecvError::Closed)
         );
         assert_eq!(take(call_id), SettleOutcome::UnknownCall);
+    }
+
+    const TEST_WAIT_BOUND: Duration = Duration::from_secs(30);
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_within_its_bound_gets_its_answer() {
+        let (sender, receiver) = oneshot::channel::<Result<String, CallbackFailure>>();
+        let _sent = sender.send(Ok("pong".to_owned()));
+        assert_eq!(
+            answer_within(receiver, CallbackWait::Within(TEST_WAIT_BOUND)).await,
+            Ok("pong".to_owned())
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_with_no_answer_at_its_bound_ends_with_no_answer() {
+        let (_sender, receiver) = oneshot::channel::<Result<String, CallbackFailure>>();
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            answer_within(receiver, CallbackWait::Within(TEST_WAIT_BOUND)).await,
+            Err(CallbackFailure::NoAnswer {
+                bound: TEST_WAIT_BOUND
+            })
+        );
+        assert!(started.elapsed() >= TEST_WAIT_BOUND);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_with_no_bound_waits_past_any_bound_for_its_answer() {
+        let (sender, receiver) = oneshot::channel::<Result<String, CallbackFailure>>();
+        let late = tokio::spawn(async move {
+            tokio::time::sleep(TEST_WAIT_BOUND * 100).await;
+            let _sent = sender.send(Ok("late".to_owned()));
+        });
+        assert_eq!(
+            answer_within(receiver, CallbackWait::NoBound).await,
+            Ok("late".to_owned())
+        );
+        late.await.expect("the sender task ends");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_end_of_a_call_at_its_bound_removes_its_pending_entry() {
+        let (pending, receiver) = pending_call();
+        let call_id = pending.call_id;
+        let ended = answer_within(receiver, CallbackWait::Within(TEST_WAIT_BOUND)).await;
+        assert_eq!(
+            ended,
+            Err(CallbackFailure::NoAnswer {
+                bound: TEST_WAIT_BOUND
+            })
+        );
+        drop(pending);
+        assert_eq!(
+            settle(
+                &bigint_of_u64(call_id),
+                Settlement::Threw {
+                    name: "Error".to_owned(),
+                    message: "late".to_owned(),
+                },
+            ),
+            Envelope::Value(SettleOutcome::UnknownCall)
+        );
     }
 
     #[test]

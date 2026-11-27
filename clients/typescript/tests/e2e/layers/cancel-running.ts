@@ -105,11 +105,11 @@ async function assertCancelledWithOneAttempt<O, E extends string>(suite: Suite, 
     [{ attempt: 1, outcome: "CANCELLED", errorCode: { kind: "recorded", value: "TASK_CANCELLED" }, willRetry: false }],
   );
 
-  const read = await suite.app.monitoring.taskDetail(handle.taskId);
+  const read = await suite.app.monitoring.getTaskDetail(handle.taskId);
 
   assert.ok(read.ok && read.value.kind === "found", `read the task detail: ${read.ok ? read.value.kind : read.error.code}`);
 
-  const detail = read.value.detail;
+  const detail = read.value.taskDetail;
   const [attempt, ...others] = detail.attempts;
 
   assert.equal(detail.leaf.status, "CANCELLED");

@@ -139,7 +139,7 @@ fn recovery_member(field: RecoveryField) -> &'static str {
         RecoveryField::RunningStaleThresholdMs => "runningStaleThresholdMs",
         RecoveryField::FinalizingStaleThresholdMs => "finalizingStaleThresholdMs",
         RecoveryField::CrashedWorkerRecoveryGraceMs => "crashedWorkerRecoveryGraceMs",
-        RecoveryField::Phase2QuarantineAfterAttempts => "phase2QuarantineAfterAttempts",
+        RecoveryField::Phase2QuarantineAfterAttempts => "finalizationQuarantineAfterAttempts",
         RecoveryField::WorkflowRecoveryFailureLimit => "workflowRecoveryFailureLimit",
         RecoveryField::CheckIntervalMs => "checkIntervalMs",
         RecoveryField::OrphanTaskAuditIntervalMs => "orphanTaskAuditIntervalMs",
@@ -392,7 +392,7 @@ mod tests {
             ),
             (
                 ConfigField::Recovery(RecoveryField::Phase2QuarantineAfterAttempts),
-                "recovery.phase2QuarantineAfterAttempts",
+                "recovery.finalizationQuarantineAfterAttempts",
             ),
             (
                 ConfigField::Retention(RetentionField::QueueRetention {

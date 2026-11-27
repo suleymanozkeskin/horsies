@@ -195,8 +195,8 @@ class SendRetry(Enum):
 
     #: A ``retryable`` field of the value.
     FIELD = 'field'
-    #: The class value ``retryable: ClassVar[bool] = True``.
-    ALWAYS = 'always'
+    #: The class value ``retryable: ClassVar[bool] = False``.
+    NEVER = 'never'
     #: No ``retryable``.
     ABSENT = 'absent'
 
@@ -218,14 +218,14 @@ SEND_SHAPES: Final[tuple[SendClassShape, ...]] = (
     SendClassShape(task_send_types.TaskSendEnqueueFailed, task_send_errors.TaskSendEnqueueFailed, (('task_id', True), ('payload', False), ('message', False), ('retryable', True), ('cause', False)), 'ENQUEUE_FAILED', SendRetry.FIELD),
     SendClassShape(task_send_types.TaskSendPayloadMismatch, task_send_errors.TaskSendPayloadMismatch, (('task_id', True), ('payload', False), ('message', False)), 'PAYLOAD_MISMATCH', SendRetry.ABSENT),
     SendClassShape(task_send_types.TaskSendPayloadTooLarge, task_send_errors.TaskSendPayloadTooLarge, (('message', False), ('size_bytes', True), ('limit_bytes', True)), 'PAYLOAD_TOO_LARGE', SendRetry.ABSENT),
-    SendClassShape(task_send_types.TaskSendIdempotencyKeyConflict, task_send_errors.TaskSendIdempotencyKeyConflict, (('task_id', True), ('payload', False), ('message', False), ('owner_task_id', True)), 'IDEMPOTENCY_KEY_CONFLICT', SendRetry.ALWAYS),
+    SendClassShape(task_send_types.TaskSendIdempotencyKeyConflict, task_send_errors.TaskSendIdempotencyKeyConflict, (('task_id', True), ('payload', False), ('message', False), ('owner_task_id', True)), 'IDEMPOTENCY_KEY_CONFLICT', SendRetry.NEVER),
 )
 
 
 @pytest.mark.parametrize('shape', SEND_SHAPES, ids=lambda shape: shape.generated.__name__)
 class TestGeneratedSendClass:
     """``TaskSendEnqueueFailed`` has a ``retryable`` field, and
-    ``TaskSendIdempotencyKeyConflict`` the class value ``retryable = True``.
+    ``TaskSendIdempotencyKeyConflict`` the class value ``retryable = False``.
     The other send classes have no ``retryable``."""
 
     def test_the_public_names_are_the_generated_class(self, shape: SendClassShape) -> None:
@@ -250,9 +250,9 @@ class TestGeneratedSendClass:
         match shape.retry:
             case SendRetry.FIELD:
                 assert 'retryable' in field_names
-            case SendRetry.ALWAYS:
+            case SendRetry.NEVER:
                 assert 'retryable' not in field_names
-                assert getattr(shape.generated, 'retryable') is True
+                assert getattr(shape.generated, 'retryable') is False
             case SendRetry.ABSENT:
                 assert not hasattr(shape.generated, 'retryable')
 

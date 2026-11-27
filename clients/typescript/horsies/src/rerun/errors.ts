@@ -1,6 +1,5 @@
 // The errors of a rerun: a closed union for the rerun in the app's transaction (`RerunError`) and one
-// for the rerun in the caller's transaction (`CallerRerunError`), each told apart by `kind`, the code in `code` in
-// camelCase.
+// for the rerun in the caller's transaction (`CallerRerunError`), each told apart by `code`.
 
 import type { CoreFailure } from "../_catalog/error_detail.ts";
 import { RerunErrorCode } from "../_catalog/history.ts";
@@ -9,42 +8,38 @@ import type { CallerConnectionState } from "./caller.ts";
 
 /** The app's handle could not connect, install the schema, or open its closed pools again. Nothing ran. */
 export interface RerunConnectFailed {
-  readonly kind: "connectFailed";
   readonly code: typeof RerunErrorCode.CONNECT_FAILED;
   readonly retryable: boolean;
   readonly message: string;
-  readonly cause: CoreFailure;
+  readonly exception: CoreFailure;
 }
 
 /** Whether a failed statement of the app's transaction may have committed the rerun. */
 export type RerunStatementOutcome = "notCommitted" | "unknown";
 
 /**
- * A statement of the app's transaction failed. `outcome` is `notCommitted`, or `unknown` when the
+ * A statement of the app's transaction failed. `stateAfter` is `notCommitted`, or `unknown` when the
  * reply to `COMMIT` was lost: then a keyed rerun sent again answers `keyReplay` if the first one
  * committed.
  */
 export interface RerunStatementFailed {
-  readonly kind: "statementFailed";
   readonly code: typeof RerunErrorCode.STATEMENT_FAILED;
   readonly retryable: boolean;
   readonly message: string;
-  readonly outcome: RerunStatementOutcome;
-  readonly cause: CoreFailure;
+  readonly stateAfter: RerunStatementOutcome;
+  readonly exception: CoreFailure;
 }
 
 /** The check of the database's client family could not read the family row. Nothing was read or written. */
 export interface RerunFamilyCheckFailed {
-  readonly kind: "familyCheckFailed";
   readonly code: typeof RerunErrorCode.FAMILY_CHECK_FAILED;
   readonly retryable: boolean;
   readonly message: string;
-  readonly cause: CoreFailure;
+  readonly exception: CoreFailure;
 }
 
 /** The command breaks a rule of its fields. Nothing ran. */
 export interface RerunInvalidCommand {
-  readonly kind: "invalidCommand";
   readonly code: typeof RerunErrorCode.INVALID_COMMAND;
   readonly retryable: false;
   readonly message: string;
@@ -52,7 +47,6 @@ export interface RerunInvalidCommand {
 
 /** The policy breaks a rule of its fields. Nothing ran. */
 export interface RerunInvalidPolicy {
-  readonly kind: "invalidPolicy";
   readonly code: typeof RerunErrorCode.INVALID_POLICY;
   readonly retryable: false;
   readonly message: string;
@@ -60,7 +54,6 @@ export interface RerunInvalidPolicy {
 
 /** The retention class of the new task has no class row: register its period first. Nothing is written. */
 export interface RerunClassNotRegistered {
-  readonly kind: "classNotRegistered";
   readonly code: typeof RerunErrorCode.CLASS_NOT_REGISTERED;
   readonly retryable: false;
   readonly message: string;
@@ -69,15 +62,37 @@ export interface RerunClassNotRegistered {
 
 /** The caller key is not a valid idempotency key: empty, or more than 255 UTF-8 bytes. Nothing is written. */
 export interface RerunCallerKeyRefused {
-  readonly kind: "callerKeyRefused";
   readonly code: typeof RerunErrorCode.CALLER_KEY_REFUSED;
   readonly retryable: false;
   readonly message: string;
 }
 
+/**
+ * The stored retry list of the source names the custom code `retryCode`, and the app's contract for the task `taskName`
+ * does not declare it: the new task would not retry on it. Nothing is written. The same call meets it again until the
+ * contract declares the code in `errorCodes`.
+ */
+export interface RerunRetryCodeNotDeclared {
+  readonly code: typeof RerunErrorCode.RETRY_CODE_NOT_DECLARED;
+  readonly retryable: false;
+  readonly message: string;
+  readonly taskName: string;
+  readonly retryCode: string;
+}
+
+/**
+ * The stored retry list of the source names a custom code, and the app does not list the task `taskName`, so the code
+ * cannot be checked. Nothing is written. The same call meets it again until the app lists the task's contract.
+ */
+export interface RerunTaskNotRegistered {
+  readonly code: typeof RerunErrorCode.TASK_NOT_REGISTERED;
+  readonly retryable: false;
+  readonly message: string;
+  readonly taskName: string;
+}
+
 /** The task id source refused to mint the new task's id. Nothing is written. */
 export interface RerunIdMintRefused {
-  readonly kind: "idMintRefused";
   readonly code: typeof RerunErrorCode.ID_MINT_REFUSED;
   readonly retryable: false;
   readonly message: string;
@@ -93,7 +108,6 @@ export type RerunStoredFamily =
 
 /** Another client family installed the database, or it records none. Nothing is written. */
 export interface RerunClientFamilyMismatch {
-  readonly kind: "clientFamilyMismatch";
   readonly code: typeof RerunErrorCode.CLIENT_FAMILY_MISMATCH;
   readonly retryable: false;
   readonly message: string;
@@ -102,7 +116,6 @@ export interface RerunClientFamilyMismatch {
 
 /** The family row holds a value that is not a client family: corrupt stored data. Nothing is written. */
 export interface RerunUnknownStoredFamily {
-  readonly kind: "unknownStoredFamily";
   readonly code: typeof RerunErrorCode.UNKNOWN_STORED_FAMILY;
   readonly retryable: false;
   readonly message: string;
@@ -111,7 +124,6 @@ export interface RerunUnknownStoredFamily {
 
 /** A row or stored data broke the rerun's contract. Nothing committed; the same call meets it again. */
 export interface RerunContractViolation {
-  readonly kind: "contractViolation";
   readonly code: typeof RerunErrorCode.CONTRACT_VIOLATION;
   readonly retryable: false;
   readonly message: string;
@@ -122,7 +134,6 @@ export interface RerunContractViolation {
  * back. Whether to run the transaction again is the rule of `driverError`, for example its SQLSTATE.
  */
 export interface RerunDriverFailed {
-  readonly kind: "driverFailed";
   readonly code: typeof RerunErrorCode.DRIVER_FAILED;
   readonly message: string;
   /** The name of the core statement that failed. */
@@ -136,7 +147,6 @@ export interface RerunDriverFailed {
  * roll back a failed transaction.
  */
 export interface RerunNoOpenTransaction {
-  readonly kind: "noOpenTransaction";
   readonly code: typeof RerunErrorCode.NO_OPEN_TRANSACTION;
   readonly retryable: false;
   readonly message: string;
@@ -151,7 +161,6 @@ export interface RerunNoOpenTransaction {
  * and use a client that reads text.
  */
 export interface RerunResultNotText {
-  readonly kind: "resultNotText";
   readonly code: typeof RerunErrorCode.RESULT_NOT_TEXT;
   readonly retryable: false;
   readonly message: string;
@@ -173,6 +182,8 @@ export type RerunStepRefused =
   | RerunIdMintRefused
   | RerunClientFamilyMismatch
   | RerunUnknownStoredFamily
+  | RerunRetryCodeNotDeclared
+  | RerunTaskNotRegistered
   | RerunContractViolation;
 
 /**
@@ -197,15 +208,15 @@ export type CallerRerunError =
 
 /** The refusal of a command field. Pure. */
 export function invalidCommand(message: string): RerunInvalidCommand {
-  return { kind: "invalidCommand", code: RerunErrorCode.INVALID_COMMAND, retryable: false, message };
+  return { code: RerunErrorCode.INVALID_COMMAND, retryable: false, message };
 }
 
 /** The refusal of a policy field. Pure. */
 export function invalidPolicy(message: string): RerunInvalidPolicy {
-  return { kind: "invalidPolicy", code: RerunErrorCode.INVALID_POLICY, retryable: false, message };
+  return { code: RerunErrorCode.INVALID_POLICY, retryable: false, message };
 }
 
 /** The contract violation of a row. Pure. */
 export function contractViolation(message: string): RerunContractViolation {
-  return { kind: "contractViolation", code: RerunErrorCode.CONTRACT_VIOLATION, retryable: false, message };
+  return { code: RerunErrorCode.CONTRACT_VIOLATION, retryable: false, message };
 }

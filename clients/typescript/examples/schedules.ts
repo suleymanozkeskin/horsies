@@ -63,7 +63,7 @@ async function demo(): Promise<Result<void, string>> {
     printLine(`${entry.name} sends ${entry.task.name} with ${JSON.stringify(entry.input)}`);
   }
 
-  const states = await app.monitoring.schedules();
+  const states = await app.monitoring.listSchedules();
 
   if (!states.ok) {
     return demoFailed(`read the schedule states: ${states.error.code}: ${states.error.message}`);

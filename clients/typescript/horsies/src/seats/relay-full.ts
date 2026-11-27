@@ -8,15 +8,14 @@ import { SeatRelayCode } from "../_catalog/task_send.ts";
 
 /**
  * `SEAT_RELAY_FULL`: the seat relay holds its bound of waiting calls; nothing was sent; retry. Only a call in a
- * `SHARED_THREAD` body gives it. `cause` is a retryable precondition of the seat relay whose text names the bound
- * and its value. A send past the bound minted no row, so `retrySend` does not take it: send again.
+ * `SHARED_THREAD` body gives it. `exception` is a retryable precondition of the seat relay whose text names the bound
+ * and its value. A send past the bound minted no row, so `resend` does not take it: send again.
  */
 export type SeatRelayFull = {
-  readonly kind: "seatRelayFull";
   readonly code: typeof SeatRelayCode.SEAT_RELAY_FULL;
   readonly retryable: true;
   readonly message: string;
-  readonly cause: CoreCause;
+  readonly exception: CoreCause;
 };
 
 /** The answer of a relayed call that the seat relay did not send. */
@@ -25,10 +24,9 @@ export type SeatRelayFullOutcome = { readonly kind: "seatRelayFull"; readonly er
 /** `SEAT_RELAY_FULL` with the text `message`, which names the bound and its value. Pure. */
 export function seatRelayFull(message: string): SeatRelayFull {
   return Object.freeze({
-    kind: "seatRelayFull",
     code: SeatRelayCode.SEAT_RELAY_FULL,
     retryable: true,
     message,
-    cause: Object.freeze({ kind: "coreFailure", failure: "preconditionFailed", subject: "seat relay", message, retryable: true }),
+    exception: Object.freeze({ kind: "coreFailure", failure: "preconditionFailed", subject: "seat relay", message, retryable: true }),
   });
 }

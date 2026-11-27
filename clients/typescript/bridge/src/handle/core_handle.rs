@@ -97,10 +97,6 @@ impl BrokerConnection {
     }
 
     /// The core's lazy handle, for a core function of a later area.
-    #[allow(
-        dead_code,
-        reason = "the operations of the sends, workflows and facades areas use it"
-    )]
     pub fn lazy_handle(&self) -> &LazyHandle {
         &self.handle
     }
@@ -142,10 +138,6 @@ impl CoreHandle {
 
     /// Set the child spec source of the handle's workflow operations. A
     /// second set is refused. Starts nothing.
-    #[allow(
-        dead_code,
-        reason = "the workflows area sets the source that it builds"
-    )]
     pub fn set_child_spec_source(
         &self,
         source: Arc<dyn ChildSpecSource>,

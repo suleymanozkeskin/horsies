@@ -6,7 +6,8 @@
 // Rules:
 // - An undeclared key is refused at every depth. A key that only the engine writes is refused in a record.
 // - A member that the text leaves out: a required one is refused; an `.optional()` one stays absent; a defaulted one
-//   is filled in the worker form and stays absent in the stored form (the form that a read-back writes again).
+//   is filled in the worker form and stays absent in the stored form (the form that a read-back writes again). A
+//   computed default (a default function) runs once per worker-form decode.
 // - Records are built with own data properties: a stored key `__proto__` never changes a prototype.
 
 import { Decimal } from "../wire/decimal.ts";
@@ -20,7 +21,9 @@ import type {
   MemberPresence,
   ObjectKind,
   TaggedUnionKind,
+  TupleKind,
 } from "../wire/kinds.ts";
+import { lazyTarget } from "../wire/lazy.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import type { TaskOutcome } from "../wire/task-error.ts";
 import { outcomeValueKind } from "../wire/task-outcome.ts";
@@ -39,6 +42,7 @@ import {
   entryPath,
   itemPath,
   memberPath,
+  refusalText,
   ROOT_PATH,
 } from "./refusal.ts";
 import {
@@ -49,6 +53,7 @@ import {
   readPlainTime,
   type TemporalReadRefused,
 } from "./temporal-text.ts";
+import { tupleItem, tupleLength } from "./tuple-items.ts";
 import { isLiteralType, unionRefusal } from "./union.ts";
 import { isBigint, isBoolean, isNumber, isString, isUuidText, setOwn } from "./values.ts";
 
@@ -156,7 +161,7 @@ export function decodeNode(kind: Kind, node: TreeValue, path: string, depth: num
     case "array":
       return decodeItems(() => kind.item, node, path, depth, form);
     case "tuple":
-      return decodeTuple(kind.items, node, path, depth, form);
+      return decodeTuple(kind, node, path, depth, form);
     case "record":
       return decodeRecord(kind.value, node, path, depth, form);
     case "object":
@@ -172,6 +177,8 @@ export function decodeNode(kind: Kind, node: TreeValue, path: string, depth: num
       return decodeConverted(kind, node, path, depth, form);
     case "checked":
       return decodeChecked(kind, node, path, depth, form);
+    case "lazy":
+      return decodeNode(lazyTarget(kind, `decodeNode at ${path}`), node, path, depth, form);
     default:
       return unreachable(kind, "decodeNode");
   }
@@ -288,7 +295,7 @@ function decodeInt(node: TreeValue, path: string): Decoded {
   }
 
   if (isBigint(node)) {
-    return refuse("IntegerOutOfRange", path, "outside the safe integer range of h.int()");
+    return refuse("IntegerOutOfRange", path, "outside the safe integer range of the integer kind");
   }
 
   return node instanceof IntegralFloat
@@ -422,23 +429,18 @@ function decodeItems(
   return ok(items);
 }
 
-function decodeTuple(items: readonly Kind[], node: TreeValue, path: string, depth: number, form: DecodeForm): Decoded {
-  if (isTreeArray(node) && node.length !== items.length) {
-    return refuse("WrongType", path, `expected an array of ${items.length} items`);
+function decodeTuple(kind: TupleKind, node: TreeValue, path: string, depth: number, form: DecodeForm): Decoded {
+  if (!isTreeArray(node)) {
+    return refuse("WrongType", path, "expected an array");
   }
 
-  return decodeItems((index) => tupleItemKind(items, index), node, path, depth, form);
-}
+  const length = tupleLength(kind, node.length);
 
-/** The kind of a tuple item. The caller checked the length, so a missing kind is a defect. */
-function tupleItemKind(items: readonly Kind[], index: number): Kind {
-  const kind = items[index];
-
-  if (kind === undefined) {
-    throw new TypeError(`decodeTuple: the tuple has no item ${index}`);
+  if (length.state === "wrongLength") {
+    return refuse("WrongType", path, length.detail);
   }
 
-  return kind;
+  return decodeItems((index) => tupleItem(kind, index), node, path, depth, form);
 }
 
 function decodeRecord(entryKind: Kind, node: TreeValue, path: string, depth: number, form: DecodeForm): Decoded {
@@ -572,11 +574,21 @@ function defaultedMember(
   }
 }
 
-/** The default, decoded from its stored text, so that each value is new. */
+/**
+ * The default, decoded from its stored text, so that each value is new. A computed default calls its function here,
+ * once per decode: a value that does not encode is `DefaultRefused`; a function that throws is not caught.
+ */
 function filledDefault(fallback: DefaultText, kind: Kind, path: string, level: number): Decoded {
   switch (fallback.state) {
     case "stored":
       return decodeNode(kind, readTree(fallback.text), path, level, "worker");
+    case "computed": {
+      const text = fallback.compute();
+      const detail = text.ok ? "" : `the default function gave a value that does not encode: ${refusalText(text.error)}`;
+
+      return text.ok ? decodeNode(kind, readTree(text.value), path, level, "worker") : refuse("DefaultRefused", path, detail);
+    }
+
     case "refused":
       throw new TypeError(`decode: the default of ${path} does not encode; checkKind refuses this wire type`);
     default:

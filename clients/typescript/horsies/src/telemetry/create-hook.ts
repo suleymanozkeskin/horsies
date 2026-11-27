@@ -10,7 +10,7 @@ import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import { NO_OP_OBSERVER, type SendObserver } from "../app/observers.ts";
 import type { AppContext } from "../app/context.ts";
 import { type BodyObserver, NO_BODY_OBSERVER, setBodyObserver } from "../child/body-observer.ts";
-import { refusal, type Refusal } from "../app/refusal.ts";
+import { refusal, type HorsiesError } from "../app/refusal.ts";
 import { NO_SEAT_BODY_OBSERVER, type SeatBodyObserver, setSeatBodyObserver } from "../seats/body-observer.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
@@ -31,7 +31,7 @@ export type TracingParts = {
   readonly setting: TracingSetting;
   /** Wraps each send of the app; gives the carrier of a rerun. */
   readonly sendObserver: SendObserver;
-  /** Wraps the core's start of each `app.start` and `app.retryStart`; gives the carrier that the tree stores. */
+  /** Wraps the core's start of each `app.start` and `app.resendStart`; gives the carrier that the tree stores. */
   readonly startObserver: StartObserver;
   /** Wraps each task body in a child of the app. */
   readonly bodyObserver: BodyObserver;
@@ -43,7 +43,7 @@ export type TracingParts = {
 
 /** The parts of an app with no tracing. */
 const NO_TRACING_PARTS: TracingParts = Object.freeze({
-  setting: Object.freeze({ kind: "none" }),
+  setting: Object.freeze({ kind: "noTracing" }),
   sendObserver: NO_OP_OBSERVER,
   startObserver: NO_OP_START_OBSERVER,
   bodyObserver: NO_BODY_OBSERVER,
@@ -80,11 +80,11 @@ const TRACING_PATH = "tracing";
 /**
  * The tracing parts of `setting`, or the refusal `CONFIG_OTEL_API_MISSING`. Effects: loads the API for `otel` only.
  */
-export function tracingPartsOf(setting: TracingSetting, environment: TracingEnvironment): Result<TracingParts, Refusal> {
+export function tracingPartsOf(setting: TracingSetting, environment: TracingEnvironment): Result<TracingParts, HorsiesError> {
   switch (setting.kind) {
-    case "none":
+    case "noTracing":
       return ok(NO_TRACING_PARTS);
-    case "otel": {
+    case "otelTracing": {
       const loaded = environment.loadApi();
 
       switch (loaded.kind) {
@@ -152,11 +152,11 @@ export function tracingPartsOfApp(context: AppContext): TracingParts {
 }
 
 /** The refusal of `otel` with no API: the cause of the failed load, and the two fixes. Pure. */
-function apiMissing(cause: string): Refusal {
+function apiMissing(cause: string): HorsiesError {
   return refusal(
     HorsiesErrorCode.CONFIG_OTEL_API_MISSING,
     TRACING_PATH,
-    `{ kind: "otel" } needs the OpenTelemetry API: the module ${OTEL_API_MODULE} does not load (${cause})`,
-    [`install the peer dependency ${OTEL_API_MODULE} (1.7 or later, before 2.0)`, 'or set tracing: { kind: "none" }'],
+    `{ kind: "otelTracing" } needs the OpenTelemetry API: the module ${OTEL_API_MODULE} does not load (${cause})`,
+    [`install the peer dependency ${OTEL_API_MODULE} (1.7 or later, before 2.0)`, 'or set tracing: { kind: "noTracing" }'],
   );
 }

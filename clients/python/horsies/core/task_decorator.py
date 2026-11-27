@@ -3068,20 +3068,15 @@ def create_task_wrapper(
     ) -> Result[tuple[UUID, TaskSendPayload], TaskSendValidationFailed]:
         """Check that a retryable error's payload fits this retry method.
 
-        The parameter type admits ``TaskSendEnqueueFailed``,
-        ``TaskSendAsyncContext`` and ``TaskSendIdempotencyKeyConflict``; each
-        carries its task id and payload. Another variant, passed by a caller
+        The parameter type admits ``TaskSendEnqueueFailed`` and
+        ``TaskSendAsyncContext``; each carries its task id and payload. Another variant, passed by a caller
         without a type checker, fails an assertion that names it. Refused: a
         payload of another task, a payload without a delay when
         ``require_delay``, and a payload with a delay when ``reject_delay``.
         Returns ``Ok((task_id, payload))``.
         """
         match error:
-            case (
-                TaskSendEnqueueFailed()
-                | TaskSendAsyncContext()
-                | TaskSendIdempotencyKeyConflict()
-            ):
+            case TaskSendEnqueueFailed() | TaskSendAsyncContext():
                 pass
             case _ as refused:
                 assert_never(refused)

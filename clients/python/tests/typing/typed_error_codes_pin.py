@@ -24,6 +24,7 @@ from horsies import (
     ReadResult,
     Result,
     RetrievalCode,
+    RetryPolicy,
     Succeeded,
     TaskError,
     TaskHandle,
@@ -118,3 +119,16 @@ def typed_read(read: ReadResult[str, TaskError[WelcomeCode]]) -> str:
             return every_code(task_error)
         case Err(read_error):
             return read_error.message
+
+
+def retry_codes() -> None:
+    """`auto_retry_for` takes code members: a built-in member, or a member
+    of the declared `Enum` class. A plain `str` is refused."""
+    _ = RetryPolicy.fixed(
+        [1, 2],
+        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED, WelcomeCode.MAILBOX_FULL],
+    )
+    _ = RetryPolicy.exponential(1, max_retries=2, auto_retry_for=[OutcomeCode.TASK_TIMEOUT])
+    _ = RetryPolicy.fixed([1], auto_retry_for=['MAILBOX_FULL'])  # pyright: ignore[reportArgumentType]
+    _ = RetryPolicy.exponential(1, max_retries=2, auto_retry_for=['WORKER_CRASHED'])  # pyright: ignore[reportArgumentType]
+    _ = RetryPolicy(max_retries=1, intervals=[1], auto_retry_for=['MAILBOX_FULL'])  # pyright: ignore[reportArgumentType]

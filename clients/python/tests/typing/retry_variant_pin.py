@@ -35,7 +35,7 @@ def sync_retries(
 ) -> None:
     _ = task.retry_send(enqueue_failed)
     _ = task.retry_send(async_context)
-    _ = task.retry_send(key_conflict)
+    _ = task.retry_send(key_conflict)  # pyright: ignore[reportArgumentType]
     _ = task.retry_send(suppressed)  # pyright: ignore[reportArgumentType]
     _ = task.retry_send(validation_failed)  # pyright: ignore[reportArgumentType]
     _ = task.retry_send(payload_mismatch)  # pyright: ignore[reportArgumentType]

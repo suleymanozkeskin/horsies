@@ -45,6 +45,7 @@ def my_task(*, ...) -> Result[T, TaskError]: ...
 - `queue_name` cross-validated against `AppConfig.queue_mode`.
 - `good_until` rejected — raises `HRS-102` with help text directing to `.with_options()` or `.node()`.
 - Top-level `auto_retry_for` kwarg is rejected — it belongs inside `RetryPolicy`.
+- `retry_policy.auto_retry_for` entries are code members: members of a built-in code enum, or members of the `Enum` class of `error_codes=`. A plain `str`, a member of another `Enum` class, or a custom member of a task that declares a tuple or no `error_codes` raises `HRS-102`; the notes name the task and the entry. One error per refused entry; several come in one `MultipleValidationErrors`.
 - `execution` rules, one code each, checked in this order (the first broken rule is reported): `SHARED_ASYNC` on a `def` function — `HRS-107`; `SHARED_THREAD` on an `async def` function — `HRS-108`; `SHARED_ASYNC` or `SHARED_THREAD` without `timeout_ms` — `HRS-109`; `cancel_grace_ms` with `SHARED_THREAD` — `HRS-110`; `cancel_grace_ms` outside 100 to 10,000 — `HRS-111`. A value that is not an `Execution` member raises `HRS-102`.
 - With `execution` written as a member, a type checker refuses the same declarations: the overloads require `timeout_ms` for a shared class and refuse `cancel_grace_ms` with `SHARED_THREAD`, and the decorator they return accepts only the function kind of the class. A class known only at run time requires `timeout_ms`.
 
@@ -417,8 +418,10 @@ rows; a resend under the same key with a *different* request returns
 `Err(TaskSendIdempotencyKeyConflict)`. Its `owner_task_id` names the task
 that holds the key. While the owner task is
 live, the key stays reserved. After the owner task finishes, the key clears
-when the reservation window (24 h by default) has passed. The retry methods
-accept the error. A retry that changes the key of a sent task id returns
+when the reservation window (24 h by default) has passed; a send with the key
+after that time starts a new task. A repeat of the same send does not complete
+it, so the error is not retryable: send the same command as the owner task, or
+use another key. The retry methods refuse the error. A retry that changes the key of a sent task id returns
 `PAYLOAD_MISMATCH`. Keys are not a rerun contract — they deduplicate enqueues.
 
 **`retention`**: how long the terminal record is kept. Precedence,
@@ -567,13 +570,9 @@ type TaskSendError = (
     | TaskSendEnqueueFailed          # task_id, payload, message, retryable, cause
     | TaskSendPayloadMismatch        # task_id, payload, message
     | TaskSendPayloadTooLarge        # message, size_bytes, limit_bytes
-    | TaskSendIdempotencyKeyConflict # task_id, payload, message, owner_task_id; retryable is True
+    | TaskSendIdempotencyKeyConflict # task_id, payload, message, owner_task_id; retryable is False
 )
-type TaskSendRetryable = (
-    TaskSendEnqueueFailed
-    | TaskSendAsyncContext
-    | TaskSendIdempotencyKeyConflict
-)
+type TaskSendRetryable = TaskSendEnqueueFailed | TaskSendAsyncContext
 ```
 
 `cause` is `BaseException | NoCause` on `TaskSendValidationFailed` and `TaskSendEnqueueFailed`. `NoCause()` means a check found the failure without a Python exception. `NoCause` is not an exception: match on `exception` before `raise ... from`, `exc_info=` or an error tracker call.
@@ -590,7 +589,7 @@ Validation failure text never contains the refused value: each failure is `<loc>
 | `VALIDATION_FAILED` | Refused | Serialization failed, invalid queue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), or cross-method retry attempted |
 | `ENQUEUE_FAILED` | Accepted | Broker/DB failure, or the core of this process could not run the send (`cause` is the core error: `TooManyPendingCalls` and `CoreCallTimedOut` are retryable; `CoreStartFailed` is not). The row may or may not exist. The `TaskSendPayload` keeps the task id, command and `sent_at` for the retry, which returns the task id if the first send was written; `retryable` is the core's classification |
 | `PAYLOAD_MISMATCH` | Refused | The task id exists, and the command or the idempotency key differs from the original send — the payload was altered between send and retry |
-| `IDEMPOTENCY_KEY_CONFLICT` | Accepted | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. `retryable` is `True`: a retry after the reservation ends is accepted |
+| `IDEMPOTENCY_KEY_CONFLICT` | Refused | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. `retryable` is `False`: a repeat of the same send does not complete it; send the same command, or use another key |
 | `PAYLOAD_TOO_LARGE` | Refused | The serialized input exceeded `payload.reject_bytes` bytes of UTF-8 text (off by default); nothing was enqueued — shrink the payload (pass a reference to external storage) or raise the limit |
 
 ### `TaskSendPayload`
@@ -637,7 +636,7 @@ Always use the class methods:
 RetryPolicy.fixed(
     intervals: list[int],                              # seconds, e.g. [60, 300, 900]
     *,
-    auto_retry_for: list[str | BuiltInTaskCode],        # required
+    auto_retry_for: list[BuiltInTaskCode | Enum],       # required: code members
     jitter: bool = True,
 )
 
@@ -646,7 +645,7 @@ RetryPolicy.exponential(
     base_seconds: int,
     *,
     max_retries: int,
-    auto_retry_for: list[str | BuiltInTaskCode],        # required
+    auto_retry_for: list[BuiltInTaskCode | Enum],       # required: code members
     jitter: bool = True,
     max_delay_seconds: int | None = None,              # cap on each delay; None = no cap
 )
@@ -657,8 +656,8 @@ RetryPolicy.exponential(
 - `fixed`: `intervals` must have 1–20 entries. Each entry is 1–86400 seconds. The number of entries is the number of retries.
 - `exponential`: `base_seconds` is 1–86400. `max_retries` is 1–20.
 - `max_delay_seconds` (`exponential` only): `None` or an integer >= 1. The cap applies last, after backoff and jitter.
-- `auto_retry_for` must have at least 1 entry. Each entry must be `UPPER_SNAKE_CASE` — exception class names like `"TimeoutError"` are rejected.
-- A rule violation raises `pydantic.ValidationError` (a `ValueError` subclass) at the constructor call.
+- `auto_retry_for` must have at least 1 entry. Each entry is a code member (see below). Pyright refuses a plain `str`.
+- A rule violation of the constructor raises `pydantic.ValidationError` (a `ValueError` subclass) at the constructor call. The constructor does not check the entries: `@app.task` checks them against the codes of the task.
 
 ### Jitter
 
@@ -666,24 +665,41 @@ RetryPolicy.exponential(
 
 ### `auto_retry_for` valid values
 
-- User-defined domain codes: `"RATE_LIMITED"`, `"DEADLOCK"`, `"SERVICE_UNAVAILABLE"`
 - `BuiltInTaskCode` members that a task failure produces, for example `OperationalCode.UNHANDLED_EXCEPTION`, `OperationalCode.WORKER_CRASHED`, `OutcomeCode.TASK_TIMEOUT`
-- Plain strings matching `^[A-Z][A-Z0-9_]*$`
+- Members of the task's own code `Enum` class, declared with `error_codes=`: `ApiCode.RATE_LIMITED` with `error_codes=ApiCode`
 
-Retries only trigger when the error code on the stored result matches and `retry_count < max_retries`.
+`@app.task` refuses any other entry with `HRS-102`: a plain `str` (`"RATE_LIMITED"`), a member of another `Enum` class, or a custom member of a task that declares a tuple or no `error_codes`. A task that retries on a code of its own declares the code in an `Enum` class. The task body can return the member or its text: the stored code is the text in both cases.
+
+The stored policy holds the text of each code (`"RATE_LIMITED"`). A retry starts when the stored error code of the failure is in the list and `retry_count < max_retries`.
 
 ### Examples
 
-<!-- check: skip partial -- uses a name before the page defines it -->
 ```python
+class ApiCode(str, Enum):
+    RATE_LIMITED = "RATE_LIMITED"
+    TIMEOUT = "TIMEOUT"
+    DEADLOCK = "DEADLOCK"
+
 # 3 fixed retries: 1min, 5min, 15min
-RetryPolicy.fixed([60, 300, 900], auto_retry_for=["RATE_LIMITED"])
+RetryPolicy.fixed([60, 300, 900], auto_retry_for=[ApiCode.RATE_LIMITED])
 
 # 5 exponential retries: 30s, 60s, 120s, 240s, 480s
-RetryPolicy.exponential(base_seconds=30, max_retries=5, auto_retry_for=["TIMEOUT"])
+RetryPolicy.exponential(base_seconds=30, max_retries=5, auto_retry_for=[ApiCode.TIMEOUT])
 
 # Quick deadlock retries, no jitter
-RetryPolicy.fixed([1, 2, 5], auto_retry_for=["DEADLOCK"], jitter=False)
+RetryPolicy.fixed([1, 2, 5], auto_retry_for=[ApiCode.DEADLOCK], jitter=False)
+
+# A built-in code and a code of the task
+@app.task(
+    "sync_orders",
+    error_codes=ApiCode,
+    retry_policy=RetryPolicy.fixed(
+        [60, 300],
+        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED, ApiCode.RATE_LIMITED],
+    ),
+)
+def sync_orders() -> Result[int, TaskError[ApiCode]]:
+    return Err(TaskError(error_code=ApiCode.RATE_LIMITED))
 ```
 
 ## `ExceptionMapper`
@@ -831,11 +847,11 @@ def good(*, x: int) -> Result[dict[str, int], TaskError]:
 <!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # WRONG — rejected at definition time
-@app.task("t", auto_retry_for=["TIMEOUT"])
+@app.task("t", auto_retry_for=[OutcomeCode.TASK_TIMEOUT])
 def t() -> Result[str, TaskError]: ...
 
 # CORRECT — goes inside RetryPolicy
-@app.task("t", retry_policy=RetryPolicy.fixed([60], auto_retry_for=["TIMEOUT"]))
+@app.task("t", retry_policy=RetryPolicy.fixed([60], auto_retry_for=[OutcomeCode.TASK_TIMEOUT]))
 def t() -> Result[str, TaskError]: ...
 ```
 

@@ -97,7 +97,7 @@ Deadline: `add_numbers.with_options(good_until=deadline).send(a=5, b=3)` expires
 
 ### Retry a Failed Send
 
-`TaskSendError` is a union with one variant per code; match on the variant. `TaskSendEnqueueFailed` has the field `retryable` (`True` for a transient cause); `TaskSendIdempotencyKeyConflict` has the class value `retryable = True` (the conflict clears when the reservation ends). The retry methods take a `TaskSendRetryable` (`TaskSendEnqueueFailed`, `TaskSendAsyncContext`, `TaskSendIdempotencyKeyConflict`); another variant is a type error and fails an assertion at run time. For a key conflict, `owner_task_id` names the task that holds the key; a retry is accepted after the reservation ends:
+`TaskSendError` is a union with one variant per code; match on the variant. `TaskSendEnqueueFailed` has the field `retryable` (`True` for a transient cause); `TaskSendIdempotencyKeyConflict` has the class value `retryable = False` (a repeat of the same send does not complete it). The retry methods take a `TaskSendRetryable` (`TaskSendEnqueueFailed`, `TaskSendAsyncContext`); another variant, the key conflict included, is a type error and fails an assertion at run time. For a key conflict, `owner_task_id` names the task that holds the key; send the same command, or use another key:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -316,6 +316,9 @@ outcome = await rerun_task(
         retain_rerun_input=True,
         reservation_window=timedelta(hours=24),
     ),
+    # The declared codes of the app's tasks: the stored retry list of the
+    # source is checked against them before the write.
+    registered_task_codes=app.registered_task_codes(),
 )
 match outcome:
     case RerunEnqueued(new_task_id=new_id):
@@ -336,6 +339,16 @@ checking one variant. Eligibility is decided **at enqueue** by
 was not retained cannot be rerun. A `COMPLETED` source is not eligible.
 `RerunSourceAbsent.reason` is a `TaskAbsenceReason`: it says whether
 retention can explain that no record has the id (see `monitoring.md`).
+
+Before the write, the rerun checks the stored `auto_retry_for` of the source
+against `registered_task_codes` (`app.registered_task_codes()`: each
+registered task by name, with its `task_error_codes`). A built-in code
+passes for every task; a custom code passes when the app registers the task
+and the task declares the code. Otherwise `CorePreconditionFailed` (subject
+`rerun_task`, not retryable, nothing written): `RETRY_CODE_NOT_DECLARED`
+for a code that the task does not declare, `TASK_NOT_REGISTERED` for a task
+that the app does not register. `app.rerun_task_async` and `app.rerun_task`
+pass the app's codes themselves.
 
 `app.rerun_task_async(connection, command, policy)` is the same rerun with
 the tracing setting of the app (blocking: `app.rerun_task` on a SQLAlchemy
@@ -363,7 +376,7 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`. Read a 
 - `WorkflowHandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DATABASE_OPERATION_FAILED`, `STORED_DATA_INVALID`, `RESUME_RECOVERY_FAILED`, `ASYNC_CONTEXT`
 - `ReadError` (a union, one class per read failure; each has `code` and `message`): `WaitTimeout`, `TaskNotFound`, `WorkflowNotFound`, `ResultNotAvailable`, `ResultNotReady`, `WaitInsideTask`, `AsyncContext`, `InvalidInput`, `ResultDeserializationError`, `UnknownCustomCode` (a stored custom code that the declared `Enum` does not name; adds `custom_code`), `ReadDatabaseError` (adds `retryable` and `cause`), `NoTypeAvailable`, `WorkflowCtxMissingId`
 
-`retryable=True` means transient (DB connection blip). `retryable=False` means permanent. On send errors, `TaskSendEnqueueFailed` has the field `retryable` and `TaskSendIdempotencyKeyConflict` the class value `retryable = True`; the other send errors have no `retryable`.
+`retryable=True` means transient (DB connection blip). `retryable=False` means permanent. On send errors, `TaskSendEnqueueFailed` has the field `retryable` and `TaskSendIdempotencyKeyConflict` the class value `retryable = False`; the other send errors have no `retryable`.
 
 `WorkflowHandleError` is a union with one variant per `WorkflowHandleErrorCode` member (`WorkflowHandleNotFound`, `WorkflowHandleDatabaseOperationFailed`, `WorkflowHandleStoredDataInvalid`, `WorkflowHandleResumeRecoveryFailed`, `WorkflowHandleAsyncContext`); match on the variant. `WorkflowHandleResumeRecoveryFailed` means `resume()` committed and only its recovery pass failed: the workflow is `RUNNING`.
 

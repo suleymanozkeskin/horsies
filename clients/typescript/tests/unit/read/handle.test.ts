@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { defineTask } from "../../../horsies/src/contract/public.ts";
-import type { ReadError } from "../../../horsies/src/read/errors.ts";
+import { type ReadError, readErrorCode } from "../../../horsies/src/read/errors.ts";
 import { readFormOf, taskHandleOf, waitBound } from "../../../horsies/src/read/handle.ts";
 import { MAX_WAIT_LIMIT_MS } from "../../../horsies/src/send/bounds.ts";
 import { AddonOutsideMainThread } from "../../../horsies/src/thrown-errors.ts";
@@ -122,33 +122,28 @@ describe("TaskHandle.get", () => {
     assert.equal(read.ok && read.value.kind === "failed" ? read.value.error.code : "", "TASK_CANCELLED");
   });
 
-  test("a stored value that does not fit the output kind is storedResultUnreadable with no value in the cause", async () => {
+  test("a stored value that does not fit the output kind is resultDeserializationError with no value in the cause", async () => {
     const { handle } = declaredHandle({ results: [storedRead("COMPLETED", okEnvelope('{"id":"seven-secret"}'))] });
     const error = await readError(handle.get());
 
-    assert.equal(error.kind, "storedResultUnreadable");
-    assert.equal(error.code, "RESULT_DESERIALIZATION_ERROR");
-    assert.equal(error.kind === "storedResultUnreadable" && error.cause.includes("seven-secret"), false);
+    assert.equal(error.kind, "resultDeserializationError");
+    assert.equal(error.kind === "resultDeserializationError" && error.cause.includes("seven-secret"), false);
   });
 
-  test("a contract that is refused reads as storedResultUnreadable, and its decode never runs", async () => {
+  test("a contract that is refused reads as resultDeserializationError, and its decode never runs", async () => {
     const fake = fakeProducer({ results: [storedRead("COMPLETED", okEnvelope("7"))] });
     const form = readFormOf(refused);
     const error = await readError(taskHandleOf(addonAccess(fake), form, TASK_ID).get());
 
     assert.equal(form.kind, "unreadable");
-    assert.equal(error.kind, "storedResultUnreadable");
-    assert.equal(error.kind === "storedResultUnreadable" && error.cause.startsWith("the contract is refused"), true);
+    assert.equal(error.kind, "resultDeserializationError");
+    assert.equal(error.kind === "resultDeserializationError" && error.cause.startsWith("the contract is refused"), true);
   });
 
-  test("a custom code that the declared list does not hold is unknownCustomCode with the stored code", async () => {
+  test("a custom code that the declared list does not hold is unknownCustomCode", async () => {
     const { handle } = declaredHandle({ results: [storedRead("FAILED", customErrorEnvelope("CARD_DECLINED"))] });
 
-    assert.deepEqual(await readError(handle.get()), {
-      kind: "unknownCustomCode",
-      code: "UNKNOWN_CUSTOM_CODE",
-      storedCode: "CARD_DECLINED",
-    });
+    assert.deepEqual(await readError(handle.get()), { kind: "unknownCustomCode", code: "CARD_DECLINED" });
   });
 
   test("a declared custom code reads as the failed outcome with the tag custom", async () => {
@@ -168,11 +163,11 @@ describe("TaskHandle.get", () => {
   });
 
   test("a built-in code reads with a declared list", async () => {
-    const { handle } = declaredHandle({ results: [storedRead("FAILED", builtInErrorEnvelope("DATABASE_ERROR"))] });
+    const { handle } = declaredHandle({ results: [storedRead("FAILED", builtInErrorEnvelope("BROKER_ERROR"))] });
     const read = await handle.get();
     const error = read.ok && read.value.kind === "failed" ? read.value.error : undefined;
 
-    assert.deepEqual([error?.kind, error?.code], ["builtIn", "DATABASE_ERROR"]);
+    assert.deepEqual([error?.kind, error?.code], ["builtIn", "BROKER_ERROR"]);
   });
 
   test("a wait in a process that runs task bodies is waitInsideTask, before any read", async () => {
@@ -191,13 +186,12 @@ describe("TaskHandle.get", () => {
     assert.equal(relay.requests(), 0);
   });
 
-  test("a failed database read is databaseError with the operation code and the retryable flag", async () => {
+  test("a failed database read is database with the broker code and the retryable flag", async () => {
     const { handle } = declaredHandle({ results: [{ kind: "failed", error: operationFailedRaw("TASK_INFO_QUERY_FAILED", true) }] });
 
     assert.deepEqual(await readError(handle.get()), {
-      kind: "databaseError",
-      code: "DATABASE_ERROR",
-      databaseCode: "TASK_INFO_QUERY_FAILED",
+      kind: "database",
+      code: "TASK_INFO_QUERY_FAILED",
       retryable: true,
       message: "connection failed: refused",
     });
@@ -207,8 +201,12 @@ describe("TaskHandle.get", () => {
     const { handle, calls } = declaredHandle({ results: [{ kind: "failed", error: invalidJsonPayloadRaw() }] });
     const error = await readError(handle.get());
 
-    // A fact of the stored data, as the Python and Rust clients read it: storedResultUnreadable, kept.
-    assert.deepEqual(error, { kind: "storedResultUnreadable", code: "RESULT_DESERIALIZATION_ERROR", cause: "result JSON is refused: duplicate key" });
+    // A fact of the stored data, as the Python and Rust clients read it: resultDeserializationError, kept.
+    assert.deepEqual(error, {
+      kind: "resultDeserializationError",
+      code: "RESULT_DESERIALIZATION_ERROR",
+      cause: "result JSON is refused: duplicate key",
+    });
     assert.deepEqual(await readError(handle.get()), error);
     assert.equal(calls.getResult, 1);
   });
@@ -246,12 +244,12 @@ describe("TaskHandle.get", () => {
     assert.equal(calls.getResult, 1);
   });
 
-  test("a kept storedResultUnreadable is final too", async () => {
+  test("a kept resultDeserializationError is final too", async () => {
     const { handle, calls } = declaredHandle({ results: [storedRead("COMPLETED", okEnvelope("null"))] });
     const first = await handle.get();
     const second = await handle.get();
 
-    assert.equal(!first.ok && first.error.kind, "storedResultUnreadable");
+    assert.equal(!first.ok && first.error.kind, "resultDeserializationError");
     assert.equal(second, first);
     assert.equal(calls.getResult, 1);
   });
@@ -286,5 +284,25 @@ describe("readFormOf", () => {
     const form = readFormOf(refused);
 
     assert.equal(form.kind === "unreadable" && form.cause.includes("input.ratio"), true);
+  });
+});
+
+describe("readErrorCode", () => {
+  test("each read error kind has the catalog code of the Python and Rust clients", () => {
+    const cases: readonly (readonly [ReadError, string])[] = [
+      [{ kind: "waitTimeout", code: "WAIT_TIMEOUT", status: "PENDING" }, "WAIT_TIMEOUT"],
+      [{ kind: "taskNotFound", code: "TASK_NOT_FOUND", reason: "NOT_CLASSIFIED" }, "TASK_NOT_FOUND"],
+      [{ kind: "resultNotAvailable", code: "RESULT_NOT_AVAILABLE", status: "EXPIRED" }, "RESULT_NOT_AVAILABLE"],
+      [{ kind: "resultDeserializationError", code: "RESULT_DESERIALIZATION_ERROR", cause: "c" }, "RESULT_DESERIALIZATION_ERROR"],
+      [{ kind: "unknownCustomCode", code: "X" }, "RESULT_DESERIALIZATION_ERROR"],
+      [{ kind: "waitInsideTask", code: "WAIT_INSIDE_TASK" }, "WAIT_INSIDE_TASK"],
+      [{ kind: "database", code: "TASK_INFO_QUERY_FAILED", retryable: true, message: "m" }, "BROKER_ERROR"],
+      [{ kind: "invalidInput", code: "INVALID_INPUT", maxMs: MAX_WAIT_LIMIT_MS }, "INVALID_INPUT"],
+      [{ kind: "seatRelayFull", code: "SEAT_RELAY_FULL", retryable: true, message: "m" }, "SEAT_RELAY_FULL"],
+    ];
+
+    for (const [error, code] of cases) {
+      assert.equal(readErrorCode(error), code, error.kind);
+    }
   });
 });

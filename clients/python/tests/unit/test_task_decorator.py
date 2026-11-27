@@ -2925,13 +2925,14 @@ class TestIdempotencyKeyConflictClassification:
         assert result.err_value.owner_task_id == 'owner-task-1'
         assert result.err_value.payload.task_name == 'test.good_fn'
 
-    def test_retry_send_accepts_the_conflict(self) -> None:
+    def test_retry_send_refuses_the_conflict_and_writes_nothing(self) -> None:
+        # Reverting the removal of `TaskSendIdempotencyKeyConflict` from the
+        # accepted case in `_validate_retry` fails this test.
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
         app = _make_app()
         broker = MagicMock()
-        broker.enqueue.return_value = Ok('retry-id-1')
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
         enqueue_failed = _make_enqueue_failed_error()
@@ -2942,7 +2943,47 @@ class TestIdempotencyKeyConflictClassification:
             owner_task_id='owner-task-1',
         )
 
-        result = wrapper.retry_send(conflict)
+        with pytest.raises(AssertionError, match='TaskSendIdempotencyKeyConflict'):
+            wrapper.retry_send(conflict)  # pyright: ignore[reportArgumentType]
+
+        broker.enqueue.assert_not_called()
+
+    def test_the_send_loop_does_not_resend_a_conflict(self) -> None:
+        # With the resend loop on, the conflict gets one broker call.
+        def good_fn(*, x: int) -> Result[int, TaskError]:
+            return Ok(x)
+
+        app = _make_app()
+        app.config.resend_on_transient_err = True
+        broker = MagicMock()
+        broker.enqueue.return_value = Err(BrokerIdempotencyKeyConflict(
+            message='idempotency key is reserved by task owner-task-1',
+            owner_task_id='owner-task-1',
+        ))
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.send(x=1)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, TaskSendIdempotencyKeyConflict)
+        assert broker.enqueue.call_count == 1
+
+    def test_the_conflict_is_not_retryable(self) -> None:
+        # Reverting `retryable` of the generated class to `True` fails this test.
+        assert TaskSendIdempotencyKeyConflict.retryable is False
+
+    def test_retry_send_still_accepts_a_retryable_enqueue_failure(self) -> None:
+        def good_fn(*, x: int) -> Result[int, TaskError]:
+            return Ok(x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('retry-id-1')
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.retry_send(_make_enqueue_failed_error())
 
         assert is_ok(result)
         assert broker.enqueue.call_args.kwargs['task_id'] == 'retry-id-1'

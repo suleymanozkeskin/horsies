@@ -58,6 +58,7 @@ drops the value, so the code never reads which error the call gave.
 await app.send(report, { n: 1 }); // error: the statement drops the Result
 app.send(report, { n: 1 }); // error: the statement drops a Promise of a Result
 await handle.get(); // error: the statement drops the Result
+await Promise.all([app.send(report, { n: 1 }), app.send(report, { n: 2 })]); // error: the statement drops an array of Results
 
 void (await app.send(report, { n: 1 })); // passes: `void` is the explicit discard
 
@@ -76,7 +77,9 @@ Passes:
 How the rule finds the type: horsies marks `Ok` and `Err` with a property that exists only in the types. Its key is a
 `unique symbol` and its type is `"horsies.Result"`. The rule reads this mark from the type checker. It does not read
 the name of a type, of a method or of an import, so it finds the `Result` of every call and of every installed copy
-of horsies. A union that has a `Result` member is a `Result` for the rule (`flag ? parse(text) : undefined`).
+of horsies. A union that has a `Result` member is a `Result` for the rule (`flag ? parse(text) : undefined`). An array
+or a tuple whose element type is a `Result` (`Result[]`, `[Result, Result]`) holds a `Result` for the rule, to a nesting
+depth of 3. The settled array of `Promise.allSettled` over Results (`PromiseSettledResult<Result>[]`) is such a collection; the rule does not read its `value`.
 
 `@typescript-eslint/no-floating-promises` refuses a `Promise` that is not awaited, of any type. This rule refuses a
 `Result` that is dropped, awaited or not. The two rules can run together.

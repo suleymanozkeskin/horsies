@@ -11,7 +11,7 @@ const reserveStock = defineTask({ name: "reserve_stock", input: {}, output: h.in
 const charge = defineTask({ name: "charge", input: { order: h.taskOutcome(validateOrder) }, output: h.null() });
 
 export const fulfil = defineWorkflow(
-  { name: "fulfil", definitionKey: "tests.fulfil.v1", params: {}, output: h.null() },
+  { name: "fulfil", definitionKey: "tests.fulfil.v1", parameters: {}, outputType: h.null() },
   (w) => {
     const reserved = w.task(reserveStock, {}, { nodeId: "reserve" });
 

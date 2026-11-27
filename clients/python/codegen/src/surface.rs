@@ -3267,6 +3267,20 @@ const HISTORY_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
+        name: "RerunRetryCodeNotDeclared",
+        doc: "The stored retry list of the source names the custom code retry_code, and the task task_name\nof the calling app does not declare it (RETRY_CODE_NOT_DECLARED). Nothing written.\nmessage names both; exception is a CorePreconditionFailed with the subject rerun_task,\nnot retryable.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_name", "str"), property("retry_code", "str"), property("message", "str"), property("exception", CORE_FAILURE_EXCEPTION)],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunTaskNotRegistered",
+        doc: "The stored retry list of the source names a custom code, and the calling app does not\nregister the task task_name (TASK_NOT_REGISTERED). Nothing written. message names the\ntask; exception is a CorePreconditionFailed with the subject rerun_task, not retryable.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_name", "str"), property("message", "str"), property("exception", CORE_FAILURE_EXCEPTION)],
+        methods: &[],
+    },
+    StubClass {
         name: "RerunEnqueuedRecord",
         doc: "The new task exists: this write, or this write already run in the caller's transaction.",
         constructor: Constructor::NoConstructor,
@@ -3933,9 +3947,9 @@ const FUNCTIONS: &[StubFunction] = &[
     },
     StubFunction {
         name: "prepare_rerun_write",
-        parameters: &[positional("read", "PreparedStatement"), positional("row", "tuple[object, ...]"), positional("command", "RerunCommandRecord"), positional("policy", "RerunPolicyRecord"), keyword("sent_at", "datetime.datetime")],
-        returns: TypeText::Plain("RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunCallerKeyRefused | IdMintRefused"),
-        doc: "Decide the rerun from the row of its read (a tuple in column order): the write, or the\nanswer that ends it with nothing written. Pure apart from the id mint. A row that does not\nfit the columns raises CoreDefect.",
+        parameters: &[positional("read", "PreparedStatement"), positional("row", "tuple[object, ...]"), positional("command", "RerunCommandRecord"), positional("policy", "RerunPolicyRecord"), keyword("registered_task_codes", "dict[str, tuple[str, ...]]"), keyword("sent_at", "datetime.datetime")],
+        returns: TypeText::Plain("RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunCallerKeyRefused | RerunRetryCodeNotDeclared | RerunTaskNotRegistered | IdMintRefused"),
+        doc: "Decide the rerun from the row of its read (a tuple in column order): the write, or the\nanswer that ends it with nothing written. registered_task_codes maps the name of each task\nthat the calling app registers to the custom codes that it declares; the stored retry\nlist of the source is checked against it. Pure apart from the id mint. A row that does not\nfit the columns raises CoreDefect; a code set that the core refuses raises ValueError.",
     },
     StubFunction {
         name: "prepare_worker",

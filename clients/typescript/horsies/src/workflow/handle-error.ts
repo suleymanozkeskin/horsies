@@ -1,13 +1,13 @@
 // The errors of a workflow handle: the handle catalog of the core, generated (`src/_catalog/workflow_handle_errors.ts`),
-// and the errors of a read of an outcome (`get`, `resultFor`). Both are told apart by `kind`.
+// told apart by `code`; and the errors of a read of an outcome (`get`, `resultFor`), told apart by `kind`.
 
-import { OperationalCode, RetrievalCode } from "../_catalog/task_codes.ts";
-import type { WorkflowHandleErrorCode } from "../_catalog/workflow_handle.ts";
+import { OperationalErrorCode, RetrievalCode } from "../_catalog/task_codes.ts";
+import type { HandleErrorCode } from "../_catalog/workflow_handle.ts";
 import {
   type HandleCoreError,
   handleCoreErrorFromNative,
-  type WorkflowHandleStoredDataInvalid,
-  type WorkflowHandleNotFound,
+  type HandleStoredDataInvalid,
+  type HandleWorkflowNotFound,
   type NativeHandleCoreError,
 } from "../_catalog/workflow_handle_errors.ts";
 import type { RawCatalogError } from "../native/values/records.ts";
@@ -15,48 +15,57 @@ import type { SeatRelayFull } from "../seats/relay-full.ts";
 import { nativeCatalogValue } from "../send/catalog-value.ts";
 import { MAX_WAIT_LIMIT_MS } from "../send/bounds.ts";
 import type { WaitBound } from "../native/sends/addon.ts";
-import type { ReadErrorTag } from "../read/errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 
 /**
- * The error of a handle call (`status`, `results`, `tasks`, `pause`, `resume`, `cancel`): the handle catalog of the
+ * The error of a handle call (`status`, `results`, `nodes`, `pause`, `resume`, `cancel`): the handle catalog of the
  * core, or, in a `SHARED_THREAD` body, the seat relay at its bound (nothing was sent).
  */
 export type WorkflowHandleError = HandleCoreError | SeatRelayFull;
 
 /**
- * Why a read of a workflow outcome failed, told apart by `kind`; `code` is the catalog code of the kind
- * (`ReadErrorCodes`). A read error is not the workflow's outcome. `databaseError` holds the code of the failed handle
- * operation in `databaseCode`, and `unknownCustomCode` holds the stored custom code in `storedCode`.
+ * Why a read of a workflow outcome failed, told apart by `kind`, which is named after the catalog code in `code`. A
+ * read error is not the workflow's outcome. One variant has no `code` member, `unknownCustomCode`
+ * (`RESULT_DESERIALIZATION_ERROR`), and `database` holds the handle code in `code` (`BROKER_ERROR`).
  */
 export type WorkflowReadError =
   /** The workflow had not ended when the wait ended; it may still run. */
-  | ReadErrorTag<"waitTimeout">
-  | ReadErrorTag<"workflowNotFound">
+  | { readonly kind: "waitTimeout"; readonly code: "WAIT_TIMEOUT" }
+  | { readonly kind: "workflowNotFound"; readonly code: "WORKFLOW_NOT_FOUND" }
   /** The node stores no result yet, or the workflow has no node of this id. */
-  | ReadErrorTag<"resultNotReady">
+  | { readonly kind: "resultNotReady"; readonly code: "RESULT_NOT_READY" }
   /** The stored value does not read with the handle's types. `cause` holds no value. */
-  | (ReadErrorTag<"storedResultUnreadable"> & { readonly cause: string })
+  | {
+      readonly kind: "resultDeserializationError";
+      readonly code: "RESULT_DESERIALIZATION_ERROR";
+      readonly cause: string;
+    }
   /** The stored error has a custom code that the node's contract does not list. */
-  | (ReadErrorTag<"unknownCustomCode"> & { readonly storedCode: string })
+  | { readonly kind: "unknownCustomCode"; readonly code: string }
   /** A wait in a process that runs task bodies; nothing was read. */
-  | ReadErrorTag<"waitInsideTask">
+  | { readonly kind: "waitInsideTask"; readonly code: "WAIT_INSIDE_TASK" }
   /** The app does not list the workflow, so its output has no type to read with; nothing was read. */
-  | (ReadErrorTag<"noTypeAvailable"> & { readonly workflowName: string })
+  | { readonly kind: "noTypeAvailable"; readonly code: "NO_TYPE_AVAILABLE"; readonly workflowName: string }
   /** The database or the connection failed. */
-  | (ReadErrorTag<"databaseError"> & {
-      readonly databaseCode: WorkflowHandleErrorCode;
+  | {
+      readonly kind: "database";
+      readonly code: HandleErrorCode;
       readonly retryable: boolean;
       readonly message: string;
-    })
+    }
   /** A `waitMs` that is not a whole number of milliseconds from 0 to `maxMs`; nothing was read. */
-  | (ReadErrorTag<"invalidInput"> & { readonly maxMs: number })
+  | { readonly kind: "invalidInput"; readonly code: "INVALID_INPUT"; readonly maxMs: number }
   /**
    * In a `SHARED_THREAD` body: the seat relay held its bound of waiting calls; nothing was read; retry. `message` names
    * the bound and its value.
    */
-  | (ReadErrorTag<"seatRelayFull"> & { readonly retryable: true; readonly message: string });
+  | {
+      readonly kind: "seatRelayFull";
+      readonly code: "SEAT_RELAY_FULL";
+      readonly retryable: true;
+      readonly message: string;
+    };
 
 /** The public error of a raw record of the handle catalog. An unknown class throws (a build defect). */
 export function handleErrorOfRaw(raw: RawCatalogError): HandleCoreError {
@@ -67,45 +76,39 @@ export function handleErrorOfRaw(raw: RawCatalogError): HandleCoreError {
 }
 
 /** `WORKFLOW_NOT_FOUND`: no workflow has the id. Pure. */
-export function workflowNotFound(workflowId: string): WorkflowHandleNotFound {
+export function workflowNotFound(workflowId: string): HandleWorkflowNotFound {
   const error = handleCoreErrorFromNative({
-    class: "WorkflowHandleNotFound",
+    class: "HandleWorkflowNotFound",
     slots: { message: `workflow ${workflowId} not found`, workflow_id: workflowId },
   });
 
-  return error.kind === "notFound" ? error : wrongClass(error);
+  return error.code === "WORKFLOW_NOT_FOUND" ? error : wrongCode(error);
 }
 
 /** `STORED_DATA_INVALID`: the handle's decode refused a stored value. Not retryable. Pure. */
-export function storedDataInvalid(workflowId: string, message: string): WorkflowHandleStoredDataInvalid {
+export function storedDataInvalid(workflowId: string, message: string): HandleStoredDataInvalid {
   const error = handleCoreErrorFromNative({
-    class: "WorkflowHandleStoredDataInvalid",
-    slots: { message, workflow_id: workflowId, cause: { kind: "jsonUnreadable", message } },
+    class: "HandleStoredDataInvalid",
+    slots: { message, workflow_id: workflowId, exception: { kind: "jsonUnreadable", message } },
   });
 
-  return error.kind === "storedDataInvalid" ? error : wrongClass(error);
+  return error.code === "STORED_DATA_INVALID" ? error : wrongCode(error);
 }
 
 /** The read error of a handle error: not found, unreadable, or the database. Pure. */
 export function readErrorOfHandle(error: HandleCoreError): WorkflowReadError {
-  switch (error.kind) {
-    case "notFound":
+  switch (error.code) {
+    case "WORKFLOW_NOT_FOUND":
       return Object.freeze({ kind: "workflowNotFound", code: RetrievalCode.WORKFLOW_NOT_FOUND });
-    case "storedDataInvalid":
+    case "STORED_DATA_INVALID":
       return Object.freeze({
-        kind: "storedResultUnreadable",
-        code: OperationalCode.RESULT_DESERIALIZATION_ERROR,
+        kind: "resultDeserializationError",
+        code: OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
         cause: error.message,
       });
-    case "databaseOperationFailed":
-    case "resumeRecoveryFailed":
-      return Object.freeze({
-        kind: "databaseError",
-        code: OperationalCode.DATABASE_ERROR,
-        databaseCode: error.code,
-        retryable: error.retryable,
-        message: error.message,
-      });
+    case "DB_OPERATION_FAILED":
+    case "RESUME_RECOVERY_FAILED":
+      return Object.freeze({ kind: "database", code: error.code, retryable: error.retryable, message: error.message });
     default:
       return unreachable(error, "readErrorOfHandle");
   }
@@ -122,6 +125,6 @@ export function workflowWait(waitMs: number | undefined): Result<WaitBound, Work
     : err(Object.freeze({ kind: "invalidInput", code: RetrievalCode.INVALID_INPUT, maxMs: MAX_WAIT_LIMIT_MS }));
 }
 
-function wrongClass(error: HandleCoreError): never {
-  throw new TypeError(`handleCoreErrorFromNative: the converter gave the kind ${error.kind} for another class`);
+function wrongCode(error: HandleCoreError): never {
+  throw new TypeError(`handleCoreErrorFromNative: the converter gave the code ${error.code} for another class`);
 }

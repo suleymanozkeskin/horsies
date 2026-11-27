@@ -24,6 +24,10 @@ from horsies.core.declared_error_codes import (
     CodeTextRefused,
     RepeatedCodeRefused,
     ReservedNameRefused,
+    RetryEntriesRefused,
+    RetryEntryNotAMember,
+    RetryMemberNotDeclared,
+    check_retry_codes,
     parse_declared_error_codes,
     with_mapper_codes,
 )
@@ -34,7 +38,7 @@ from horsies.core.errors import (
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskError
+from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode, TaskError
 from horsies.core.types.result import Err, Ok, Result
 
 pytestmark = [pytest.mark.unit]
@@ -52,6 +56,10 @@ class EmptyCodes(Enum):
 
 class LowerCaseCodes(Enum):
     DECLINED = 'declined'
+
+
+class OtherCode(Enum):
+    RATE_LIMITED = 'RATE_LIMITED'
 
 
 def _app(
@@ -208,6 +216,61 @@ class TestWithMapperCodes:
         )
         assert parse_declared_error_codes(codes) == Ok(codes)
 
+
+
+class TestCheckRetryCodes:
+    def test_built_in_members_and_members_of_the_declared_enum_are_accepted(
+        self,
+    ) -> None:
+        entries = [
+            OperationalErrorCode.WORKER_CRASHED,
+            OutcomeCode.TASK_TIMEOUT,
+            ChargeCode.RATE_LIMITED,
+        ]
+        assert check_retry_codes(entries, ChargeCode) == Ok(None)
+        assert check_retry_codes([OutcomeCode.TASK_TIMEOUT], None) == Ok(None)
+
+    def test_a_plain_text_is_not_a_member(self) -> None:
+        assert check_retry_codes(['WORKER_CRASHED'], ChargeCode) == Err(
+            RetryEntriesRefused(
+                refusals=(
+                    RetryEntryNotAMember(index=0, entry="'WORKER_CRASHED'", given='str'),
+                ),
+            ),
+        )
+
+    def test_a_member_of_another_enum_is_not_declared(self) -> None:
+        assert check_retry_codes([OtherCode.RATE_LIMITED], ChargeCode) == Err(
+            RetryEntriesRefused(
+                refusals=(
+                    RetryMemberNotDeclared(index=0, member='OtherCode.RATE_LIMITED'),
+                ),
+            ),
+        )
+
+    def test_with_no_declared_enum_a_custom_member_is_not_declared(self) -> None:
+        assert check_retry_codes([ChargeCode.CARD_DECLINED], None) == Err(
+            RetryEntriesRefused(
+                refusals=(
+                    RetryMemberNotDeclared(index=0, member='ChargeCode.CARD_DECLINED'),
+                ),
+            ),
+        )
+
+    def test_every_refused_entry_is_named_in_list_order(self) -> None:
+        entries: list[object] = [
+            7,
+            OperationalErrorCode.BROKER_ERROR,
+            OtherCode.RATE_LIMITED,
+        ]
+        assert check_retry_codes(entries, ChargeCode) == Err(
+            RetryEntriesRefused(
+                refusals=(
+                    RetryEntryNotAMember(index=0, entry='7', given='int'),
+                    RetryMemberNotDeclared(index=2, member='OtherCode.RATE_LIMITED'),
+                ),
+            ),
+        )
 
 class TestDecorator:
     def test_a_task_declares_no_code_by_default(self) -> None:

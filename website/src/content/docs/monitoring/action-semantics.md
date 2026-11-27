@@ -128,6 +128,8 @@ source (`rerun_of_task_id`, and `rerun_root_task_id` for a chain).
 | Not found in live or history | Refused, source absent, with a `TaskAbsenceReason` that says whether retention can explain the absence |
 | Row is a workflow node | Refused, not eligible (workflow task) |
 | Caller key already used | Key replay (same request: the id of the task it enqueued) or key conflict (a different request under that key) |
+| The stored `auto_retry_for` names a custom code that the task does not declare in the calling app | Refused with the error `RETRY_CODE_NOT_DECLARED`; nothing is written |
+| The stored `auto_retry_for` names a custom code, and the calling app does not register the task | Refused with the error `TASK_NOT_REGISTERED`; nothing is written |
 
 Whether a task can be rerun is decided **at enqueue**, not at rerun time: the
 `retain_rerun_input_default` broker setting (with a per-task override)
@@ -135,6 +137,12 @@ decides whether the enqueue input is preserved with the record. A task
 enqueued without a retained input cannot be rerun later.
 
 Every outcome other than enqueued writes nothing.
+
+The calling app supplies the declared codes of its tasks. The rerun checks
+the stored retry list of the source against them: a built-in code passes for
+every task, and a custom code passes when the app registers the task and the
+task declares the code. A stored list of built-in codes only, or no retry
+policy, needs no registered task.
 
 The caller supplies the enqueue policy of the new request, because enqueue
 policy lives in configuration, not in the rerun contract: the **new** request

@@ -97,7 +97,7 @@ describe("taskSendCoreErrorFromNative", () => {
     });
 
     expectConverted(value, {
-      shown: { kind: "suppressed", code: "SEND_SUPPRESSED" },
+      shown: { code: "SEND_SUPPRESSED" },
       hidden: ["message"],
       message: MESSAGE,
       cause: null,
@@ -107,12 +107,12 @@ describe("taskSendCoreErrorFromNative", () => {
   test("TaskSendValidationFailed", () => {
     const value = taskSendCoreErrorFromNative({
       class: "TaskSendValidationFailed",
-      slots: { message: MESSAGE, cause: RULE_REFUSED },
+      slots: { message: MESSAGE, exception: RULE_REFUSED },
     });
 
     expectConverted(value, {
-      shown: { kind: "validationFailed", code: "VALIDATION_FAILED" },
-      hidden: ["message", "cause"],
+      shown: { code: "VALIDATION_FAILED" },
+      hidden: ["message", "exception"],
       message: MESSAGE,
       cause: RULE_REFUSED,
     });
@@ -126,13 +126,13 @@ describe("taskSendCoreErrorFromNative", () => {
         payload: NATIVE_PAYLOAD,
         message: MESSAGE,
         retryable: true,
-        cause: CONNECTION_FAILURE,
+        exception: CONNECTION_FAILURE,
       },
     });
 
     expectConverted(value, {
-      shown: { kind: "enqueueFailed", code: "ENQUEUE_FAILED", taskId: TASK_ID, retryable: true },
-      hidden: ["payload", "message", "cause"],
+      shown: { code: "ENQUEUE_FAILED", taskId: TASK_ID, retryable: true },
+      hidden: ["payload", "message", "exception"],
       message: MESSAGE,
       cause: CONNECTION_FAILURE,
     });
@@ -143,7 +143,7 @@ describe("taskSendCoreErrorFromNative", () => {
       payloadFacts(taskSendPayloadFromNative(NATIVE_PAYLOAD)),
     );
     expect(JSON.stringify(value)).toBe(
-      `{"kind":"enqueueFailed","code":"ENQUEUE_FAILED","taskId":"${TASK_ID}","retryable":true}`,
+      `{"code":"ENQUEUE_FAILED","taskId":"${TASK_ID}","retryable":true}`,
     );
   });
 
@@ -154,7 +154,7 @@ describe("taskSendCoreErrorFromNative", () => {
     });
 
     expectConverted(value, {
-      shown: { kind: "payloadMismatch", code: "PAYLOAD_MISMATCH", taskId: TASK_ID },
+      shown: { code: "PAYLOAD_MISMATCH", taskId: TASK_ID },
       hidden: ["payload", "message"],
       message: MESSAGE,
       cause: null,
@@ -169,7 +169,6 @@ describe("taskSendCoreErrorFromNative", () => {
 
     expectConverted(value, {
       shown: {
-        kind: "payloadTooLarge",
         code: "PAYLOAD_TOO_LARGE",
         sizeBytes: 18_446_744_073_709_551_615n,
         limitBytes: 1_048_576n,
@@ -192,7 +191,7 @@ describe("taskSendCoreErrorFromNative", () => {
     });
 
     expectConverted(value, {
-      shown: { kind: "idempotencyKeyConflict", code: "IDEMPOTENCY_KEY_CONFLICT", retryable: true, taskId: TASK_ID, ownerTaskId: OTHER_TASK_ID },
+      shown: { code: "IDEMPOTENCY_KEY_CONFLICT", retryable: false, taskId: TASK_ID, ownerTaskId: OTHER_TASK_ID },
       hidden: ["payload", "message"],
       message: MESSAGE,
       cause: null,
@@ -202,12 +201,12 @@ describe("taskSendCoreErrorFromNative", () => {
   test("a no-cause value stays a no-cause value", () => {
     const value = taskSendCoreErrorFromNative({
       class: "TaskSendValidationFailed",
-      slots: { message: MESSAGE, cause: NO_CAUSE },
+      slots: { message: MESSAGE, exception: NO_CAUSE },
     });
 
     expectConverted(value, {
-      shown: { kind: "validationFailed", code: "VALIDATION_FAILED" },
-      hidden: ["message", "cause"],
+      shown: { code: "VALIDATION_FAILED" },
+      hidden: ["message", "exception"],
       message: MESSAGE,
       cause: NO_CAUSE,
     });

@@ -113,7 +113,7 @@ export const retryThenOk = defineTask({
   input: { token: h.string(), succeedOnAttempt: h.int() },
   output: h.string(),
   errorCodes: WF_CODES,
-  retryPolicy: { kind: "exponential", baseSeconds: 1, maxRetries: 3, jitter: false, autoRetryFor: ["RETRY_NEEDED"] },
+  retryPolicy: { kind: "exponential", baseSeconds: 1, maxRetries: 3, jitter: false, retryFor: ["RETRY_NEEDED"] },
 });
 
 /** Python `e2e_wf_produce_int`: returns `value`. */

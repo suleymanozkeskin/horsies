@@ -15,7 +15,7 @@ import type {
   SqlTextValue,
 } from "../native/facades/rerun.ts";
 import type { CallerRow, CallerStatement, SqlText } from "./caller.ts";
-import { contractViolation, invalidPolicy, type RerunError, type RerunStepRefused } from "./errors.ts";
+import type { RerunError, RerunStepRefused } from "./errors.ts";
 import type { RerunOutcome } from "./types.ts";
 
 /** The public outcome of an outcome record: the same fields, each id as a `TaskId`. Pure. */
@@ -43,7 +43,7 @@ export function rerunOutcome(record: RerunOutcomeRecord): RerunOutcome {
     case "inputCorrupt":
       return { kind: "inputCorrupt", taskId: id(record.taskId), detail: record.detail };
     case "keyConflict":
-      return { kind: "keyConflict", taskId: id(record.taskId), reservedByTaskId: id(record.reservedByTaskId) };
+      return { kind: "keyConflict", taskId: id(record.taskId), ownerTaskId: id(record.reservedByTaskId) };
     case "keyReplay":
       return { kind: "keyReplay", existingTaskId: id(record.existingTaskId) };
     default:
@@ -54,44 +54,34 @@ export function rerunOutcome(record: RerunOutcomeRecord): RerunOutcome {
 /** The public error of a failure of the rerun in the app's transaction. Pure. */
 export function appRerunError(failure: AppRerunFailure): RerunError {
   switch (failure.code) {
-    case RerunErrorCode.CONNECT_FAILED: {
-      const cause = coreFailureOf(failure.cause);
-
-      return { kind: "connectFailed", code: failure.code, retryable: failureRetryable(cause), message: failure.message, cause };
-    }
-
+    case RerunErrorCode.CONNECT_FAILED:
     case RerunErrorCode.FAMILY_CHECK_FAILED: {
-      const cause = coreFailureOf(failure.cause);
+      const exception = coreFailureOf(failure.cause);
 
-      return {
-        kind: "familyCheckFailed",
-        code: failure.code,
-        retryable: failureRetryable(cause),
-        message: failure.message,
-        cause,
-      };
+      return { code: failure.code, retryable: failureRetryable(exception), message: failure.message, exception };
     }
 
     case RerunErrorCode.STATEMENT_FAILED: {
-      const cause = coreFailureOf(failure.cause);
+      const exception = coreFailureOf(failure.cause);
 
       return {
-        kind: "statementFailed",
         code: RerunErrorCode.STATEMENT_FAILED,
-        retryable: failureRetryable(cause),
+        retryable: failureRetryable(exception),
         message: failure.message,
-        outcome: failure.outcome,
-        cause,
+        stateAfter: failure.outcome,
+        exception,
       };
     }
 
     case RerunErrorCode.INVALID_POLICY:
-      return invalidPolicy(failure.message);
+      return { code: RerunErrorCode.INVALID_POLICY, retryable: false, message: failure.message };
     case RerunErrorCode.CLASS_NOT_REGISTERED:
     case RerunErrorCode.CALLER_KEY_REFUSED:
     case RerunErrorCode.ID_MINT_REFUSED:
     case RerunErrorCode.CLIENT_FAMILY_MISMATCH:
     case RerunErrorCode.UNKNOWN_STORED_FAMILY:
+    case RerunErrorCode.RETRY_CODE_NOT_DECLARED:
+    case RerunErrorCode.TASK_NOT_REGISTERED:
     case RerunErrorCode.CONTRACT_VIOLATION:
       return stepRefused(failure);
     default:
@@ -103,35 +93,25 @@ export function appRerunError(failure: AppRerunFailure): RerunError {
 export function stepRefused(refusal: CallerStepRefusal): RerunStepRefused {
   switch (refusal.code) {
     case RerunErrorCode.CLASS_NOT_REGISTERED:
-      return {
-        kind: "classNotRegistered",
-        code: refusal.code,
-        retryable: false,
-        message: refusal.message,
-        classKey: refusal.classKey,
-      };
+      return { code: refusal.code, retryable: false, message: refusal.message, classKey: refusal.classKey };
     case RerunErrorCode.CLIENT_FAMILY_MISMATCH:
-      return {
-        kind: "clientFamilyMismatch",
-        code: refusal.code,
-        retryable: false,
-        message: refusal.message,
-        stored: refusal.stored,
-      };
+      return { code: refusal.code, retryable: false, message: refusal.message, stored: refusal.stored };
     case RerunErrorCode.UNKNOWN_STORED_FAMILY:
+      return { code: refusal.code, retryable: false, message: refusal.message, stored: refusal.stored };
+    case RerunErrorCode.RETRY_CODE_NOT_DECLARED:
       return {
-        kind: "unknownStoredFamily",
         code: refusal.code,
         retryable: false,
         message: refusal.message,
-        stored: refusal.stored,
+        taskName: refusal.taskName,
+        retryCode: refusal.retryCode,
       };
+    case RerunErrorCode.TASK_NOT_REGISTERED:
+      return { code: refusal.code, retryable: false, message: refusal.message, taskName: refusal.taskName };
     case RerunErrorCode.CALLER_KEY_REFUSED:
-      return { kind: "callerKeyRefused", code: refusal.code, retryable: false, message: refusal.message };
     case RerunErrorCode.ID_MINT_REFUSED:
-      return { kind: "idMintRefused", code: refusal.code, retryable: false, message: refusal.message };
     case RerunErrorCode.CONTRACT_VIOLATION:
-      return contractViolation(refusal.message);
+      return { code: refusal.code, retryable: false, message: refusal.message };
     default:
       return unreachable(refusal);
   }

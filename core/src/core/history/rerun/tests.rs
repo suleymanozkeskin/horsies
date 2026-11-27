@@ -3,8 +3,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::operations::{
-    rerun_task_in_transaction, NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome,
-    RerunTask,
+    rerun_task_in_transaction, NotEligibleReason, RegisteredTaskCodes, RerunEnqueuePolicy,
+    RerunError, RerunOutcome, RerunTask,
 };
 use super::provenance::RERUN_FIELD_PROVENANCE;
 use crate::broker::client_family::ClientFamily;
@@ -386,6 +386,7 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
             .rerun_task(
                 RerunTask::new(source, Some(deadline), None),
                 policy(target_class, retain_rerun_input),
+                &RegisteredTaskCodes::NONE,
             )
             .await
             .unwrap();
@@ -493,6 +494,7 @@ async fn root_lineage_is_preserved_across_multiple_reruns() {
         .rerun_task(
             RerunTask::new(source, None, None),
             policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
         )
         .await
         .unwrap();
@@ -533,6 +535,7 @@ async fn python_float_exponent_bytes_drive_rerun_input_and_fingerprint() {
         .rerun_task(
             RerunTask::new(source, None, None),
             policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
         )
         .await
         .unwrap();
@@ -609,6 +612,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
             StatementLog::Off,
             &RerunTask::new(completed, None, None),
             &policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
             ClientFamily::Rust,
         )
         .await
@@ -624,6 +628,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
             StatementLog::Off,
             &RerunTask::new(workflow_task, None, None),
             &policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
             ClientFamily::Rust,
         )
         .await
@@ -653,7 +658,11 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
     .unwrap();
     assert_eq!(
         broker
-            .rerun_task(RerunTask::new(live, None, None), policy(SOURCE_CLASS, true))
+            .rerun_task(
+                RerunTask::new(live, None, None),
+                policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE,
+            )
             .await
             .unwrap(),
         RerunOutcome::SourceLive { task_id: live }
@@ -727,7 +736,8 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         broker
             .rerun_task(
                 RerunTask::new(absent, None, None),
-                policy(SOURCE_CLASS, true)
+                policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE,
             )
             .await
             .unwrap(),
@@ -756,6 +766,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         StatementLog::Off,
         &RerunTask::new(old_absent, None, None),
         &policy(SOURCE_CLASS, true),
+        &RegisteredTaskCodes::NONE,
         ClientFamily::Rust,
     )
     .await
@@ -802,7 +813,8 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
             broker
                 .rerun_task(
                     RerunTask::new(source, None, None),
-                    policy(SOURCE_CLASS, true)
+                    policy(SOURCE_CLASS, true),
+                    &RegisteredTaskCodes::NONE,
                 )
                 .await
                 .unwrap(),
@@ -845,6 +857,7 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
             StatementLog::Off,
             &RerunTask::new(source, None, None),
             &policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
             ClientFamily::Rust,
         )
         .await
@@ -872,7 +885,8 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
         broker
             .rerun_task(
                 RerunTask::new(source, None, None),
-                policy(SOURCE_CLASS, true)
+                policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE,
             )
             .await
             .unwrap(),
@@ -898,7 +912,8 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
             broker
                 .rerun_task(
                     RerunTask::new(source, None, None),
-                    policy(SOURCE_CLASS, true)
+                    policy(SOURCE_CLASS, true),
+                    &RegisteredTaskCodes::NONE,
                 )
                 .await
                 .unwrap(),
@@ -917,7 +932,8 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
         broker
             .rerun_task(
                 RerunTask::new(source, None, None),
-                policy(SOURCE_CLASS, true)
+                policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE,
             )
             .await
             .unwrap(),
@@ -975,7 +991,8 @@ async fn an_unknown_stored_status_is_source_corrupt() {
         broker
             .rerun_task(
                 RerunTask::new(source, None, None),
-                policy(SOURCE_CLASS, true)
+                policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE,
             )
             .await
             .unwrap(),
@@ -996,6 +1013,7 @@ async fn a_rerun_keeps_the_execution_class_of_the_request() {
         .rerun_task(
             RerunTask::new(source, None, None),
             policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
         )
         .await
         .unwrap()
@@ -1021,7 +1039,8 @@ async fn an_invalid_stored_execution_is_input_corrupt() {
         broker
             .rerun_task(
                 RerunTask::new(source, None, None),
-                policy(SOURCE_CLASS, true)
+                policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE,
             )
             .await
             .unwrap(),
@@ -1030,6 +1049,59 @@ async fn an_invalid_stored_execution_is_input_corrupt() {
     ));
     assert_eq!(rerun_count(&pool, source).await, 0);
     cleanup(&pool, &[source], &[]).await;
+}
+
+/// The stored retry list of the source is checked against the codes of the
+/// calling app through the broker's own transaction: a custom code of a
+/// task that the app does not register is `TaskNotRegistered`, a custom code
+/// that the task does not declare is `RetryCodeNotDeclared`, and neither
+/// writes a task; a declared code reruns.
+#[tokio::test]
+async fn a_stored_custom_retry_code_is_checked_against_the_calling_app() {
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
+    let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
+    let stored_options = "{\"retry_policy\":{\"max_retries\":1,\"intervals\":[1],\
+                          \"backoff_strategy\":\"fixed\",\"jitter\":true,\
+                          \"auto_retry_for\":[\"WORKER_CRASHED\",\"TRANSIENT\"]}}";
+    store_inline_input(&pool, source, stored_options).await;
+    let codes_declaring = |custom: &[&str]| {
+        let declared = crate::core::task::DeclaredErrorCodes::parse(custom).unwrap();
+        RegisteredTaskCodes::new(std::collections::BTreeMap::from([(
+            "p8.rerun".to_owned(),
+            declared,
+        )]))
+    };
+    let rerun = |codes: RegisteredTaskCodes| {
+        let broker = &broker;
+        async move {
+            broker
+                .rerun_task(
+                    RerunTask::new(source, None, None),
+                    policy(SOURCE_CLASS, true),
+                    &codes,
+                )
+                .await
+        }
+    };
+
+    assert!(matches!(
+        rerun(RegisteredTaskCodes::NONE).await,
+        Err(RerunError::TaskNotRegistered { ref task_name }) if task_name == "p8.rerun"
+    ));
+    assert!(matches!(
+        rerun(codes_declaring(&["RATE_LIMITED"])).await,
+        Err(RerunError::RetryCodeNotDeclared { ref task_name, ref retry_code })
+            if task_name == "p8.rerun" && retry_code == "TRANSIENT"
+    ));
+    assert_eq!(rerun_count(&pool, source).await, 0);
+
+    let RerunOutcome::Enqueued { new_task_id, .. } =
+        rerun(codes_declaring(&["TRANSIENT"])).await.unwrap()
+    else {
+        panic!("a declared custom retry code must rerun");
+    };
+    cleanup(&pool, &[source, new_task_id], &[]).await;
 }
 
 /// A rerun of a stored request of a shared class with no `timeout_ms`
@@ -1046,6 +1118,7 @@ async fn a_rerun_of_a_stored_shared_request_without_a_timeout_is_enqueued() {
         .rerun_task(
             RerunTask::new(source, None, None),
             policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
         )
         .await
         .unwrap()
@@ -1070,7 +1143,11 @@ async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     let command = || RerunTask::new(source, None, Some("p8-replay".to_owned()));
     let first = broker
-        .rerun_task(command(), policy(SOURCE_CLASS, true))
+        .rerun_task(
+            command(),
+            policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
+        )
         .await
         .unwrap();
     let RerunOutcome::Enqueued { new_task_id, .. } = first else {
@@ -1078,7 +1155,11 @@ async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
     };
     assert_eq!(
         broker
-            .rerun_task(command(), policy(SOURCE_CLASS, true))
+            .rerun_task(
+                command(),
+                policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE
+            )
             .await
             .unwrap(),
         RerunOutcome::KeyReplay {
@@ -1130,6 +1211,7 @@ async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
             .rerun_task(
                 RerunTask::new(conflict_source, None, Some("p8-source-key".to_owned())),
                 policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE,
             )
             .await
             .unwrap(),
@@ -1178,6 +1260,7 @@ async fn broker_rolls_back_an_applied_reservation_when_the_live_insert_fails() {
         .rerun_task(
             RerunTask::new(source, None, Some(caller_key.to_owned())),
             policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
         )
         .await
         .unwrap_err();
@@ -1232,6 +1315,7 @@ async fn unregistered_class_refuses_before_source_or_reservation_writes() {
         .rerun_task(
             RerunTask::new(source, None, Some("must-not-claim".to_owned())),
             policy("p8_not_registered", true),
+            &RegisteredTaskCodes::NONE,
         )
         .await
         .unwrap_err();
@@ -1264,6 +1348,7 @@ async fn unregistered_class_refuses_before_source_or_reservation_writes() {
         StatementLog::Off,
         &RerunTask::new(source, None, None),
         &policy("p8_not_registered", true),
+        &RegisteredTaskCodes::NONE,
         ClientFamily::Rust,
     )
     .await
@@ -1538,6 +1623,7 @@ async fn a_handle_of_another_client_family_reruns_nothing() {
         .rerun_task(
             RerunTask::new(source, None, Some("family-refused".to_owned())),
             policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
         )
         .await
         .expect_err("a handle of another family must not rerun");
@@ -1570,7 +1656,16 @@ async fn prepared_write(
 
     let read = rerun_read(command, policy);
     let row = transaction.query_one(&read).await.unwrap();
-    match prepare_rerun_write(&read, &row, command, policy, ClientFamily::Rust, Utc::now()).unwrap()
+    match prepare_rerun_write(
+        &read,
+        &row,
+        command,
+        policy,
+        &RegisteredTaskCodes::NONE,
+        ClientFamily::Rust,
+        Utc::now(),
+    )
+    .unwrap()
     {
         RerunPreparation::Write(write) => write,
         other => panic!("expected a write, got {other:?}"),

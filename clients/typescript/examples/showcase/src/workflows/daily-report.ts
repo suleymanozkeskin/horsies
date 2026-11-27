@@ -12,7 +12,7 @@ import { ABANDONED_CART_AGE_MINUTES } from "../tuning.ts";
 export const REPORT_WINDOW = "CHECK";
 
 export const dailyReport = defineWorkflow(
-  { name: "daily_report", definitionKey: "acme.daily_report.v1", params: {}, output: AbandonedCartSweep },
+  { name: "daily_report", definitionKey: "acme.daily_report.v1", parameters: {}, outputType: AbandonedCartSweep },
   (w) => {
     const rollup = w.task(salesRollup, { window: REPORT_WINDOW }, { nodeId: "sales_rollup" });
 

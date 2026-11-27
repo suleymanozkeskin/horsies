@@ -137,7 +137,6 @@ class TestVariantCatalog:
         assert set(get_args(TaskSendRetryable.__value__)) == {
             TaskSendEnqueueFailed,
             TaskSendAsyncContext,
-            TaskSendIdempotencyKeyConflict,
         }
 
     @pytest.mark.parametrize(
@@ -254,8 +253,8 @@ class TestEnqueueFailedCause:
 class TestRetryRefusesOtherVariants:
     """A caller without a type checker can pass a refused variant."""
 
-    def test_the_fixture_has_four_refused_variants(self) -> None:
-        assert len(_refused_variants()) == 4
+    def test_the_fixture_has_five_refused_variants(self) -> None:
+        assert len(_refused_variants()) == 5
 
     @pytest.mark.parametrize(
         'error', _refused_variants(), ids=lambda error: type(error).__name__,

@@ -253,6 +253,8 @@ mod tests {
                 "DRIVER_FAILED",
                 "NO_OPEN_TRANSACTION",
                 "RESULT_NOT_TEXT",
+                "RETRY_CODE_NOT_DECLARED",
+                "TASK_NOT_REGISTERED",
             ]
         );
     }

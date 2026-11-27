@@ -496,7 +496,7 @@ fn invoice_options(invoice_id: u64) -> TaskSendOptions {
 | `EnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable`, `cause` | Accepted |
 | `PayloadMismatch` | `PAYLOAD_MISMATCH` | `task_id`, `payload`, `message` | Refused |
 | `PayloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `size_bytes`, `limit_bytes` | Refused |
-| `IdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` | Accepted |
+| `IdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` | Refused |
 
 - `ValidationFailed` with the cause `PreconditionFailed` is also the answer
   of a generated send through an app that does not register the task.
@@ -510,7 +510,10 @@ fn invoice_options(invoice_id: u64) -> TaskSendOptions {
 - `PayloadMismatch`: the task id exists with another command or key.
   Nothing was written.
 - `IdempotencyKeyConflict`: another task (`owner_task_id`) holds the key
-  with another command. Nothing was written.
+  with another command. Nothing was written. A repeat of the same send does
+  not complete it: send the same command as the owner task, or use another
+  key. The reservation ends `reservation_window` after the owner task
+  finishes; a send with the key after that time starts a new task.
 - `error.code()` returns the `TaskSendErrorCode`.
 - A send in a fork panics, as every call that runs on the core: see
   `SKILL.md`, Result Types.
@@ -691,10 +694,12 @@ In a transaction that the caller owns (feature `sqlx`; feature
 ```rust
 use chrono::Utc;
 use horsies::rerun::{rerun_task_in, RerunEnqueuePolicy, RerunOutcome, RerunTask, SqlxCaller};
+use horsies::Horsies;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 async fn rerun_with_audit(
+    app: &Horsies,
     pool: &PgPool,
     source_task_id: Uuid,
 ) -> Result<RerunOutcome, Box<dyn std::error::Error>> {
@@ -707,6 +712,7 @@ async fn rerun_with_audit(
         &mut SqlxCaller::new(&mut transaction),
         &RerunTask::new(source_task_id, None, None),
         &RerunEnqueuePolicy::standard(true),
+        &app.registered_task_codes(),
         Utc::now(),
     )
     .await?;
@@ -729,8 +735,18 @@ async fn rerun_with_audit(
   `Rerun(RerunError)`.
 - `CallerRerunError<E>`: `Driver(E)`, `ClassNotRegistered { key }`,
   `ClientFamilyMismatch { stored }`, `UnknownStoredFamily` (a family row
-  that holds no client family), `CallerKeyRefused`, `IdMintRefused`,
-  `Row`.
+  that holds no client family), `CallerKeyRefused`,
+  `RetryCodeNotDeclared { task_name, retry_code }`, `TaskNotRegistered
+  { task_name }`, `IdMintRefused`, `Row`.
+- The stored retry list of the source is checked before the write: a
+  built-in code passes; a custom code passes when the app registers the
+  task and the task declares the code. `app.rerun_task` reads the app's
+  registry; `rerun_task_in` takes `&app.registered_task_codes()`. A custom
+  code that the task does not declare is `RetryCodeNotDeclared`
+  (`RerunErrorCode::RetryCodeNotDeclared`); a custom code of a task that
+  the app does not register is `TaskNotRegistered`
+  (`RerunErrorCode::TaskNotRegistered`). Nothing is written; not
+  retryable. `RerunError` has the same two variants.
 
 | `RerunOutcome` | Meaning |
 |---|---|

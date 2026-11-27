@@ -1,5 +1,5 @@
 // Compile-pass cases of the sketch's start and handle code (section 5.3): the start error switch with a full match,
-// retryStart of ENQUEUE_FAILED, get with open custom codes, resultFor typed by the node's contract, pause, resume,
+// resendStart of ENQUEUE_FAILED, get with open custom codes, resultFor typed by the node's contract, pause, resume,
 // cancel, and a handle by id.
 
 import {
@@ -38,8 +38,8 @@ const fulfil = defineWorkflow(
   {
     name: "fulfil",
     definitionKey: "shop.fulfil.v1",
-    output: Receipt,
-    params: { orderId: h.uuid() },
+    outputType: Receipt,
+    parameters: { orderId: h.uuid() },
     checkCases: [{ orderId: "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b" }],
   },
   (w, { orderId }) => {
@@ -62,7 +62,7 @@ export async function startAndRead(workflowId: WorkflowId): Promise<void> {
         break;
       case "ENQUEUE_FAILED":
         if (started.error.retryable) {
-          void (await app.retryStart(started.error));
+          void (await app.resendStart(started.error));
         }
 
         break;

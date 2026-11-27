@@ -20,7 +20,7 @@ mod scheduler_manifest;
 mod worker_manifest;
 
 pub(crate) use scheduler_manifest::{schedule_input_text, scheduler_manifest};
-pub(crate) use worker_manifest::{rust_child_launch, worker_manifest};
+pub(crate) use worker_manifest::{declared_codes, rust_child_launch, worker_manifest};
 
 pub use horsies_core::core::config::worker_profile::input::{
     ClaimLimits, ExecutorThreadsSetting, IsolatedChildren, IsolatedPool, IsolatedRecycle,

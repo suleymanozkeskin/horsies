@@ -1,10 +1,10 @@
 // The `check` command: the static check of the app, and with `--live` the live steps on its database.
 //
-//   <entry> check [--live] [--loglevel LEVEL]
+//   <entry> check [--live] [--log-level LEVEL]
 //
 // - `--live`: after a passing static check, the connectivity of the database and the connection fit of each worker
 //   profile. It installs no schema.
-// - `--loglevel`: the lowest level of the core records of this process; default `WARNING`.
+// - `--log-level`: the lowest level of the core records of this process; default `WARNING`.
 //
 // Exit codes: 0 for a passing check (its summary on stdout); 1 for a check report, or a core that refused the live
 // steps (on stderr); 2 for arguments that do not parse. Sends stay suppressed in this command.
@@ -38,15 +38,15 @@ import {
 } from "./usage.ts";
 
 /** The usage line of `check`. */
-export const CHECK_USAGE = "<entry> check [--live] [--loglevel LEVEL]";
+export const CHECK_USAGE = "<entry> check [--live] [--log-level LEVEL]";
 
-/** The default `--loglevel` of `check`. */
+/** The default `--log-level` of `check`. */
 export const CHECK_DEFAULT_LOG_LEVEL: WorkerLogLevel = "WARNING";
 
 /** The flags of `check`. */
 const CHECK_FLAGS = {
   live: { type: "boolean" },
-  loglevel: { type: "string" },
+  "log-level": { type: "string" },
 } as const;
 
 /** Which steps `check` runs: the static check, or the static check and then the live steps. */
@@ -143,7 +143,7 @@ export function parseCheckFlags(args: readonly string[]): Result<CheckFlags, Usa
     return flags;
   }
 
-  const levelText = textFlag(flags.value, "loglevel");
+  const levelText = textFlag(flags.value, "log-level");
   const logLevel = levelText === undefined ? ok(CHECK_DEFAULT_LOG_LEVEL) : parseLogLevel(levelText);
 
   if (!logLevel.ok) {

@@ -7,12 +7,12 @@ import { defineWorkflow } from "../../../horsies/src/workflow/public.ts";
 const ping = defineTask({ name: "ping", input: { region: h.string() }, output: h.null() });
 
 const child = defineWorkflow(
-  { name: "child", definitionKey: "tests.child.v1", output: h.null(), params: { region: h.string() }, checkCases: [{ region: "eu" }] },
+  { name: "child", definitionKey: "tests.child.v1", outputType: h.null(), parameters: { region: h.string() }, checkCases: [{ region: "eu" }] },
   (w, { region }) => ({ output: w.task(ping, { region }, { nodeId: "ping" }) }),
 );
 
 export const parent = defineWorkflow(
-  { name: "parent", definitionKey: "tests.parent.v1", output: h.null(), params: {} },
+  { name: "parent", definitionKey: "tests.parent.v1", outputType: h.null(), parameters: {} },
   (w) => ({
     output: w.subWorkflow(child,
       { region: 7 },

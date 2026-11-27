@@ -126,7 +126,7 @@ defineTask({
   input: {},
   output: h.null(),
   errorCodes: ["PROVIDER_DOWN"],
-  retryPolicy: { kind: "exponential", baseSeconds: 30, maxRetries: 5, autoRetryFor: ["PROVIDER_DOWN", "TASK_TIMEOUT"] },
+  retryPolicy: { kind: "exponential", baseSeconds: 30, maxRetries: 5, retryFor: ["PROVIDER_DOWN", "TASK_TIMEOUT"] },
 });
 
 // A zod output.

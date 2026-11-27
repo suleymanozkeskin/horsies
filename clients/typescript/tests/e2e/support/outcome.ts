@@ -16,10 +16,10 @@ const INFO_POLL_MS = 200;
 export type CodeSource = "custom" | "builtIn";
 
 /** The code of a stored error and who chose it. */
-export type HorsiesErrorCode = { readonly source: CodeSource; readonly code: string };
+export type ErrorCode = { readonly source: CodeSource; readonly code: string };
 
 /** The code of `error`. The one reader of the code form of a stored error. Pure. */
-export function errorCode(error: TaskError): HorsiesErrorCode {
+export function errorCode(error: TaskError): ErrorCode {
   return { source: error.kind, code: error.code };
 }
 
@@ -32,14 +32,14 @@ export function readErrorText(error: ReadError): string {
       return `no task (${error.reason})`;
     case "resultNotAvailable":
       return `the task is ${error.status} and stores no result`;
-    case "storedResultUnreadable":
+    case "resultDeserializationError":
       return `the stored result does not read: ${error.cause}`;
     case "unknownCustomCode":
-      return `the stored error has the undeclared code ${error.storedCode}`;
+      return `the stored error has the undeclared code ${error.code}`;
     case "waitInsideTask":
       return "a wait inside a task";
-    case "databaseError":
-      return `the database read failed: ${error.databaseCode}: ${error.message}`;
+    case "database":
+      return `the database read failed: ${error.code}: ${error.message}`;
     case "invalidInput":
       return `the wait is not 0 to ${String(error.maxMs)} ms`;
     case "seatRelayFull":

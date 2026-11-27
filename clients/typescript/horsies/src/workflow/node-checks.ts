@@ -207,8 +207,8 @@ function noParams(context: NodeContext, input: object): Result<CheckedInput, Non
         finding(
           HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH,
           `${context.place} input`,
-          "the child workflow takes no params",
-          ["give {} to a child with params: {}"],
+          "the child workflow takes no parameters",
+          ["give {} to a child with parameters: {}"],
         ),
       ]);
 }

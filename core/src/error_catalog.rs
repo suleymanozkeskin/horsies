@@ -12,9 +12,9 @@
 //!
 //! 1. `code`: a `ClassVar` member of the code catalog, or an instance field
 //!    typed by a `Literal` subset of it ([`CodeSubset`]);
-//! 2. `retryable: ClassVar[bool] = False` for a class that never clears,
-//!    or `retryable: ClassVar[bool] = True` for a class whose state may
-//!    clear;
+//! 2. `retryable: ClassVar[bool] = False` for a class whose call a repeat
+//!    does not complete, or `retryable: ClassVar[bool] = True` for a class
+//!    whose same call, unchanged, can succeed later;
 //! 3. the fields of the variant, in declaration order, each with its
 //!    Python type and whether `repr` shows it;
 //! 4. `cause`, the core's exception class of the cause, for a class
@@ -108,10 +108,11 @@ pub enum ErrorSlot {
     /// `code: <subset>`: an instance field typed by a `Literal` subset of
     /// the code catalog, named by [`CodeSubset::name`].
     CodeSubset { subset: &'static str },
-    /// `retryable: ClassVar[bool] = False`: the state never clears.
+    /// `retryable: ClassVar[bool] = False`: a repeat of the same call does
+    /// not complete it. The caller must change the call.
     NeverRetryable,
-    /// `retryable: ClassVar[bool] = True`: the state may clear, so the same
-    /// call can succeed later. It does not say that a repeat is safe.
+    /// `retryable: ClassVar[bool] = True`: a repeat of the same call,
+    /// unchanged, can succeed later. It does not say that a repeat is safe.
     AlwaysRetryable,
     /// An instance field of the variant.
     Field {
@@ -940,7 +941,7 @@ mod tests {
                 ErrorSlot::CodeMember {
                     member: "IDEMPOTENCY_KEY_CONFLICT"
                 },
-                ErrorSlot::AlwaysRetryable,
+                ErrorSlot::NeverRetryable,
                 ErrorSlot::Field {
                     name: "task_id",
                     python_type: SlotType::Uuid,

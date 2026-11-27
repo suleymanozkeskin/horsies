@@ -29,12 +29,27 @@ export interface SeatBodyObservation {
   cancelled(cause: CancelCauseName): void;
 }
 
+/**
+ * A run whose seat isolate ended before the run's result: the facts of the run (from the core's `runBody` post), the
+ * main thread's time of the `run` post, and the main thread's time of the isolate's exit.
+ */
+export type EndedSeatRun = {
+  readonly facts: BodyFactsRecord;
+  readonly startedAt: Temporal.Instant;
+  readonly endedAt: Temporal.Instant;
+};
+
 /** The observer of the task bodies of a seat isolate. */
 export interface SeatBodyObserver {
   /** The observation of one body, before the body runs. `facts` is `notRecorded` when the app traces no body. */
   enter(facts: BodyFactsRecord): SeatBodyObservation;
   /** Send what the observer holds. Never rejects; the exit rule of the child bounds the wait for it. */
   flush(): Promise<void>;
+  /**
+   * The seat isolate of a run ended before the run's result, so the isolate's observation never ended. The main
+   * thread of the child calls it once for that run, at the isolate's exit. It never throws.
+   */
+  isolateEnded(run: EndedSeatRun): void;
 }
 
 /** The observation that does nothing: `run` calls the body. */
@@ -49,6 +64,7 @@ export const NO_SEAT_OBSERVATION: SeatBodyObservation = Object.freeze({
 export const NO_SEAT_BODY_OBSERVER: SeatBodyObserver = Object.freeze({
   enter: (): SeatBodyObservation => NO_SEAT_OBSERVATION,
   flush: async (): Promise<void> => undefined,
+  isolateEnded: (): void => undefined,
 });
 
 const observers = new WeakMap<AppContext, SeatBodyObserver>();

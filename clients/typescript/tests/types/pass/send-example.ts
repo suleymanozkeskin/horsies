@@ -1,5 +1,5 @@
-// Compile-pass cases of a send and a read through the app: the send error switch with a full match (one case for
-// `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT`, which both carry `retryable`), `retrySend` of either, the send
+// Compile-pass cases of a send and a read through the app: the send error switch with a full match (`resend` of
+// `ENQUEUE_FAILED`; `IDEMPOTENCY_KEY_CONFLICT` has `retryable: false`), the send
 // options, and the read switch over the tag and the code of the task error.
 
 import { defineTask, type Horsies, TaskId } from "../../../horsies/src/index.ts";
@@ -25,10 +25,13 @@ export async function sendAndRead(): Promise<void> {
 
   if (!sent.ok) {
     switch (sent.error.code) {
-      case "ENQUEUE_FAILED":
       case "IDEMPOTENCY_KEY_CONFLICT":
+        // Not retryable: `resend` does not take it. Send the owner's command, or use another key.
+        console.warn(sent.error.ownerTaskId);
+        break;
+      case "ENQUEUE_FAILED":
         if (sent.error.retryable) {
-          void (await app.retrySend(sent.error));
+          void (await app.resend(sent.error));
         }
 
         break;
@@ -113,20 +116,19 @@ export async function sendWithOptions(): Promise<void> {
       idempotencyKey: "validate:1",
       goodUntil: Temporal.Now.instant().add({ minutes: 10 }),
       delaySeconds: 30,
-      retention: { kind: "days", days: 30 },
+      retention: { kind: "period", days: 30 },
     },
   ));
   void (await app.send(validateOrder, { orderId: crypto.randomUUID(), lines: [] }, { retention: { kind: "forever" } }));
 }
 
-/** A key conflict is retryable (`retryable: true`), and `retrySend` takes it with no `retryable` check. */
-export async function retryKeyConflict(): Promise<void> {
+/** A key conflict is not retryable (`retryable: false`). */
+export async function keyConflictIsNotRetryable(): Promise<void> {
   const sent = await app.send(validateOrder, { orderId: crypto.randomUUID(), lines: [] }, { idempotencyKey: "validate:2" });
 
   if (!sent.ok && sent.error.code === "IDEMPOTENCY_KEY_CONFLICT") {
-    const retryable: true = sent.error.retryable;
+    const retryable: false = sent.error.retryable;
 
     console.warn(retryable, sent.error.ownerTaskId);
-    void (await app.retrySend(sent.error));
   }
 }

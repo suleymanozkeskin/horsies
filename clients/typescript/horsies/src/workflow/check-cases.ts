@@ -3,8 +3,8 @@
 // fails for certain: a child that includes itself with the same params and no wait between (`HRS-037`), and a nesting
 // past depth 32 with no wait on the path (`HRS-036`). The checks of the Rust client's `check_findings`.
 
-import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
-import { refusal, type Refusal } from "../app/refusal.ts";
+import { ErrorCode } from "../_catalog/error_codes.ts";
+import { refusal, type HorsiesError } from "../app/refusal.ts";
 import { decodeParameters } from "../codec/reader.ts";
 import { refusalText } from "../codec/refusal.ts";
 import { thrownFacts } from "../native/call/thrown-facts.ts";
@@ -25,11 +25,11 @@ type ChildStart = "withItsWorkflow" | "afterDependencies";
 type NestingStep = { readonly definitionKey: string; readonly paramsText: string; readonly start: ChildStart };
 
 /** The refusals of every listed workflow, in list order. Effects: the builds of the workflows and their children. */
-export function checkWorkflows(registry: WorkflowRegistry): readonly Refusal[] {
+export function checkWorkflows(registry: WorkflowRegistry): readonly HorsiesError[] {
   return registry.workflows.flatMap((entry) => workflowRefusals(registry, entry));
 }
 
-function workflowRefusals(registry: WorkflowRegistry, entry: ListedWorkflow): readonly Refusal[] {
+function workflowRefusals(registry: WorkflowRegistry, entry: ListedWorkflow): readonly HorsiesError[] {
   const path = `workflow ${entry.record.name}`;
 
   if (entry.record.paramNames.length === 0) {
@@ -43,8 +43,8 @@ function workflowRefusals(registry: WorkflowRegistry, entry: ListedWorkflow): re
     return params.ok
       ? rootRefusals(registry, entry, params.value, casePath)
       : [
-          refusal(HorsiesErrorCode.WORKFLOW_CHECK_CASE_INVALID, casePath, refusalText(params.error), [
-            "give each case the params of the workflow",
+          refusal(ErrorCode.WORKFLOW_CHECK_CASE_INVALID, casePath, refusalText(params.error), [
+            "give each case the parameters of the workflow",
           ]),
         ];
   });
@@ -56,7 +56,7 @@ function rootRefusals(
   entry: ListedWorkflow,
   params: object,
   path: string,
-): readonly Refusal[] {
+): readonly HorsiesError[] {
   const built = checkedSpec(registry, entry.record, params, path);
 
   return built.ok ? walk(registry, built.value, [], path) : built.error;
@@ -68,7 +68,7 @@ function checkedSpec(
   record: WorkflowRecord,
   params: object,
   path: string,
-): Result<CheckedSpec, readonly Refusal[]> {
+): Result<CheckedSpec, readonly HorsiesError[]> {
   const run = runBuild(record.build, params);
 
   switch (run.kind) {
@@ -77,7 +77,7 @@ function checkedSpec(
 
       return err([
         refusal(
-          HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
+          ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
           path,
           `the build threw ${facts.name}: ${facts.message}`,
           [],
@@ -87,7 +87,7 @@ function checkedSpec(
 
     case "thenable":
       return err([
-        refusal(HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION, path, "the build returned a thenable; a build is sync", []),
+        refusal(ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION, path, "the build returned a thenable; a build is sync", []),
       ]);
     case "returned": {
       const checked = checkBuild(record, run, registry.view);
@@ -106,8 +106,8 @@ function walk(
   spec: CheckedSpec,
   steps: readonly NestingStep[],
   path: string,
-): readonly Refusal[] {
-  const refusals: Refusal[] = [];
+): readonly HorsiesError[] {
+  const refusals: HorsiesError[] = [];
 
   for (const node of spec.nodes) {
     // A node with args_from takes params from results at run time: its child is not built.
@@ -142,10 +142,10 @@ function walk(
           // Rust client's walk gives the same finding.
           refusals.push(
             refusal(
-              HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+              ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
               nodePath,
-              `the params of the sub-workflow node do not decode: ${refusalText(params.error)}`,
-              ["make each check of the child's params pure"],
+              `the parameters of the sub-workflow node do not decode: ${refusalText(params.error)}`,
+              ["make each check of the child's parameters pure"],
             ),
           );
 
@@ -169,7 +169,7 @@ function walk(
 
 type NestingDecision =
   | { readonly kind: "walk"; readonly steps: readonly NestingStep[] }
-  | { readonly kind: "stop"; readonly refusals: readonly Refusal[] };
+  | { readonly kind: "stop"; readonly refusals: readonly HorsiesError[] };
 
 /**
  * The decision for the child of one node (the Rust client's `decide_nesting`): the same definition with the same
@@ -189,10 +189,10 @@ function decideNesting(steps: readonly NestingStep[], step: NestingStep, path: s
       refusals: startsForCertain(walked.slice(earlier + 1))
         ? [
             refusal(
-              HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING,
+              ErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING,
               path,
-              "a sub-workflow includes itself with the same params, and no node between the two waits",
-              ["change the params at each level, so that the nesting ends"],
+              "a sub-workflow includes itself with the same parameters, and no node between the two waits",
+              ["change the parameters at each level, so that the nesting ends"],
             ),
           ]
         : [],
@@ -205,7 +205,7 @@ function decideNesting(steps: readonly NestingStep[], step: NestingStep, path: s
       refusals: startsForCertain(walked)
         ? [
             refusal(
-              HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT,
+              ErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT,
               path,
               `the child workflow would have depth ${walked.length}; the limit is ${MAX_SUBWORKFLOW_DEPTH}`,
               ["nest fewer levels; at run time this node fails with SUBWORKFLOW_DEPTH_LIMIT_REACHED"],

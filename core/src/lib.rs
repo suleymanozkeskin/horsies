@@ -252,7 +252,8 @@ pub use crate::broker::migrations::SchemaRefusal;
 pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
 pub use crate::core::history::rerun::{
-    NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunErrorCode, RerunOutcome, RerunTask,
+    DeclaredCodes, NotEligibleReason, RegisteredTaskCodes, RerunEnqueuePolicy, RerunError,
+    RerunErrorCode, RerunOutcome, RerunTask,
 };
 // One core statement in a transaction that the caller owns: the Rust
 // client's adapters implement `CallerTransaction`; the core's own

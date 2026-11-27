@@ -8,8 +8,8 @@
 // - A refusal of the cluster cap has the code `HRS-201`; a refusal of a claim field has the code of the prefetch
 //   setting (`HRS-202`).
 
-import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
-import type { Refusal } from "../app/refusal.ts";
+import { ErrorCode } from "../_catalog/error_codes.ts";
+import type { HorsiesError } from "../app/refusal.ts";
 import type { TracingConfigInput } from "../telemetry/tracing-config.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
@@ -67,7 +67,7 @@ export type AppConfigInput = QueueConfigInput & {
   readonly workerProfiles?: Readonly<Record<string, WorkerProfileInput>>;
   /** Send again, up to 3 times, after a send fails with a transient database error. Left out: no resend. */
   readonly resendOnTransientError?: boolean;
-  /** The spans and producer metrics of the app. Left out: `{ kind: "none" }`. `Horsies.create` reads it; the core does not. */
+  /** The spans and producer metrics of the app. Left out: `{ kind: "noTracing" }`. `Horsies.create` reads it; the core does not. */
   readonly tracing?: TracingConfigInput;
 };
 
@@ -80,10 +80,10 @@ export type AppConfig = {
 };
 
 /** A `u32` field of the cluster cap. */
-const CLUSTER_CAP_U32 = u32Field(HorsiesErrorCode.CONFIG_INVALID_CLUSTER_CAP);
+const CLUSTER_CAP_U32 = u32Field(ErrorCode.CONFIG_INVALID_CLUSTER_CAP);
 
 /** A `u32` field of the claim settings. */
-const PREFETCH_U32 = u32Field(HorsiesErrorCode.CONFIG_INVALID_PREFETCH);
+const PREFETCH_U32 = u32Field(ErrorCode.CONFIG_INVALID_PREFETCH);
 
 /** The core's value of `prefetch_buffer` in the hard cap mode. */
 const HARD_CAP_PREFETCH_BUFFER = 0;
@@ -95,14 +95,14 @@ const HARD_CAP_PREFETCH_BUFFER = 0;
 const SOFT_CAP_PREFETCH_BUFFER: IntegerBound = Object.freeze({
   min: 1,
   max: U32_MAX,
-  code: HorsiesErrorCode.CONFIG_INVALID_PREFETCH,
+  code: ErrorCode.CONFIG_INVALID_PREFETCH,
 });
 
 /**
  * The parsed config of `input`, or every refusal in field order. Reads each `fromEnv` secret through `environment`.
  * The parse checks the shape that the core's config reader needs; the bridge's `checkAppConfig` checks the rules.
  */
-export function parseAppConfig(input: AppConfigInput, environment: EnvironmentRead): Result<AppConfig, readonly Refusal[]> {
+export function parseAppConfig(input: AppConfigInput, environment: EnvironmentRead): Result<AppConfig, readonly HorsiesError[]> {
   const parsed = coreConfigObject(input, environment);
 
   switch (parsed.kind) {

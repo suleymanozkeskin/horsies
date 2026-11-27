@@ -2615,6 +2615,137 @@ async fn pool_coverage_creates_the_period_leaves_and_no_forever_leaf() {
     database.drop().await;
 }
 
+/// The duplicate guard of an id born now probes the manifest leaves whose
+/// upper anchor is after now. After a pass with a history horizon of 3 days,
+/// these are the 4 daily leaves of the default class and the static forever
+/// leaf: no other forever leaf and no heartbeat leaf.
+#[tokio::test]
+async fn guard_probe_set_is_standard_horizon_plus_the_static_forever_leaf() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let coverage = ensure_partition_coverage_in_pool(
+        &core_pool_for_test_url(database.pool.url()),
+        StatementLog::Off,
+        3,
+        2,
+        &[],
+    )
+    .await
+    .expect("coverage pass");
+    assert!(
+        matches!(coverage, CoverageOutcome::Ensured(_)),
+        "{coverage:?}"
+    );
+    let probed: Vec<(String, String)> = sql::query_as(&format!(
+        "SELECT catalog.class_key, manifest.leaf_name
+         FROM {TASK_LOOKUP_MANIFEST} AS manifest
+         JOIN {LEAF_CATALOG} AS catalog USING (leaf_name)
+         WHERE manifest.upper_anchor > statement_timestamp()
+         ORDER BY 1, 2"
+    ))
+    .fetch_all(&database.pool)
+    .await
+    .expect("read the probed manifest leaves");
+    let standard = probed
+        .iter()
+        .filter(|(class, _)| class == "standard_30d")
+        .count();
+    let forever: Vec<&str> = probed
+        .iter()
+        .filter(|(class, _)| class == FOREVER_CLASS_KEY)
+        .map(|(_, name)| name.as_str())
+        .collect();
+    assert_eq!(standard, 4, "{probed:?}");
+    assert_eq!(forever, vec![TASK_HISTORY_FOREVER_LEAF]);
+    assert_eq!(probed.len(), standard + forever.len(), "{probed:?}");
+    database.drop().await;
+}
+
+/// A history leaf removed out of band keeps its attached catalog row, is left
+/// out of the reader manifest and is the one absent leaf. A heartbeat leaf
+/// removed out of band is in neither list. The next coverage pass fails the
+/// class of the removed history leaf and names the leaf.
+#[tokio::test]
+async fn manifest_excludes_absent_probes_and_keeps_the_complete_attached_set() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let class_key = "standard_34d";
+    let parent = register_class(&database.pool, class_key, 34).await;
+    let today = utc_day_start(database_now(&database.pool).await);
+    let gone = leaf_ref(&parent, class_key, today);
+    let kept = leaf_ref(&parent, class_key, today + Duration::days(1));
+    for leaf in [&gone, &kept] {
+        assert!(matches!(
+            create_leaf(&database.pool, leaf).await,
+            LeafCreation::Created { .. }
+        ));
+    }
+    let heartbeat_leaves = expired_heartbeat_leaves(&database.pool, &[10]).await;
+    let heartbeat = heartbeat_leaves[0].leaf_name();
+    for relation in [gone.leaf_name(), heartbeat] {
+        sql::query(&format!("DROP TABLE {relation}"))
+            .execute(&database.pool)
+            .await
+            .expect("drop a leaf out of band");
+    }
+
+    let attached: Vec<String> = sql::query_scalar(&format!(
+        "SELECT leaf_name FROM {LEAF_CATALOG}
+         WHERE detached_at IS NULL AND dropped_at IS NULL ORDER BY leaf_name"
+    ))
+    .fetch_all(&database.pool)
+    .await
+    .expect("read the attached catalog leaves");
+    assert!(
+        attached.iter().any(|name| name == gone.leaf_name()),
+        "{attached:?}"
+    );
+    assert!(
+        attached.iter().any(|name| name == kept.leaf_name()),
+        "{attached:?}"
+    );
+    let manifest: Vec<String> =
+        sql::query_scalar("SELECT leaf_name FROM horsies_history_reader_manifest()")
+            .fetch_all(&database.pool)
+            .await
+            .expect("read the reader manifest");
+    assert!(
+        manifest.iter().any(|name| name == kept.leaf_name()),
+        "{manifest:?}"
+    );
+    assert!(
+        !manifest.iter().any(|name| name == gone.leaf_name()),
+        "{manifest:?}"
+    );
+    assert!(
+        !manifest.iter().any(|name| name == heartbeat),
+        "{manifest:?}"
+    );
+    let absent: Vec<String> = sql::query_scalar("SELECT horsies_history_absent_leaves()")
+        .fetch_one(&database.pool)
+        .await
+        .expect("read the absent history leaves");
+    assert_eq!(absent, vec![gone.leaf_name().to_owned()]);
+
+    let coverage = ensure_partition_coverage_in_pool(
+        &core_pool_for_test_url(database.pool.url()),
+        StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("coverage pass");
+    match coverage {
+        CoverageOutcome::Failed(failure) => {
+            assert_eq!(failure.stage, CoverageFailureStage::EnsureLeafCoverage);
+            assert_eq!(failure.class_key.as_deref(), Some(class_key));
+            assert!(failure.refusal.contains(gone.leaf_name()), "{failure:?}");
+            assert_eq!(failure.absent_leaves, vec![gone.leaf_name().to_owned()]);
+        }
+        other => panic!("a removed in-horizon leaf fails its class: {other:?}"),
+    }
+    database.drop().await;
+}
+
 fn utc_day_start(value: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
     value.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc()
 }

@@ -238,7 +238,7 @@ function zodRefusals(path: string, refused: ZodAdapterRefused): readonly Contrac
         ),
       ];
     case "KindRefused":
-      return refused.refusals.map((kind) => wireKindRefused(path, kind));
+      return refused.refusals.map((kind) => wireKindRefused(path, kind, kind.help));
     case "SchemaRefused":
       return refused.refusals.map((node) =>
         contractRefused(
@@ -258,8 +258,8 @@ function versionText(version: ZodVersion): string {
 }
 
 /** A `checkKind` refusal under `root` (`input`, `output`, or a parameter). Pure. */
-function wireKindRefused(root: string, refused: KindRefused): ContractRefused {
-  return contractRefused("WireKind", `${root}${refused.path.slice(ROOT_PATH.length)}`, `${refused.detail} [${refused.rule}]`, []);
+function wireKindRefused(root: string, refused: KindRefused, help: readonly string[] = []): ContractRefused {
+  return contractRefused("WireKind", `${root}${refused.path.slice(ROOT_PATH.length)}`, `${refused.detail} [${refused.rule}]`, help);
 }
 
 /** The send form of the parameters. Pure. */

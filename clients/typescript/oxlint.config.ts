@@ -16,6 +16,7 @@ export default defineConfig({
   ignorePatterns: ["lint/anti-slop/**"],
   jsPlugins: [{ name: "anti-slop", specifier: "./lint/anti-slop/index.ts" }],
   rules: {
+    "anti-slop/no-module-mocking": "error",
     "anti-slop/no-runtime-typeof": "error",
     "anti-slop/no-shape-in-symbol-names": "error",
     "anti-slop/no-unknown-parameters": "error",

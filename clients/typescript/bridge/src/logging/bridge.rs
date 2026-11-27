@@ -463,13 +463,9 @@ pub fn make_thread_default(dispatch: &tracing::Dispatch) {
 }
 
 /// The log setup of a task or handler child: the child host calls it once
-/// with the worker's `--loglevel`, before the boot. It sets every logger to
+/// with the worker's `--log-level`, before the boot. It sets every logger to
 /// that level and starts the log bridge. It never fails: when the forwarder
 /// cannot start, one line goes to stderr and the child keeps no log sink.
-#[allow(
-    dead_code,
-    reason = "the child host entry of the child area passes it to the core"
-)]
 pub fn child_log_setup() -> ChildLogSetup {
     ChildLogSetup::Install(Box::new(|level: ChildLogLevel| {
         LEVELS.store_all(child_threshold(level), &[]);

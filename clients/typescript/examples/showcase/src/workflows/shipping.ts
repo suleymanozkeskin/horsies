@@ -13,8 +13,8 @@ export const shipping = defineWorkflow(
   {
     name: "shipping",
     definitionKey: "acme.shipping.v1",
-    params: { orderId: h.string(), courier: h.string(), express: h.boolean() },
-    output: TrackingSeed,
+    parameters: { orderId: h.string(), courier: h.string(), express: h.boolean() },
+    outputType: TrackingSeed,
     onError: "fail",
     checkCases: [SHIPPING_CHECK_PARAMS],
   },

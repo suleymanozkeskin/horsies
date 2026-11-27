@@ -2,8 +2,11 @@
 // addon.
 //
 // - `taskId` and the attempt are the test's; `fencingToken` is `{ taskId, value: attempt }`.
-// - `signal` never fires, and `cancelState()` is `notRequested`.
-// - `spawn` runs the work at once with a signal of its own that never fires; it is never refused.
+// - `cancelState()` gives the test's cancel state for the whole call; `notRequested` when the test gives none.
+// - `signal` fires before the body starts when the cancel state is `requested`, with the reason `{ cause }` of that
+//   state, as after the cancel of a run. It never fires when the cancel state is `notRequested`.
+// - `spawn` runs the work at once with a signal of its own; it is never refused. That signal fires before the work
+//   starts when the cancel state is `requested`, with the same reason, and never fires otherwise.
 // - `state(key)` gives the value of the test's entry for `key`. Each entry pairs a key that `app.provide` returned
 //   with a value of the key's type (typecheck); a key with no entry is a defect: `ClientDefect`.
 // - `workflowContext` is the context of the test's stored form, which the codec writer writes (strict JSON only) and
@@ -16,8 +19,9 @@ import { engineKeysKeptText, type JsonValue } from "../codec/json-value.ts";
 import { refusalText, ROOT_PATH } from "../codec/refusal.ts";
 import type { TaskId } from "../contract/ids.ts";
 import type { AttemptNumber } from "../child/attempt.ts";
-import type { RunControls } from "../child/runtime.ts";
+import type { CancelState, RunControls } from "../child/runtime.ts";
 import { NOT_REQUESTED } from "../child/runtime.ts";
+import { unreachable } from "../wire/unreachable.ts";
 import { type AnyStateKey, type StateKey, type StateValueOf, StateValues } from "../child/state.ts";
 import { ok } from "../wire/result.ts";
 import { NO_WORKFLOW_CONTEXT, type RuntimeWorkflowContext, workflowContextOf } from "../workflow/context.ts";
@@ -53,6 +57,11 @@ export interface TestRuntimeOptions<Keys extends readonly AnyStateKey[]> {
   readonly state?: TestStateEntries<Keys>;
   /** The workflow context of the run, in its stored form. Left out: `noContext`, as a run outside a workflow. */
   readonly workflowContext?: StoredWorkflowContext;
+  /**
+   * The cancel state of the run for the whole call: `{ kind: "requested", cause: "OPERATOR" }` tests the stop path of
+   * a body. A requested state also fires `signal` before the body starts. Left out: `{ kind: "notRequested" }`.
+   */
+  readonly cancelState?: CancelState;
 }
 
 /** The run controls of a test runtime. */
@@ -64,14 +73,14 @@ export function testRunControls<Keys extends readonly AnyStateKey[]>(options: Te
     states.keep(key, value);
   }
 
-  const signal = new AbortController().signal;
+  const cancelState = options.cancelState ?? NOT_REQUESTED;
 
   return Object.freeze({
     taskId: options.taskId,
     attempt: options.attempt,
-    signal,
-    cancelState: () => NOT_REQUESTED,
-    spawn: <T>(_name: string, work: (signal: AbortSignal) => Promise<T>) => ok(startedTestWork(work)),
+    signal: testSignal(cancelState),
+    cancelState: () => cancelState,
+    spawn: <T>(_name: string, work: (signal: AbortSignal) => Promise<T>) => ok(startedTestWork(work, cancelState)),
     state: <T>(key: StateKey<T>): T => states.value(key),
   });
 }
@@ -100,10 +109,28 @@ export function testWorkflowContext(stored: StoredWorkflowContext | undefined): 
   return Object.freeze({ kind: "context", context: read.value });
 }
 
-/** Start test work with a signal of its own; a sync throw of `work` is a rejected Promise, as in a child. */
-function startedTestWork<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+/**
+ * A signal of a test runtime: fired with the reason `{ cause }` of a `requested` cancel state, never fired for
+ * `notRequested`. Pure.
+ */
+function testSignal(cancelState: CancelState): AbortSignal {
+  switch (cancelState.kind) {
+    case "notRequested":
+      return new AbortController().signal;
+    case "requested":
+      return AbortSignal.abort(Object.freeze({ cause: cancelState.cause }));
+    default:
+      return unreachable(cancelState, "testSignal");
+  }
+}
+
+/**
+ * Start test work with a signal of its own (`testSignal` of the cancel state); a sync throw of `work` is a rejected
+ * Promise, as in a child.
+ */
+function startedTestWork<T>(work: (signal: AbortSignal) => Promise<T>, cancelState: CancelState): Promise<T> {
   try {
-    return Promise.resolve(work(new AbortController().signal));
+    return Promise.resolve(work(testSignal(cancelState)));
   } catch (cause) {
     return Promise.reject(cause);
   }

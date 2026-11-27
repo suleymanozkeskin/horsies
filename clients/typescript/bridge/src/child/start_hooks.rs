@@ -19,11 +19,15 @@ use horsies_core::{
 };
 use napi_derive::napi;
 
-use crate::call::callback::{CallbackFailure, JsCallback, NotRunCause};
+use crate::call::callback::{CallbackFailure, CallbackWait, JsCallback, NotRunCause};
 
 /// The calls of the hook dispatcher that wait for the JavaScript thread at
 /// once: the core runs one hook at a time.
 pub const START_HOOK_QUEUE_BOUND: usize = 1;
+
+/// The wait of a hook call. A start hook is user code of any duration; the
+/// call ends at its answer or at the end of the environment.
+const START_HOOK_WAIT: CallbackWait = CallbackWait::NoBound;
 
 /// The facts of the child that a start hook runs in.
 #[napi(
@@ -112,7 +116,7 @@ fn named_hook(index: usize, name: String, dispatcher: Arc<HookDispatcher>) -> Na
                     facts: StartFactsRecord::of(facts),
                 };
                 dispatcher
-                    .call(call)
+                    .call(call, START_HOOK_WAIT)
                     .await
                     .map(|_ended: StartHookEnd| ())
                     .map_err(hook_failure)
@@ -124,6 +128,9 @@ fn named_hook(index: usize, name: String, dispatcher: Arc<HookDispatcher>) -> Na
 /// The core's failure of a hook call that did not end. Pure.
 fn hook_failure(failure: CallbackFailure) -> ChildHookFailure {
     let cause = match failure {
+        CallbackFailure::NoAnswer { bound } => {
+            format!("the hook gave no answer within {bound:?}")
+        }
         CallbackFailure::Threw { name, message, .. } => format!("{name}: {message}"),
         CallbackFailure::NotRun {
             cause: NotRunCause::QueueFull,
@@ -178,6 +185,12 @@ mod tests {
                     cause: NotRunCause::EnvClosing,
                 },
                 "closing",
+            ),
+            (
+                CallbackFailure::NoAnswer {
+                    bound: std::time::Duration::from_secs(3),
+                },
+                "no answer within 3s",
             ),
             (
                 CallbackFailure::Panicked {

@@ -69,13 +69,15 @@ export type CheckedPolicy =
       readonly optional: readonly number[];
     };
 
+/** The output of a checked spec: the index of its output node, or none (a workflow with no `outputType`). */
+export type CheckedOutput = { readonly kind: "node"; readonly index: number } | { readonly kind: "noOutput" };
+
 /** A spec that passed both gates of the checks. Plain data. */
 export type CheckedSpec = {
   readonly name: string;
   readonly definitionKey: string;
   readonly onError: SpecOnError;
   readonly nodes: readonly CheckedNode[];
-  /** The index of the output node. */
-  readonly output: number;
+  readonly output: CheckedOutput;
   readonly successPolicy: CheckedPolicy;
 };
