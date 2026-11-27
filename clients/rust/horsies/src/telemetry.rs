@@ -217,6 +217,8 @@ mod untraced {
 #[cfg(all(test, not(feature = "otel")))]
 mod tests {
     use horsies_core::telemetry::trace_carrier::SendTrace;
+    #[cfg(feature = "cli")]
+    use horsies_core::BodyScope;
     use horsies_core::{TaskSendErrorCode, WorkflowStartErrorCode};
 
     use super::*;
