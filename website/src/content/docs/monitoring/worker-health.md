@@ -28,7 +28,7 @@ Use the database ping and the worker ping for active liveness at the time of the
 
 ## Is Postgres alive?
 
-The database ping runs `SELECT 1` through the live broker pool, so success also confirms that a pooled connection could be checked out. It reports the round-trip latency. A failure has the code `DB_PING_FAILED`.
+The database ping runs `SELECT 1` through the live broker pool, so success also confirms that a pooled connection could be checked out. It reports the round-trip latency. A failure has the code `DATABASE_PING_FAILED`.
 
 ## Which workers are alive?
 

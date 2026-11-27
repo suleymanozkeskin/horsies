@@ -228,7 +228,7 @@ async def test_a_registered_code_set_that_the_core_refuses_raises_value_error() 
     connection = _history_connection(['TRANSIENT'])
 
     with pytest.raises(ValueError, match="registered_task_codes of task 'charge'"):
-        _ = await _rerun_with(connection, {TASK_NAME: ('BROKER_ERROR',)})
+        _ = await _rerun_with(connection, {TASK_NAME: ('DATABASE_ERROR',)})
 
     assert connection.execute.await_count == 1
 

@@ -44,7 +44,7 @@ use horsies_core::{
     build_failed_error, merged_child_input, node_failure_result, params_decode_failed_error,
     params_refused_error, parse_workflow_spec_data, subworkflow_load_failed_error, ChildBuildInput,
     ChildSpecError, ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable,
-    ClientChildSpec, ErrorCode, HorsiesError, NodeInput, RefusedMember, TaskError,
+    ClientChildSpec, HorsiesError, HorsiesErrorCode, NodeInput, RefusedMember, TaskError,
 };
 use napi::bindgen_prelude::{BigInt, FnArgs, Function};
 use napi_derive::napi;
@@ -448,7 +448,7 @@ fn build_error_of(
     match code {
         BuildRefusalCode::NoCode => Ok(HorsiesError::new(message)),
         BuildRefusalCode::Catalog { code } => {
-            match <ErrorCode as CodeEnum>::VARIANTS
+            match <HorsiesErrorCode as CodeEnum>::VARIANTS
                 .iter()
                 .find(|known| known.wire_value() == code)
             {

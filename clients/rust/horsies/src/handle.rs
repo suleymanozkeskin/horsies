@@ -27,10 +27,9 @@ use horsies_core::core::task::result::{
 use horsies_core::core::task::StoredErrorRefused;
 use horsies_core::handle::CoreHandle;
 use horsies_core::{
-    process_role, wait_inside_task_message, BoundedWait, BrokerError, BrokerErrorCode,
-    BrokerOperationError, BuiltInTaskCode, JsonText, OperationalErrorCode, OutcomeCode,
-    ProcessRole, RawResultRead, RawResultRecord, RetrievalCode, StoredEnvelopeText, TaskInfoRead,
-    TaskResult,
+    process_role, wait_inside_task_message, BoundedWait, BrokerError, BuiltInTaskCode,
+    DatabaseErrorCode, DatabaseOperationError, JsonText, OperationalCode, OutcomeCode, ProcessRole,
+    RawResultRead, RawResultRecord, RetrievalCode, StoredEnvelopeText, TaskInfoRead, TaskResult,
 };
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
@@ -97,8 +96,9 @@ pub enum ReadError {
     /// the result of this task's types. `cause` names no value.
     #[error("the stored result of task {task_id} does not read: {cause}")]
     StoredResultUnreadable { task_id: Uuid, cause: String },
-    /// The stored error has a user code that `E` does not name: the task
-    /// that stored it has another code type, or another version of it.
+    /// `UNKNOWN_CUSTOM_CODE`: the stored error has a user code that `E`
+    /// does not name: the task that stored it has another code type, or
+    /// another version of it.
     #[error(
         "the stored error of task {task_id} has user code {code}, which {code_type} does not name"
     )]
@@ -124,11 +124,11 @@ pub enum ReadError {
     /// async form reads.
     #[error("{message}")]
     AsyncContext { message: String },
-    /// `BROKER_ERROR`: the database or the connection failed; `retryable`
+    /// `DATABASE_ERROR`: the database or the connection failed; `retryable`
     /// is the classification of the cause.
     #[error("the read failed ({code}): {message}")]
     Database {
-        code: BrokerErrorCode,
+        code: DatabaseErrorCode,
         message: String,
         retryable: bool,
     },
@@ -136,20 +136,21 @@ pub enum ReadError {
 
 impl ReadError {
     /// The library code of this failure, as Python's `TaskHandle.get`
-    /// stores it. A user code that `E` does not name is a stored result
-    /// that does not read: `RESULT_DESERIALIZATION_ERROR`.
+    /// stores it. A user code that `E` does not name is
+    /// `UNKNOWN_CUSTOM_CODE`.
     pub fn code(&self) -> BuiltInTaskCode {
         match self {
             Self::WaitTimedOut { .. } => RetrievalCode::WaitTimeout.into(),
             Self::TaskNotFound { .. } => RetrievalCode::TaskNotFound.into(),
             Self::ResultNotAvailable { .. } => RetrievalCode::ResultNotAvailable.into(),
-            Self::StoredResultUnreadable { .. } | Self::UnknownUserCode { .. } => {
-                OperationalErrorCode::ResultDeserializationError.into()
+            Self::StoredResultUnreadable { .. } => {
+                OperationalCode::ResultDeserializationError.into()
             }
+            Self::UnknownUserCode { .. } => RetrievalCode::UnknownCustomCode.into(),
             Self::InvalidInput { .. } => RetrievalCode::InvalidInput.into(),
             Self::WaitInsideTask { .. } => RetrievalCode::WaitInsideTask.into(),
             Self::AsyncContext { .. } => RetrievalCode::AsyncContext.into(),
-            Self::Database { .. } => OperationalErrorCode::BrokerError.into(),
+            Self::Database { .. } => OperationalCode::DatabaseError.into(),
         }
     }
 
@@ -172,7 +173,7 @@ impl ReadError {
     /// The failure of a connect or a schema install before the read.
     pub(crate) fn of_broker(error: &BrokerError) -> Self {
         Self::Database {
-            code: BrokerErrorCode::TaskInfoQueryFailed,
+            code: DatabaseErrorCode::TaskInfoQueryFailed,
             message: error.to_string(),
             retryable: error.is_retryable(),
         }
@@ -180,9 +181,9 @@ impl ReadError {
 
     /// The failure of a read. A stored payload that does not read keeps its
     /// own variant.
-    pub(crate) fn of_operation(task_id: Uuid, error: BrokerOperationError) -> Self {
+    pub(crate) fn of_operation(task_id: Uuid, error: DatabaseOperationError) -> Self {
         match error {
-            BrokerOperationError::InvalidJsonPayload { message, .. } => {
+            DatabaseOperationError::InvalidJsonPayload { message, .. } => {
                 Self::StoredResultUnreadable {
                     task_id,
                     cause: message,
@@ -878,7 +879,7 @@ mod tests {
                 message: "blocking get on a runtime thread".to_owned(),
             },
             ReadError::Database {
-                code: BrokerErrorCode::TaskInfoQueryFailed,
+                code: DatabaseErrorCode::TaskInfoQueryFailed,
                 message: "down".to_owned(),
                 retryable: true,
             },
@@ -962,7 +963,7 @@ mod tests {
     fn an_invalid_payload_read_is_unreadable_and_another_failure_is_database() {
         let unreadable = ReadError::of_operation(
             task(),
-            BrokerOperationError::InvalidJsonPayload {
+            DatabaseOperationError::InvalidJsonPayload {
                 message: "digest mismatch".to_owned(),
                 cause: Box::new(horsies_core::BrokerCheckCause::Check),
             },
@@ -973,7 +974,7 @@ mod tests {
         ));
         let database = ReadError::of_operation(
             task(),
-            BrokerOperationError::task_info_query_failed(
+            DatabaseOperationError::task_info_query_failed(
                 task(),
                 horsies_core::BrokerOperationSource::Broker(
                     horsies_core::BrokerError::ListenerClosed,

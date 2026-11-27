@@ -63,7 +63,7 @@ The module holds no state. Each send finds the task's typed function in the app 
 A send runs these steps in order, and stops at the first refusal:
 
 1. A generated send finds the task in the app that it names: an app that does not register the task refuses with `ValidationFailed`.
-2. The suppression check: a suppressed send returns `SendSuppressed`.
+2. The suppression check: a suppressed send returns `Suppressed`.
 3. The retention of the send.
 4. The read-back of the input: encode it, decode the text with `A`, encode that value again. Two different texts refuse the send with `ValidationFailed` before any statement.
 5. The payload size: an input over `payload.reject_bytes` is `PayloadTooLarge`.
@@ -111,7 +111,7 @@ The meaning of the reservation window and of retention is on [Retention Config](
 
 | Variant | Code | Fields | Retry methods |
 |---------|------|--------|---------------|
-| `SendSuppressed` | `SEND_SUPPRESSED` | `message` | Refused |
+| `Suppressed` | `SEND_SUPPRESSED` | `message` | Refused |
 | `AsyncContext` | `ASYNC_CONTEXT` | `task_id`, `payload`, `message` | Accepted |
 | `ValidationFailed` | `VALIDATION_FAILED` | `message` | Refused |
 | `EnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable` | Accepted |

@@ -221,7 +221,7 @@ describe("layer 7: sub-workflows", () => {
     const childId = childIdOf(nodeById(nodes, parents.FAILURE_PROBE_CHILD));
 
     assert.deepEqual(await workflowValue(handle), {
-      argsCode: "SUBWORKFLOW_FAILED",
+      argsCode: "SUB_WORKFLOW_FAILED",
       argsChildId: childId,
       ctxChildId: childId,
       summaryStatus: "FAILED",

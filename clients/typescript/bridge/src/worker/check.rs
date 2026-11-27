@@ -144,7 +144,7 @@ fn connections_outcome(errors: &[horsies_core::HorsiesError]) -> LiveCheckOutcom
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::{CheckInterruption, ErrorCode, HorsiesError, ListenProbeFailure};
+    use horsies_core::{CheckInterruption, HorsiesError, HorsiesErrorCode, ListenProbeFailure};
 
     use super::*;
 
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn each_connection_error_is_one_refusal_with_its_code() {
         let errors = vec![HorsiesError::new("profile io needs 41 connections")
-            .with_code(ErrorCode::CheckWorkerConnections)];
+            .with_code(HorsiesErrorCode::CheckWorkerConnections)];
         let LiveCheckOutcome::ConnectionsRefused { refusals } = connections_outcome(&errors) else {
             panic!("an error refuses");
         };

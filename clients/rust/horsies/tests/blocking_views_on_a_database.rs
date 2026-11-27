@@ -24,10 +24,10 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use horsies::{
-    task, AppConfig, HandleOperationError, HandleResult, Horsies, HorsiesError, NodeKey,
-    NodeResult, PingTarget, ReadError, TaskError, TaskFunction, TaskInfoParts, TaskOutcome,
-    TaskSendErrorCode, TaskSendOptions, TaskStatus, WaitLimit, WholeSeconds, WorkerHistoryLimit,
-    WorkflowDefConfig, WorkflowDefinition, WorkflowReadError, WorkflowSpec, WorkflowSpecBuilder,
+    task, AppConfig, HandleResult, Horsies, HorsiesError, NodeKey, NodeResult, PingTarget,
+    ReadError, TaskError, TaskFunction, TaskInfoParts, TaskOutcome, TaskSendErrorCode,
+    TaskSendOptions, TaskStatus, WaitLimit, WholeSeconds, WorkerHistoryLimit, WorkflowDefConfig,
+    WorkflowDefinition, WorkflowHandleError, WorkflowReadError, WorkflowSpec, WorkflowSpecBuilder,
     WorkflowStartErrorCode, WorkflowStatus,
 };
 use horsies_core::core::lifecycle::{OwnedClaim, TerminalizationOutcome, WorkflowSuccessOutcome};
@@ -476,7 +476,7 @@ fn assert_task_not_found<V: Debug>(read: Result<V, ReadError>, task_id: Uuid) {
 /// `answer` is `WORKFLOW_NOT_FOUND` of `workflow_id`.
 fn assert_workflow_not_found<V: Debug>(answer: HandleResult<V>, workflow_id: Uuid) {
     match answer {
-        Err(HandleOperationError::WorkflowNotFound {
+        Err(WorkflowHandleError::NotFound {
             workflow_id: missing,
             ..
         }) => assert_eq!(missing, workflow_id),

@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from horsies.core.models.resilience import WorkerResilienceConfig
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 
 
 @pytest.mark.unit
@@ -112,7 +112,7 @@ class TestResilienceConfigCrossFieldValidation:
                 db_retry_max_ms=500,
             )
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_RESILIENCE
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_RESILIENCE
         assert error.notes == [
             'db_retry_initial_ms=5000ms',
             'db_retry_max_ms=500ms',

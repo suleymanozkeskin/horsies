@@ -19,7 +19,7 @@ from horsies import (
     Failed,
     Horsies,
     Ok,
-    OperationalErrorCode,
+    OperationalCode,
     OutcomeCode,
     ReadResult,
     Result,
@@ -76,7 +76,7 @@ def context_code_left_out(node: TaskNode[str, WelcomeCode], ctx: WorkflowContext
             match task_error.error_code:  # pyright: ignore[reportMatchNotExhaustive]
                 case WelcomeCode.INVALID_EMAIL:
                     return 'invalid'
-                case OperationalErrorCode() | ContractCode() | RetrievalCode() | OutcomeCode():
+                case OperationalCode() | ContractCode() | RetrievalCode() | OutcomeCode():
                     return 'library'
     return ''
 
@@ -87,7 +87,7 @@ def every_code(task_error: TaskError[WelcomeCode]) -> str:
             return 'invalid'
         case WelcomeCode.MAILBOX_FULL:
             return 'full'
-        case OperationalErrorCode() | ContractCode() | RetrievalCode() | OutcomeCode():
+        case OperationalCode() | ContractCode() | RetrievalCode() | OutcomeCode():
             return 'library'
         case _ as unreachable:
             assert_never(unreachable)
@@ -97,7 +97,7 @@ def code_left_out(task_error: TaskError[WelcomeCode]) -> str:
     match task_error.error_code:  # pyright: ignore[reportMatchNotExhaustive]
         case WelcomeCode.INVALID_EMAIL:
             return 'invalid'
-        case OperationalErrorCode() | ContractCode() | RetrievalCode() | OutcomeCode():
+        case OperationalCode() | ContractCode() | RetrievalCode() | OutcomeCode():
             return 'library'
     return ''
 
@@ -106,7 +106,7 @@ def text_codes_need_a_default_arm(task_error: TaskError) -> str:
     match task_error.error_code:  # pyright: ignore[reportMatchNotExhaustive]
         case 'INVALID_EMAIL':
             return 'invalid'
-        case OperationalErrorCode() | ContractCode() | RetrievalCode() | OutcomeCode():
+        case OperationalCode() | ContractCode() | RetrievalCode() | OutcomeCode():
             return 'library'
     return ''
 
@@ -126,7 +126,7 @@ def retry_codes() -> None:
     of the declared `Enum` class. A plain `str` is refused."""
     _ = RetryPolicy.fixed(
         [1, 2],
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED, WelcomeCode.MAILBOX_FULL],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED, WelcomeCode.MAILBOX_FULL],
     )
     _ = RetryPolicy.exponential(1, max_retries=2, auto_retry_for=[OutcomeCode.TASK_TIMEOUT])
     _ = RetryPolicy.fixed([1], auto_retry_for=['MAILBOX_FULL'])  # pyright: ignore[reportArgumentType]

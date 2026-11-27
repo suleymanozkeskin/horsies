@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
-import { brokerCoreErrorFromNative } from "../../../horsies/src/_catalog/broker_errors.ts";
-import type { BrokerCoreEnqueueError } from "../../../horsies/src/_catalog/broker_errors.ts";
+import { databaseCoreErrorFromNative } from "../../../horsies/src/_catalog/broker_errors.ts";
+import type { DatabaseCoreEnqueueError } from "../../../horsies/src/_catalog/broker_errors.ts";
 import {
   CONNECTION_FAILURE,
   expectConverted,
@@ -14,127 +14,127 @@ import {
 
 const MESSAGE = "the broker refused the call";
 
-describe("brokerCoreErrorFromNative", () => {
-  test("BrokerOperationFailed keeps the code of its subset", () => {
-    const value = brokerCoreErrorFromNative({
-      class: "BrokerOperationFailed",
-      slots: { code: "CLOSE_FAILED", message: MESSAGE, retryable: true, exception: SERVER_FAILURE },
+describe("databaseCoreErrorFromNative", () => {
+  test("DatabaseOperationFailed keeps the code of its subset", () => {
+    const value = databaseCoreErrorFromNative({
+      class: "DatabaseOperationFailed",
+      slots: { code: "CLOSE_FAILED", message: MESSAGE, retryable: true, cause: SERVER_FAILURE },
     });
 
     expectConverted(value, {
-      shown: { code: "CLOSE_FAILED", retryable: true },
-      hidden: ["message", "exception"],
+      shown: { kind: "closeFailed", code: "CLOSE_FAILED", retryable: true },
+      hidden: ["message", "cause"],
       message: MESSAGE,
       cause: SERVER_FAILURE,
     });
   });
 
-  test("BrokerEnqueueFailed", () => {
-    const value = brokerCoreErrorFromNative({
-      class: "BrokerEnqueueFailed",
-      slots: { message: MESSAGE, retryable: true, exception: CONNECTION_FAILURE },
+  test("DatabaseEnqueueFailed", () => {
+    const value = databaseCoreErrorFromNative({
+      class: "DatabaseEnqueueFailed",
+      slots: { message: MESSAGE, retryable: true, cause: CONNECTION_FAILURE },
     });
 
     expectConverted(value, {
-      shown: { code: "ENQUEUE_FAILED", retryable: true },
-      hidden: ["message", "exception"],
+      shown: { kind: "enqueueFailed", code: "ENQUEUE_FAILED", retryable: true },
+      hidden: ["message", "cause"],
       message: MESSAGE,
       cause: CONNECTION_FAILURE,
     });
   });
 
-  test("BrokerPayloadMismatch never retries", () => {
-    const value = brokerCoreErrorFromNative({
-      class: "BrokerPayloadMismatch",
+  test("DatabasePayloadMismatch never retries", () => {
+    const value = databaseCoreErrorFromNative({
+      class: "DatabasePayloadMismatch",
       slots: { message: MESSAGE },
     });
 
     expectConverted(value, {
-      shown: { code: "PAYLOAD_MISMATCH", retryable: false },
+      shown: { kind: "payloadMismatch", code: "PAYLOAD_MISMATCH", retryable: false },
       hidden: ["message"],
       message: MESSAGE,
       cause: null,
     });
   });
 
-  test("BrokerIdempotencyKeyConflict names the owner task", () => {
-    const value = brokerCoreErrorFromNative({
-      class: "BrokerIdempotencyKeyConflict",
+  test("DatabaseIdempotencyKeyConflict names the owner task", () => {
+    const value = databaseCoreErrorFromNative({
+      class: "DatabaseIdempotencyKeyConflict",
       slots: { message: MESSAGE, owner_task_id: OTHER_TASK_ID },
     });
 
     expectConverted(value, {
-      shown: { code: "IDEMPOTENCY_KEY_CONFLICT", retryable: false, ownerTaskId: OTHER_TASK_ID },
+      shown: { kind: "idempotencyKeyConflict", code: "IDEMPOTENCY_KEY_CONFLICT", retryable: false, ownerTaskId: OTHER_TASK_ID },
       hidden: ["message"],
       message: MESSAGE,
       cause: null,
     });
   });
 
-  test("BrokerInvalidJsonPayload", () => {
-    const value = brokerCoreErrorFromNative({
-      class: "BrokerInvalidJsonPayload",
-      slots: { message: MESSAGE, exception: JSON_UNREADABLE },
+  test("DatabaseInvalidJsonPayload", () => {
+    const value = databaseCoreErrorFromNative({
+      class: "DatabaseInvalidJsonPayload",
+      slots: { message: MESSAGE, cause: JSON_UNREADABLE },
     });
 
     expectConverted(value, {
-      shown: { code: "INVALID_JSON_PAYLOAD", retryable: false },
-      hidden: ["message", "exception"],
+      shown: { kind: "invalidJsonPayload", code: "INVALID_JSON_PAYLOAD", retryable: false },
+      hidden: ["message", "cause"],
       message: MESSAGE,
       cause: JSON_UNREADABLE,
     });
   });
 
-  test("BrokerInvalidTaskOptions", () => {
-    const value = brokerCoreErrorFromNative({
-      class: "BrokerInvalidTaskOptions",
-      slots: { message: MESSAGE, exception: NO_CAUSE },
+  test("DatabaseInvalidTaskOptions", () => {
+    const value = databaseCoreErrorFromNative({
+      class: "DatabaseInvalidTaskOptions",
+      slots: { message: MESSAGE, cause: NO_CAUSE },
     });
 
     expectConverted(value, {
-      shown: { code: "INVALID_TASK_OPTIONS", retryable: false },
-      hidden: ["message", "exception"],
+      shown: { kind: "invalidTaskOptions", code: "INVALID_TASK_OPTIONS", retryable: false },
+      hidden: ["message", "cause"],
       message: MESSAGE,
       cause: NO_CAUSE,
     });
   });
 
-  test("BrokerInvalidInput", () => {
-    const value = brokerCoreErrorFromNative({
-      class: "BrokerInvalidInput",
-      slots: { message: MESSAGE, exception: RULE_REFUSED },
+  test("DatabaseInvalidInput", () => {
+    const value = databaseCoreErrorFromNative({
+      class: "DatabaseInvalidInput",
+      slots: { message: MESSAGE, cause: RULE_REFUSED },
     });
 
     expectConverted(value, {
-      shown: { code: "INVALID_INPUT", retryable: false },
-      hidden: ["message", "exception"],
+      shown: { kind: "invalidInput", code: "INVALID_INPUT", retryable: false },
+      hidden: ["message", "cause"],
       message: MESSAGE,
       cause: RULE_REFUSED,
     });
   });
 
-  test("BrokerListenerDisabled", () => {
-    const value = brokerCoreErrorFromNative({
-      class: "BrokerListenerDisabled",
+  test("DatabaseListenerDisabled", () => {
+    const value = databaseCoreErrorFromNative({
+      class: "DatabaseListenerDisabled",
       slots: { message: MESSAGE },
     });
 
     expectConverted(value, {
-      shown: { code: "LISTENER_DISABLED", retryable: false },
+      shown: { kind: "listenerDisabled", code: "LISTENER_DISABLED", retryable: false },
       hidden: ["message"],
       message: MESSAGE,
       cause: null,
     });
   });
 
-  test("BrokerWaitInsideTask", () => {
-    const value = brokerCoreErrorFromNative({
-      class: "BrokerWaitInsideTask",
+  test("DatabaseWaitInsideTask", () => {
+    const value = databaseCoreErrorFromNative({
+      class: "DatabaseWaitInsideTask",
       slots: { message: MESSAGE },
     });
 
     expectConverted(value, {
-      shown: { code: "WAIT_INSIDE_TASK", retryable: false },
+      shown: { kind: "waitInsideTask", code: "WAIT_INSIDE_TASK", retryable: false },
       hidden: ["message"],
       message: MESSAGE,
       cause: null,
@@ -143,20 +143,20 @@ describe("brokerCoreErrorFromNative", () => {
 
   test("a class name that this build does not know throws", () => {
     expect(() =>
-      brokerCoreErrorFromNative(JSON.parse('{"class":"BrokerAsyncContext","slots":{"message":"m"}}')),
-    ).toThrow("brokerCoreErrorFromNative: unknown class name BrokerAsyncContext");
+      databaseCoreErrorFromNative(JSON.parse('{"class":"DatabaseAsyncContext","slots":{"message":"m"}}')),
+    ).toThrow("databaseCoreErrorFromNative: unknown class name DatabaseAsyncContext");
   });
 
   test("an enqueue error narrows on its code", () => {
-    const value = brokerCoreErrorFromNative({
-      class: "BrokerInvalidInput",
-      slots: { message: MESSAGE, exception: RULE_REFUSED },
+    const value = databaseCoreErrorFromNative({
+      class: "DatabaseInvalidInput",
+      slots: { message: MESSAGE, cause: RULE_REFUSED },
     });
 
     expect(value.code).toBe("INVALID_INPUT");
 
     if (value.code === "INVALID_INPUT") {
-      const enqueueError: BrokerCoreEnqueueError = value;
+      const enqueueError: DatabaseCoreEnqueueError = value;
 
       expect(enqueueError.retryable).toBe(false);
     }

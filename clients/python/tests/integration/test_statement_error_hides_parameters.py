@@ -84,5 +84,5 @@ async def test_failed_enqueue_hides_the_task_arguments(
     assert 'canceling statement due to lock timeout' in error.message
     assert CORE_STATEMENT in error.message
     assert ARGUMENT_MARKER not in error.message
-    assert isinstance(error.exception, BaseException)
-    assert ARGUMENT_MARKER not in str(error.exception)
+    assert isinstance(error.cause, BaseException)
+    assert ARGUMENT_MARKER not in str(error.cause)

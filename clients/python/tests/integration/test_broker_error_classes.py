@@ -22,10 +22,10 @@ from horsies._catalog.error_detail import NoCause
 from horsies._core import CoreConnectionError
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
-    BrokerErrorCode,
-    BrokerInvalidInput,
-    BrokerListenerDisabled,
-    BrokerOperationFailed,
+    DatabaseErrorCode,
+    DatabaseInvalidInput,
+    DatabaseListenerDisabled,
+    DatabaseOperationFailed,
 )
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import is_err
@@ -63,25 +63,25 @@ async def listenerless_broker() -> AsyncGenerator[PostgresBroker, None]:
 
 def _assert_failed_connect(
     error: object,
-    code: BrokerErrorCode,
+    code: DatabaseErrorCode,
     prefix: str,
     subject: str,
 ) -> None:
     """A failed connect of a broker operation, as the core builds it:
-    ``BrokerOperationFailed`` with the operation's code, Python 0.7's message
+    ``DatabaseOperationFailed`` with the operation's code, Python 0.7's message
     (``prefix`` and the cause's text), retryable, and the core's class of the
     cause with the operation as its subject and the cause's own text."""
-    assert type(error) is BrokerOperationFailed
+    assert type(error) is DatabaseOperationFailed
     assert error.code is code
     assert error.retryable is True
     assert error.message.startswith(prefix)
     cause_text = error.message.removeprefix(prefix)
     assert cause_text != ''
-    assert type(error.exception) is CoreConnectionError
-    assert error.exception.subject == subject
-    assert error.exception.message == cause_text
-    assert error.exception.retryable is True
-    assert str(error.exception) == f'{subject}: {cause_text}'
+    assert type(error.cause) is CoreConnectionError
+    assert error.cause.subject == subject
+    assert error.cause.message == cause_text
+    assert error.cause.retryable is True
+    assert str(error.cause) == f'{subject}: {cause_text}'
 
 
 async def test_a_failed_database_ping_is_db_ping_failed(
@@ -92,7 +92,7 @@ async def test_a_failed_database_ping_is_db_ping_failed(
     assert is_err(result)
     _assert_failed_connect(
         result.err_value,
-        BrokerErrorCode.DB_PING_FAILED,
+        DatabaseErrorCode.DATABASE_PING_FAILED,
         'ping_database failed: ',
         'ping_database',
     )
@@ -108,7 +108,7 @@ async def test_a_failed_worker_ping_is_worker_ping_failed(
     assert is_err(result)
     _assert_failed_connect(
         result.err_value,
-        BrokerErrorCode.WORKER_PING_FAILED,
+        DatabaseErrorCode.WORKER_PING_FAILED,
         'ping_workers reply subscribe failed: ',
         'ping_workers',
     )
@@ -122,7 +122,7 @@ async def test_a_failed_task_info_read_names_the_task(
     assert is_err(result)
     _assert_failed_connect(
         result.err_value,
-        BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+        DatabaseErrorCode.TASK_INFO_QUERY_FAILED,
         f'get_task_info failed for {TASK_ID}: ',
         'task_info',
     )
@@ -136,7 +136,7 @@ async def test_a_failed_result_read_names_the_task(
     assert is_err(result)
     _assert_failed_connect(
         result.err_value,
-        BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+        DatabaseErrorCode.TASK_INFO_QUERY_FAILED,
         f'Broker error while retrieving task {TASK_ID}: ',
         'raw_result_record',
     )
@@ -150,7 +150,7 @@ async def test_a_failed_monitoring_read_names_the_read(
     assert is_err(result)
     _assert_failed_connect(
         result.err_value,
-        BrokerErrorCode.MONITORING_QUERY_FAILED,
+        DatabaseErrorCode.MONITORING_QUERY_FAILED,
         'list_worker_states failed: ',
         'list_worker_states',
     )
@@ -163,11 +163,11 @@ async def test_a_refused_argument_is_invalid_input_with_no_cause(
 
     assert is_err(result)
     error = result.err_value
-    assert type(error) is BrokerInvalidInput
-    assert error.code is BrokerErrorCode.INVALID_INPUT
+    assert type(error) is DatabaseInvalidInput
+    assert error.code is DatabaseErrorCode.INVALID_INPUT
     assert error.retryable is False
     assert error.message == 'timeout_seconds must be positive, got 0'
-    assert type(error.exception) is NoCause
+    assert type(error.cause) is NoCause
 
 
 async def test_a_refused_history_limit_is_invalid_input_with_no_cause(
@@ -177,9 +177,9 @@ async def test_a_refused_history_limit_is_invalid_input_with_no_cause(
 
     assert is_err(result)
     error = result.err_value
-    assert type(error) is BrokerInvalidInput
+    assert type(error) is DatabaseInvalidInput
     assert error.message == 'limit must be positive when set, got 0'
-    assert type(error.exception) is NoCause
+    assert type(error.cause) is NoCause
 
 
 async def test_a_ping_on_a_broker_with_no_listener_is_listener_disabled(
@@ -189,8 +189,8 @@ async def test_a_ping_on_a_broker_with_no_listener_is_listener_disabled(
 
     assert is_err(result)
     error = result.err_value
-    assert type(error) is BrokerListenerDisabled
-    assert error.code is BrokerErrorCode.LISTENER_DISABLED
+    assert type(error) is DatabaseListenerDisabled
+    assert error.code is DatabaseErrorCode.LISTENER_DISABLED
     assert error.retryable is False
     assert error.message == (
         'ping_workers listener unavailable: this broker was built with '

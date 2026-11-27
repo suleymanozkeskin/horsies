@@ -153,6 +153,7 @@ In 0.7, the `exception` field of a database failure held the exception of the dr
 
 Code that tests the class of `exception` against a SQLAlchemy or psycopg class must test the core classes. The SQLSTATE of a server error is `CoreServerError.sqlstate`:
 
+<!-- check: skip elided -- the 0.8.0 names; a later release renames them -->
 ```python
 from horsies import BrokerOperationFailed, CoreServerError
 

@@ -63,7 +63,7 @@ def _failure_record(cause: BaseException, *, retryable: bool) -> WorkflowStartEn
         retryable=retryable,
         workflow_name='test-wf',
         workflow_id=WORKFLOW_ID,
-        exception=cause,
+        cause=cause,
     )
 
 
@@ -102,7 +102,7 @@ class TestTransactionCatch:
 
         assert is_err(result)
         assert isinstance(result.err_value, WorkflowStartEnqueueFailed)
-        assert result.err_value.exception is cause
+        assert result.err_value.cause is cause
         assert result.err_value.retryable is True
 
     @pytest.mark.asyncio
@@ -116,7 +116,7 @@ class TestTransactionCatch:
 
         assert is_err(result)
         assert isinstance(result.err_value, WorkflowStartEnqueueFailed)
-        assert result.err_value.exception is cause
+        assert result.err_value.cause is cause
         assert result.err_value.retryable is False
 
     @pytest.mark.asyncio

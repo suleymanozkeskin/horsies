@@ -3,7 +3,7 @@
 // `core/src/core/config/worker_profile.rs`). A worker runs the profile of its name. The core checks every profile
 // with the app config. A refusal of a profile field has the code of a worker profile (`HRS-218`).
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import {
   CHILD_POOL_CONNECTIONS_MAX,
   CHILD_POOL_CONNECTIONS_MIN,
@@ -185,7 +185,7 @@ export interface WorkerProfileInput {
 
 /** A bound of a field of a worker profile, with the code of a worker profile refusal. */
 function profileBound(min: number, max: number): IntegerBound {
-  return Object.freeze({ min, max, code: ErrorCode.CONFIG_INVALID_WORKER_PROFILE });
+  return Object.freeze({ min, max, code: HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE });
 }
 
 const TASK_COUNT = profileBound(TASK_LIMIT_MIN, TASK_LIMIT_MAX);
@@ -211,7 +211,7 @@ export function workerProfilesJson(
   return checkedObject(
     Object.entries(profiles).map(([name, profile]) => {
       const at = keyPath(path, name);
-      const checkedName = checkedText(name, ErrorCode.CONFIG_INVALID_WORKER_PROFILE, at);
+      const checkedName = checkedText(name, HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE, at);
 
       return checkedName.kind === "refused" ? checkedName : entry(name, profileJson(profile, at));
     }),

@@ -3,15 +3,17 @@
 import type { CoreCause, NoCause } from "./error_detail.ts";
 
 export interface WorkflowStartValidationFailed {
+  readonly kind: "validationFailed";
   readonly code: "VALIDATION_FAILED";
   readonly retryable: false;
   readonly message: string;
   readonly workflowName: string;
   readonly workflowId: string;
-  readonly exception: CoreCause | NoCause;
+  readonly cause: CoreCause | NoCause;
 }
 
 export interface WorkflowStartIdConflict {
+  readonly kind: "idConflict";
   readonly code: "WORKFLOW_ID_CONFLICT";
   readonly retryable: false;
   readonly message: string;
@@ -21,6 +23,7 @@ export interface WorkflowStartIdConflict {
 }
 
 export interface WorkflowStartCommandConflict {
+  readonly kind: "commandConflict";
   readonly code: "WORKFLOW_COMMAND_CONFLICT";
   readonly retryable: false;
   readonly message: string;
@@ -29,12 +32,13 @@ export interface WorkflowStartCommandConflict {
 }
 
 export interface WorkflowStartEnqueueFailed {
+  readonly kind: "enqueueFailed";
   readonly code: "ENQUEUE_FAILED";
   readonly message: string;
   readonly retryable: boolean;
   readonly workflowName: string;
   readonly workflowId: string;
-  readonly exception: CoreCause;
+  readonly cause: CoreCause;
 }
 
 export type WorkflowStartCoreError =
@@ -49,7 +53,7 @@ export interface NativeWorkflowStartValidationFailed {
     readonly message: string;
     readonly workflow_name: string;
     readonly workflow_id: string;
-    readonly exception: CoreCause | NoCause;
+    readonly cause: CoreCause | NoCause;
   };
 }
 
@@ -79,7 +83,7 @@ export interface NativeWorkflowStartEnqueueFailed {
     readonly retryable: boolean;
     readonly workflow_name: string;
     readonly workflow_id: string;
-    readonly exception: CoreCause;
+    readonly cause: CoreCause;
   };
 }
 
@@ -99,24 +103,26 @@ export function workflowStartCoreErrorFromNative(raw: NativeWorkflowStartCoreErr
   switch (raw.class) {
     case "WorkflowStartValidationFailed": {
       const value: WorkflowStartValidationFailed = {
+        kind: "validationFailed",
         code: "VALIDATION_FAILED",
         retryable: false,
         message: raw.slots.message,
         workflowName: raw.slots.workflow_name,
         workflowId: raw.slots.workflow_id,
-        exception: Object.freeze({ ...raw.slots.exception }),
+        cause: Object.freeze({ ...raw.slots.cause }),
       };
 
       return Object.freeze(
         Object.defineProperties(value, {
           message: { enumerable: false },
-          exception: { enumerable: false },
+          cause: { enumerable: false },
         }),
       );
     }
 
     case "WorkflowStartIdConflict": {
       const value: WorkflowStartIdConflict = {
+        kind: "idConflict",
         code: "WORKFLOW_ID_CONFLICT",
         retryable: false,
         message: raw.slots.message,
@@ -134,6 +140,7 @@ export function workflowStartCoreErrorFromNative(raw: NativeWorkflowStartCoreErr
 
     case "WorkflowStartCommandConflict": {
       const value: WorkflowStartCommandConflict = {
+        kind: "commandConflict",
         code: "WORKFLOW_COMMAND_CONFLICT",
         retryable: false,
         message: raw.slots.message,
@@ -150,18 +157,19 @@ export function workflowStartCoreErrorFromNative(raw: NativeWorkflowStartCoreErr
 
     case "WorkflowStartEnqueueFailed": {
       const value: WorkflowStartEnqueueFailed = {
+        kind: "enqueueFailed",
         code: "ENQUEUE_FAILED",
         message: raw.slots.message,
         retryable: raw.slots.retryable,
         workflowName: raw.slots.workflow_name,
         workflowId: raw.slots.workflow_id,
-        exception: Object.freeze({ ...raw.slots.exception }),
+        cause: Object.freeze({ ...raw.slots.cause }),
       };
 
       return Object.freeze(
         Object.defineProperties(value, {
           message: { enumerable: false },
-          exception: { enumerable: false },
+          cause: { enumerable: false },
         }),
       );
     }

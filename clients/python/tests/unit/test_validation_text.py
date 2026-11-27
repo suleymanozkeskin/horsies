@@ -45,7 +45,7 @@ from horsies.core.codec.validation_errors import (
     validation_summary,
     without_validation_input,
 )
-from horsies.core.errors import ErrorCode, TaskDefinitionError
+from horsies.core.errors import HorsiesErrorCode, TaskDefinitionError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.payload import PayloadPolicy
@@ -465,9 +465,9 @@ class TestSendOptions:
         assert is_err(result)
         err = result.err_value
         assert isinstance(err, TaskSendValidationFailed)
-        assert isinstance(err.exception, ValueValidationError)
+        assert isinstance(err.cause, ValueValidationError)
         assert '2031' not in err.message
-        assert '2031' not in str(err.exception)
+        assert '2031' not in str(err.cause)
         assert 'good_until must be timezone-aware' in err.message
 
 
@@ -504,7 +504,7 @@ class TestDefinitionTimeOptions:
             app.task(task_name='test.bad_timeout', **refused_options)(task_fn)
 
         notes = ' '.join(caught.value.notes)
-        assert caught.value.code == ErrorCode.TASK_INVALID_OPTIONS
+        assert caught.value.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
         assert MARKER not in notes
         assert 'timeout_ms: Input should be a valid integer' in notes
 

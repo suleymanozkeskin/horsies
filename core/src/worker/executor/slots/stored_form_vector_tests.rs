@@ -8,7 +8,7 @@ use uuid::Uuid;
 use super::outcome::{killed_child_write, timeout_write};
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
-use crate::core::task::error::OperationalErrorCode;
+use crate::core::task::error::OperationalCode;
 use crate::stored_form_vectors::error_data::{vector, ErrorVector};
 use crate::worker::executor::protocol::TaskTimeoutMs;
 use crate::worker::retry::read_stored_options;
@@ -80,7 +80,7 @@ fn the_killed_child_write_stores_python_s_text() {
     let write = killed_child_write(
         &claimed(&vector),
         &worker_id,
-        OperationalErrorCode::WorkerCrashed.into(),
+        OperationalCode::WorkerCrashed.into(),
         message,
         RetryPlacement::SameClass,
         crate::core::lifecycle::AttemptPlacement::NotObserved,

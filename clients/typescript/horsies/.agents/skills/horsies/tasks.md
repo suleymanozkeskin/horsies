@@ -628,8 +628,8 @@ export async function sendValidation(orderId: string): Promise<void> {
     return;
   }
 
-  switch (sent.error.code) {
-    case "ENQUEUE_FAILED":
+  switch (sent.error.kind) {
+    case "enqueueFailed":
       if (sent.error.retryable) {
         const again = await app.resend(sent.error);
 
@@ -637,15 +637,15 @@ export async function sendValidation(orderId: string): Promise<void> {
       }
 
       break;
-    case "IDEMPOTENCY_KEY_CONFLICT": {
+    case "idempotencyKeyConflict": {
       // Not retryable, and `resend` does not take it: send the owner's command, or use another key.
       console.warn(`task ${sent.error.ownerTaskId} holds the key`);
       break;
     }
-    case "VALIDATION_FAILED":
-    case "PAYLOAD_TOO_LARGE":
-    case "PAYLOAD_MISMATCH":
-    case "SEND_SUPPRESSED":
+    case "validationFailed":
+    case "payloadTooLarge":
+    case "payloadMismatch":
+    case "suppressed":
       console.warn(sent.error.message);
       break;
   }
@@ -675,19 +675,20 @@ task child are suppressed: the child lifts the suppression when it serves.
 | `delaySeconds` | Whole seconds, 0 to 4,294,967,295, before a worker may start the task |
 | `retention` | `{ kind: "period", days }`: a period that the app registers; `{ kind: "forever" }`. Left out: the queue's retention, else 30 days |
 
-`TaskSendError<O, E>`, told apart by `code`:
+`TaskSendError<O, E>`, told apart by `kind`, the variant name, named after
+its `code`:
 
-| `code` | Fields | When |
-|---|---|---|
-| `SEND_SUPPRESSED` | `message` | The process does not send now: a task child before it serves, the `check` command, or `HORSIES_SUPPRESS_SENDS=1` |
-| `VALIDATION_FAILED` | `message`, `exception` | A rule refused the send. Nothing was written |
-| `PAYLOAD_TOO_LARGE` | `message`, `sizeBytes`, `limitBytes` (`bigint`) | The input is over the reject bound. Nothing was written |
-| `PAYLOAD_MISMATCH` | `taskId`, `payload`, `message` | The task id exists with another command or key. Nothing was written |
-| `IDEMPOTENCY_KEY_CONFLICT` | `taskId`, `payload`, `message`, `ownerTaskId`, `retryable: false` | Another task holds the key with another command. Nothing was written. Not retryable, and `resend` refuses it: send the owner's command, or use another key |
-| `ENQUEUE_FAILED` | `taskId`, `payload`, `message`, `retryable`, `exception` | The enqueue failed. The row may or may not exist. `retryable` is the classification of the cause |
-| `SEAT_RELAY_FULL` | `message`, `retryable: true`, `exception` | A `SHARED_THREAD` body only: the seat relay holds its bound of waiting calls. Nothing was sent; send again |
+| `kind` | `code` | Fields | When |
+|---|---|---|---|
+| `suppressed` | `SEND_SUPPRESSED` | `message` | The process does not send now: a task child before it serves, the `check` command, or `HORSIES_SUPPRESS_SENDS=1` |
+| `validationFailed` | `VALIDATION_FAILED` | `message`, `cause` | A rule refused the send. Nothing was written |
+| `payloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `sizeBytes`, `limitBytes` (`bigint`) | The input is over the reject bound. Nothing was written |
+| `payloadMismatch` | `PAYLOAD_MISMATCH` | `taskId`, `payload`, `message` | The task id exists with another command or key. Nothing was written |
+| `idempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `taskId`, `payload`, `message`, `ownerTaskId`, `retryable: false` | Another task holds the key with another command. Nothing was written. Not retryable, and `resend` refuses it: send the owner's command, or use another key |
+| `enqueueFailed` | `ENQUEUE_FAILED` | `taskId`, `payload`, `message`, `retryable`, `cause` | The enqueue failed. The row may or may not exist. `retryable` is the classification of the cause |
+| `seatRelayFull` | `SEAT_RELAY_FULL` | `message`, `retryable: true`, `cause` | A `SHARED_THREAD` body only: the seat relay holds its bound of waiting calls. Nothing was sent; send again |
 
-- `exception` is the cause that the send met: the server's error, no answer,
+- `cause` is the cause that the send met: the server's error, no answer,
   a broken read contract, a failed precondition, or a rule of the client.
 - `payload` is not enumerable, so `JSON.stringify` of an error never holds
   the input.
@@ -715,14 +716,14 @@ function readErrorText(error: ReadError): string {
       return `no record holds the task (${error.reason})`;
     case "resultNotAvailable":
       return `the task is ${error.status} and stores no result`;
-    case "resultDeserializationError":
+    case "storedResultUnreadable":
       return error.cause;
     case "unknownCustomCode":
-      return `the stored code ${error.code} is not declared`;
+      return `the stored code ${error.storedCode} is not declared`;
     case "waitInsideTask":
       return "a result wait inside a task body";
-    case "database":
-      return `${error.code}, retryable: ${String(error.retryable)}`;
+    case "databaseError":
+      return `${error.databaseCode}, retryable: ${String(error.retryable)}`;
     case "invalidInput":
       return `waitMs is a whole number from 0 to ${error.maxMs}`;
     case "seatRelayFull":
@@ -806,10 +807,10 @@ or `"builtIn"` with `code: BuiltInTaskCode` (a code of horsies).
 | `waitTimeout` | `WAIT_TIMEOUT` | `status` | The task had not ended when the wait ended; it may still run | No |
 | `taskNotFound` | `TASK_NOT_FOUND` | `reason` | Neither the live table nor the history holds the task | No |
 | `resultNotAvailable` | `RESULT_NOT_AVAILABLE` | `status` | The task ended and stores no result | Yes |
-| `resultDeserializationError` | - | `cause` | The stored result does not read with the contract's types | Yes |
-| `unknownCustomCode` | - | `code` (the stored code) | The stored custom code is not in the contract's `errorCodes` | Yes |
+| `storedResultUnreadable` | `RESULT_DESERIALIZATION_ERROR` | `cause` | The stored result does not read with the contract's types | Yes |
+| `unknownCustomCode` | `UNKNOWN_CUSTOM_CODE` | `storedCode` | The stored custom code is not in the contract's `errorCodes` | Yes |
 | `waitInsideTask` | `WAIT_INSIDE_TASK` | - | A result wait in a worker child. Nothing was read | No |
-| `database` | the broker code | `retryable`, `message` | The database or the connection failed | No |
+| `databaseError` | `DATABASE_ERROR` | `databaseCode` (the code of the failed operation), `retryable`, `message` | The database or the connection failed | No |
 | `invalidInput` | `INVALID_INPUT` | `maxMs` | `waitMs` outside its range. Nothing was read | No |
 | `seatRelayFull` | `SEAT_RELAY_FULL` | `retryable: true`, `message` | A `SHARED_THREAD` body only: the seat relay holds its bound of waiting calls. Nothing was read | No |
 

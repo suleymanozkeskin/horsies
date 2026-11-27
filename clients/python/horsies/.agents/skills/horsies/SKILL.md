@@ -240,7 +240,7 @@ All methods have `_async()` variants.
 ### Reconnect to an Existing Workflow
 
 `WorkflowHandle.for_id(text, broker)` parses a workflow id text once, at the
-boundary: `Ok(handle)`, or `Err(HandleInvalidWorkflowId)` for text that is not
+boundary: `Ok(handle)`, or `Err(WorkflowHandleInvalidWorkflowId)` for text that is not
 a UUID (no handle is built).
 
 ```python
@@ -269,7 +269,7 @@ match await app.get_result_async(task_id, timeout_ms=5000):
     case Ok(Failed(task_error)):
         ...  # the task failed: task_error.error_code
     case Err(read_error):
-        ...  # no outcome: WaitTimeout, NoTypeAvailable, ResultDeserializationError, BrokerError, ...
+        ...  # no outcome: WaitTimeout, NoTypeAvailable, ResultDeserializationError, ReadDatabaseError, ...
 
 # Task metadata with typed-decoded result: the app-level wrapper decodes
 # when the task is registered locally (decoded_result / result_decoded set).
@@ -364,8 +364,8 @@ The free `rerun_task` stores no carrier.
 | `get()` / `get_result()` / `result_for()` | `ReadResult[T, TaskError]` | `Succeeded(value)` or `Failed(task_error)` | `ReadError` |
 | `send()` / `schedule()` | `TaskSendResult[TaskHandle[T]]` | `TaskHandle` | `TaskSendError` |
 | `start()` | `WorkflowStartResult[WorkflowHandle[T]]` | `WorkflowHandle` | `WorkflowStartError` |
-| Broker infra | `BrokerResult[T]` | value `T` | `BrokerOperationError` |
-| Handle ops | `HandleResult[T]` | value `T` | `HandleOperationError` |
+| Broker infra | `DatabaseResult[T]` | value `T` | `DatabaseOperationError` |
+| Handle ops | `HandleResult[T]` | value `T` | `WorkflowHandleError` |
 
 Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`. Read a `ReadResult` with one `match`: `case Ok(Succeeded(value))`, `case Ok(Failed(task_error))`, `case Err(read_error)`. A workflow node input (`args_from`) and `WorkflowContext.result_for()` give a `TaskOutcome[T, TaskError]`: `Succeeded(value)` or `Failed(task_error)`.
 
@@ -373,16 +373,16 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`. Read a 
 
 - `TaskSendErrorCode`: `SEND_SUPPRESSED`, `ASYNC_CONTEXT`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`, `PAYLOAD_TOO_LARGE`
 - `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `WORKFLOW_ID_CONFLICT`, `WORKFLOW_COMMAND_CONFLICT`, `ENQUEUE_FAILED`, `ASYNC_CONTEXT`
-- `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `STORED_DATA_INVALID`, `RESUME_RECOVERY_FAILED`, `ASYNC_CONTEXT`
-- `ReadError` (a union, one class per read failure; each has `code` and `message`): `WaitTimeout`, `TaskNotFound`, `WorkflowNotFound`, `ResultNotAvailable`, `ResultNotReady`, `WaitInsideTask`, `AsyncContext`, `InvalidInput`, `ResultDeserializationError`, `UnknownCustomCode` (a stored custom code that the declared `Enum` does not name; adds `custom_code`), `BrokerError` (adds `retryable` and `exception`), `NoTypeAvailable`, `WorkflowCtxMissingId`
+- `WorkflowHandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DATABASE_OPERATION_FAILED`, `STORED_DATA_INVALID`, `RESUME_RECOVERY_FAILED`, `ASYNC_CONTEXT`, `INVALID_WORKFLOW_ID`
+- `ReadError` (a union, one class per read failure; each has `code` and `message`): `WaitTimeout`, `TaskNotFound`, `WorkflowNotFound`, `ResultNotAvailable`, `ResultNotReady`, `WaitInsideTask`, `AsyncContext`, `InvalidInput`, `ResultDeserializationError`, `UnknownCustomCode` (a stored custom code that the declared `Enum` does not name; adds `custom_code`), `ReadDatabaseError` (adds `retryable` and `cause`), `NoTypeAvailable`, `WorkflowCtxMissingId`
 
 `retryable=True` means transient (DB connection blip). `retryable=False` means permanent. On send errors, `TaskSendEnqueueFailed` has the field `retryable` and `TaskSendIdempotencyKeyConflict` the class value `retryable = False`; the other send errors have no `retryable`.
 
-`HandleOperationError` is a union with one variant per `HandleErrorCode` member (`HandleWorkflowNotFound`, `HandleDbOperationFailed`, `HandleStoredDataInvalid`, `HandleResumeRecoveryFailed`, `HandleAsyncContext`); match on the variant. `HandleResumeRecoveryFailed` means `resume()` committed and only its recovery pass failed: the workflow is `RUNNING`.
+`WorkflowHandleError` is a union with one variant per `WorkflowHandleErrorCode` member (`WorkflowHandleNotFound`, `WorkflowHandleDatabaseOperationFailed`, `WorkflowHandleStoredDataInvalid`, `WorkflowHandleResumeRecoveryFailed`, `WorkflowHandleAsyncContext`); match on the variant. `WorkflowHandleResumeRecoveryFailed` means `resume()` committed and only its recovery pass failed: the workflow is `RUNNING`.
 
 Every call runs on the core of the process: one pool for every thread and event loop, so no call has an event loop limit.
 
-`ASYNC_CONTEXT` (every catalog above, `BrokerErrorCode`, and the read error `AsyncContext`): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell). Its wait would stall that loop, so nothing ran. Call the `*_async` form. `retryable=False` where the error has the field; a handle does not keep an `AsyncContext` read error; `await spec.retry_start_async(err)` completes a start that returned it. `app.check(live=True)` there reports `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`).
+`ASYNC_CONTEXT` (every catalog above, `DatabaseErrorCode`, and the read error `AsyncContext`): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell). Its wait would stall that loop, so nothing ran. Call the `*_async` form. `retryable=False` where the error has the field; a handle does not keep an `AsyncContext` read error; `await spec.retry_start_async(err)` completes a start that returned it. `app.check(live=True)` there reports `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`).
 
 ### Raised, never returned: `ForkedAfterCoreStart`, `CoreStopped`
 

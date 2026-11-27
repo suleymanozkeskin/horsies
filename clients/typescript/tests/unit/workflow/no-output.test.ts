@@ -286,18 +286,18 @@ describe("get of a workflow with no outputType", () => {
   ];
 
   for (const [title, text, cause] of refused) {
-    test(`${title}: resultDeserializationError`, async () => {
+    test(`${title}: storedResultUnreadable`, async () => {
       const read = await getOf(fanout, text);
 
-      assert(!read.ok && read.error.kind === "resultDeserializationError");
+      assert(!read.ok && read.error.kind === "storedResultUnreadable");
       assert.match(read.error.cause, cause);
     });
   }
 
-  test("a workflow with an outputType that reads an outputless envelope: resultDeserializationError", async () => {
+  test("a workflow with an outputType that reads an outputless envelope: storedResultUnreadable", async () => {
     const read = await getOf<BuildReturn>(parent, outputlessEnvelope(terminals({}, {})));
 
-    assert(!read.ok && read.error.kind === "resultDeserializationError");
+    assert(!read.ok && read.error.kind === "storedResultUnreadable");
     assert.match(read.error.cause, /wire_outputless=true, handle_outputless=false/);
   });
 });

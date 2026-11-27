@@ -402,15 +402,15 @@ broker = app.get_broker()
 
 # Typed result by ID — app-level API (broker.get_result(_async) was removed in 0.1.2).
 # Returns ReadResult[Any, TaskError]: Ok(Succeeded(value)), Ok(Failed(task_error)),
-# or Err(read_error) for a read that gave no outcome (BrokerError,
+# or Err(read_error) for a read that gave no outcome (ReadDatabaseError,
 # ResultDeserializationError, NoTypeAvailable, WaitTimeout, ...).
 read = await app.get_result_async("task-uuid", timeout_ms=5000)
 read = app.get_result("task-uuid", timeout_ms=5000)  # sync
 
-# Raw stored envelope, no typed decode — returns BrokerResult[RawResultRecord | None]
+# Raw stored envelope, no typed decode — returns DatabaseResult[RawResultRecord | None]
 raw = await broker.get_raw_result_record_async("task-uuid", timeout_ms=5000)
 
-# Fetch task metadata by ID — returns BrokerResult[TaskInfo | None]
+# Fetch task metadata by ID — returns DatabaseResult[TaskInfo | None]
 info = await broker.get_task_info_async("task-uuid", include_result=True)
 info = broker.get_task_info("task-uuid", include_result=True)  # sync
 ```
@@ -450,7 +450,7 @@ config = PostgresConfig(
 | `tcp_user_timeout_ms` | `int` | `30000` | `0` or 1 to 2,147,483,647 | Milliseconds that sent data may stay unacknowledged before the connection is closed (as libpq `tcp_user_timeout`); `0` uses the OS default |
 | `echo` | `bool` | `False` | – | Echo SQL (debug only); bound values are not shown |
 
-A pool value outside its range fails with HRS-213 (`CONFIG_INVALID_BROKER_POOL`); `pool_size=0` and `max_overflow=-1` (no limit in SQLAlchemy) are refused, and the help says to give a number. A TCP value outside its range fails with HRS-215 (`CONFIG_INVALID_KEEPALIVE`); the three keepalive values are checked only when `tcp_keepalives` is `True`.
+A pool value outside its range fails with HRS-213 (`CONFIG_INVALID_DATABASE_POOL`); `pool_size=0` and `max_overflow=-1` (no limit in SQLAlchemy) are refused, and the help says to give a number. A TCP value outside its range fails with HRS-215 (`CONFIG_INVALID_KEEPALIVE`); the three keepalive values are checked only when `tcp_keepalives` is `True`.
 
 `database_url` and `session_database_url` take the scheme `postgresql://` or `postgres://` and name no driver; the core of horsies opens the database with its own driver, not libpq. A URL that names a driver (`postgresql+psycopg://`, `postgresql+psycopg2://`) is refused with HRS-203, and the error says to use `postgresql://`.
 

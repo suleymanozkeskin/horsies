@@ -16,7 +16,7 @@ import pytest
 
 from horsies.core.models.tasks import (
     ContractCode,
-    OperationalErrorCode,
+    OperationalCode,
     OutcomeCode,
     RetrievalCode,
 )
@@ -154,7 +154,7 @@ class TestCategorizeErrorCode:
     @pytest.mark.parametrize(
         'family,expected',
         [
-            (OperationalErrorCode, ErrorCategory.OPERATIONAL),
+            (OperationalCode, ErrorCategory.OPERATIONAL),
             (ContractCode, ErrorCategory.CONTRACT),
             (RetrievalCode, ErrorCategory.RETRIEVAL),
             (OutcomeCode, ErrorCategory.OUTCOME),
@@ -162,7 +162,7 @@ class TestCategorizeErrorCode:
     )
     def test_every_builtin_member_maps_to_its_family(
         self,
-        family: type[OperationalErrorCode]
+        family: type[OperationalCode]
         | type[ContractCode]
         | type[RetrievalCode]
         | type[OutcomeCode],
@@ -190,7 +190,7 @@ class TestCategorizeErrorCode:
         values = [
             member.value
             for family in (
-                OperationalErrorCode,
+                OperationalCode,
                 ContractCode,
                 RetrievalCode,
                 OutcomeCode,

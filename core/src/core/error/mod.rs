@@ -15,7 +15,7 @@ use crate::catalog::CodeEnum;
 /// In Rust, rather than separate error types, we use this enum for
 /// type-level discrimination via `match error.category()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ErrorCategory {
+pub enum HorsiesErrorCategory {
     /// Workflow validation errors (HRS-001-HRS-099). Maps to Python's `WorkflowValidationError`.
     Workflow,
     /// Task definition errors (HRS-100-HRS-199). Maps to Python's `TaskDefinitionError`.
@@ -26,7 +26,7 @@ pub enum ErrorCategory {
     Registry,
 }
 
-impl std::fmt::Display for ErrorCategory {
+impl std::fmt::Display for HorsiesErrorCategory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Workflow => write!(f, "workflow validation"),
@@ -48,8 +48,8 @@ impl std::fmt::Display for ErrorCategory {
 /// HRS-023 and HRS-106 are retired and are not used again.
 ///
 /// This enum is the one list of the codes of both clients. `horsies-codegen`
-/// renders it as `horsies._catalog.error_codes.ErrorCode`, the Python
-/// `ErrorCode`: the member name is the variant name in SCREAMING_SNAKE_CASE,
+/// renders it as `horsies._catalog.error_codes.HorsiesErrorCode`, the Python
+/// `HorsiesErrorCode`: the member name is the variant name in SCREAMING_SNAKE_CASE,
 /// the value is the `HRS-nnn` code, and the docstring is the variant doc.
 #[derive(
     Debug,
@@ -63,7 +63,7 @@ impl std::fmt::Display for ErrorCategory {
     horsies_core_derive::CodeCatalog,
 )]
 #[code_catalog(module = "error_codes", base = "str_enum")]
-pub enum ErrorCode {
+pub enum HorsiesErrorCode {
     // Workflow validation (HRS-001-HRS-099)
     /// The workflow has no name.
     #[code_catalog(value = "HRS-001")]
@@ -92,10 +92,10 @@ pub enum ErrorCode {
     WorkflowInvalidArgsFrom,
     /// A `workflow_context_from` reference is not valid.
     #[code_catalog(value = "HRS-009")]
-    WorkflowInvalidCtxFrom,
+    WorkflowInvalidContextFrom,
     /// The workflow context parameter is missing.
     #[code_catalog(value = "HRS-010")]
-    WorkflowCtxParamMissing,
+    WorkflowContextParameterMissing,
     /// The output of the workflow is not valid.
     #[code_catalog(value = "HRS-011")]
     WorkflowInvalidOutput,
@@ -248,7 +248,7 @@ pub enum ErrorCode {
     ConfigInvalidPrefetch,
     /// The broker URL is not valid, or the broker connectivity check failed.
     #[code_catalog(value = "HRS-203")]
-    BrokerInvalidUrl,
+    DatabaseInvalidUrl,
     /// The recovery config is not valid.
     #[code_catalog(value = "HRS-204")]
     ConfigInvalidRecovery,
@@ -269,10 +269,10 @@ pub enum ErrorCode {
     ConfigInvalidExceptionMapper,
     /// A module raised an error while it was imported.
     #[code_catalog(value = "HRS-210")]
-    ModuleExecError,
+    ModuleImportError,
     /// The broker failed to start.
     #[code_catalog(value = "HRS-211")]
-    BrokerInitFailed,
+    DatabaseInitFailed,
     /// A config value or a declared task code is a built-in code or a
     /// reserved name.
     #[code_catalog(value = "HRS-212")]
@@ -280,7 +280,7 @@ pub enum ErrorCode {
     /// A pool value of a broker config is outside its range, or the config
     /// names a pool field that 0.7.0 moved to the worker profile.
     #[code_catalog(value = "HRS-213")]
-    ConfigInvalidBrokerPool,
+    ConfigInvalidDatabasePool,
     /// A child start hook is not callable, or it is an async function.
     #[code_catalog(value = "HRS-214")]
     ConfigInvalidChildHook,
@@ -350,19 +350,19 @@ pub enum ErrorCode {
     WorkflowUnregisteredTask,
 }
 
-impl ErrorCode {
+impl HorsiesErrorCode {
     /// Numeric code string (e.g. "HRS-001"): the catalog value of the code.
     pub fn as_code_str(&self) -> &'static str {
         CodeEnum::wire_value(self)
     }
 }
 
-impl ErrorCode {
+impl HorsiesErrorCode {
     /// Returns the error category for this code.
     ///
     /// Maps each error code to one of the four categories that correspond
     /// to Python's exception subclass hierarchy.
-    pub fn category(&self) -> ErrorCategory {
+    pub fn category(&self) -> HorsiesErrorCategory {
         match self {
             Self::WorkflowNoName
             | Self::WorkflowNoNodes
@@ -372,8 +372,8 @@ impl ErrorCode {
             | Self::WorkflowInvalidDependency
             | Self::WorkflowCycleDetected
             | Self::WorkflowInvalidArgsFrom
-            | Self::WorkflowInvalidCtxFrom
-            | Self::WorkflowCtxParamMissing
+            | Self::WorkflowInvalidContextFrom
+            | Self::WorkflowContextParameterMissing
             | Self::WorkflowInvalidOutput
             | Self::WorkflowInvalidSuccessPolicy
             | Self::WorkflowInvalidJoin
@@ -400,7 +400,7 @@ impl ErrorCode {
             | Self::WorkflowNaiveGoodUntil
             | Self::WorkflowSubworkflowDepthLimit
             | Self::WorkflowSubworkflowSelfNesting
-            | Self::WorkflowTooManyNodes => ErrorCategory::Workflow,
+            | Self::WorkflowTooManyNodes => HorsiesErrorCategory::Workflow,
 
             Self::TaskNoReturnType
             | Self::TaskInvalidReturnType
@@ -414,22 +414,22 @@ impl ErrorCode {
             | Self::TaskCancelGraceRequiresSharedAsync
             | Self::TaskCancelGraceOutOfRange
             | Self::TaskInvalidErrorCode
-            | Self::TaskDuplicateErrorCode => ErrorCategory::Task,
+            | Self::TaskDuplicateErrorCode => HorsiesErrorCategory::Task,
 
             Self::ConfigInvalidQueueMode
             | Self::ConfigInvalidClusterCap
             | Self::ConfigInvalidPrefetch
-            | Self::BrokerInvalidUrl
+            | Self::DatabaseInvalidUrl
             | Self::ConfigInvalidRecovery
             | Self::ConfigInvalidSchedule
             | Self::CliInvalidArgs
             | Self::WorkerInvalidLocator
             | Self::ConfigInvalidResilience
             | Self::ConfigInvalidExceptionMapper
-            | Self::ModuleExecError
-            | Self::BrokerInitFailed
+            | Self::ModuleImportError
+            | Self::DatabaseInitFailed
             | Self::CheckReservedCodeCollision
-            | Self::ConfigInvalidBrokerPool
+            | Self::ConfigInvalidDatabasePool
             | Self::ConfigInvalidChildHook
             | Self::ConfigInvalidKeepalive
             | Self::ConfigInvalidRetention
@@ -443,36 +443,36 @@ impl ErrorCode {
             | Self::EventHandlerDuplicateName
             | Self::EventHandlerInvalidName
             | Self::EventHandlerLimit
-            | Self::ConfigInvalidPayload => ErrorCategory::Config,
+            | Self::ConfigInvalidPayload => HorsiesErrorCategory::Config,
 
             Self::TaskNotRegistered | Self::TaskDuplicateName | Self::WorkflowUnregisteredTask => {
-                ErrorCategory::Registry
+                HorsiesErrorCategory::Registry
             }
         }
     }
 
     /// Returns true if this is a workflow validation error (HRS-001-HRS-099).
     pub fn is_workflow_error(&self) -> bool {
-        self.category() == ErrorCategory::Workflow
+        self.category() == HorsiesErrorCategory::Workflow
     }
 
     /// Returns true if this is a task definition error (HRS-100-HRS-199).
     pub fn is_task_error(&self) -> bool {
-        self.category() == ErrorCategory::Task
+        self.category() == HorsiesErrorCategory::Task
     }
 
     /// Returns true if this is a configuration error (HRS-200-HRS-299).
     pub fn is_config_error(&self) -> bool {
-        self.category() == ErrorCategory::Config
+        self.category() == HorsiesErrorCategory::Config
     }
 
     /// Returns true if this is a registry error (HRS-300-HRS-399).
     pub fn is_registry_error(&self) -> bool {
-        self.category() == ErrorCategory::Registry
+        self.category() == HorsiesErrorCategory::Registry
     }
 }
 
-impl std::fmt::Display for ErrorCode {
+impl std::fmt::Display for HorsiesErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_code_str())
     }
@@ -482,7 +482,7 @@ impl std::fmt::Display for ErrorCode {
 #[derive(Debug, Clone)]
 pub struct HorsiesError {
     pub message: String,
-    pub code: Option<ErrorCode>,
+    pub code: Option<HorsiesErrorCode>,
     pub notes: Vec<String>,
     pub help_text: Option<String>,
 }
@@ -516,7 +516,7 @@ impl HorsiesError {
         }
     }
 
-    pub fn with_code(mut self, code: ErrorCode) -> Self {
+    pub fn with_code(mut self, code: HorsiesErrorCode) -> Self {
         self.code = Some(code);
         self
     }
@@ -539,38 +539,38 @@ impl HorsiesError {
     ///
     /// # Example
     /// ```
-    /// # use horsies_core::core::error::{HorsiesError, ErrorCode, ErrorCategory};
+    /// # use horsies_core::core::error::{HorsiesError, HorsiesErrorCode, HorsiesErrorCategory};
     /// let err = HorsiesError::new("bad config")
-    ///     .with_code(ErrorCode::ConfigInvalidQueueMode);
-    /// assert_eq!(err.category(), Some(ErrorCategory::Config));
+    ///     .with_code(HorsiesErrorCode::ConfigInvalidQueueMode);
+    /// assert_eq!(err.category(), Some(HorsiesErrorCategory::Config));
     /// ```
-    pub fn category(&self) -> Option<ErrorCategory> {
+    pub fn category(&self) -> Option<HorsiesErrorCategory> {
         self.code.map(|c| c.category())
     }
 
     /// Returns true if this error belongs to the given category.
-    pub fn is_category(&self, category: ErrorCategory) -> bool {
+    pub fn is_category(&self, category: HorsiesErrorCategory) -> bool {
         self.category() == Some(category)
     }
 
     /// Returns true if this is a workflow validation error.
     pub fn is_workflow_error(&self) -> bool {
-        self.is_category(ErrorCategory::Workflow)
+        self.is_category(HorsiesErrorCategory::Workflow)
     }
 
     /// Returns true if this is a task definition error.
     pub fn is_task_error(&self) -> bool {
-        self.is_category(ErrorCategory::Task)
+        self.is_category(HorsiesErrorCategory::Task)
     }
 
     /// Returns true if this is a configuration error.
     pub fn is_config_error(&self) -> bool {
-        self.is_category(ErrorCategory::Config)
+        self.is_category(HorsiesErrorCategory::Config)
     }
 
     /// Returns true if this is a registry error.
     pub fn is_registry_error(&self) -> bool {
-        self.is_category(ErrorCategory::Registry)
+        self.is_category(HorsiesErrorCategory::Registry)
     }
 }
 
@@ -645,30 +645,45 @@ mod tests {
 
     #[test]
     fn error_code_display() {
-        assert_eq!(ErrorCode::WorkflowCycleDetected.to_string(), "HRS-007");
-        assert_eq!(ErrorCode::TaskNotRegistered.to_string(), "HRS-300");
-        assert_eq!(ErrorCode::ConfigInvalidRetention.to_string(), "HRS-216");
         assert_eq!(
-            ErrorCode::ConfigInvalidRetention.category(),
-            ErrorCategory::Config,
+            HorsiesErrorCode::WorkflowCycleDetected.to_string(),
+            "HRS-007"
         );
-        assert!(ErrorCode::ConfigInvalidRetention.is_config_error());
-        assert_eq!(ErrorCode::ConfigInvalidResilience.to_string(), "HRS-208");
-        assert!(ErrorCode::ConfigInvalidResilience.is_config_error());
-        assert_eq!(ErrorCode::CheckWorkerConnections.to_string(), "HRS-219");
+        assert_eq!(HorsiesErrorCode::TaskNotRegistered.to_string(), "HRS-300");
         assert_eq!(
-            ErrorCode::CheckWorkerConnections.category(),
-            ErrorCategory::Config,
+            HorsiesErrorCode::ConfigInvalidRetention.to_string(),
+            "HRS-216"
         );
-        assert!(ErrorCode::CheckWorkerConnections.is_config_error());
-        assert_eq!(ErrorCode::CheckLiveAsyncContext.to_string(), "HRS-217");
-        assert!(ErrorCode::CheckLiveAsyncContext.is_config_error());
+        assert_eq!(
+            HorsiesErrorCode::ConfigInvalidRetention.category(),
+            HorsiesErrorCategory::Config,
+        );
+        assert!(HorsiesErrorCode::ConfigInvalidRetention.is_config_error());
+        assert_eq!(
+            HorsiesErrorCode::ConfigInvalidResilience.to_string(),
+            "HRS-208"
+        );
+        assert!(HorsiesErrorCode::ConfigInvalidResilience.is_config_error());
+        assert_eq!(
+            HorsiesErrorCode::CheckWorkerConnections.to_string(),
+            "HRS-219"
+        );
+        assert_eq!(
+            HorsiesErrorCode::CheckWorkerConnections.category(),
+            HorsiesErrorCategory::Config,
+        );
+        assert!(HorsiesErrorCode::CheckWorkerConnections.is_config_error());
+        assert_eq!(
+            HorsiesErrorCode::CheckLiveAsyncContext.to_string(),
+            "HRS-217"
+        );
+        assert!(HorsiesErrorCode::CheckLiveAsyncContext.is_config_error());
     }
 
     #[test]
     fn horsies_error_builder() {
         let err = HorsiesError::new("cycle detected in workflow DAG")
-            .with_code(ErrorCode::WorkflowCycleDetected)
+            .with_code(HorsiesErrorCode::WorkflowCycleDetected)
             .with_note("workflows must be acyclic directed graphs")
             .with_help("remove circular dependencies between tasks");
 
@@ -689,10 +704,12 @@ mod tests {
     #[test]
     fn validation_report_single_error() {
         let mut report = ValidationReport::new("test");
-        report.add(HorsiesError::new("bad config").with_code(ErrorCode::ConfigInvalidQueueMode));
+        report.add(
+            HorsiesError::new("bad config").with_code(HorsiesErrorCode::ConfigInvalidQueueMode),
+        );
         assert!(report.has_errors());
         let err = report.into_result().unwrap_err();
-        assert_eq!(err.code, Some(ErrorCode::ConfigInvalidQueueMode));
+        assert_eq!(err.code, Some(HorsiesErrorCode::ConfigInvalidQueueMode));
     }
 
     #[test]
@@ -706,13 +723,13 @@ mod tests {
         assert_eq!(err.notes.len(), 3);
     }
 
-    // --- ErrorCode catalog tests ---
+    // --- HorsiesErrorCode catalog tests ---
 
     /// Each code is `HRS-` and three digits, and its hundred is the range of
     /// its category: 0 workflow, 1 task, 2 config, 3 registry.
     #[test]
     fn every_code_is_three_digits_in_the_range_of_its_category() {
-        for code in <ErrorCode as CodeEnum>::VARIANTS {
+        for code in <HorsiesErrorCode as CodeEnum>::VARIANTS {
             let text = code.as_code_str();
             let digits = text
                 .strip_prefix("HRS-")
@@ -722,10 +739,10 @@ mod tests {
                 "{code:?}: {text}"
             );
             let hundred = match code.category() {
-                ErrorCategory::Workflow => '0',
-                ErrorCategory::Task => '1',
-                ErrorCategory::Config => '2',
-                ErrorCategory::Registry => '3',
+                HorsiesErrorCategory::Workflow => '0',
+                HorsiesErrorCategory::Task => '1',
+                HorsiesErrorCategory::Config => '2',
+                HorsiesErrorCategory::Registry => '3',
             };
             assert!(
                 digits.starts_with(hundred),
@@ -738,7 +755,7 @@ mod tests {
     /// Each code has its short text: the docstring of its Python member.
     #[test]
     fn every_code_has_its_short_text() {
-        for member in <ErrorCode as CodeEnum>::CATALOG.members {
+        for member in <HorsiesErrorCode as CodeEnum>::CATALOG.members {
             assert!(
                 !member.doc.trim().is_empty(),
                 "{} ({}) has no doc",
@@ -752,18 +769,18 @@ mod tests {
     /// `is_registry_error()` alike.
     #[test]
     fn the_unregistered_workflow_task_code_is_a_registry_error() {
-        let code = ErrorCode::WorkflowUnregisteredTask;
+        let code = HorsiesErrorCode::WorkflowUnregisteredTask;
         assert_eq!(code.as_code_str(), "HRS-302");
-        assert_eq!(code.category(), ErrorCategory::Registry);
+        assert_eq!(code.category(), HorsiesErrorCategory::Registry);
         assert!(code.is_registry_error());
         assert!(!code.is_workflow_error());
     }
 
-    // --- ErrorCode category helper tests ---
+    // --- HorsiesErrorCode category helper tests ---
 
     #[test]
     fn workflow_code_is_workflow_error_only() {
-        let code = ErrorCode::WorkflowCycleDetected;
+        let code = HorsiesErrorCode::WorkflowCycleDetected;
         assert!(code.is_workflow_error());
         assert!(!code.is_task_error());
         assert!(!code.is_config_error());
@@ -772,7 +789,7 @@ mod tests {
 
     #[test]
     fn task_code_is_task_error_only() {
-        let code = ErrorCode::TaskInvalidOptions;
+        let code = HorsiesErrorCode::TaskInvalidOptions;
         assert!(!code.is_workflow_error());
         assert!(code.is_task_error());
         assert!(!code.is_config_error());
@@ -781,7 +798,7 @@ mod tests {
 
     #[test]
     fn config_code_is_config_error_only() {
-        let code = ErrorCode::ConfigInvalidQueueMode;
+        let code = HorsiesErrorCode::ConfigInvalidQueueMode;
         assert!(!code.is_workflow_error());
         assert!(!code.is_task_error());
         assert!(code.is_config_error());
@@ -790,35 +807,41 @@ mod tests {
 
     #[test]
     fn registry_code_is_registry_error_only() {
-        let code = ErrorCode::TaskNotRegistered;
+        let code = HorsiesErrorCode::TaskNotRegistered;
         assert!(!code.is_workflow_error());
         assert!(!code.is_task_error());
         assert!(!code.is_config_error());
         assert!(code.is_registry_error());
     }
 
-    // --- ErrorCode::category() tests ---
+    // --- HorsiesErrorCode::category() tests ---
 
     #[test]
     fn error_code_category_workflow() {
         assert_eq!(
-            ErrorCode::WorkflowCycleDetected.category(),
-            ErrorCategory::Workflow
+            HorsiesErrorCode::WorkflowCycleDetected.category(),
+            HorsiesErrorCategory::Workflow
         );
         assert_eq!(
-            ErrorCode::WorkflowNoName.category(),
-            ErrorCategory::Workflow
+            HorsiesErrorCode::WorkflowNoName.category(),
+            HorsiesErrorCategory::Workflow
         );
         assert_eq!(
-            ErrorCode::WorkflowSubworkflowAppMissing.category(),
-            ErrorCategory::Workflow
+            HorsiesErrorCode::WorkflowSubworkflowAppMissing.category(),
+            HorsiesErrorCategory::Workflow
         );
     }
 
     #[test]
     fn error_code_category_task() {
-        assert_eq!(ErrorCode::TaskNoReturnType.category(), ErrorCategory::Task);
-        assert_eq!(ErrorCode::TaskInvalidQueue.category(), ErrorCategory::Task);
+        assert_eq!(
+            HorsiesErrorCode::TaskNoReturnType.category(),
+            HorsiesErrorCategory::Task
+        );
+        assert_eq!(
+            HorsiesErrorCode::TaskInvalidQueue.category(),
+            HorsiesErrorCategory::Task
+        );
     }
 
     /// HRS-112 and HRS-113, the refusals of a declared code, are task
@@ -826,11 +849,11 @@ mod tests {
     #[test]
     fn the_declared_code_refusals_are_task_codes() {
         for (code, text) in [
-            (ErrorCode::TaskInvalidErrorCode, "HRS-112"),
-            (ErrorCode::TaskDuplicateErrorCode, "HRS-113"),
+            (HorsiesErrorCode::TaskInvalidErrorCode, "HRS-112"),
+            (HorsiesErrorCode::TaskDuplicateErrorCode, "HRS-113"),
         ] {
             assert_eq!(code.as_code_str(), text);
-            assert_eq!(code.category(), ErrorCategory::Task);
+            assert_eq!(code.category(), HorsiesErrorCategory::Task);
             assert!(code.is_task_error());
             assert!(!code.is_config_error());
         }
@@ -839,47 +862,51 @@ mod tests {
     #[test]
     fn error_code_category_config() {
         assert_eq!(
-            ErrorCode::ConfigInvalidQueueMode.category(),
-            ErrorCategory::Config
+            HorsiesErrorCode::ConfigInvalidQueueMode.category(),
+            HorsiesErrorCategory::Config
         );
         assert_eq!(
-            ErrorCode::BrokerInvalidUrl.category(),
-            ErrorCategory::Config
+            HorsiesErrorCode::DatabaseInvalidUrl.category(),
+            HorsiesErrorCategory::Config
         );
         assert_eq!(
-            ErrorCode::WorkerInvalidLocator.category(),
-            ErrorCategory::Config
+            HorsiesErrorCode::WorkerInvalidLocator.category(),
+            HorsiesErrorCategory::Config
         );
     }
 
     #[test]
     fn error_code_category_registry() {
         assert_eq!(
-            ErrorCode::TaskNotRegistered.category(),
-            ErrorCategory::Registry
+            HorsiesErrorCode::TaskNotRegistered.category(),
+            HorsiesErrorCategory::Registry
         );
         assert_eq!(
-            ErrorCode::TaskDuplicateName.category(),
-            ErrorCategory::Registry
+            HorsiesErrorCode::TaskDuplicateName.category(),
+            HorsiesErrorCategory::Registry
         );
     }
 
-    // --- ErrorCategory Display tests ---
+    // --- HorsiesErrorCategory Display tests ---
 
     #[test]
     fn error_category_display() {
-        assert_eq!(ErrorCategory::Workflow.to_string(), "workflow validation");
-        assert_eq!(ErrorCategory::Task.to_string(), "task definition");
-        assert_eq!(ErrorCategory::Config.to_string(), "configuration");
-        assert_eq!(ErrorCategory::Registry.to_string(), "registry");
+        assert_eq!(
+            HorsiesErrorCategory::Workflow.to_string(),
+            "workflow validation"
+        );
+        assert_eq!(HorsiesErrorCategory::Task.to_string(), "task definition");
+        assert_eq!(HorsiesErrorCategory::Config.to_string(), "configuration");
+        assert_eq!(HorsiesErrorCategory::Registry.to_string(), "registry");
     }
 
     // --- HorsiesError category methods ---
 
     #[test]
     fn horsies_error_category_from_code() {
-        let err = HorsiesError::new("bad config").with_code(ErrorCode::ConfigInvalidQueueMode);
-        assert_eq!(err.category(), Some(ErrorCategory::Config));
+        let err =
+            HorsiesError::new("bad config").with_code(HorsiesErrorCode::ConfigInvalidQueueMode);
+        assert_eq!(err.category(), Some(HorsiesErrorCategory::Config));
         assert!(err.is_config_error());
         assert!(!err.is_workflow_error());
         assert!(!err.is_task_error());
@@ -888,8 +915,8 @@ mod tests {
 
     #[test]
     fn horsies_error_category_workflow() {
-        let err = HorsiesError::new("cycle").with_code(ErrorCode::WorkflowCycleDetected);
-        assert_eq!(err.category(), Some(ErrorCategory::Workflow));
+        let err = HorsiesError::new("cycle").with_code(HorsiesErrorCode::WorkflowCycleDetected);
+        assert_eq!(err.category(), Some(HorsiesErrorCategory::Workflow));
         assert!(err.is_workflow_error());
     }
 
@@ -905,9 +932,9 @@ mod tests {
 
     #[test]
     fn horsies_error_is_category() {
-        let err = HorsiesError::new("not found").with_code(ErrorCode::TaskNotRegistered);
-        assert!(err.is_category(ErrorCategory::Registry));
-        assert!(!err.is_category(ErrorCategory::Workflow));
+        let err = HorsiesError::new("not found").with_code(HorsiesErrorCode::TaskNotRegistered);
+        assert!(err.is_category(HorsiesErrorCategory::Registry));
+        assert!(!err.is_category(HorsiesErrorCategory::Workflow));
     }
 
     // -- HorsiesError creation and fluent API (ported from Python test_errors.py) --
@@ -923,8 +950,8 @@ mod tests {
 
     #[test]
     fn horsies_error_creation_with_code() {
-        let err = HorsiesError::new("bad cycle").with_code(ErrorCode::WorkflowCycleDetected);
-        assert_eq!(err.code, Some(ErrorCode::WorkflowCycleDetected));
+        let err = HorsiesError::new("bad cycle").with_code(HorsiesErrorCode::WorkflowCycleDetected);
+        assert_eq!(err.code, Some(HorsiesErrorCode::WorkflowCycleDetected));
         assert!(err.notes.is_empty());
         assert!(err.help_text.is_none());
     }
@@ -932,7 +959,7 @@ mod tests {
     #[test]
     fn horsies_error_fluent_api_chained() {
         let err = HorsiesError::new("problem")
-            .with_code(ErrorCode::WorkflowNoNodes)
+            .with_code(HorsiesErrorCode::WorkflowNoNodes)
             .with_note("first note")
             .with_note("second note")
             .with_help("try adding tasks");
@@ -951,7 +978,8 @@ mod tests {
 
     #[test]
     fn horsies_error_display_with_code() {
-        let err = HorsiesError::new("cycle detected").with_code(ErrorCode::WorkflowCycleDetected);
+        let err =
+            HorsiesError::new("cycle detected").with_code(HorsiesErrorCode::WorkflowCycleDetected);
         let s = err.to_string();
         assert!(s.contains("cycle detected"));
     }
@@ -968,7 +996,7 @@ mod tests {
     #[test]
     fn error_code_display_format() {
         // All error codes should display as "HRS-XXX" format.
-        let code = ErrorCode::WorkflowNoName;
+        let code = HorsiesErrorCode::WorkflowNoName;
         let s = code.to_string();
         assert!(
             s.starts_with("HRS-"),
@@ -1016,8 +1044,8 @@ mod tests {
     #[test]
     fn into_result_two_errors_message_contains_count() {
         let mut report = ValidationReport::new("test");
-        report.add(HorsiesError::new("err1").with_code(ErrorCode::WorkflowNoName));
-        report.add(HorsiesError::new("err2").with_code(ErrorCode::WorkflowNoNodes));
+        report.add(HorsiesError::new("err1").with_code(HorsiesErrorCode::WorkflowNoName));
+        report.add(HorsiesError::new("err2").with_code(HorsiesErrorCode::WorkflowNoNodes));
         let result: Result<(), HorsiesError> = report.into_result();
         let err = result.unwrap_err();
         assert!(

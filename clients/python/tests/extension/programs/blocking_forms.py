@@ -26,15 +26,15 @@ from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode
 from horsies.core.brokers.result_types import (
-    BrokerInvalidInput,
-    BrokerInvalidJsonPayload,
-    BrokerListenerDisabled,
-    BrokerOperationFailed,
+    DatabaseInvalidInput,
+    DatabaseInvalidJsonPayload,
+    DatabaseListenerDisabled,
+    DatabaseOperationFailed,
 )
 from horsies.core.models.workflow.handle_types import (
-    HandleDbOperationFailed,
-    HandleResumeRecoveryFailed,
-    HandleStoredDataInvalid,
+    WorkflowHandleDatabaseOperationFailed,
+    WorkflowHandleResumeRecoveryFailed,
+    WorkflowHandleStoredDataInvalid,
 )
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.workflows.start_types import (
@@ -124,18 +124,18 @@ def describe(outcome: object) -> JsonValue:
         case core.WorkflowNodeResultsRead(nodes=nodes):
             return [name, [node.node_id for node in nodes]]
         case (
-            HandleDbOperationFailed()
-            | HandleStoredDataInvalid()
-            | HandleResumeRecoveryFailed()
+            WorkflowHandleDatabaseOperationFailed()
+            | WorkflowHandleStoredDataInvalid()
+            | WorkflowHandleResumeRecoveryFailed()
         ):
             return [name, outcome.code.value, outcome.retryable]
         case WorkflowStartEnqueueFailed(retryable=retryable):
             return [name, retryable]
         case (
-            BrokerOperationFailed()
-            | BrokerInvalidInput()
-            | BrokerInvalidJsonPayload()
-            | BrokerListenerDisabled()
+            DatabaseOperationFailed()
+            | DatabaseInvalidInput()
+            | DatabaseInvalidJsonPayload()
+            | DatabaseListenerDisabled()
         ):
             return [name, outcome.code.value, outcome.retryable]
         case core.WorkerStatesRecord(states=states):

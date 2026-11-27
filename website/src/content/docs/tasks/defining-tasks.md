@@ -248,7 +248,7 @@ Unhandled exceptions are wrapped automatically:
 def might_crash() -> Result[str, TaskError]:
     raise ValueError("Something went wrong")
     # Becomes Err(TaskError(
-    #     error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+    #     error_code=OperationalCode.UNHANDLED_EXCEPTION,
     #     message="Unhandled exception in task might_crash: ...",
     # ))
 ```
@@ -484,7 +484,7 @@ def register(app: Horsies) -> None:
 - The body passes members of `E` (`ChargeCode.CARD_DECLINED`). A `str` code is a `RETURN_TYPE_MISMATCH`.
 - The stored text is the value of the member. It does not change.
 - These reads give members of `E` back: `TaskHandle.get()`; `WorkflowHandle.result_for(node)` and `WorkflowContext.result_for(node)` for a node of the task (`task.node()(...)` gives a `TaskNode[T, E]`); an `args_from` parameter annotated `TaskOutcome[T, TaskError[E]]`; the entries of `results()`, `tasks()` and the map of an outputless workflow's `get()`; and `app.get_result()`, typed `TaskError[Any]`.
-- A stored code that `E` does not name (a row of another version of the task) is the read failure `UnknownCustomCode`. In a map of node outcomes and in a workflow context, it is a failed entry with `RESULT_DESERIALIZATION_ERROR`; for an `args_from` input, the node fails with `WORKER_SERIALIZATION_ERROR`.
+- A stored code that `E` does not name (a row of another version of the task) is the read failure `UnknownCustomCode` (`UNKNOWN_CUSTOM_CODE`). In a map of node outcomes and in a workflow context, it is a failed entry with `RESULT_DESERIALIZATION_ERROR`; for an `args_from` input, the node fails with `WORKER_SERIALIZATION_ERROR`.
 - The error of a workflow that `WorkflowHandle.get()` gives keeps its custom code as text. That error is the error of the failed node, which can be any node of the workflow, with the codes of its own task, so no one `Enum` names it.
 - A `SubWorkflowNode` gives custom codes as text: a child workflow holds the codes of many tasks.
 - A `match` on `task_error.error_code` that leaves out a member of `E` fails pyright's exhaustiveness check.
@@ -683,7 +683,7 @@ The stored options of the task hold the value in effect when the task is sent, s
 
 `@app.task` refuses a declaration that breaks a rule with a `TaskDefinitionError`, one code per rule:
 
-<!-- members: ErrorCode subset -->
+<!-- members: HorsiesErrorCode subset -->
 | Code | Name | Rule |
 | ---- | ---- | ---- |
 | HRS-107 | `TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF` | `SHARED_ASYNC` needs an `async def` function |

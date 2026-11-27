@@ -48,7 +48,7 @@ from horsies._core import (
 )
 from horsies.core.app import Horsies
 from horsies.core.fleet_metrics import fleet_label_names
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.web.auth import INTENT_HEADER, MonitoringAuthPolicy
 from horsies.web.schema import SchemaState
 
@@ -93,7 +93,7 @@ class TraceLinkTemplate(BaseModel):
             case str() as refusal:
                 raise ConfigurationError(
                     message='invalid trace link template',
-                    code=ErrorCode.CONFIG_INVALID_TRACE_LINK,
+                    code=HorsiesErrorCode.CONFIG_INVALID_TRACE_LINK,
                     notes=[refusal],
                     help_text=(
                         'use an http or https URL with one '

@@ -20,14 +20,14 @@ use crate::failure_cause::FailureCause;
 /// The members are Python's, in Python's order
 /// (`clients/python/horsies/core/brokers/result_types.py`). The nine operation codes from
 /// `SCHEMA_INIT_FAILED` to `LISTENER_SUBSCRIBE_FAILED` share one variant in
-/// Python, `BrokerOperationFailed`. A client produces `NO_BROKER` and
+/// Python, `DatabaseOperationFailed`. A client produces `NO_DATABASE` and
 /// `NO_TYPE_AVAILABLE`; only the Python client produces `ASYNC_CONTEXT`.
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
 #[code_catalog(module = "broker", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum BrokerErrorCode {
+pub enum DatabaseErrorCode {
     SchemaInitFailed,
     EnqueueFailed,
     PayloadMismatch,
@@ -36,7 +36,7 @@ pub enum BrokerErrorCode {
     IdempotencyKeyConflict,
     TaskInfoQueryFailed,
     MonitoringQueryFailed,
-    DbPingFailed,
+    DatabasePingFailed,
     WorkerPingFailed,
     CleanupFailed,
     CloseFailed,
@@ -44,7 +44,7 @@ pub enum BrokerErrorCode {
     ListenerSubscribeFailed,
     /// The task handle has no broker, so it cannot read task info. Nothing
     /// ran. A client produces it.
-    NoBroker,
+    NoDatabase,
     /// A typed result was requested, but the process has no registered type
     /// for the task. The stored result is unchanged. A client produces it.
     NoTypeAvailable,
@@ -68,7 +68,7 @@ pub enum BrokerErrorCode {
     WaitInsideTask,
 }
 
-impl std::fmt::Display for BrokerErrorCode {
+impl std::fmt::Display for DatabaseErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = serde_plain::to_string(self).unwrap_or_else(|_| format!("{:?}", self));
         write!(f, "{}", s)
@@ -76,15 +76,15 @@ impl std::fmt::Display for BrokerErrorCode {
 }
 
 /// The codes of the broker operations whose failure is one variant,
-/// [`BrokerOperationError::OperationFailed`], that keeps the code (Python
-/// `BrokerOperationFailedCode`, a `Literal` subset of `BrokerErrorCode`).
+/// [`DatabaseOperationError::OperationFailed`], that keeps the code (Python
+/// `DatabaseOperationFailedCode`, a `Literal` subset of `DatabaseErrorCode`).
 /// The members are Python's, in Python's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BrokerOperationFailedCode {
+pub enum DatabaseOperationFailedCode {
     SchemaInitFailed,
     TaskInfoQueryFailed,
     MonitoringQueryFailed,
-    DbPingFailed,
+    DatabasePingFailed,
     WorkerPingFailed,
     CleanupFailed,
     CloseFailed,
@@ -92,13 +92,13 @@ pub enum BrokerOperationFailedCode {
     ListenerSubscribeFailed,
 }
 
-impl BrokerOperationFailedCode {
+impl DatabaseOperationFailedCode {
     /// Every member, in Python's order.
     pub const ALL: [Self; 9] = [
         Self::SchemaInitFailed,
         Self::TaskInfoQueryFailed,
         Self::MonitoringQueryFailed,
-        Self::DbPingFailed,
+        Self::DatabasePingFailed,
         Self::WorkerPingFailed,
         Self::CleanupFailed,
         Self::CloseFailed,
@@ -107,28 +107,28 @@ impl BrokerOperationFailedCode {
     ];
 
     /// The member of the whole catalog. Pure.
-    pub const fn broker_code(self) -> BrokerErrorCode {
+    pub const fn broker_code(self) -> DatabaseErrorCode {
         match self {
-            Self::SchemaInitFailed => BrokerErrorCode::SchemaInitFailed,
-            Self::TaskInfoQueryFailed => BrokerErrorCode::TaskInfoQueryFailed,
-            Self::MonitoringQueryFailed => BrokerErrorCode::MonitoringQueryFailed,
-            Self::DbPingFailed => BrokerErrorCode::DbPingFailed,
-            Self::WorkerPingFailed => BrokerErrorCode::WorkerPingFailed,
-            Self::CleanupFailed => BrokerErrorCode::CleanupFailed,
-            Self::CloseFailed => BrokerErrorCode::CloseFailed,
-            Self::ListenerStartFailed => BrokerErrorCode::ListenerStartFailed,
-            Self::ListenerSubscribeFailed => BrokerErrorCode::ListenerSubscribeFailed,
+            Self::SchemaInitFailed => DatabaseErrorCode::SchemaInitFailed,
+            Self::TaskInfoQueryFailed => DatabaseErrorCode::TaskInfoQueryFailed,
+            Self::MonitoringQueryFailed => DatabaseErrorCode::MonitoringQueryFailed,
+            Self::DatabasePingFailed => DatabaseErrorCode::DatabasePingFailed,
+            Self::WorkerPingFailed => DatabaseErrorCode::WorkerPingFailed,
+            Self::CleanupFailed => DatabaseErrorCode::CleanupFailed,
+            Self::CloseFailed => DatabaseErrorCode::CloseFailed,
+            Self::ListenerStartFailed => DatabaseErrorCode::ListenerStartFailed,
+            Self::ListenerSubscribeFailed => DatabaseErrorCode::ListenerSubscribeFailed,
         }
     }
 }
 
 /// The failure of a broker operation: one variant per Python class of
 /// `clients/python/horsies/core/brokers/result_types.py`, each with the facts of its
-/// state only. Carried inside `Err(...)` of a [`BrokerResult`]. Each
+/// state only. Carried inside `Err(...)` of a [`DatabaseResult`]. Each
 /// variant's doc is its Python class doc (`ErrorCatalog`).
 ///
 /// The classes that only the Python client produces are not variants:
-/// `BrokerNotAttached` and `BrokerNoTypeAvailable`.
+/// `DatabaseNotAttached` and `DatabaseNoTypeAvailable`.
 ///
 /// `cause` is the typed cause of the variant's `exception`
 /// (`ErrorClassValues`): the [`BrokerOperationSource`] that a failed
@@ -142,11 +142,11 @@ impl BrokerOperationFailedCode {
 #[derive(Debug, horsies_core_derive::ErrorCatalog, horsies_core_derive::ErrorClassValues)]
 #[error_catalog(
     module = "broker_errors",
-    code = "BrokerErrorCode",
-    union = "BrokerCoreError",
+    code = "DatabaseErrorCode",
+    union = "DatabaseCoreError",
     union_doc = "Every failure of a broker operation that the core gives: one class per state."
 )]
-pub enum BrokerOperationError {
+pub enum DatabaseOperationError {
     /// A broker operation failed with a database, driver or connection error.
     ///
     /// ``code`` names the operation. ``retryable`` is the core's classification
@@ -154,13 +154,13 @@ pub enum BrokerOperationError {
     /// connection. A read changed nothing. A cleanup may have finished part of
     /// its rows; no write of the library's own data is left half done.
     #[error_class(
-        class = "BrokerOperationFailed",
+        class = "DatabaseOperationFailed",
         code_field = "code",
-        code_subset = "BrokerOperationFailedCode",
+        code_subset = "DatabaseOperationFailedCode",
         exception = "BaseException"
     )]
     OperationFailed {
-        code: BrokerOperationFailedCode,
+        code: DatabaseOperationFailedCode,
         #[error_slot(python = "Str", hidden)]
         message: String,
         #[error_slot(python = "Bool")]
@@ -173,10 +173,10 @@ pub enum BrokerOperationError {
     ///
     /// ``retryable`` is the core's classification of the cause. An enqueue
     /// again with the same task id and payload is safe: the broker returns the
-    /// existing task for a duplicate. ``exception`` is ``NoCause()`` when the
+    /// existing task for a duplicate. ``cause`` is ``NoCause()`` when the
     /// broker found the failure by a data check (the conflicting row was gone).
     #[error_class(
-        class = "BrokerEnqueueFailed",
+        class = "DatabaseEnqueueFailed",
         code = "EnqueueFailed",
         exception = "BaseException | NoCause"
     )]
@@ -194,7 +194,7 @@ pub enum BrokerOperationError {
     /// different idempotency key. Nothing was written. The same enqueue fails
     /// again.
     #[error_class(
-        class = "BrokerPayloadMismatch",
+        class = "DatabasePayloadMismatch",
         code = "PayloadMismatch",
         never_retryable
     )]
@@ -210,7 +210,7 @@ pub enum BrokerOperationError {
     /// has passed (24 h by default, at most 30 days); an enqueue with the same
     /// key is then accepted.
     #[error_class(
-        class = "BrokerIdempotencyKeyConflict",
+        class = "DatabaseIdempotencyKeyConflict",
         code = "IdempotencyKeyConflict",
         never_retryable
     )]
@@ -222,10 +222,10 @@ pub enum BrokerOperationError {
     },
     /// Stored JSON failed strict validation. The stored data is unchanged.
     ///
-    /// The same read fails again. ``exception`` is ``NoCause()`` when a shape
+    /// The same read fails again. ``cause`` is ``NoCause()`` when a shape
     /// check found the failure without a Python exception.
     #[error_class(
-        class = "BrokerInvalidJsonPayload",
+        class = "DatabaseInvalidJsonPayload",
         code = "InvalidJsonPayload",
         never_retryable,
         exception = "BaseException | NoCause"
@@ -239,11 +239,11 @@ pub enum BrokerOperationError {
     },
     /// The task options are not valid JSON or carry a retry limit that cannot be stored.
     ///
-    /// Nothing was written. The same options are refused again. ``exception``
+    /// Nothing was written. The same options are refused again. ``cause``
     /// is ``NoCause()`` when a check refused the options without a Python
     /// exception.
     #[error_class(
-        class = "BrokerInvalidTaskOptions",
+        class = "DatabaseInvalidTaskOptions",
         code = "InvalidTaskOptions",
         never_retryable,
         exception = "BaseException | NoCause"
@@ -259,10 +259,10 @@ pub enum BrokerOperationError {
     /// An argument of the call was refused before anything ran. Nothing was written.
     ///
     /// The message names the argument and the rule. The same arguments are
-    /// refused again. ``exception`` is ``NoCause()`` when a check refused the
+    /// refused again. ``cause`` is ``NoCause()`` when a check refused the
     /// argument without a Python exception.
     #[error_class(
-        class = "BrokerInvalidInput",
+        class = "DatabaseInvalidInput",
         code = "InvalidInput",
         never_retryable,
         exception = "BaseException | NoCause"
@@ -279,7 +279,7 @@ pub enum BrokerOperationError {
     ///
     /// A sync call on that thread returns the same error; call the
     /// ``*_async`` form.
-    #[error_class(class = "BrokerAsyncContext", code = "AsyncContext", never_retryable)]
+    #[error_class(class = "DatabaseAsyncContext", code = "AsyncContext", never_retryable)]
     AsyncContext {
         #[error_slot(python = "Str", hidden)]
         message: String,
@@ -289,7 +289,7 @@ pub enum BrokerOperationError {
     /// A broker built with ``assume_initialized=True`` has no listener. Every
     /// call that needs one returns this error for that broker.
     #[error_class(
-        class = "BrokerListenerDisabled",
+        class = "DatabaseListenerDisabled",
         code = "ListenerDisabled",
         never_retryable
     )]
@@ -302,7 +302,7 @@ pub enum BrokerOperationError {
     /// Every result wait in that process returns this error. Compose the tasks
     /// with a workflow, or send the other task and return.
     #[error_class(
-        class = "BrokerWaitInsideTask",
+        class = "DatabaseWaitInsideTask",
         code = "WaitInsideTask",
         never_retryable
     )]
@@ -312,16 +312,16 @@ pub enum BrokerOperationError {
     },
 }
 
-impl From<BrokerOperationFailedCode> for BrokerErrorCode {
-    fn from(code: BrokerOperationFailedCode) -> Self {
+impl From<DatabaseOperationFailedCode> for DatabaseErrorCode {
+    fn from(code: DatabaseOperationFailedCode) -> Self {
         code.broker_code()
     }
 }
 
-impl BrokerOperationError {
+impl DatabaseOperationError {
     /// The catalog code of the variant: the code of its Python class
     /// (`ErrorCatalog`). Pure.
-    pub fn code(&self) -> BrokerErrorCode {
+    pub fn code(&self) -> DatabaseErrorCode {
         ErrorEnum::error_code(self)
     }
 
@@ -385,7 +385,7 @@ impl BrokerOperationError {
     }
 }
 
-impl std::fmt::Display for BrokerOperationError {
+impl std::fmt::Display for DatabaseOperationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -397,7 +397,7 @@ impl std::fmt::Display for BrokerOperationError {
     }
 }
 
-impl std::error::Error for BrokerOperationError {
+impl std::error::Error for DatabaseOperationError {
     /// The variant's `cause`, when it has one and it is an error. A refused
     /// argument, input or task options has no error.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
@@ -417,13 +417,13 @@ impl std::error::Error for BrokerOperationError {
     }
 }
 
-impl BrokerOperationError {
+impl DatabaseOperationError {
     /// `code` failed with `source`, with the message `message`; the retry
     /// rule is the source's. The constructors below give Python's message of
     /// each operation; a client uses this one for a failure of its own (a
     /// process runtime that did not start, the connect before a read). Pure.
     pub fn operation_failed(
-        code: BrokerOperationFailedCode,
+        code: DatabaseOperationFailedCode,
         message: String,
         source: BrokerOperationSource,
     ) -> Self {
@@ -439,7 +439,7 @@ impl BrokerOperationError {
     /// (Python: `Schema initialization failed: {error}`). Pure.
     pub fn schema_init_failed(error: BrokerError) -> Self {
         Self::operation_failed(
-            BrokerOperationFailedCode::SchemaInitFailed,
+            DatabaseOperationFailedCode::SchemaInitFailed,
             format!("Schema initialization failed: {error}"),
             BrokerOperationSource::Broker(error),
         )
@@ -449,7 +449,7 @@ impl BrokerOperationError {
     /// `get_task_info failed for {task_id}: {source}`). Pure.
     pub fn task_info_query_failed(task_id: Uuid, source: BrokerOperationSource) -> Self {
         Self::operation_failed(
-            BrokerOperationFailedCode::TaskInfoQueryFailed,
+            DatabaseOperationFailedCode::TaskInfoQueryFailed,
             format!("get_task_info failed for {task_id}: {source}"),
             source,
         )
@@ -474,7 +474,7 @@ impl BrokerOperationError {
     /// Pure.
     pub fn raw_result_query_failed(task_id: Uuid, error: BrokerError) -> Self {
         Self::operation_failed(
-            BrokerOperationFailedCode::TaskInfoQueryFailed,
+            DatabaseOperationFailedCode::TaskInfoQueryFailed,
             format!("Broker error while retrieving task {task_id}: {error}"),
             BrokerOperationSource::Broker(error),
         )
@@ -484,7 +484,7 @@ impl BrokerOperationError {
     /// `{operation} failed: {source}`). Pure.
     pub fn monitoring_query_failed(operation: &str, source: BrokerOperationSource) -> Self {
         Self::operation_failed(
-            BrokerOperationFailedCode::MonitoringQueryFailed,
+            DatabaseOperationFailedCode::MonitoringQueryFailed,
             format!("{operation} failed: {source}"),
             source,
         )
@@ -495,17 +495,17 @@ impl BrokerOperationError {
     /// {refused}`). Pure.
     pub fn monitoring_query_refused(operation: &str, refused: ClassReadRefused) -> Self {
         Self::operation_failed(
-            BrokerOperationFailedCode::MonitoringQueryFailed,
+            DatabaseOperationFailedCode::MonitoringQueryFailed,
             format!("{operation} refused: {refused}"),
             BrokerOperationSource::ClassRead(refused),
         )
     }
 
-    /// `DB_PING_FAILED`: the ping met `error` (Python: `ping_database failed:
+    /// `DATABASE_PING_FAILED`: the ping met `error` (Python: `ping_database failed:
     /// {error}`). Pure.
-    pub fn db_ping_failed(error: BrokerError) -> Self {
+    pub fn database_ping_failed(error: BrokerError) -> Self {
         Self::operation_failed(
-            BrokerOperationFailedCode::DbPingFailed,
+            DatabaseOperationFailedCode::DatabasePingFailed,
             format!("ping_database failed: {error}"),
             BrokerOperationSource::Broker(error),
         )
@@ -515,7 +515,7 @@ impl BrokerOperationError {
     /// the step's Python message ([`WorkerPingStep::message`]). Pure.
     pub fn worker_ping_failed(step: WorkerPingStep, source: BrokerOperationSource) -> Self {
         Self::operation_failed(
-            BrokerOperationFailedCode::WorkerPingFailed,
+            DatabaseOperationFailedCode::WorkerPingFailed,
             step.message(&source),
             source,
         )
@@ -665,7 +665,7 @@ impl WorkerPingStep {
 }
 
 /// What a failed broker operation met: the cause of
-/// [`BrokerOperationError::OperationFailed`]. The client builds the
+/// [`DatabaseOperationError::OperationFailed`]. The client builds the
 /// exception of the class from it: the core's class of the cause, with the
 /// cause's own text (`ExceptionCause`).
 #[derive(Debug, thiserror::Error)]
@@ -785,8 +785,8 @@ impl BrokerRefusalCause {
 
 /// Result type for broker operations.
 ///
-/// `Ok(T)` on success, `Err(BrokerOperationError)` on infrastructure failure.
-pub type BrokerResult<T> = Result<T, BrokerOperationError>;
+/// `Ok(T)` on success, `Err(DatabaseOperationError)` on infrastructure failure.
+pub type DatabaseResult<T> = Result<T, DatabaseOperationError>;
 
 /// Raw broker-level snapshot of a task's stored result envelope.
 ///
@@ -902,16 +902,16 @@ mod tests {
 
     #[test]
     fn broker_error_code_serde() {
-        let code = BrokerErrorCode::EnqueueFailed;
+        let code = DatabaseErrorCode::EnqueueFailed;
         let json = serde_json::to_string(&code).unwrap();
         assert_eq!(json, "\"ENQUEUE_FAILED\"");
-        let back: BrokerErrorCode = serde_json::from_str(&json).unwrap();
+        let back: DatabaseErrorCode = serde_json::from_str(&json).unwrap();
         assert_eq!(back, code);
     }
 
     #[test]
     fn broker_operation_error_display() {
-        let err = BrokerOperationError::schema_init_failed(BrokerError::ConnectionFailed(
+        let err = DatabaseOperationError::schema_init_failed(BrokerError::ConnectionFailed(
             "connection refused".to_owned(),
         ));
         let s = format!("{}", err);
@@ -927,64 +927,64 @@ mod tests {
         let message = || "m".to_owned();
         let cases = [
             (
-                BrokerOperationError::operation_failed(
-                    BrokerOperationFailedCode::WorkerPingFailed,
+                DatabaseOperationError::operation_failed(
+                    DatabaseOperationFailedCode::WorkerPingFailed,
                     message(),
                     BrokerOperationSource::Broker(BrokerError::ListenerClosed),
                 ),
-                BrokerErrorCode::WorkerPingFailed,
+                DatabaseErrorCode::WorkerPingFailed,
             ),
             (
-                BrokerOperationError::EnqueueFailed {
+                DatabaseOperationError::EnqueueFailed {
                     message: message(),
                     retryable: true,
                     cause: Box::new(BrokerCheckCause::Check),
                 },
-                BrokerErrorCode::EnqueueFailed,
+                DatabaseErrorCode::EnqueueFailed,
             ),
             (
-                BrokerOperationError::PayloadMismatch { message: message() },
-                BrokerErrorCode::PayloadMismatch,
+                DatabaseOperationError::PayloadMismatch { message: message() },
+                DatabaseErrorCode::PayloadMismatch,
             ),
             (
-                BrokerOperationError::IdempotencyKeyConflict {
+                DatabaseOperationError::IdempotencyKeyConflict {
                     message: message(),
                     owner_task_id: Uuid::from_u128(7),
                 },
-                BrokerErrorCode::IdempotencyKeyConflict,
+                DatabaseErrorCode::IdempotencyKeyConflict,
             ),
             (
-                BrokerOperationError::InvalidJsonPayload {
+                DatabaseOperationError::InvalidJsonPayload {
                     message: message(),
                     cause: Box::new(BrokerCheckCause::Check),
                 },
-                BrokerErrorCode::InvalidJsonPayload,
+                DatabaseErrorCode::InvalidJsonPayload,
             ),
             (
-                BrokerOperationError::InvalidTaskOptions {
+                DatabaseOperationError::InvalidTaskOptions {
                     message: message(),
                     cause: BrokerRefusalCause::Check,
                 },
-                BrokerErrorCode::InvalidTaskOptions,
+                DatabaseErrorCode::InvalidTaskOptions,
             ),
             (
-                BrokerOperationError::InvalidInput {
+                DatabaseOperationError::InvalidInput {
                     message: message(),
                     cause: BrokerRefusalCause::Check,
                 },
-                BrokerErrorCode::InvalidInput,
+                DatabaseErrorCode::InvalidInput,
             ),
             (
-                BrokerOperationError::AsyncContext { message: message() },
-                BrokerErrorCode::AsyncContext,
+                DatabaseOperationError::AsyncContext { message: message() },
+                DatabaseErrorCode::AsyncContext,
             ),
             (
-                BrokerOperationError::ListenerDisabled { message: message() },
-                BrokerErrorCode::ListenerDisabled,
+                DatabaseOperationError::ListenerDisabled { message: message() },
+                DatabaseErrorCode::ListenerDisabled,
             ),
             (
-                BrokerOperationError::WaitInsideTask { message: message() },
-                BrokerErrorCode::WaitInsideTask,
+                DatabaseOperationError::WaitInsideTask { message: message() },
+                DatabaseErrorCode::WaitInsideTask,
             ),
         ];
         for (error, code) in cases {
@@ -997,10 +997,11 @@ mod tests {
     /// other variant never clears.
     #[test]
     fn only_a_failed_operation_or_enqueue_can_be_retryable() {
-        let failed =
-            BrokerOperationError::db_ping_failed(BrokerError::ConnectionFailed("lost".to_owned()));
-        let refused = BrokerOperationError::invalid_input("bad".to_owned());
-        let async_context = BrokerOperationError::AsyncContext {
+        let failed = DatabaseOperationError::database_ping_failed(BrokerError::ConnectionFailed(
+            "lost".to_owned(),
+        ));
+        let refused = DatabaseOperationError::invalid_input("bad".to_owned());
+        let async_context = DatabaseOperationError::AsyncContext {
             message: "loop".to_owned(),
         };
         assert!(failed.retryable());
@@ -1022,42 +1023,42 @@ mod tests {
         let refused = || BrokerError::ConnectionFailed("refused".to_owned());
         let cases = [
             (
-                BrokerOperationError::schema_init_failed(refused()),
-                BrokerErrorCode::SchemaInitFailed,
+                DatabaseOperationError::schema_init_failed(refused()),
+                DatabaseErrorCode::SchemaInitFailed,
                 "Schema initialization failed: connection failed: refused".to_owned(),
             ),
             (
-                BrokerOperationError::task_info_query_failed(
+                DatabaseOperationError::task_info_query_failed(
                     task_id,
                     BrokerOperationSource::Broker(refused()),
                 ),
-                BrokerErrorCode::TaskInfoQueryFailed,
+                DatabaseErrorCode::TaskInfoQueryFailed,
                 format!("get_task_info failed for {task_id}: connection failed: refused"),
             ),
             (
-                BrokerOperationError::raw_result_query_failed(task_id, refused()),
-                BrokerErrorCode::TaskInfoQueryFailed,
+                DatabaseOperationError::raw_result_query_failed(task_id, refused()),
+                DatabaseErrorCode::TaskInfoQueryFailed,
                 format!("Broker error while retrieving task {task_id}: connection failed: refused"),
             ),
             (
-                BrokerOperationError::monitoring_query_failed(
+                DatabaseOperationError::monitoring_query_failed(
                     "list_worker_states",
                     BrokerOperationSource::Broker(refused()),
                 ),
-                BrokerErrorCode::MonitoringQueryFailed,
+                DatabaseErrorCode::MonitoringQueryFailed,
                 "list_worker_states failed: connection failed: refused".to_owned(),
             ),
             (
-                BrokerOperationError::db_ping_failed(refused()),
-                BrokerErrorCode::DbPingFailed,
+                DatabaseOperationError::database_ping_failed(refused()),
+                DatabaseErrorCode::DatabasePingFailed,
                 "ping_database failed: connection failed: refused".to_owned(),
             ),
             (
-                BrokerOperationError::worker_ping_failed(
+                DatabaseOperationError::worker_ping_failed(
                     WorkerPingStep::Notify,
                     BrokerOperationSource::Broker(refused()),
                 ),
-                BrokerErrorCode::WorkerPingFailed,
+                DatabaseErrorCode::WorkerPingFailed,
                 "ping_workers failed: connection failed: refused".to_owned(),
             ),
         ];
@@ -1068,7 +1069,7 @@ mod tests {
             assert_eq!(error.failure_cause(), FailureCause::Connection);
             assert!(std::error::Error::source(&error).is_some());
         }
-        let refused_argument = BrokerOperationError::invalid_input("bad".to_owned());
+        let refused_argument = DatabaseOperationError::invalid_input("bad".to_owned());
         assert!(std::error::Error::source(&refused_argument).is_none());
     }
 
@@ -1093,20 +1094,20 @@ mod tests {
         );
     }
 
-    /// The operation codes are Python's `BrokerOperationFailedCode`, in its
+    /// The operation codes are Python's `DatabaseOperationFailedCode`, in its
     /// order.
     #[test]
     fn the_operation_codes_are_the_nine_of_python() {
         let codes = [
-            BrokerOperationFailedCode::SchemaInitFailed,
-            BrokerOperationFailedCode::TaskInfoQueryFailed,
-            BrokerOperationFailedCode::MonitoringQueryFailed,
-            BrokerOperationFailedCode::DbPingFailed,
-            BrokerOperationFailedCode::WorkerPingFailed,
-            BrokerOperationFailedCode::CleanupFailed,
-            BrokerOperationFailedCode::CloseFailed,
-            BrokerOperationFailedCode::ListenerStartFailed,
-            BrokerOperationFailedCode::ListenerSubscribeFailed,
+            DatabaseOperationFailedCode::SchemaInitFailed,
+            DatabaseOperationFailedCode::TaskInfoQueryFailed,
+            DatabaseOperationFailedCode::MonitoringQueryFailed,
+            DatabaseOperationFailedCode::DatabasePingFailed,
+            DatabaseOperationFailedCode::WorkerPingFailed,
+            DatabaseOperationFailedCode::CleanupFailed,
+            DatabaseOperationFailedCode::CloseFailed,
+            DatabaseOperationFailedCode::ListenerStartFailed,
+            DatabaseOperationFailedCode::ListenerSubscribeFailed,
         ]
         .map(|code| code.broker_code().to_string());
         assert_eq!(
@@ -1115,7 +1116,7 @@ mod tests {
                 "SCHEMA_INIT_FAILED",
                 "TASK_INFO_QUERY_FAILED",
                 "MONITORING_QUERY_FAILED",
-                "DB_PING_FAILED",
+                "DATABASE_PING_FAILED",
                 "WORKER_PING_FAILED",
                 "CLEANUP_FAILED",
                 "CLOSE_FAILED",
@@ -1128,16 +1129,16 @@ mod tests {
     #[test]
     fn invalid_input_has_python_wire_name() {
         assert_eq!(
-            serde_json::to_string(&BrokerErrorCode::InvalidInput).unwrap(),
+            serde_json::to_string(&DatabaseErrorCode::InvalidInput).unwrap(),
             "\"INVALID_INPUT\""
         );
-        assert_eq!(BrokerErrorCode::InvalidInput.to_string(), "INVALID_INPUT");
+        assert_eq!(DatabaseErrorCode::InvalidInput.to_string(), "INVALID_INPUT");
     }
 
     #[test]
     fn listener_disabled_has_python_wire_name() {
         assert_eq!(
-            serde_json::to_string(&BrokerErrorCode::ListenerDisabled).unwrap(),
+            serde_json::to_string(&DatabaseErrorCode::ListenerDisabled).unwrap(),
             "\"LISTENER_DISABLED\""
         );
     }
@@ -1145,30 +1146,30 @@ mod tests {
     #[test]
     fn all_codes_round_trip() {
         let codes = [
-            BrokerErrorCode::SchemaInitFailed,
-            BrokerErrorCode::EnqueueFailed,
-            BrokerErrorCode::PayloadMismatch,
-            BrokerErrorCode::IdempotencyKeyConflict,
-            BrokerErrorCode::TaskInfoQueryFailed,
-            BrokerErrorCode::MonitoringQueryFailed,
-            BrokerErrorCode::DbPingFailed,
-            BrokerErrorCode::WorkerPingFailed,
-            BrokerErrorCode::CleanupFailed,
-            BrokerErrorCode::CloseFailed,
-            BrokerErrorCode::ListenerStartFailed,
-            BrokerErrorCode::ListenerSubscribeFailed,
-            BrokerErrorCode::NoBroker,
-            BrokerErrorCode::NoTypeAvailable,
-            BrokerErrorCode::InvalidJsonPayload,
-            BrokerErrorCode::InvalidTaskOptions,
-            BrokerErrorCode::AsyncContext,
-            BrokerErrorCode::InvalidInput,
-            BrokerErrorCode::ListenerDisabled,
-            BrokerErrorCode::WaitInsideTask,
+            DatabaseErrorCode::SchemaInitFailed,
+            DatabaseErrorCode::EnqueueFailed,
+            DatabaseErrorCode::PayloadMismatch,
+            DatabaseErrorCode::IdempotencyKeyConflict,
+            DatabaseErrorCode::TaskInfoQueryFailed,
+            DatabaseErrorCode::MonitoringQueryFailed,
+            DatabaseErrorCode::DatabasePingFailed,
+            DatabaseErrorCode::WorkerPingFailed,
+            DatabaseErrorCode::CleanupFailed,
+            DatabaseErrorCode::CloseFailed,
+            DatabaseErrorCode::ListenerStartFailed,
+            DatabaseErrorCode::ListenerSubscribeFailed,
+            DatabaseErrorCode::NoDatabase,
+            DatabaseErrorCode::NoTypeAvailable,
+            DatabaseErrorCode::InvalidJsonPayload,
+            DatabaseErrorCode::InvalidTaskOptions,
+            DatabaseErrorCode::AsyncContext,
+            DatabaseErrorCode::InvalidInput,
+            DatabaseErrorCode::ListenerDisabled,
+            DatabaseErrorCode::WaitInsideTask,
         ];
         for code in codes {
             let json = serde_json::to_string(&code).unwrap();
-            let back: BrokerErrorCode = serde_json::from_str(&json).unwrap();
+            let back: DatabaseErrorCode = serde_json::from_str(&json).unwrap();
             assert_eq!(back, code);
         }
     }

@@ -90,7 +90,7 @@ function assertRelayFull(error: SeatRelayFull): void {
   assert.equal(error.code, SeatRelayCode.SEAT_RELAY_FULL);
   assert.equal(error.retryable, true);
   assert.ok(error.message.includes(BOUND_TEXT) && error.message.includes("nothing was sent; retry"), error.message);
-  assert.deepEqual(error.exception, {
+  assert.deepEqual(error.cause, {
     kind: "coreFailure",
     failure: "preconditionFailed",
     subject: "seat relay",

@@ -10,7 +10,7 @@ use chrono::Utc;
 
 use super::*;
 use crate::broker::claims::ClaimRead;
-use crate::core::task::error::OperationalErrorCode;
+use crate::core::task::error::OperationalCode;
 use crate::core::task::{Execution, TaskErrorCode, UserCode};
 use crate::core::{BuiltInTaskCode, OutcomeCode};
 use crate::events::{
@@ -384,7 +384,7 @@ fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
             },
             ExpectedEnd::Reported(ChildResult::Failed {
                 error_code: AttemptErrorCode::BuiltIn {
-                    code: OperationalErrorCode::WorkerSerializationError.into(),
+                    code: OperationalCode::WorkerSerializationError.into(),
                 },
             }),
             "FAILED",
@@ -396,7 +396,7 @@ fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
             },
             ExpectedEnd::Reported(ChildResult::WorkerFailure),
             "WORKER_FAILURE",
-            "BROKER_ERROR",
+            "DATABASE_ERROR",
         ),
         (
             EndView::TimedOut {

@@ -139,8 +139,8 @@ without it has no such member (typecheck).
   `outputFor(nodeId, workflow)` and `hasSummary(nodeId)`.
 - A read gives `notInContext` for a node that is not in
   `workflowContextFrom` or that did not end, `unreadable` for a value that
-  does not read with the contract, and `unknownCustomCode` for a code that the
-  contract does not list.
+  does not read with the contract, and `unknownCustomCode` (with the stored
+  code in `storedCode`) for a code that the contract does not list.
 
 <!-- ts-check: alone -->
 ```ts
@@ -290,7 +290,7 @@ export const allRegions = defineWorkflow(
   `SUBWORKFLOW_DEPTH_LIMIT_REACHED`. `check` reports a nesting that reaches
   it for certain (`HRS-036`) and a child that includes itself with the same
   parameters and no wait between (`HRS-037`).
-- A failed child fails its node with `SUBWORKFLOW_FAILED`. The node's
+- A failed child fails its node with `SUB_WORKFLOW_FAILED`. The node's
   `error.subWorkflow` holds the child's `workflowId` and its `summary`
   (status, output, task counts, error summary).
 
@@ -340,7 +340,7 @@ export async function refreshed(app: Horsies): Promise<void> {
   entries stay readable.
 - A stored result whose form does not match the definition (the definition
   gained or lost `outputType` between the start and the read) is
-  `resultDeserializationError`.
+  `storedResultUnreadable`.
 - A sub-workflow node of such a child, `resultFor` of that node and an
   `h.taskOutcome(workflow)` parameter give `NoWorkflowOutput`.
 
@@ -353,8 +353,8 @@ export async function runCheckout(app: Horsies, orderId: string): Promise<void> 
   const started = await app.start(checkout, { order: { orderId, totalCents: 900 } });
 
   if (!started.ok) {
-    switch (started.error.code) {
-      case "ENQUEUE_FAILED":
+    switch (started.error.kind) {
+      case "enqueueFailed":
         if (started.error.retryable) {
           const again = await app.resendStart(started.error);
 
@@ -362,9 +362,9 @@ export async function runCheckout(app: Horsies, orderId: string): Promise<void> 
         }
 
         break;
-      case "WORKFLOW_ID_CONFLICT":
-      case "WORKFLOW_COMMAND_CONFLICT":
-      case "VALIDATION_FAILED":
+      case "idConflict":
+      case "commandConflict":
+      case "validationFailed":
         console.error(started.error.message);
         break;
     }
@@ -427,16 +427,16 @@ the first refusal. Every refusal before the core's write writes nothing.
 - A workflow with a required `h.taskOutcome` param cannot be started with
   `app.start` (typecheck); only a sub-workflow node runs it.
 
-`WorkflowStartError<R>`, told apart by `code`. Every variant has `message`,
-`workflowName`, `workflowId` (the id of the start: the caller's, or the one
-minted for it) and `retryable`.
+`WorkflowStartError<R>`, told apart by `kind`, named after its `code`. Every
+variant has `message`, `workflowName`, `workflowId` (the id of the start:
+the caller's, or the one minted for it) and `retryable`.
 
-| `code` | Fields | When |
-|---|---|---|
-| `VALIDATION_FAILED` | `exception` | Before any write: not listed, a bad id, parameters that do not read back, a build that threw, a spec check, a child that is not listed. Not retryable |
-| `WORKFLOW_ID_CONFLICT` | `existingWorkflowName` | The id belongs to another workflow name. Nothing was written. Not retryable |
-| `WORKFLOW_COMMAND_CONFLICT` | - | The id holds a workflow of the same name with another start command, or a sub-workflow. Nothing was written. Not retryable |
-| `ENQUEUE_FAILED` | `exception` | The connect, the schema install or the start failed. `retryable` is the classification of the cause. A start again with the same id finds the workflow when the commit reply was lost |
+| `kind` | `code` | Fields | When |
+|---|---|---|---|
+| `validationFailed` | `VALIDATION_FAILED` | `cause` | Before any write: not listed, a bad id, parameters that do not read back, a build that threw, a spec check, a child that is not listed. Not retryable |
+| `idConflict` | `WORKFLOW_ID_CONFLICT` | `existingWorkflowName` | The id belongs to another workflow name. Nothing was written. Not retryable |
+| `commandConflict` | `WORKFLOW_COMMAND_CONFLICT` | - | The id holds a workflow of the same name with another start command, or a sub-workflow. Nothing was written. Not retryable |
+| `enqueueFailed` | `ENQUEUE_FAILED` | `cause` | The connect, the schema install or the start failed. `retryable` is the classification of the cause. A start again with the same id finds the workflow when the commit reply was lost |
 
 `app.resendStart(error)` sends the same spec text, workflow id and sent
 instant again. It takes an `ENQUEUE_FAILED` error that a start of this
@@ -516,24 +516,24 @@ export async function checkoutState(app: Horsies, text: string): Promise<void> {
 | `waitTimeout` | `WAIT_TIMEOUT` | - | The workflow had not ended when the wait ended |
 | `workflowNotFound` | `WORKFLOW_NOT_FOUND` | - | No workflow has the id |
 | `resultNotReady` | `RESULT_NOT_READY` | - | `resultFor`: the node stores no result yet, or the workflow has no node of the id |
-| `resultDeserializationError` | - | `cause` | The stored value does not read with the handle's types |
-| `unknownCustomCode` | - | `code` (the stored code) | The stored custom code is not in the node contract's `errorCodes` |
+| `storedResultUnreadable` | `RESULT_DESERIALIZATION_ERROR` | `cause` | The stored value does not read with the handle's types |
+| `unknownCustomCode` | `UNKNOWN_CUSTOM_CODE` | `storedCode` | The stored custom code is not in the node contract's `errorCodes` |
 | `waitInsideTask` | `WAIT_INSIDE_TASK` | - | A wait in a worker child. Nothing was read |
 | `noTypeAvailable` | `NO_TYPE_AVAILABLE` | `workflowName` | The app does not list the workflow, so its output has no type to read with. Nothing was read |
-| `database` | the handle code | `retryable`, `message` | The database or the connection failed |
+| `databaseError` | `DATABASE_ERROR` | `databaseCode` (the handle code), `retryable`, `message` | The database or the connection failed |
 | `invalidInput` | `INVALID_INPUT` | `maxMs` | `waitMs` outside its range. Nothing was read |
 | `seatRelayFull` | `SEAT_RELAY_FULL` | `retryable: true`, `message` | A `SHARED_THREAD` body only: the seat relay holds its bound of waiting calls. Nothing was read |
 
 `HandleCoreError` (from `status`, `results`, `nodes`, `pause`, `resume`,
-`cancel`), told apart by `code`; every variant has `message`, `workflowId`
-and `retryable`:
+`cancel`), told apart by `kind`, named after its `code`; every variant has
+`message`, `workflowId` and `retryable`:
 
-| `code` | When |
-|---|---|
-| `WORKFLOW_NOT_FOUND` | No workflow has the id |
-| `DB_OPERATION_FAILED` | The database or the connection failed; `retryable` is the classification of the cause |
-| `STORED_DATA_INVALID` | A stored value does not read |
-| `RESUME_RECOVERY_FAILED` | `resume` committed and the work after it failed: the workflow is RUNNING |
+| `kind` | `code` | When |
+|---|---|---|
+| `notFound` | `WORKFLOW_NOT_FOUND` | No workflow has the id |
+| `databaseOperationFailed` | `DATABASE_OPERATION_FAILED` | The database or the connection failed; `retryable` is the classification of the cause |
+| `storedDataInvalid` | `STORED_DATA_INVALID` | A stored value does not read |
+| `resumeRecoveryFailed` | `RESUME_RECOVERY_FAILED` | `resume` committed and the work after it failed: the workflow is RUNNING |
 
 ## Statuses
 

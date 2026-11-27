@@ -275,7 +275,7 @@ mod tests {
         );
         let stub = render_core_stub(&CORE_MODULE);
         assert!(stub.contains(
-            "from typing import Literal, final\n\nfrom horsies._catalog.broker_errors import BrokerCoreEnqueueError, BrokerInvalidInput, BrokerInvalidJsonPayload, BrokerListenerDisabled, BrokerOperationFailed\nfrom horsies._catalog.monitoring_errors import MonitoringQueryCoreError, TaskActionCoreError\n"
+            "from typing import Literal, final\n\nfrom horsies._catalog.broker_errors import DatabaseCoreEnqueueError, DatabaseInvalidInput, DatabaseInvalidJsonPayload, DatabaseListenerDisabled, DatabaseOperationFailed\nfrom horsies._catalog.monitoring_errors import MonitoringQueryCoreError, TaskActionCoreError\n"
         ));
     }
 
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn a_catalog_code_is_typed_by_its_wire_values() {
-        let catalog = <horsies_core::BrokerErrorCode as CodeEnum>::CATALOG;
+        let catalog = <horsies_core::DatabaseErrorCode as CodeEnum>::CATALOG;
         let rendered = type_text(&TypeText::WireValuesOf(catalog));
         assert!(rendered.starts_with("Literal['"));
         for member in catalog.members {

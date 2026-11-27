@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     HorsiesError,
     MultipleValidationErrors,
 )
@@ -150,7 +150,7 @@ class TestRecoveryConfigMultiError:
                 claimed_stale_threshold_ms=1_000,
             )
         for error in exc_info.value.report.errors:
-            assert error.code == ErrorCode.CONFIG_INVALID_RECOVERY
+            assert error.code == HorsiesErrorCode.CONFIG_INVALID_RECOVERY
 
     def test_single_error_code_is_config_invalid_recovery(self) -> None:
         """Single error also carries the correct error code."""
@@ -159,7 +159,7 @@ class TestRecoveryConfigMultiError:
                 runner_heartbeat_interval_ms=30_000,
                 running_stale_threshold_ms=1_000,
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_RECOVERY
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_RECOVERY
 
     def test_errors_carry_notes_and_help_text(self) -> None:
         """Collected errors include structured notes and help_text."""
@@ -251,7 +251,7 @@ class TestFailClosedThresholdFloor:
             )
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_RECOVERY
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_RECOVERY
         assert error.message == (
             'running_stale_threshold_ms too low for auto_fail_stale_running'
         )

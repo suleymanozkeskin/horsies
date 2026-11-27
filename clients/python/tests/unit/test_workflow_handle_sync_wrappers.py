@@ -2,9 +2,9 @@
 
 Each sync method calls a blocking form of the core handle. A core boundary
 error of that call (``CoreError``) is the method's own failure: the
-wrap-strategy methods return ``Err(HandleDbOperationFailed)`` with the error,
+wrap-strategy methods return ``Err(WorkflowHandleDatabaseOperationFailed)`` with the error,
 retryable by the core's rule; the read-strategy methods return
-``Err(BrokerError)`` with the error, its type and text, retryable by the same
+``Err(ReadDatabaseError)`` with the error, its type and text, retryable by the same
 rule. Any other exception propagates unchanged, and a record passes to the
 method's answer.
 """
@@ -19,12 +19,12 @@ from unittest.mock import MagicMock
 import pytest
 
 import horsies._core as core
-from horsies.core.models.outcome import BrokerError, Succeeded
+from horsies.core.models.outcome import ReadDatabaseError, Succeeded
 from horsies.core.models.workflow import NodeKey
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow.handle_types import (
-    HandleDbOperationFailed,
-    HandleErrorCode,
+    WorkflowHandleDatabaseOperationFailed,
+    WorkflowHandleErrorCode,
 )
 from horsies.core.models.workflow.enums import WorkflowStatus
 from horsies.core.types.result import Err, Ok, is_err, is_ok
@@ -74,11 +74,11 @@ class TestWrapStrategy:
 
         assert is_err(result)
         error = result.err_value
-        assert isinstance(error, HandleDbOperationFailed)
-        assert error.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert isinstance(error, WorkflowHandleDatabaseOperationFailed)
+        assert error.code == WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED
         assert error.retryable is True
         assert error.workflow_id == WORKFLOW_ID
-        assert error.exception is refused
+        assert error.cause is refused
         getattr(broker._core_handle, f'{method}_async').assert_not_called()
 
     @pytest.mark.parametrize('name', list(WRAP_METHODS))
@@ -128,10 +128,10 @@ class TestReadStrategy:
 
         assert isinstance(result, Err)
         error = result.err_value
-        assert isinstance(error, BrokerError)
+        assert isinstance(error, ReadDatabaseError)
         assert 'TooManyPendingCalls' in error.message
         assert error.retryable is True
-        assert error.exception is refused
+        assert error.cause is refused
         getattr(broker._core_handle, f'{method}_async').assert_not_called()
 
     @pytest.mark.parametrize('name', list(READ_METHODS))

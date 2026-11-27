@@ -40,7 +40,7 @@ from horsies.core.models.queues import QueueMode
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import (
     Execution,
-    OperationalErrorCode,
+    OperationalCode,
     RetryPolicy,
     TaskError,
 )
@@ -297,7 +297,7 @@ async def async_neighbour() -> Result[str, TaskError]:
     task_name='whole_run.blocks_loop_once',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=[OperationalErrorCode.TASK_BLOCKED_LOOP]),
+    retry_policy=RetryPolicy.fixed([1], auto_retry_for=[OperationalCode.TASK_BLOCKED_LOOP]),
 )
 async def blocks_loop_once() -> Result[str, TaskError]:
     """The first attempt waits until its neighbour runs, then blocks the

@@ -15,7 +15,7 @@ from horsies import (
     Err,
     Failed,
     Ok,
-    OperationalErrorCode,
+    OperationalCode,
     Result,
     RetryPolicy,
     Succeeded,
@@ -41,7 +41,7 @@ from . import store_failure
     retry_policy=RetryPolicy.exponential(
         base_seconds=tuning.COURIER_RETRY_BASE_SECONDS,
         max_retries=tuning.COURIER_MAX_RETRIES,
-        auto_retry_for=[COURIER_UNAVAILABLE, OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[COURIER_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
     ),
 )
 def book_courier(
@@ -110,7 +110,7 @@ def book_courier(
     queue_name=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def print_label(
@@ -154,7 +154,7 @@ def print_label(
     queue_name=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def tracking_seed(

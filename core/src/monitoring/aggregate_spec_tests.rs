@@ -16,7 +16,7 @@ use super::spec_support::{
 use crate::broker::lifecycle_tests::support::{single_session_pool, WireProxy};
 use crate::broker::PostgresBroker;
 use crate::core::history::reads::pages::HistoryWindow;
-use crate::core::task::error::{ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode};
+use crate::core::task::error::{ContractCode, OperationalCode, OutcomeCode, RetrievalCode};
 use crate::monitoring::{
     list_tasks, task_breakdown, task_facets, task_stats, Breakdown, BreakdownGroup, ErrorCategory,
     TaskBreakdownQuery, TaskFacetsQuery, TaskFilters, TaskGroupBy, TaskListQuery, TaskStatsQuery,
@@ -736,7 +736,7 @@ async fn two_categories_select_the_codes_of_either() {
 
 /// Every built-in code, family by family.
 fn built_in_codes() -> Vec<String> {
-    OperationalErrorCode::ALL
+    OperationalCode::ALL
         .iter()
         .map(ToString::to_string)
         .chain(ContractCode::ALL.iter().map(ToString::to_string))

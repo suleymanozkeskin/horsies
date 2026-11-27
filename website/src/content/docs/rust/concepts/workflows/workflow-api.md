@@ -273,7 +273,7 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 | `pause()` | `HandleResult<bool>`: `true` when a RUNNING workflow paused, `false` when it is not RUNNING |
 | `resume()` | `HandleResult<bool>`: `true` when a PAUSED workflow resumed, `false` when it is not PAUSED. The children that the resume owes build from the app's registered definitions |
 
-`HandleResult<T>` is `Result<T, HandleOperationError>`. Clones of a handle share one workflow.
+`HandleResult<T>` is `Result<T, WorkflowHandleError>`. Clones of a handle share one workflow.
 
 `get`:
 
@@ -308,22 +308,22 @@ A workflow with no output node is read as `OutputlessResults`: the outcome of ea
 | `WorkflowNotFound { workflow_id }` | `WORKFLOW_NOT_FOUND` | No workflow has the id |
 | `ResultNotReady { workflow_id, node_id }` | `RESULT_NOT_READY` | `result_for`: the node stores no result yet, or no node has the id |
 | `StoredResultUnreadable { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored value does not read with the handle's types; `cause` names no value |
-| `UnknownUserCode { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored user code is not a code of `E` |
+| `UnknownUserCode { workflow_id, cause }` | `UNKNOWN_CUSTOM_CODE` | The stored user code is not a code of `E` |
 | `InvalidInput { workflow_id, cause }` | `INVALID_INPUT` | `get`: the `Within` limit is above `MAX_WAIT_LIMIT_MS`; `cause` is `WaitLimitRefused`. Nothing was read |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A wait in a worker child. Nothing was read |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking `get` or `result_for` (`handle.blocking()`) on a thread that runs a tokio runtime. Nothing was read |
-| `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed; `code` is the `HandleErrorCode`. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
+| `Database { code, message, retryable }` | `DATABASE_ERROR` | The database or the connection failed; `code` is the `WorkflowHandleErrorCode`. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
 
 `WorkflowReadError::code()` returns the library code of the failure.
 
-### HandleOperationError
+### WorkflowHandleError
 
-`status`, `results`, `tasks`, `cancel`, `pause` and `resume` return `HandleOperationError`, an enum with one variant per state: `WorkflowNotFound`, `DbOperationFailed` (with `retryable` and `cause`), `StoredDataInvalid` and `ResumeRecoveryFailed` (with `cause`), and `AsyncContext`. Every variant has `message` and `workflow_id`; the methods `code()`, `message()`, `retryable()`, `workflow_id()` and `failure_cause()` read them. The `cause` is the `WorkflowError` that failed the operation; a failed connect is `WorkflowError::Broker`. The message of a failure starts with the operation's label, as Python's handle: `Status failed for workflow <id>: <cause>`; `WorkflowNotFound` has `Workflow <id> not found`. `retryable()` is `false` for every variant but `DbOperationFailed`:
+`status`, `results`, `tasks`, `cancel`, `pause` and `resume` return `WorkflowHandleError`, an enum with one variant per state: `NotFound`, `DatabaseOperationFailed` (with `retryable` and `cause`), `StoredDataInvalid` and `ResumeRecoveryFailed` (with `cause`), and `AsyncContext`. Every variant has `message` and `workflow_id`; the methods `code()`, `message()`, `retryable()`, `workflow_id()` and `failure_cause()` read them. The `cause` is the `WorkflowError` that failed the operation; a failed connect is `WorkflowError::Broker`. The message of a failure starts with the operation's label, as Python's handle: `Status failed for workflow <id>: <cause>`; `NotFound` has `Workflow <id> not found`. `retryable()` is `false` for every variant but `DatabaseOperationFailed`:
 
-| `HandleErrorCode` | Returned by |
+| `WorkflowHandleErrorCode` | Returned by |
 |-------------------|-------------|
 | `WorkflowNotFound` | Each operation |
-| `DbOperationFailed` | Each operation: the connect, a statement or the commit failed |
+| `DatabaseOperationFailed` | Each operation: the connect, a statement or the commit failed |
 | `StoredDataInvalid` | `status`, `tasks`, `resume`: a stored value does not parse. Nothing changed. Not retryable |
 | `ResumeRecoveryFailed` | `resume`: the resume committed and the recovery pass after it failed. The workflow is RUNNING. Not retryable |
 | `AsyncContext` | Each blocking form (`handle.blocking()`) on a thread that runs a tokio runtime. Nothing ran. Not retryable |

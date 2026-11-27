@@ -248,8 +248,8 @@ A paused workflow resumes on an explicit resume of its workflow handle. The Pyth
 
 **Resume failures:**
 
-- A database error before the commit returns `Err(HandleDbOperationFailed)`: the transaction rolled back, or its commit outcome is unknown.
-- A database error in the recovery pass returns `Err(HandleResumeRecoveryFailed)`: the workflow is `RUNNING`, and the worker reaper runs the same pass over all workflows. A repeated `resume()` returns `Ok(False)`.
+- A database error before the commit returns `Err(WorkflowHandleDatabaseOperationFailed)`: the transaction rolled back, or its commit outcome is unknown.
+- A database error in the recovery pass returns `Err(WorkflowHandleResumeRecoveryFailed)`: the workflow is `RUNNING`, and the worker reaper runs the same pass over all workflows. A repeated `resume()` returns `Ok(False)`.
 - Any other exception propagates.
 
 **What resume does NOT do:**
@@ -504,7 +504,7 @@ A child workflow with no output node is not affected: its `SubWorkflowNode` is C
 
 If the node is also the parent's output node, the parent stores the same error, and its `get()` gives it as a `Failed` outcome. A `SubWorkflowNode` of that parent is FAILED in the same way, and `data` still names the workflow that holds the SKIPPED output node.
 
-**Nesting without a success policy.** The parent is FAILED, so the next level sees a failed child: its node holds a `SubWorkflowError` with `SUBWORKFLOW_FAILED`. The message of the first error is in `SubWorkflowSummary.error_summary`.
+**Nesting without a success policy.** The parent is FAILED, so the next level sees a failed child: its node holds a `SubWorkflowFailure` with `SUB_WORKFLOW_FAILED`. The message of the first error is in `SubWorkflowSummary.error_summary`.
 
 **A child result that does not parse.** A COMPLETED child whose stored result is not a well-formed result envelope, or that stores no result, also makes a FAILED node. The node holds an error envelope with `RESULT_DESERIALIZATION_ERROR` that names the child and the cause, so each reader of the node, the parent's `get()` and the next level report that code. The stored text stays in the `result` column of the child workflow.
 

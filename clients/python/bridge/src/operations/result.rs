@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use horsies_core::catalog::CodeEnum;
-use horsies_core::{BrokerOperationError, RawResultRead, RawResultRecord};
+use horsies_core::{DatabaseOperationError, RawResultRead, RawResultRecord};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -97,7 +97,7 @@ pub fn result_wait_bound(timeout_ms: Option<u64>) -> BlockingBound {
 /// The outcome of a read. Pure.
 fn read_outcome(
     task_id: Uuid,
-    read: Result<RawResultRead, horsies_core::BrokerOperationError>,
+    read: Result<RawResultRead, horsies_core::DatabaseOperationError>,
 ) -> RawResultOutcome {
     match read {
         Ok(RawResultRead::Found(record)) => {
@@ -126,7 +126,7 @@ pub async fn raw_result_record_operation(
         Err(error) => {
             return RawResultOutcome::Failed(BrokerFailure::of_operation_error(
                 SUBJECT,
-                BrokerOperationError::raw_result_query_failed(task_id, error),
+                DatabaseOperationError::raw_result_query_failed(task_id, error),
             ))
         }
     };
@@ -138,7 +138,7 @@ pub async fn raw_result_record_operation(
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::{BrokerOperationError, StoredEnvelopeText, TaskAbsenceReason, TaskStatus};
+    use horsies_core::{DatabaseOperationError, StoredEnvelopeText, TaskAbsenceReason, TaskStatus};
 
     use super::*;
 
@@ -200,7 +200,7 @@ mod tests {
     fn a_failed_read_keeps_its_code_and_retry_rule() {
         let RawResultOutcome::Failed(failure) = read_outcome(
             task(),
-            Err(BrokerOperationError::InvalidJsonPayload {
+            Err(DatabaseOperationError::InvalidJsonPayload {
                 message: "digest mismatch".to_owned(),
                 cause: Box::new(horsies_core::BrokerCheckCause::Check),
             }),
@@ -210,7 +210,7 @@ mod tests {
         assert_eq!(failure.subject, SUBJECT);
         assert_eq!(
             failure.error.code(),
-            horsies_core::BrokerErrorCode::InvalidJsonPayload
+            horsies_core::DatabaseErrorCode::InvalidJsonPayload
         );
         assert!(!failure.error.retryable());
     }

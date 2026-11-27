@@ -14,7 +14,7 @@ use uuid::Uuid;
 use super::state::test_rows::{delete_state, seed_state, state_row};
 use super::{fire_due_schedule, manifest_plan, ActivePlan, DueSchedule, StartPlan};
 use crate::broker::core_rows::StatementLog;
-use crate::core::{OperationalErrorCode, RetryPolicy, TaskErrorCode, TaskOptions};
+use crate::core::{OperationalCode, RetryPolicy, TaskErrorCode, TaskOptions};
 use crate::scheduler_manifest::parse_scheduler_manifest;
 use crate::test_support::sql::{self, TestPool};
 
@@ -79,9 +79,7 @@ fn schedule_plan(schedule_name: &str, task_name: &str) -> ActivePlan {
         task_name: task_name.to_owned(),
         queue_name: None,
         good_until: None,
-        auto_retry_for: Some(vec![TaskErrorCode::from(
-            OperationalErrorCode::TaskException,
-        )]),
+        auto_retry_for: Some(vec![TaskErrorCode::from(OperationalCode::TaskException)]),
         retry_policy: Some(
             RetryPolicy::fixed(RETRY_INTERVALS_SECONDS.to_vec(), true)
                 .expect("two intervals inside the bounds"),

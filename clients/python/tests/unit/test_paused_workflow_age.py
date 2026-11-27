@@ -21,7 +21,7 @@ import pytest
 from pydantic import ValidationError
 
 from horsies._catalog.worker_manifest import PAUSED_AGE_MICROS_MAX
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.models.retention import PAUSED_WORKFLOW_AGE_MAX, RetentionConfig
 
 _ONE_MICROSECOND = timedelta(microseconds=1)
@@ -107,5 +107,5 @@ def test_a_paused_age_above_the_bound_is_refused_with_the_retention_code(
     with pytest.raises(ConfigurationError) as raised:
         RetentionConfig(paused_workflow_auto_cancel_after=given)
 
-    assert raised.value.code is ErrorCode.CONFIG_INVALID_RETENTION
+    assert raised.value.code is HorsiesErrorCode.CONFIG_INVALID_RETENTION
     assert 'longer than 365000 days' in raised.value.message

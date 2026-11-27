@@ -24,10 +24,10 @@ use horsies_core::core::task::StoredErrorRefused;
 use horsies_core::handle::CoreHandle;
 use horsies_core::JsonText;
 use horsies_core::{
-    process_role, wait_inside_task_message, BuiltInTaskCode, HandleErrorCode, HandleOperation,
-    HandleOperationError, HandleResult, NodeResultsRead, NodesRead, OperationalErrorCode,
-    OutcomeCode, PostgresBroker, ProcessRole, RetrievalCode, StoredNode, SubWorkflowSummary,
-    TaskResult, TerminalErrorStatus, UserCode, WaitLimit, WorkflowEnd, WorkflowError,
+    process_role, wait_inside_task_message, BuiltInTaskCode, HandleOperation, HandleResult,
+    NodeResultsRead, NodesRead, OperationalCode, OutcomeCode, PostgresBroker, ProcessRole,
+    RetrievalCode, StoredNode, SubWorkflowSummary, TaskResult, TerminalErrorStatus, UserCode,
+    WaitLimit, WorkflowEnd, WorkflowError, WorkflowHandleError, WorkflowHandleErrorCode,
     WorkflowStatus, WorkflowTaskStatus, WorkflowWait,
 };
 use serde::de::DeserializeOwned;
@@ -63,8 +63,8 @@ pub enum WorkflowReadError {
     /// the handle's types. `cause` names no value.
     #[error("the stored value of workflow {workflow_id} does not read: {cause}")]
     StoredResultUnreadable { workflow_id: Uuid, cause: String },
-    /// The stored error has a user code that the asked code type does not
-    /// name.
+    /// `UNKNOWN_CUSTOM_CODE`: the stored error has a user code that the
+    /// asked code type does not name.
     #[error("the stored error of workflow {workflow_id}: {cause}")]
     UnknownUserCode {
         workflow_id: Uuid,
@@ -87,11 +87,11 @@ pub enum WorkflowReadError {
     /// async form reads.
     #[error("{message}")]
     AsyncContext { message: String },
-    /// `BROKER_ERROR`: the database or the connection failed, with the
+    /// `DATABASE_ERROR`: the database or the connection failed, with the
     /// handle code; `retryable` is the classification of the cause.
     #[error("the read failed ({code}): {message}")]
     Database {
-        code: HandleErrorCode,
+        code: WorkflowHandleErrorCode,
         message: String,
         retryable: bool,
     },
@@ -104,22 +104,23 @@ impl WorkflowReadError {
             Self::WaitTimedOut { .. } => RetrievalCode::WaitTimeout.into(),
             Self::WorkflowNotFound { .. } => RetrievalCode::WorkflowNotFound.into(),
             Self::ResultNotReady { .. } => RetrievalCode::ResultNotReady.into(),
-            Self::StoredResultUnreadable { .. } | Self::UnknownUserCode { .. } => {
-                OperationalErrorCode::ResultDeserializationError.into()
+            Self::StoredResultUnreadable { .. } => {
+                OperationalCode::ResultDeserializationError.into()
             }
+            Self::UnknownUserCode { .. } => RetrievalCode::UnknownCustomCode.into(),
             Self::InvalidInput { .. } => RetrievalCode::InvalidInput.into(),
             Self::WaitInsideTask { .. } => RetrievalCode::WaitInsideTask.into(),
             Self::AsyncContext { .. } => RetrievalCode::AsyncContext.into(),
-            Self::Database { .. } => OperationalErrorCode::BrokerError.into(),
+            Self::Database { .. } => OperationalCode::DatabaseError.into(),
         }
     }
 
-    fn of_handle_error(error: HandleOperationError) -> Self {
+    fn of_handle_error(error: WorkflowHandleError) -> Self {
         match error {
-            HandleOperationError::WorkflowNotFound { workflow_id, .. } => {
+            WorkflowHandleError::NotFound { workflow_id, .. } => {
                 Self::WorkflowNotFound { workflow_id }
             }
-            HandleOperationError::StoredDataInvalid {
+            WorkflowHandleError::StoredDataInvalid {
                 workflow_id,
                 message,
                 ..
@@ -127,9 +128,9 @@ impl WorkflowReadError {
                 workflow_id,
                 cause: message,
             },
-            HandleOperationError::AsyncContext { message, .. } => Self::AsyncContext { message },
-            failed @ (HandleOperationError::DbOperationFailed { .. }
-            | HandleOperationError::ResumeRecoveryFailed { .. }) => Self::Database {
+            WorkflowHandleError::AsyncContext { message, .. } => Self::AsyncContext { message },
+            failed @ (WorkflowHandleError::DatabaseOperationFailed { .. }
+            | WorkflowHandleError::ResumeRecoveryFailed { .. }) => Self::Database {
                 code: failed.code(),
                 message: failed.message().to_owned(),
                 retryable: failed.retryable(),
@@ -227,7 +228,7 @@ impl<T> WorkflowHandle<T> {
     }
 
     /// The connected broker of the handle for its method `method`, which
-    /// runs `operation`, or `DB_OPERATION_FAILED` of `operation` with the
+    /// runs `operation`, or `DATABASE_OPERATION_FAILED` of `operation` with the
     /// broker error as its cause.
     ///
     /// # Panics
@@ -244,14 +245,14 @@ impl<T> WorkflowHandle<T> {
             self.workflow_id
         ));
         self.reads.initialized_broker().await.map_err(|error| {
-            HandleOperationError::connect_failed(&operation, self.workflow_id, error)
+            WorkflowHandleError::connect_failed(&operation, self.workflow_id, error)
         })
     }
 
     /// The status of the workflow (Python `status`).
     ///
     /// Errors: `WORKFLOW_NOT_FOUND`; `STORED_DATA_INVALID`;
-    /// `DB_OPERATION_FAILED`.
+    /// `DATABASE_OPERATION_FAILED`.
     pub async fn status(&self) -> HandleResult<WorkflowStatus> {
         self.broker("status", HandleOperation::Status)
             .await?
@@ -262,7 +263,7 @@ impl<T> WorkflowHandle<T> {
     /// The stored result of each node that has one, by node id (Python
     /// `results`). A node stored without a node id is left out.
     ///
-    /// Errors: `WORKFLOW_NOT_FOUND`; `DB_OPERATION_FAILED`.
+    /// Errors: `WORKFLOW_NOT_FOUND`; `DATABASE_OPERATION_FAILED`.
     pub async fn results(&self) -> HandleResult<BTreeMap<String, NodeResult>> {
         match self
             .broker("results", HandleOperation::Results)
@@ -284,7 +285,7 @@ impl<T> WorkflowHandle<T> {
     /// Every node of the workflow in index order (Python `tasks`).
     ///
     /// Errors: `WORKFLOW_NOT_FOUND`; `STORED_DATA_INVALID` for a stored
-    /// node status or summary that does not read; `DB_OPERATION_FAILED`.
+    /// node status or summary that does not read; `DATABASE_OPERATION_FAILED`.
     pub async fn tasks(&self) -> HandleResult<Vec<WorkflowNodeInfo>> {
         match self
             .broker("tasks", HandleOperation::Tasks)
@@ -303,7 +304,7 @@ impl<T> WorkflowHandle<T> {
     /// Cancel the workflow and its descendants (Python `cancel`). A
     /// workflow that already ended is left as it is.
     ///
-    /// Errors: `WORKFLOW_NOT_FOUND`; `DB_OPERATION_FAILED`.
+    /// Errors: `WORKFLOW_NOT_FOUND`; `DATABASE_OPERATION_FAILED`.
     pub async fn cancel(&self) -> HandleResult<()> {
         self.broker("cancel", HandleOperation::Cancel)
             .await?
@@ -315,7 +316,7 @@ impl<T> WorkflowHandle<T> {
     /// Pause a RUNNING workflow (Python `pause`): `true` when it paused,
     /// `false` when it is not RUNNING.
     ///
-    /// Errors: `WORKFLOW_NOT_FOUND`; `DB_OPERATION_FAILED`.
+    /// Errors: `WORKFLOW_NOT_FOUND`; `DATABASE_OPERATION_FAILED`.
     pub async fn pause(&self) -> HandleResult<bool> {
         self.broker("pause", HandleOperation::Pause)
             .await?
@@ -327,7 +328,7 @@ impl<T> WorkflowHandle<T> {
     /// `false` when it is not PAUSED. The children that the resume owes
     /// build from the app's registered definitions.
     ///
-    /// Errors: `WORKFLOW_NOT_FOUND`; `DB_OPERATION_FAILED`;
+    /// Errors: `WORKFLOW_NOT_FOUND`; `DATABASE_OPERATION_FAILED`;
     /// `STORED_DATA_INVALID`; `RESUME_RECOVERY_FAILED` (the resume
     /// committed, the work after it failed).
     pub async fn resume(&self) -> HandleResult<bool> {
@@ -370,8 +371,8 @@ impl<T> WorkflowHandle<T> {
         envelope_outcome(self.workflow_id, &stored.result)
     }
 
-    fn not_found(&self) -> HandleOperationError {
-        HandleOperationError::not_found(self.workflow_id)
+    fn not_found(&self) -> WorkflowHandleError {
+        WorkflowHandleError::not_found(self.workflow_id)
     }
 }
 
@@ -381,8 +382,8 @@ fn stored_data_invalid(
     workflow_id: Uuid,
     message: String,
     cause: WorkflowError,
-) -> HandleOperationError {
-    HandleOperationError::StoredDataInvalid {
+) -> WorkflowHandleError {
+    WorkflowHandleError::StoredDataInvalid {
         message,
         workflow_id,
         cause,
@@ -687,7 +688,7 @@ fn outputless_entry(
     let missing = |cause: String| {
         TaskOutcome::Failed(
             TaskError::library(
-                OperationalErrorCode::ResultDeserializationError,
+                OperationalCode::ResultDeserializationError,
                 format!("Outputless workflow {workflow_id} node {node_id:?} {cause}"),
             )
             .with_data(serde_json::json!({ "node_id": node_id })),

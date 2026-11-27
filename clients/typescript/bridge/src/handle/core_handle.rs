@@ -17,8 +17,8 @@ use std::sync::{Arc, OnceLock};
 use horsies_core::handle::{CoreHandle as LazyHandle, HandleConnection};
 use horsies_core::manifest::{parse_producer_manifest, ProducerManifest, SchemaMode};
 use horsies_core::{
-    BrokerError, BrokerOperationError, ChildSpecSource, ClientFamily, CoverageRequest, PoolProfile,
-    PostgresBroker, RetentionDays,
+    BrokerError, ChildSpecSource, ClientFamily, CoverageRequest, DatabaseOperationError,
+    PoolProfile, PostgresBroker, RetentionDays,
 };
 use napi::bindgen_prelude::Object;
 use napi::Env;
@@ -273,7 +273,7 @@ impl CoreHandle {
     }
 
     /// Ping the database: the round trip, or the catalog value with
-    /// `DB_PING_FAILED`.
+    /// `DATABASE_PING_FAILED`.
     #[napi(ts_return_type = "Promise<NativeEnvelope<NativeOutcome<DatabasePingRecord>>>")]
     pub fn ping_database<'env>(&self, env: &'env Env) -> napi::Result<Object<'env>> {
         let connection = self.connection();
@@ -338,7 +338,7 @@ async fn ping_database_operation(connection: BrokerConnection) -> Outcome<Databa
         Err(error) => {
             return Outcome::failed(
                 "ping_database",
-                &BrokerOperationError::db_ping_failed(error),
+                &DatabaseOperationError::database_ping_failed(error),
             )
         }
     };

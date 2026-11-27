@@ -128,10 +128,10 @@ describe("WorkflowHandle.get", () => {
     [
       "a text that the strict check refused",
       { wait: { kind: "completed", result: { kind: "refused", cause: "x" } } },
-      "resultDeserializationError",
+      "storedResultUnreadable",
     ],
-    ["a NULL result", { wait: { kind: "completed", result: { kind: "none" } } }, "resultDeserializationError"],
-    ["a failed read", { wait: { kind: "failed", error: rawDbFailed() } }, "database"],
+    ["a NULL result", { wait: { kind: "completed", result: { kind: "none" } } }, "storedResultUnreadable"],
+    ["a failed read", { wait: { kind: "failed", error: rawDbFailed() } }, "databaseError"],
   ];
 
   for (const [title, script, kind] of errors) {
@@ -281,24 +281,27 @@ describe("WorkflowHandle.resultFor", () => {
       nodeResult: { kind: "stored", result: { kind: "checked", text: customErrorEnvelope("OTHER") } },
     }).handle.resultFor("count");
 
-    assert.deepEqual(read, { ok: false, error: { kind: "unknownCustomCode", code: "OTHER" } });
+    assert.deepEqual(read, {
+      ok: false,
+      error: { kind: "unknownCustomCode", code: "UNKNOWN_CUSTOM_CODE", storedCode: "OTHER" },
+    });
   });
 
-  test("no stored result: resultNotReady; a failed read: database", async () => {
+  test("no stored result: resultNotReady; a failed read: databaseError", async () => {
     assert.deepEqual(await handle().handle.resultFor("count"), { ok: false, error: { kind: "resultNotReady", code: "RESULT_NOT_READY" } });
 
     const failed = await handle({ nodeResult: { kind: "failed", error: rawDbFailed() } }).handle.resultFor("count");
 
-    assert(!failed.ok && failed.error.kind === "database");
+    assert(!failed.ok && failed.error.kind === "databaseError" && failed.error.code === "DATABASE_ERROR");
   });
 
-  test("a stored text that the core's strict check refuses ends as resultDeserializationError and never reaches the reader", async () => {
+  test("a stored text that the core's strict check refuses ends as storedResultUnreadable and never reaches the reader", async () => {
     // The addon ran the strict check (`nodeResult`); a refused text crosses as its cause only, so no text is decoded.
     const refused = await handle({
       nodeResult: { kind: "stored", result: { kind: "refused", cause: "a repeated key" } },
     }).handle.resultFor("count");
 
-    assert.deepEqual(refused, { ok: false, error: { kind: "resultDeserializationError", code: "RESULT_DESERIALIZATION_ERROR", cause: "a repeated key" } });
+    assert.deepEqual(refused, { ok: false, error: { kind: "storedResultUnreadable", code: "RESULT_DESERIALIZATION_ERROR", cause: "a repeated key" } });
   });
 
   test("a handle by id reads with the contract that the caller gives", async () => {
@@ -337,12 +340,12 @@ describe("WorkflowHandle.resultFor", () => {
     assert.deepEqual(await byId.resultFor("child", child), { ok: true, value: { kind: "succeeded", value: 8 } });
   });
 
-  test("a sub-workflow node by id whose stored value is not the child's declared output: resultDeserializationError", async () => {
+  test("a sub-workflow node by id whose stored value is not the child's declared output: storedResultUnreadable", async () => {
     const { byId } = byIdReading(okEnvelope('"eight"'));
     const read = await byId.resultFor("child", child);
 
     assert(!read.ok);
-    assert.equal(read.error.kind, "resultDeserializationError");
+    assert.equal(read.error.kind, "storedResultUnreadable");
   });
 
   test("a sub-workflow node by id of a child that the app does not list: noTypeAvailable, no read", async () => {
@@ -377,7 +380,7 @@ describe("the other handle methods", () => {
 
     const status = await failed.status();
 
-    assert(!status.ok && status.error.code === "DB_OPERATION_FAILED");
+    assert(!status.ok && status.error.code === "DATABASE_OPERATION_FAILED");
     assert(!(await failed.cancel()).ok);
   });
 
@@ -632,7 +635,7 @@ describe("the workflow context", () => {
     assert.deepEqual(context.value.resultFor("count", count), { ok: true, value: { kind: "succeeded", value: 7 } });
     assert.deepEqual(context.value.resultFor("other", count), {
       ok: false,
-      error: { kind: "unknownCustomCode", nodeId: "other", code: "OTHER" },
+      error: { kind: "unknownCustomCode", code: "UNKNOWN_CUSTOM_CODE", nodeId: "other", storedCode: "OTHER" },
     });
     assert.deepEqual(context.value.resultFor("none", count), {
       ok: false,

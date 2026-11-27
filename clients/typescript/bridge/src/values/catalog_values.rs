@@ -9,7 +9,7 @@
 //!
 //! Slot values: text as a string; a flag as a boolean; an integer as a
 //! `BigInt`; a UUID as its text; a code member as its wire value; the payload
-//! of a send as a raw record of its fields; the `exception` slot as an
+//! of a send as a raw record of its fields; the `cause` slot as an
 //! exception record.
 
 use horsies_core::error_catalog::{
@@ -69,7 +69,7 @@ pub enum RawSlotValue {
     SendPayload {
         fields: Vec<RawRecordField>,
     },
-    /// The `exception` slot.
+    /// The `cause` slot.
     Exception {
         exception: ExceptionRecord,
     },
@@ -105,7 +105,7 @@ pub enum RawRecordValue {
     RetainForever,
 }
 
-/// The exception of an `exception` slot.
+/// The exception of an `cause` slot.
 #[napi(discriminant = "kind", discriminant_case = "camelCase")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExceptionRecord {
@@ -135,7 +135,7 @@ pub enum ClientClassName {
 
 impl RawCatalogError {
     /// The raw record of `error`. `subject` is the operation that failed, for
-    /// example `cancel_task`: the subject of a core cause in the `exception`
+    /// example `cancel_task`: the subject of a core cause in the `cause`
     /// slot. Pure.
     pub fn of<E: ErrorClassValues>(subject: &str, error: &E) -> Self {
         Self {
@@ -153,11 +153,11 @@ impl RawCatalogError {
 }
 
 impl RawCatalogError {
-    /// The raw record of `error` with `exception` in its `exception` slot:
+    /// The raw record of `error` with the cause `exception` in its `cause` slot:
     /// for a core value whose type does not hold the exact cause while the
     /// caller holds it (the send error of a failed enqueue,
     /// `send_failure_exception`). Every other slot is the slot of
-    /// [`Self::of`]; a class with no `exception` slot has the slots of
+    /// [`Self::of`]; a class with no `cause` slot has the slots of
     /// [`Self::of`]. Pure.
     pub fn of_with_exception<E: ErrorClassValues>(
         subject: &str,
@@ -262,7 +262,7 @@ fn record_value(value: RecordValue<'_>) -> RawRecordValue {
     }
 }
 
-/// The exception record of an `exception` slot. Pure.
+/// The exception record of an `cause` slot. Pure.
 fn exception_record(subject: &str, exception: ExceptionValue) -> ExceptionRecord {
     match exception {
         ExceptionValue::CoreFailure {
@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn the_given_exception_takes_the_place_of_the_exception_slot() {
+    fn the_given_exception_takes_the_place_of_the_cause_slot() {
         let refusal = horsies_core::TaskSendError::ValidationFailed {
             message: "idempotency key refused".to_owned(),
             cause: FailureCause::PreconditionFailed,
@@ -395,7 +395,7 @@ mod tests {
                         },
                     },
                     RawSlot {
-                        name: "exception".to_owned(),
+                        name: "cause".to_owned(),
                         value: RawSlotValue::Exception {
                             exception: ExceptionRecord::ClientClass {
                                 class: ClientClassName::ValueError,
@@ -409,8 +409,8 @@ mod tests {
     }
 
     #[test]
-    fn a_class_with_no_exception_slot_keeps_its_slots() {
-        let suppressed = horsies_core::TaskSendError::SendSuppressed {
+    fn a_class_with_no_cause_slot_keeps_its_slots() {
+        let suppressed = horsies_core::TaskSendError::Suppressed {
             message: "sends are suppressed".to_owned(),
         };
         assert_eq!(

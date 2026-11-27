@@ -31,7 +31,7 @@ from horsies.core.utils.url import (
 )
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     ValidationReport,
     raise_collected,
 )
@@ -77,7 +77,7 @@ def _pool_value_error(
     """The refusal of a pool value of `PostgresConfig`."""
     return ConfigurationError(
         message=f'invalid {field}',
-        code=ErrorCode.CONFIG_INVALID_BROKER_POOL,
+        code=HorsiesErrorCode.CONFIG_INVALID_DATABASE_POOL,
         notes=[f'got: {field}={value}', cause],
         help_text=help_text,
     )
@@ -89,7 +89,7 @@ def _tcp_value_error(
     """The refusal of a TCP keepalive or user timeout value of `PostgresConfig`."""
     return ConfigurationError(
         message=f'invalid {field}',
-        code=ErrorCode.CONFIG_INVALID_KEEPALIVE,
+        code=HorsiesErrorCode.CONFIG_INVALID_KEEPALIVE,
         notes=[f'got: {field}={value}', cause],
         help_text=help_text,
     )
@@ -276,7 +276,7 @@ class PostgresConfig(BaseModel):
         """Accept a pool size from ``POOL_SIZE_MIN`` to ``POOL_SIZE_MAX``.
 
         Any other value raises ``ConfigurationError``
-        (``CONFIG_INVALID_BROKER_POOL``). ``0`` is refused with its own cause:
+        (``CONFIG_INVALID_DATABASE_POOL``). ``0`` is refused with its own cause:
         SQLAlchemy reads it as no size limit, and the core always bounds its
         connections.
         """
@@ -304,7 +304,7 @@ class PostgresConfig(BaseModel):
         """Accept an overflow from ``POOL_CONNECTIONS_MIN`` to ``POOL_CONNECTIONS_MAX``.
 
         Any other value raises ``ConfigurationError``
-        (``CONFIG_INVALID_BROKER_POOL``). ``-1`` is refused with its own cause:
+        (``CONFIG_INVALID_DATABASE_POOL``). ``-1`` is refused with its own cause:
         SQLAlchemy reads it as no overflow limit, and the core always bounds
         its connections.
         """
@@ -332,7 +332,7 @@ class PostgresConfig(BaseModel):
         """Accept whole seconds from ``WHOLE_SECONDS_MIN`` to ``WHOLE_SECONDS_MAX``.
 
         ``0`` means that a checkout does not wait. Any other value raises
-        ``ConfigurationError`` (``CONFIG_INVALID_BROKER_POOL``).
+        ``ConfigurationError`` (``CONFIG_INVALID_DATABASE_POOL``).
         """
         match v:
             case _ if WHOLE_SECONDS_MIN <= v <= WHOLE_SECONDS_MAX:
@@ -351,7 +351,7 @@ class PostgresConfig(BaseModel):
         """Accept ``-1`` or whole seconds from ``WHOLE_SECONDS_MIN`` to ``WHOLE_SECONDS_MAX``.
 
         ``-1`` means that a connection is never replaced by age. Any other
-        value raises ``ConfigurationError`` (``CONFIG_INVALID_BROKER_POOL``).
+        value raises ``ConfigurationError`` (``CONFIG_INVALID_DATABASE_POOL``).
         """
         match v:
             case _ if WHOLE_SECONDS_MIN <= v <= WHOLE_SECONDS_MAX:
@@ -386,7 +386,7 @@ class PostgresConfig(BaseModel):
         if self.pgbouncer_transaction_mode and self.session_database_url is None:
             raise ConfigurationError(
                 message='session_database_url required when pgbouncer_transaction_mode=True',
-                code=ErrorCode.BROKER_INVALID_URL,
+                code=HorsiesErrorCode.DATABASE_INVALID_URL,
                 notes=[
                     'PgBouncer transaction pooling cannot support session locks or persistent LISTEN sessions',
                 ],
@@ -398,7 +398,7 @@ class PostgresConfig(BaseModel):
         ):
             raise ConfigurationError(
                 message='session_database_url must not use the transaction-pool URL',
-                code=ErrorCode.BROKER_INVALID_URL,
+                code=HorsiesErrorCode.DATABASE_INVALID_URL,
                 notes=[
                     'partition maintenance and LISTEN require PostgreSQL session affinity',
                 ],
@@ -553,7 +553,7 @@ def _moved_child_pool_field_error(name: str, pool_argument: str) -> Configuratio
     each child kind in a worker profile that replaces it."""
     return ConfigurationError(
         message=f'{name} was removed in 0.7.0',
-        code=ErrorCode.CONFIG_INVALID_BROKER_POOL,
+        code=HorsiesErrorCode.CONFIG_INVALID_DATABASE_POOL,
         notes=[
             'each child kind of a worker profile has its own connection pool',
         ],
@@ -571,7 +571,7 @@ def _moved_parent_pool_field_error(name: str, note: str) -> ConfigurationError:
     worker process in a worker profile that replaces it."""
     return ConfigurationError(
         message=f'{name} was removed in 0.7.0',
-        code=ErrorCode.CONFIG_INVALID_BROKER_POOL,
+        code=HorsiesErrorCode.CONFIG_INVALID_DATABASE_POOL,
         notes=[
             note,
             'task code in a worker child that sends opens the task_send_pool '
@@ -587,7 +587,7 @@ def _moved_parent_pool_field_error(name: str, note: str) -> ConfigurationError:
 
 
 def _raise_for_url_scheme(field_name: str, url: str) -> None:
-    """Raise ``ConfigurationError`` (``BROKER_INVALID_URL``) for a URL whose
+    """Raise ``ConfigurationError`` (``DATABASE_INVALID_URL``) for a URL whose
     scheme is not ``postgresql`` or ``postgres``."""
     match check_database_url_scheme(url):
         case Ok():
@@ -606,7 +606,7 @@ def _url_scheme_error(
         case DatabaseUrlNamesDriver(scheme=scheme):
             return ConfigurationError(
                 message=f'invalid {field_name} scheme {scheme!r}',
-                code=ErrorCode.BROKER_INVALID_URL,
+                code=HorsiesErrorCode.DATABASE_INVALID_URL,
                 notes=[
                     f'got: {scheme}://...',
                     'the URL names a driver; horsies opens the database '
@@ -620,7 +620,7 @@ def _url_scheme_error(
         case DatabaseUrlNotPostgres(scheme=scheme):
             return ConfigurationError(
                 message=f'invalid {field_name} scheme {scheme!r}',
-                code=ErrorCode.BROKER_INVALID_URL,
+                code=HorsiesErrorCode.DATABASE_INVALID_URL,
                 notes=[
                     f'got: {scheme}://...',
                     'horsies accepts the schemes postgresql:// and postgres://',
@@ -630,7 +630,7 @@ def _url_scheme_error(
         case DatabaseUrlWithoutScheme():
             return ConfigurationError(
                 message=f'invalid {field_name}: the URL has no scheme',
-                code=ErrorCode.BROKER_INVALID_URL,
+                code=HorsiesErrorCode.DATABASE_INVALID_URL,
                 notes=['horsies accepts the schemes postgresql:// and postgres://'],
                 help_text="use 'postgresql://user:pass@host/db'",
             )

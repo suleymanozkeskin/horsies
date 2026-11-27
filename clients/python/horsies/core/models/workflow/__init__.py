@@ -31,7 +31,7 @@ from horsies.core.models.workflow.typing_utils import (
 from horsies.core.models.workflow.context import (
     SubWorkflowSummary,
     WorkflowMeta,
-    WorkflowContextMissingIdError,
+    WorkflowContextMissingId,
     WorkflowContext,
 )
 from horsies.core.models.workflow.handle import (
@@ -39,15 +39,15 @@ from horsies.core.models.workflow.handle import (
     WorkflowHandle,
 )
 from horsies.core.models.workflow.handle_types import (
-    HandleAsyncContext,
-    HandleDbOperationFailed,
-    HandleErrorCode,
-    HandleInvalidWorkflowId,
-    HandleOperationError,
+    WorkflowHandleAsyncContext,
+    WorkflowHandleDatabaseOperationFailed,
+    WorkflowHandleErrorCode,
+    WorkflowHandleInvalidWorkflowId,
+    WorkflowHandleError,
     HandleResult,
-    HandleResumeRecoveryFailed,
-    HandleStoredDataInvalid,
-    HandleWorkflowNotFound,
+    WorkflowHandleResumeRecoveryFailed,
+    WorkflowHandleStoredDataInvalid,
+    WorkflowHandleNotFound,
 )
 from horsies.core.models.workflow.spec import WorkflowSpec
 from horsies.core.models.workflow.definition import (
@@ -84,21 +84,21 @@ __all__ = [
     # context
     'SubWorkflowSummary',
     'WorkflowMeta',
-    'WorkflowContextMissingIdError',
+    'WorkflowContextMissingId',
     'WorkflowContext',
     # handle
     'WorkflowTaskInfo',
     'WorkflowHandle',
     # handle types
-    'HandleAsyncContext',
-    'HandleDbOperationFailed',
-    'HandleErrorCode',
-    'HandleInvalidWorkflowId',
-    'HandleOperationError',
+    'WorkflowHandleAsyncContext',
+    'WorkflowHandleDatabaseOperationFailed',
+    'WorkflowHandleErrorCode',
+    'WorkflowHandleInvalidWorkflowId',
+    'WorkflowHandleError',
     'HandleResult',
-    'HandleResumeRecoveryFailed',
-    'HandleStoredDataInvalid',
-    'HandleWorkflowNotFound',
+    'WorkflowHandleResumeRecoveryFailed',
+    'WorkflowHandleStoredDataInvalid',
+    'WorkflowHandleNotFound',
     # spec
     'WorkflowSpec',
     # definition

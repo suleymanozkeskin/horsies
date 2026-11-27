@@ -2,85 +2,89 @@
 
 import type { CoreCause } from "./error_detail.ts";
 
-export interface HandleWorkflowNotFound {
+export interface WorkflowHandleNotFound {
+  readonly kind: "notFound";
   readonly code: "WORKFLOW_NOT_FOUND";
   readonly retryable: false;
   readonly message: string;
   readonly workflowId: string;
 }
 
-export interface HandleDbOperationFailed {
-  readonly code: "DB_OPERATION_FAILED";
+export interface WorkflowHandleDatabaseOperationFailed {
+  readonly kind: "databaseOperationFailed";
+  readonly code: "DATABASE_OPERATION_FAILED";
   readonly message: string;
   readonly retryable: boolean;
   readonly workflowId: string;
-  readonly exception: CoreCause;
+  readonly cause: CoreCause;
 }
 
-export interface HandleStoredDataInvalid {
+export interface WorkflowHandleStoredDataInvalid {
+  readonly kind: "storedDataInvalid";
   readonly code: "STORED_DATA_INVALID";
   readonly retryable: false;
   readonly message: string;
   readonly workflowId: string;
-  readonly exception: CoreCause;
+  readonly cause: CoreCause;
 }
 
-export interface HandleResumeRecoveryFailed {
+export interface WorkflowHandleResumeRecoveryFailed {
+  readonly kind: "resumeRecoveryFailed";
   readonly code: "RESUME_RECOVERY_FAILED";
   readonly retryable: false;
   readonly message: string;
   readonly workflowId: string;
-  readonly exception: CoreCause;
+  readonly cause: CoreCause;
 }
 
 export type HandleCoreError =
-  | HandleWorkflowNotFound
-  | HandleDbOperationFailed
-  | HandleStoredDataInvalid
-  | HandleResumeRecoveryFailed;
+  | WorkflowHandleNotFound
+  | WorkflowHandleDatabaseOperationFailed
+  | WorkflowHandleStoredDataInvalid
+  | WorkflowHandleResumeRecoveryFailed;
 
-export interface NativeHandleWorkflowNotFound {
-  readonly class: "HandleWorkflowNotFound";
+export interface NativeWorkflowHandleNotFound {
+  readonly class: "WorkflowHandleNotFound";
   readonly slots: {
     readonly message: string;
     readonly workflow_id: string;
   };
 }
 
-export interface NativeHandleDbOperationFailed {
-  readonly class: "HandleDbOperationFailed";
+export interface NativeWorkflowHandleDatabaseOperationFailed {
+  readonly class: "WorkflowHandleDatabaseOperationFailed";
   readonly slots: {
     readonly message: string;
     readonly retryable: boolean;
     readonly workflow_id: string;
-    readonly exception: CoreCause;
+    readonly cause: CoreCause;
   };
 }
 
-export interface NativeHandleStoredDataInvalid {
-  readonly class: "HandleStoredDataInvalid";
+export interface NativeWorkflowHandleStoredDataInvalid {
+  readonly class: "WorkflowHandleStoredDataInvalid";
   readonly slots: {
     readonly message: string;
     readonly workflow_id: string;
-    readonly exception: CoreCause;
+    readonly cause: CoreCause;
   };
 }
 
-export interface NativeHandleResumeRecoveryFailed {
-  readonly class: "HandleResumeRecoveryFailed";
+export interface NativeWorkflowHandleResumeRecoveryFailed {
+  readonly class: "WorkflowHandleResumeRecoveryFailed";
   readonly slots: {
     readonly message: string;
     readonly workflow_id: string;
-    readonly exception: CoreCause;
+    readonly cause: CoreCause;
   };
 }
 
 /** The value that the bridge gives: the class name and the instance slots by core name. */
 export type NativeHandleCoreError =
-  | NativeHandleWorkflowNotFound
-  | NativeHandleDbOperationFailed
-  | NativeHandleStoredDataInvalid
-  | NativeHandleResumeRecoveryFailed;
+  | NativeWorkflowHandleNotFound
+  | NativeWorkflowHandleDatabaseOperationFailed
+  | NativeWorkflowHandleStoredDataInvalid
+  | NativeWorkflowHandleResumeRecoveryFailed;
 
 function unknownClass(converter: string, raw: { readonly class: string }): never {
   throw new Error(`${converter}: unknown class name ${raw.class}`);
@@ -89,8 +93,9 @@ function unknownClass(converter: string, raw: { readonly class: string }): never
 /** The frozen value of `raw`. A class name that this build does not know throws. */
 export function handleCoreErrorFromNative(raw: NativeHandleCoreError): HandleCoreError {
   switch (raw.class) {
-    case "HandleWorkflowNotFound": {
-      const value: HandleWorkflowNotFound = {
+    case "WorkflowHandleNotFound": {
+      const value: WorkflowHandleNotFound = {
+        kind: "notFound",
         code: "WORKFLOW_NOT_FOUND",
         retryable: false,
         message: raw.slots.message,
@@ -104,53 +109,56 @@ export function handleCoreErrorFromNative(raw: NativeHandleCoreError): HandleCor
       );
     }
 
-    case "HandleDbOperationFailed": {
-      const value: HandleDbOperationFailed = {
-        code: "DB_OPERATION_FAILED",
+    case "WorkflowHandleDatabaseOperationFailed": {
+      const value: WorkflowHandleDatabaseOperationFailed = {
+        kind: "databaseOperationFailed",
+        code: "DATABASE_OPERATION_FAILED",
         message: raw.slots.message,
         retryable: raw.slots.retryable,
         workflowId: raw.slots.workflow_id,
-        exception: Object.freeze({ ...raw.slots.exception }),
+        cause: Object.freeze({ ...raw.slots.cause }),
       };
 
       return Object.freeze(
         Object.defineProperties(value, {
           message: { enumerable: false },
-          exception: { enumerable: false },
+          cause: { enumerable: false },
         }),
       );
     }
 
-    case "HandleStoredDataInvalid": {
-      const value: HandleStoredDataInvalid = {
+    case "WorkflowHandleStoredDataInvalid": {
+      const value: WorkflowHandleStoredDataInvalid = {
+        kind: "storedDataInvalid",
         code: "STORED_DATA_INVALID",
         retryable: false,
         message: raw.slots.message,
         workflowId: raw.slots.workflow_id,
-        exception: Object.freeze({ ...raw.slots.exception }),
+        cause: Object.freeze({ ...raw.slots.cause }),
       };
 
       return Object.freeze(
         Object.defineProperties(value, {
           message: { enumerable: false },
-          exception: { enumerable: false },
+          cause: { enumerable: false },
         }),
       );
     }
 
-    case "HandleResumeRecoveryFailed": {
-      const value: HandleResumeRecoveryFailed = {
+    case "WorkflowHandleResumeRecoveryFailed": {
+      const value: WorkflowHandleResumeRecoveryFailed = {
+        kind: "resumeRecoveryFailed",
         code: "RESUME_RECOVERY_FAILED",
         retryable: false,
         message: raw.slots.message,
         workflowId: raw.slots.workflow_id,
-        exception: Object.freeze({ ...raw.slots.exception }),
+        cause: Object.freeze({ ...raw.slots.cause }),
       };
 
       return Object.freeze(
         Object.defineProperties(value, {
           message: { enumerable: false },
-          exception: { enumerable: false },
+          cause: { enumerable: false },
         }),
       );
     }

@@ -42,11 +42,11 @@ from horsies.core.codec.kwargs import (
 from horsies.core.codec.typed import conform_to_target
 from horsies.core.task_read import typed_outcome
 from horsies.core.codec.validation_errors import ValueValidationError
-from horsies.core.errors import ConfigurationError, ErrorCode, WorkflowValidationError
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode, WorkflowValidationError
 from horsies.core.logging import get_logger
 from horsies.core.models.outcome import TaskOutcome
 from horsies.core.models.tasks import (
-    OperationalErrorCode,
+    OperationalCode,
     TaskError,
 )
 from horsies.core.models.workflow import (
@@ -190,7 +190,7 @@ def node_error(
     workflow_id: str,
     task_index: int,
     message: str,
-    error_code: OperationalErrorCode,
+    error_code: OperationalCode,
 ) -> TaskError:
     """The error of a node whose task or child cannot be built. Pure.
 
@@ -210,7 +210,7 @@ def node_failure_result(error: TaskError) -> str:
 
 
 def _failed(
-    node: ChildOfNode, message: str, error_code: OperationalErrorCode,
+    node: ChildOfNode, message: str, error_code: OperationalCode,
 ) -> ChildBuildFailed:
     return ChildBuildFailed(
         error=node_error(node.workflow_id, node.task_index, message, error_code),
@@ -220,7 +220,7 @@ def _failed(
 def _load_failed(node: ChildOfNode) -> ChildBuildFailed:
     return ChildBuildFailed(
         error=TaskError(
-            error_code=OperationalErrorCode.SUBWORKFLOW_LOAD_FAILED,
+            error_code=OperationalCode.SUBWORKFLOW_LOAD_FAILED,
             message=(
                 f'Failed to load subworkflow definition for '
                 f'{node.workflow_name}:{node.task_index}'
@@ -277,7 +277,7 @@ def _args_from_map(
         return _failed(
             node,
             f'Corrupt args_from JSON for subworkflow task {node.task_index}',
-            OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            OperationalCode.WORKER_SERIALIZATION_ERROR,
         )
     if not isinstance(raw, dict):
         return {}
@@ -292,7 +292,7 @@ def _args_from_map(
             return _failed(
                 node,
                 f'args_from has non-int values for subworkflow task {node.task_index}',
-                OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                OperationalCode.WORKER_SERIALIZATION_ERROR,
             )
         validated[key] = value
     return validated
@@ -321,7 +321,7 @@ def _input_kwargs(
         return _failed(
             node,
             f'Corrupt kwargs JSON for subworkflow task {node.task_index}',
-            OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            OperationalCode.WORKER_SERIALIZATION_ERROR,
         )
     raw_kwargs_dict: dict[str, Any] = (
         cast(dict[str, Any], raw_kwargs) if isinstance(raw_kwargs, dict) else {}
@@ -332,7 +332,7 @@ def _input_kwargs(
         return _failed(
             node,
             f'Typed decode of subworkflow kwargs failed for task {node.task_index}: {exc}',
-            OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            OperationalCode.WORKER_SERIALIZATION_ERROR,
         )
     match _args_from_map(node):
         case ChildBuildFailed() as failed:
@@ -347,7 +347,7 @@ def _input_kwargs(
                     f"args_from key '{kwarg_name}' conflicts with static kwarg "
                     f'(subworkflow task {node.task_index})'
                 ),
-                OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
+                OperationalCode.WORKFLOW_ENQUEUE_FAILED,
             )
         dependency_result = dependency_results.get(dependency_index)
         if dependency_result is None:
@@ -400,7 +400,7 @@ def _dependency_input(
             f'that build_with declares (subworkflow task {node.task_index}): '
             f'{escape_lone_surrogates(refusal_text)[:BUILD_FAILURE_TEXT_CHARS]}'
         ),
-        OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+        OperationalCode.WORKER_SERIALIZATION_ERROR,
     )
 
 
@@ -419,7 +419,7 @@ def _built_spec(
         if app is None:
             raise WorkflowValidationError(
                 message='Broker missing app reference for subworkflow',
-                code=ErrorCode.WORKFLOW_SUBWORKFLOW_APP_MISSING,
+                code=HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_APP_MISSING,
                 notes=[
                     'Subworkflows require a Horsies app instance to build the child spec',
                     'Ensure broker.app is set (Horsies.get_broker() does this automatically)',
@@ -452,7 +452,7 @@ def _built_spec(
                 f'{str(exc)[:BUILD_FAILURE_TEXT_CHARS]} '
                 f'(workflow {node.workflow_name}:{node.task_index})'
             ),
-            OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
+            OperationalCode.WORKFLOW_ENQUEUE_FAILED,
         )
     return child_spec
 
@@ -681,7 +681,7 @@ def child_node_rows(
                     f'Invalid child {kind_text} node args for {child_node.name}: '
                     f'{str(exc)[:BUILD_FAILURE_TEXT_CHARS]}'
                 ),
-                OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
+                OperationalCode.WORKFLOW_ENQUEUE_FAILED,
             )
         match child_node:
             case SubWorkflowNode():
@@ -700,7 +700,7 @@ def child_node_rows(
                     return _failed(
                         node,
                         f'Invalid queue/priority for child task {child_node.name}: {exc}',
-                        OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
+                        OperationalCode.WORKFLOW_ENQUEUE_FAILED,
                     )
                 rows.append(
                     task_node_row(

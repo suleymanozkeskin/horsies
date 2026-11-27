@@ -669,7 +669,7 @@ fn enqueue_failed(command: &EnqueueCommand, error: &BrokerError) -> EnqueueOutco
 
 /// The raw record of the send error of a failed enqueue of `command`: the
 /// class by the core's one rule (`send_error_from_enqueue`), and in the
-/// `exception` slot the exception that Python stores for `error`
+/// `cause` slot the exception that Python stores for `error`
 /// (`send_failure_exception`). The send error holds no rule text, no
 /// reader text and no data check, so its own slot is not exact for each
 /// error. Pure.
@@ -1091,7 +1091,7 @@ mod tests {
 
     /// A connect or a schema install that fails (here: the listener closed)
     /// is the send error `ENQUEUE_FAILED`, retryable, with the core's class
-    /// in the `exception` slot.
+    /// in the `cause` slot.
     #[test]
     fn a_failed_connect_or_install_is_enqueue_failed() {
         let command = report_command();
@@ -1130,7 +1130,7 @@ mod tests {
         })
     }
 
-    /// The class and the `exception` slot of the raw record of a failed
+    /// The class and the `cause` slot of the raw record of a failed
     /// enqueue of `error`.
     fn failure_exception(error: &BrokerError) -> (String, ExceptionRecord) {
         let raw = enqueue_failure_record(&report_command(), error);
@@ -1237,7 +1237,7 @@ mod tests {
         );
     }
 
-    /// A task id with another command has no `exception` slot: the record
+    /// A task id with another command has no `cause` slot: the record
     /// is the send error's own.
     #[test]
     fn a_payload_mismatch_is_the_record_of_the_send_error() {

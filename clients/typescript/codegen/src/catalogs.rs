@@ -223,7 +223,7 @@ mod tests {
     fn catalogs_group_by_module_in_name_order() {
         let modules = catalog_modules(&[
             catalog("status", "TaskStatus"),
-            catalog("broker", "BrokerErrorCode"),
+            catalog("broker", "DatabaseErrorCode"),
             catalog("status", "WorkflowStatus"),
         ]);
         let names: Vec<&str> = modules.keys().copied().collect();
@@ -300,7 +300,7 @@ mod tests {
                 members += 1;
             }
         }
-        assert_eq!(members, 206);
+        assert_eq!(members, 208);
         let retrieval = <RetrievalCode as CodeEnum>::CATALOG;
         let async_context = retrieval
             .member_named("ASYNC_CONTEXT")

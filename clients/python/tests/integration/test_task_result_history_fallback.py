@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
-    BrokerErrorCode,
+    DatabaseErrorCode,
 )
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskStatus
@@ -234,7 +234,7 @@ class TestStagedResultReader:
 
             failed = await broker.get_raw_result_record_async(uuid.UUID(completed))
             assert is_err(failed)
-            assert failed.err_value.code is BrokerErrorCode.TASK_INFO_QUERY_FAILED
+            assert failed.err_value.code is DatabaseErrorCode.TASK_INFO_QUERY_FAILED
             assert TASK_RESULT_FUNCTION in failed.err_value.message
 
             outcome = await broker.get_raw_result_record_async(uuid.UUID(completed))

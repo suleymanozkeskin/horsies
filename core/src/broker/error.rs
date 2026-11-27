@@ -14,7 +14,7 @@ use crate::core::history::identity::fingerprint::FingerprintError;
 use crate::db::{StatementFailure, Transience};
 
 /// Why the core refused a send before any statement (Python's
-/// `BrokerInvalidInput` and `BrokerInvalidTaskOptions`). Nothing was
+/// `DatabaseInvalidInput` and `DatabaseInvalidTaskOptions`). Nothing was
 /// written.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]

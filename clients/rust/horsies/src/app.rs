@@ -564,7 +564,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ChildPreload, ErrorCode, PostgresConfig, WorkerProfile};
+    use crate::{ChildPreload, HorsiesErrorCode, PostgresConfig, WorkerProfile};
 
     fn config() -> AppConfig {
         AppConfig::for_database_url("postgresql://localhost/horsies")
@@ -709,17 +709,19 @@ mod tests {
     fn discover_stops_at_the_first_refusal() {
         let mut app = Horsies::new(config()).unwrap();
         let calls = std::cell::Cell::new(0);
-        let registrar = |app: &mut Horsies| {
-            calls.set(calls.get() + 1);
-            match calls.get() {
-                2 => Err(HorsiesError::new("refused").with_code(ErrorCode::TaskInvalidOptions)),
-                _ => app.provide(calls.get()),
-            }
-        };
+        let registrar =
+            |app: &mut Horsies| {
+                calls.set(calls.get() + 1);
+                match calls.get() {
+                    2 => Err(HorsiesError::new("refused")
+                        .with_code(HorsiesErrorCode::TaskInvalidOptions)),
+                    _ => app.provide(calls.get()),
+                }
+            };
         let refused = app
             .discover([&registrar, &registrar, &registrar])
             .unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::TaskInvalidOptions));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::TaskInvalidOptions));
         assert_eq!(calls.get(), 2);
     }
 }

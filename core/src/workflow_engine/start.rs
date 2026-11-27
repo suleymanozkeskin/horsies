@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::core::history::enqueue::{prepare_workflow_task_facts, WorkflowTaskFacts};
 use crate::core::{
-    AnyNode, ErrorCategory, HorsiesError, OperationalErrorCode, TaskError, WorkflowSpec,
+    AnyNode, HorsiesError, HorsiesErrorCategory, OperationalCode, TaskError, WorkflowSpec,
 };
 
 use crate::workflow_engine::error::WorkflowError;
@@ -79,7 +79,7 @@ pub(crate) fn child_workflow_depth(
                 "task_index": task_index,
             }))),
             ..TaskError::builtin(
-                OperationalErrorCode::SubworkflowDepthLimitReached,
+                OperationalCode::SubworkflowDepthLimitReached,
                 format!(
                     "Subworkflow not started: the child workflow would have depth {child_depth}, \
                      and the limit is {MAX_SUBWORKFLOW_DEPTH} (workflow {parent_workflow_name}:{task_index})"
@@ -175,19 +175,19 @@ fn resolve_insert_priority(node: &AnyNode) -> Result<i32, WorkflowError> {
 /// What names a failed child build in the node error. A builder failure takes the Python exception
 /// class, Python's `type(exc).__name__` (`core/workflows/engine.py:1196-1211`): a [`HorsiesError`]
 /// takes the class of its error category, the subclass of Python's `HorsiesError` that the category
-/// stands for ([`ErrorCategory`]); an error with no code takes the base class. A stored node input
+/// stands for ([`HorsiesErrorCategory`]); an error with no code takes the base class. A stored node input
 /// that the core refuses ([`Self::StoredInputRefused`]) names no class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChildSpecErrorType {
     /// A [`HorsiesError`] with no error code.
     HorsiesError,
-    /// A [`HorsiesError`] whose code is of [`ErrorCategory::Workflow`].
+    /// A [`HorsiesError`] whose code is of [`HorsiesErrorCategory::Workflow`].
     WorkflowValidationError,
-    /// A [`HorsiesError`] whose code is of [`ErrorCategory::Task`].
+    /// A [`HorsiesError`] whose code is of [`HorsiesErrorCategory::Task`].
     TaskDefinitionError,
-    /// A [`HorsiesError`] whose code is of [`ErrorCategory::Config`].
+    /// A [`HorsiesError`] whose code is of [`HorsiesErrorCategory::Config`].
     ConfigurationError,
-    /// A [`HorsiesError`] whose code is of [`ErrorCategory::Registry`].
+    /// A [`HorsiesError`] whose code is of [`HorsiesErrorCategory::Registry`].
     RegistryError,
     /// A stored node input from which the core cannot make the builder input
     /// ([`child_build_input`](crate::workflow_engine::args_merge::child_build_input)): the text
@@ -201,10 +201,10 @@ impl ChildSpecErrorType {
     pub(crate) fn of(error: &HorsiesError) -> Self {
         match error.category() {
             None => Self::HorsiesError,
-            Some(ErrorCategory::Workflow) => Self::WorkflowValidationError,
-            Some(ErrorCategory::Task) => Self::TaskDefinitionError,
-            Some(ErrorCategory::Config) => Self::ConfigurationError,
-            Some(ErrorCategory::Registry) => Self::RegistryError,
+            Some(HorsiesErrorCategory::Workflow) => Self::WorkflowValidationError,
+            Some(HorsiesErrorCategory::Task) => Self::TaskDefinitionError,
+            Some(HorsiesErrorCategory::Config) => Self::ConfigurationError,
+            Some(HorsiesErrorCategory::Registry) => Self::RegistryError,
         }
     }
 
@@ -537,24 +537,24 @@ mod tests {
     /// `HorsiesError` (Python `type(exc).__name__`, `core/workflows/engine.py:1196-1211`).
     #[test]
     fn a_builder_error_takes_the_python_class_of_its_category() {
-        use crate::core::ErrorCode;
+        use crate::core::HorsiesErrorCode;
 
         for (error, class) in [
             (HorsiesError::new("no code"), "HorsiesError"),
             (
-                HorsiesError::new("cycle").with_code(ErrorCode::WorkflowCycleDetected),
+                HorsiesError::new("cycle").with_code(HorsiesErrorCode::WorkflowCycleDetected),
                 "WorkflowValidationError",
             ),
             (
-                HorsiesError::new("options").with_code(ErrorCode::TaskInvalidOptions),
+                HorsiesError::new("options").with_code(HorsiesErrorCode::TaskInvalidOptions),
                 "TaskDefinitionError",
             ),
             (
-                HorsiesError::new("queue mode").with_code(ErrorCode::ConfigInvalidQueueMode),
+                HorsiesError::new("queue mode").with_code(HorsiesErrorCode::ConfigInvalidQueueMode),
                 "ConfigurationError",
             ),
             (
-                HorsiesError::new("not registered").with_code(ErrorCode::TaskNotRegistered),
+                HorsiesError::new("not registered").with_code(HorsiesErrorCode::TaskNotRegistered),
                 "RegistryError",
             ),
         ] {

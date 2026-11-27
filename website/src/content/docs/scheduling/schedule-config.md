@@ -116,7 +116,7 @@ The kwargs are encoded once per scheduler start (see [Validation](/horsies/sched
 
 `TaskSchedule` has no task options. A scheduled run stores the options that the task declares on `@app.task()` (`timeout_ms`, `retry_policy`, `execution`, `cancel_grace_ms`), as a plain `.send()` of the task does. See [Task Options](/horsies/scheduling/scheduler-overview/#task-options).
 
-`@app.task()` encodes the options once, when the task is defined. If the options do not encode, `@app.task()` raises `ValueError` with the task name and the cause, and the task is not registered. `horsies scheduler` then exits 1 at startup: the startup check reports the module import with `MODULE_EXEC_ERROR`, and `Scheduler.start()` refuses the schedule with `TASK_NOT_REGISTERED`.
+`@app.task()` encodes the options once, when the task is defined. If the options do not encode, `@app.task()` raises `ValueError` with the task name and the cause, and the task is not registered. `horsies scheduler` then exits 1 at startup: the startup check reports the module import with `MODULE_IMPORT_ERROR`, and `Scheduler.start()` refuses the schedule with `TASK_NOT_REGISTERED`.
 
 ### Queue Override
 

@@ -9,7 +9,7 @@
 //! it to [`CODE_CATALOGS`], and add a test below that pins its wire values
 //! to the enum's own text form. A lifecycle status also marks its terminal
 //! variants, and a test pins them to the enum's own terminal rule.
-//! [`ErrorCode`] has no other text form: its `HRS-nnn` text is its catalog
+//! [`HorsiesErrorCode`] has no other text form: its `HRS-nnn` text is its catalog
 //! value.
 //!
 //! A member that only a blocking call form gives sets
@@ -22,9 +22,10 @@ use crate::monitoring::{
     MonitoringQueryErrorCode, MonitoringQueryRefusalCode, TaskActionErrorCode,
 };
 use crate::{
-    BrokerErrorCode, ContractCode, ErrorCode, HandleErrorCode, OperationalErrorCode, OutcomeCode,
+    ContractCode, DatabaseErrorCode, HorsiesErrorCode, OperationalCode, OutcomeCode,
     RerunErrorCode, RetrievalCode, TaskAbsenceReason, TaskAttemptOutcome, TaskSendErrorCode,
-    TaskStatus, WorkflowStartErrorCode, WorkflowStatus, WorkflowTaskStatus,
+    TaskStatus, WorkflowHandleErrorCode, WorkflowStartErrorCode, WorkflowStatus,
+    WorkflowTaskStatus,
 };
 
 /// The Python base class of a generated enum.
@@ -115,12 +116,12 @@ pub trait CodeEnum: Sized + 'static {
 
 /// Every catalog that the Python package gets, in render order.
 pub const CODE_CATALOGS: &[CodeCatalog] = &[
-    <BrokerErrorCode as CodeEnum>::CATALOG,
+    <DatabaseErrorCode as CodeEnum>::CATALOG,
     <TaskSendErrorCode as CodeEnum>::CATALOG,
     <SeatRelayCode as CodeEnum>::CATALOG,
     <WorkflowStartErrorCode as CodeEnum>::CATALOG,
-    <HandleErrorCode as CodeEnum>::CATALOG,
-    <OperationalErrorCode as CodeEnum>::CATALOG,
+    <WorkflowHandleErrorCode as CodeEnum>::CATALOG,
+    <OperationalCode as CodeEnum>::CATALOG,
     <ContractCode as CodeEnum>::CATALOG,
     <RetrievalCode as CodeEnum>::CATALOG,
     <OutcomeCode as CodeEnum>::CATALOG,
@@ -133,7 +134,7 @@ pub const CODE_CATALOGS: &[CodeCatalog] = &[
     <MonitoringQueryRefusalCode as CodeEnum>::CATALOG,
     <TaskAbsenceReason as CodeEnum>::CATALOG,
     <RerunErrorCode as CodeEnum>::CATALOG,
-    <ErrorCode as CodeEnum>::CATALOG,
+    <HorsiesErrorCode as CodeEnum>::CATALOG,
 ];
 
 #[cfg(test)]
@@ -165,15 +166,15 @@ mod tests {
 
     #[test]
     fn broker_send_start_and_handle_codes_match_their_display() {
-        assert_wire_values::<BrokerErrorCode>(ToString::to_string);
+        assert_wire_values::<DatabaseErrorCode>(ToString::to_string);
         assert_wire_values::<TaskSendErrorCode>(ToString::to_string);
         assert_wire_values::<WorkflowStartErrorCode>(ToString::to_string);
-        assert_wire_values::<HandleErrorCode>(ToString::to_string);
+        assert_wire_values::<WorkflowHandleErrorCode>(ToString::to_string);
     }
 
     #[test]
     fn built_in_task_codes_match_their_display() {
-        assert_wire_values::<OperationalErrorCode>(ToString::to_string);
+        assert_wire_values::<OperationalCode>(ToString::to_string);
         assert_wire_values::<ContractCode>(ToString::to_string);
         assert_wire_values::<RetrievalCode>(ToString::to_string);
         assert_wire_values::<OutcomeCode>(ToString::to_string);
@@ -199,8 +200,8 @@ mod tests {
             serde_plain::to_string(code).expect("a unit variant serializes")
         });
         assert_eq!(
-            MonitoringQueryRefusalCode::QueryRefused.wire_value(),
-            "QUERY_REFUSED"
+            MonitoringQueryRefusalCode::InvalidInput.wire_value(),
+            "INVALID_INPUT"
         );
     }
 
@@ -272,20 +273,20 @@ mod tests {
     #[test]
     fn broker_send_start_and_monitoring_catalogs_equal_python_s() {
         // clients/python/horsies/core/brokers/result_types.py
-        assert_python_members::<BrokerErrorCode>(&[
+        assert_python_members::<DatabaseErrorCode>(&[
             "SCHEMA_INIT_FAILED",
             "ENQUEUE_FAILED",
             "PAYLOAD_MISMATCH",
             "IDEMPOTENCY_KEY_CONFLICT",
             "TASK_INFO_QUERY_FAILED",
             "MONITORING_QUERY_FAILED",
-            "DB_PING_FAILED",
+            "DATABASE_PING_FAILED",
             "WORKER_PING_FAILED",
             "CLEANUP_FAILED",
             "CLOSE_FAILED",
             "LISTENER_START_FAILED",
             "LISTENER_SUBSCRIBE_FAILED",
-            "NO_BROKER",
+            "NO_DATABASE",
             "NO_TYPE_AVAILABLE",
             "INVALID_JSON_PAYLOAD",
             "INVALID_TASK_OPTIONS",
@@ -315,7 +316,7 @@ mod tests {
         ]);
         // clients/python/horsies/monitoring/errors.py
         assert_python_members::<MonitoringQueryErrorCode>(&[
-            "DB_OPERATION_FAILED",
+            "DATABASE_OPERATION_FAILED",
             "HISTORY_CONTRACT_VIOLATION",
         ]);
         // clients/python/horsies/monitoring/task_actions.py
@@ -323,7 +324,7 @@ mod tests {
             "TASK_NOT_FOUND",
             "TASK_NOT_CANCELLABLE",
             "TASK_IS_WORKFLOW_TASK",
-            "DB_OPERATION_FAILED",
+            "DATABASE_OPERATION_FAILED",
             "STORED_DATA_INVALID",
         ]);
     }
@@ -332,11 +333,11 @@ mod tests {
     fn built_in_task_code_catalogs_equal_python_s() {
         // clients/python/horsies/core/models/tasks.py; WORKFLOW_START_INCOMPLETE is the one
         // approved addition, last in both catalogs.
-        assert_python_members::<OperationalErrorCode>(&[
+        assert_python_members::<OperationalCode>(&[
             "UNHANDLED_EXCEPTION",
             "TASK_EXCEPTION",
             "WORKER_CRASHED",
-            "BROKER_ERROR",
+            "DATABASE_ERROR",
             "WORKER_RESOLUTION_ERROR",
             "WORKER_SERIALIZATION_ERROR",
             "RESULT_DESERIALIZATION_ERROR",
@@ -350,7 +351,7 @@ mod tests {
         ]);
         assert_python_members::<ContractCode>(&[
             "RETURN_TYPE_MISMATCH",
-            "WORKFLOW_CTX_MISSING_ID",
+            "WORKFLOW_CONTEXT_MISSING_ID",
             "NO_TYPE_AVAILABLE",
         ]);
         assert_python_members::<RetrievalCode>(&[
@@ -362,6 +363,7 @@ mod tests {
             "ASYNC_CONTEXT",
             "INVALID_INPUT",
             "WAIT_INSIDE_TASK",
+            "UNKNOWN_CUSTOM_CODE",
         ]);
         assert_python_members::<OutcomeCode>(&[
             "TASK_CANCELLED",
@@ -372,7 +374,7 @@ mod tests {
             "WORKFLOW_FAILED",
             "WORKFLOW_CANCELLED",
             "UPSTREAM_SKIPPED",
-            "SUBWORKFLOW_FAILED",
+            "SUB_WORKFLOW_FAILED",
             "WORKFLOW_SUCCESS_CASE_NOT_MET",
             "WORKFLOW_OUTPUT_SKIPPED",
         ]);
@@ -388,10 +390,8 @@ mod tests {
                 .collect()
         };
         assert_eq!(
-            OperationalErrorCode::ALL
-                .map(|code| code.to_string())
-                .to_vec(),
-            catalog(<OperationalErrorCode as CodeEnum>::CATALOG)
+            OperationalCode::ALL.map(|code| code.to_string()).to_vec(),
+            catalog(<OperationalCode as CodeEnum>::CATALOG)
         );
         assert_eq!(
             ContractCode::ALL.map(|code| code.to_string()).to_vec(),
@@ -455,12 +455,13 @@ mod tests {
     #[test]
     fn the_handle_catalog_is_python_s() {
         // clients/python/horsies/core/models/workflow/handle_types.py
-        assert_python_members::<HandleErrorCode>(&[
+        assert_python_members::<WorkflowHandleErrorCode>(&[
             "WORKFLOW_NOT_FOUND",
-            "DB_OPERATION_FAILED",
+            "DATABASE_OPERATION_FAILED",
             "STORED_DATA_INVALID",
             "RESUME_RECOVERY_FAILED",
             "ASYNC_CONTEXT",
+            "INVALID_WORKFLOW_ID",
         ]);
     }
 
@@ -603,10 +604,10 @@ mod tests {
         assert_eq!(
             marked,
             [
-                "BrokerErrorCode",
+                "DatabaseErrorCode",
                 "TaskSendErrorCode",
                 "WorkflowStartErrorCode",
-                "HandleErrorCode",
+                "WorkflowHandleErrorCode",
                 "RetrievalCode",
             ],
         );
@@ -664,8 +665,8 @@ mod tests {
         assert_eq!(
             marked,
             [
-                "BrokerAsyncContext",
-                "HandleAsyncContext",
+                "DatabaseAsyncContext",
+                "WorkflowHandleAsyncContext",
                 "TaskSendAsyncContext",
                 "WorkflowStartAsyncContext",
             ],

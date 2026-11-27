@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from horsies.core.models.workflow import SubWorkflowSummary
 
 from horsies._catalog.task_codes import ContractCode as ContractCode
-from horsies._catalog.task_codes import OperationalErrorCode as OperationalErrorCode
+from horsies._catalog.task_codes import OperationalCode as OperationalCode
 from horsies._catalog.task_codes import OutcomeCode as OutcomeCode
 from horsies._catalog.task_codes import RetrievalCode as RetrievalCode
 from horsies.core.types.json_value import JsonInput, JsonValue
@@ -46,7 +46,7 @@ from horsies.core.exception_mapper import (
 )
 
 type BuiltInTaskCode = (
-    OperationalErrorCode
+    OperationalCode
     | ContractCode
     | RetrievalCode
     | OutcomeCode
@@ -59,7 +59,7 @@ Used by ``TaskError._coerce_error_code`` for round-trip coercion and by
 ``horsies check`` for reserved-code collision detection.
 """
 for _family in (
-    OperationalErrorCode,
+    OperationalCode,
     ContractCode,
     RetrievalCode,
     OutcomeCode,
@@ -76,7 +76,7 @@ for _family in (
 
 
 _BUILTIN_FAMILIES = (
-    OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode,
+    OperationalCode, ContractCode, RetrievalCode, OutcomeCode,
 )
 
 BUILTIN_FAMILIES: Final = _BUILTIN_FAMILIES
@@ -88,7 +88,7 @@ C = TypeVar('C', covariant=True, default=str)
 that the task declares with `error_codes=`."""
 
 
-class FlattenedException(TypedDict):
+class ExceptionRecord(TypedDict):
     """Wire-safe dict form of a ``BaseException``.
 
     Produced by ``flatten_exception`` (``codec/error_payload.py``) before
@@ -130,7 +130,7 @@ class TaskError(BaseModel, Generic[C]):
     ``Failed`` of what a reader gets.
 
     ``error_code`` carries one of four built-in families
-    (``OperationalErrorCode``, ``ContractCode``, ``RetrievalCode``,
+    (``OperationalCode``, ``ContractCode``, ``RetrievalCode``,
     ``OutcomeCode``) or a custom code of the task: a ``str``, or a member of
     the ``Enum`` class that the task declares with ``error_codes=``.
     ``TaskError[C]`` is generic in the type of the custom code, with the
@@ -144,13 +144,13 @@ class TaskError(BaseModel, Generic[C]):
     ``message``, ``data`` and ``exception`` are optional.
 
     **Construction**: built-in code values must be passed as enum
-    members, not raw strings.  ``TaskError(error_code="BROKER_ERROR",
-    message="...")`` raises ``ValueError``.  Use ``OperationalErrorCode.BROKER_ERROR``
+    members, not raw strings.  ``TaskError(error_code="DATABASE_ERROR",
+    message="...")`` raises ``ValueError``.  Use ``OperationalCode.DATABASE_ERROR``
     instead.  A custom code is a ``str`` or a member of a custom ``Enum``
     whose value is that ``str``; both follow the code-text rules.
 
     **Serialization**: built-in codes are serialized as tagged dicts
-    ``{"__builtin_task_code__": "BROKER_ERROR"}`` so they round-trip
+    ``{"__builtin_task_code__": "DATABASE_ERROR"}`` so they round-trip
     through ``model_validate()`` / ``model_validate_json()`` without
     ambiguity.  A custom code is serialized as its text: the ``str``, or
     the value of the member. A decode gives the text; the reader of a task
@@ -162,13 +162,13 @@ class TaskError(BaseModel, Generic[C]):
 
     **Unknown keys**: refused at construction and at decode. A stored value
     with a key that this class does not declare is stored data that does not
-    parse. Subclasses inherit the rule, so ``SubWorkflowError`` accepts its
+    parse. Subclasses inherit the rule, so ``SubWorkflowFailure`` accepts its
     own fields and no others.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid')
 
-    exception: BaseException | FlattenedException | None = None
+    exception: BaseException | ExceptionRecord | None = None
     # The type checker sees the code type of the error. At run time the
     # before validator is the one check: it keeps a custom `Enum` member as
     # the member, which a `str` field would turn into its text.
@@ -265,10 +265,10 @@ class TaskError(BaseModel, Generic[C]):
     @classmethod
     def _serialize_exception(
         cls,
-        value: BaseException | FlattenedException | None,
+        value: BaseException | ExceptionRecord | None,
         _info: Any,
-    ) -> FlattenedException | None:
-        """Serialize a live exception to its wire-safe FlattenedException form.
+    ) -> ExceptionRecord | None:
+        """Serialize a live exception to its wire-safe ExceptionRecord form.
 
         json.dumps cannot encode a BaseException, so without this any caller
         doing model_dump(mode='json') / model_dump_json() crashes (the codec
@@ -366,7 +366,7 @@ def custom_code_type_of(annot: object) -> CustomCodeType | NotATaskErrorType:
             return NotATaskErrorType()
 
 
-class SubWorkflowError(TaskError):
+class SubWorkflowFailure(TaskError):
     """
     Error representing a failed subworkflow.
 
@@ -374,7 +374,7 @@ class SubWorkflowError(TaskError):
     task failures via pattern matching:
 
         match outcome:
-            case Failed(SubWorkflowError() as e):
+            case Failed(SubWorkflowFailure() as e):
                 print(f"Subworkflow {e.sub_workflow_id} failed")
             case Failed(e):
                 print(f"Task error: {e.message}")
@@ -531,7 +531,7 @@ class RetryPolicy(BaseModel):
         jitter: whether to add ±25% randomization to delays
         max_delay_seconds: optional maximum delay after backoff and jitter
         auto_retry_for: the code members that start a retry: members of the
-            built-in code enums (`OperationalErrorCode`, `ContractCode`,
+            built-in code enums (`OperationalCode`, `ContractCode`,
             `RetrievalCode`, `OutcomeCode`), or members of the `Enum` class
             that the task declares with `error_codes=`. At least one.
 
@@ -705,14 +705,14 @@ class TaskOptions(BaseModel):
         return v
 
 
-# Rebuild SubWorkflowError to resolve forward reference to SubWorkflowSummary
+# Rebuild SubWorkflowFailure to resolve forward reference to SubWorkflowSummary
 def _rebuild_subworkflow_error() -> None:
-    """Rebuild SubWorkflowError after SubWorkflowSummary is importable."""
+    """Rebuild SubWorkflowFailure after SubWorkflowSummary is importable."""
     from horsies.core.models.workflow import SubWorkflowSummary  # noqa: F811
 
     _ = SubWorkflowSummary  # keep in scope for model_rebuild forward ref resolution
 
-    SubWorkflowError.model_rebuild()
+    SubWorkflowFailure.model_rebuild()
 
 
 _rebuild_subworkflow_error()

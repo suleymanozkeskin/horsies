@@ -24,7 +24,7 @@ use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC
 use crate::core::history::reads::aggregates::plan_rows_from_explain_text;
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::lifecycle::TerminalizationKind;
-use crate::core::task::error::{ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode};
+use crate::core::task::error::{ContractCode, OperationalCode, OutcomeCode, RetrievalCode};
 use crate::core::task::result::TaskResult;
 use crate::core::task::Execution;
 use crate::core::types::status::TaskStatus;
@@ -247,7 +247,7 @@ pub(super) fn builtin_taxonomy() -> BuiltinTaxonomy {
     let families: [(ErrorCategory, Vec<String>); 4] = [
         (
             ErrorCategory::Operational,
-            OperationalErrorCode::ALL
+            OperationalCode::ALL
                 .iter()
                 .map(ToString::to_string)
                 .collect(),

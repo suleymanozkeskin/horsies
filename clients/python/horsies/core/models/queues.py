@@ -6,7 +6,7 @@ from typing import Annotated, assert_never
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.types.result import Err, Ok, Result
 
 QUEUE_NAME_MAX_BYTES = 52
@@ -60,7 +60,7 @@ class CustomQueueConfig(BaseModel):
                         f'invalid queue name {self.name!r}: '
                         f'{_describe_refusal(refusal)}'
                     ),
-                    code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                    code=HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE,
                     notes=[f'CustomQueueConfig(name={self.name!r})'],
                     help_text=(
                         'use a non-empty name without leading or trailing '

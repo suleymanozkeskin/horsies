@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use super::*;
 use crate::core::config::child_sizing::parent_pool_connections;
-use crate::core::error::{ErrorCode, HorsiesError};
+use crate::core::error::{HorsiesError, HorsiesErrorCode};
 
 /// A profile with every setting of every kind of child.
 pub(crate) fn full_profile() -> Value {
@@ -546,7 +546,7 @@ fn the_handler_fields_are_required_and_closed() {
 #[test]
 fn the_declared_codes_of_a_task_give_its_error_code_labels() {
     use crate::core::task::{
-        error_code_label, ErrorCodeLabel, OperationalErrorCode, TaskErrorCode, UserCode,
+        error_code_label, ErrorCodeLabel, OperationalCode, TaskErrorCode, UserCode,
     };
     let manifest = parsed(&manifest(
         &json!({"batch": full_profile()}),
@@ -555,10 +555,10 @@ fn the_declared_codes_of_a_task_give_its_error_code_labels() {
     let fetch = &manifest.tasks["app.tasks.fetch"].error_codes;
     let declared = TaskErrorCode::User(UserCode::parse("RATE_LIMITED").expect("a user code"));
     let other = TaskErrorCode::User(UserCode::parse("GONE").expect("a user code"));
-    let built_in = TaskErrorCode::from(OperationalErrorCode::BrokerError);
+    let built_in = TaskErrorCode::from(OperationalCode::DatabaseError);
     assert_eq!(error_code_label(fetch, &declared).value(), "RATE_LIMITED");
     assert_eq!(error_code_label(fetch, &other), ErrorCodeLabel::Undeclared);
-    assert_eq!(error_code_label(fetch, &built_in).value(), "BROKER_ERROR");
+    assert_eq!(error_code_label(fetch, &built_in).value(), "DATABASE_ERROR");
 }
 
 #[test]
@@ -609,7 +609,7 @@ fn no_name_and_an_unknown_name_are_refused_with_the_defined_names() {
     assert_eq!(defined, &["batch", "small"]);
     let [error]: [HorsiesError; 1] = not_given.errors().try_into().expect("one error");
     assert_eq!(error.message, "--profile is required");
-    assert_eq!(error.code, Some(ErrorCode::CliInvalidArgs));
+    assert_eq!(error.code, Some(HorsiesErrorCode::CliInvalidArgs));
     assert_eq!(
         error.notes,
         [

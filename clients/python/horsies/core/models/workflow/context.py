@@ -188,7 +188,7 @@ class WorkflowMeta:
 # =============================================================================
 
 
-class WorkflowContextMissingIdError(RuntimeError):
+class WorkflowContextMissingId(RuntimeError):
     """Raised when TaskNode node_id is missing for WorkflowContext.result_for()."""
 
 
@@ -548,7 +548,7 @@ class WorkflowContext(BaseModel):
             node_id = node.node_id
 
         if node_id is None:
-            raise WorkflowContextMissingIdError(
+            raise WorkflowContextMissingId(
                 'TaskNode node_id is not set. Ensure WorkflowSpec assigns node_id '
                 'or provide an explicit node_id.'
             )
@@ -603,7 +603,7 @@ class WorkflowContext(BaseModel):
         node_id = node.node_id
 
         if node_id is None:
-            raise WorkflowContextMissingIdError(
+            raise WorkflowContextMissingId(
                 'SubWorkflowNode node_id is not set. Ensure WorkflowSpec assigns node_id.'
             )
 

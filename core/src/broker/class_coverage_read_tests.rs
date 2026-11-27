@@ -21,7 +21,7 @@ use crate::broker::class_coverage::{
 };
 use crate::broker::class_coverage_reads::{CLASS_COVERAGE_SQL, CLASS_REPORT_SQL};
 use crate::broker::monitoring_test_database::MonitoringTestDatabase;
-use crate::broker::result_types::BrokerErrorCode;
+use crate::broker::result_types::DatabaseErrorCode;
 use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
 use crate::core::task::Execution;
 use crate::test_support::sql::{self, TestPool};
@@ -288,7 +288,7 @@ async fn a_live_snapshot_with_unreadable_budgets_fails_both_reads() {
     let report = broker.get_class_report().await.expect_err("refused");
 
     for error in [coverage, report] {
-        assert_eq!(error.code(), BrokerErrorCode::MonitoringQueryFailed);
+        assert_eq!(error.code(), DatabaseErrorCode::MonitoringQueryFailed);
         assert!(!error.retryable());
         assert!(error.message().contains("w-odd"), "{}", error.message());
         assert!(
@@ -429,7 +429,7 @@ async fn rows_of_a_class_the_worker_does_not_serve_fail_the_report() {
         .await
         .expect_err("the report is refused");
 
-    assert_eq!(error.code(), BrokerErrorCode::MonitoringQueryFailed);
+    assert_eq!(error.code(), DatabaseErrorCode::MonitoringQueryFailed);
     assert!(!error.retryable());
     assert!(error.message().contains("w1"), "{}", error.message());
     assert!(error.message().contains("ISOLATED"), "{}", error.message());

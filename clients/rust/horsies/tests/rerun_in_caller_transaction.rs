@@ -20,7 +20,7 @@ use horsies::rerun::{
     UnknownStoredFamily,
 };
 use horsies::{AppConfig, Horsies};
-use horsies_core::{BrokerError, DeclaredErrorCodes, OperationalErrorCode, TaskError, TaskResult};
+use horsies_core::{BrokerError, DeclaredErrorCodes, OperationalCode, TaskError, TaskResult};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -103,7 +103,7 @@ async fn seed_failed_source_with_options(pool: &PgPool, task_options: &str) -> U
     .await
     .unwrap();
     let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
-        TaskError::builtin(OperationalErrorCode::TaskException, "adapter source"),
+        TaskError::builtin(OperationalCode::TaskException, "adapter source"),
     ))
     .unwrap();
     let finished: i64 = sqlx::query_scalar(

@@ -95,7 +95,7 @@ app. Two apps in one process share no registration.
   `PreconditionFailed`. The message names the task. Nothing is written.
 - `builder.task(node)` on a builder of an app that does not register the
   task returns a `HorsiesError` with `HRS-302`
-  (`ErrorCode::WorkflowUnregisteredTask`). The node is not added.
+  (`HorsiesErrorCode::WorkflowUnregisteredTask`). The node is not added.
 - `register` checks the codes of the code type (`UserErrorCode::CODES`):
   a built-in or reserved name is `HRS-212`; a code that is empty, not
   `UPPER_SNAKE_CASE` or an exception class name is `HRS-112`; a code given
@@ -113,7 +113,7 @@ app. Two apps in one process share no registration.
 ## `TaskError<E>`
 
 ```rust
-use horsies::{task, OperationalErrorCode, TaskError, UserErrorCode};
+use horsies::{task, OperationalCode, TaskError, UserErrorCode};
 
 #[derive(Debug, Clone, PartialEq, UserErrorCode)]
 enum ChargeCode {
@@ -124,7 +124,7 @@ enum ChargeCode {
 #[task("charge_card")]
 async fn charge_card(amount_cents: u64) -> Result<String, TaskError<ChargeCode>> {
     if amount_cents == 0 {
-        return Err(TaskError::library(OperationalErrorCode::TaskException, "nothing to charge"));
+        return Err(TaskError::library(OperationalCode::TaskException, "nothing to charge"));
     }
     Err(TaskError::user(ChargeCode::CardDeclined, "the issuer declined the card")
         .with_data(serde_json::json!({ "amount_cents": amount_cents })))
@@ -139,7 +139,7 @@ name of a built-in code or of the reserved code `WORKFLOW_STOPPED`.
 | Item | Returns |
 |---|---|
 | `TaskError::user(code, message)` | An error with a code of `E` |
-| `TaskError::library(code, message)` | An error with a library code: `BuiltInTaskCode` or a family (`OperationalErrorCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`) |
+| `TaskError::library(code, message)` | An error with a library code: `BuiltInTaskCode` or a family (`OperationalCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`) |
 | `.with_data(value)` | This error with `data`. Never fails |
 | `.code()` | `&TaskErrorCode<E>`: `Library(BuiltInTaskCode)` or `User(E)` |
 | `.code().text()` | The stored code text |
@@ -445,7 +445,7 @@ A send runs these steps in order and stops at the first refusal:
 
 1. A generated send finds the task in the app that it names. An app that
    does not register the task refuses with `ValidationFailed`.
-2. Send suppression: a suppressed send returns `SendSuppressed`.
+2. Send suppression: a suppressed send returns `Suppressed`.
 3. The retention of the send.
 4. The read-back of the input: encode it, decode the text with `A`, encode
    that value again. Two different texts refuse the send with
@@ -490,7 +490,7 @@ fn invoice_options(invoice_id: u64) -> TaskSendOptions {
 
 | Variant | Code | Fields | Retry methods |
 |---|---|---|---|
-| `SendSuppressed` | `SEND_SUPPRESSED` | `message` | Refused |
+| `Suppressed` | `SEND_SUPPRESSED` | `message` | Refused |
 | `AsyncContext` | `ASYNC_CONTEXT` | `task_id`, `payload`, `message` | Accepted |
 | `ValidationFailed` | `VALIDATION_FAILED` | `message`, `cause` | Refused |
 | `EnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable`, `cause` | Accepted |
@@ -588,11 +588,11 @@ async fn print_outcome(
 | `TaskNotFound { task_id, reason }` | `TASK_NOT_FOUND` | Neither the live table nor the history holds the task | No |
 | `ResultNotAvailable { task_id, status }` | `RESULT_NOT_AVAILABLE` | Terminal status with no stored result | Yes |
 | `StoredResultUnreadable { task_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored result does not read with `T` and `E` | Yes |
-| `UnknownUserCode { task_id, code, code_type }` | `RESULT_DESERIALIZATION_ERROR` | The stored user code is not a code of `E` | Yes |
+| `UnknownUserCode { task_id, code, code_type }` | `UNKNOWN_CUSTOM_CODE` | The stored user code is not a code of `E` | Yes |
 | `InvalidInput { task_id, cause }` | `INVALID_INPUT` | The `Within` limit is above `MAX_WAIT_LIMIT_MS`; `cause` is `WaitLimitRefused`. Nothing was read | No |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A result wait in a worker child. Nothing was read | No |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking read on a thread that runs a tokio runtime. Nothing was read | No |
-| `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed | No |
+| `Database { code, message, retryable }` | `DATABASE_ERROR` | The database or the connection failed | No |
 
 - `ReadError::code()` returns the library code of the failure.
 - `reason` is a `TaskAbsenceReason`: `PredatesRetainedHistory` (retention
@@ -641,17 +641,17 @@ The starts of a definition by its type are methods of the app view:
   returns the `ASYNC_CONTEXT` member of its catalog:
   `TaskSendError::AsyncContext` (with the prepared task id and payload, so
   `retry_send(&error).await` completes the same send),
-  `ReadError::AsyncContext`, `BrokerOperationError::AsyncContext`, a
+  `ReadError::AsyncContext`, `DatabaseOperationError::AsyncContext`, a
   `CheckReport` with `HRS-217`,
   `WorkflowStartError::AsyncContext` (with the `workflow_id` of the
   start; `retry_start(&error).await` completes the same start from async
-  code), `HandleOperationError::AsyncContext`, or
+  code), `WorkflowHandleError::AsyncContext`, or
   `WorkflowReadError::AsyncContext`.
 - The thread of a `#[blocking_task]` body in a worker child drives no async
   task, so a blocking send or workflow start works there. A result wait in
   a worker child is still `WaitInsideTask`.
 - A refused input is refused before the thread check: a suppressed send is
-  `SendSuppressed` on any thread, and a read with a `Within` limit above
+  `Suppressed` on any thread, and a read with a `Within` limit above
   `MAX_WAIT_LIMIT_MS` is `InvalidInput` on any thread. A workflow start
   checks the thread first, as Python's `WorkflowSpec.start`: on a runtime
   thread a template's build does not run. `retry_start` checks its error
@@ -826,7 +826,7 @@ use horsies::{
     StoredDateTime, RetryPolicy, RetryPolicyError, Execution, TaskOptions,
     RegisteredTask, async_task_fn, blocking_task_fn,
     // Library codes
-    BuiltInTaskCode, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode,
+    BuiltInTaskCode, OperationalCode, ContractCode, RetrievalCode, OutcomeCode,
     ExceptionRecord, SubWorkflowFailure, UserCode, UserCodeRefused, UnknownUserCode,
     // Sends
     TaskFunction, TaskFunctionSendOptions, TaskFunctionNotFound, TaskSendOptions,

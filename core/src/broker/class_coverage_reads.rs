@@ -34,7 +34,7 @@ use crate::broker::class_coverage::{
 use crate::broker::core_rows::{column, one_row, RowDecodeError};
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
-use crate::broker::result_types::{BrokerOperationError, BrokerOperationSource, BrokerResult};
+use crate::broker::result_types::{BrokerOperationSource, DatabaseOperationError, DatabaseResult};
 use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
 use crate::core::task::Execution;
 use crate::db::{
@@ -256,7 +256,7 @@ impl PostgresBroker {
     ///   that reached its bound ([`LIVE_SNAPSHOT_ROW_LIMIT`],
     ///   [`PENDING_STREAM_LIMIT`]); not retryable, since the same rows give
     ///   the same answer.
-    pub async fn get_class_coverage(&self) -> BrokerResult<ClassCoverage> {
+    pub async fn get_class_coverage(&self) -> DatabaseResult<ClassCoverage> {
         let row = self
             .coverage_row(CheckoutClass::Batch)
             .await
@@ -276,7 +276,7 @@ impl PostgresBroker {
     /// [`PENDING_HEAD_LIMIT`] in place of the stream bound, or a live worker
     /// that holds rows of a class that its recorded budgets do not serve
     /// (not retryable).
-    pub async fn get_class_report(&self) -> BrokerResult<ClassReport> {
+    pub async fn get_class_report(&self) -> DatabaseResult<ClassReport> {
         let row = self
             .report_row()
             .await
@@ -356,7 +356,7 @@ pub(crate) fn coverage_row_from(rows: Vec<Row>) -> Result<CoverageRow, RowDecode
 /// after each pass: the same statement on the main core pool, checked out as
 /// reserved work ([`CheckoutClass::Reserved`]) as the reaper's other steps.
 /// Same answers and errors; reads only.
-pub(crate) async fn read_class_coverage(broker: &PostgresBroker) -> BrokerResult<ClassCoverage> {
+pub(crate) async fn read_class_coverage(broker: &PostgresBroker) -> DatabaseResult<ClassCoverage> {
     let row = broker
         .coverage_row(CheckoutClass::Reserved)
         .await
@@ -368,15 +368,15 @@ pub(crate) async fn read_class_coverage(broker: &PostgresBroker) -> BrokerResult
 /// row did not read. `retryable` is the statement layer's classification
 /// ([`BrokerError::is_retryable`]); a row that does not read is not
 /// retryable.
-fn class_statement_failed(operation: &str, error: BrokerError) -> BrokerOperationError {
-    BrokerOperationError::monitoring_query_failed(operation, BrokerOperationSource::Broker(error))
+fn class_statement_failed(operation: &str, error: BrokerError) -> DatabaseOperationError {
+    DatabaseOperationError::monitoring_query_failed(operation, BrokerOperationSource::Broker(error))
 }
 
 /// Stored data that a class read cannot decide on, or a bound it reached.
 /// Not retryable: the same rows give the same answer. Nothing changed
 /// (Python `_class_read_refused`, `postgres.py:408-421`).
-fn class_read_refused(operation: &str, cause: &ClassReadRefused) -> BrokerOperationError {
-    BrokerOperationError::monitoring_query_refused(operation, cause.clone())
+fn class_read_refused(operation: &str, cause: &ClassReadRefused) -> DatabaseOperationError {
+    DatabaseOperationError::monitoring_query_refused(operation, cause.clone())
 }
 
 /// The fleet check from its statement row, checked in Python's order: the

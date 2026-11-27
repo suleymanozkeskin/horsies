@@ -23,7 +23,9 @@ use horsies_core::core::task::declared_options::{
     DeclaredRetry, DeclaredTaskOptions, RetryCodeScope,
 };
 use horsies_core::core::task::execution::{MAX_CANCEL_GRACE_MS, MIN_CANCEL_GRACE_MS};
-use horsies_core::{ErrorCode, Execution, TaskOptions, MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS};
+use horsies_core::{
+    Execution, HorsiesErrorCode, TaskOptions, MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS,
+};
 use napi_derive::napi;
 
 use crate::call::guard::sync_call;
@@ -315,7 +317,7 @@ fn declared_retry(retry: &RetryFacts) -> Result<DeclaredRetry, Vec<BoundaryRefus
 /// The refusal of a number that is not a `u32` (`HRS-102`). Pure.
 fn number_refusal(name: &str, refusal: &BoundaryRefusal) -> CoreRefusal {
     CoreRefusal::coded(
-        ErrorCode::TaskInvalidOptions,
+        HorsiesErrorCode::TaskInvalidOptions,
         format!("{}: {}", refusal.subject, refusal.rule),
         vec![format!("task '{name}'")],
         RefusalHelp::Help {

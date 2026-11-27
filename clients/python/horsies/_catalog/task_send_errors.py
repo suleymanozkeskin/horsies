@@ -56,6 +56,14 @@ class TaskSendSuppressed:
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.SEND_SUPPRESSED
     message: str = field(repr=False)
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
 class TaskSendAsyncContext:
@@ -71,18 +79,34 @@ class TaskSendAsyncContext:
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
 class TaskSendValidationFailed:
     """The input was refused before anything was written.
 
-    ``exception`` is the cause, or ``NoCause()`` when a check refused the
+    ``cause`` is the exception of the cause, or ``NoCause()`` when a check refused the
     input without a Python exception. The retry methods refuse this error.
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.VALIDATION_FAILED
     message: str = field(repr=False)
-    exception: BaseException | NoCause = field(repr=False)
+    cause: BaseException | NoCause = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
@@ -91,7 +115,7 @@ class TaskSendEnqueueFailed:
 
     ``retryable`` is the core's classification of the cause. ``retry_send(err)``
     sends the same task id and payload again; the broker returns the existing
-    task for a duplicate. ``exception`` is ``NoCause()`` when the broker found
+    task for a duplicate. ``cause`` is ``NoCause()`` when the broker found
     the failure by a data check.
     """
 
@@ -100,7 +124,15 @@ class TaskSendEnqueueFailed:
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
     retryable: bool
-    exception: BaseException | NoCause = field(repr=False)
+    cause: BaseException | NoCause = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
@@ -115,6 +147,14 @@ class TaskSendPayloadMismatch:
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
 class TaskSendPayloadTooLarge:
@@ -128,6 +168,14 @@ class TaskSendPayloadTooLarge:
     message: str = field(repr=False)
     size_bytes: int
     limit_bytes: int
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
 
 
 @dataclass(slots=True, frozen=True)
@@ -148,6 +196,14 @@ class TaskSendIdempotencyKeyConflict:
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
     owner_task_id: uuid.UUID
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
 
 
 type TaskSendCoreError = (

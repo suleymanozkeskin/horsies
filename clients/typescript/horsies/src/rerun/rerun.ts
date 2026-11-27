@@ -171,6 +171,7 @@ function callerQueryError(statement: string, failure: CallerQueryFailure): Calle
   switch (failure.kind) {
     case "driverFailed":
       return {
+        kind: "driverFailed",
         code: RerunErrorCode.DRIVER_FAILED,
         message: `statement ${statement} failed in the caller's driver: ${failure.driverError.message}`,
         statement,
@@ -178,6 +179,7 @@ function callerQueryError(statement: string, failure: CallerQueryFailure): Calle
       };
     case "noOpenTransaction":
       return {
+        kind: "noOpenTransaction",
         code: RerunErrorCode.NO_OPEN_TRANSACTION,
         retryable: false,
         message: `statement ${statement} did not run: ${noOpenTransactionCause(failure.state)}`,
@@ -186,6 +188,7 @@ function callerQueryError(statement: string, failure: CallerQueryFailure): Calle
       };
     case "resultNotText":
       return {
+        kind: "resultNotText",
         code: RerunErrorCode.RESULT_NOT_TEXT,
         retryable: false,
         message:

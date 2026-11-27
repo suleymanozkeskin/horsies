@@ -159,13 +159,19 @@ describe("TaskHandle.info", () => {
     assert.deepEqual(read, { ok: false, error: { kind: "taskNotFound", code: "TASK_NOT_FOUND", reason: "PREDATES_RETAINED_HISTORY" } });
   });
 
-  test("a failed read is database", async () => {
+  test("a failed read is databaseError", async () => {
     const fake = fakeProducer({ infos: [{ kind: "failed", error: operationFailedRaw("TASK_INFO_QUERY_FAILED", false) }] });
     const read = await taskHandleOf(addonAccess(fake), readFormOf(contract), TASK_ID).info();
 
     assert.deepEqual(read, {
       ok: false,
-      error: { kind: "database", code: "TASK_INFO_QUERY_FAILED", retryable: false, message: "connection failed: refused" },
+      error: {
+        kind: "databaseError",
+        code: "DATABASE_ERROR",
+        databaseCode: "TASK_INFO_QUERY_FAILED",
+        retryable: false,
+        message: "connection failed: refused",
+      },
     });
   });
 

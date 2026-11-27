@@ -202,7 +202,7 @@ def show_total(handle: TaskHandle[int]) -> None:
 
 ### `ReadError`
 
-`ReadError` is a closed union of frozen classes, one per catalog code. A `match` on it is exhaustive under a type checker. Every class has `code` (a class variable: its catalog member) and `message` (the subject and the cause). `BrokerError` adds `retryable` (whether the cause may clear) and `exception` (the cause, or `NoCause()`). Match one class with its arm, for example `case Err(WaitTimeout()):`.
+`ReadError` is a closed union of frozen classes, one per catalog code. A `match` on it is exhaustive under a type checker. Every class has `code` (a class variable: its catalog member) and `message` (the subject and the cause). `ReadDatabaseError` adds `retryable` (whether the cause may clear) and `cause` (the exception of the cause, or `NoCause()`). Match one class with its arm, for example `case Err(WaitTimeout()):`.
 
 | Class | `code` | When |
 |---|---|---|
@@ -214,11 +214,11 @@ def show_total(handle: TaskHandle[int]) -> None:
 | `WaitInsideTask` | `RetrievalCode.WAIT_INSIDE_TASK` | A result wait in a process that runs task bodies. Nothing was read |
 | `AsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form |
 | `InvalidInput` | `RetrievalCode.INVALID_INPUT` | `timeout_ms` is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`. Nothing was read |
-| `ResultDeserializationError` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types |
-| `UnknownCustomCode` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored error has a custom code that the declared `Enum` does not name (a row of another version of the task); `custom_code` is the stored text |
-| `BrokerError` | `OperationalErrorCode.BROKER_ERROR` | The database, the connection or the core call failed. A later read may succeed |
+| `ResultDeserializationError` | `OperationalCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types |
+| `UnknownCustomCode` | `RetrievalCode.UNKNOWN_CUSTOM_CODE` | The stored error has a custom code that the declared `Enum` does not name (a row of another version of the task); `custom_code` is the stored text |
+| `ReadDatabaseError` | `OperationalCode.DATABASE_ERROR` | The database, the connection or the core call failed. A later read may succeed |
 | `NoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The stored value succeeded, and this process has no declared type to read it with: the handle was built by id, or the task or workflow is not registered here |
-| `WorkflowCtxMissingId` | `ContractCode.WORKFLOW_CTX_MISSING_ID` | `WorkflowHandle.result_for()` got a node with no `node_id`. Nothing was read |
+| `WorkflowCtxMissingId` | `ContractCode.WORKFLOW_CONTEXT_MISSING_ID` | `WorkflowHandle.result_for()` got a node with no `node_id`. Nothing was read |
 
 ## `TaskError`
 
@@ -237,26 +237,26 @@ class TaskError(BaseModel):
 
 <!-- check: skip partial -- uses a name before the page defines it -->
 ```python
-TaskError(error_code=OperationalErrorCode.BROKER_ERROR, message="db down")  # OK
+TaskError(error_code=OperationalCode.DATABASE_ERROR, message="db down")  # OK
 TaskError(error_code="MY_CUSTOM_CODE", message="card declined")             # OK
-TaskError(error_code="BROKER_ERROR", message="db down")                     # ValueError — reserved
+TaskError(error_code="DATABASE_ERROR", message="db down")                     # ValueError — reserved
 TaskError(message="card declined")                                          # ValueError — no code
 ```
 
-**Serialization**: built-in codes serialize as tagged dicts `{"__builtin_task_code__": "BROKER_ERROR"}` so round-trip identity is preserved. User strings serialize as plain strings.
+**Serialization**: built-in codes serialize as tagged dicts `{"__builtin_task_code__": "DATABASE_ERROR"}` so round-trip identity is preserved. User strings serialize as plain strings.
 
 **Deserialization**: use standard `model_validate()` / `model_validate_json()` everywhere. No special rehydration methods needed — works for nested models too.
 
 **Stored data**: `TaskError` refuses a key that it does not declare, at construction and at decode. A stored error with an unknown key, or without `error_code`, is stored data that does not parse: `TaskHandle.get()`, `WorkflowHandle.get()` and `app.get_result()` return `Err(ResultDeserializationError(...))` with the cause.
 
-### `SubWorkflowError`
+### `SubWorkflowFailure`
 
 Extends `TaskError` with `sub_workflow_id: str` and `sub_workflow_summary: SubWorkflowSummary[Any]`. Distinguish via pattern matching on the `Failed` error:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 match outcome:  # a TaskOutcome[T, TaskError]
-    case Failed(SubWorkflowError() as error):
+    case Failed(SubWorkflowFailure() as error):
         print(error.sub_workflow_id)  # available
     case Failed(error):
         ...  # regular task error
@@ -268,15 +268,15 @@ match outcome:  # a TaskOutcome[T, TaskError]
 
 The old flat `LibraryErrorCode` enum has been split into 4 families. The umbrella type alias is `BuiltInTaskCode`.
 
-### `OperationalErrorCode`
+### `OperationalCode`
 
 Infra-level failures during task execution, brokering, or worker processing:
 
-<!-- members: OperationalErrorCode -->
+<!-- members: OperationalCode -->
 - `UNHANDLED_EXCEPTION` — uncaught exception wrapped by library
 - `TASK_EXCEPTION` — the worker caught an exception outside the task wrapper, or a validator raised on a default
 - `WORKER_CRASHED` — worker process died during execution
-- `BROKER_ERROR` — DB/broker failure during result retrieval (`read_error.code` of `BrokerError`)
+- `DATABASE_ERROR` — DB/broker failure during result retrieval (`read_error.code` of `ReadDatabaseError`)
 - `WORKER_RESOLUTION_ERROR` — task name not found in registry
 - `WORKER_SERIALIZATION_ERROR` — failed to serialize/deserialize arguments
 - `RESULT_DESERIALIZATION_ERROR` — a stored result or a stored workflow error is corrupt or does not decode (`read_error.code` of `ResultDeserializationError`)
@@ -294,7 +294,7 @@ Violations of the declared API contract between task author and library:
 
 <!-- members: ContractCode -->
 - `RETURN_TYPE_MISMATCH` — returned value doesn't fit the declared type, or is not `Ok` or `Err`, including `None`
-- `WORKFLOW_CTX_MISSING_ID` — workflow context missing required ID (`read_error.code` of `WorkflowCtxMissingId`)
+- `WORKFLOW_CONTEXT_MISSING_ID` — workflow context missing required ID (`read_error.code` of `WorkflowCtxMissingId`)
 - `NO_TYPE_AVAILABLE` — a typed decode needs the success type, but the task or workflow is not registered locally (for example a handle built from an id) (`read_error.code` of `NoTypeAvailable`)
 
 ### `RetrievalCode`
@@ -309,7 +309,8 @@ The `code` of a read error (`read_error.code`) when `handle.get()` / `handle.res
 - `RESULT_NOT_READY` — `ResultNotReady`: the workflow node stores no result yet
 - `ASYNC_CONTEXT` — `AsyncContext`: sync `get()` / `result_for()` called on a thread that runs an event loop; nothing ran, not cached — call `get_async()` / `result_for_async()`
 - `INVALID_INPUT` — `InvalidInput`: an argument of `get()` / `get_async()` was refused before any read: `timeout_ms` must be None or an int from 0 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached
-- `WAIT_INSIDE_TASK` — `WaitInsideTask`: a result wait (`TaskHandle.get()` / `get_async()`, `app.get_result()` / `get_result_async()`, `WorkflowHandle.get()` / `get_async()`) was called inside a worker child, also from a thread that the task started; it waited for nothing, not cached. It is the first check of the call, before `timeout_ms` and `ASYNC_CONTEXT`. The raw reads `app.get_raw_result()` and `broker.get_raw_result_record()` (and `*_async`) return `Err(BrokerWaitInsideTask)` there. A task never waits for another task: compose them as a workflow. `send()`, starting a workflow, `info()` and `workflow_ctx.result_for()` still work in a task
+- `WAIT_INSIDE_TASK` — `WaitInsideTask`: a result wait (`TaskHandle.get()` / `get_async()`, `app.get_result()` / `get_result_async()`, `WorkflowHandle.get()` / `get_async()`) was called inside a worker child, also from a thread that the task started; it waited for nothing, not cached. It is the first check of the call, before `timeout_ms` and `ASYNC_CONTEXT`. The raw reads `app.get_raw_result()` and `broker.get_raw_result_record()` (and `*_async`) return `Err(DatabaseWaitInsideTask)` there. A task never waits for another task: compose them as a workflow. `send()`, starting a workflow, `info()` and `workflow_ctx.result_for()` still work in a task
+- `UNKNOWN_CUSTOM_CODE` — the stored error has a custom code that the declared code type of the task does not name; the same read gives the same error
 
 ### `OutcomeCode`
 
@@ -324,7 +325,7 @@ Terminal lifecycle outcomes for tasks and workflows:
 - `WORKFLOW_FAILED` — workflow has failed
 - `WORKFLOW_CANCELLED` — workflow was cancelled
 - `UPSTREAM_SKIPPED` — upstream task was skipped
-- `SUBWORKFLOW_FAILED` — sub-workflow has failed
+- `SUB_WORKFLOW_FAILED` — sub-workflow has failed
 - `WORKFLOW_SUCCESS_CASE_NOT_MET` — success condition not satisfied
 - `WORKFLOW_OUTPUT_SKIPPED` — a `COMPLETED` workflow has no output: its output node, or a terminal node of an outputless workflow, is SKIPPED, and a success case does not require that node
 
@@ -506,14 +507,14 @@ task_id: UUID  # stable across retries of the same send
 def get(timeout_ms: int | None = None) -> ReadResult[T, TaskError]
 async def get_async(timeout_ms: int | None = None) -> ReadResult[T, TaskError]
 
-def info(*, include_result: bool = False, include_failed_reason: bool = False, include_attempts: bool = False) -> BrokerResult[TaskInfo | None]
-async def info_async(*, include_result: bool = False, include_failed_reason: bool = False, include_attempts: bool = False) -> BrokerResult[TaskInfo | None]
+def info(*, include_result: bool = False, include_failed_reason: bool = False, include_attempts: bool = False) -> DatabaseResult[TaskInfo | None]
+async def info_async(*, include_result: bool = False, include_failed_reason: bool = False, include_attempts: bool = False) -> DatabaseResult[TaskInfo | None]
 ```
 
 ### Caching semantics
 
 - An outcome (`Ok(Succeeded(...))`, `Ok(Failed(...))`) and the final read errors `ResultNotAvailable`, `ResultDeserializationError`, `UnknownCustomCode` and `NoTypeAvailable` **are** cached — repeated `get()` returns the cached value without DB query.
-- The other read errors (`WaitTimeout`, `TaskNotFound`, `BrokerError`, `AsyncContext`, `WaitInsideTask`, `InvalidInput`) are **not** cached — subsequent `get()` calls read from the broker again.
+- The other read errors (`WaitTimeout`, `TaskNotFound`, `ReadDatabaseError`, `AsyncContext`, `WaitInsideTask`, `InvalidInput`) are **not** cached — subsequent `get()` calls read from the broker again.
 
 ### `TaskInfo` fields
 
@@ -559,15 +560,15 @@ type TaskSendResult[T] = Result[T, TaskSendError]
 
 ### `TaskSendError`
 
-One frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure; `err.code` (a class variable) names its member. `payload`, `message` and `exception` are not in the repr.
+One frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure; `err.code` (a class variable) names its member. `payload`, `message` and `cause` are not in the repr.
 
 <!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 type TaskSendError = (
     TaskSendSuppressed               # message
     | TaskSendAsyncContext           # task_id, payload, message
-    | TaskSendValidationFailed       # message, exception
-    | TaskSendEnqueueFailed          # task_id, payload, message, retryable, exception
+    | TaskSendValidationFailed       # message, cause
+    | TaskSendEnqueueFailed          # task_id, payload, message, retryable, cause
     | TaskSendPayloadMismatch        # task_id, payload, message
     | TaskSendPayloadTooLarge        # message, size_bytes, limit_bytes
     | TaskSendIdempotencyKeyConflict # task_id, payload, message, owner_task_id; retryable is False
@@ -575,9 +576,9 @@ type TaskSendError = (
 type TaskSendRetryable = TaskSendEnqueueFailed | TaskSendAsyncContext
 ```
 
-`exception` is `BaseException | NoCause` on `TaskSendValidationFailed` and `TaskSendEnqueueFailed`. `NoCause()` means a check found the failure without a Python exception. `NoCause` is not an exception: match on `exception` before `raise ... from`, `exc_info=` or an error tracker call.
+`cause` is `BaseException | NoCause` on `TaskSendValidationFailed` and `TaskSendEnqueueFailed`. `NoCause()` means a check found the failure without a Python exception. `NoCause` is not an exception: match on `exception` before `raise ... from`, `exc_info=` or an error tracker call.
 
-Validation failure text never contains the refused value: each failure is `<loc>: <msg> [<type>]`, at most 10, and a message part that comes from the input is `<input>`. Text that your own validators write is kept as written. A kwarg that fails its declared type gives `TaskSendValidationFailed.exception` as a `ValueValidationError` (`horsies.core.codec`), not a pydantic `ValidationError`. A key from the input can be part of `<loc>` for a dict or mapping type, and for a key that `extra='forbid'` refuses.
+Validation failure text never contains the refused value: each failure is `<loc>: <msg> [<type>]`, at most 10, and a message part that comes from the input is `<input>`. Text that your own validators write is kept as written. A kwarg that fails its declared type gives `TaskSendValidationFailed.cause` as a `ValueValidationError` (`horsies.core.codec`), not a pydantic `ValidationError`. A key from the input can be part of `<loc>` for a dict or mapping type, and for a key that `extra='forbid'` refuses.
 
 ### `TaskSendErrorCode`
 
@@ -587,7 +588,7 @@ Validation failure text never contains the refused value: each failure is `<loc>
 | `SEND_SUPPRESSED` | Refused | `.send()` called during worker import/discovery |
 | `ASYNC_CONTEXT` | Accepted | Sync `.send()` / `.schedule()` (or a sync retry) called inside a running event loop; nothing was enqueued — the error keeps the payload, so `retry_send_async(err)` / `retry_schedule_async(err)` completes the same send |
 | `VALIDATION_FAILED` | Refused | Serialization failed, invalid queue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), or cross-method retry attempted |
-| `ENQUEUE_FAILED` | Accepted | Broker/DB failure, or the core of this process could not run the send (`exception` is the core error: `TooManyPendingCalls` and `CoreCallTimedOut` are retryable; `CoreStartFailed` is not). The row may or may not exist. The `TaskSendPayload` keeps the task id, command and `sent_at` for the retry, which returns the task id if the first send was written; `retryable` is the core's classification |
+| `ENQUEUE_FAILED` | Accepted | Broker/DB failure, or the core of this process could not run the send (`cause` is the core error: `TooManyPendingCalls` and `CoreCallTimedOut` are retryable; `CoreStartFailed` is not). The row may or may not exist. The `TaskSendPayload` keeps the task id, command and `sent_at` for the retry, which returns the task id if the first send was written; `retryable` is the core's classification |
 | `PAYLOAD_MISMATCH` | Refused | The task id exists, and the command or the idempotency key differs from the original send — the payload was altered between send and retry |
 | `IDEMPOTENCY_KEY_CONFLICT` | Refused | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. `retryable` is `False`: a repeat of the same send does not complete it; send the same command, or use another key |
 | `PAYLOAD_TOO_LARGE` | Refused | The serialized input exceeded `payload.reject_bytes` bytes of UTF-8 text (off by default); nothing was enqueued — shrink the payload (pass a reference to external storage) or raise the limit |
@@ -665,7 +666,7 @@ RetryPolicy.exponential(
 
 ### `auto_retry_for` valid values
 
-- `BuiltInTaskCode` members that a task failure produces, for example `OperationalErrorCode.UNHANDLED_EXCEPTION`, `OperationalErrorCode.WORKER_CRASHED`, `OutcomeCode.TASK_TIMEOUT`
+- `BuiltInTaskCode` members that a task failure produces, for example `OperationalCode.UNHANDLED_EXCEPTION`, `OperationalCode.WORKER_CRASHED`, `OutcomeCode.TASK_TIMEOUT`
 - Members of the task's own code `Enum` class, declared with `error_codes=`: `ApiCode.RATE_LIMITED` with `error_codes=ApiCode`
 
 `@app.task` refuses any other entry with `HRS-102`: a plain `str` (`"RATE_LIMITED"`), a member of another `Enum` class, or a custom member of a task that declares a tuple or no `error_codes`. A task that retries on a code of its own declares the code in an `Enum` class. The task body can return the member or its text: the stored code is the text in both cases.
@@ -695,7 +696,7 @@ RetryPolicy.fixed([1, 2, 5], auto_retry_for=[ApiCode.DEADLOCK], jitter=False)
     error_codes=ApiCode,
     retry_policy=RetryPolicy.fixed(
         [60, 300],
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED, ApiCode.RATE_LIMITED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED, ApiCode.RATE_LIMITED],
     ),
 )
 def sync_orders() -> Result[int, TaskError[ApiCode]]:
@@ -930,16 +931,16 @@ from horsies import (
     # App and config
     Horsies, AppConfig, PostgresConfig,
     # Task result types
-    TaskError, SubWorkflowError, TaskInfo, TaskAttemptInfo,
+    TaskError, SubWorkflowFailure, TaskInfo, TaskAttemptInfo,
     # Read result types: the outcome and the read errors
     ReadResult, TaskOutcome, Succeeded, Failed, ReadError,
     WaitTimeout, TaskNotFound, WorkflowNotFound, ResultNotAvailable, ResultNotReady,
     WaitInsideTask, AsyncContext, InvalidInput, ResultDeserializationError, UnknownCustomCode,
-    BrokerError, NoTypeAvailable, WorkflowCtxMissingId,
+    ReadDatabaseError, NoTypeAvailable, WorkflowCtxMissingId,
     # The run of a task: cancel state
     TaskRuntime, RunCancelState, CancelNotRequested, CancelRequested, CancelCause,
     # Error code families
-    BuiltInTaskCode, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode,
+    BuiltInTaskCode, OperationalCode, ContractCode, RetrievalCode, OutcomeCode,
     # Retry
     RetryPolicy,
     # Send types
@@ -952,9 +953,8 @@ from horsies import (
     # Status
     TaskStatus, TaskAttemptOutcome, TASK_TERMINAL_STATES,
     # Broker result (for handle.info()); match on the variant
-    BrokerResult, BrokerOperationError, BrokerErrorCode,
-    BrokerOperationFailed, BrokerEnqueueFailed, BrokerInvalidInput,
-    broker_error_cause,
+    DatabaseResult, DatabaseOperationError, DatabaseErrorCode,
+    DatabaseOperationFailed, DatabaseEnqueueFailed, DatabaseInvalidInput,
     # Node data flow helper
     from_node,
     # Rerun (re-execute a terminal task as a new request)

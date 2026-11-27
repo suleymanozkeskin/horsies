@@ -14,7 +14,7 @@ from pydantic import AfterValidator
 from horsies.core.app import Horsies, _BUILDER_ATTR, _NO_CHECK_ATTR
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     WorkflowValidationError,
 )
 from horsies.core.models.app import AppConfig
@@ -178,7 +178,7 @@ class TestCheckWorkflowBuilders:
             errors = app._check_workflow_builders()
 
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION
+        assert errors[0].code == HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION
         assert 'not introspectable' in errors[0].message
 
     def test_zero_arg_builder_exception_wrapped_as_e029(self) -> None:
@@ -191,7 +191,7 @@ class TestCheckWorkflowBuilders:
 
         errors = app._check_workflow_builders()
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION
+        assert errors[0].code == HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION
         assert 'kaboom' in str(errors[0])
 
     def test_builder_returning_non_workflow_spec_wrapped_as_e029(self) -> None:
@@ -204,7 +204,7 @@ class TestCheckWorkflowBuilders:
 
         errors = app._check_workflow_builders()
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION
+        assert errors[0].code == HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION
         assert 'returned non-WorkflowSpec' in str(errors[0])
 
     def test_builder_validation_error_collected(self) -> None:
@@ -215,12 +215,12 @@ class TestCheckWorkflowBuilders:
         def bad_workflow_builder() -> WorkflowSpec[Any]:
             raise WorkflowValidationError(
                 message='bad graph',
-                code=ErrorCode.WORKFLOW_CYCLE_DETECTED,
+                code=HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED,
             )
 
         errors = app._check_workflow_builders()
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.WORKFLOW_CYCLE_DETECTED
+        assert errors[0].code == HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED
 
     def test_parameterized_builder_without_cases_e027(self) -> None:
         """Parameterized builder missing cases= fails with HRS-027."""
@@ -232,7 +232,7 @@ class TestCheckWorkflowBuilders:
 
         errors = app._check_workflow_builders()
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_CASES_REQUIRED
+        assert errors[0].code == HorsiesErrorCode.WORKFLOW_CHECK_CASES_REQUIRED
         assert 'urls' in str(errors[0])
 
     def test_parameterized_builder_with_valid_cases(self) -> None:
@@ -259,7 +259,7 @@ class TestCheckWorkflowBuilders:
 
         errors = app._check_workflow_builders()
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_CASE_INVALID
+        assert errors[0].code == HorsiesErrorCode.WORKFLOW_CHECK_CASE_INVALID
         assert 'bogus' in str(errors[0])
 
     def test_case_missing_required_keys_e028(self) -> None:
@@ -272,7 +272,7 @@ class TestCheckWorkflowBuilders:
 
         errors = app._check_workflow_builders()
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_CASE_INVALID
+        assert errors[0].code == HorsiesErrorCode.WORKFLOW_CHECK_CASE_INVALID
         assert 'y' in str(errors[0])
 
     def test_case_not_a_dict_e028(self) -> None:
@@ -285,7 +285,7 @@ class TestCheckWorkflowBuilders:
 
         errors = app._check_workflow_builders()
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_CASE_INVALID
+        assert errors[0].code == HorsiesErrorCode.WORKFLOW_CHECK_CASE_INVALID
 
     def test_case_exception_wrapped_as_e029(self) -> None:
         """Exception during case execution is wrapped with HRS-029."""
@@ -297,7 +297,7 @@ class TestCheckWorkflowBuilders:
 
         errors = app._check_workflow_builders()
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION
+        assert errors[0].code == HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION
         assert 'bad value: 1' in str(errors[0])
 
     def test_send_suppression_active_during_builder_execution(self) -> None:
@@ -333,7 +333,7 @@ class TestCheckWorkflowBuilders:
         errors = app._check_workflow_builders()
         assert len(errors) == 2
         codes = {e.code for e in errors}
-        assert codes == {ErrorCode.WORKFLOW_CHECK_CASES_REQUIRED}
+        assert codes == {HorsiesErrorCode.WORKFLOW_CHECK_CASES_REQUIRED}
 
     def test_builder_horsies_error_collected_directly(self) -> None:
         """HorsiesError from builder is collected as-is (not wrapped)."""
@@ -343,12 +343,12 @@ class TestCheckWorkflowBuilders:
         def my_builder() -> WorkflowSpec[Any]:
             raise ConfigurationError(
                 message='bad config in builder',
-                code=ErrorCode.BROKER_INVALID_URL,
+                code=HorsiesErrorCode.DATABASE_INVALID_URL,
             )
 
         errors = app._check_workflow_builders()
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.BROKER_INVALID_URL
+        assert errors[0].code == HorsiesErrorCode.DATABASE_INVALID_URL
 
 
 # =============================================================================
@@ -391,7 +391,7 @@ class TestCheckUndecoratedBuilders:
         try:
             errors = app._check_undecorated_builders()
             assert len(errors) == 1
-            assert errors[0].code == ErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER
+            assert errors[0].code == HorsiesErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER
             assert 'build_wf' in str(errors[0])
         finally:
             self._cleanup_module(mod_name)
@@ -506,7 +506,7 @@ class TestCheckUndecoratedBuilders:
         try:
             errors = app._check_undecorated_builders()
             assert len(errors) == 1
-            assert errors[0].code == ErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER
+            assert errors[0].code == HorsiesErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER
             assert 'build_wf' in str(errors[0])
         finally:
             self._cleanup_module(pkg_name)
@@ -563,7 +563,7 @@ class TestCheckUndecoratedBuilders:
         try:
             errors = app._check_undecorated_builders()
             assert len(errors) == 1
-            assert errors[0].code == ErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER
+            assert errors[0].code == HorsiesErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER
             assert 'build_pipeline' in str(errors[0])
         finally:
             self._cleanup_module(sub_name)
@@ -652,7 +652,7 @@ class TestCheckIntegration:
         # No modules to import, so import phase passes
         errors = app.check(live=False)
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_CASES_REQUIRED
+        assert errors[0].code == HorsiesErrorCode.WORKFLOW_CHECK_CASES_REQUIRED
 
     def test_check_passes_with_valid_builder(self) -> None:
         """check() passes when builder is valid and produces no errors."""
@@ -706,7 +706,7 @@ class TestCheckIntegration:
         try:
             errors = app.check(live=False)
             assert len(errors) == 1
-            assert errors[0].code == ErrorCode.WORKFLOW_NO_DEFINITION_KEY
+            assert errors[0].code == HorsiesErrorCode.WORKFLOW_NO_DEFINITION_KEY
         finally:
             sys.modules.pop(mod_name, None)
 
@@ -723,7 +723,7 @@ class TestCheckIntegration:
 
         errors = app.check(live=False)
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.WORKFLOW_NO_DEFINITION_KEY
+        assert errors[0].code == HorsiesErrorCode.WORKFLOW_NO_DEFINITION_KEY
 
 
 def _make_custom_app(*queues: tuple[str, int]) -> Horsies:
@@ -789,7 +789,7 @@ class TestNodeBindingInCheck:
 
         errors = app.check(live=False)
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.TASK_INVALID_QUEUE
+        assert errors[0].code == HorsiesErrorCode.TASK_INVALID_QUEUE
 
 
 def _refuse(value: int) -> int:
@@ -837,7 +837,7 @@ class TestRecursiveSubworkflowBindingInCheck:
 
         errors = app.check(live=False)
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.TASK_INVALID_QUEUE
+        assert errors[0].code == HorsiesErrorCode.TASK_INVALID_QUEUE
 
     def test_nested_valid_subworkflow_passes(self) -> None:
         """A nested child whose nodes bind cleanly reports nothing."""
@@ -936,7 +936,7 @@ class TestRecursiveSubworkflowBindingInCheck:
         errors = app.check(live=False)
 
         assert [error.code for error in errors] == [
-            ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+            HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
         ]
         assert 'do not fit build_with' in str(errors[0])
 
@@ -1094,7 +1094,7 @@ class TestRecursiveSubworkflowBindingInCheck:
         # Cycle guard: returns without hanging or RecursionError, with HRS-037.
         errors = app.check(live=False)
         assert [error.code for error in errors] == [
-            ErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING
+            HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING
         ]
 
     def test_param_varying_self_reference_invalid_queue_caught(self) -> None:
@@ -1137,7 +1137,7 @@ class TestRecursiveSubworkflowBindingInCheck:
             )
 
         codes = [e.code for e in app.check(live=False)]
-        assert ErrorCode.TASK_INVALID_QUEUE in codes
+        assert HorsiesErrorCode.TASK_INVALID_QUEUE in codes
 
     def test_nested_child_single_structural_error_surfaces(self) -> None:
         """A nested static child that fails with ONE structural error surfaces it.
@@ -1166,7 +1166,7 @@ class TestRecursiveSubworkflowBindingInCheck:
             )
 
         codes = [e.code for e in app.check(live=False)]
-        assert ErrorCode.WORKFLOW_NO_NODES in codes
+        assert HorsiesErrorCode.WORKFLOW_NO_NODES in codes
 
     def test_nested_child_multi_error_surfaces_all(self) -> None:
         """A nested static child failing with MULTIPLE errors surfaces them all."""
@@ -1195,4 +1195,4 @@ class TestRecursiveSubworkflowBindingInCheck:
 
         codes = [e.code for e in app.check(live=False)]
         # Both invalid-queue nodes reported (not just the first).
-        assert codes.count(ErrorCode.TASK_INVALID_QUEUE) == 2
+        assert codes.count(HorsiesErrorCode.TASK_INVALID_QUEUE) == 2

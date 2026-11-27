@@ -324,7 +324,7 @@ fn a_profile_above_the_usable_slots_is_refused_with_the_formula_and_the_task_sen
     let [error] = errors.as_slice() else {
         panic!("expected one error, got {errors:?}");
     };
-    assert_eq!(error.code, Some(ErrorCode::CheckWorkerConnections));
+    assert_eq!(error.code, Some(HorsiesErrorCode::CheckWorkerConnections));
     assert_eq!(
         error.message,
         format!(
@@ -396,7 +396,10 @@ async fn a_profile_value_outside_its_bound_is_refused_and_nothing_is_read() {
         messages,
         ["worker_profiles['web'].isolated.count: 0 is outside the bounds 1 to 1024"],
     );
-    assert_eq!(errors[0].code, Some(ErrorCode::ConfigInvalidWorkerProfile));
+    assert_eq!(
+        errors[0].code,
+        Some(HorsiesErrorCode::ConfigInvalidWorkerProfile)
+    );
 }
 
 #[tokio::test]
@@ -415,7 +418,7 @@ async fn an_unreadable_limit_is_one_error_and_no_profile_is_compared() {
     let [error] = errors.as_slice() else {
         panic!("expected one error, got {errors:?}");
     };
-    assert_eq!(error.code, Some(ErrorCode::CheckWorkerConnections));
+    assert_eq!(error.code, Some(HorsiesErrorCode::CheckWorkerConnections));
     assert_eq!(
         error.message,
         "the server connection limit could not be read"
@@ -504,7 +507,7 @@ async fn on_a_handle_an_unreachable_server_is_one_unreadable_limit_error() {
     let [error] = errors.as_slice() else {
         panic!("expected one error, got {errors:?}");
     };
-    assert_eq!(error.code, Some(ErrorCode::CheckWorkerConnections));
+    assert_eq!(error.code, Some(HorsiesErrorCode::CheckWorkerConnections));
     assert_eq!(
         error.message,
         "the server connection limit could not be read"
@@ -554,7 +557,7 @@ async fn each_child_kind_counts_its_own_pool_against_the_server() {
     let [error] = errors.as_slice() else {
         panic!("expected one error, got {errors:?}");
     };
-    assert_eq!(error.code, Some(ErrorCode::CheckWorkerConnections));
+    assert_eq!(error.code, Some(HorsiesErrorCode::CheckWorkerConnections));
     assert!(
         error.message.starts_with(&format!(
             "worker_profiles['big']: one worker opens up to {total} Postgres connections itself"
@@ -614,7 +617,7 @@ async fn the_parent_pool_of_the_profile_is_counted_against_the_server() {
     let [error] = errors.as_slice() else {
         panic!("expected one error, got {errors:?}");
     };
-    assert_eq!(error.code, Some(ErrorCode::CheckWorkerConnections));
+    assert_eq!(error.code, Some(HorsiesErrorCode::CheckWorkerConnections));
     assert_eq!(
         error.notes.first().map(String::as_str),
         Some(
@@ -678,7 +681,7 @@ async fn a_separate_session_url_counts_its_session_pool_against_the_server() {
     let [error] = errors.as_slice() else {
         panic!("expected one error, got {errors:?}");
     };
-    assert_eq!(error.code, Some(ErrorCode::CheckWorkerConnections));
+    assert_eq!(error.code, Some(HorsiesErrorCode::CheckWorkerConnections));
     assert!(
         error.message.starts_with(&format!(
             "worker_profiles['session']: one worker opens up to {total} Postgres connections \

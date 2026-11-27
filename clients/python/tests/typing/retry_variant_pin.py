@@ -59,11 +59,11 @@ async def async_retries(
 
 
 def chain_the_cause(enqueue_failed: TaskSendEnqueueFailed) -> None:
-    raise RuntimeError('send failed') from enqueue_failed.exception  # pyright: ignore[reportGeneralTypeIssues]
+    raise RuntimeError('send failed') from enqueue_failed.cause  # pyright: ignore[reportGeneralTypeIssues]
 
 
 def chain_the_matched_cause(enqueue_failed: TaskSendEnqueueFailed) -> None:
-    match enqueue_failed.exception:
+    match enqueue_failed.cause:
         case NoCause():
             raise RuntimeError('send failed')
         case cause:

@@ -2,7 +2,7 @@
 
 The result models (`DatabasePing`, `WorkerPong`, `WorkerStateSnapshot` with
 its slot health, class capacity and profile) are frozen dataclasses returned
-to callers inside ``BrokerResult``. They carry no behaviour, only observed
+to callers inside ``DatabaseResult``. They carry no behaviour, only observed
 data.
 The core encodes and decodes the ping-pong payloads.
 

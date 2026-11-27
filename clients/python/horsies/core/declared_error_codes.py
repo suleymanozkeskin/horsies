@@ -275,7 +275,7 @@ def check_retry_codes(
     the task. Pure.
 
     An entry is accepted when it is a member of a built-in code enum
-    (`OperationalErrorCode`, `ContractCode`, `RetrievalCode`,
+    (`OperationalCode`, `ContractCode`, `RetrievalCode`,
     `OutcomeCode`), or a member of `code_enum`: the `Enum` class of the
     task's `error_codes=`, or None for a tuple or no declaration. The stored
     text of an accepted entry is its value: a built-in value, or a value

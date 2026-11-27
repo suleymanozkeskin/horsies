@@ -27,7 +27,7 @@ from horsies._core import (
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.periods import RetentionDays, period_class_key
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
+from horsies.core.brokers.result_types import DatabaseErrorCode, DatabaseOperationFailed
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.types.result import Err, Ok, is_ok
@@ -51,6 +51,7 @@ _MIGRATION_DESCRIPTIONS: Final[dict[int, str]] = {
     1004: 'worker profile name',
     1005: 'claim generation by status',
     1006: 'typescript client family',
+    1007: 'sub-workflow failed code',
 }
 """The description that the bookkeeping row of each migration of the chain
 stores (``MIGRATION_SOURCES``, ``core/src/broker/migrations.rs``)."""
@@ -100,7 +101,7 @@ async def _initialize(url: str, *, run_schema_migrations: bool = True) -> Ok[Non
         match await broker.ensure_schema_initialized():
             case Ok():
                 return Ok(None)
-            case Err(BrokerOperationFailed(code=BrokerErrorCode.SCHEMA_INIT_FAILED) as failed):
+            case Err(DatabaseOperationFailed(code=DatabaseErrorCode.SCHEMA_INIT_FAILED) as failed):
                 return Err(failed.message)
             case Err(other):
                 pytest.fail(f'unexpected install error: {other!r}')
@@ -495,10 +496,10 @@ async def test_a_family_row_that_holds_no_client_family_fails_closed(database_ur
         try:
             match await broker.ensure_schema_initialized():
                 case Err(
-                    BrokerOperationFailed(
-                        code=BrokerErrorCode.SCHEMA_INIT_FAILED,
+                    DatabaseOperationFailed(
+                        code=DatabaseErrorCode.SCHEMA_INIT_FAILED,
                         retryable=False,
-                        exception=CoreContractViolation() as exception,
+                        cause=CoreContractViolation() as exception,
                     )
                 ):
                     assert exception.subject == 'install_schema'

@@ -949,7 +949,7 @@ mod tests {
             ));
             let refused = registered_task_codes(BTreeMap::from([(
                 "charge".to_owned(),
-                vec!["BROKER_ERROR".to_owned()],
+                vec!["DATABASE_ERROR".to_owned()],
             )]))
             .expect_err("a built-in name is not a custom code");
             assert!(refused.is_instance_of::<PyValueError>(py));

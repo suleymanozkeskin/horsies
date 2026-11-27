@@ -21,7 +21,7 @@ Adjust to your needs.
 
 | Category | Source | Examples | Auto-Retry? |
 | -------- | ------ | -------- | ----------- |
-| Read errors | `handle.get()` gave no outcome | `WaitTimeout`, `BrokerError` | No |
+| Read errors | `handle.get()` gave no outcome | `WaitTimeout`, `ReadDatabaseError` | No |
 | Execution errors | Task raised an exception, or its worker process died | `UNHANDLED_EXCEPTION`, `TASK_EXCEPTION`, `WORKER_CRASHED` | If in `auto_retry_for` |
 | Domain errors | User returned error | `"RATE_LIMITED"`, `"VALIDATION_FAILED"` | If in `auto_retry_for` |
 
@@ -44,7 +44,7 @@ The library handles retries automatically when `auto_retry_for` matches the erro
 ```python
 from enum import Enum
 
-from horsies import OperationalErrorCode, RetryPolicy, Result, TaskError, JsonValue
+from horsies import OperationalCode, RetryPolicy, Result, TaskError, JsonValue
 
 
 class FetchCode(str, Enum):
@@ -58,7 +58,7 @@ class FetchCode(str, Enum):
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=3,
-        auto_retry_for=[OperationalErrorCode.UNHANDLED_EXCEPTION, FetchCode.RATE_LIMITED],
+        auto_retry_for=[OperationalCode.UNHANDLED_EXCEPTION, FetchCode.RATE_LIMITED],
     ),
 )
 def fetch_api_data(*, url: str) -> Result[dict[str, JsonValue], TaskError]:

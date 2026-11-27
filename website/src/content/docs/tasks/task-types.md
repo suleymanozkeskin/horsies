@@ -129,7 +129,7 @@ A self-check runs each rule once per process. The rules read core schema keys th
 The rules of an error that crosses the wire are on [The Error Path](/horsies/internals/serialization/#the-error-path). In Python:
 
 - `TaskError.data` takes `JsonInput` and gives `JsonValue`, so pyright flags a value that is not JSON-native at the call, and takes a `list[str]`.
-- A `SubWorkflowError` keeps its class, its id, its status and its counts. If its output cannot cross, the output is `None`.
+- A `SubWorkflowFailure` keeps its class, its id, its status and its counts. If its output cannot cross, the output is `None`.
 - A `TaskError` subclass with extra fields does not cross the wire, and comes back as a plain `TaskError`. Put the values in `data`, and match on `error_code`.
 - A `str` or `dict` subclass in `data` passes and reads as a plain `str` or `dict`. A `StrEnum` member reads as its value.
 
@@ -230,10 +230,10 @@ The consumer holds the declared `ok_type` (from the task registry) and calls `de
 
 | Code | Source | When |
 |------|--------|------|
-| `BrokerErrorCode.INVALID_JSON_PAYLOAD` | raw result read (`app.get_raw_result`, `broker.get_raw_result_record`), task info read (`handle.info(include_result=True)`) | the stored result does not parse as JSON, or is not a JSON object. For the task info read, also a malformed envelope or a failed typed slot decode |
-| `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | typed read (`TaskHandle.get`, `app.get_result`, `WorkflowHandle.get`, `WorkflowHandle.result_for`) | the stored result does not parse, has a malformed envelope, or fails the typed slot decode. The read returns `Err(ResultDeserializationError(...))` |
+| `DatabaseErrorCode.INVALID_JSON_PAYLOAD` | raw result read (`app.get_raw_result`, `broker.get_raw_result_record`), task info read (`handle.info(include_result=True)`) | the stored result does not parse as JSON, or is not a JSON object. For the task info read, also a malformed envelope or a failed typed slot decode |
+| `OperationalCode.RESULT_DESERIALIZATION_ERROR` | typed read (`TaskHandle.get`, `app.get_result`, `WorkflowHandle.get`, `WorkflowHandle.result_for`) | the stored result does not parse, has a malformed envelope, or fails the typed slot decode. The read returns `Err(ResultDeserializationError(...))` |
 | `ContractCode.NO_TYPE_AVAILABLE` | typed read | the task succeeded, and its `task_name` is not in the local task registry, so no `ok_type` is available to decode the ok slot. The read returns `Err(NoTypeAvailable(...))` |
-| `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` or `ContractCode.NO_TYPE_AVAILABLE` | node map (`WorkflowHandle.results()`, the terminal results of an outputless workflow's `get()`) | a node whose stored result does not decode stays in the map as `Failed(TaskError(error_code=...))` with one of these codes |
+| `OperationalCode.RESULT_DESERIALIZATION_ERROR` or `ContractCode.NO_TYPE_AVAILABLE` | node map (`WorkflowHandle.results()`, the terminal results of an outputless workflow's `get()`) | a node whose stored result does not decode stays in the map as `Failed(TaskError(error_code=...))` with one of these codes |
 
 ## API Reference
 
@@ -337,4 +337,4 @@ def good(*, data: dict[str, JsonValue]) -> Result[dict[str, JsonValue], TaskErro
 
 **Don't define result types in `__main__` or inside functions.** Workers import types by module path; classes without an importable qualname cannot participate in typed decode.
 
-**Don't smuggle reserved keys into `TaskError.error_code` or `TaskError.data`.** `TaskError.error_code` accepts the built-in `OperationalErrorCode` / `RetrievalCode` / `ContractCode` enums or any non-reserved string. Reserved built-in codes passed as strings (e.g. `"WORKER_RESOLUTION_ERROR"`) are rejected — pass the enum member directly.
+**Don't smuggle reserved keys into `TaskError.error_code` or `TaskError.data`.** `TaskError.error_code` accepts the built-in `OperationalCode` / `RetrievalCode` / `ContractCode` enums or any non-reserved string. Reserved built-in codes passed as strings (e.g. `"WORKER_RESOLUTION_ERROR"`) are rejected — pass the enum member directly.

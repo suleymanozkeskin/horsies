@@ -53,14 +53,14 @@ pub async fn check_worker_connections_operation(
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::core::ErrorCode;
+    use horsies_core::core::HorsiesErrorCode;
 
     use super::*;
 
     #[test]
     fn the_record_keeps_every_part_of_the_core_error() {
         let error = HorsiesError::new("the server connection limit could not be read")
-            .with_code(ErrorCode::CheckWorkerConnections)
+            .with_code(HorsiesErrorCode::CheckWorkerConnections)
             .with_note("reading the server connection limit failed: refused")
             .with_help("check the role");
 

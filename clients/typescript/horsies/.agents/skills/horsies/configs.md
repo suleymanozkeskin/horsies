@@ -60,8 +60,8 @@ const app = created.value;
 - `ValidationReport.refusals` is a non-empty list of `HorsiesError`. The order: the
   config (the TypeScript parse, then the core's check), then each listed
   contract in list order, then the workflows.
-- A `HorsiesError` has `code` (an `HRS-nnn` value of `ErrorCode`), `path` (the
-  config field, for example `customQueues[1].name`, or the contract, for
+- A `HorsiesError` has `code` (an `HRS-nnn` value of `HorsiesErrorCode`), `path`
+  (the config field, for example `customQueues[1].name`, or the contract, for
   example `tasks[2] charge_payment`), `message` and `helpText` (zero or more
   lines). The codes are on the shared docs page
   `https://suleymanozkeskin.github.io/horsies/tasks/errors/` ("Config error
@@ -507,7 +507,7 @@ after `cli.run`.** Each command sets every logger to its `--log-level`.
 ```ts
 import {
   // App
-  Horsies, ErrorCode, cli,
+  Horsies, HorsiesErrorCode, cli,
   type HorsiesConfig, type ValidationReport, type HorsiesError, type RefusalCode,
   // Config
   type AppConfigInput, type BrokerConfigInput, type BrokerConnection, type SessionDatabase, type Secret,

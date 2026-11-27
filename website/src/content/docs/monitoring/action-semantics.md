@@ -202,7 +202,7 @@ Compare-and-swap `PAUSED` → `RUNNING`, then re-enqueue synchronously.
 
 Resume runs a scoped recovery pass in a second transaction after the resume
 itself has committed. That pass can fail on its own. When it does, the resume
-has still happened: `resume_workflow()` returns `HandleResumeRecoveryFailed`,
+has still happened: `resume_workflow()` returns `WorkflowHandleResumeRecoveryFailed`,
 and the response is 200 with `warning: "post_resume_recovery_failed"`. Treat
 that as *resumed, check worker logs* — not as a failed resume. The worker
 reaper runs the same recovery pass over all workflows. A database failure

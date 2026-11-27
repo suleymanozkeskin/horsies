@@ -163,12 +163,12 @@ The bounded builders return `Result<_, PaginationRefused>`:
 
 ## MonitoringQueryError
 
-Every read returns `MonitoringResult<T>`: `Result<T, MonitoringQueryError>`. `MonitoringQueryError` is an enum with one variant per state; each variant has `message` and `source`. The methods `code()`, `message()`, `retryable()`, `error_source()` and `failure_cause()` read them.
+Every read returns `MonitoringResult<T>`: `Result<T, MonitoringQueryError>`. `MonitoringQueryError` is an enum with one variant per state; each variant has `message` and `cause`. The methods `code()`, `message()`, `retryable()`, `error_source()` and `failure_cause()` read them.
 
 | Variant | `code()` | When |
 |---------|----------|------|
-| `DbOperationFailed { retryable, .. }` | `DbOperationFailed` | The connect or the statement failed. No statement ran after a failed connect. `retryable` is the classification of the cause |
-| `HistoryContractViolation` | `HistoryContractViolation` | A stored history row does not decode (`task_stats`, `task_facets`, `task_breakdown`, `list_tasks`, `get_task_detail`, `get_workflow_run`, `get_workflow_node`); `source` is a `HistoryContractSource` that holds the error. Not retryable: a repeat gives the same result until the row changes |
+| `DatabaseOperationFailed { retryable, .. }` | `DatabaseOperationFailed` | The connect or the statement failed. No statement ran after a failed connect. `retryable` is the classification of the cause |
+| `HistoryContractViolation` | `HistoryContractViolation` | A stored history row does not decode (`task_stats`, `task_facets`, `task_breakdown`, `list_tasks`, `get_task_detail`, `get_workflow_run`, `get_workflow_node`); `cause` is a `HistoryContractSource` that holds the error. Not retryable: a repeat gives the same result until the row changes |
 
 ## Cancel a Task
 
@@ -183,7 +183,7 @@ async fn cancel_pending(app: &Horsies, task_id: Uuid) -> Result<bool, String> {
         Err(TaskActionError::NotCancellable { .. } | TaskActionError::NotFound { .. }) => Ok(false),
         Err(
             error @ (TaskActionError::WorkflowTask { .. }
-            | TaskActionError::DbOperationFailed { .. }
+            | TaskActionError::DatabaseOperationFailed { .. }
             | TaskActionError::StoredDataInvalid { .. }),
         ) => Err(error.message().to_owned()),
     }
@@ -204,7 +204,7 @@ The rules are on [Action Semantics](/horsies/monitoring/action-semantics/#task-c
 | `NotFound` | `TaskNotFound` | No live or history row has the id. Nothing changed |
 | `NotCancellable { current_status, .. }` | `TaskNotCancellable` | The task is terminal, or RUNNING without `include_running`; `current_status` is the status that the cancel found. Nothing changed |
 | `WorkflowTask { current_status, .. }` | `TaskIsWorkflowTask` | The task belongs to a workflow. Nothing changed |
-| `DbOperationFailed { retryable, cause, .. }` | `DbOperationFailed` | The connect or the statement failed; `cause` is the `Box<BrokerError>`. Nothing was written, or the commit reply was lost. A cancel again tells which: a committed cancel answers `NotCancellable` with `Cancelled` |
+| `DatabaseOperationFailed { retryable, cause, .. }` | `DatabaseOperationFailed` | The connect or the statement failed; `cause` is the `Box<BrokerError>`. Nothing was written, or the commit reply was lost. A cancel again tells which: a committed cancel answers `NotCancellable` with `Cancelled` |
 | `StoredDataInvalid { cause, .. }` | `StoredDataInvalid` | Stored data does not parse; `cause` is the `OutcomeDecodeError`. Nothing changed. Not retryable |
 
 ## Actions as the Web Routes Answer

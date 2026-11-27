@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.workflows.registry import (
     clear_workflow_definition_registry,
     get_workflow_definition,
@@ -44,4 +44,4 @@ class TestWorkflowRegistry:
 
         with pytest.raises(WorkflowValidationError) as exc_info:
             register_workflow_definition(second)
-        assert exc_info.value.code == ErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY

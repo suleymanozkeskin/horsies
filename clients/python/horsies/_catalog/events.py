@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Final, Literal, cast
 
-from horsies._catalog.task_codes import ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode
+from horsies._catalog.task_codes import ContractCode, OperationalCode, OutcomeCode, RetrievalCode
 from horsies.core.types.result import Err, Ok, Result
 
 __all__ = [
@@ -88,7 +88,7 @@ EVENT_CONTRACT_VERSION: Final = 8
 """The version of the event contract that this module reads."""
 
 
-type BuiltInTaskCode = OperationalErrorCode | ContractCode | RetrievalCode | OutcomeCode
+type BuiltInTaskCode = OperationalCode | ContractCode | RetrievalCode | OutcomeCode
 """A built-in task error code: a member of one of the four built-in code catalogs."""
 
 
@@ -218,7 +218,7 @@ class ChildResultFailed:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ChildResultWorkerFailure:
     """The worker code of the child failed, not the task. The attempt
-    outcome is `WORKER_FAILURE`, with the code `BROKER_ERROR`.
+    outcome is `WORKER_FAILURE`, with the code `DATABASE_ERROR`.
     """
 
 
@@ -990,7 +990,7 @@ def _read_variant(value: object, at: _At, type_name: str) -> Result[tuple[str, l
 
 
 _BUILT_IN_TASK_CODE_MEMBERS: Final[dict[str, BuiltInTaskCode]] = {
-    member.value: member for catalog in (OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode) for member in catalog
+    member.value: member for catalog in (OperationalCode, ContractCode, RetrievalCode, OutcomeCode) for member in catalog
 }
 """The members of `BuiltInTaskCode` by their wire value."""
 

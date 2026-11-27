@@ -2,7 +2,7 @@
 
 A workflow operation of the handle (pause, cancel, resume, and the reads)
 runs through ``horsies._core``. The core answers with one record per
-outcome; a failure is the generated ``HandleOperationError`` class, which
+outcome; a failure is the generated ``WorkflowHandleError`` class, which
 the core builds with its message, and the client returns it as it is.
 ``core_call_error`` builds the handle error that never reaches the core: a
 core boundary error raised by the call. The calls raise
@@ -17,7 +17,7 @@ import uuid
 from enum import Enum
 from typing import assert_never
 
-from horsies.core.models.workflow.handle_types import HandleDbOperationFailed
+from horsies.core.models.workflow.handle_types import WorkflowHandleDatabaseOperationFailed
 from horsies.core.types.core_failure import CoreCallRefusal, core_error_retryable
 
 
@@ -67,18 +67,18 @@ def core_call_error(
     exc: CoreCallRefusal,
     workflow_id: uuid.UUID,
     operation: WorkflowOperation,
-) -> HandleDbOperationFailed:
+) -> WorkflowHandleDatabaseOperationFailed:
     """The handle error of a core boundary error raised by the call: nothing
     ran (``TooManyPendingCalls``, ``CoreStartFailed``), or the outcome is
     unknown (``CoreCallTimedOut``). Retryable by ``core_error_retryable``.
     The id in the message and in ``workflow_id`` is the canonical text of the
     UUID. Pure."""
-    return HandleDbOperationFailed(
+    return WorkflowHandleDatabaseOperationFailed(
         message=(
             f'{_label(operation)} failed for workflow {workflow_id}: '
             f'{type(exc).__name__}: {exc}'
         ),
         retryable=core_error_retryable(exc),
         workflow_id=str(workflow_id),
-        exception=exc,
+        cause=exc,
     )

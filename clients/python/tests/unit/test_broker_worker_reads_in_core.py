@@ -46,11 +46,11 @@ from horsies._core import (
 )
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
-    BrokerErrorCode,
-    BrokerInvalidInput,
-    BrokerListenerDisabled,
-    BrokerOperationFailed,
-    BrokerResult,
+    DatabaseErrorCode,
+    DatabaseInvalidInput,
+    DatabaseListenerDisabled,
+    DatabaseOperationFailed,
+    DatabaseResult,
 )
 from horsies.core.models.boot_failure import (
     ResourceShortage,
@@ -338,7 +338,7 @@ class TestHistoryLimit:
         result = await broker.get_worker_state_history_async('w1', limit=limit)
 
         match result:
-            case Err(BrokerInvalidInput(message=message, exception=NoCause())):
+            case Err(DatabaseInvalidInput(message=message, cause=NoCause())):
                 assert message == f'limit must be positive when set, got {limit}'
             case _:
                 raise AssertionError(f'expected INVALID_INPUT, got {result!r}')
@@ -353,8 +353,8 @@ class TestHistoryLimit:
         result = await broker.get_worker_state_history_async('w1', limit=limit)
 
         match result:
-            case Err(BrokerOperationFailed() as error):
-                assert error.code is BrokerErrorCode.MONITORING_QUERY_FAILED
+            case Err(DatabaseOperationFailed() as error):
+                assert error.code is DatabaseErrorCode.MONITORING_QUERY_FAILED
                 assert error.retryable is False
                 assert error.message.startswith('get_worker_state_history failed: limit ')
             case _:
@@ -490,26 +490,26 @@ class TestClassReads:
         )
 
 
-type _Read = Callable[[PostgresBroker], Awaitable[BrokerResult[Any]]]
+type _Read = Callable[[PostgresBroker], Awaitable[DatabaseResult[Any]]]
 
 
-async def _list(broker: PostgresBroker) -> BrokerResult[Any]:
+async def _list(broker: PostgresBroker) -> DatabaseResult[Any]:
     return await broker.list_worker_states_async()
 
 
-async def _one(broker: PostgresBroker) -> BrokerResult[Any]:
+async def _one(broker: PostgresBroker) -> DatabaseResult[Any]:
     return await broker.get_worker_state_async('w1')
 
 
-async def _history(broker: PostgresBroker) -> BrokerResult[Any]:
+async def _history(broker: PostgresBroker) -> DatabaseResult[Any]:
     return await broker.get_worker_state_history_async('w1', limit=5)
 
 
-async def _coverage(broker: PostgresBroker) -> BrokerResult[Any]:
+async def _coverage(broker: PostgresBroker) -> DatabaseResult[Any]:
     return await broker.get_class_coverage_async()
 
 
-async def _report(broker: PostgresBroker) -> BrokerResult[Any]:
+async def _report(broker: PostgresBroker) -> DatabaseResult[Any]:
     return await broker.get_class_report_async()
 
 
@@ -534,17 +534,17 @@ class TestFailures:
         cause = CoreConnectionError(read, 'connection refused', retryable)
         broker = _broker_answering(
             method,
-            BrokerOperationFailed(code=BrokerErrorCode.MONITORING_QUERY_FAILED, message=message, retryable=retryable, exception=cause),
+            DatabaseOperationFailed(code=DatabaseErrorCode.MONITORING_QUERY_FAILED, message=message, retryable=retryable, cause=cause),
         )
 
         result = await call(broker)
 
         match result:
-            case Err(BrokerOperationFailed() as error):
-                assert error.code is BrokerErrorCode.MONITORING_QUERY_FAILED
+            case Err(DatabaseOperationFailed() as error):
+                assert error.code is DatabaseErrorCode.MONITORING_QUERY_FAILED
                 assert error.message == message
                 assert error.retryable is retryable
-                assert error.exception is cause
+                assert error.cause is cause
             case _:
                 raise AssertionError(f'expected MONITORING_QUERY_FAILED, got {result!r}')
 
@@ -553,12 +553,12 @@ class TestFailures:
         message = 'limit must be positive when set, got 0'
         broker = _broker_answering(
             'worker_state_history_async',
-            BrokerInvalidInput(message=message, exception=NoCause()),
+            DatabaseInvalidInput(message=message, cause=NoCause()),
         )
 
         result = await broker.get_worker_state_history_async('w1', limit=0)
 
-        assert result == Err(BrokerInvalidInput(message=message, exception=NoCause()))
+        assert result == Err(DatabaseInvalidInput(message=message, cause=NoCause()))
 
     @pytest.mark.parametrize(('method', 'read', 'call'), _READS, ids=_READ_IDS)
     @pytest.mark.asyncio
@@ -571,9 +571,9 @@ class TestFailures:
         result = await call(broker)
 
         match result:
-            case Err(BrokerOperationFailed() as error):
-                assert error.code is BrokerErrorCode.MONITORING_QUERY_FAILED
-                assert error.exception is raised
+            case Err(DatabaseOperationFailed() as error):
+                assert error.code is DatabaseErrorCode.MONITORING_QUERY_FAILED
+                assert error.cause is raised
                 assert error.retryable is True
                 assert error.message.startswith(f'{read} failed: ')
             case _:
@@ -585,10 +585,10 @@ class TestFailures:
         self, method: str, read: str, call: _Read,
     ) -> None:
         broker = _broker_answering(
-            method, BrokerOperationFailed(code=BrokerErrorCode.DB_PING_FAILED, message='x', retryable=False, exception=CoreConnectionError('test_operation', 'x', True)),
+            method, DatabaseOperationFailed(code=DatabaseErrorCode.DATABASE_PING_FAILED, message='x', retryable=False, cause=CoreConnectionError('test_operation', 'x', True)),
         )
 
-        with pytest.raises(AssertionError, match='DB_PING_FAILED'):
+        with pytest.raises(AssertionError, match='DATABASE_PING_FAILED'):
             await call(broker)
 
 
@@ -644,19 +644,19 @@ class TestWorkerPing:
             timeout_seconds=timeout_seconds, min_responses=min_responses,
         )
 
-        assert result == Err(BrokerInvalidInput(message=message, exception=NoCause()))
+        assert result == Err(DatabaseInvalidInput(message=message, cause=NoCause()))
 
     @pytest.mark.asyncio
     async def test_a_broker_without_a_listener_is_listener_disabled(self) -> None:
         message = 'ping_workers needs a listener: this broker has no listener'
         broker = _broker_answering(
             'ping_workers_async',
-            BrokerListenerDisabled(message=message),
+            DatabaseListenerDisabled(message=message),
         )
 
         result = await broker.ping_workers_async()
 
-        assert result == Err(BrokerListenerDisabled(message=message))
+        assert result == Err(DatabaseListenerDisabled(message=message))
 
     @pytest.mark.parametrize('retryable', [True, False])
     @pytest.mark.asyncio
@@ -665,17 +665,17 @@ class TestWorkerPing:
         cause = CoreConnectionError('ping_workers', 'connection refused', retryable)
         broker = _broker_answering(
             'ping_workers_async',
-            BrokerOperationFailed(code=BrokerErrorCode.WORKER_PING_FAILED, message=message, retryable=retryable, exception=cause),
+            DatabaseOperationFailed(code=DatabaseErrorCode.WORKER_PING_FAILED, message=message, retryable=retryable, cause=cause),
         )
 
         result = await broker.ping_workers_async()
 
         match result:
-            case Err(BrokerOperationFailed() as error):
-                assert error.code is BrokerErrorCode.WORKER_PING_FAILED
+            case Err(DatabaseOperationFailed() as error):
+                assert error.code is DatabaseErrorCode.WORKER_PING_FAILED
                 assert error.message == message
                 assert error.retryable is retryable
-                assert error.exception is cause
+                assert error.cause is cause
             case _:
                 raise AssertionError(f'expected WORKER_PING_FAILED, got {result!r}')
 
@@ -687,9 +687,9 @@ class TestWorkerPing:
         result = await broker.ping_workers_async()
 
         match result:
-            case Err(BrokerOperationFailed() as error):
-                assert error.code is BrokerErrorCode.WORKER_PING_FAILED
-                assert error.exception is raised
+            case Err(DatabaseOperationFailed() as error):
+                assert error.code is DatabaseErrorCode.WORKER_PING_FAILED
+                assert error.cause is raised
                 assert error.retryable is True
                 assert error.message.startswith('ping_workers failed: ')
             case _:
@@ -699,8 +699,8 @@ class TestWorkerPing:
     async def test_another_code_from_the_core_is_a_defect(self) -> None:
         broker = _broker_answering(
             'ping_workers_async',
-            BrokerOperationFailed(code=BrokerErrorCode.DB_PING_FAILED, message='x', retryable=False, exception=CoreConnectionError('test_operation', 'x', True)),
+            DatabaseOperationFailed(code=DatabaseErrorCode.DATABASE_PING_FAILED, message='x', retryable=False, cause=CoreConnectionError('test_operation', 'x', True)),
         )
 
-        with pytest.raises(AssertionError, match='DB_PING_FAILED'):
+        with pytest.raises(AssertionError, match='DATABASE_PING_FAILED'):
             await broker.ping_workers_async()

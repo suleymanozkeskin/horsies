@@ -15,9 +15,9 @@
 use std::convert::Infallible;
 
 use horsies::{
-    task, AppConfig, ErrorCode, Horsies, HorsiesError, TaskError, TaskSendError, TaskSendOptions,
-    WholeSeconds, WorkflowDefConfig, WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder,
-    WorkflowStartError,
+    task, AppConfig, Horsies, HorsiesError, HorsiesErrorCode, TaskError, TaskSendError,
+    TaskSendOptions, WholeSeconds, WorkflowDefConfig, WorkflowDefinition, WorkflowSpec,
+    WorkflowSpecBuilder, WorkflowStartError,
 };
 use horsies_core::{
     CoverageOutcome, CoverageRequest, CoverageSerialization, FailureCause, PostgresBroker,
@@ -341,7 +341,7 @@ async fn a_send_and_a_node_of_a_task_that_the_app_does_not_register_write_nothin
     };
     assert_eq!(
         refused.code,
-        Some(ErrorCode::WorkflowUnregisteredTask),
+        Some(HorsiesErrorCode::WorkflowUnregisteredTask),
         "{refused}"
     );
     let refused = match app.start_workflow::<Nightly>().await {

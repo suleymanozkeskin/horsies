@@ -187,7 +187,7 @@ pub async fn task_info_operation(
         Err(error) => {
             return TaskInfoOutcome::Failed(BrokerFailure::of_operation_error(
                 SUBJECT,
-                horsies_core::BrokerOperationError::task_info_query_failed(
+                horsies_core::DatabaseOperationError::task_info_query_failed(
                     task_id,
                     horsies_core::BrokerOperationSource::Broker(error),
                 ),

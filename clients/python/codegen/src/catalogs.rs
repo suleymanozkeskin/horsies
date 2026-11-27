@@ -139,7 +139,7 @@ fn render_terminal_constant(class: &str, constant: &str, members: &[&str]) -> St
 #[cfg(test)]
 mod tests {
     use horsies_core::catalog::{CallForms, CatalogMember, CodeEnum, CODE_CATALOGS};
-    use horsies_core::ErrorCode;
+    use horsies_core::HorsiesErrorCode;
 
     use super::*;
 
@@ -216,25 +216,25 @@ mod tests {
                 doc: "The workflow has no name.",
                 forms: CallForms::AnyForm,
             }],
-            ..catalog("error_codes", "ErrorCode", PythonEnumBase::StrEnum)
+            ..catalog("error_codes", "HorsiesErrorCode", PythonEnumBase::StrEnum)
         };
         assert_eq!(
             render_class(&codes),
-            "class ErrorCode(str, Enum):\n    \"\"\"Task status.\"\"\"\n\n    WORKFLOW_NO_NAME = 'HRS-001'\n    \"\"\"The workflow has no name.\"\"\"\n"
+            "class HorsiesErrorCode(str, Enum):\n    \"\"\"Task status.\"\"\"\n\n    WORKFLOW_NO_NAME = 'HRS-001'\n    \"\"\"The workflow has no name.\"\"\"\n"
         );
     }
 
-    /// The `error_codes` module holds one member per core `ErrorCode`: the
+    /// The `error_codes` module holds one member per core `HorsiesErrorCode`: the
     /// variant name in SCREAMING_SNAKE_CASE, its `HRS-nnn` code and its
     /// short text, in declaration order, and no other member.
     #[test]
     fn the_error_code_module_renders_every_hrs_code_with_its_name_and_text() {
-        let catalog = <ErrorCode as CodeEnum>::CATALOG;
+        let catalog = <HorsiesErrorCode as CodeEnum>::CATALOG;
         let modules = group_by_module(CODE_CATALOGS);
         let rendered = render_module("error_codes", &modules["error_codes"]);
-        assert!(rendered.contains("\n\n\nclass ErrorCode(str, Enum):\n"));
+        assert!(rendered.contains("\n\n\nclass HorsiesErrorCode(str, Enum):\n"));
         let mut expected_lines = Vec::new();
-        for (code, member) in <ErrorCode as CodeEnum>::VARIANTS
+        for (code, member) in <HorsiesErrorCode as CodeEnum>::VARIANTS
             .iter()
             .zip(catalog.members)
         {
@@ -275,7 +275,7 @@ mod tests {
     fn catalogs_group_by_module_in_name_order() {
         let catalogs = [
             catalog("status", "TaskStatus", PythonEnumBase::PlainEnum),
-            catalog("broker", "BrokerErrorCode", PythonEnumBase::StrEnum),
+            catalog("broker", "DatabaseErrorCode", PythonEnumBase::StrEnum),
             catalog("status", "WorkflowStatus", PythonEnumBase::StrEnum),
         ];
         let modules = group_by_module(&catalogs);

@@ -19,7 +19,7 @@ describe("nativeCatalogValue", () => {
         { name: "integer", value: { kind: "integer", value: 18_446_744_073_709_551_615n } },
         { name: "uuid", value: { kind: "uuid", text: TASK_ID } },
         { name: "member", value: { kind: "codeMember", catalog: "TaskStatus", value: "PENDING" } },
-        { name: "exception", value: { kind: "exception", exception: { kind: "noCause" } } },
+        { name: "cause", value: { kind: "exception", exception: { kind: "noCause" } } },
       ],
     });
 
@@ -31,7 +31,7 @@ describe("nativeCatalogValue", () => {
         integer: 18_446_744_073_709_551_615n,
         uuid: TASK_ID,
         member: "PENDING",
-        exception: { kind: "noCause" },
+        cause: { kind: "noCause" },
       },
     });
     assert.equal(Object.isFrozen(value), true);

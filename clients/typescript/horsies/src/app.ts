@@ -224,7 +224,7 @@ export class Horsies {
     return taskHandleOf(this.#context.core, readFormOf(contract), taskId);
   }
 
-  /** A timed `SELECT 1` round trip: the latency of the database, or `DB_PING_FAILED`. */
+  /** A timed `SELECT 1` round trip: the latency of the database, or `DATABASE_PING_FAILED`. */
   async pingDatabase(): Promise<Result<DatabasePing, PingDatabaseError>> {
     return this.#monitoringArea.pingDatabase();
   }

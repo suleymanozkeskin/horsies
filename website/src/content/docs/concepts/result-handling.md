@@ -99,7 +99,7 @@ match divide.send(a=10, b=2):
 
 ### ReadError
 
-`ReadError` is a closed union of frozen classes. Each class has the name of its code. A `match` on `ReadError` is exhaustive under a type checker. Each class has `code` (its catalog member) and `message` (the subject and the cause). `BrokerError` also has `retryable` (whether the cause may clear) and `exception` (the cause, or `NoCause()`).
+`ReadError` is a closed union of frozen classes. Each class has the name of its code. A `match` on `ReadError` is exhaustive under a type checker. Each class has `code` (its catalog member) and `message` (the subject and the cause). `ReadDatabaseError` also has `retryable` (whether the cause may clear) and `cause` (the exception of the cause, or `NoCause()`).
 
 | Class | Code | When | Kept by `TaskHandle` |
 |-------|------|------|----------------------|
@@ -111,11 +111,11 @@ match divide.send(a=10, b=2):
 | `WaitInsideTask` | `RetrievalCode.WAIT_INSIDE_TASK` | A result wait in a worker child, where task bodies run. Nothing was read. See [Waiting for a Result Inside a Task](#waiting-for-a-result-inside-a-task) | No |
 | `AsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form there | No |
 | `InvalidInput` | `RetrievalCode.INVALID_INPUT` | `timeout_ms` is negative, not an int, or above `MAX_TASK_TIMEOUT_MS`. Nothing was read | No |
-| `ResultDeserializationError` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types. The same read gives the same error until the stored value changes | Yes |
-| `UnknownCustomCode` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored error has a custom code that the declared `Enum` of the task does not name: a row of another version of the task. `custom_code` holds the stored text. It shares its code with `ResultDeserializationError` and names the code | Yes |
-| `BrokerError` | `OperationalErrorCode.BROKER_ERROR` | The database, the connection or the core call failed, or a workflow handle read found stored workflow data that is not valid. The condition can clear, so a later read can succeed | No |
+| `ResultDeserializationError` | `OperationalCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types. The same read gives the same error until the stored value changes | Yes |
+| `UnknownCustomCode` | `RetrievalCode.UNKNOWN_CUSTOM_CODE` | The stored error has a custom code that the declared `Enum` of the task does not name: a row of another version of the task. `custom_code` holds the stored text. It shares its code with `ResultDeserializationError` and names the code | Yes |
+| `ReadDatabaseError` | `OperationalCode.DATABASE_ERROR` | The database, the connection or the core call failed, or a workflow handle read found stored workflow data that is not valid. The condition can clear, so a later read can succeed | No |
 | `NoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The task succeeded, and this process has no declared type to read the value with: the handle was built by id, or the task or the workflow is not registered here | Yes |
-| `WorkflowCtxMissingId` | `ContractCode.WORKFLOW_CTX_MISSING_ID` | `WorkflowHandle.result_for()` got a node with no `node_id`. Nothing was read | No |
+| `WorkflowCtxMissingId` | `ContractCode.WORKFLOW_CONTEXT_MISSING_ID` | `WorkflowHandle.result_for()` got a node with no `node_id`. Nothing was read | No |
 
 A `TaskHandle` keeps an outcome and each class with "Yes": a later `get()` returns it with no read. A class with "No" is not kept, so a later `get()` reads again.
 
@@ -131,7 +131,7 @@ The Rust and the TypeScript clients use the same order. So a read inside a task 
 Match a class to handle one failure in its own arm:
 
 ```python
-from horsies import BrokerError, ReadResult, TaskNotFound, WaitTimeout
+from horsies import ReadDatabaseError, ReadResult, TaskNotFound, WaitTimeout
 
 def describe_read(read: ReadResult[float, TaskError]) -> str:
     match read:
@@ -139,7 +139,7 @@ def describe_read(read: ReadResult[float, TaskError]) -> str:
             return f"value {value}"
         case Ok(Failed(task_error)):
             return f"task failed: {task_error.error_code}"
-        case Err(WaitTimeout() | TaskNotFound() | BrokerError()):
+        case Err(WaitTimeout() | TaskNotFound() | ReadDatabaseError()):
             return "no outcome yet: read again later"
         case Err(read_error):
             return f"no outcome: {read_error.code} - {read_error.message}"
@@ -156,7 +156,7 @@ def describe_read(read: ReadResult[float, TaskError]) -> str:
 | `error_code` | `C \| BuiltInTaskCode` (required): a custom code, or a built-in code | Identifies the error type |
 | `message` | `str` | Human-readable description |
 | `data` | `Any` | Additional context (dict, list, etc.) |
-| `exception` | `BaseException` or `FlattenedException` | Live exception in-process; flattened on the wire to `type`, `module`, `message`, `repr`, and `traceback` |
+| `exception` | `BaseException` or `ExceptionRecord` | Live exception in-process; flattened on the wire to `type`, `module`, `message`, `repr`, and `traceback` |
 
 <!-- check: skip elided -- a return statement shown without its function -->
 ```python
@@ -171,15 +171,15 @@ return Err(TaskError(
 
 When the library itself encounters an error (not your task code), it uses one of four error code families. The umbrella type alias `BuiltInTaskCode` covers all of them.
 
-### OperationalErrorCode
+### OperationalCode
 
-<!-- members: OperationalErrorCode -->
+<!-- members: OperationalCode -->
 | Code | When |
 | ---- | ---- |
 | `UNHANDLED_EXCEPTION` | Task raised an uncaught exception |
 | `TASK_EXCEPTION` | The worker caught an exception outside the task wrapper, or a validator raised on a default |
 | `WORKER_CRASHED` | A child process died (the worker sees it at once), or the worker died (detected via missing heartbeats) |
-| `BROKER_ERROR` | Broker failed while retrieving the result |
+| `DATABASE_ERROR` | Broker failed while retrieving the result |
 | `WORKER_RESOLUTION_ERROR` | Worker couldn't find the task in registry |
 | `WORKER_SERIALIZATION_ERROR` | Result couldn't be serialized |
 | `RESULT_DESERIALIZATION_ERROR` | A stored result or a stored workflow error is corrupt or could not be deserialized |
@@ -198,7 +198,7 @@ When the library itself encounters an error (not your task code), it uses one of
 | ---- | ---- |
 | `RETURN_TYPE_MISMATCH` | The returned value does not fit the declared type, or it is not an `Ok` or an `Err`, including `None` |
 | `NO_TYPE_AVAILABLE` | A successful result could not be decoded because the caller does not have the task's declared success type locally registered |
-| `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID |
+| `WORKFLOW_CONTEXT_MISSING_ID` | Workflow context is missing required ID |
 
 ### RetrievalCode
 
@@ -215,6 +215,7 @@ A read gives these codes as `read_error.code`, not inside a `TaskError`. Each co
 | `ASYNC_CONTEXT` | Sync `get()` / `result_for()` was called on a thread that runs an event loop; nothing ran; not cached. Call `await handle.get_async()` / `result_for_async()` |
 | `INVALID_INPUT` | An argument of `get()` / `get_async()` was refused before any read, for example a `timeout_ms` that is negative, not an int, or above `MAX_TASK_TIMEOUT_MS`; not cached |
 | `WAIT_INSIDE_TASK` | A result wait was called inside a worker child, where task bodies run; it waited for nothing; not cached. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](#waiting-for-a-result-inside-a-task) |
+| `UNKNOWN_CUSTOM_CODE` | The stored error has a custom code that the declared code type of the task does not name; the same read gives the same error |
 
 ### OutcomeCode
 
@@ -229,7 +230,7 @@ A read gives these codes as `read_error.code`, not inside a `TaskError`. Each co
 | `WORKFLOW_FAILED` | Workflow failed |
 | `WORKFLOW_CANCELLED` | Workflow was cancelled |
 | `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped |
-| `SUBWORKFLOW_FAILED` | Subworkflow failed |
+| `SUB_WORKFLOW_FAILED` | Subworkflow failed |
 | `WORKFLOW_SUCCESS_CASE_NOT_MET` | Workflow success condition was not satisfied |
 | `WORKFLOW_OUTPUT_SKIPPED` | A `COMPLETED` workflow has no output: its output node, or a terminal node of an outputless workflow, is SKIPPED, and a success case does not require that node |
 
@@ -241,7 +242,7 @@ A task does not wait for the result of another task. In a worker child, these ca
 - `app.get_result()` and `app.get_result_async()`
 - `WorkflowHandle.get()` and `WorkflowHandle.get_async()`
 
-The raw result reads wait too. In a worker child they return `Err(BrokerWaitInsideTask)` (`BrokerErrorCode.WAIT_INSIDE_TASK`) at once: `app.get_raw_result()`, `app.get_raw_result_async()`, `broker.get_raw_result_record()` and `broker.get_raw_result_record_async()`.
+The raw result reads wait too. In a worker child they return `Err(DatabaseWaitInsideTask)` (`DatabaseErrorCode.WAIT_INSIDE_TASK`) at once: `app.get_raw_result()`, `app.get_raw_result_async()`, `broker.get_raw_result_record()` and `broker.get_raw_result_record_async()`.
 
 The refusal is the first check of each call. It comes before the check of `timeout_ms` (`InvalidInput`) and before the check of the event loop (`AsyncContext`). The rule covers the whole child process: the task body, the threads that it starts, and the `on_child_process_start` hooks.
 

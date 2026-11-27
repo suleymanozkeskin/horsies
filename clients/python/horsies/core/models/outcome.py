@@ -11,7 +11,7 @@ task ended:
 - ``Err(read_error)``: the read gave no outcome. ``read_error`` is one class
   of ``ReadError``, named after its catalog code. A later read can give an
   outcome for some of them (``WaitTimeout``, ``TaskNotFound``,
-  ``BrokerError``).
+  ``ReadDatabaseError``).
 
 A workflow node input that takes an upstream result (``args_from``) is a
 ``TaskOutcome``, and so is the result of ``WorkflowContext.result_for``.
@@ -19,7 +19,7 @@ A workflow node input that takes an upstream result (``args_from``) is a
 ``ReadError`` is a closed union of frozen classes, so a ``match`` on it is
 exhaustive under a type checker. Every class has ``code`` (its catalog
 member) and ``message`` (the subject and the cause, as text).
-``BrokerError`` also has ``retryable`` and ``exception``.
+``ReadDatabaseError`` also has ``retryable`` and ``cause``.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from typing import ClassVar, Literal
 
 from horsies._catalog.task_codes import (
     ContractCode,
-    OperationalErrorCode,
+    OperationalCode,
     RetrievalCode,
 )
 from horsies.core.types.error_detail import NoCause
@@ -37,7 +37,7 @@ from horsies.core.types.result import Err, Ok
 
 __all__ = [
     'AsyncContext',
-    'BrokerError',
+    'ReadDatabaseError',
     'Failed',
     'InvalidInput',
     'NoTypeAvailable',
@@ -171,8 +171,8 @@ class ResultDeserializationError:
     by the handle.
     """
 
-    code: ClassVar[Literal[OperationalErrorCode.RESULT_DESERIALIZATION_ERROR]] = (
-        OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+    code: ClassVar[Literal[OperationalCode.RESULT_DESERIALIZATION_ERROR]] = (
+        OperationalCode.RESULT_DESERIALIZATION_ERROR
     )
     message: str
 
@@ -183,36 +183,34 @@ class UnknownCustomCode:
     task does not name: a row of another version of the task, or of a task
     with another code type. ``custom_code`` is the stored text.
 
-    Its code is ``RESULT_DESERIALIZATION_ERROR``, as for
-    ``ResultDeserializationError``: the stored value does not read as the
-    result of the declared types. It has its own class because it names the
-    code. The same read gives the same error until the stored value or the
-    ``Enum`` changes. Kept by the handle.
+    An ``Enum`` that names the code reads the row. The same read gives the
+    same error until the stored value or the ``Enum`` changes. Kept by the
+    handle.
     """
 
-    code: ClassVar[Literal[OperationalErrorCode.RESULT_DESERIALIZATION_ERROR]] = (
-        OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+    code: ClassVar[Literal[RetrievalCode.UNKNOWN_CUSTOM_CODE]] = (
+        RetrievalCode.UNKNOWN_CUSTOM_CODE
     )
     message: str
     custom_code: str
 
 
 @dataclass(slots=True, frozen=True)
-class BrokerError:
+class ReadDatabaseError:
     """The database, the connection or the core call failed.
 
     ``message`` names the code of the failed operation and its cause.
     ``retryable`` is the classification of the cause: ``True`` when the
-    condition may clear, so that a later read may succeed. ``exception`` is
-    the cause, or ``NoCause()``. Not kept by the handle.
+    condition may clear, so that a later read may succeed. ``cause`` is
+    the exception of the cause, or ``NoCause()``. Not kept by the handle.
     """
 
-    code: ClassVar[Literal[OperationalErrorCode.BROKER_ERROR]] = (
-        OperationalErrorCode.BROKER_ERROR
+    code: ClassVar[Literal[OperationalCode.DATABASE_ERROR]] = (
+        OperationalCode.DATABASE_ERROR
     )
     message: str
     retryable: bool
-    exception: BaseException | NoCause = field(repr=False)
+    cause: BaseException | NoCause = field(repr=False)
 
 
 @dataclass(slots=True, frozen=True)
@@ -230,8 +228,8 @@ class NoTypeAvailable:
 class WorkflowCtxMissingId:
     """``result_for`` got a node with no ``node_id``. Nothing was read."""
 
-    code: ClassVar[Literal[ContractCode.WORKFLOW_CTX_MISSING_ID]] = (
-        ContractCode.WORKFLOW_CTX_MISSING_ID
+    code: ClassVar[Literal[ContractCode.WORKFLOW_CONTEXT_MISSING_ID]] = (
+        ContractCode.WORKFLOW_CONTEXT_MISSING_ID
     )
     message: str
 
@@ -247,13 +245,11 @@ type ReadError = (
     | InvalidInput
     | ResultDeserializationError
     | UnknownCustomCode
-    | BrokerError
+    | ReadDatabaseError
     | NoTypeAvailable
     | WorkflowCtxMissingId
 )
-"""Why a read gave no outcome: one class per catalog code, and
-``UnknownCustomCode``, which shares the code of
-``ResultDeserializationError`` and names the custom code."""
+"""Why a read gave no outcome: one class per catalog code."""
 
 
 type ReadResult[T, E] = Ok[Succeeded[T]] | Ok[Failed[E]] | Err[ReadError]

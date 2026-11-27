@@ -49,7 +49,7 @@ use crate::app::SendSuppression;
 use crate::process_state::refuse_in_a_fork;
 use crate::task::body::encode_send_input;
 use crate::telemetry::{CallEnd, TaskSendSpan, TaskSendSubject};
-use crate::{ErrorCode, Horsies, HorsiesError, TaskHandle, UserErrorCode};
+use crate::{Horsies, HorsiesError, HorsiesErrorCode, TaskHandle, UserErrorCode};
 
 /// Resends of a retryable `ENQUEUE_FAILED` after the first send (Python
 /// `_SEND_RETRY_COUNT`).
@@ -165,7 +165,7 @@ where
             return Err(HorsiesError::new(format!(
                 "task '{task_name}' has no resolved queue; register it with Horsies::register"
             ))
-            .with_code(ErrorCode::TaskInvalidQueue));
+            .with_code(HorsiesErrorCode::TaskInvalidQueue));
         };
         let function = Self {
             task_name: task_name.to_owned(),
@@ -263,7 +263,7 @@ where
     ) -> Result<(Uuid, TaskSendPayload), TaskSendError> {
         let context = &self.context;
         if context.suppression.is_active() {
-            return Err(TaskSendError::SendSuppressed {
+            return Err(TaskSendError::Suppressed {
                 message: format!(
                     "Task send suppressed for {} (import/check phase or \
                      HORSIES_SUPPRESS_SENDS=1)",
@@ -713,11 +713,14 @@ mod tests {
         let without = Horsies::new(config()).unwrap();
         let mut builder = without.workflow_builder("invoices");
         let refused = builder.task(node_of()).unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::WorkflowUnregisteredTask));
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::WorkflowUnregisteredTask)
+        );
         assert!(refused.message.contains("task 'send_invoice'"), "{refused}");
         assert_eq!(
             builder.build().unwrap_err().code,
-            Some(ErrorCode::WorkflowNoNodes)
+            Some(HorsiesErrorCode::WorkflowNoNodes)
         );
     }
 
@@ -731,7 +734,10 @@ mod tests {
         let refused = builder
             .task(crate::__private::task_node::<u32, String>("send_invoice"))
             .unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::WorkflowUnregisteredTask));
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::WorkflowUnregisteredTask)
+        );
         assert!(refused.message.contains("Invoice"), "{refused}");
         assert!(refused.message.contains("String"), "{refused}");
     }
@@ -741,7 +747,7 @@ mod tests {
         let app = app_with(config());
         let refused =
             TaskFunction::<Invoice, u32, Infallible>::__registered(&app, "missing").unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::TaskNotRegistered));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::TaskNotRegistered));
     }
 
     #[test]
@@ -802,7 +808,7 @@ mod tests {
             .prepare(&TaskSendOptions::new(), &invoice())
             .unwrap_err();
         match refused {
-            TaskSendError::SendSuppressed { message } => {
+            TaskSendError::Suppressed { message } => {
                 assert!(message.contains("Task send suppressed for send_invoice"));
             }
             other => panic!("expected SEND_SUPPRESSED, got {other}"),
@@ -1130,7 +1136,7 @@ mod tests {
         let second = app_with_generated_send(limited);
         let refused = generated_send::send(&first, 7).await.unwrap_err();
         assert!(
-            matches!(refused, TaskSendError::SendSuppressed { .. }),
+            matches!(refused, TaskSendError::Suppressed { .. }),
             "{refused}"
         );
         let refused = generated_send::send(&second, 7).await.unwrap_err();
@@ -1152,7 +1158,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(refused, TaskSendError::SendSuppressed { .. }),
+            matches!(refused, TaskSendError::Suppressed { .. }),
             "{refused}"
         );
     }
