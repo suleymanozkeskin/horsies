@@ -3,6 +3,7 @@
 use chrono::Duration;
 use sha2::{Digest, Sha256};
 
+/// The most UTF-8 bytes of an idempotency key; a key has at least one.
 pub const IDEMPOTENCY_KEY_MAX_BYTES: usize = 255;
 pub const IDEMPOTENCY_SCOPE_VERSION: i16 = 1;
 pub const IDEMPOTENCY_WINDOW_DEFAULT_HOURS: i64 = 24;
@@ -116,6 +117,11 @@ fn update_framed(digest: &mut Sha256, value: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_key_bound_is_255_bytes() {
+        assert_eq!(IDEMPOTENCY_KEY_MAX_BYTES, 255);
+    }
 
     #[test]
     fn a_window_keeps_its_microseconds() {
