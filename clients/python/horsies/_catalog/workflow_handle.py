@@ -49,7 +49,7 @@ class WorkflowHandleErrorCode(str, Enum):
     """
 
     INVALID_WORKFLOW_ID = 'INVALID_WORKFLOW_ID'
-    """The workflow id text of a handle built from text is not a UUID. No handle was built, and the
-    same text is refused again. A client that takes the id as text produces it; no handle operation
-    gives it.
+    """The workflow id text of a handle built from text is not a UUID. No
+    handle was built, and the same text is refused again. A client that
+    takes the id as text produces it; no handle operation gives it.
     """
