@@ -1,7 +1,7 @@
 // The public names of the wire types and the codec. `src/index.ts` exports this module. Every type that a public
 // declaration names is exported here (the public API gate refuses a type that it cannot import).
 
-export { BUILT_IN_TASK_CODES, WORKFLOW_STATUSES } from "../codec/bounds.ts";
+export { BUILT_IN_TASK_CODES } from "../_catalog/task_code.ts";
 
 export type {
   CodecRefused,
@@ -53,7 +53,8 @@ export type {
   SubWorkflowSummary,
   TaskError,
   TaskOutcome,
-  WorkflowStatus,
 } from "./task-error.ts";
+
+export { WORKFLOW_STATUSES, WorkflowStatus } from "./task-error.ts";
 
 export type { Presence, Role, Wire } from "./wire-type.ts";

@@ -16,7 +16,12 @@ import type { EndedAttemptRecord, EndedWorkflowRecord } from "../native/handler-
 import { unreachable } from "../wire/unreachable.ts";
 import { type AttemptSpanDeps, runAttributes, spanPlace, workflowAttributes } from "./attempt-span.ts";
 import { RUN_OPERATION, SPAN_SOURCE_KEY, WORKER_SPAN_SOURCE } from "./attributes.ts";
-import { INSTRUMENTATION_SCOPE, type OtelAttributes, type OtelHighResolutionTime } from "./otel-api.ts";
+import {
+  INSTRUMENTATION_SCOPE,
+  INSTRUMENTATION_SCOPE_VERSION,
+  type OtelAttributes,
+  type OtelHighResolutionTime,
+} from "./otel-api.ts";
 import { markError } from "./send-span.ts";
 
 /** The span maker of a handler child: the one of the user's SDK, or none. */
@@ -75,7 +80,7 @@ function makeEndedSpan(deps: AttemptSpanDeps, attempt: EndedAttemptRecord): void
     [SPAN_SOURCE_KEY]: WORKER_SPAN_SOURCE,
   };
 
-  const span = api.trace.getTracer(INSTRUMENTATION_SCOPE).startSpan(
+  const span = api.trace.getTracer(INSTRUMENTATION_SCOPE, INSTRUMENTATION_SCOPE_VERSION).startSpan(
     `${RUN_OPERATION} ${attempt.taskName}`,
     {
       kind: api.SpanKind.CONSUMER,

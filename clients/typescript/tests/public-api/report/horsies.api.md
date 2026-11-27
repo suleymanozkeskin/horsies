@@ -5086,7 +5086,7 @@ export interface WorkerStateSnapshot {
 }
 
 // @public
-export const WORKFLOW_STATUSES: readonly ["PENDING", "RUNNING", "COMPLETED", "FAILED", "PAUSED", "CANCELLED", "EXPIRED"];
+export const WORKFLOW_STATUSES: ReadonlyArray<WorkflowStatus>;
 
 // @public
 export type WorkflowBuild<P extends ParameterSchemas, R extends BuildReturn> = (w: WorkflowBuilder, parameters: BodyInput<P>) => R;
@@ -5474,8 +5474,19 @@ export interface WorkflowStartValidationFailed {
     readonly workflowName: string;
 }
 
-// @public
-export type WorkflowStatus = (typeof WORKFLOW_STATUSES)[number];
+// @public (undocumented)
+export const WorkflowStatus: {
+    readonly PENDING: "PENDING";
+    readonly RUNNING: "RUNNING";
+    readonly COMPLETED: "COMPLETED";
+    readonly FAILED: "FAILED";
+    readonly PAUSED: "PAUSED";
+    readonly CANCELLED: "CANCELLED";
+    readonly EXPIRED: "EXPIRED";
+};
+
+// @public (undocumented)
+export type WorkflowStatus = (typeof WorkflowStatus)[keyof typeof WorkflowStatus];
 
 // @public (undocumented)
 export interface WorkflowTaskDetail {

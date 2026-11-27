@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/_catalog/codec_bounds.ts";
 import { defineTask } from "../../../horsies/src/contract/define-task.ts";
 import { h, parametersKind } from "../../../horsies/src/wire/builders.ts";
 import { checkKind, checkParameters } from "../../../horsies/src/wire/check.ts";

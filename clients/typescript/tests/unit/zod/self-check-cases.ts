@@ -14,7 +14,7 @@
 
 import { z } from "zod";
 
-import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/_catalog/codec_bounds.ts";
 import type { JsonValue } from "../../../horsies/src/codec/json-value.ts";
 import { encodeValue } from "../../../horsies/src/codec/writer.ts";
 import { h } from "../../../horsies/src/wire/builders.ts";

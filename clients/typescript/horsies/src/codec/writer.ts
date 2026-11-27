@@ -24,7 +24,7 @@ import type {
 import { lazyTarget } from "../wire/lazy.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import { MAX_VALUE_JSON_DEPTH } from "./bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../_catalog/codec_bounds.ts";
 import { checkView } from "./check-view.ts";
 import { issuesText } from "./conversion.ts";
 import { isEngineKey } from "./engine-keys.ts";

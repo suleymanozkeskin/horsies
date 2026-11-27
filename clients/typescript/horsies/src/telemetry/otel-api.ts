@@ -9,11 +9,16 @@
 
 import { createRequire } from "node:module";
 
+import { PACKAGE_VERSION } from "../_catalog/package_version.ts";
+
 /** The module name of the OpenTelemetry API. */
 export const OTEL_API_MODULE = "@opentelemetry/api";
 
 /** The instrumentation scope of every span and metric of the package. */
 export const INSTRUMENTATION_SCOPE = "horsies";
+
+/** The version of the instrumentation scope: the version of the package (the generated catalog). */
+export const INSTRUMENTATION_SCOPE_VERSION: string = PACKAGE_VERSION;
 
 /** A value that a context holds; the package reads none. */
 export type OtelContextValue = OtelAttributeValue | object | undefined;
@@ -79,12 +84,12 @@ export interface OtelTracer {
 
 /** The global tracer provider (the API's proxy). */
 export interface OtelTracerProvider {
-  getTracer(name: string): OtelTracer;
+  getTracer(name: string, version: string): OtelTracer;
 }
 
 /** The trace members of the API. */
 export interface OtelTraceApi {
-  getTracer(name: string): OtelTracer;
+  getTracer(name: string, version: string): OtelTracer;
   getTracerProvider(): OtelTracerProvider;
   setSpan(context: OtelContext, span: OtelSpan): OtelContext;
   getSpan(context: OtelContext): OtelSpan | undefined;
@@ -149,7 +154,7 @@ export interface OtelMeter {
 
 /** The metrics members of the API. */
 export interface OtelMetricsApi {
-  getMeter(name: string): OtelMeter;
+  getMeter(name: string, version: string): OtelMeter;
 }
 
 /** The members of the API that the package uses. */

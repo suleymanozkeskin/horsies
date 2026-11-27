@@ -1,4 +1,4 @@
-import { BUILTIN_CODE_KEY, ENGINE_KEY_PREFIXES } from "./bounds.ts";
+import { BUILTIN_CODE_KEY, ENGINE_KEY_PREFIXES } from "../_catalog/codec_bounds.ts";
 
 /**
  * Whether only the engine may write this object key: a key that starts with an engine prefix, and the tag of a
