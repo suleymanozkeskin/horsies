@@ -5,9 +5,9 @@
 // - `ProducerManifest`: `buildCoreHandle` parses it with the core's producer manifest parser.
 // - `SchedulerManifest`: `prepareScheduler`, with one pattern of each kind.
 // - `WorkflowSpecData`: `prepareClientSpec`.
-// - `WorkerManifest`: the addon builds the config sections itself and parses the whole manifest; the start members
-//   (profile, metrics endpoint, tasks, handlers, spans switch and child launch) are the part that the package
-//   writes, so `prepareWorker` takes them.
+// - `WorkerManifest`: no export takes a whole manifest text (a worker start builds it from the config and the start
+//   members), so the test export `probeParseWorkerManifest` calls the core's parser on the whole sample; and
+//   `prepareWorker` takes the start members that the package writes.
 //
 // Runs only where a built addon exists (`HORSIES_NATIVE_ADDON_PATH`). It needs no database: nothing connects.
 // Run it under the memory watchdog (2 GiB, with a wall-time bound).
@@ -32,6 +32,9 @@ import { coreState } from "../../../horsies/src/native/process-core/process-core
 import { prepareScheduler } from "../../../horsies/src/native/scheduler/scheduler.ts";
 import { prepareClientSpec } from "../../../horsies/src/native/workflows/workflows.ts";
 import { prepareWorker } from "../../../horsies/src/native/worker/worker.ts";
+import { workerManifestToWire } from "../../../horsies/src/_catalog/worker_manifest.ts";
+import { MANIFEST as WORKER_MANIFEST_SAMPLE } from "../../unit/generated/support/worker-manifest-sample.ts";
+import { parseWorkerManifestText } from "./manifest-probe.ts";
 import { manifestText } from "../../../horsies/src/worker/manifest-text.ts";
 import { startMembersText, type StartMembers } from "../../../horsies/src/worker/start-members.ts";
 
@@ -190,6 +193,19 @@ describe("the core parses the generated manifest samples", () => {
     const prepared = prepareClientSpec(textOf(workflowSpecDataToWire(WORKFLOW_SAMPLE)));
 
     assert.equal(prepared.kind === "refused" ? `refused at ${prepared.fieldPath}: ${prepared.cause}` : prepared.kind, "prepared");
+  });
+
+  test("the whole worker manifest", () => {
+    const outcome = parseWorkerManifestText(textOf(workerManifestToWire(WORKER_MANIFEST_SAMPLE)));
+
+    assert.deepEqual(outcome, { kind: "parsed" });
+  });
+
+  test("a worker manifest of an unknown version is refused by the core, with its field path", () => {
+    const text = textOf(workerManifestToWire(WORKER_MANIFEST_SAMPLE)).replace('"manifest_version":1', '"manifest_version":2');
+    const outcome = parseWorkerManifestText(text);
+
+    assert.equal(outcome.kind === "refused" ? outcome.fieldPath : outcome.kind, "manifest_version");
   });
 
   test("the worker manifest: the start members that the package writes, with the config sections of the addon", () => {

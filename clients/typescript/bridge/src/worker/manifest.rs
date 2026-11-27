@@ -338,46 +338,46 @@ mod tests {
                 "customQueues[0].maxConcurrency.tasks",
             ),
             recovery("recovery.claimedStaleThresholdMs", |c| {
-                c.claimed_stale_threshold_ms = u64::MAX
+                c.claimed_stale_threshold_ms = u64::MAX;
             }),
             recovery("recovery.runningStaleThresholdMs", |c| {
-                c.running_stale_threshold_ms = u64::MAX
+                c.running_stale_threshold_ms = u64::MAX;
             }),
             recovery("recovery.finalizingStaleThresholdMs", |c| {
-                c.finalizing_stale_threshold_ms = u64::MAX
+                c.finalizing_stale_threshold_ms = u64::MAX;
             }),
             recovery("recovery.crashedWorkerRecoveryGraceMs", |c| {
-                c.crashed_worker_recovery_grace_ms = u64::MAX
+                c.crashed_worker_recovery_grace_ms = u64::MAX;
             }),
             recovery("recovery.finalizationQuarantineAfterAttempts", |c| {
                 c.finalization_quarantine_after_attempts = u32::MAX;
             }),
             recovery("recovery.workflowRecoveryFailureLimit", |c| {
-                c.workflow_recovery_failure_limit = u32::MAX
+                c.workflow_recovery_failure_limit = u32::MAX;
             }),
             recovery("recovery.orphanTaskAuditIntervalMs", |c| {
-                c.orphan_task_audit_interval_ms = u64::MAX
+                c.orphan_task_audit_interval_ms = u64::MAX;
             }),
             recovery("recovery.runnerHeartbeatIntervalMs", |c| {
-                c.runner_heartbeat_interval_ms = u64::MAX
+                c.runner_heartbeat_interval_ms = u64::MAX;
             }),
             recovery("recovery.claimerHeartbeatIntervalMs", |c| {
-                c.claimer_heartbeat_interval_ms = u64::MAX
+                c.claimer_heartbeat_interval_ms = u64::MAX;
             }),
             recovery("recovery.workerStateSnapshotIntervalMs", |c| {
-                c.worker_state_snapshot_interval_ms = u64::MAX
+                c.worker_state_snapshot_interval_ms = u64::MAX;
             }),
             retention("retention.workerStateRetention.hours", |c| {
-                c.worker_state_retention_hours = Some(u32::MAX)
+                c.worker_state_retention_hours = Some(u32::MAX);
             }),
             retention("retention.terminalRecordRetention.hours", |c| {
-                c.terminal_record_retention_hours = Some(u32::MAX)
+                c.terminal_record_retention_hours = Some(u32::MAX);
             }),
             retention("retention.historyLeafHorizonDays", |c| {
-                c.history_leaf_horizon_days = u32::MAX
+                c.history_leaf_horizon_days = u32::MAX;
             }),
             retention("retention.heartbeatLeafHorizonHours", |c| {
-                c.heartbeat_leaf_horizon_hours = u32::MAX
+                c.heartbeat_leaf_horizon_hours = u32::MAX;
             }),
             retention(r#"retention.queueRetention["bulk"].days"#, |c| {
                 c.queue_retention
@@ -387,19 +387,19 @@ mod tests {
                 c.partition_maintenance_interval_seconds = u64::MAX;
             }),
             retention("retention.retentionSweepIntervalSeconds", |c| {
-                c.retention_sweep_interval_seconds = u64::MAX
+                c.retention_sweep_interval_seconds = u64::MAX;
             }),
             retention("retention.retentionDeleteBatchSize", |c| {
-                c.retention_delete_batch_size = u32::MAX
+                c.retention_delete_batch_size = u32::MAX;
             }),
             resilience("resilience.databaseRetryInitialMs", |c| {
-                c.database_retry_initial_ms = u64::MAX
+                c.database_retry_initial_ms = u64::MAX;
             }),
             resilience("resilience.databaseRetryMaxMs", |c| {
-                c.database_retry_max_ms = u64::MAX
+                c.database_retry_max_ms = u64::MAX;
             }),
             resilience("resilience.databaseRetryMaxAttempts.attempts", |c| {
-                c.database_retry_max_attempts = u64::MAX
+                c.database_retry_max_attempts = u64::MAX;
             }),
             (
                 Box::new(|config: &mut AppConfig| config.payload.reject_bytes = Some(0)),
