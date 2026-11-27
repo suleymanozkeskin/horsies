@@ -18,7 +18,7 @@ const validateOrder = defineTask({
   name: "validate_order",
   input: { orderId: h.uuid() },
   output: h.object({ orderId: h.uuid(), total: h.decimal() }),
-  errors: ["EMPTY_ORDER", "INVALID_EMAIL"],
+  errorCodes: ["EMPTY_ORDER", "INVALID_EMAIL"],
 });
 
 type ValidateOrderHandle = TaskHandle<{ orderId: string; total: Decimal }, "EMPTY_ORDER" | "INVALID_EMAIL">;
@@ -28,7 +28,7 @@ function assertNever(value: never): never {
 }
 
 export async function printOutcome(handle: ValidateOrderHandle): Promise<void> {
-  const read = await handle.get({ timeoutMs: 30_000 });
+  const read = await handle.get({ waitMs: 30_000 });
 
   if (!read.ok) {
     console.warn(`the read failed: ${read.error.kind}`);
@@ -42,15 +42,15 @@ export async function printOutcome(handle: ValidateOrderHandle): Promise<void> {
       console.log(`validated ${outcome.value.orderId}: ${outcome.value.total.toString()}`);
       break;
     case "failed":
-      switch (outcome.error.code.kind) {
-        case "user":
-          console.log(`refused with ${outcome.error.code.code}`);
+      switch (outcome.error.kind) {
+        case "custom":
+          console.log(`refused with ${outcome.error.code}`);
           break;
-        case "library":
-          console.log(`the library recorded ${outcome.error.code.code}`);
+        case "builtIn":
+          console.log(`horsies recorded ${outcome.error.code}`);
           break;
         default:
-          assertNever(outcome.error.code);
+          assertNever(outcome.error);
       }
       break;
     default:
@@ -61,55 +61,62 @@ export async function printOutcome(handle: ValidateOrderHandle): Promise<void> {
 
 `handle.get(options)` waits while the task has not finished:
 
-| `GetOptions.timeoutMs` | Wait |
+| `GetOptions.waitMs` | Wait |
 |------------------------|------|
 | Left out | Until the task ends |
 | A whole number of milliseconds from 0 to 4,294,967,295 | Up to that time |
-| Any other number | No wait and no read: the read error `invalidWait`, with `maxMs` |
+| Any other number | No wait and no read: the read error `invalidInput`, with `maxMs` |
 
 `TaskOutcome<O, E>`:
 
 | `kind` | Members | The task |
 |--------|---------|----------|
 | `"succeeded"` | `value: O` | Returned this value |
-| `"failed"` | `error: TaskError<E>` | Returned this error, or the library recorded it |
+| `"failed"` | `error: TaskError<E>` | Returned this error, or horsies recorded a code |
 
-`TaskError<E>`:
+`TaskError<E>` is told apart by `kind`:
+
+| `kind` | `code` | The error |
+|--------|--------|-----------|
+| `"custom"` | `E` | A code that the contract declares in `errorCodes` |
+| `"builtIn"` | `BuiltInTaskCode` | A code that horsies records, for example `TASK_CANCELLED`, `TASK_EXPIRED`, `TASK_TIMEOUT` or `WORKER_CRASHED` |
+
+Both variants have these members:
 
 | Member | Type | Holds |
 |--------|------|-------|
-| `code` | `TaskErrorCode<E>` | `{ kind: "user", code: E }` for a code of the contract, or `{ kind: "library", code: LibraryTaskCode }` for a code that the library records, for example `TASK_CANCELLED`, `TASK_EXPIRED`, `TASK_TIMEOUT` or `WORKER_CRASHED` |
 | `message` | `string \| null` | The message, or `null` |
 | `data` | `JsonValue` | The error data, or `null` |
 | `exception` | `ExceptionRecord \| null` | The record of a thrown error, or `null` |
 | `subWorkflow` | `SubWorkflowFailure \| null` | The failed child workflow of a sub-workflow node, or `null` |
 
-A task that was cancelled reads as the outcome `failed` with the library code `TASK_CANCELLED`, also when its row stores no result. The codes and their meaning are on [Task Errors](/horsies/typescript/tasks/errors/) and the [Errors Reference](/horsies/tasks/errors/#task-error-codes).
+A task that was cancelled reads as the outcome `failed` with the built-in code `TASK_CANCELLED`, also when its row stores no result. The codes and their meaning are on [Task Errors](/horsies/typescript/tasks/errors/) and the [Errors Reference](/horsies/tasks/errors/#task-error-codes).
 
 ## ReadError
 
 `ReadError` is a closed union, told apart by `kind`.
 
-| `kind` | Members | When | A later read |
-|--------|---------|------|--------------|
-| `"waitTimedOut"` | `status`: `PENDING`, `CLAIMED` or `RUNNING` | The task had not finished when the wait ended | May find it finished |
-| `"taskNotFound"` | `absence`: `TaskAbsence` | Neither the live table nor the history holds the task. A handle built from a stored id can race the commit of its send | May find it |
-| `"resultNotAvailable"` | `status`: `COMPLETED`, `FAILED` or `EXPIRED` | The task finished and stores no result | Kept: gives the same |
-| `"storedResultUnreadable"` | `cause` | The stored result does not read with the contract's types. `cause` holds no value | Kept: gives the same |
-| `"unknownUserCode"` | `code` | The stored error has a user code that the contract's `errors` does not list | Kept: gives the same |
-| `"waitInsideTask"` | - | A wait in a process that runs task bodies. Nothing was read. Compose the tasks with a workflow | - |
-| `"database"` | `code`: `BrokerErrorCode`, `retryable`, `message` | The database or the connection failed. `retryable` is the classification of the cause | May succeed |
-| `"invalidWait"` | `maxMs` | `timeoutMs` is not a whole number of milliseconds from 0 to `maxMs`. Nothing was read | - |
+| `kind` | `code` | Members | When | A later read |
+|--------|--------|---------|------|--------------|
+| `"waitTimeout"` | `WAIT_TIMEOUT` | `status`: `PENDING`, `CLAIMED` or `RUNNING` | The task had not finished when the wait ended. It may still run | May find it finished |
+| `"taskNotFound"` | `TASK_NOT_FOUND` | `reason`: `TaskAbsenceReason` | Neither the live table nor the history holds the task. A handle built from a stored id can race the commit of its send | May find it |
+| `"resultNotAvailable"` | `RESULT_NOT_AVAILABLE` | `status`: `COMPLETED`, `FAILED` or `EXPIRED` | The task finished and stores no result | Kept: gives the same |
+| `"storedResultUnreadable"` | `RESULT_DESERIALIZATION_ERROR` | `cause` | The stored result does not read with the contract's types. `cause` holds no value | Kept: gives the same |
+| `"unknownCustomCode"` | `UNKNOWN_CUSTOM_CODE` | `storedCode` | The stored error has a custom code that the contract's `errorCodes` does not list | Kept: gives the same |
+| `"waitInsideTask"` | `WAIT_INSIDE_TASK` | - | A wait in a process that runs task bodies. Nothing was read. Compose the tasks with a workflow | - |
+| `"databaseError"` | `DATABASE_ERROR` | `databaseCode`, `retryable`, `message` | The database or the connection failed. `retryable` is the classification of the cause | May succeed |
+| `"invalidInput"` | `INVALID_INPUT` | `maxMs` | `waitMs` is not a whole number of milliseconds from 0 to `maxMs`. Nothing was read | - |
+| `"seatRelayFull"` | `SEAT_RELAY_FULL` | `retryable: true`, `message` | A `SHARED_THREAD` body only: the seat relay holds its bound of waiting calls. Nothing was read. Read again | May succeed |
 
-`TaskAbsence` tells why the task is held nowhere:
+`TaskAbsenceReason` tells why the task is held nowhere:
 
 | Value | Meaning |
 |-------|---------|
-| `"predatesRetainedHistory"` | The task is older than the oldest history that retention keeps: retention can have removed it |
-| `"withinRetainedHistory"` | No removed history can have held the task: it did not exist, or its history was removed out of band |
-| `"notClassified"` | The id is not a UUIDv7, so it tells no time of birth |
+| `"PREDATES_RETAINED_HISTORY"` | The task is older than the oldest history that retention keeps: retention can have removed it |
+| `"WITHIN_RETAINED_HISTORY"` | No removed history can have held the task: it did not exist, or its history was removed out of band |
+| `"NOT_CLASSIFIED"` | The id is not a UUIDv7, so it tells no time of birth |
 
-The handle keeps its first final read: an outcome, `resultNotAvailable`, `storedResultUnreadable` and `unknownUserCode`. A later `get` gives it with no I/O. The `timeoutMs` check runs first, also on a handle that keeps a read.
+The handle keeps its first final read: an outcome, `resultNotAvailable`, `storedResultUnreadable` and `unknownCustomCode`. A later `get` gives it with no I/O. The `waitMs` check runs first, also on a handle that keeps a read.
 
 ## Task Info
 
@@ -122,7 +129,7 @@ export async function printAttempts(handle: ValidateOrderHandle): Promise<void> 
     return;
   }
 
-  console.log(info.value.status, info.value.queueName, `retry ${info.value.retryCount} of ${info.value.maxRetries}`);
+  console.log(info.value.status, info.value.queue, `retry ${info.value.retryCount} of ${info.value.maxRetries}`);
 
   for (const attempt of info.value.attempts) {
     const code = attempt.errorCode.kind === "recorded" ? attempt.errorCode.value : "no error code";
@@ -131,21 +138,21 @@ export async function printAttempts(handle: ValidateOrderHandle): Promise<void> 
 }
 ```
 
-`handle.info()` returns the task's `TaskInfo`. The info is not kept: a status changes. Its read errors are `taskNotFound` and `database`.
+`handle.info()` returns the task's `TaskInfo`. The info is not kept: a status changes. Its read errors are the `ReadError` kinds `taskNotFound` and `databaseError`.
 
 | Member | Type | Holds |
 |--------|------|-------|
-| `taskId`, `taskName`, `queueName` | `TaskId`, `string`, `string` | The task |
+| `taskId`, `taskName`, `queue` | `TaskId`, `string`, `string` | The task |
 | `status` | `TaskStatus` | `PENDING`, `CLAIMED`, `RUNNING`, `COMPLETED`, `FAILED`, `CANCELLED` or `EXPIRED` |
 | `priority`, `retryCount`, `maxRetries` | `number` | The priority of the send and the retry counts |
-| `enqueuedAt` | `Temporal.Instant` | When the row was written |
+| `dueAt` | `Temporal.Instant` | When the task is due to start |
 | `sentAt`, `claimedAt`, `startedAt`, `completedAt`, `failedAt`, `nextRetryAt` | `Recorded<Temporal.Instant>` | Each time, or `notRecorded` |
 | `workerHostname`, `workerPid`, `workerProcessName` | `Recorded<string>`, `Recorded<number>`, `Recorded<string>` | The worker, or `notRecorded` |
 | `errorCode`, `failedReason` | `Recorded<string>` | The error code and the failed reason, or `notRecorded` |
 | `attempts` | `readonly TaskAttempt[]` | Every attempt, newest first |
 | `execution` | `ExecutionFact` | `{ kind: "class", execution }` for a live task; `{ kind: "notKeptInHistory" }` for a task read from history |
 
-`Recorded<T>` is `{ kind: "recorded", value: T }` or `{ kind: "notRecorded" }`. A `TaskAttempt` has `attempt`, `outcome` (`COMPLETED`, `FAILED`, `WORKER_FAILURE` or `CANCELLED`), `willRetry`, `startedAt`, `finishedAt`, and the recorded `errorCode`, `errorMessage`, `failedReason`, `workerId`, `workerHostname`, `workerPid` and `workerProcessName`.
+`Recorded<T>` is `{ kind: "recorded", value: T }` or `{ kind: "notRecorded" }`. A `TaskAttempt` has `attempt`, `outcome` (`COMPLETED`, `FAILED`, `WORKER_FAILURE` or `CANCELLED`), `willRetry`, `startedAt`, `finishedAt`, and the `Recorded` `errorCode`, `errorMessage`, `failedReason`, `workerId`, `workerHostname`, `workerPid` and `workerProcessName`.
 
 ## Reads by Task Id
 
@@ -159,7 +166,7 @@ const validateOrder = defineTask({
   name: "validate_order",
   input: { orderId: h.uuid() },
   output: h.object({ orderId: h.uuid(), total: h.decimal() }),
-  errors: ["EMPTY_ORDER", "INVALID_EMAIL"],
+  errorCodes: ["EMPTY_ORDER", "INVALID_EMAIL"],
 });
 
 export async function readStoredOrder(app: Horsies, storedId: string): Promise<string> {
@@ -169,7 +176,7 @@ export async function readStoredOrder(app: Horsies, storedId: string): Promise<s
     return taskId.error.detail;
   }
 
-  const read = await app.taskHandle(validateOrder, taskId.value).get({ timeoutMs: 5_000 });
+  const read = await app.taskHandle(validateOrder, taskId.value).get({ waitMs: 5_000 });
 
   if (!read.ok) {
     return read.error.kind;
@@ -188,6 +195,6 @@ A plain `string` is not a `TaskId`: the typecheck refuses it. A handle of a cont
 
 ## Things to Avoid
 
-**Do not wait for a result inside a task body.** The read returns `waitInsideTask` and reads nothing. Compose the tasks with a workflow. See [Workflow API](/horsies/typescript/concepts/workflows/workflow-api/).
+**Do not wait for a result inside a task body.** The read returns the read error `waitInsideTask` and reads nothing. Compose the tasks with a workflow. See [Workflow API](/horsies/typescript/concepts/workflows/workflow-api/).
 
-**Do not treat a read error as the task's outcome.** `waitTimedOut` and `database` say nothing about the task: it may still run or may have finished.
+**Do not treat a read error as the task's outcome.** `waitTimeout` and `databaseError` say nothing about the task: it may still run or may have finished.

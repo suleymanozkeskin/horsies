@@ -17,10 +17,11 @@ import type { WorkerProfileInput } from "horsies";
 export const workerProfiles: Readonly<Record<string, WorkerProfileInput>> = {
   default: {
     isolated: {
+      kind: "isolatedChildren",
       count: 2,
-      recycle: { after: { kind: "tasks", tasks: 500 }, above: { kind: "mb", mb: 1024 } },
+      recycle: { after: { kind: "taskLimit", tasks: 500 }, above: { kind: "memoryLimit", mb: 1024 } },
     },
-    sharedAsync: { count: 4, seats: 25 },
+    sharedAsync: { kind: "sharedAsyncChildren", count: 4, seats: 25 },
     drainTimeoutMs: 120_000,
   },
 };
@@ -32,7 +33,7 @@ Pass the profiles to `Horsies.create({ ..., workerProfiles })`, then start a wor
 node main.ts worker --profile default
 ```
 
-- A class that the profile leaves out has no children. The core refuses a profile that starts no children, at `Horsies.create`.
+- A class that the profile leaves out has no children. Its `kind` can also say so: `{ kind: "noIsolatedChildren" }` or `{ kind: "noSharedAsyncChildren" }`. The core refuses a profile that starts no children, at `Horsies.create`.
 - A task runs on the children of its execution class. The routing of each class, and the class to choose by the work of a task, are on [Choosing an Execution Mode](/horsies/workers/execution-modes/).
 - A field outside its bound is refused at `Horsies.create` with `HRS-218` and the path of the field.
 
@@ -40,8 +41,8 @@ node main.ts worker --profile default
 
 | Field | Type | Default |
 |-------|------|---------|
-| `isolated` | `IsolatedChildrenInput` | No isolated children |
-| `sharedAsync` | `SharedAsyncChildrenInput` | No shared async children |
+| `isolated` | `IsolatedSetting`: `IsolatedChildren` or `NoIsolatedChildren` | No isolated children |
+| `sharedAsync` | `SharedAsyncSetting`: `SharedAsyncChildren` or `NoSharedAsyncChildren` | No shared async children |
 | `pool` | `ParentPoolInput`: the connection pool of the worker process | Its size follows the seats |
 | `claim` | `ClaimLimitsInput` | No limits |
 | `drainTimeoutMs` | `number`: how long a stopping worker waits for running tasks, in milliseconds | 300,000 (300 s) |
@@ -51,10 +52,12 @@ node main.ts worker --profile default
 
 | Type | Fields |
 |------|--------|
-| `IsolatedChildrenInput` | `count`, `recycle?: IsolatedRecycleInput`, `pool?: IsolatedPoolInput`, `taskSendPool?: PoolSize` |
-| `SharedAsyncChildrenInput` | `count`, `seats`, `recycle?: SharedRecycleInput`, `pool?: SharedPoolInput`, `taskSendPool?: PoolSize` |
+| `IsolatedChildren` | `kind: "isolatedChildren"`, `count`, `recycle?: IsolatedRecycleInput`, `pool?: IsolatedPoolInput`, `taskSendPool?: PoolSize` |
+| `NoIsolatedChildren` | `kind: "noIsolatedChildren"` |
+| `SharedAsyncChildren` | `kind: "sharedAsyncChildren"`, `count`, `seats`, `recycle?: SharedRecycleInput`, `pool?: SharedPoolInput`, `executor?: ExecutorThreads`, `taskSendPool?: PoolSize` |
+| `NoSharedAsyncChildren` | `kind: "noSharedAsyncChildren"` |
 
-An isolated child runs one task at a time in its own process. A shared async child runs up to `seats` tasks at once on its one event loop. `SharedAsyncChildrenInput` has no executor field: the task code of a shared async child runs on its event loop, and the core sizes the other threads of the child from the seats. See [Concurrency](/horsies/workers/concurrency/#worker-level-children).
+An isolated child runs one task at a time in its own process. A shared async child runs up to `seats` tasks at once on its one event loop. The task code of a shared async child runs on its event loop. `executor` sets the threads of the core's runtime in the child: they run its database writes, its connections and its frames to the worker. `ExecutorThreads` is `{ kind: "threads", threads }` (1 to 256) or `{ kind: "fromSeats" }` (the default). See [Concurrency](/horsies/workers/concurrency/#worker-level-children).
 
 ### Recycling
 
@@ -63,8 +66,8 @@ An isolated child runs one task at a time in its own process. A shared async chi
 | `IsolatedRecycleInput` | `after?: TaskLimit`: replace a child after it completes this many tasks; `above?: MemoryLimit`: replace a child when its resident memory reaches this limit | `after` 100 tasks, `above` no limit |
 | `SharedRecycleInput` | `afterPerSeat?: TaskLimit`: replace a child after `tasks × seats` tasks; `above?: MemoryLimit` | `afterPerSeat` 100 tasks, `above` no limit |
 
-- `TaskLimit` is `{ kind: "tasks", tasks }` or `{ kind: "noLimit" }`.
-- `MemoryLimit` is `{ kind: "mb", mb }` or `{ kind: "noLimit" }`.
+- `TaskLimit` is `{ kind: "taskLimit", tasks }` or `{ kind: "noTaskLimit" }`.
+- `MemoryLimit` is `{ kind: "memoryLimit", mb }` or `{ kind: "noMemoryLimit" }`.
 - A child is recycled when either limit is reached. The worker start fails when a memory limit is at or below the measured child baseline.
 
 The rules are on [Concurrency](/horsies/workers/concurrency/#process-recycling).
@@ -73,13 +76,13 @@ The rules are on [Concurrency](/horsies/workers/concurrency/#process-recycling).
 
 | Type | Fields | Default |
 |------|--------|---------|
-| `IsolatedPoolInput` | `minSize?: number`, `maxSize?: PoolSize`, `check?: boolean` | 0 open, at most 1 connection, no check |
-| `SharedPoolInput` | `minSize?: number`, `maxSize?: SharedPoolSize`, `check?: boolean` | 0 open, a size from the seats, no check |
+| `IsolatedPoolInput` | `minSize?: number`, `maxSize?: PoolSize`, `prePing?: boolean` | 0 open, at most 1 connection, no check |
+| `SharedPoolInput` | `minSize?: number`, `maxSize?: SharedPoolSize`, `prePing?: boolean` | 0 open, a size from the seats, no check |
 | `ParentPoolInput` | `maxSize?: SharedPoolSize` | A size from the seats |
 | `PoolSize` | `{ kind: "connections", connections }` | `taskSendPool`: 2 connections |
 
 - `SharedPoolSize` is a `PoolSize` or `{ kind: "fromSeats" }`.
-- `check: true` checks each connection when a write takes it from the pool.
+- `prePing: true` checks each connection when a write takes it from the pool.
 - `taskSendPool` is the pool that a send from task code opens in its child.
 
 ### Claim Limits and Drain
@@ -98,6 +101,7 @@ Set the drain timeout below the stop window of the supervisor. See [Graceful Shu
 | Field | Bounds |
 |-------|--------|
 | `isolated.count`, `sharedAsync.count` | 1 to 1,024 |
+| `executor.threads` | 1 to 256 |
 | `sharedAsync.seats` | 1 to 1,000 |
 | `tasks` of a `TaskLimit` | 1 to 2,147,483,647 |
 | `mb` of a `MemoryLimit` | 1 to 16,777,216 |
@@ -161,8 +165,8 @@ const countOrders = defineTask({
 });
 
 const created = Horsies.create({
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
-  workerProfiles: { default: { isolated: { count: 2 } } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  workerProfiles: { default: { isolated: { kind: "isolatedChildren", count: 2 } } },
   tasks: [countOrders],
 });
 
@@ -186,7 +190,7 @@ app.implement(countOrders, async ({ customerId }, runtime) => {
     .state(OrdersDb)
     .query<{ count: number }>("SELECT count(*)::int AS count FROM orders WHERE customer_id = $1", [customerId]);
 
-  return countOrders.ok(result.rows[0]?.count ?? 0);
+  return runtime.ok(result.rows[0]?.count ?? 0);
 });
 
 process.exitCode = await cli.run(app);
@@ -237,7 +241,7 @@ Nothing starts before step 4. The command exits with code 1 and writes the cause
 | The child command cannot be built | Yes |
 | A config value is outside the bound of its worker manifest field | Yes |
 | The profile set is refused, or `--profile` names no profile of the app; the report lists the profile names | Yes |
-| The connection settings fail the broker config check | Yes |
+| The connection settings fail the database config check | Yes |
 | The core of this process refused the call | Yes |
 | The start failed, for example with `CHILD_HOOK_FAILED`; the worker claimed nothing | The worker claimed nothing |
 | The worker was ready, then failed; its running tasks drained first | No |

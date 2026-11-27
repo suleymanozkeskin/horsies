@@ -17,21 +17,21 @@ A database belongs to one client: the core refuses a database that another clien
   <LinkCard title="Getting Started" href="/horsies/typescript/quick-start/getting-started/" description="Define a task, run a worker, send the task, read the result" />
   <LinkCard title="Wire Types" href="/horsies/typescript/tasks/wire-types/" description="The h.* kinds, the zod adapter, the stored form of each kind" />
   <LinkCard title="Defining Tasks" href="/horsies/typescript/tasks/defining-tasks/" description="defineTask, app.implement, execution classes, retries, TaskRuntime" />
-  <LinkCard title="Task Errors" href="/horsies/typescript/tasks/errors/" description="Declared codes, the two-level code, the exceptions mapping" />
-  <LinkCard title="Sending Tasks" href="/horsies/typescript/tasks/sending-tasks/" description="app.send, send options, the send errors, retrySend" />
+  <LinkCard title="Task Errors" href="/horsies/typescript/tasks/errors/" description="Declared codes, the two-level code, the exception mapper" />
+  <LinkCard title="Sending Tasks" href="/horsies/typescript/tasks/sending-tasks/" description="app.send, send options, the send errors, resend" />
   <LinkCard title="Retrieving Results" href="/horsies/typescript/tasks/retrieving-results/" description="handle.get, the outcome, the read errors, task info" />
   <LinkCard title="Cancellation" href="/horsies/typescript/tasks/cancellation/" description="runtime.signal, cancelState, spawn, the cancel grace" />
   <LinkCard title="Workflow API" href="/horsies/typescript/concepts/workflows/workflow-api/" description="defineWorkflow, nodes, joins, check cases, app.start, the handle" />
   <LinkCard title="Subworkflows" href="/horsies/typescript/concepts/workflows/subworkflows/" description="w.subWorkflow, children built from results" />
-  <LinkCard title="App Config" href="/horsies/typescript/configuration/app-config/" description="Horsies.create and its refusals, the broker, queues, profiles" />
+  <LinkCard title="App Config" href="/horsies/typescript/configuration/app-config/" description="Horsies.create and its refusals, the database, queues, schedules, profiles" />
   <LinkCard title="Worker Setup" href="/horsies/typescript/workers/worker-setup/" description="cli.run, worker profiles, child start hooks, app.provide" />
   <LinkCard title="Health Reads" href="/horsies/typescript/monitoring/health-reads/" description="pingDatabase, pingWorkers" />
   <LinkCard title="Monitoring Queries" href="/horsies/typescript/monitoring/monitoring-queries/" description="app.monitoring reads, task cancel, workflow actions" />
   <LinkCard title="Web UI Mount" href="/horsies/typescript/monitoring/web-ui-mount/" description="createMonitoringHandler, access policies, mounts" />
-  <LinkCard title="Rerun" href="/horsies/typescript/operations/rerun/" description="app.rerun, app.rerunIn, the pg and postgres adapters" />
+  <LinkCard title="Rerun" href="/horsies/typescript/operations/rerun/" description="app.rerunTask, app.rerunTaskIn, the pg and postgres adapters" />
   <LinkCard title="Frameworks" href="/horsies/typescript/guides/frameworks/" description="Sends and reads from an API server" />
   <LinkCard title="Testing" href="/horsies/typescript/operations/testing/" description="TaskRuntime.forTest, implementation.run" />
-  <LinkCard title="CLI Reference" href="/horsies/typescript/cli/" description="cli.run: worker, check, web, metrics; the horsies bin" />
+  <LinkCard title="CLI Reference" href="/horsies/typescript/cli/" description="cli.run: worker, check, scheduler, web, metrics; the horsies bin" />
 </CardGrid>
 
 ## The Package
@@ -44,7 +44,7 @@ A database belongs to one client: the core refuses a database that another clien
 | Runtimes | Node 26 or later, Bun 1.4 or later |
 | TypeScript | 6.0 or later, for the published types |
 | Native addon | One prebuilt platform package, `@horsies/native-<platform>`, that the package manager selects |
-| Optional peer packages | `zod` (zod schemas and `horsies/zod`), `pg` (`horsies/rerun/pg`), `postgres` (`horsies/rerun/postgres`) |
+| Optional peer packages | `zod` (zod schemas and `horsies/zod`), `pg` (`horsies/rerun/pg`), `postgres` (`horsies/rerun/postgres`), `@opentelemetry/api` (tracing) |
 
 The versions, the platforms and the setup are on [Installation](/horsies/typescript/installation/). The sidebar lists every page of the TypeScript API.
 

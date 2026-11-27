@@ -28,7 +28,7 @@ const validateOrder = defineTask({
   name: "validate_order",
   input: { totalCents: h.int() },
   output: h.int(),
-  errors: ["LIMIT_EXCEEDED"],
+  errorCodes: ["LIMIT_EXCEEDED"],
 });
 
 const welcomeUser = defineTask({
@@ -38,7 +38,7 @@ const welcomeUser = defineTask({
 });
 
 const created = Horsies.create({
-  broker: { databaseUrl: { kind: "value", value: "postgresql://localhost/horsies_test" } },
+  database: { databaseUrl: { kind: "value", value: "postgresql://localhost/horsies_test" } },
   tasks: [validateOrder, welcomeUser],
 });
 
@@ -48,10 +48,8 @@ if (!created.ok) {
 
 const app = created.value;
 
-const validate = app.implement(validateOrder, ({ totalCents }) =>
-  totalCents > 1_000_000
-    ? validateOrder.err({ code: "LIMIT_EXCEEDED", message: "order over the limit" })
-    : validateOrder.ok(totalCents),
+const validate = app.implement(validateOrder, ({ totalCents }, { ok, err }) =>
+  totalCents > 1_000_000 ? err({ code: "LIMIT_EXCEEDED", message: "order over the limit" }) : ok(totalCents),
 );
 
 const TASK_ID = TaskId.parse("0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b");
@@ -68,7 +66,8 @@ test("an order over the limit is refused", async () => {
   assert.equal(outcome.kind, "failed");
 
   if (outcome.kind === "failed") {
-    assert.deepEqual(outcome.error.code, { kind: "user", code: "LIMIT_EXCEEDED" });
+    assert.equal(outcome.error.kind, "custom");
+    assert.equal(outcome.error.code, "LIMIT_EXCEEDED");
   }
 });
 ```
@@ -80,10 +79,10 @@ test("an order over the limit is refused", async () => {
 
 1. The input encodes with the contract's parameters and reads back, as a send does. A refusal is the outcome `failed` with the library code `WORKER_SERIALIZATION_ERROR`, and the body does not run.
 2. The body runs with the decoded input, defaults filled, and `runtime`.
-3. A value of `contract.ok(...)` reads back with the output type; a refusal is `WORKER_SERIALIZATION_ERROR`. An error of `contract.err(...)` is stored with its user code. Any other return is `RETURN_TYPE_MISMATCH`.
-4. A thrown error of a class in the `exceptions` map of `app.implement` is stored with its mapped code; any other thrown error is stored as `UNHANDLED_EXCEPTION`. Both carry the exception record.
+3. A value of `ok(...)` reads back with the output type; a refusal is `WORKER_SERIALIZATION_ERROR`. An error of `err(...)` is stored with its custom code. Any other return is `RETURN_TYPE_MISMATCH`. `ok` and `err` are members of the second argument of the body.
+4. A thrown error of a class in the `exceptionMapper` option of `app.implement` is stored with its mapped code; any other thrown error is stored as `UNHANDLED_EXCEPTION`. Both carry the exception record.
 
-A rule of the core on a user code is not checked by `run`: that check needs a worker.
+A rule of the core on a custom code is not checked by `run`: that check needs a worker.
 
 ## TaskRuntime.forTest
 
@@ -94,6 +93,7 @@ A rule of the core on a user code is not checked by `run`: that check needs a wo
 | `taskId` | `TaskId` | Yes | `runtime.taskId`, from `TaskId.parse` |
 | `attempt` | `AttemptNumber` | Yes | The attempt number, from `AttemptNumber.parse`: a whole number from `AttemptNumber.MIN` (1) to `AttemptNumber.MAX` |
 | `state` | entries | No | The app state of the test: `[[Key, value], ...]`, each a key that `app.provide` returned and a value of the key's type |
+| `workflowContext` | stored workflow context | No | The stored form of the workflow context of a workflow node: `workflow_id`, `task_index`, `task_name` and `results_by_id`. Left out, the runtime holds `{ kind: "noContext" }`. A form that does not read throws `TypeError` |
 
 The runtime answers:
 
@@ -115,8 +115,8 @@ type Greeter = { readonly greeting: string };
 
 const GreeterKey = app.provide((): Greeter => ({ greeting: "welcome" }));
 
-const welcome = app.implement(welcomeUser, ({ user }, runtime) =>
-  welcomeUser.ok(`${runtime.state(GreeterKey).greeting}, ${user}`),
+const welcome = app.implement(welcomeUser, ({ user }, { ok, state }) =>
+  ok(`${state(GreeterKey).greeting}, ${user}`),
 );
 
 test("welcome reads the greeter", async () => {
@@ -162,6 +162,6 @@ See [Sending Tasks](/horsies/typescript/tasks/sending-tasks/#suppressed-sends).
 
 **Do not test the worker's behaviour with `implementation.run`.** A run has no deadline, no retry, no cancel and no stored outcome. Start a worker against a test database for those.
 
-**Do not pass an upstream outcome to `implementation.run`.** A parameter of `h.resultOf(T)` takes its value from a workflow node only. The input does not encode, and the outcome is `WORKER_SERIALIZATION_ERROR` with no body call.
+**Do not run a task with an `h.taskOutcome(contract)` parameter through `implementation.run`.** Such a parameter takes its value from a workflow node only. Test that body with a workflow.
 
 **Do not run a test that sends against the database of a deployment.** Give the app of the test the URL of a test database, or suppress the sends.

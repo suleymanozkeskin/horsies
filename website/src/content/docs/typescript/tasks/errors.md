@@ -1,17 +1,17 @@
 ---
 title: Task Errors
-summary: The declared codes of a contract, contract.err, the two-level code of a stored error, the exceptions mapping of thrown errors, UNHANDLED_EXCEPTION, and what the library records.
+summary: The declared codes of a contract, err, the kind and code of a stored error, the exceptionMapper option for thrown errors, UNHANDLED_EXCEPTION, and what the library records.
 related: [defining-tasks, retrieving-results, ../../tasks/errors, ../../internals/serialization]
-tags: [typescript, errors, TaskError, TaskErrorCode, LibraryTaskCode, exceptions, UNHANDLED_EXCEPTION]
+tags: [typescript, errors, TaskError, BuiltInTaskCode, exceptionMapper, UNHANDLED_EXCEPTION]
 ---
 
 # Task Errors
 
-A body returns an error with `contract.err({ code, message?, data? })`. The code is one of the task's own codes. The library records its own codes, for example `TASK_TIMEOUT` or `WORKER_CRASHED`, in the same error shape. A read tells the two apart by a two-level code. The codes and their meaning are on the shared [Errors Reference](/horsies/tasks/errors/).
+A body returns an error with `err({ code, message?, data? })`. The code is one of the task's own codes. The library records its own codes, for example `TASK_TIMEOUT` or `WORKER_CRASHED`, in the same error shape. A read tells the two apart by the `kind` of the error. The codes and their meaning are on the shared [Errors Reference](/horsies/tasks/errors/).
 
 ## Declared Codes
 
-`errors` of `defineTask` lists the codes that the task may return, as literals:
+`errorCodes` of `defineTask` lists the codes that the task may return, as literals:
 
 ```ts
 import { defineTask, h, Horsies } from "horsies";
@@ -20,13 +20,13 @@ const chargeCard = defineTask({
   name: "charge_card",
   input: { orderId: h.uuid(), amountCents: h.int() },
   output: h.string(),
-  errors: ["CARD_DECLINED", "PROVIDER_DOWN"],
+  errorCodes: ["CARD_DECLINED", "PROVIDER_DOWN"],
 });
 ```
 
-- A code that `errors` does not list fails typecheck in `err`, in `retry.autoRetryFor` and in the `exceptions` option.
-- A built-in or reserved name (`TASK_TIMEOUT`, `WORKFLOW_STOPPED`) in `errors` fails typecheck. A list of the type `string[]` fails typecheck too: its codes are not known to the types.
-- Without `errors`, the task may return any code that is not a built-in name.
+- A code that `errorCodes` does not list fails typecheck in `err`, in `retryPolicy.retryFor` and in the `exceptionMapper` option.
+- A built-in or reserved name (`TASK_TIMEOUT`, `WORKFLOW_STOPPED`) in `errorCodes` fails typecheck. A list of the type `string[]` fails typecheck too: its codes are not known to the types.
+- Without `errorCodes`, the task may return any code that is not a built-in name.
 
 The listed codes are the task's [declared error codes](/horsies/tasks/errors/#declared-error-codes). `Horsies.create` checks them with the core's rules:
 
@@ -40,7 +40,7 @@ The listed codes are the task's [declared error codes](/horsies/tasks/errors/#de
 
 ```ts
 const created = Horsies.create({
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
   tasks: [chargeCard],
 });
 
@@ -64,16 +64,16 @@ async function chargeWithProvider(orderId: string, amountCents: number): Promise
 
 app.implement(
   chargeCard,
-  async ({ orderId, amountCents }) => {
+  async ({ orderId, amountCents }, { ok, err }) => {
     const answer = await chargeWithProvider(orderId, amountCents);
 
     if (answer === "declined") {
-      return chargeCard.err({ code: "CARD_DECLINED", message: "the issuer declined the card", data: { amountCents } });
+      return err({ code: "CARD_DECLINED", message: "the issuer declined the card", data: { amountCents } });
     }
 
-    return chargeCard.ok(orderId);
+    return ok(orderId);
   },
-  { exceptions: [[ProviderUnavailable, "PROVIDER_DOWN"]] },
+  { exceptionMapper: [[ProviderUnavailable, "PROVIDER_DOWN"]] },
 );
 ```
 
@@ -83,9 +83,9 @@ app.implement(
 | `message` | `string` | Optional |
 | `data` | `JsonValue` | Optional. `data: undefined` is no data |
 
-`err` returns a frozen `Err<UserFailure<E>>`. At run time it throws `TypeError` for a built-in name that a cast takes past the types; in a body that throw is stored as `UNHANDLED_EXCEPTION`.
+`ok` and `err` are members of the second argument of the body. The contract has no `ok` and no `err`. At run time it throws `TypeError` for a built-in name that a cast takes past the types; in a body that throw is stored as `UNHANDLED_EXCEPTION`.
 
-A code that the core's code rules refuse at the end of a run, for example a code that is not `UPPER_SNAKE_CASE` in a task with no `errors` list, is stored as `RETURN_TYPE_MISMATCH`. Its message names the task and the rule.
+A code that the core's code rules refuse at the end of a run, for example a code that is not `UPPER_SNAKE_CASE` in a task with no `errorCodes` list, is stored as `RETURN_TYPE_MISMATCH`. Its message names the task and the rule.
 
 ### Data
 
@@ -97,58 +97,48 @@ A code that the core's code rules refuse at the end of a run, for example a code
 
 The rules of the error path are on [Serialization](/horsies/internals/serialization/#the-error-path).
 
-## The Two-Level Code
+## The Kind and the Code
 
 A read gives a `TaskError<E>`:
 
 | Field | Type |
 |-------|------|
-| `code` | `TaskErrorCode<E>`: `{ kind: "library", code: LibraryTaskCode }` or `{ kind: "user", code: E }` |
+| `kind` | `"custom"`: a code of the contract. `"builtIn"`: a code that the library recorded |
+| `code` | `E` for `custom`. `BuiltInTaskCode` for `builtIn` |
 | `message` | `string \| null` |
 | `data` | `JsonValue`: `null` when the error has none |
 | `exception` | `ExceptionRecord \| null`: set by the library for a thrown error |
 | `subWorkflow` | `SubWorkflowFailure \| null`: the failed child workflow of a sub-workflow node |
 
-`LibraryTaskCode` is the union of the library codes, and `LIBRARY_TASK_CODES` lists them. A switch over both levels is exhaustive:
+`BuiltInTaskCode` is the union of the library codes, and `BUILT_IN_TASK_CODES` lists them. A switch over `kind` and then over `code` is exhaustive:
 
 ```ts
 import type { TaskError } from "horsies";
 
-function assertNever(value: never): never {
-  throw new TypeError(`no case for ${String(value)}`);
-}
-
 function chargeFailureText(error: TaskError<"CARD_DECLINED" | "PROVIDER_DOWN">): string {
-  switch (error.code.kind) {
-    case "user": {
-      const code = error.code.code;
-
-      switch (code) {
+  switch (error.kind) {
+    case "custom":
+      switch (error.code) {
         case "CARD_DECLINED":
           return "ask the customer for another card";
         case "PROVIDER_DOWN":
           return "the provider is down; the task can run again later";
-        default:
-          return assertNever(code);
       }
-    }
 
-    case "library":
-      return `the library recorded ${error.code.code}`;
-    default:
-      return assertNever(error.code);
+    case "builtIn":
+      return `the library recorded ${error.code}`;
   }
 }
 ```
 
-The read of a stored error is on [Retrieving Results](/horsies/typescript/tasks/retrieving-results/). A stored user code that the contract's `errors` does not list is the read error `unknownUserCode`: the task that stored it had another contract.
+The read of a stored error is on [Retrieving Results](/horsies/typescript/tasks/retrieving-results/). A stored custom code that the contract's `errorCodes` does not list is the read error `unknownCustomCode`: the task that stored it had another contract.
 
 ## Thrown Errors
 
 A value that a body throws, or a Promise of the body that rejects, is stored as an error:
 
-- The `exceptions` option of `app.implement` maps classes of thrown errors to codes of the contract. The first entry whose class the value is an instance of gives the code; a subclass matches its class.
-- With `errors`, a mapped code that the list does not hold fails typecheck. Without `errors`, `check` and the worker start refuse a mapped code that the core's code rules refuse (`HRS-112`, `HRS-212`).
+- The `exceptionMapper` option of `app.implement` maps classes of thrown errors to codes of the contract. The first entry whose class the value is an instance of gives the code; a subclass matches its class.
+- With `errorCodes`, a mapped code that the list does not hold fails typecheck. Without `errorCodes`, `check` and the worker start refuse a mapped code that the core's code rules refuse (`HRS-112`, `HRS-212`).
 - A value that no entry maps is stored as `UNHANDLED_EXCEPTION`.
 
 Each such error has:
@@ -174,15 +164,16 @@ Throws outside the body's own call chain do not change the outcome:
 | Event | Stored error |
 |-------|--------------|
 | The input does not decode with the contract's parameters | `WORKER_SERIALIZATION_ERROR`. The message names the task, the field path and the kind of the failure, never a value. `data` has `expected_type` (`<task>.input`) and `validation_error` |
+| An `h.taskOutcome(contract)` parameter holds a custom code that the `errorCodes` of `contract` do not declare | `WORKER_SERIALIZATION_ERROR`. The body does not run. The field path is `$.<parameter>.err.error_code`. A built-in code always decodes. A contract with no `errorCodes` accepts every custom code |
 | The value of `ok` does not encode with the output type, or does not read back to the same text | `WORKER_SERIALIZATION_ERROR`, with `expected_type` `<task>.output` |
 | The body returns a value that is neither `ok(value)` nor `err(failure)` | `RETURN_TYPE_MISMATCH` |
-| The body throws, with no `exceptions` entry for the value | `UNHANDLED_EXCEPTION` |
+| The body throws, with no `exceptionMapper` entry for the value | `UNHANDLED_EXCEPTION` |
 
 The other library codes (timeouts, crashes, cancels, expiry) are on the [Errors Reference](/horsies/tasks/errors/).
 
 ## Things to Avoid
 
-**Don't throw for an expected failure.** A throw needs an `exceptions` entry to keep its code, and a reader sees it as an exception. Return the code with `err`.
+**Don't throw for an expected failure.** A throw needs an `exceptionMapper` entry to keep its code, and a reader sees it as an exception. Return the code with `err`.
 
 <!-- ts-check: skip elided -- a Wrong / Correct pair of statements -->
 ```ts
@@ -190,7 +181,7 @@ The other library codes (timeouts, crashes, cancels, expiry) are on the [Errors 
 throw new Error("card declined");
 
 // Correct
-return chargeCard.err({ code: "CARD_DECLINED", message: "the issuer declined the card" });
+return err({ code: "CARD_DECLINED", message: "the issuer declined the card" });
 ```
 
 **Don't put a value in `data` that the reader cannot read.** A class instance or a `Map` is replaced with `{"data_refused": ...}`. Put plain JSON in `data`.

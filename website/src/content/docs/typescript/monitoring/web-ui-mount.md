@@ -1,8 +1,8 @@
 ---
 title: Web UI Mount
-summary: Serve the monitoring web UI of an app with createMonitoringHandler, a Fetch-API handler for Bun.serve, node:http, Hono and Next.js routes, and decide access per request with a MonitoringAuthPolicy.
+summary: Serve the monitoring web UI of an app with createMonitoringHandler, a Fetch-API handler for Bun.serve, node:http, Hono and Next.js routes, and decide access per request with a MonitoringAuthorizationPolicy.
 related: [monitoring-queries, ../cli, ../../monitoring/web-ui-overview, ../../monitoring/web-ui-deployment, ../../monitoring/action-semantics]
-tags: [typescript, monitoring, web, createMonitoringHandler, Bun.serve, node:http, Hono, Next.js, MonitoringAuthPolicy, trustedHeader]
+tags: [typescript, monitoring, web, createMonitoringHandler, Bun.serve, node:http, Hono, Next.js, MonitoringAuthorizationPolicy, trustedHeader]
 ---
 
 # Web UI Mount
@@ -13,7 +13,6 @@ The `web` command of `cli.run(app)` serves the handler of the app with no host s
 
 ## Create the Handler
 
-<!-- ts-check: skip partial -- Bun.serve needs the Bun types, and the docs check loads the Node types only -->
 ```ts
 import { createMonitoringHandler, type Horsies, trustedHeader } from "horsies";
 
@@ -26,7 +25,7 @@ function serveMonitoring(app: Horsies): void {
     return;
   }
 
-  const monitoring = createMonitoringHandler(app, { auth: policy.value, basePath: "/monitoring" });
+  const monitoring = createMonitoringHandler(app, { authorizationPolicy: policy.value, basePath: "/monitoring" });
 
   const server = Bun.serve({
     port: 3000,
@@ -51,7 +50,7 @@ function serveMonitoring(app: Horsies): void {
 
 The handler serves every path of the mount: the page and its assets, `/api/...`, the event stream `GET /api/events`, and `GET /metrics`, the fleet metrics of the app's database behind the view verdict. The `queue` label values of `/metrics` are the queues of the app config. See [Fleet Collector](/horsies/observability/fleet-collector/).
 
-- `createMonitoringHandler` does no I/O. The first request connects the app's broker. A request whose broker cannot be built is answered with the cause as `{"detail": ...}`: 503 when the cause may clear, 500 when it stays (for example a connection setting that the core refuses). The next request tries again.
+- `createMonitoringHandler` does no I/O. The first request connects the app's handle. A request whose handle cannot be built is answered with the cause as `{"detail": ...}`: 503 when the cause may clear, 500 when it stays (for example a connection setting that the core refuses). The next request tries again.
 - The handler runs no schema step. The schema gate of the core answers 409 `SCHEMA_INCOMPATIBLE`: see [Schema Handling](/horsies/monitoring/web-ui-deployment/#schema-handling).
 - A workflow resume builds the sub-workflow children that it owes from the workflows of the app: the `workflows` list of `Horsies.create`. Create the handler from the app that lists every workflow whose runs the UI resumes.
 - A request body is read up to the core's bound (1 MiB) plus one byte; a longer body is answered 413.
@@ -71,7 +70,7 @@ An event stream sends a heartbeat frame after 15 s with no event, so that a prox
 
 | Field | Type | Default |
 |-------|------|---------|
-| `auth` | `MonitoringAuthPolicy` | Required, with no default: a deployment chooses it |
+| `authorizationPolicy` | `MonitoringAuthorizationPolicy` | Required, with no default: a deployment chooses it |
 | `actions` | `ActionsSwitch`: `"enabled"` or `"disabled"` | `"enabled"` |
 | `ui` | `MonitoringUiOptions`: `customCssUrl?: string`, `traceLink?: TraceLinkTemplate` | No stylesheet; no trace link (the task detail shows the trace id as text) |
 | `basePath` | `MountPathText`: `` `/${string}` `` | `"/"` |
@@ -94,7 +93,7 @@ function withTraceLink(app: Horsies): MonitoringHandler | undefined {
     return undefined;
   }
 
-  return createMonitoringHandler(app, { auth: viewOnly(), ui: { traceLink: traceLink.value } });
+  return createMonitoringHandler(app, { authorizationPolicy: viewOnly(), ui: { traceLink: traceLink.value } });
 }
 ```
 
@@ -117,20 +116,20 @@ function withTraceLink(app: Horsies): MonitoringHandler | undefined {
 | `viewOnly()` | Yes | No |
 | `trustedHeader(headerName, { actions })` | The header is present, and no member between its commas is blank | With `actions: "enabled"`, the same check; with `"disabled"`, no |
 
-`trustedHeader` returns `Result<MonitoringAuthPolicy, TrustedHeaderRefused>`. It refuses a blank name (`{ kind: "blankHeaderName" }`) and a name that is not an HTTP token (`{ kind: "invalidHeaderName", headerName, rule }`). A request with the header two times, one of them blank, is refused: `Headers.get` joins the values with `", "`.
+`trustedHeader` returns `Result<MonitoringAuthorizationPolicy, TrustedHeaderRefused>`. It refuses a blank name (`{ kind: "blankHeaderName" }`) and a name that is not an HTTP token (`{ kind: "invalidHeaderName", headerName, rule }`). A request with the header two times, one of them blank, is refused: `Headers.get` joins the values with `", "`.
 
 ### Write a Policy
 
 ```ts
-import type { MonitoringAuthPolicy } from "horsies";
+import type { MonitoringAuthorizationPolicy } from "horsies";
 
-const adminHeader: MonitoringAuthPolicy = {
+const adminHeader: MonitoringAuthorizationPolicy = {
   canView: (request) => request.headers.has("x-admin-user"),
   canAct: (request) => request.headers.get("x-admin-role") === "operator",
 };
 ```
 
-- `MonitoringAuthPolicy` has `canView(request)` and `canAct(request)`. Each returns `boolean` or `Promise<boolean>`. Only an answer of `true` allows; every other answer refuses.
+- `MonitoringAuthorizationPolicy` has `canView(request)` and `canAct(request)`. Each returns `boolean` or `Promise<boolean>`. Only an answer of `true` allows; every other answer refuses.
 - The `request` of a verdict has the method, the URL, the headers and the signal of the incoming request, and no body: the core reads the body.
 - A verdict that throws or rejects answers the request with 500 `Internal Server Error`, and writes one ERROR record of the `horsies.web` logger that names the route.
 - The handler asks only the verdicts that the route needs, in this order: `canView` for every read route, the event stream, `/metrics` and `/api/meta`; then, when the view is allowed, `canAct` for an action route while actions are enabled, and for `/api/meta`, which reports it. The page and its assets ask nothing.
@@ -210,7 +209,7 @@ async function answer(monitoring: MonitoringHandler, incoming: IncomingMessage, 
 }
 
 function serveOnNode(app: Horsies): void {
-  const monitoring = createMonitoringHandler(app, { auth: viewOnly() });
+  const monitoring = createMonitoringHandler(app, { authorizationPolicy: viewOnly() });
 
   const server = createServer((incoming, outgoing) => {
     answer(monitoring, incoming, outgoing).catch((cause: unknown) => {
@@ -238,7 +237,7 @@ import { Hono } from "hono";
 import { createMonitoringHandler, type Horsies, viewOnly } from "horsies";
 
 export function honoServer(app: Horsies): Hono {
-  const monitoring = createMonitoringHandler(app, { auth: viewOnly(), basePath: "/monitoring" });
+  const monitoring = createMonitoringHandler(app, { authorizationPolicy: viewOnly(), basePath: "/monitoring" });
   const server = new Hono();
 
   server.all("/monitoring", async (context) => monitoring(context.req.raw));
@@ -260,7 +259,7 @@ import { app } from "@/horsies/app";
 
 export const runtime = "nodejs";
 
-const monitoring = createMonitoringHandler(app, { auth: viewOnly(), basePath: "/monitoring" });
+const monitoring = createMonitoringHandler(app, { authorizationPolicy: viewOnly(), basePath: "/monitoring" });
 
 export async function GET(request: Request): Promise<Response> {
   return monitoring(request);

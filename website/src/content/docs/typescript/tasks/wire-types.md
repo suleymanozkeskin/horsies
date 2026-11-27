@@ -57,8 +57,10 @@ const unitPrice = Decimal.parse("19.90");
 | `h.object({...})` | An object of the members | A JSON object, members in declaration order |
 | `h.array(item)` | `T[]` | A JSON array |
 | `h.tuple([...])` | `[A, B, ...]` | A JSON array with one value per item type |
+| `h.tuple([...], rest)` | `[A, B, ...R[]]` | The items, then zero or more `rest` values. Python's `tuple[R, ...]` when the item list is empty |
+| `h.lazy(() => w)` | The value type of `w` | The stored form of `w`. See [Recursive Types](#recursive-types) |
 | `h.record(value)` | `Readonly<Record<string, T>>` | A JSON object, keys in the value's own key order |
-| `h.resultOf(T)` | `TaskOutcome<T>` | Only for a workflow node. See [Upstream Results](#upstream-results) |
+| `h.taskOutcome(contract)` | `TaskOutcome<O, E>` of the contract | Only for a workflow node. See [Upstream Results](#upstream-results) |
 
 Date-time texts:
 
@@ -72,6 +74,7 @@ Date-time texts:
 | `.optional()` | The member may be absent | The key is left out of the stored text. It is never `null`, and an explicit `undefined` is refused |
 | `.nullable()` | `T \| null` | `null` or the value |
 | `.default(value)` | A sender may leave the member out; a reader and a body get `value` | The sender never stores the default: the worker fills it when it reads the input |
+| `.default(() => value)` | As `.default(value)`. The reader calls the function at each read, so each read gets a new value | `Horsies.create` calls it once to check its value |
 
 `.optional()` and `.default()` apply to an object member and to a task parameter only. An array, tuple or record item, a union member and an output are always present: `h.array(h.int().optional())` fails typecheck.
 
@@ -125,12 +128,31 @@ const sentOrder: SentOf<typeof Order> = {
 };
 ```
 
+## Recursive Types
+
+A recursive type refers to itself through `h.lazy`. Give the constant its type with `Wire<T>`.
+
+```ts
+import type { Wire } from "horsies";
+
+type Category = { name: string; children: Category[] };
+
+const CategoryTree: Wire<Category> = h.object({
+  name: h.string(),
+  children: h.array(h.lazy(() => CategoryTree)),
+});
+```
+
+- Each cycle must pass an array or an object. A nullable or a union of the type itself is refused (`RecursiveWithoutLevel`).
+- A value that is deeper than 200 levels of arrays and objects is refused (`TooDeep`).
+
 ## Upstream Results
 
-`h.resultOf(T)` declares a parameter that a workflow node fills with the outcome of an upstream task: `{ kind: "succeeded", value }` or `{ kind: "failed", error }`. The rules:
+`h.taskOutcome(contract)` declares a parameter that a workflow node fills with the outcome of an upstream task: `{ kind: "succeeded", value }` or `{ kind: "failed", error }`. The rules:
 
 - It is valid only as a whole task parameter, also with `.optional()` or `.nullable()`. Anywhere else it fails typecheck.
-- A sender never gives it. A task with a required `h.resultOf` parameter cannot be sent: its sent input type is the text `"horsies: this task takes an upstream result (h.resultOf); only a workflow node can run it"`. An optional one is left out of the sent input.
+- A sender never gives it. A task with a required `h.taskOutcome` parameter cannot be sent: its sent input type is a type that no value has. An optional one is left out of the sent input.
+- It takes a workflow contract too: the parameter then holds the outcome of a child workflow.
 
 The workflow side is on [Workflow API](/horsies/typescript/concepts/workflows/workflow-api/).
 
@@ -179,8 +201,9 @@ const shipOrder = defineTask({
 });
 ```
 
-- Supported zod releases: `>=4.1.13 <4.7.0`, the peer dependency range of the package. A schema of another zod 4 release is refused (`ZodVersionNotSupported`). A zod 3 schema, from zod 3 or from `zod/v3`, is refused (`Zod3Schema`).
+- Supported zod releases: `>=4.1.13 <4.7.0`, the peer dependency range of the package. A schema of another zod 4 release is refused (`ZodVersionNotSupported`). A zod 3 schema, from zod 3 or from `zod/v3`, is refused (`Zod3Schema`). The refusal names zod 4 as the fix.
 - A Standard Schema of another library is refused (`SchemaVendor`): only `h.*` wire types and zod 4 schemas have a stored form.
+- `z.uuid()` stores the text as given: an upper-case UUID is stored in upper case. `h.uuid()` refuses it. Use `hz.wire(h.uuid())` for the lower-case form.
 - A body gets zod's output type. A sender gives the same values (an `hz` codec takes the Temporal or `Decimal` value, not its text), and may leave out a member with `.optional()` or `.default()`. An explicit `undefined` fails typecheck.
 
 ### What Each zod Form Stores
@@ -194,7 +217,9 @@ const shipOrder = defineTask({
 | `z.boolean()`, `z.null()` | `h.boolean()`, `h.null()` |
 | `z.literal()`, `z.enum()` | `h.literal()` |
 | `z.object()`, `z.strictObject()` | `h.object()`. An undeclared key is refused at a read, also for `z.object()`, which zod would strip |
-| `z.array()`, `z.tuple()` | `h.array()`, `h.tuple()` |
+| `z.array()` | `h.array()` |
+| `z.tuple()`, with or without a rest item | `h.tuple()` |
+| `z.lazy()`, or an object with a getter member that returns its own schema | `h.lazy()` |
 | `z.record()` with string keys | `h.record()` |
 | `z.union()` of primitives | `h.union([...])` |
 | `z.discriminatedUnion()` | `h.union(tag, [...])` |
@@ -225,11 +250,11 @@ zod checks (`.refine()`, `.min()`, `.positive()`, formats) run at each write of 
 | `INTERSECTION` | `z.intersection()`, `.and()` | One `z.object()` |
 | `RECORD_KEY` | A record key that is not a string, a string format, a string enum or a string literal | String keys |
 | `OPTIONAL_NOT_A_MEMBER` | `.optional()`, `.nullish()`, `.default()` or `.prefault()` outside an object member or a parameter | `.nullable()` |
-| `CHANGING_DEFAULT` | A function default | A fixed value |
-| `RECURSIVE` | `z.lazy()`, or a getter that refers to its own schema | `h.json()` |
-| `TUPLE_REST` | `z.tuple([...], rest)` | `z.array()`, or a tuple of fixed length |
+| `UNION_FALLBACK` | `z.discriminatedUnion()` with `unionFallback` | Remove it: an unknown tag is refused |
+| `DEFAULT_UNDER_NONOPTIONAL` | `.default()` or `.prefault()` under `.nonoptional()` | Remove one of them |
+| `RECURSIVE_PRESENCE` | A recursive schema that is `.optional()`, `.default()` or `.prefault()` at its top | Put `.optional()` on the member that refers to the schema |
 | `LITERAL_MEMBER` | A literal member that is not a string, number, boolean or `null` | A member of those types |
-| `UNION_OPTION` | A `z.discriminatedUnion()` option that is not a `z.object()` | `z.object()` options with the tag member |
+| `UNION_OPTION` | A `z.discriminatedUnion()` option that is not a `z.object()` or a discriminated union of the same tag | `z.object()` options with the tag member |
 | `ENGINE_KEY` | A member name that only the engine writes | Another name |
 | `UNKNOWN_DEFINITION`, `UNKNOWN_DEFINITION_FIELD`, `UNKNOWN_FORMAT`, `UNKNOWN_CHECK` | A zod part that this release of horsies does not know | A supported zod release, or `h.*` |
 | `TOO_DEEP` | A schema nested deeper than the adapter walks | Fewer levels |
@@ -248,7 +273,10 @@ The static types refuse most wrong schemas. `Horsies.create` refuses the rest, e
 | `AmbiguousUnion` | Two union members store the same JSON type |
 | `UnionMemberNotPrimitive` | An array or object member of `h.union([...])` |
 | `UnionTagInvalid` | A tagged-union member without a required string-literal tag, or a tag value twice |
-| `ResultOfPlacement` | `h.resultOf` inside another `h.resultOf` |
+| `RecursiveWithoutLevel` | A recursive type that does not pass an array or an object |
+| `TaskOutcomePlacement` | `h.taskOutcome` anywhere but as a whole task parameter |
+| `UpstreamOutputRefused` | An `h.taskOutcome` parameter whose upstream output has no stored form |
+| `KindNodesTooDeep` | A schema with more nodes than the check walks |
 | `WireKind` | An output with `.optional()` or `.default()`: an output is always present |
 | `SchemaVendor`, `Zod3Schema`, `ZodVersionNotSupported`, `ZodSchema` | A schema that the zod adapter refuses |
 

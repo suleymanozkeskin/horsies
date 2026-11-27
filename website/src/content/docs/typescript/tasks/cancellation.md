@@ -25,6 +25,8 @@ A cancel reaches a task body through its runtime: `runtime.signal` fires, and `r
 
 Give `runtime.signal` to each call that takes an `AbortSignal`: `fetch`, `setTimeout` of `node:timers/promises`, and the clients that take a signal. The call then rejects with the signal's reason, and the body ends.
 
+The second argument of a body holds the members of the runtime (`signal`, `cancelState`, `spawn`) and `ok` and `err`. A body can destructure it.
+
 ```ts
 import { setTimeout as sleep } from "node:timers/promises";
 import { defineTask, h, Horsies } from "horsies";
@@ -52,11 +54,11 @@ const warmCaches = defineTask({
   timeoutMs: 60_000,
   input: { urls: h.array(h.string()) },
   output: h.int(),
-  errors: ["TOO_MUCH_WORK"],
+  errorCodes: ["TOO_MUCH_WORK"],
 });
 
 const created = Horsies.create({
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
   tasks: [syncFeed, importBatches, warmCaches],
 });
 
@@ -66,18 +68,18 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(syncFeed, async ({ feedUrl, pages }, runtime) => {
+app.implement(syncFeed, async ({ feedUrl, pages }, { ok, signal }) => {
   let items = 0;
 
   for (let page = 1; page <= pages; page += 1) {
-    const response = await fetch(`${feedUrl}?page=${page}`, { signal: runtime.signal });
+    const response = await fetch(`${feedUrl}?page=${page}`, { signal });
     const body: unknown = await response.json();
 
     items += Array.isArray(body) ? body.length : 0;
-    await sleep(100, undefined, { signal: runtime.signal });
+    await sleep(100, undefined, { signal });
   }
 
-  return syncFeed.ok(items);
+  return ok(items);
 });
 ```
 
@@ -88,16 +90,16 @@ function importBatch(batchId: string): void {
   void batchId; // stands in for one step of the work
 }
 
-app.implement(importBatches, ({ batchIds }, runtime) => {
+app.implement(importBatches, ({ batchIds }, { ok, cancelState }) => {
   let done = 0;
 
   for (const batchId of batchIds) {
-    const state = runtime.cancelState();
+    const state = cancelState();
 
     switch (state.kind) {
       case "requested":
         // What the task returns after an operator cancel is dropped.
-        return importBatches.ok(done);
+        return ok(done);
       case "notRequested":
         importBatch(batchId);
         done += 1;
@@ -105,7 +107,7 @@ app.implement(importBatches, ({ batchIds }, runtime) => {
     }
   }
 
-  return importBatches.ok(done);
+  return ok(done);
 });
 ```
 
@@ -129,14 +131,14 @@ So a `SHARED_ASYNC` body stops at its deadline only where it passes `runtime.sig
 `runtime.spawn(name, work)` starts work that belongs to the run. `work` is a function that takes its own signal and returns a Promise. `spawn` gives `Result<Promise<T>, SpawnRefused>`: the Promise settles with the work.
 
 ```ts
-app.implement(warmCaches, async ({ urls }, runtime) => {
+app.implement(warmCaches, async ({ urls }, { ok, err, spawn }) => {
   const started: Promise<Response>[] = [];
 
   for (const url of urls) {
-    const spawned = runtime.spawn(`warm ${url}`, (signal) => fetch(url, { signal }));
+    const spawned = spawn(`warm ${url}`, (signal) => fetch(url, { signal }));
 
     if (!spawned.ok) {
-      return warmCaches.err({ code: "TOO_MUCH_WORK", message: spawned.error.kind });
+      return err({ code: "TOO_MUCH_WORK", message: spawned.error.kind });
     }
 
     started.push(spawned.value);
@@ -144,7 +146,7 @@ app.implement(warmCaches, async ({ urls }, runtime) => {
 
   const responses = await Promise.allSettled(started);
 
-  return warmCaches.ok(responses.filter((response) => response.status === "fulfilled").length);
+  return ok(responses.filter((response) => response.status === "fulfilled").length);
 });
 ```
 

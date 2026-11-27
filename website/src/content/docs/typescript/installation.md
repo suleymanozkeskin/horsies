@@ -40,8 +40,9 @@ Install a peer package only for the entry point or the feature that needs it.
 | `zod` | `>=4.1.13 <4.7.0` | zod schemas in `defineTask` and `defineWorkflow`, and the `hz` codecs of `horsies/zod`. See [Wire Types](/horsies/typescript/tasks/wire-types/) |
 | `pg` | `>=8.23.1 <8.24.0` | `horsies/rerun/pg`. See [Rerun](/horsies/typescript/operations/rerun/) |
 | `postgres` | `>=3.4.9 <3.5.0` | `horsies/rerun/postgres`. See [Rerun](/horsies/typescript/operations/rerun/) |
+| `@opentelemetry/api` | `>=1.7.0 <2` | Spans and producer metrics of an app that turns on OpenTelemetry tracing |
 
-The `horsies` entry point imports none of them. An app with `h.*` schemas only needs no peer package.
+The `horsies` entry point imports none of them. It loads `@opentelemetry/api` only for an app that turns on tracing. An app with `h.*` schemas only needs no peer package.
 
 ## Platforms
 
@@ -61,7 +62,7 @@ These hosts have no platform package:
 
 ## A Host With No Platform Package
 
-Importing `horsies` loads no native code. The first call that needs the core loads the addon; `Horsies.create` is such a call, because it checks the config in the core. On a host with no platform package, that call throws `CoreStartFailed` (code `CORE_START_FAILED`) with the message:
+Importing `horsies` loads no native code. The first call that needs the core loads the addon; `Horsies.create` is such a call, because it checks the config in the core. On a host with no platform package, that call throws `RuntimeStartFailed` (code `RUNTIME_START_FAILED`) with the message:
 
 ```text
 the core could not start: no native addon of horsies is built for <host>

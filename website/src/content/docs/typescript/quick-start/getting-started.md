@@ -41,8 +41,8 @@ const greet = defineTask({
 
 // Every process builds the same app: the producer, the worker and each child.
 const created = Horsies.create({
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
-  workerProfiles: { default: { isolated: { count: 2 } } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  workerProfiles: { default: { isolated: { kind: "isolatedChildren", count: 2 } } },
   tasks: [greet],
 });
 
@@ -56,7 +56,7 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(greet, ({ name }) => greet.ok(`hello, ${name}`));
+app.implement(greet, ({ name }, { ok }) => ok(`hello, ${name}`));
 
 async function sendGreeting(): Promise<number> {
   const sent = await app.send(greet, { name: "world" });
@@ -67,7 +67,7 @@ async function sendGreeting(): Promise<number> {
     return 1;
   }
 
-  const read = await sent.value.get({ timeoutMs: 30_000 });
+  const read = await sent.value.get({ waitMs: 30_000 });
 
   if (!read.ok) {
     console.error(`greet has no outcome: ${read.error.kind}`);
@@ -83,7 +83,7 @@ async function sendGreeting(): Promise<number> {
 
       return 0;
     case "failed":
-      console.error(`greet failed: ${outcome.error.code.code}`);
+      console.error(`greet failed: ${outcome.error.code}`);
 
       return 1;
   }
@@ -94,7 +94,7 @@ process.exitCode = process.argv[2] === "send" ? await sendGreeting() : await cli
 
 - `defineTask` defines the contract of the task `greet`: its name, its input and its output. The parameter `name` is stored under its name: the input `{"name": "world"}`. See [Defining Tasks](/horsies/typescript/tasks/defining-tasks/).
 - `Horsies.create` checks the config and each contract of `tasks`, and gives the app or every refusal. It opens no database connection: the app connects at its first operation and runs the schema step there. The database URL is read from the environment variable `DATABASE_URL` at `Horsies.create`. See [App Config](/horsies/typescript/configuration/app-config/).
-- `app.implement` gives the contract its body. The body returns `greet.ok(value)` for a success. See [Defining Tasks](/horsies/typescript/tasks/defining-tasks/).
+- `app.implement` gives the contract its body. The body returns `ok(value)` for a success. `ok` comes from the second argument of the body. See [Defining Tasks](/horsies/typescript/tasks/defining-tasks/).
 - The worker profile `default` has two isolated children. See [Worker Setup](/horsies/typescript/workers/worker-setup/).
 - `app.send` gives a handle or the send error. `get` waits for the outcome. See [Sending Tasks](/horsies/typescript/tasks/sending-tasks/) and [Retrieving Results](/horsies/typescript/tasks/retrieving-results/).
 - The worker starts this entry file again for each child, with arguments of its own. `cli.run` serves them. Every line before `cli.run` runs in each child too: build the app there and start nothing else.

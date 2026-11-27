@@ -24,15 +24,15 @@ const validateOrder = defineTask({
     lines: h.array(h.object({ sku: h.string(), quantity: h.int(), unitPriceCents: h.int() })),
   },
   output: h.object({ orderId: h.uuid(), totalCents: h.int() }),
-  errors: ["EMPTY_ORDER", "LIMIT_EXCEEDED"],
+  errorCodes: ["EMPTY_ORDER", "LIMIT_EXCEEDED"],
 });
 ```
 
 - `input` has one schema per parameter. A send stores the input as an object keyed by the parameter names: `{"orderId": "...", "lines": [...]}`. A task with no parameters has `input: {}` and stores `{}`.
 - A schema is an `h.*` wire type or a zod 4 schema. See [Wire Types](/horsies/typescript/tasks/wire-types/).
-- A parameter name is a letter or `_`, then letters, digits and `_`. The names `workflow_ctx` and `workflow_meta`, and a name that only the engine writes (`__h_...`, `__horsies_...`), are refused.
+- A parameter name is a letter or `_`, then letters, digits and `_`. The names `workflow_context` and `workflow_meta`, and a name that only the engine writes (`__h_...`, `__horsies_...`), are refused.
 - `output` is always present: `.optional()` and `.default()` on it are refused.
-- `errors` lists the task's own codes as literals, with no `as const`. Without `errors`, the task may return any code that is not a built-in name. See [Task Errors](/horsies/typescript/tasks/errors/).
+- `errorCodes` lists the task's own codes as literals, with no `as const`. Without `errorCodes`, the task may return any code that is not a built-in name. See [Task Errors](/horsies/typescript/tasks/errors/).
 
 `defineTask` never throws and refuses nothing. `Horsies.create` checks each listed contract and reports what it breaks: see [The Task List](#the-task-list).
 
@@ -43,13 +43,13 @@ const validateOrder = defineTask({
 | `name` | `string` | The task name. Each send stores it, and a worker finds the implementation by it. Not empty |
 | `queue` | `string` | One of `customQueues` in the custom queue mode. Left out in the default queue mode |
 | `input` | `{ [parameter]: schema }` | One schema per parameter |
-| `output` | schema | The schema of the value of `contract.ok` |
-| `errors` | `readonly string[]` | The task's own codes. A built-in name, or a list of the type `string[]`, fails typecheck |
+| `output` | schema | The schema of the value of `ok` |
+| `errorCodes` | `readonly string[]` | The task's own codes. A built-in name, or a list of the type `string[]`, fails typecheck |
 | `execution` | `"ISOLATED"` (default), `"SHARED_ASYNC"`, `"SHARED_THREAD"` | See [Execution Class](#execution-class) |
 | `timeoutMs` | `number` | The deadline of a run, from 1,000 to 4,294,967,295. Required for `SHARED_ASYNC` and `SHARED_THREAD` |
 | `cancelGraceMs` | `number` | From 100 to 10,000. Not taken by `SHARED_THREAD`. See [Cancellation](/horsies/typescript/tasks/cancellation/) |
-| `retry` | `RetryPolicy` | See [Retry Policy](#retry-policy) |
-| `workflowContext` | `boolean` | `true`: a workflow node of the task may name `ctxFrom`. See [Workflow API](/horsies/typescript/concepts/workflows/workflow-api/) |
+| `retryPolicy` | `RetryPolicy` | See [Retry Policy](#retry-policy) |
+| `workflowContext` | `boolean` | `true`: a workflow node of the task may name `workflowContextFrom`. See [Workflow API](/horsies/typescript/concepts/workflows/workflow-api/) |
 
 `goodUntil` is not a contract field: set a deadline per send. See [Sending Tasks](/horsies/typescript/tasks/sending-tasks/).
 
@@ -59,7 +59,7 @@ const validateOrder = defineTask({
 import { Horsies } from "horsies";
 
 const created = Horsies.create({
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
   tasks: [validateOrder],
 });
 
@@ -69,24 +69,24 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(validateOrder, ({ orderId, lines }) => {
+app.implement(validateOrder, ({ orderId, lines }, { ok, err }) => {
   if (lines.length === 0) {
-    return validateOrder.err({ code: "EMPTY_ORDER", message: "the order has no lines" });
+    return err({ code: "EMPTY_ORDER", message: "the order has no lines" });
   }
 
   const totalCents = lines.reduce((sum, line) => sum + line.quantity * line.unitPriceCents, 0);
 
   if (totalCents > 1_000_000) {
-    return validateOrder.err({ code: "LIMIT_EXCEEDED", message: "the order is over the limit", data: { totalCents } });
+    return err({ code: "LIMIT_EXCEEDED", message: "the order is over the limit", data: { totalCents } });
   }
 
-  return validateOrder.ok({ orderId, totalCents });
+  return ok({ orderId, totalCents });
 });
 ```
 
-- The body takes `(input, runtime)`. `input` has every parameter, with each default filled. `runtime` is the [Task Runtime](#task-runtime) of the run.
-- The body returns `contract.ok(value)` or `contract.err({ code, message?, data? })`, or a Promise of one. The result constructors are bound to the contract: a value of the wrong type, or a code that `errors` does not list, fails typecheck at its own line.
-- A thrown error is stored as `UNHANDLED_EXCEPTION`, or as a declared code through the `exceptions` option. See [Task Errors](/horsies/typescript/tasks/errors/#thrown-errors).
+- The body takes `(input, runtime)`. `input` has every parameter, with each default filled. `runtime` holds the members of the [Task Runtime](#task-runtime) of the run, and `ok` and `err`. A body may destructure it, or leave it out.
+- The body returns `ok(value)` or `err({ code, message?, data? })`, from its second argument, or a Promise of one. `ok` and `err` are bound to the contract. The contract has no `ok` and no `err`: a value of the wrong type, or a code that `errorCodes` does not list, fails typecheck at its own line.
+- A thrown error is stored as `UNHANDLED_EXCEPTION`, or as a declared code through the `exceptionMapper` option. See [Task Errors](/horsies/typescript/tasks/errors/#thrown-errors).
 - The worker decodes the input with the contract's types, and checks that the value of `ok` encodes and reads back. See [Task Errors](/horsies/typescript/tasks/errors/#what-the-library-records).
 - `app.implement` never throws. It records a refusal for a contract that the app does not list (`HRS-300`) and for a second implementation of a contract (`HRS-301`). `check` reports each refusal, and a worker refuses to start while the app holds one, or while a listed contract has no implementation. See [CLI Reference](/horsies/typescript/cli/).
 
@@ -115,11 +115,11 @@ const fetchQuote = defineTask({
   cancelGraceMs: 2_000,
   input: { symbol: h.string() },
   output: h.string(),
-  errors: ["QUOTE_UNAVAILABLE"],
+  errorCodes: ["QUOTE_UNAVAILABLE"],
 });
 
 const created = Horsies.create({
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
   tasks: [fetchQuote],
 });
 
@@ -129,14 +129,14 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(fetchQuote, async ({ symbol }, runtime) => {
-  const response = await fetch(`https://quotes.example.com/${encodeURIComponent(symbol)}`, { signal: runtime.signal });
+app.implement(fetchQuote, async ({ symbol }, { ok, err, signal }) => {
+  const response = await fetch(`https://quotes.example.com/${encodeURIComponent(symbol)}`, { signal });
 
   if (!response.ok) {
-    return fetchQuote.err({ code: "QUOTE_UNAVAILABLE", message: `status ${response.status}` });
+    return err({ code: "QUOTE_UNAVAILABLE", message: `status ${response.status}` });
   }
 
-  return fetchQuote.ok(await response.text());
+  return ok(await response.text());
 });
 ```
 
@@ -169,7 +169,7 @@ const sendReceipt = defineTask({
 });
 
 const created = Horsies.create({
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
   queueMode: "custom",
   customQueues: [{ name: "payments" }, { name: "email" }],
   tasks: [chargeCard, sendReceipt],
@@ -180,7 +180,7 @@ The queue fields are on [App Config](/horsies/typescript/configuration/app-confi
 
 ## Retry Policy
 
-`retry` names when a failed run runs again. `autoRetryFor` lists the codes that start a retry: a code of the task's `errors`, or a library code (`TASK_TIMEOUT`, `WORKER_CRASHED`, ...). A user code that `errors` does not list fails typecheck.
+`retryPolicy` names when a failed run runs again. `retryFor` lists the codes that start a retry: a code of the task's `errorCodes`, or a library code (`TASK_TIMEOUT`, `WORKER_CRASHED`, ...). A custom code that `errorCodes` does not list fails typecheck.
 
 ```ts
 const fetchPrices = defineTask({
@@ -188,21 +188,21 @@ const fetchPrices = defineTask({
   timeoutMs: 5_000,
   input: { symbol: h.string() },
   output: h.string(),
-  errors: ["RATE_LIMITED", "UPSTREAM_DOWN"],
-  retry: {
+  errorCodes: ["RATE_LIMITED", "UPSTREAM_DOWN"],
+  retryPolicy: {
     kind: "exponential",
     baseSeconds: 30,
     maxRetries: 5,
     maxDelaySeconds: 600,
-    autoRetryFor: ["RATE_LIMITED", "TASK_TIMEOUT", "WORKER_CRASHED"],
+    retryFor: ["RATE_LIMITED", "TASK_TIMEOUT", "WORKER_CRASHED"],
   },
 });
 ```
 
 | `kind` | Fields | Delay before retry n |
 |--------|--------|----------------------|
-| `"fixed"` | `intervalsSeconds` (one delay per retry; its length is the number of retries), `jitter?`, `autoRetryFor` | `intervalsSeconds[n - 1]` |
-| `"exponential"` | `baseSeconds`, `maxRetries`, `jitter?`, `maxDelaySeconds?`, `autoRetryFor` | `baseSeconds * 2^(n - 1)`, at most `maxDelaySeconds` |
+| `"fixed"` | `intervalsSeconds` (one delay per retry; its length is the number of retries), `jitter?`, `retryFor` | `intervalsSeconds[n - 1]` |
+| `"exponential"` | `baseSeconds`, `maxRetries`, `jitter?`, `maxDelaySeconds?`, `retryFor` | `baseSeconds * 2^(n - 1)`, at most `maxDelaySeconds` |
 
 - `jitter` is `true` when left out.
 - A policy has 1 to 20 retries; each interval and `baseSeconds` is 1 to 86,400 seconds; `maxDelaySeconds` is greater than 0. `Horsies.create` refuses a policy that breaks a rule (`HRS-102`).
@@ -230,7 +230,7 @@ The codes are on the shared [Errors Reference](/horsies/tasks/errors/#task-defin
 
 ## Task Runtime
 
-The second argument of a body is the runtime of its run.
+The second argument of a body is one frozen object for its run. Each member is bound to the run, so a destructured member works.
 
 | Member | Gives |
 |--------|-------|
@@ -238,8 +238,10 @@ The second argument of a body is the runtime of its run.
 | `fencingToken` | `{ taskId, value }`: `value` is an `AttemptNumber`. See [Fencing Token](#fencing-token) |
 | `signal` | An `AbortSignal` that fires at an operator cancel, and at the deadline of a `SHARED_ASYNC` run. See [Cancellation](/horsies/typescript/tasks/cancellation/) |
 | `cancelState()` | `{ kind: "notRequested" }` or `{ kind: "requested", cause }`, `cause` `"OPERATOR"` or `"DEADLINE"` |
-| `spawn(name, work)` | `Result<Promise<T>, SpawnRefused>`: starts work that belongs to the run. Not on `ThreadTaskRuntime` |
+| `spawn(name, (signal) => work)` | `Result<Promise<T>, SpawnRefused>`: starts work that belongs to the run. Not on `ThreadTaskRuntime` |
 | `state(key)` | The value that the provider of `key` built in this process |
+| `workflowContext` | Only for a task with `workflowContext: true`: `{ kind: "context", context }` or `{ kind: "noContext" }` |
+| `ok(value)`, `err({ code, message?, data? })` | The constructors of the result of the body |
 
 `app.provide(factory)` returns the key of one value of app state. The factory runs in each task child before the child takes its first task. See [Worker Setup](/horsies/typescript/workers/worker-setup/). A test builds a runtime with `TaskRuntime.forTest`. See [Testing](/horsies/typescript/operations/testing/).
 
@@ -260,11 +262,11 @@ const recordPayment = defineTask({
   name: "record_payment",
   input: { orderId: h.string(), cents: h.int() },
   output: h.string(),
-  errors: ["LATER_ATTEMPT", "STORE_FAILED"],
+  errorCodes: ["LATER_ATTEMPT", "STORE_FAILED"],
 });
 
 const created = Horsies.create({
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
   tasks: [recordPayment],
 });
 
@@ -280,10 +282,10 @@ const Payments = app.provide(() => new pg.Pool({ connectionString: process.env["
 //                        order_id text NOT NULL, cents bigint NOT NULL);
 app.implement(
   recordPayment,
-  async ({ orderId, cents }, runtime) => {
-    const { taskId, value } = runtime.fencingToken;
+  async ({ orderId, cents }, { ok, err, fencingToken, state }) => {
+    const { taskId, value } = fencingToken;
     // One conditional write: the row changes only when no later attempt of this task wrote it.
-    const written = await runtime.state(Payments).query(
+    const written = await state(Payments).query(
       "INSERT INTO payments (task_id, fence, order_id, cents) VALUES ($1, $2, $3, $4) " +
         "ON CONFLICT (task_id) DO UPDATE " +
         "SET fence = EXCLUDED.fence, order_id = EXCLUDED.order_id, cents = EXCLUDED.cents " +
@@ -292,10 +294,10 @@ app.implement(
     );
 
     return written.rowCount === 0
-      ? recordPayment.err({ code: "LATER_ATTEMPT", message: "a later attempt of this task holds the fence" })
-      : recordPayment.ok(orderId);
+      ? err({ code: "LATER_ATTEMPT", message: "a later attempt of this task holds the fence" })
+      : ok(orderId);
   },
-  { exceptions: [[pg.DatabaseError, "STORE_FAILED"]] },
+  { exceptionMapper: [[pg.DatabaseError, "STORE_FAILED"]] },
 );
 ```
 
@@ -311,7 +313,7 @@ A rerun, and a workflow node that a resume starts again, get a new task id: thei
 app.implement(greet, ({ name }) => `hello, ${name}`);
 
 // Correct
-app.implement(greet, ({ name }) => greet.ok(`hello, ${name}`));
+app.implement(greet, ({ name }, { ok }) => ok(`hello, ${name}`));
 ```
 
 **Don't declare a task `SHARED_ASYNC` when its libraries take no signal.** Its body runs on past the deadline and holds its seat. Keep it `ISOLATED`, the default.
@@ -326,7 +328,7 @@ app.implement(greet, ({ name }) => greet.ok(`hello, ${name}`));
 |-----------|------|----------|-------------|
 | `definition` | `TaskDefinition & ExecutionRules<X>` | Yes | The fields of [Fields](#fields) |
 
-**Returns:** a frozen `TaskContract` with `name`, `ok(value)` and `err(failure)`. `err` throws `TypeError` for a built-in code that a cast takes past the types.
+**Returns:** a frozen `TaskContract` with `kind` and `name`. It has no `ok` and no `err`: those are members of the second argument of the body. `err` throws `TypeError` for a built-in code that a cast takes past the types.
 
 ### `app.implement(contract, body, options?): Implementation<P, O, E, X>`
 
@@ -334,6 +336,6 @@ app.implement(greet, ({ name }) => greet.ok(`hello, ${name}`));
 |-----------|------|----------|-------------|
 | `contract` | `TaskContract` | Yes | A contract of the app's task list |
 | `body` | `BodyFor<P, O, E, X>` | Yes | `(input, runtime) => result`, or a Promise of it |
-| `options.exceptions` | `readonly [ErrorClass, E][]` | No | Thrown error classes and their codes. See [Task Errors](/horsies/typescript/tasks/errors/#thrown-errors) |
+| `options.exceptionMapper` | `readonly [ErrorClass, E][]` | No | Thrown error classes and their codes. See [Task Errors](/horsies/typescript/tasks/errors/#thrown-errors) |
 
 **Returns:** the `Implementation`. Its `run(input, runtime)` runs the body with no worker; see [Testing](/horsies/typescript/operations/testing/).

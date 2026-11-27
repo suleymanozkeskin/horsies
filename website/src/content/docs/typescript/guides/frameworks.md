@@ -36,7 +36,7 @@ export const sendReceipt = defineTask({
   name: "send_receipt",
   input: { orderId: h.uuid(), email: h.string() },
   output: h.null(),
-  errors: ["MAILBOX_FULL"],
+  errorCodes: ["MAILBOX_FULL"],
 });
 ```
 
@@ -49,8 +49,8 @@ import { Horsies } from "horsies";
 import { sendReceipt } from "./contracts.ts";
 
 const created = Horsies.create({
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
-  workerProfiles: { default: { isolated: { count: 2 } } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  workerProfiles: { default: { isolated: { kind: "isolatedChildren", count: 2 } } },
   tasks: [sendReceipt],
 });
 
@@ -74,10 +74,10 @@ import { cli } from "horsies";
 import { app } from "./app.ts";
 import { sendReceipt } from "./contracts.ts";
 
-app.implement(sendReceipt, async ({ orderId, email }) => {
+app.implement(sendReceipt, async ({ orderId, email }, { ok }) => {
   console.log(`receipt of ${orderId} to ${email}`);
 
-  return sendReceipt.ok(null);
+  return ok(null);
 });
 
 process.exitCode = await cli.run(app);
@@ -106,6 +106,8 @@ function sendErrorStatus(error: TaskSendError<null, "MAILBOX_FULL">): number {
       return 400;
     case "ENQUEUE_FAILED":
       return error.retryable ? 503 : 500;
+    case "SEAT_RELAY_FULL":
+      return 503;
     case "IDEMPOTENCY_KEY_CONFLICT":
       return 409;
     case "PAYLOAD_MISMATCH":
@@ -175,10 +177,10 @@ const server = createServer((request, response) => {
 
   void app
     .taskHandle(sendReceipt, taskId.value)
-    .get({ timeoutMs: 0 })
+    .get({ waitMs: 0 })
     .then((read) => {
       if (!read.ok) {
-        const status = read.error.kind === "waitTimedOut" ? 202 : read.error.kind === "taskNotFound" ? 404 : 500;
+        const status = read.error.kind === "waitTimeout" ? 202 : read.error.kind === "taskNotFound" ? 404 : 500;
 
         response.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify({ state: read.error.kind }));
 
@@ -186,7 +188,7 @@ const server = createServer((request, response) => {
       }
 
       const outcome = read.value;
-      const body = outcome.kind === "succeeded" ? { state: "sent" } : { state: "failed", code: outcome.error.code.code };
+      const body = outcome.kind === "succeeded" ? { state: "sent" } : { state: "failed", code: outcome.error.code };
 
       response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(body));
     });
@@ -195,7 +197,7 @@ const server = createServer((request, response) => {
 server.listen(8080);
 ```
 
-- `get({ timeoutMs: 0 })` reads once and does not wait: a task that has not finished gives the read error `waitTimedOut`. Do not hold a request open for a task: give the client the task id, and read again later.
+- `get({ waitMs: 0 })` reads once and does not wait: a task that has not finished gives the read error `waitTimeout`. Do not hold a request open for a task: give the client the task id, and read again later.
 - `taskHandle` takes the contract for the types only. The app need not list it.
 - The read errors and the outcome are on [Retrieving Results](/horsies/typescript/tasks/retrieving-results/).
 
@@ -209,6 +211,6 @@ node server.ts
 
 **Do not import the implementations into the server.** The server needs the contracts only. A module that calls `app.implement` belongs to the worker's entry.
 
-**Do not wait without a bound in a request handler.** `get()` with no `timeoutMs` waits until the task finishes. Pass a `timeoutMs`, or `0` for one read.
+**Do not wait without a bound in a request handler.** `get()` with no `waitMs` waits until the task finishes. Pass a `waitMs`, or `0` for one read.
 
 **Do not wait for a task result in a task body.** A read that waits in a process that runs task bodies gives `waitInsideTask` and reads nothing. Compose the tasks with a workflow: see [Workflow API](/horsies/typescript/concepts/workflows/workflow-api/).
