@@ -33,7 +33,7 @@ export type ContextReadError =
    * The context holds no entry for the node: it is not in the node's `workflowContextFrom`, or the dependency did not
    * end.
    */
-  | { readonly kind: "notInContext"; readonly nodeId: string }
+  | { readonly kind: "nodeNotInContext"; readonly nodeId: string }
   /** The stored value does not read with the contract's types. `cause` holds no value. */
   | { readonly kind: "unreadable"; readonly nodeId: string; readonly cause: string }
   /** The stored error has a custom code that the contract does not list; `storedCode` holds it. */
@@ -204,7 +204,7 @@ function contextValue(
 }
 
 function notInContext(nodeId: string): Result<never, ContextReadError> {
-  return err(Object.freeze({ kind: "notInContext", nodeId }));
+  return err(Object.freeze({ kind: "nodeNotInContext", nodeId }));
 }
 
 /**

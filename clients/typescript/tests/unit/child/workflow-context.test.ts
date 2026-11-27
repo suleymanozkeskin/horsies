@@ -60,7 +60,7 @@ function served(implementations: readonly ImplementationParts[]): {
 }
 
 function runBody(runKey: bigint, taskName: string, inputJson: string): ChildPost {
-  return { kind: "runBody", runKey, taskName, inputJson, taskId: RUN_TASK_ID, attempt: 1, facts: { kind: "notRecorded" } };
+  return { kind: "runBody", runKey, taskName, inputJson, taskId: RUN_TASK_ID, attempt: 1, maxRetries: 0, facts: { kind: "notRecorded" } };
 }
 
 /** A child of `audit` whose body records what it saw. */

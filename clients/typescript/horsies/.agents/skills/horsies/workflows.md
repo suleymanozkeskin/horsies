@@ -137,7 +137,7 @@ without it has no such member (typecheck).
   `TaskOutcome`, read with the contract's output type and codes),
   `hasResult(nodeId)`, and for a sub-workflow node `summaryFor(nodeId)`,
   `outputFor(nodeId, workflow)` and `hasSummary(nodeId)`.
-- A read gives `notInContext` for a node that is not in
+- A read gives `nodeNotInContext` for a node that is not in
   `workflowContextFrom` or that did not end, `unreadable` for a value that
   does not read with the contract, and `unknownCustomCode` (with the stored
   code in `storedCode`) for a code that the contract does not list.

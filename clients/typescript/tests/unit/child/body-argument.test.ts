@@ -16,7 +16,7 @@ import { adapterRun, RUN_TASK_ID } from "./support.ts";
 const add = defineTask({ name: "add", input: { a: h.int(), b: h.int() }, output: h.int(), errorCodes: ["TOO_BIG"] });
 
 /** The own member names of the second argument of a body of a task that takes no workflow context. */
-const MEMBERS = ["taskId", "fencingToken", "signal", "cancelState", "spawn", "state", "workflowContext", "ok", "err"];
+const MEMBERS = ["taskId", "attempt", "maxRetries", "retriesLeft", "fencingToken", "signal", "cancelState", "spawn", "state", "workflowContext", "ok", "err"];
 
 function attemptOne(): AttemptNumber {
   const attempt = AttemptNumber.parse(1);

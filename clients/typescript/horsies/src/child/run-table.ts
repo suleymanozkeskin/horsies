@@ -21,6 +21,7 @@ import { ClientDefect } from "../thrown-errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import type { AttemptNumber } from "./attempt.ts";
+import type { MaxRetries } from "./retry-budget.ts";
 import { type RunMark, runStore } from "./run-store.ts";
 import {
   type CancelState,
@@ -59,6 +60,7 @@ export type RunFacts = {
   readonly taskId: TaskId;
   readonly taskName: string;
   readonly attempt: AttemptNumber;
+  readonly maxRetries: MaxRetries;
 };
 
 /** One run of the table. `seen` is the cancel state that the posts gave. */
@@ -140,6 +142,7 @@ export class RunTable {
     return Object.freeze({
       taskId: facts.taskId,
       attempt: facts.attempt,
+      maxRetries: facts.maxRetries,
       signal: entry.controller.signal,
       cancelState: (): CancelState => this.#cancelState(facts.runKey, entry),
       spawn: <T>(name: string, work: SpawnedWork<T>): Result<Promise<T>, SpawnRefused> =>

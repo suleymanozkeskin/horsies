@@ -22,6 +22,7 @@ export type OperationalCode = (typeof OperationalCode)[keyof typeof OperationalC
 export const ContractCode = {
   RETURN_TYPE_MISMATCH: "RETURN_TYPE_MISMATCH",
   WORKFLOW_CONTEXT_MISSING_ID: "WORKFLOW_CONTEXT_MISSING_ID",
+  NODE_NOT_IN_CONTEXT: "NODE_NOT_IN_CONTEXT",
   NO_TYPE_AVAILABLE: "NO_TYPE_AVAILABLE",
 } as const;
 

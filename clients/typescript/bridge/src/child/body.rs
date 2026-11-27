@@ -7,7 +7,7 @@
 //! `SHARED_THREAD` child, gives it to a free seat isolate and settles the run
 //! with the isolate's result; a seat isolate never loads this addon. Each
 //! call:
-//! 1. reads the run's fencing token and cancel signal; an async run also
+//! 1. reads the run's attempt facts (fencing token and retry budget) and cancel signal; an async run also
 //!    takes its run handle and registers the body as host-held work, named
 //!    by the task name;
 //! 2. enters the run in the run table under a new run key;
@@ -49,8 +49,8 @@ use std::time::Duration;
 use horsies_core::core::task::fn_trait::{AsyncTaskFn, BlockingTaskFn, RawTaskResult};
 use horsies_core::frame_protocol::MAX_SEATS_PER_SHARED_ASYNC_CHILD;
 use horsies_core::{
-    current_run, run_cancel_signal, run_cancel_state, run_fencing_token, CancelCause, FencingToken,
-    HostWork, HostWorkRefused, RunCancelSignal, RunCancelState, RunHandle, TaskResult,
+    current_run, run_cancel_signal, run_cancel_state, run_task_attempt, CancelCause, HostWork,
+    HostWorkRefused, RunCancelSignal, RunCancelState, RunHandle, TaskAttempt, TaskResult,
     WorkStopCause, HOST_LOOP_TURN_TICK, MAX_RUN_WORK,
 };
 use napi::bindgen_prelude::{BigInt, Function};
@@ -158,13 +158,15 @@ impl WorkStopCauseName {
 )]
 pub enum ChildPost {
     /// Run the body of `task_name` for the run `run_key`, with the stored
-    /// input text. `attempt` is the fencing token's value, from 1.
+    /// input text. `attempt` is the fencing token's value, from 1;
+    /// `max_retries` is the retry budget of the task row, from 0 to 20.
     RunBody {
         run_key: BigInt,
         task_name: String,
         input_json: String,
         task_id: String,
         attempt: u32,
+        max_retries: u32,
         facts: BodyFactsRecord,
     },
     /// The cancel signal of the run fired.
@@ -474,7 +476,7 @@ impl AsyncTaskFn for JsAsyncBody {
 impl JsAsyncBody {
     /// The run of the body: enter it, post it, wait for its settle call.
     async fn run(&self, input: Vec<u8>) -> RawTaskResult {
-        let token = run_token(&self.task_name);
+        let attempt = run_attempt(&self.task_name);
         let signal = run_signal(&self.task_name);
         let handle = current_run().unwrap_or_else(|refused| {
             panic!(
@@ -509,7 +511,7 @@ impl JsAsyncBody {
                 life: RunLife::RUNNING,
             },
         );
-        post_body(&self.task_name, &self.bodies, run_key, token, input);
+        post_body(&self.task_name, &self.bodies, run_key, attempt, input);
         tokio::select! {
             result = &mut settled => return settled_value(result, &self.task_name),
             () = signal.cancelled() => {}
@@ -550,7 +552,7 @@ pub struct JsBlockingBody {
 
 impl BlockingTaskFn for JsBlockingBody {
     fn execute(&self, args: &[u8]) -> RawTaskResult {
-        let token = run_token(&self.task_name);
+        let attempt = run_attempt(&self.task_name);
         let signal = run_signal(&self.task_name);
         let (done, settled) = std::sync::mpsc::sync_channel(1);
         let cancel = Arc::new(CancelSeen::new());
@@ -562,7 +564,13 @@ impl BlockingTaskFn for JsBlockingBody {
                 form: RunForm::Blocking { done },
             },
         );
-        post_body(&self.task_name, &self.bodies, run_key, token, args.to_vec());
+        post_body(
+            &self.task_name,
+            &self.bodies,
+            run_key,
+            attempt,
+            args.to_vec(),
+        );
         let watched = CancelWatch {
             run_key,
             cancel: &cancel,
@@ -646,11 +654,11 @@ impl CancelWatch<'_> {
     }
 }
 
-/// The fencing token of the current run. Outside a run is a defect: the
+/// The attempt facts of the current run. Outside a run is a defect: the
 /// core calls a body only in its run.
-fn run_token(task_name: &str) -> FencingToken {
-    run_fencing_token().unwrap_or_else(|refused| {
-        panic!("the body of task {task_name} has no fencing token: {refused}")
+fn run_attempt(task_name: &str) -> TaskAttempt {
+    run_task_attempt().unwrap_or_else(|refused| {
+        panic!("the body of task {task_name} has no attempt facts: {refused}")
     })
 }
 
@@ -667,7 +675,7 @@ fn post_body(
     task_name: &str,
     bodies: &ChildBodies,
     run_key: u64,
-    token: FencingToken,
+    attempt: TaskAttempt,
     input: Vec<u8>,
 ) {
     let input_json = String::from_utf8(input)
@@ -676,9 +684,10 @@ fn post_body(
         run_key: bigint_of_u64(run_key),
         task_name: task_name.to_owned(),
         input_json,
-        task_id: token.task_id().to_string(),
-        attempt: token.value().get(),
-        facts: bodies.facts.take_for_run(token),
+        task_id: attempt.task_id().to_string(),
+        attempt: attempt.attempt().get(),
+        max_retries: attempt.max_retries().get(),
+        facts: bodies.facts.take_for_run(attempt.fencing_token()),
     });
     if let Err(refused) = posted {
         let _work_ends_with_the_entry = lock(&RUNS).remove(&run_key);
