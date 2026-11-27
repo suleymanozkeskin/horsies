@@ -3370,11 +3370,11 @@ async fn a_body_over_the_bound_with_an_unknown_key_is_413_on_every_action_route(
 async fn route_access_follows_the_actions_switch() {
     let path = format!("/api/workflows/{}/resume", Uuid::nil());
     assert_eq!(
-        super::handler::route_access(true, &Method::POST, &path),
+        super::handler::route_access(Actions::Enabled, &Method::POST, &path),
         granted_handler(Actions::Enabled).route_access(&Method::POST, &path)
     );
     assert_eq!(
-        super::handler::route_access(false, &Method::POST, &path).need,
+        super::handler::route_access(Actions::Disabled, &Method::POST, &path).need,
         AccessNeed::View
     );
 }

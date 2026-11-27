@@ -1588,7 +1588,7 @@ async fn the_stored_allow_failed_deps_column_reads_as_allow_failed_dependencies(
         detail
             .nodes
             .iter()
-            .map(|node| (node.task_index, node.allow_failed_dependencies))
+            .map(|node| (node.node_index, node.allow_failed_dependencies))
             .collect::<Vec<_>>(),
         vec![(0, false), (1, true)]
     );

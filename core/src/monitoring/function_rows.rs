@@ -1855,18 +1855,22 @@ mod tests {
         let started = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("valid time");
         let completed = started + chrono::Duration::seconds(30);
 
-        assert!(node_exec_s("RUNNING", Some(started), None)
+        assert!(node_execution_seconds("RUNNING", Some(started), None)
             .is_some_and(|running| running > TimeDelta::seconds(30)));
         for status in ["COMPLETED", "FAILED", "SKIPPED", "CANCELLED"] {
             assert_eq!(
-                node_exec_s(status, Some(started), Some(completed)),
+                node_execution_seconds(status, Some(started), Some(completed)),
                 Some(TimeDelta::seconds(30)),
                 "{status}"
             );
-            assert_eq!(node_exec_s(status, Some(started), None), None, "{status}");
+            assert_eq!(
+                node_execution_seconds(status, Some(started), None),
+                None,
+                "{status}"
+            );
         }
         assert_eq!(
-            node_exec_s("ENQUEUED", Some(started), Some(completed)),
+            node_execution_seconds("ENQUEUED", Some(started), Some(completed)),
             None
         );
     }
