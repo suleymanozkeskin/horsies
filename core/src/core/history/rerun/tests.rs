@@ -1065,7 +1065,7 @@ async fn a_stored_custom_retry_code_is_checked_against_the_calling_app() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
-    let stored_options = "{\"retry_policy\":{\"max_retries\":1,\"intervals\":[1],\
+    let stored_options = "{\"retry_policy\":{\"max_retries\":1,\"intervals_seconds\":[1],\
                           \"backoff_strategy\":\"fixed\",\"jitter\":true,\
                           \"retry_for\":[\"WORKER_CRASHED\",\"TRANSIENT\"]}}";
     store_inline_input(&pool, source, stored_options).await;

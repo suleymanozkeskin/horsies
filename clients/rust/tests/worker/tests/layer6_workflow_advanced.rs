@@ -58,7 +58,7 @@ fn add<T: 'static, I: 'static>(
 /// A step node `id` that returns `completed_<id>`.
 fn step(suite: &Suite, id: &str) -> TaskNode<String, workflow::step::Input> {
     suite
-        .function(workflow::step::handle)
+        .function(workflow::step::function)
         .node()
         .node_id(id)
         .set(workflow::step::fields::step(), id.to_owned())
@@ -72,7 +72,7 @@ fn slow_step(
     delay_ms: u64,
 ) -> TaskNode<String, workflow::slow_step::Input> {
     suite
-        .function(workflow::slow_step::handle)
+        .function(workflow::slow_step::function)
         .node()
         .node_id(id)
         .set(workflow::slow_step::fields::step(), id.to_owned())
@@ -83,7 +83,7 @@ fn slow_step(
 /// A node `id` that returns `value`.
 fn mark(suite: &Suite, id: &str, value: &str) -> TaskNode<String, workflow::mark::Input> {
     suite
-        .function(workflow::mark::handle)
+        .function(workflow::mark::function)
         .node()
         .node_id(id)
         .set(workflow::mark::fields::value(), value.to_owned())
@@ -93,7 +93,7 @@ fn mark(suite: &Suite, id: &str, value: &str) -> TaskNode<String, workflow::mark
 /// A node `id` that returns `value`.
 fn produce(suite: &Suite, id: &str, value: i64) -> TaskNode<i64, workflow::produce_int::Input> {
     suite
-        .function(workflow::produce_int::handle)
+        .function(workflow::produce_int::function)
         .node()
         .node_id(id)
         .set(workflow::produce_int::fields::value(), value)
@@ -102,7 +102,7 @@ fn produce(suite: &Suite, id: &str, value: i64) -> TaskNode<i64, workflow::produ
 
 /// A node `id` that fails with `DELIBERATE_FAILURE`.
 fn fail(suite: &Suite, id: &str) -> TaskNode<i64, ()> {
-    suite.function(workflow::fail::handle).node().node_id(id)
+    suite.function(workflow::fail::function).node().node_id(id)
 }
 
 /// A node `id` that fails with the code named `error_code`.
@@ -112,7 +112,7 @@ fn fail_with(
     error_code: &str,
 ) -> TaskNode<i64, workflow::fail_with::Input> {
     suite
-        .function(workflow::fail_with::handle)
+        .function(workflow::fail_with::function)
         .node()
         .node_id(id)
         .set(
@@ -130,7 +130,7 @@ fn retry_then_ok(
     succeed_on_attempt: u32,
 ) -> TaskNode<String, workflow::retry_then_ok::Input> {
     suite
-        .function(workflow::retry_then_ok::handle)
+        .function(workflow::retry_then_ok::function)
         .node()
         .node_id(id)
         .set(workflow::retry_then_ok::fields::token(), token.to_owned())
@@ -150,7 +150,7 @@ fn recovery_step(
     delay_ms: u64,
 ) -> TaskNode<String, recovery::recovery_wf_step::Input> {
     suite
-        .function(recovery::recovery_wf_step::handle)
+        .function(recovery::recovery_wf_step::function)
         .node()
         .node_id(id)
         .set(recovery::recovery_wf_step::fields::step(), id.to_owned())
@@ -332,7 +332,7 @@ async fn test_quorum_ctx_gating() {
     let _d = add(
         &mut spec,
         suite
-            .function(workflow::ctx_reader_str::handle)
+            .function(workflow::ctx_reader_str::function)
             .node()
             .node_id("d")
             .set(workflow::ctx_reader_str::fields::source(), "c".to_owned())

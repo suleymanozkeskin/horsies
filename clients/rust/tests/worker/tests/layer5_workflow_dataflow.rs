@@ -41,7 +41,7 @@ fn add<T: 'static, I: 'static>(
 /// A node `id` that returns `value`.
 fn produce(suite: &Suite, id: &str, value: i64) -> TaskNode<i64, workflow::produce_int::Input> {
     suite
-        .function(workflow::produce_int::handle)
+        .function(workflow::produce_int::function)
         .node()
         .node_id(id)
         .set(workflow::produce_int::fields::value(), value)
@@ -55,7 +55,7 @@ fn double(
     source: TypedNodeRef<i64>,
 ) -> TaskNode<i64, workflow::double::Input> {
     suite
-        .function(workflow::double::handle)
+        .function(workflow::double::function)
         .node()
         .node_id(id)
         .arg_from(workflow::double::fields::input_result(), source)
@@ -63,7 +63,7 @@ fn double(
 
 /// A node `id` that fails with `DELIBERATE_FAILURE`.
 fn fail(suite: &Suite, id: &str) -> TaskNode<i64, ()> {
-    suite.function(workflow::fail::handle).node().node_id(id)
+    suite.function(workflow::fail::function).node().node_id(id)
 }
 
 async fn start<T: DeserializeOwned + 'static>(
@@ -132,7 +132,7 @@ async fn test_args_from_multiple_dependencies() {
     let sum = add(
         &mut spec,
         suite
-            .function(workflow::sum_two::handle)
+            .function(workflow::sum_two::function)
             .node()
             .node_id("sum")
             .arg_from(workflow::sum_two::fields::first(), a)
@@ -188,7 +188,7 @@ async fn test_skipped_propagation() {
     let c = add(
         &mut spec,
         suite
-            .function(workflow::check_upstream_skipped::handle)
+            .function(workflow::check_upstream_skipped::function)
             .node()
             .node_id("c")
             .arg_from(workflow::check_upstream_skipped::fields::input_result(), b)
@@ -250,7 +250,7 @@ async fn test_dual_injection_same_node() {
     let reader = add(
         &mut spec,
         suite
-            .function(workflow::mixed_reader::handle)
+            .function(workflow::mixed_reader::function)
             .node()
             .node_id("reader")
             .arg_from(workflow::mixed_reader::fields::from_args(), a)
@@ -278,7 +278,7 @@ async fn test_workflow_ctx_single_dependency() {
     let reader = add(
         &mut spec,
         suite
-            .function(workflow::ctx_reader::handle)
+            .function(workflow::ctx_reader::function)
             .node()
             .node_id("reader")
             .set(workflow::ctx_reader::fields::source(), "a".to_owned())
@@ -303,7 +303,7 @@ async fn test_workflow_ctx_multiple_dependencies() {
     let sum = add(
         &mut spec,
         suite
-            .function(workflow::ctx_sum::handle)
+            .function(workflow::ctx_sum::function)
             .node()
             .node_id("sum")
             .set(workflow::ctx_sum::fields::first(), "a".to_owned())
@@ -329,7 +329,7 @@ async fn test_mixed_args_from_and_ctx() {
     let reader = add(
         &mut spec,
         suite
-            .function(workflow::mixed_reader::handle)
+            .function(workflow::mixed_reader::function)
             .node()
             .node_id("reader")
             .arg_from(workflow::mixed_reader::fields::from_args(), a)
@@ -356,7 +356,7 @@ async fn test_args_from_dict_serialization() {
     let a = add(
         &mut spec,
         suite
-            .function(workflow::produce_dict::handle)
+            .function(workflow::produce_dict::function)
             .node()
             .node_id("a")
             .set(workflow::produce_dict::fields::value(), "hello".to_owned())
@@ -365,7 +365,7 @@ async fn test_args_from_dict_serialization() {
     let b = add(
         &mut spec,
         suite
-            .function(workflow::receive_dict::handle)
+            .function(workflow::receive_dict::function)
             .node()
             .node_id("b")
             .arg_from(workflow::receive_dict::fields::input_result(), a),
@@ -392,7 +392,7 @@ async fn test_join_ctx_gating() {
     let reader = add(
         &mut spec,
         suite
-            .function(workflow::ctx_reader::handle)
+            .function(workflow::ctx_reader::function)
             .node()
             .node_id("reader")
             .set(workflow::ctx_reader::fields::source(), "b".to_owned())
@@ -430,7 +430,7 @@ async fn wrapped_input_args_from_deserializes_under_strict() {
     let sum = add(
         &mut spec,
         suite
-            .function(workflow::sum_two::handle)
+            .function(workflow::sum_two::function)
             .node()
             .node_id("sum")
             .arg_from(workflow::sum_two::fields::first(), a)
@@ -450,7 +450,7 @@ async fn wrapped_input_extra_kwarg_is_refused_at_build() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let mut spec = builder(&suite, "wrapped_extra_kwarg");
     let refused = match suite
-        .function(workflow::produce_int::handle)
+        .function(workflow::produce_int::function)
         .node()
         .node_id("a")
         .input_json(r#"{"value": 1, "extra": 2}"#)

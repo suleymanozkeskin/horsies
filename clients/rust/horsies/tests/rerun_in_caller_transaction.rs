@@ -365,7 +365,7 @@ fn codes_declaring(custom: &[&str]) -> RegisteredTaskCodes {
 async fn a_stored_custom_retry_code_is_checked_against_the_app() {
     let database = TestDatabase::create().await;
     let pool = pool_of(&database).await;
-    let options = "{\"retry_policy\":{\"max_retries\":3,\"intervals\":[1,1,1],\
+    let options = "{\"retry_policy\":{\"max_retries\":3,\"intervals_seconds\":[1,1,1],\
                    \"backoff_strategy\":\"fixed\",\"jitter\":true,\
                    \"retry_for\":[\"WORKER_CRASHED\",\"TRANSIENT\"]}}";
     let source = seed_failed_source_with_options(&pool, options).await;

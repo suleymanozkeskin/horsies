@@ -84,11 +84,11 @@ impl RerunPolicyArgument {
     #[new]
     #[pyo3(signature = (*, retention_class_key, retain_rerun_input, reservation_window_us))]
     fn new(
-        retention_class_key: String,
+        retention_class_key: &str,
         retain_rerun_input: bool,
         reservation_window_us: i64,
     ) -> PyResult<Self> {
-        let retention = EnqueueRetention::from_class_key(&retention_class_key)
+        let retention = EnqueueRetention::from_class_key(retention_class_key)
             .map_err(|refused| PyValueError::new_err(refused.to_string()))?;
         let policy = RerunEnqueuePolicy::new(
             retention,

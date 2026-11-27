@@ -32,7 +32,7 @@ async fn test_a_handler_receives_the_attempt_ended_event_of_a_task() {
     let suite = Suite::start(BIN, Instance::Handlers).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let handle = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send(basic::simple::Input { x: 21 })
         .await
         .expect("send e2e_simple");

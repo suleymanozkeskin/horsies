@@ -43,7 +43,7 @@ fn add<T: 'static, I: 'static>(
 /// A step node `id` that returns `completed_<id>`.
 fn step(suite: &Suite, id: &str) -> TaskNode<String, workflow::step::Input> {
     suite
-        .function(workflow::step::handle)
+        .function(workflow::step::function)
         .node()
         .node_id(id)
         .set(workflow::step::fields::step(), id.to_owned())
@@ -57,7 +57,7 @@ fn slow_step(
     delay_ms: u64,
 ) -> TaskNode<String, workflow::slow_step::Input> {
     suite
-        .function(workflow::slow_step::handle)
+        .function(workflow::slow_step::function)
         .node()
         .node_id(id)
         .set(workflow::slow_step::fields::step(), id.to_owned())
@@ -67,7 +67,7 @@ fn slow_step(
 
 /// A node `id` that fails with `DELIBERATE_FAILURE`.
 fn fail(suite: &Suite, id: &str) -> TaskNode<i64, ()> {
-    suite.function(workflow::fail::handle).node().node_id(id)
+    suite.function(workflow::fail::function).node().node_id(id)
 }
 
 async fn start<T: DeserializeOwned + 'static>(
