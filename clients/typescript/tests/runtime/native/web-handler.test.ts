@@ -156,6 +156,25 @@ describe("the monitoring handler with a built addon and a database", () => {
     assert.equal((await refused(request("/api/tasks"))).status, 403);
   });
 
+  test("a route refuses an unknown query parameter with 422 extra_forbidden and the parameter's name", async () => {
+    const response = await handler(request("/api/tasks?no_such_parameter=1"));
+    const body: unknown = await response.json();
+
+    assert.equal(response.status, 422);
+    assert.ok(body instanceof Object);
+    const issues: unknown = Reflect.get(body, "detail");
+    assert.ok(Array.isArray(issues));
+    const issue: unknown = issues[0];
+    assert.ok(issue instanceof Object);
+    assert.equal(Reflect.get(issue, "type"), "extra_forbidden");
+    assert.deepEqual(Reflect.get(issue, "loc"), ["query", "no_such_parameter"]);
+    assert.equal(Reflect.get(issue, "input"), "1");
+  });
+
+  test("a route accepts a known query parameter", async () => {
+    assert.equal((await handler(request("/api/tasks?limit=1"))).status, 200);
+  });
+
   test("a body of 1 MiB + 1 byte is 413", async () => {
     const response = await handler(
       request(`/api/tasks/${TASK_ID}/cancel`, {
@@ -265,6 +284,21 @@ describe("the refusals of the build and of the broker", () => {
     const detail = String(Reflect.get(body, "detail"));
     assert.match(detail, /^Task list query failed: /u);
     assert.ok(detail.includes(`could not open a connection: connecting to ${REFUSED_DATABASE_URL} failed`), detail);
+  });
+
+  // A refused caller gets the 403 before the broker builds: the answer shows nothing of the database.
+  test("a refused view answers 403 before a database error", async () => {
+    const refusing: MonitoringAuthorizationPolicy = { canView: () => false, canAct: () => false };
+
+    const refused = monitoringHandlerOf(testApp(probedHandle(manifestJson(REFUSED_DATABASE_URL, false))), {
+      authorizationPolicy: refusing,
+    });
+
+    const response = await refused(request("/api/tasks"));
+    const body: unknown = await response.json();
+
+    assert.equal(response.status, 403);
+    assert.deepEqual(body, { detail: "Not authorized." });
   });
 
   test("the core accepts a trace link template", () => {
