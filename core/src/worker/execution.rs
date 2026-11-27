@@ -178,19 +178,6 @@ const PHASE_RETRY_MAX_DELAY_S: f64 = 15.0;
 // Phase 1a: Build the task input from the one stored input value
 // ---------------------------------------------------------------------------
 
-/// Where the input build reads the custom codes that an upstream task declares.
-#[derive(Clone, Copy)]
-pub(crate) enum UpstreamCodes<'a> {
-    /// The build checks no upstream code: a check-time read of an input and a
-    /// vector read have no registry of the process that ran the upstream task.
-    NotChecked,
-    /// The build refuses an `args_from` result whose stored error holds a custom code that
-    /// the upstream task, found in this registry by its name, does not declare. An upstream
-    /// task that declares no code, a task that the registry does not hold, and a
-    /// sub-workflow node are not checked.
-    Registry(&'a TaskRegistry),
-}
-
 /// Build the task input bytes from one encoded input value.
 ///
 /// Shared by the child's run (`worker::executor::child_host`) and
@@ -220,13 +207,16 @@ pub(crate) enum UpstreamCodes<'a> {
 /// integer outside the `i64` and `u64` range reaches the task as stored, as
 /// Python's `loads_json` reads any integer (`core/codec/json_io.py:97`).
 ///
-/// With [`UpstreamCodes::Registry`], an `args_from` result whose stored error holds a custom code
-/// that its upstream task does not declare is `WORKER_SERIALIZATION_ERROR`
+/// `upstream` is the registry of the tasks that declare their custom codes: an `args_from`
+/// result whose stored error holds a custom code that its upstream task, found there by name,
+/// does not declare is `WORKER_SERIALIZATION_ERROR`. A task that declares no code, a task that
+/// the registry does not hold, and a sub-workflow node are not checked, so an empty registry
+/// checks nothing
 /// ([`refuse_undeclared_upstream_code`]).
 pub(crate) fn build_task_input(
     input: &str,
     accepts_workflow_context: bool,
-    upstream: UpstreamCodes<'_>,
+    upstream: &TaskRegistry,
 ) -> Result<Vec<u8>, TaskError> {
     check_json_text(input)
         .map_err(|e| serialization_error(format!("stored input refused: {e}")))?;
@@ -325,10 +315,7 @@ struct TaskMembers<'a> {
 /// Errors: `WORKER_SERIALIZATION_ERROR` for a malformed `args_from` entry
 /// ([`args_from_inner_text`]), and when serde_json does not read the members
 /// of a text that the strict read took. Pure.
-fn task_members<'a>(
-    input: &'a str,
-    upstream: UpstreamCodes<'_>,
-) -> Result<TaskMembers<'a>, TaskError> {
+fn task_members<'a>(input: &'a str, upstream: &TaskRegistry) -> Result<TaskMembers<'a>, TaskError> {
     let members = object_members(input)
         .map_err(|e| serialization_error(format!("stored input refused: {e}")))?;
     let mut read = TaskMembers {
@@ -388,17 +375,13 @@ fn refuse_undeclared_upstream_code(
     name: &str,
     entry: &RawValue,
     inner: &RawValue,
-    upstream: UpstreamCodes<'_>,
+    upstream: &TaskRegistry,
 ) -> Result<(), TaskError> {
-    let registry = match upstream {
-        UpstreamCodes::NotChecked => return Ok(()),
-        UpstreamCodes::Registry(registry) => registry,
-    };
     let source_name = match args_from_source(entry) {
         Some(ArgsFromSource::Task(source_name)) => source_name,
         Some(ArgsFromSource::SubWorkflow) | None => return Ok(()),
     };
-    let declared = match registry.get(&source_name) {
+    let declared = match upstream.get(&source_name) {
         Ok(task) => task.error_codes(),
         Err(_not_registered) => return Ok(()),
     };
@@ -407,7 +390,7 @@ fn refuse_undeclared_upstream_code(
     }
     let error = match read_task_result_text(inner.get()) {
         Ok(TaskResultText::Err(error)) => error,
-        Ok(TaskResultText::Ok(_value)) | Err(_unreadable) => return Ok(()),
+        Ok(TaskResultText::Ok(_)) | Err(_) => return Ok(()),
     };
     match error.error_code {
         TaskErrorCode::Custom(code) if !declared.contains(&code.as_str()) => {
@@ -417,7 +400,7 @@ fn refuse_undeclared_upstream_code(
                 code.as_str()
             )))
         }
-        TaskErrorCode::Custom(_declared_code) | TaskErrorCode::BuiltIn(_) => Ok(()),
+        TaskErrorCode::Custom(_) | TaskErrorCode::BuiltIn(_) => Ok(()),
     }
 }
 
@@ -1696,7 +1679,7 @@ mod result_wrap_tests {
 mod task_input_tests {
     use std::sync::Arc;
 
-    use super::{build_task_input, UpstreamCodes};
+    use super::build_task_input;
     use crate::core::task::fn_trait::{
         BlockingTaskFn, RawTaskResult, RegisteredTask, TaskMetadata,
     };
@@ -1705,8 +1688,7 @@ mod task_input_tests {
     use crate::core::TaskRegistry;
 
     fn task_input(input: &str) -> String {
-        let bytes =
-            build_task_input(input, false, UpstreamCodes::NotChecked).expect("task input built");
+        let bytes = build_task_input(input, false, &TaskRegistry::new()).expect("task input built");
         String::from_utf8(bytes).expect("task input is UTF-8")
     }
 
@@ -1732,7 +1714,7 @@ mod task_input_tests {
     #[test]
     fn input_text_that_breaks_the_strict_read_rule_is_refused() {
         for input in ["{", "NaN", r#"{"a":1,"a":2}"#] {
-            let err = build_task_input(input, false, UpstreamCodes::NotChecked).unwrap_err();
+            let err = build_task_input(input, false, &TaskRegistry::new()).unwrap_err();
             assert!(
                 err.message
                     .unwrap_or_default()
@@ -1749,7 +1731,7 @@ mod task_input_tests {
     }
 
     fn refusal(input: &str) -> String {
-        let err = build_task_input(input, false, UpstreamCodes::NotChecked).unwrap_err();
+        let err = build_task_input(input, false, &TaskRegistry::new()).unwrap_err();
         assert_eq!(err.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
         err.message.unwrap_or_default()
     }
@@ -1840,8 +1822,7 @@ mod task_input_tests {
 
     /// The task input of a task that takes the workflow context.
     fn task_input_with_context(input: &str) -> String {
-        let bytes =
-            build_task_input(input, true, UpstreamCodes::NotChecked).expect("task input built");
+        let bytes = build_task_input(input, true, &TaskRegistry::new()).expect("task input built");
         String::from_utf8(bytes).expect("task input is UTF-8")
     }
 
@@ -1909,7 +1890,7 @@ mod task_input_tests {
             format!(r#"{{"long":{long},"x":{{"__h_x":1}},"__h_workflow_meta__":{{}}}}"#),
             r#"{"__h_other__":1}"#.to_owned(),
         ] {
-            let error = build_task_input(&refused, false, UpstreamCodes::NotChecked).unwrap_err();
+            let error = build_task_input(&refused, false, &TaskRegistry::new()).unwrap_err();
             assert_eq!(
                 error.error_code.to_string(),
                 "WORKER_SERIALIZATION_ERROR",
@@ -1951,23 +1932,15 @@ mod task_input_tests {
     #[test]
     fn an_upstream_code_that_the_upstream_task_declares_reads() {
         let registry = registry_with(&["RATE_LIMITED"]);
-        let built = build_task_input(
-            &input_with_upstream_code("RATE_LIMITED"),
-            false,
-            UpstreamCodes::Registry(&registry),
-        );
+        let built = build_task_input(&input_with_upstream_code("RATE_LIMITED"), false, &registry);
         assert!(built.is_ok(), "{built:?}");
     }
 
     #[test]
     fn an_upstream_code_that_the_upstream_task_does_not_declare_is_worker_serialization_error() {
         let registry = registry_with(&["RATE_LIMITED"]);
-        let error = build_task_input(
-            &input_with_upstream_code("CARD_DECLINED"),
-            false,
-            UpstreamCodes::Registry(&registry),
-        )
-        .unwrap_err();
+        let error = build_task_input(&input_with_upstream_code("CARD_DECLINED"), false, &registry)
+            .unwrap_err();
         assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
         let message = error.message.unwrap_or_default();
         assert!(message.contains("CARD_DECLINED"), "{message}");
@@ -1977,11 +1950,7 @@ mod task_input_tests {
     #[test]
     fn an_upstream_task_without_declared_codes_reads_any_code() {
         let registry = registry_with(&[]);
-        let built = build_task_input(
-            &input_with_upstream_code("CARD_DECLINED"),
-            false,
-            UpstreamCodes::Registry(&registry),
-        );
+        let built = build_task_input(&input_with_upstream_code("CARD_DECLINED"), false, &registry);
         assert!(built.is_ok(), "{built:?}");
     }
 
