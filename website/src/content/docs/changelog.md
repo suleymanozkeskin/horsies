@@ -1169,6 +1169,10 @@ there is no migration contract between pre-1.0 versions.
   it for reads and for actions, as the TypeScript client does. Every value
   of a repeated header is checked. A value with all members present, such as
   `alice, bob`, is still allowed.
+- **The monitoring page escapes the custom stylesheet URL and the mount path.**
+  `custom_css_url` and the mount path are written into the `<link href>` and
+  `<base href>` attributes of the page with `&`, `"`, `'`, `<` and `>` escaped.
+  A value with a quote no longer ends the attribute.
 
 ## 0.8.1 — 2026-11-25
 
