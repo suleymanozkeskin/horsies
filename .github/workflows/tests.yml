@@ -1004,7 +1004,10 @@ jobs:
         working-directory: clients/typescript
         env:
           RUNTIME: ${{ matrix.runtime }}
-        run: bun tests/e2e/run.ts "$RUNTIME"
+        # No core file: on the Linux runner the kernel core handler holds each aborting child about 20 s.
+        run: |
+          ulimit -c 0
+          bun tests/e2e/run.ts "$RUNTIME"
 
   # The parity of the TypeScript client with the Python client
   # (crossclient/parity): the compare tests, then each scenario on the Python
