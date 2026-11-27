@@ -28,13 +28,19 @@ export const retrySuccess = defineTask({
   retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1, 1], jitter: false, retryFor: ["TRANSIENT"] },
 });
 
-/** Always `TRANSIENT`; three retries 1 s, 2 s and 4 s apart. */
+/** The base of the exponential policy of `exponential`: the delay of the first retry. */
+export const EXPONENTIAL_BASE_SECONDS = 1;
+
+/** The retries of the exponential policy of `exponential`. */
+export const EXPONENTIAL_MAX_RETRIES = 3;
+
+/** Always `TRANSIENT`; the retry delays are the base, twice the base and four times the base. */
 export const exponential = defineTask({
   name: "e2e_exponential",
   input: {},
   output: h.string(),
   errorCodes: RETRY_CODES,
-  retryPolicy: { kind: "exponential", baseSeconds: 1, maxRetries: 3, jitter: false, retryFor: ["TRANSIENT"] },
+  retryPolicy: { kind: "exponential", baseSeconds: EXPONENTIAL_BASE_SECONDS, maxRetries: EXPONENTIAL_MAX_RETRIES, jitter: false, retryFor: ["TRANSIENT"] },
 });
 
 /** Always `RETRYABLE_ERROR`; one retry. */

@@ -1114,17 +1114,20 @@ function readSample(
             .map(|named| named.name().to_owned())
             .collect();
 
-        assert_eq!(names.len(), 113);
+        assert_eq!(names.len(), 118);
         for expected in [
             "TaskAttemptInfo",
             "AttemptPhasesInfo",
             "PhasesNotCapturedInfo",
             "AttemptPlacementInfo",
             "TimingSegmentInfo",
-            "SnapshotProfileInfo",
+            "SnapshotProfile",
             "Execution",
-            "StreamCoverageInfo",
-            "SlotHealthKind",
+            "StreamCoverageState",
+            "SlotHealth",
+            "DownSlot",
+            "ErrorFacet",
+            "ExecutionClassReport",
             "TerminalNodeStatus",
         ] {
             assert!(names.iter().any(|name| name == expected), "{expected}");

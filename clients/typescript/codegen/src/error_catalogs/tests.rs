@@ -924,12 +924,12 @@ fn the_model_s_send_module_has_the_payload_record_and_its_converter() {
     assert!(text.contains(
         "\nexport interface TaskSendIdempotencyKeyConflict {\n  \
          readonly kind: \"idempotencyKeyConflict\";\n  \
-         readonly code: \"IDEMPOTENCY_KEY_CONFLICT\";\n  readonly retryable: true;\n  \
+         readonly code: \"IDEMPOTENCY_KEY_CONFLICT\";\n  readonly retryable: false;\n  \
          readonly taskId: string;\n"
     ));
     assert!(text.contains(
         "\n        kind: \"idempotencyKeyConflict\",\n        \
-                       code: \"IDEMPOTENCY_KEY_CONFLICT\",\n        retryable: true,\n"
+                       code: \"IDEMPOTENCY_KEY_CONFLICT\",\n        retryable: false,\n"
     ));
     assert!(text.contains(
         "\nexport function taskSendCoreErrorFromNative(raw: NativeTaskSendCoreError): \

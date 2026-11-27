@@ -35,6 +35,13 @@ void loadAddon();
 /** The longest wait for the outcome of a task that a running worker runs. */
 const RESULT_WAIT_MS = 15_000;
 
+const MILLISECONDS_PER_SECOND = 1_000;
+
+/** The delay before retry `retryNumber` (counted from 1) of the exponential policy of `retry.exponential`. */
+function exponentialDelayMs(retryNumber: number): number {
+  return retry.EXPONENTIAL_BASE_SECONDS * 2 ** (retryNumber - 1) * MILLISECONDS_PER_SECOND;
+}
+
 /** The result wait of a task that a cancel moved to history. */
 const CANCELLED_READ_MS = 1_000;
 
@@ -317,7 +324,7 @@ describe("layer 1: tasks", () => {
     const handle = await sentHandle("e2e_exponential", suite.app.send(retry.exponential, {}));
     const info = await pollUntilInfo(handle, 5_000, "a retry is scheduled", (read) => read.retryCount >= 1 && read.nextRetryAt.kind === "recorded");
 
-    assert.equal(info.maxRetries, 3);
+    assert.equal(info.maxRetries, retry.EXPONENTIAL_MAX_RETRIES);
   });
 
   e2eTest("exponential retries wait longer each time; sentAt does not change", "default", async (suite) => {
@@ -326,22 +333,28 @@ describe("layer 1: tasks", () => {
     const enqueued = [first.enqueuedAt];
 
     await suite.worker("isolated-1");
-    // The first interval would hold the boot of the worker, which the task waits for: the compared intervals are the
-    // waits between the three retries (1 s base: 2 s, then 4 s).
-    await pollUntilInfo(handle, 30_000, "the third retry", (info) => {
+    await pollUntilInfo(handle, 20_000, "the third retry", (info) => {
       if (info.retryCount === enqueued.length) {
         enqueued.push(info.enqueuedAt);
       }
 
       assert.deepEqual(info.sentAt, first.sentAt, "sentAt changed on a retry");
 
-      return enqueued.length > 3;
+      return enqueued.length > retry.EXPONENTIAL_MAX_RETRIES;
     });
 
+    // The interval from the send to the first retry holds the start of the worker, so it is not measured.
     const [, firstRetry, secondRetry, thirdRetry] = enqueued.map((instant) => instant.epochMilliseconds);
 
     assert.ok(firstRetry !== undefined && secondRetry !== undefined && thirdRetry !== undefined);
-    assert.ok(thirdRetry - secondRetry > secondRetry - firstRetry, `intervals ${String(secondRetry - firstRetry)} then ${String(thirdRetry - secondRetry)} ms`);
+    const secondDelay = secondRetry - firstRetry;
+    const thirdDelay = thirdRetry - secondRetry;
+    const policySecondDelayMs = exponentialDelayMs(2);
+    const policyThirdDelayMs = exponentialDelayMs(3);
+
+    assert.ok(secondDelay >= policySecondDelayMs, `the second delay is ${String(secondDelay)} ms, the policy gives ${String(policySecondDelayMs)} ms`);
+    assert.ok(thirdDelay >= policyThirdDelayMs, `the third delay is ${String(thirdDelay)} ms, the policy gives ${String(policyThirdDelayMs)} ms`);
+    assert.ok(thirdDelay > secondDelay, `delays ${String(secondDelay)} then ${String(thirdDelay)} ms`);
   });
 
   e2eTest("a code that the policy names is retried", "default", async (suite) => {
