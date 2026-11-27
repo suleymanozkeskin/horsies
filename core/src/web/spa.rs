@@ -109,6 +109,23 @@ pub(crate) fn base_href(base_path: &str) -> String {
     }
 }
 
+/// The text with `&`, `"`, `'`, `<` and `>` replaced by character references,
+/// safe inside a double-quoted or single-quoted HTML attribute. Pure.
+pub(crate) fn escape_html_attribute(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
 pub(crate) fn inject(index_html: &str, base_path: &str, custom_css_url: Option<&str>) -> String {
     let base_path = normalize_base_path(base_path);
     let api_base = if base_path == "/" {
@@ -119,10 +136,13 @@ pub(crate) fn inject(index_html: &str, base_path: &str, custom_css_url: Option<&
     let runtime = runtime_config_json(&base_path, &api_base);
     let mut block = format!(
         "<base href=\"{}\"><script>window.__HORSIES_UI__ = {runtime}</script>",
-        base_href(&base_path),
+        escape_html_attribute(&base_href(&base_path)),
     );
     if let Some(url) = custom_css_url {
-        block.push_str(&format!("<link rel=\"stylesheet\" href=\"{url}\">"));
+        block.push_str(&format!(
+            "<link rel=\"stylesheet\" href=\"{}\">",
+            escape_html_attribute(url),
+        ));
     }
 
     if let Some(position) = head_close_position(index_html) {
@@ -179,4 +199,44 @@ pub(crate) fn safe_asset_path(request_path: &str) -> Option<String> {
         return None;
     }
     Some(decoded.into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inject;
+
+    const EMPTY_PAGE: &str = "<html><head></head><body></body></html>";
+
+    #[test]
+    fn custom_css_url_is_escaped_in_the_link_attribute() {
+        let page = inject(
+            EMPTY_PAGE,
+            "/",
+            Some("/x.css\"><script>alert(1)</script>&a='b"),
+        );
+        assert!(page.contains(
+            "<link rel=\"stylesheet\" href=\"/x.css&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;&amp;a=&#39;b\">"
+        ));
+        assert!(!page.contains("<script>alert(1)"));
+    }
+
+    #[test]
+    fn mount_path_is_escaped_in_the_base_attribute() {
+        let page = inject(EMPTY_PAGE, "/a\"b>c", None);
+        assert!(page.contains("<base href=\"/a&quot;b&gt;c/\">"));
+        assert!(!page.contains("<base href=\"/a\""));
+    }
+
+    #[test]
+    fn normal_url_and_mount_path_are_unchanged() {
+        let page = inject(
+            EMPTY_PAGE,
+            "/horsies/ui",
+            Some("https://cdn.example.com/a-b.css?v=1"),
+        );
+        assert!(page.contains("<base href=\"/horsies/ui/\">"));
+        assert!(
+            page.contains("<link rel=\"stylesheet\" href=\"https://cdn.example.com/a-b.css?v=1\">")
+        );
+    }
 }
