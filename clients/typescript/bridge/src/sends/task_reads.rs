@@ -640,7 +640,7 @@ pub fn process_role() -> Envelope<ProcessRoleName> {
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::BrokerCheckCause;
+    use horsies_core::{BrokerCheckCause, ResultSlot};
 
     use super::*;
     use crate::sends::task_options::ExecutionName;
@@ -793,7 +793,7 @@ mod tests {
             worker_process_name: None,
             error_code: Some("CARD_DECLINED".to_owned()),
             failed_reason: None,
-            result: None,
+            result: ResultSlot::NotRequested,
             attempts: Some(vec![TaskAttemptInfo {
                 task_id: task(),
                 attempt: 1,
