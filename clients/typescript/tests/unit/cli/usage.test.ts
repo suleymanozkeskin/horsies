@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { LOG_LEVELS, parseFlags, parseLogLevel, switchFlag, textFlag, usageErrorLines } from "../../../horsies/src/cli/usage.ts";
-import { parseToolFlags } from "../../../horsies/src/tools/command-line.ts";
 
 const FLAGS = { profile: { type: "string" }, live: { type: "boolean" } } as const;
 
@@ -56,11 +55,20 @@ describe("the flag parse", () => {
     ]);
   });
 
-  test("cli.run and the horsies tool give the same result for the same arguments", () => {
-    const given = [["--profile", "a", "--live"], [], ["--unknown"], ["--profile"], ["--live=yes"], ["extra"]];
+  test("a valid parse gives the values of the flags", () => {
+    assert.deepEqual(parseFlags(["--profile", "a", "--live"], FLAGS), { ok: true, value: { profile: "a", live: true } });
+  });
 
-    for (const args of given) {
-      assert.deepEqual(parseFlags(args, FLAGS), parseToolFlags(args, FLAGS), args.join(" "));
+  test("each refusal is a usage error with the message of the rule", () => {
+    const refusals: readonly (readonly [readonly string[], string])[] = [
+      [["--unknown"], "Unknown option '--unknown'"],
+      [["--profile"], "Option '--profile <value>' argument missing"],
+      [["--live=yes"], "Option '--live' does not take an argument"],
+      [["extra"], "Unexpected argument 'extra'. This command does not take positional arguments"],
+    ];
+
+    for (const [args, message] of refusals) {
+      assert.deepEqual(parseFlags(args, FLAGS), { ok: false, error: { kind: "usageError", message } }, args.join(" "));
     }
   });
 });
