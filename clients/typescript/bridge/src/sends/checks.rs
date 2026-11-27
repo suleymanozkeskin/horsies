@@ -206,7 +206,15 @@ impl CoverageCheck {
 /// Order of the refusals: the rules of `AppConfig::validate` in its order,
 /// then the manifest bounds of the broker settings, then the coverage
 /// bounds of the retention.
-fn app_config_check(config: AppConfig, schema: SchemaMode) -> AppConfigCheck {
+fn app_config_check(mut config: AppConfig, schema: SchemaMode) -> AppConfigCheck {
+    // The producer manifest writes `postgres://` as `postgresql://`, and the worker start validates the settings
+    // from the manifest. Both URLs are compared in that form, so the same refusals hold at create and at start.
+    config.database.database_url = core_scheme_url(&config.database.database_url);
+
+    if let CoreSessionDatabase::Separate { url } = &mut config.database.session_database {
+        *url = core_scheme_url(url);
+    }
+
     let errors = config.validate();
     let mut refusals: Vec<CoreRefusal> = errors.iter().map(CoreRefusal::of_config_error).collect();
     let manifest = producer_manifest(&config.database, schema);
@@ -344,14 +352,19 @@ fn database_setting_refused(field: &str, cause: &str) -> CoreRefusal {
     )
 }
 
+/// The text of `url` with the scheme that the core reads. Pure.
+fn core_scheme_url(url: &str) -> String {
+    match url.strip_prefix(SHORT_URL_SCHEME) {
+        Some(rest) => format!("{CORE_URL_SCHEME}{rest}"),
+        None => url.to_owned(),
+    }
+}
+
 /// `url` with the scheme that the core reads: `postgres://` becomes
 /// `postgresql://`, the rest is kept (Python `core_database_url`).
 /// `PostgresConfig::validate` admits only these two schemes. Pure.
 fn core_database_url(url: &str) -> DatabaseUrl {
-    let text = match url.strip_prefix(SHORT_URL_SCHEME) {
-        Some(rest) => format!("{CORE_URL_SCHEME}{rest}"),
-        None => url.to_owned(),
-    };
+    let text = core_scheme_url(url);
     // A `DatabaseUrl` is built only from its serde form, one JSON string, so
     // that no code path holds an unchecked URL type. A string always reads.
     serde_json::from_value(serde_json::Value::String(text))
@@ -459,6 +472,47 @@ mod tests {
         let text = format!(r#"{{"database": {BROKER}, "queue_mode": "custom"}}"#);
         let refusals = refusals_of(check_of(&text));
         assert_eq!(refusals[0].code, "HRS-200");
+    }
+
+    #[test]
+    fn a_session_url_equal_to_the_main_url_after_the_scheme_rewrite_is_refused_at_the_check() {
+        for (database, session) in [
+            (
+                "postgres://127.0.0.1:6432/horsies",
+                "postgresql://127.0.0.1:6432/horsies",
+            ),
+            (
+                "postgresql://127.0.0.1:6432/horsies",
+                "postgres://127.0.0.1:6432/horsies",
+            ),
+            (
+                "postgres://127.0.0.1:6432/horsies",
+                "postgres://127.0.0.1:6432/horsies",
+            ),
+            (
+                "postgresql://127.0.0.1:6432/horsies",
+                "postgresql://127.0.0.1:6432/horsies",
+            ),
+        ] {
+            let text = format!(
+                r#"{{"database": {{"database_url": "{database}", "session_database": {{"kind": "SEPARATE", "url": "{session}"}}, "pgbouncer_transaction_mode": true}}}}"#
+            );
+            let refusals = refusals_of(check_of(&text));
+            assert_eq!(refusals.len(), 1, "{database} {session}: {refusals:?}");
+            assert!(
+                refusals[0]
+                    .message
+                    .contains("must not use the transaction-pool URL"),
+                "{:?}",
+                refusals[0]
+            );
+        }
+    }
+
+    #[test]
+    fn two_urls_of_different_hosts_are_accepted_in_transaction_mode() {
+        let text = r#"{"database": {"database_url": "postgres://127.0.0.1:6432/horsies", "session_database": {"kind": "SEPARATE", "url": "postgresql://127.0.0.1:5432/horsies"}, "pgbouncer_transaction_mode": true}}"#;
+        assert!(matches!(check_of(text), AppConfigCheck::Accepted { .. }));
     }
 
     #[test]

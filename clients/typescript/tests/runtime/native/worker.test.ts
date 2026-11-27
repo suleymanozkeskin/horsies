@@ -74,8 +74,8 @@ describe("the worker area of the addon", () => {
     // The config check runs the broker check of the plan's connection step, so it refuses this text first.
     assert.throws(() => prepareWorker(pooled, startText({ kind: "NAMED", name: "io" }), "CAPPED"), ClientDefect);
 
-    // The config check compares the URL texts as written; the manifest writes `postgres://` as `postgresql://`, so
-    // the plan's connection step sees one URL twice.
+    // The config check compares the URLs as the manifest writes them (`postgres://` as `postgresql://`), so it
+    // refuses one URL named twice before the plan's connection step.
     const sameSession = JSON.stringify({
       database: {
         database_url: "postgres://127.0.0.1:6432/horsies",
@@ -85,10 +85,7 @@ describe("the worker area of the addon", () => {
       worker_profiles: { io: { isolated: { kind: "isolated_children", count: 1 } } },
     });
 
-    assert.equal(
-      prepareWorker(sameSession, startText({ kind: "NAMED", name: "io" }), "CAPPED").kind,
-      "connectionSettingsRefused",
-    );
+    assert.throws(() => prepareWorker(sameSession, startText({ kind: "NAMED", name: "io" }), "CAPPED"), ClientDefect);
 
     const capped = JSON.stringify({
       database: { database_url: "postgresql://127.0.0.1:55432/horsies" },

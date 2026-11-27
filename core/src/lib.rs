@@ -205,6 +205,15 @@ pub use crate::worker::runner_beats::RUNNER_HEARTBEAT_LOST_EXIT_CODE;
 // The bounds of a task's `timeout_ms`: the check of a declared task
 // (`core::task::declared_options`) and a client's text of its refusal.
 pub use crate::worker::retry::{MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS};
+// The default route of a task, the idempotency key bound and the schedule
+// defaults: each is read by the clients from here (Python through the
+// generated `_catalog`).
+pub use crate::core::config::queue::{DEFAULT_QUEUE_NAME, DEFAULT_QUEUE_PRIORITY};
+pub use crate::core::config::schedule::{
+    DEFAULT_MAX_CATCH_UP_RUNS, DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, DEFAULT_SCHEDULE_ENABLED,
+    DEFAULT_SCHEDULE_TIMEZONE,
+};
+pub use crate::core::history::identity::keys::IDEMPOTENCY_KEY_MAX_BYTES;
 // The worker connection check of a client's live check (`check --live`):
 // on a connected broker (the Rust client), and on a lazy handle (the Python
 // bridge).

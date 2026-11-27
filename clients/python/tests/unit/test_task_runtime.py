@@ -335,7 +335,7 @@ class TestForTest:
         runtime = TaskRuntime.for_test(task_id=TASK_ID)
 
         with pytest.raises(AttributeError):
-            setattr(runtime, 'fencing_token', FencingToken(task_id=TASK_ID, value=2))
+            setattr(runtime, 'task_id', uuid.uuid4())
         with pytest.raises(AttributeError):
             setattr(runtime.fencing_token, 'value', 2)
         with pytest.raises(AttributeError):

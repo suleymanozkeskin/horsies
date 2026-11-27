@@ -49,6 +49,17 @@ there is no migration contract between pre-1.0 versions.
   Python `WorkflowContextMissingId` carries that `code`. The core's
   `WorkflowContext::result_for`, `summary_for` and `output_for` give
   `NODE_NOT_IN_CONTEXT` for an id that is not in the context.
+- **Core: public constants for the client checks.**
+  `horsies_core` exports the idempotency key bound
+  (`IDEMPOTENCY_KEY_MAX_BYTES`, 255 UTF-8 bytes), the route of
+  `QueueMode::Default` (`DEFAULT_QUEUE_NAME`, `"default"`, and
+  `DEFAULT_QUEUE_PRIORITY`, 100), the defaults of a task schedule
+  (`DEFAULT_SCHEDULE_ENABLED`, `DEFAULT_SCHEDULE_TIMEZONE`,
+  `DEFAULT_MAX_CATCH_UP_RUNS`) and the bounds of `timeout_ms`
+  (`MIN_TASK_TIMEOUT_MS`, `MAX_TASK_TIMEOUT_MS`). The Python package reads them
+  from the generated `_catalog` modules `task_bounds`, `queue_defaults` and
+  `schedule_defaults`; the Rust client reads the queue route from the core.
+  No value changes.
 - **Codegen model: the schema of the schedule pattern.**
   `horsies_core::manifest_schema::SCHEDULE_PATTERN` lists the types of the
   `pattern_json` text of the scheduler manifest, in render order: `Weekday`,

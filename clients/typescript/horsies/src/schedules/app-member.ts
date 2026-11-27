@@ -13,6 +13,7 @@ import { DEFAULT_QUEUE_ROUTE } from "../app/contract-list.ts";
 import type { AppContext } from "../app/context.ts";
 import { taskOptionsFacts } from "../app/core-checks.ts";
 import type { HorsiesError } from "../app/refusal.ts";
+import { DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, DEFAULT_SCHEDULE_ENABLED } from "../_catalog/schedule_defaults.ts";
 import { CHECK_INTERVAL_SECONDS_MAX, CHECK_INTERVAL_SECONDS_MIN } from "../_catalog/scheduler_manifest.ts";
 import type { QueueSetup } from "../config/queues.ts";
 import { raiseDefect } from "../native/call/defect.ts";
@@ -35,7 +36,7 @@ import { ClientDefect } from "../thrown-errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { boundedCount, checkSchedule, type CoreRules, type NameUse, scheduleRefusal } from "./checks.ts";
-import { DEFAULT_CHECK_INTERVAL_SECONDS, type DeclaredEntry, type ScheduleSection } from "./entry.ts";
+import { type DeclaredEntry, type ScheduleSection } from "./entry.ts";
 import { type SectionSettings, schedulerManifestText } from "./manifest.ts";
 
 /** The core calls of a declaration on a main thread. The addon gives them; a test gives fakes. Each is pure. */
@@ -257,8 +258,8 @@ function nameUse(entries: readonly DeclaredEntry[], name: string, index: number)
 
 function defaultSettings(section: ScheduleSection): SectionSettings {
   return Object.freeze({
-    enabled: section.enabled !== false,
-    checkIntervalSeconds: section.checkIntervalSeconds ?? DEFAULT_CHECK_INTERVAL_SECONDS,
+    enabled: section.enabled ?? DEFAULT_SCHEDULE_ENABLED,
+    checkIntervalSeconds: section.checkIntervalSeconds ?? DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS,
   });
 }
 
