@@ -49,6 +49,20 @@ there is no migration contract between pre-1.0 versions.
   Python `WorkflowContextMissingId` carries that `code`. The core's
   `WorkflowContext::result_for`, `summary_for` and `output_for` give
   `NODE_NOT_IN_CONTEXT` for an id that is not in the context.
+- **Child host: the stop of a host core ends the child.** `ChildApp` has
+  the new field `host_core: HostCoreWatch`: `NoHostCore` (a Rust binary), or
+  `Host` with a read that gives `HostCoreState::Running` or
+  `Stopped(HostCoreStop { subject, cause })`. A task child reads it before
+  each start write and before each finalizing marker. A stopped host core
+  refuses the start (`OWNERSHIP_UNCONFIRMED`, no attempt charged), or keeps
+  the result of the body and writes no marker; the frame says
+  `child: ends_itself`, and the child exits with the new
+  `ChildHostExit::CoreStopped` (code 80). A shared child ends after the first
+  such frame. A TypeScript task child gives the state of its bridge core: a
+  panic in a core background task of the child stops its core and no longer
+  aborts the child, which ends with code 80 at the next start, after a body
+  that returned, or at a core call that the stopped core refuses during a
+  body.
 - **Codegen model: the schema of the schedule pattern.**
   `horsies_core::manifest_schema::SCHEDULE_PATTERN` lists the types of the
   `pattern_json` text of the scheduler manifest, in render order: `Weekday`,

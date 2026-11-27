@@ -64,6 +64,7 @@ fn context_on(broker: PostgresBroker) -> (HostContext, UnixStream) {
             handler_child: super::HandlerChildApp::without_handlers(),
             event_loop: super::EventLoopWatch::RuntimeOnly,
             exit: ProcessExit::Standard,
+            host_core: super::HostCoreWatch::NoHostCore,
         }),
         pid: PID,
         writer,

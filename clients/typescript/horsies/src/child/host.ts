@@ -4,7 +4,11 @@
 // Steps:
 // 1. The core reads the arguments. Bad arguments print the cause and end the process with 73.
 // 2. The panic rule of a worker process: a defect goes to stderr, then to the log sink, then the process aborts. The
-//    stderr lines of the core log records take the app's `logFormat`.
+//    stderr lines of the core log records take the app's `logFormat`. In a task child the first read of the core by
+//    the child host moves the rule to the task child rule of the addon: a panic in a core background task stops the
+//    core and does not abort the child; the child ends itself with exit code 80 at the next task start (no attempt
+//    is charged), after a body that returned (its result is kept), or at a core call that the stopped core refuses.
+//    A defect still aborts. The handler child keeps the abort.
 // 3. The process events: no-op `SIGINT` and `SIGTERM`; the detached throws and rejections (`process-events.ts`).
 // 4. The plan: each implementation by its task name and body form; the start hooks (the child's own, the providers,
 //    the `onChildStart` hooks); the producer manifest of the app; the host name; the body facts; the flush bound. The
@@ -15,7 +19,8 @@
 //    boots the seat isolates, and each post goes to the seat pool (`src/seats/router.ts`): the main thread runs no
 //    body and sets no run mark, and its turns keep the core's main-thread watch fed.
 // 6. The exit rule: the flush of the body observer and, in a `SHARED_THREAD` child, of each seat isolate (the router
-//    asks the pool), at most its bound, then the end of the process with the host's code. The child never waits for
+//    asks the pool), at most its bound, then the end of the process with the host's code (80, `CORE_STOPPED`, for a
+//    child whose core stopped). The child never waits for
 //    its event loop to empty.
 
 import { hostname } from "node:os";
@@ -247,6 +252,7 @@ async function servedChild(
   deps: ChildModeDeps,
   ending: ChildEnding,
 ): Promise<ChildModeEnd> {
+  // The task child rule replaces it at the first read of the core by the child host (step 2).
   deps.native.setPanicRule("ABORT_PROCESS");
   deps.native.applyLogFormat(context.config.logFormat);
   installProcessEvents({

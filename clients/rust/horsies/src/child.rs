@@ -104,6 +104,8 @@ impl Horsies {
             // The child's exits run the exit handlers of the process, as
             // before.
             exit: ProcessExit::Standard,
+            // A Rust binary has no core next to the child host.
+            host_core: horsies_core::HostCoreWatch::NoHostCore,
         };
         ExitCode::from(exit_byte(run_child_host(app, args).exit_code()))
     }
@@ -249,6 +251,7 @@ mod tests {
             ChildHostExit::BootFailed,
             ChildHostExit::ProtocolMismatch,
             ChildHostExit::ChildHookFailed,
+            ChildHostExit::CoreStopped,
         ] {
             assert_eq!(i32::from(exit_byte(exit.exit_code())), exit.exit_code());
         }

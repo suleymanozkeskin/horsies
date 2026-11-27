@@ -16,13 +16,16 @@ use super::body_scope::BodyScope;
 use super::event_loop::{EventLoopWatch, HostLoopWatched};
 use super::handler_host::boot_and_serve_handlers;
 use super::handlers::HandlerChildApp;
+use super::host_core::HostCoreWatch;
 use super::link::{read_frame, start_control_thread, write_frame, FrameWriter, ReadEnd};
 use super::panic::{install_panic_hook, CatchPanic};
 use super::producer::{publish_child_producer, task_send_manifest, task_send_pool_of};
 use super::role::mark_process_runs_task_bodies;
 use super::rss::read_rss;
 use super::run::HostContext;
-use super::seats::{serve_isolated, serve_shared_async, serve_shared_thread, PollWatch, ServeEnd};
+use super::seats::{
+    serve_isolated, serve_shared_async, serve_shared_thread, PollWatch, TaskServeEnd,
+};
 use crate::broker::client_family::ClientFamily;
 use crate::broker::PostgresBroker;
 use crate::core::config::{PostgresConfig, SessionDatabase};
@@ -97,6 +100,10 @@ pub struct ChildApp {
     /// end of the parent and at a bad parent frame. A Rust binary gives
     /// [`ProcessExit::Standard`].
     pub exit: ProcessExit,
+    /// The host core whose stop ends a task child: none, or the host's read
+    /// of its core ([`HostCoreWatch`]). A Rust binary gives
+    /// [`HostCoreWatch::NoHostCore`]. A handler child does not read it.
+    pub host_core: HostCoreWatch,
 }
 
 /// What a child does with the log level of its init frame (the worker's
@@ -185,6 +192,9 @@ pub enum ChildHostExit {
     ProtocolMismatch,
     /// The start hook failed, panicked or ran past its bound: exit 173.
     ChildHookFailed,
+    /// A run met the stopped host core ([`HostCoreWatch`]); its frame is
+    /// written: exit 80.
+    CoreStopped,
 }
 
 impl ChildHostExit {
@@ -198,6 +208,7 @@ impl ChildHostExit {
             Self::BootFailed => ChildExitCode::BootFailed.code(),
             Self::ProtocolMismatch => ChildExitCode::ProtocolMismatch.code(),
             Self::ChildHookFailed => ChildExitCode::ChildHookFailed.code(),
+            Self::CoreStopped => ChildExitCode::CoreStopped.code(),
         }
     }
 }
@@ -819,9 +830,10 @@ fn boot_and_serve_tasks(
     // The process runtime is never shut down: the binary exits with the
     // code, so work that still runs (a stuck body) does not hold the exit.
     match end {
-        ServeEnd::Stopped => ChildHostExit::Stopped,
-        ServeEnd::BadParentFrame => ChildHostExit::BadParentFrame,
-        ServeEnd::ParentGone => ChildHostExit::ParentGone,
+        TaskServeEnd::Stopped => ChildHostExit::Stopped,
+        TaskServeEnd::BadParentFrame => ChildHostExit::BadParentFrame,
+        TaskServeEnd::ParentGone => ChildHostExit::ParentGone,
+        TaskServeEnd::CoreStopped => ChildHostExit::CoreStopped,
     }
 }
 
