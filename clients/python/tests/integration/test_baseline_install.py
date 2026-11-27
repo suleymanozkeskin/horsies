@@ -286,7 +286,7 @@ async def test_a_fresh_install_covers_a_cancel_and_an_expiry_with_no_worker(
     move to history) and a pending expiry (the batch move) find the leaf of
     the default class for the current UTC day. Without the pass, the cancel
     failed with 23514: no partition for the row."""
-    app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(database_url))))
+    app = Horsies(AppConfig(database=PostgresConfig(database_url=SecretStr(database_url))))
     broker = app.get_broker()
     try:
         assert await broker.ensure_schema_initialized() == Ok(None)
@@ -342,7 +342,7 @@ async def test_the_install_covers_the_declared_periods_of_the_retention_config(
     class of that period finds its leaf."""
     app = Horsies(
         AppConfig(
-            broker=PostgresConfig(database_url=SecretStr(database_url)),
+            database=PostgresConfig(database_url=SecretStr(database_url)),
             retention=RetentionConfig(retention_periods=(timedelta(days=7),)),
         ),
     )

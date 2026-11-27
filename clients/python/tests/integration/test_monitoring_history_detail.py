@@ -46,7 +46,7 @@ class TestTaskDetailFromHistory:
         self, make_database: MakeDatabase
     ) -> None:
         url = await make_database()
-        app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(url))))
+        app = Horsies(AppConfig(database=PostgresConfig(database_url=SecretStr(url))))
         broker = app.get_broker()
         try:
             await broker.ensure_schema_initialized()
@@ -79,7 +79,7 @@ class TestTaskDetailFromHistory:
         self, make_database: MakeDatabase
     ) -> None:
         url = await make_database()
-        app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(url))))
+        app = Horsies(AppConfig(database=PostgresConfig(database_url=SecretStr(url))))
         broker = app.get_broker()
         try:
             await broker.ensure_schema_initialized()

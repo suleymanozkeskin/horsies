@@ -93,7 +93,7 @@ async def unreachable_app() -> AsyncGenerator[Horsies, None]:
         ),
         schema_mode=SchemaMode.ASSUME_INITIALIZED,
     )
-    app = Horsies(AppConfig(broker=broken.config))
+    app = Horsies(AppConfig(database=broken.config))
     app._broker = broken  # pyright: ignore[reportPrivateUsage]
     yield app
     await broken.close_async()

@@ -586,8 +586,8 @@ class TestCachedSpecRejection:
         cached: list[WorkflowSpec[Any]] = []
 
         class _MockApp:
-            def workflow(self, name: str, tasks: list[Any], **kwargs: Any) -> WorkflowSpec[Any]:
-                return WorkflowSpec(name=name, nodes=tasks, **kwargs)
+            def workflow(self, name: str, nodes: list[Any], **kwargs: Any) -> WorkflowSpec[Any]:
+                return WorkflowSpec(name=name, nodes=nodes, **kwargs)
             def get_broker(self) -> None:
                 return None
 

@@ -445,17 +445,17 @@ class _MockApp:
     def workflow(
         self,
         name: str,
-        tasks: list[Any],
+        nodes: list[Any],
         **kwargs: Any,
     ) -> WorkflowSpec[Any]:
         # Simulate the enrichment app.workflow() does (app.py:939,943)
-        for node in tasks:
+        for node in nodes:
             if isinstance(node, TaskNode):
                 if node.queue is None:
                     node.queue = 'default'
                 if node.priority is None:
                     node.priority = 5
-        return WorkflowSpec(name=name, nodes=tasks, **kwargs)
+        return WorkflowSpec(name=name, nodes=nodes, **kwargs)
 
     def get_broker(self) -> None:
         return None

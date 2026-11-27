@@ -3144,7 +3144,7 @@ def proxy(db_url: str) -> Generator[RoundTripProxy]:
 def _app_on(broker: PostgresBroker) -> Horsies:
     """An app whose broker is ``broker``, as the ``app`` fixture builds one:
     the monitoring reads take the app."""
-    app = Horsies(AppConfig(broker=broker.config))
+    app = Horsies(AppConfig(database=broker.config))
     app._broker = broker  # pyright: ignore[reportPrivateUsage]
     return app
 

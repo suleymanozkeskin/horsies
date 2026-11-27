@@ -2057,7 +2057,7 @@ class Horsies:
             return Err(WorkflowHandleInvalidWorkflowId(
                 message=f'workflow id {workflow_id!r} is not a UUID: {exc}',
                 workflow_id_text=workflow_id,
-                exception=exc,
+                cause=exc,
             ))
         handle: WorkflowHandle[Any] = WorkflowHandle(
             workflow_id=workflow_key, broker=self.get_broker(),

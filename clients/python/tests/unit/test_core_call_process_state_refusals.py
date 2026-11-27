@@ -127,7 +127,7 @@ def broker() -> Iterator[PostgresBroker]:
 def _app_of(broker: PostgresBroker) -> Horsies:
     """An app whose broker is ``broker``: the monitoring reads and the
     cancel take the app."""
-    app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(_URL))))
+    app = Horsies(AppConfig(database=PostgresConfig(database_url=SecretStr(_URL))))
     app._broker = broker  # pyright: ignore[reportPrivateUsage]
     return app
 
