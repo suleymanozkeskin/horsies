@@ -11,7 +11,9 @@
 //!   the bridge logger, when the bridge logger's threshold lets it through.
 //! - A panic in the forwarder is a panic in a core background task: the
 //!   process panic rule applies. The batch and the records still in the
-//!   channel go to stderr first.
+//!   channel go to stderr first. A build with the cargo feature
+//!   `test-probes` reads the probe of `forwarder_probe` before each batch, so
+//!   a test can cause such a panic.
 //! - It ends only when the channel closes. The sender lives in a static, so
 //!   it runs for the life of the process.
 
@@ -21,7 +23,8 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 
 use super::bridge::{CoreLogRecord, DropCounts, LogSink, LOG_CHANNEL_CAPACITY};
-use super::js_sink::{self, Handed, SINK_ANSWER_BOUND};
+use super::format::{current_format, notice_line_in, record_line, LogFormatKind};
+use super::js_sink::{self, Handed, NotTaken, SINK_ANSWER_BOUND};
 use super::levels::{RecordLevel, LEVELS};
 use super::names::LoggerName;
 use crate::process_core::panic_rule::{background_task_panicked, take_panic_cause, PanicReport};
@@ -63,6 +66,8 @@ fn run(records: &Receiver<CoreLogRecord>, sink: &LogSink) {
             return;
         };
         let delivered = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            #[cfg(feature = "test-probes")]
+            super::forwarder_probe::FORWARDER_PANIC_PROBE.panic_if_armed();
             deliver(sink, &batch);
             report_drop_counts(sink);
         }));
@@ -120,19 +125,30 @@ fn settle_batch(sink: &LogSink, batch: &[CoreLogRecord], handed: Handed) {
         Handed::NotTaken(reason) => {
             let _write_failure_ignored = writeln!(
                 std::io::stderr(),
-                "horsies: {} log records go to stderr: {reason}",
-                batch.len()
+                "{}",
+                not_taken_notice(current_format(), batch.len(), &reason)
             );
             write_stderr(batch);
         }
     }
 }
 
-/// Write each record of `batch` to stderr, one line each.
+/// The notice line that `count` records go to stderr because the sink did
+/// not take them for `reason`, in `format`. Pure but for the clock, the
+/// thread name and the process id.
+fn not_taken_notice(format: LogFormatKind, count: usize, reason: &NotTaken) -> String {
+    notice_line_in(
+        format,
+        format!("horsies: {count} log records go to stderr: {reason}"),
+    )
+}
+
+/// Write each record of `batch` to stderr, one line each, in the format of
+/// the process.
 fn write_stderr(batch: &[CoreLogRecord]) {
     let mut stderr = std::io::stderr().lock();
     for record in batch {
-        let _write_failure_ignored = writeln!(stderr, "{}", record.stderr_line());
+        let _write_failure_ignored = writeln!(stderr, "{}", record_line(record));
     }
 }
 
@@ -181,7 +197,32 @@ fn spill_all(batch: &[CoreLogRecord], records: &Receiver<CoreLogRecord>) -> usiz
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logging::js_sink::NotTaken;
+
+    #[test]
+    fn a_batch_that_the_sink_did_not_take_has_a_notice_in_the_format_of_the_process() {
+        assert_eq!(
+            not_taken_notice(LogFormatKind::TextLogs, 3, &NotTaken::SinkThrew),
+            format!(
+                "horsies: 3 log records go to stderr: {}",
+                NotTaken::SinkThrew
+            )
+        );
+        let value: serde_json::Value = serde_json::from_str(&not_taken_notice(
+            LogFormatKind::JsonLogs,
+            3,
+            &NotTaken::SinkThrew,
+        ))
+        .expect("the JSON notice is one JSON object");
+        assert_eq!(value["level"], "WARNING");
+        assert_eq!(value["logger"], "horsies.bridge");
+        assert_eq!(
+            value["message"],
+            format!(
+                "horsies: 3 log records go to stderr: {}",
+                NotTaken::SinkThrew
+            )
+        );
+    }
 
     fn record(message: &str) -> CoreLogRecord {
         CoreLogRecord::bridge(RecordLevel::Error, message.to_owned())

@@ -55,7 +55,7 @@ describe("the live steps", () => {
     assert.equal(outcome.kind, "refused");
     assert.deepEqual(
       outcome.kind === "refused" ? outcome.report.refusals.map((refused) => [refused.code, refused.message]) : [],
-      [["HRS-203", "broker: broker connectivity check failed; connection refused"]],
+      [["HRS-203", "database: broker connectivity check failed; connection refused"]],
     );
   });
 

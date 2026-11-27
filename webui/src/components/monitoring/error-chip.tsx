@@ -16,7 +16,7 @@ import {
  * Error code rendered with its taxonomy category: a flat pill with a
  * category-colored dot, the code in mono, and a tooltip explaining the family.
  * `category` may be null for codes that predate the taxonomy; we fall back to
- * DOMAIN styling.
+ * CUSTOM styling.
  */
 export function ErrorChip({
   code,
@@ -28,7 +28,7 @@ export function ErrorChip({
   if (!code) {
     return <span className="text-muted-foreground">—</span>;
   }
-  const cat: ErrorCategory = category ?? 'DOMAIN';
+  const cat: ErrorCategory = category ?? 'CUSTOM';
   const color = errorCategoryColorVar(cat);
   return (
     <TooltipProvider>

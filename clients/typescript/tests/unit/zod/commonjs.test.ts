@@ -17,7 +17,14 @@ import { hz } from "../../../horsies/src/zod/codecs.ts";
 import { zodMemberWire, zodValueWire } from "../../../horsies/src/zod/kind.ts";
 import { ASYNC_ISSUE_CODE, checksRun, ONE_WAY_ISSUE_CODE } from "../../../horsies/src/zod/runs.ts";
 import { kindText } from "./self-check-cases.ts";
-import { decodeRefusal, encodeRefusal, runsOfCodec, storedText, workerValue } from "./support.ts";
+import {
+  computedDefaultText,
+  decodeRefusal,
+  encodeRefusal,
+  runsOfCodec,
+  storedText,
+  workerValue,
+} from "./support.ts";
 
 // SAFETY: `require("zod")` gives the exports of zod's CommonJS build, which the zod declarations describe.
 const commonJs = createRequire(import.meta.url)("zod") as typeof ZodModule;
@@ -66,11 +73,11 @@ describe("a schema of zod's CommonJS build", () => {
     );
   });
 
-  test("zodMemberWire gives the presence and the stored default of a member", () => {
+  test("zodMemberWire gives the presence and the computed default of a member", () => {
     const member = zodMemberWire(zc.int().default(1));
 
     assert.ok(member.ok);
-    assert.deepEqual(presenceOf(member.value), { mode: "defaulted", fallback: { state: "stored", text: "1" } });
+    assert.equal(computedDefaultText(presenceOf(member.value)), "1");
   });
 
   test("the stored text of a value, and its read-back through the codec", () => {
@@ -91,14 +98,14 @@ describe("a schema of zod's CommonJS build", () => {
 
   test("the object refine refuses a value at encode and a stored text at decode: the check's own _zod.check", () => {
     assert.deepEqual(encodeRefusal(orderKind(), { at: Temporal.Instant.from(AT_TEXT), count: 9, code: 7 }), {
-      side: "encode",
-      kind: "CheckFailed",
+      kind: "encodeRefused",
+      refusal: "CheckFailed",
       path: "$",
       detail: "the check refused the value: $ custom",
     });
     assert.deepEqual(decodeRefusal(orderKind(), `{"at":"${AT_TEXT}","count":9,"code":"7"}`, "worker"), {
-      side: "decode",
-      kind: "CheckFailed",
+      kind: "decodeRefused",
+      refusal: "CheckFailed",
       path: "$",
       detail: "the check refused the read value: $ custom",
     });
@@ -106,8 +113,8 @@ describe("a schema of zod's CommonJS build", () => {
 
   test("the codec's output schema refuses a value at encode: the output's own _zod.run, backward", () => {
     assert.deepEqual(encodeRefusal(orderKind(), { at: Temporal.Instant.from(AT_TEXT), count: 2, code: 500 }), {
-      side: "encode",
-      kind: "CheckFailed",
+      kind: "encodeRefused",
+      refusal: "CheckFailed",
       path: "$.code",
       detail: "the conversion refused the value: $ too_big",
     });
@@ -118,7 +125,7 @@ describe("a schema of zod's CommonJS build", () => {
     const member = zodMemberWire(counted.prefault("5"));
 
     assert.ok(member.ok);
-    assert.deepEqual(presenceOf(member.value), { mode: "defaulted", fallback: { state: "stored", text: '"5"' } });
+    assert.equal(computedDefaultText(presenceOf(member.value)), '"5"');
   });
 
   test("a template literal tests its pattern with a copy that the schema's own constructor builds", () => {
@@ -146,7 +153,7 @@ describe("a schema of zod's CommonJS build", () => {
 
     assert.deepEqual(checksRun(later._zod.def.checks ?? [])("x"), {
       ok: false,
-      error: { issues: [{ path: "$", code: ASYNC_ISSUE_CODE }] },
+      error: { issues: [{ kind: "horsiesIssue", path: "$", code: ASYNC_ISSUE_CODE }] },
     });
   });
 
@@ -158,7 +165,7 @@ describe("a schema of zod's CommonJS build", () => {
 
     assert.deepEqual(runsOfCodec(later).decode("x"), {
       ok: false,
-      error: { issues: [{ path: "$", code: ASYNC_ISSUE_CODE }] },
+      error: { issues: [{ kind: "horsiesIssue", path: "$", code: ASYNC_ISSUE_CODE }] },
     });
   });
 
@@ -170,7 +177,7 @@ describe("a schema of zod's CommonJS build", () => {
 
     assert.deepEqual(runsOfCodec(lossy).encode("x"), {
       ok: false,
-      error: { issues: [{ path: "$", code: ONE_WAY_ISSUE_CODE }] },
+      error: { issues: [{ kind: "horsiesIssue", path: "$", code: ONE_WAY_ISSUE_CODE }] },
     });
   });
 });

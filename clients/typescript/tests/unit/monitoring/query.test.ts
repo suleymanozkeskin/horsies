@@ -9,7 +9,7 @@ import {
   taskBreakdownArg,
   taskFacetsArg,
   taskListArg,
-  taskStatsArg,
+  taskStatusCountsArg,
   windowArg,
   workflowRunsArg,
 } from "../../../horsies/src/monitoring/query.ts";
@@ -43,7 +43,7 @@ describe("taskListArg", () => {
       statuses: ["FAILED"],
       taskNames: ["resize"],
       errorCategories: ["OPERATIONAL"],
-      retried: "retriedOnly",
+      retriedOnly: true,
       sort: { field: "queueSeconds", direction: "ascending" },
       offset: 10,
       limit: 20,
@@ -57,17 +57,17 @@ describe("taskListArg", () => {
     assert.deepEqual(arg.value.limit, { kind: "set", value: 20 });
   });
 
-  test("an offset or a limit that is not a whole number is QUERY_REFUSED for the page", () => {
+  test("an offset or a limit that is not a whole number is invalidInput for the page", () => {
     for (const page of [{ offset: 1.5 }, { limit: Number.NaN }, { limit: 2 ** 53 }]) {
       const arg = taskListArg(page);
 
       assert.ok(!arg.ok);
-      assert.equal(arg.error.code, "QUERY_REFUSED");
+      assert.equal(arg.error.kind, "invalidInput");
       assert.equal(arg.error.field, "page");
     }
   });
 
-  test("a filter value that is not well-formed text is QUERY_REFUSED for its field", () => {
+  test("a filter value that is not well-formed text is invalidInput for its field", () => {
     for (const field of ["taskNames", "queues", "workers", "errorCodes"] as const) {
       const arg = taskListArg({ [field]: ["ok", LONE_SURROGATE] });
 
@@ -79,7 +79,7 @@ describe("taskListArg", () => {
 
 describe("the other queries", () => {
   test("the stats argument has no statuses", () => {
-    const arg = taskStatsArg({ queues: ["q"] });
+    const arg = taskStatusCountsArg({ queues: ["q"] });
 
     assert.ok(arg.ok);
     assert.equal("statuses" in arg.value, false);
@@ -95,7 +95,7 @@ describe("the other queries", () => {
     });
   });
 
-  test("the breakdown limit is left at the core's default, and a fraction is QUERY_REFUSED for the limit", () => {
+  test("the breakdown limit is left at the core's default, and a fraction is invalidInput for the limit", () => {
     const arg = taskBreakdownArg({ groupBy: "worker" });
 
     assert.ok(arg.ok);
@@ -107,23 +107,23 @@ describe("the other queries", () => {
     assert.equal(refused.error.field, "limit");
   });
 
-  test("the runs read has no name, no status and the core's default limit when the query names none", () => {
+  test("the runs read has no workflow name, no status and the core's default limit when the query names none", () => {
     assert.deepEqual(workflowRunsArg({}), {
       ok: true,
-      value: { name: { kind: "anyName" }, status: { kind: "anyStatus" }, limit: { kind: "coreDefault" } },
+      value: { workflowName: { kind: "anyName" }, status: { kind: "anyStatus" }, limit: { kind: "coreDefault" } },
     });
-    assert.deepEqual(workflowRunsArg({ name: "nightly", status: "FAILED", limit: 5 }), {
+    assert.deepEqual(workflowRunsArg({ workflowName: "nightly", status: "FAILED", limit: 5 }), {
       ok: true,
       value: {
-        name: { kind: "named", name: "nightly" },
+        workflowName: { kind: "named", workflowName: "nightly" },
         status: { kind: "status", status: "FAILED" },
         limit: { kind: "set", value: 5 },
       },
     });
   });
 
-  test("a workflow name that is not well-formed text is QUERY_REFUSED", () => {
-    const arg = workflowRunsArg({ name: LONE_SURROGATE });
+  test("a workflow name that is not well-formed text is invalidInput", () => {
+    const arg = workflowRunsArg({ workflowName: LONE_SURROGATE });
 
     assert.ok(!arg.ok);
     assert.equal(arg.error.field, "workflowName");

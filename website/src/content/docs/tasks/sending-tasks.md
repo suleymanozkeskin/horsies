@@ -8,7 +8,7 @@ tags: [tasks, send, async, scheduling]
 
 # Sending Tasks
 
-Enqueue tasks with `.send()`, `.send_async()`, `.schedule()`, or `.schedule_async()`. All return a `TaskSendResult[TaskHandle[T]]` -- a `Result` type that is either `Ok(TaskHandle)` on success or `Err(TaskSendError)` on failure.
+Enqueue tasks with `.send()` or `.send_async()`. For a delay, a deadline, an idempotency key or a retention, send through `.with_options(...)`. All sends return a `TaskSendResult[TaskHandle[T]]` -- a `Result` type that is either `Ok(TaskHandle)` on success or `Err(TaskSendError)` on failure.
 
 ## How To
 
@@ -41,12 +41,10 @@ async def my_endpoint():
 
 The sync variants are blocking database round trips, so calling them from a
 running event loop would stall every coroutine on it. They fail closed
-instead: `.send()`, `.schedule()`, `.retry_send()`, and `.retry_schedule()`
-called inside a running loop return `Err(TaskSendAsyncContext)`
-without touching the broker. The error carries the prepared `task_id` and
-payload — complete the dispatch with `.retry_send_async(err)` /
-`.retry_schedule_async(err)`, or call `.send_async` / `.schedule_async` with
-the original arguments.
+instead: `.send()` and `.resend()` called inside a running loop return
+`Err(TaskSendAsyncContext)` without touching the broker. The error carries
+the prepared `task_id` and payload — complete the dispatch with
+`.resend_async(err)`, or call `.send_async` with the original arguments.
 
 ### Set a Task Deadline
 
@@ -76,8 +74,6 @@ opts = my_task.with_options(good_until=deadline)
 
 opts.send(name="alice", count=3)                        # sync
 await opts.send_async(name="alice", count=3)            # async
-opts.schedule(60, name="alice", count=3)                # delayed
-await opts.schedule_async(60, name="alice", count=3)    # delayed, async
 ```
 
 For workflow nodes, use `.node(good_until=...)` instead — see [Typed Node Builder](/horsies/concepts/workflows/typed-node-builder/).
@@ -128,44 +124,56 @@ The class is fixed at enqueue.
 
 ### Delay Execution
 
+Pass `delay_seconds` to `with_options()`. The task becomes claimable after that number of seconds.
+
 ```python
 from horsies import Ok, Err
 
-match my_task.schedule(60, name="alice", count=3):
+match my_task.with_options(delay_seconds=60).send(name="alice", count=3):
     case Ok(handle):
-        print(f"Scheduled: {handle.task_id}")
+        print(f"Sent with a delay: {handle.task_id}")
     case Err(err):
-        print(f"Schedule failed: {err.code}")
+        print(f"Send failed: {err.code}")
 ```
 
-From async code, use `.schedule_async()`:
+From async code, use `.send_async()`:
 
 ```python
-match await my_task.schedule_async(60, name="alice", count=3):
+match await my_task.with_options(delay_seconds=60).send_async(name="alice", count=3):
     case Ok(handle):
-        print(f"Scheduled: {handle.task_id}")
+        print(f"Sent with a delay: {handle.task_id}")
     case Err(err):
-        print(f"Schedule failed: {err.code}")
+        print(f"Send failed: {err.code}")
 ```
+
+`delay_seconds` is a whole number of seconds, `0` or more. `0` sends now. A negative value, a `bool`, a `float` or a `str` returns `Err(VALIDATION_FAILED)` before anything is written.
 
 ### Wait for Result
 
 ```python
-from horsies import Ok, Err
+from horsies import Err, Failed, Ok, Succeeded
 
 match my_task.send(name="alice", count=3):
     case Ok(handle):
-        # Blocking wait
+        # Blocking wait, with a timeout in milliseconds
+        match handle.get(wait_ms=5000):
+            case Ok(Succeeded(value)):
+                print(f"Result: {value}")
+            case Ok(Failed(task_error)):
+                print(f"Task failed: {task_error.code}")
+            case Err(read_error):
+                print(f"No result: {read_error.code}")
+
+        # Blocking wait with no timeout
         result = handle.get()
 
-        # With timeout (milliseconds)
-        result = handle.get(timeout_ms=5000)
-
         # Async wait
-        result = await handle.get_async(timeout_ms=5000)
+        result = await handle.get_async(wait_ms=5000)
     case Err(err):
         print(f"Send failed: {err.code}")
 ```
+`get()` and `get_async()` return `ReadResult[T, TaskError]`. `Ok(Succeeded(value))` holds the value of the task. `Ok(Failed(task_error))` holds the error of the task. `Err(read_error)` means the read gave no outcome, for example `ReadWaitTimeout`. See [Retrieving Results](/horsies/tasks/retrieving-results/).
+
 `get_async()` waits via broker notifications (LISTEN/NOTIFY) with a polling fallback.
 
 ### Fire and Forget
@@ -203,7 +211,8 @@ Pydantic models and dataclasses must be defined in importable modules (not `__ma
 ### Execute Directly (Skip Queue)
 
 ```python
-# Runs immediately in current process (plain Python call; bypasses the queue)
+# Runs immediately in current process (plain Python call; bypasses the queue).
+# Returns the Result[T, TaskError] of the body: Ok(value) or Err(TaskError).
 result = my_task(name="alice", count=3)
 ```
 
@@ -223,14 +232,14 @@ Commit the application transaction, then send, and handle the `Err` result of th
 ```python
 from sqlalchemy import Engine, text
 
-from horsies import Err, Ok, TaskError, TaskResult, TaskSendEnqueueFailed
+from horsies import Err, Ok, Result, TaskError, TaskSendEnqueueFailed
 
 from myapp.instance import app
 
 
 @app.task('send_receipt')
-def send_receipt(*, order_id: str) -> TaskResult[None, TaskError]:
-    return TaskResult(ok=None)
+def send_receipt(*, order_id: str) -> Result[None, TaskError]:
+    return Ok(None)
 
 
 def place_order(engine: Engine, order_id: str) -> None:
@@ -246,16 +255,16 @@ def place_order(engine: Engine, order_id: str) -> None:
             print(f'receipt task {handle.task_id}')
         case Err(TaskSendEnqueueFailed(retryable=True) as error):
             # The order exists. Repeat the same send with the same key.
-            match send_receipt.retry_send(error):
+            match send_receipt.resend(error):
                 case Ok(handle):
                     print(f'receipt task {handle.task_id}')
-                case Err(retry_error):
-                    print(f'receipt not queued: {retry_error.code}')
+                case Err(resend_error):
+                    print(f'receipt not queued: {resend_error.code}')
         case Err(error):
             print(f'receipt not queued: {error.code}')
 ```
 
-In an async function, use `send_async()` and `retry_send_async()`.
+In an async function, use `send_async()` and `resend_async()`.
 
 ### Make a Send Repeatable
 
@@ -308,9 +317,9 @@ with engine.begin() as connection:
 send_receipt.send(order_id=order_id)
 ```
 
-## Retrying Failed Sends
+## Resending Failed Sends
 
-When `.send()` fails with `TaskSendEnqueueFailed` (a broker or database error), use the retry methods to replay the exact same payload without re-supplying arguments. The stored `TaskSendPayload` carries the task id, the serialized arguments and the `sent_at` of the first send; if that send was written, the retry finds the same command on the same task id and returns it instead of writing a second row. This holds after the task finished too: a retry reads the task history and does not run the task a second time.
+When `.send()` fails with `TaskSendEnqueueFailed` (a broker or database error), use the resend methods to replay the exact same payload without re-supplying arguments. The stored `TaskSendPayload` carries the task id, the serialized arguments, the `sent_at` and the delay of the first send; if that send was written, the resend finds the same command on the same task id and returns it instead of writing a second row. This holds after the task finished too: a resend reads the task history and does not run the task a second time.
 
 ```python
 from horsies import Err, Ok, TaskSendEnqueueFailed, TaskSendIdempotencyKeyConflict
@@ -319,33 +328,33 @@ match my_task.send(name="alice", count=3):
     case Ok(handle):
         result = handle.get()
     case Err(TaskSendEnqueueFailed(retryable=True) as err):
-        match my_task.retry_send(err):
+        match my_task.resend(err):
             case Ok(handle):
                 result = handle.get()
-            case Err(retry_err):
-                print(f"Retry failed: {retry_err.code}")
+            case Err(resend_err):
+                print(f"Resend failed: {resend_err.code}")
     case Err(TaskSendIdempotencyKeyConflict(owner_task_id=owner)):
         print(f"Key is held by task {owner}")
     case Err(err):
         print(f"Permanent failure: {err.code}")
 ```
 
-The retry methods take a `TaskSendRetryable`: `TaskSendEnqueueFailed`, `TaskSendAsyncContext` or `TaskSendIdempotencyKeyConflict`. Passing another variant is a type error; at run time it fails an assertion that names the variant. A retry of a `TaskSendIdempotencyKeyConflict` before the key's reservation ends returns the same error.
+The resend methods take a `TaskSendResendable`: `TaskSendEnqueueFailed` or `TaskSendAsyncContext`. Passing another variant is a type error; at run time it fails an assertion that names the variant. `TaskSendIdempotencyKeyConflict` is not one of them: it has `retryable = False`, because a repeat of the same send does not complete it. Send the same command as the owner task, or use another key. A send with the key after the reservation ends starts a new task. A resend of a send with a delay keeps the delay.
 
-### Automatic Retry via Config
+### Automatic Resend via Config
 
-Set `resend_on_transient_err=True` in `AppConfig` to resend a transient enqueue failure before the send returns the error. The default is `False`. The resend rules are on [Atomic Enqueue and Topology](/horsies/operations/atomic-enqueue-and-topology/#resend-transient-failures).
+Set `resend_on_transient_error=True` in `AppConfig` to resend a transient enqueue failure before the send returns the error. The default is `False`. The resend rules are on [Atomic Enqueue and Topology](/horsies/operations/atomic-enqueue-and-topology/#resend-transient-failures).
 
 ```python
 from horsies import AppConfig, Horsies, QueueMode
 
-from myapp.config import broker_config
+from myapp.config import database_config
 
 app = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=broker_config,
-        resend_on_transient_err=True,
+        database=database_config,
+        resend_on_transient_error=True,
     )
 )
 ```
@@ -371,35 +380,18 @@ This does not execute the task locally; it only enqueues. Keyword-only.
 
 **Returns:** `TaskSendResult[TaskHandle[T]]`
 
-### `.schedule(delay, **kwargs) -> TaskSendResult[TaskHandle[T]]`
+### `.with_options(*, good_until=None, idempotency_key=None, retention=<unset>, delay_seconds=None) -> TaskFunctionWithOptions[P, T]`
 
-Enqueue task for delayed execution. Task arguments are keyword-only.
-
-| Parameter | Type | Description |
-| --------- | ---- | ----------- |
-| `delay` | `int` | Seconds to wait before task becomes claimable |
-| `**kwargs` | task kwargs | Keyword arguments matching the task's signature |
-
-**Returns:** `TaskSendResult[TaskHandle[T]]`
-
-### `.schedule_async(delay, **kwargs) -> TaskSendResult[TaskHandle[T]]`
-
-Async variant of `.schedule()`. Use in async code (FastAPI, etc.).
-Same `delay` validation as `.schedule()`.
-
-**Returns:** `TaskSendResult[TaskHandle[T]]`
-
-### `.with_options(*, good_until=None, idempotency_key=None, retention=<unset>) -> TaskSendOptions[P, T]`
-
-Return a per-send options builder. The returned object exposes `.send()`, `.send_async()`, `.schedule()`, and `.schedule_async()` with the overridden options applied.
+Return a per-send options builder. The returned object exposes `.send()` and `.send_async()` with the overridden options applied.
 
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
 | `good_until` | `datetime \| None` | Task expiry deadline (must be timezone-aware) |
 | `idempotency_key` | `str \| None` | Caller-supplied enqueue-deduplication key, scoped per task name |
-| `retention` | `timedelta \| None` | Terminal-record retention: omit to take the queue's mapping (else the 30-day default), a period in whole days, or `None` for forever |
+| `retention` | `SendRetention` | Terminal-record retention: omit to take the queue's mapping (else the 30-day default), a period in whole days (`timedelta`), or `None` for forever |
+| `delay_seconds` | `int \| None` | Seconds to wait before the task becomes claimable: `0` or more. `None` (the default) sends now |
 
-**Returns:** `TaskSendOptions[P, T]` — a builder with `.send()`, `.send_async()`, `.schedule()`, and `.schedule_async()`.
+**Returns:** `TaskFunctionWithOptions[P, T]` — a builder with `.send()` and `.send_async()`.
 
 Passing `good_until=None` explicitly clears any internally inherited deadline.
 
@@ -415,14 +407,13 @@ Choosing 30 days is **not** the same as omitting the parameter. Omitting
 it takes the queue's mapping where one exists; choosing 30 days overrides
 that mapping for this send.
 
-The precedence is the same on `.schedule()` and `.schedule_async()` as on
-`.send()`, and the same for a `TaskSchedule` cron fire and a workflow
-node's backing task. `with_options(...)` applies its options to the
-delayed methods as well as the immediate ones.
+The precedence is the same for a send with a delay as for a send now,
+and the same for a `TaskSchedule` cron fire and a workflow node's backing
+task.
 
 The class is snapshotted on the row at enqueue and decides which history
 partition the record moves to at terminalization; it cannot be changed
-afterwards. A retry replays the class its original send chose, so editing
+afterwards. A resend replays the class its original send chose, so editing
 `queue_retention` governs later sends and never reaches a task in flight.
 
 ### `PostgresBroker(config, *, idempotency_reservation_window: timedelta | None = None, ...)`
@@ -431,33 +422,19 @@ afterwards. A retry replays the class its original send chose, so editing
 | --------- | ---- | ------- | ----------- |
 | `idempotency_reservation_window` | `timedelta \| None` | 24 hours | Time that a key stays reserved after its task is terminal. Must be greater than zero and at most 30 days. The constructor raises `ValueError` outside this range |
 
-### `.retry_send(error) -> TaskSendResult[TaskHandle[T]]`
+### `.resend(error) -> TaskSendResult[TaskHandle[T]]`
 
-Retry a failed send using the stored payload from the error.
-
-| Parameter | Type | Description |
-| --------- | ---- | ----------- |
-| `error` | `TaskSendRetryable` | The error from a previous `.send()` call |
-
-**Returns:** `TaskSendResult[TaskHandle[T]]`
-
-### `.retry_send_async(error) -> TaskSendResult[TaskHandle[T]]`
-
-Async variant of `.retry_send()`.
-
-### `.retry_schedule(error) -> TaskSendResult[TaskHandle[T]]`
-
-Retry a failed schedule using the stored payload. The error must come from `.schedule()` or `.schedule_async()`.
+Send again the task of a failed send, with the stored payload from the error: the same task id, the same payload and `sent_at`, and the delay of the first send when it had one.
 
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
-| `error` | `TaskSendRetryable` | The error from a previous `.schedule()` call |
+| `error` | `TaskSendResendable` | The error from a previous send of this task |
 
 **Returns:** `TaskSendResult[TaskHandle[T]]`
 
-### `.retry_schedule_async(error) -> TaskSendResult[TaskHandle[T]]`
+### `.resend_async(error) -> TaskSendResult[TaskHandle[T]]`
 
-Async variant of `.retry_schedule()`.
+Async variant of `.resend()`.
 
 ### `TaskSendResult[T]`
 
@@ -478,14 +455,14 @@ A union with one frozen variant per `TaskSendErrorCode` member; each variant has
 
 ### `TaskSendErrorCode`
 
-The codes, and which of them the retry methods accept, are in the [Errors Reference](/horsies/tasks/errors/#send-error-codes).
+The codes, and which of them the resend methods accept, are in the [Errors Reference](/horsies/tasks/errors/#send-error-codes).
 
 ### `TaskHandle[T]`
 
 | Property/Method | Type | Description |
 | --------------- | ---- | ----------- |
 | `.task_id` | `uuid.UUID` | Unique task identifier |
-| `.get(timeout_ms=None)` | `TaskResult[T, TaskError]` | Wait for result (blocking) |
-| `.get_async(timeout_ms=None)` | `TaskResult[T, TaskError]` | Wait for result (async) |
-| `.info(include_result=False, include_failed_reason=False, include_attempts=False)` | `BrokerResult[TaskInfo \| None]` | Fetch task metadata from broker |
-| `.info_async(include_result=False, include_failed_reason=False, include_attempts=False)` | `BrokerResult[TaskInfo \| None]` | Async variant of `.info()` |
+| `.get(wait_ms=None)` | `ReadResult[T, TaskError]` | Wait for result (blocking) |
+| `.get_async(wait_ms=None)` | `ReadResult[T, TaskError]` | Wait for result (async) |
+| `.info(include_result=False, include_failed_reason=False, include_attempts=False)` | `DatabaseResult[TaskInfo \| None]` | Fetch task metadata from broker |
+| `.info_async(include_result=False, include_failed_reason=False, include_attempts=False)` | `DatabaseResult[TaskInfo \| None]` | Async variant of `.info()` |

@@ -11,7 +11,7 @@ import { binaryFileOf } from "./content.ts";
 import { readHorsiesManifest } from "./manifest.ts";
 import { readPlatformList } from "./platforms.ts";
 import type { ReleasePlatform } from "./platforms.ts";
-import { stageFailedText, stagePlatforms } from "./stage.ts";
+import { stageFailedText, stageLint, stagePlatforms } from "./stage.ts";
 
 /** The committed list and manifest. */
 function committed(): { readonly rows: readonly ReleasePlatform[]; readonly manifest: ReturnType<typeof readHorsiesManifest> } {
@@ -80,6 +80,65 @@ describe("stagePlatforms", () => {
 
       assert.equal(staged.ok ? "staged" : staged.error.kind, "PlatformDirsDiffer");
       assert.match(staged.ok ? "" : stageFailedText(staged.error), /napi.targets of bridge\/package.json give the platforms/u);
+    });
+  });
+});
+
+/** Run `check` with a new stage folder and a new lint package folder (an `eslint-plugin` stand-in), removed at the end. */
+function withLintFolder(files: Readonly<Record<string, string>>, check: (stageDir: string, lintDir: string) => void): void {
+  const root = mkdtempSync(join(tmpdir(), "horsies-stage-lint-test-"));
+
+  try {
+    const lintDir = join(root, "eslint-plugin");
+
+    mkdirSync(join(lintDir, "src"), { recursive: true });
+
+    for (const [file, text] of Object.entries(files)) {
+      writeFileSync(join(lintDir, file), text);
+    }
+
+    check(join(root, "stage"), `${lintDir}/`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+describe("stageLint", () => {
+  test("staged: the committed lint package, built, with its manifest without private, the license and the README", () => {
+    withFolders((stageDir) => {
+      const staged = stageLint(stageDir);
+
+      assert.ok(staged.ok, staged.ok ? "" : stageFailedText(staged.error));
+      assert.equal(staged.value.kind, "staged");
+
+      const folder = staged.value.kind === "staged" ? staged.value.folder : assert.fail("not staged");
+
+      assert.ok(existsSync(join(folder, "dist", "index.js")));
+      assert.ok(existsSync(join(folder, "dist", "index.d.ts")));
+      assert.ok(existsSync(join(folder, "LICENSE")));
+      assert.ok(existsSync(join(folder, "README.md")));
+      assert.equal(JSON.parse(readFileSync(join(folder, "package.json"), "utf8")).private, undefined);
+    });
+  });
+
+  test("absent: a folder with no package.json", () => {
+    withFolders((stageDir) => {
+      assert.deepEqual(stageLint(stageDir, join(stageDir, "no-such-folder", "")), { ok: true, value: { kind: "absent" } });
+    });
+  });
+
+  test("LintManifestNotAnObject: a package.json that holds an array", () => {
+    withLintFolder({ "package.json": "[]" }, (stageDir, lintDir) => {
+      assert.deepEqual(stageLint(stageDir, lintDir), { ok: false, error: { kind: "LintManifestNotAnObject" } });
+    });
+  });
+
+  test("BuildFailed: a folder with no tsconfig.build.json", () => {
+    withLintFolder({ "package.json": '{"name":"@horsies/eslint-plugin"}' }, (stageDir, lintDir) => {
+      const staged = stageLint(stageDir, lintDir);
+
+      assert.equal(staged.ok ? "staged" : staged.error.kind, "BuildFailed");
+      assert.match(staged.ok ? "" : stageFailedText(staged.error), /the build of @horsies\/eslint-plugin failed/u);
     });
   });
 });

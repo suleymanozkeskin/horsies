@@ -14,7 +14,7 @@ from horsies import Horsies, AppConfig, PostgresConfig, QueueMode
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
 app = Horsies(config)
 ```
@@ -25,8 +25,8 @@ app = Horsies(config)
 |-------|------|---------|-------------|
 | `queue_mode` | `QueueMode` | `DEFAULT` | Queue operating mode |
 | `custom_queues` | `list[CustomQueueConfig]` | `None` | Queue definitions (CUSTOM mode only) |
-| `broker` | `PostgresConfig` | required | Database connection settings |
-| `cluster_wide_cap` | `int` | `None` | Max in-flight tasks cluster-wide |
+| `database` | `PostgresConfig` | required | Database connection settings |
+| `cluster_wide_cap` | `ClusterCap \| NoClusterCap` | `NoClusterCap()` | Max in-flight tasks cluster-wide: `ClusterCap(tasks=N)`, or no cap |
 | `prefetch_buffer` | `int` | `0` | 0 = hard cap mode, >0 = soft cap with prefetch |
 | `claim_lease_ms` | `int` | `None` | Claim lease duration (required if prefetch_buffer > 0; optional override in hard cap mode) |
 | `max_claim_renew_age_ms` | `int` | `180000` | Max age (ms) of a CLAIMED task that heartbeat will renew. Older claims are left to expire, preventing indefinite renewal of orphaned tasks. Must be >= effective claim lease |
@@ -37,9 +37,9 @@ app = Horsies(config)
 | `schedule` | `ScheduleConfig` | `None` | Scheduled task configuration |
 | `exception_mapper` | `ExceptionMapper` | `ExceptionMapper()` | Maps exceptions to `TaskError` codes |
 | `default_unhandled_error_code` | `str` | `"UNHANDLED_EXCEPTION"` | Error code for uncaught exceptions |
-| `resend_on_transient_err` | `bool` | `False` | Auto-retry transient enqueue failures in workflow start |
+| `resend_on_transient_error` | `bool` | `False` | Auto-retry transient enqueue failures in workflow start |
 | `tracing` | `OtelTracing \| NoTracing` | `NoTracing()` | `OtelTracing()` traces the sends and each attempt that a worker runs with the OpenTelemetry API, and records the producer metrics with its meter. `OtelTracing(parentage=...)` places the span of an attempt: `ChildOfSend()` (the default) or `LinkedToSend()`. `OtelTracing(worker_ended_spans=...)` makes the span of each attempt that the worker ended (a timeout kill, a blocked-loop kill, a lost child) in the handler child: `WorkerEndedSpans.MAKE_SPANS` (the default) or `WorkerEndedSpans.NO_SPANS` ([Event Handlers](/horsies/workers/event-handlers/#spans-of-the-attempts-that-the-worker-ended)). It needs the extra `horsies[otel]` (`pip install 'horsies[otel]'`); without it the config is refused with `HRS-220`. With `NoTracing()` horsies does not import `opentelemetry`. See [Tracing Setup](/horsies/observability/tracing-setup/) |
-| `log_format` | `TextLogs \| JsonLogs` | `TextLogs()` | The format of the horsies log records in `horsies worker`, `scheduler`, `check` and each worker child. `JsonLogs()`: one JSON object per line with the keys `ts`, `level`, `logger`, `message`, `process`, `task_id`, `task_name`, `attempt`, `trace_id`, `span_id`, `exc`. See [Log Setup](/horsies/observability/log-setup/) |
+| `log_format` | `LogFormat` (`TextLogs \| JsonLogs`) | `TextLogs()` | The format of the horsies log records in `horsies worker`, `scheduler`, `check` and each worker child. `JsonLogs()`: one JSON object per line with the keys `ts`, `level`, `logger`, `message`, `process`, `task_id`, `task_name`, `attempt`, `trace_id`, `span_id`, `exc`. See [Log Setup](/horsies/observability/log-setup/) |
 | `worker_profiles` | `dict[str, WorkerProfile]` | `{}` | Named worker settings. `horsies worker <app> --profile <name>` runs the profile of that name; see [Worker Profiles](../../workers/worker-profiles) |
 
 Every config model refuses unknown keys. This includes the nested models (`PostgresConfig`, `RecoveryConfig`, `PayloadPolicy`, `CustomQueueConfig`, `RetentionConfig`, `WorkerResilienceConfig`, `ScheduleConfig`) and the schedule patterns. A misspelled field raises `ValidationError` with the type `extra_forbidden`.
@@ -54,26 +54,26 @@ The rules of each mode are on [Queue Modes](/horsies/concepts/queue-modes/).
 
 ```python
 from pydantic import SecretStr
-from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
+from horsies import Horsies, AppConfig, PostgresConfig, Ok, Result, TaskError
 from horsies import QueueMode
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
 app = Horsies(config)
 
 @app.task("cleanup_sessions")  # Goes to "default" queue
-def cleanup_sessions() -> TaskResult[str, TaskError]:
-    return TaskResult(ok="done")
+def cleanup_sessions() -> Result[str, TaskError]:
+    return Ok("done")
 ```
 
 ### CUSTOM Mode
 
-Each task names its queue with `queue_name`.
+Each task names its queue with `queue`.
 
 ```python
-from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, QueueMode, CustomQueueConfig
+from horsies import Horsies, AppConfig, PostgresConfig, Ok, Result, TaskError, QueueMode, CustomQueueConfig
 
 config = AppConfig(
     queue_mode=QueueMode.CUSTOM,
@@ -82,31 +82,31 @@ config = AppConfig(
         CustomQueueConfig(name="normal", priority=50, max_concurrency=5),
         CustomQueueConfig(name="low", priority=100, max_concurrency=2),
     ],
-    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
 app = Horsies(config)
 
-@app.task("urgent_alert", queue_name="critical")
-def urgent_alert() -> TaskResult[str, TaskError]:
-    return TaskResult(ok="alerted")
+@app.task("urgent_alert", queue="critical")
+def urgent_alert() -> Result[str, TaskError]:
+    return Ok("alerted")
 
-@app.task("process_order", queue_name="normal")
-def process_order() -> TaskResult[str, TaskError]:
-    return TaskResult(ok="processed")
+@app.task("process_order", queue="normal")
+def process_order() -> Result[str, TaskError]:
+    return Ok("processed")
 
-@app.task("ship_item", queue_name="low")
-def ship_to_address() -> TaskResult[str, TaskError]:
-    return TaskResult(ok="shipped")
+@app.task("ship_item", queue="low")
+def ship_to_address() -> Result[str, TaskError]:
+    return Ok("shipped")
 ```
 
 ### Unknown Queue Names
 
-A `queue_name` that the config does not list raises `ConfigurationError` with code `HRS-103` when the decorator runs:
+A `queue` that the config does not list raises `ConfigurationError` with code `HRS-103` when the decorator runs:
 
 ```python
 # This raises ConfigurationError (HRS-103) at definition time:
-@app.task("bad_task", queue_name="nonexistent")
-def bad_task() -> TaskResult[str, TaskError]:
+@app.task("bad_task", queue="nonexistent")
+def bad_task() -> Result[str, TaskError]:
     ...
 ```
 
@@ -114,7 +114,7 @@ def bad_task() -> TaskResult[str, TaskError]:
 error[HRS-103]: invalid queue_name 'nonexistent'
   --> /app/tasks.py:12
    |
-12 | @app.task("bad_task", queue_name="nonexistent")
+12 | @app.task("bad_task", queue="nonexistent")
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = note: valid queues: ['critical', 'normal', 'low']
 
@@ -130,14 +130,14 @@ Limit total in-flight tasks across all workers:
 ```python
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(...),
-    cluster_wide_cap=100,  # Max 100 in-flight tasks (RUNNING + CLAIMED)
+    database=PostgresConfig(...),
+    cluster_wide_cap=ClusterCap(tasks=100),  # Max 100 in-flight tasks (RUNNING + CLAIMED)
 )
 ```
 
-Set to `None` (default) for unlimited.
+`NoClusterCap()` (the default) sets no cluster-wide cap.
 
-**Note:** When `cluster_wide_cap` is set, the system operates in hard cap mode (counts RUNNING + CLAIMED tasks). This ensures strict enforcement and fair distribution across workers.
+**Note:** With `ClusterCap`, the system operates in hard cap mode (counts RUNNING + CLAIMED tasks). This ensures strict enforcement and fair distribution across workers.
 
 ## Prefetch Configuration
 
@@ -147,19 +147,19 @@ Control whether workers can prefetch tasks beyond their running capacity:
 ```python
 # Hard cap mode (default) - strict enforcement, fair distribution
 config = AppConfig(
-    broker=PostgresConfig(...),
+    database=PostgresConfig(...),
     prefetch_buffer=0,  # No prefetch, workers only claim what they can run
 )
 
 # Soft cap mode - allows prefetch with lease expiry
 config = AppConfig(
-    broker=PostgresConfig(...),
+    database=PostgresConfig(...),
     prefetch_buffer=4,      # Prefetch up to 4 extra tasks per worker
     claim_lease_ms=5000,    # Prefetched claims expire after 5 seconds
 )
 ```
 
-**Important:** `cluster_wide_cap` cannot be used with `prefetch_buffer > 0`. If you need a global cap, hard cap mode is required.
+**Important:** `ClusterCap` cannot be used with `prefetch_buffer > 0`. If you need a global cap, hard cap mode is required.
 
 See [Concurrency](../../workers/concurrency) for detailed explanation of hard vs soft cap modes.
 
@@ -178,7 +178,7 @@ Coverage by boundary:
 
 | Boundary | Warn | Reject |
 |----------|------|--------|
-| `.send()` / `.send_async()` / `.schedule()` / `.schedule_async()` kwargs | yes | yes — `Err(PAYLOAD_TOO_LARGE)` |
+| `.send()` / `.send_async()` kwargs | yes | yes — `Err(PAYLOAD_TOO_LARGE)` |
 | Scheduled fires (TaskSchedule kwargs) | yes | yes — the slot fails, logged via the schedule's enqueue-failure path |
 | Workflow-node enqueues on a running flow (including `args_from` result injection) | yes | no — rejecting a mid-workflow node needs a defined node-failure path; deferred |
 | Subworkflow child-start kwargs and stored workflow definitions | not yet checked | not yet checked |
@@ -188,7 +188,7 @@ Coverage by boundary:
 from horsies import PayloadPolicy
 
 AppConfig(
-    broker=broker,
+    database=database,
     payload=PayloadPolicy(
         warn_bytes=1_048_576,      # warn above 1 MiB (default)
         reject_bytes=33_554_432,   # hard ceiling: reject above 32 MiB
@@ -210,15 +210,15 @@ Override crash recovery defaults. The fields, their defaults and their ranges ar
 from horsies import RecoveryConfig
 
 config = AppConfig(
-    broker=broker,
+    database=database,
     recovery=RecoveryConfig(
         # Claimer detection
-        auto_requeue_stale_claimed=True,
+        requeue_stale_claimed=True,
         claimed_stale_threshold_ms=120_000,     # 2 minutes
         claimer_heartbeat_interval_ms=30_000,   # 30 seconds
 
         # Runner detection
-        auto_fail_stale_running=True,
+        fail_stale_running=True,
         running_stale_threshold_ms=300_000,     # 5 minutes
         finalizing_stale_threshold_ms=300_000,  # 5 minutes
         runner_heartbeat_interval_ms=30_000,    # 30 seconds
@@ -262,8 +262,8 @@ quick_recovery = RecoveryConfig(
 
 ```python
 no_recovery = RecoveryConfig(
-    auto_requeue_stale_claimed=False,
-    auto_fail_stale_running=False,
+    requeue_stale_claimed=False,
+    fail_stale_running=False,
 )
 ```
 
@@ -278,7 +278,7 @@ from datetime import timedelta
 from horsies import AppConfig, RetentionConfig
 
 config = AppConfig(
-    broker=broker,
+    database=database,
     retention=RetentionConfig(
         queue_retention={
             'emails': timedelta(days=7),
@@ -322,11 +322,11 @@ Configure worker retry/backoff and NOTIFY fallback polling. The fields and their
 from horsies import WorkerResilienceConfig
 
 config = AppConfig(
-    broker=broker,
+    database=database,
     resilience=WorkerResilienceConfig(
-        db_retry_initial_ms=500,      # initial backoff on DB errors
-        db_retry_max_ms=30_000,       # backoff cap
-        db_retry_max_attempts=0,      # 0 = retry forever
+        database_retry_initial_ms=500,      # initial backoff on DB errors
+        database_retry_max_ms=30_000,       # backoff cap
+        database_retry_max_attempts=0,      # 0 = retry forever
         notify_poll_interval_ms=5_000, # poll fallback when NOTIFY is silent
     ),
 )
@@ -342,7 +342,7 @@ from horsies import ScheduleConfig, TaskSchedule, DailySchedule
 from datetime import time
 
 config = AppConfig(
-    broker=PostgresConfig(...),
+    database=PostgresConfig(...),
     schedule=ScheduleConfig(
         enabled=True,
         check_interval_seconds=1,
@@ -367,12 +367,12 @@ See [Scheduler Overview](../../scheduling/scheduler-overview) for details.
 - DEFAULT mode must not have `custom_queues`
 - Queue names must be unique
 - Each queue name must be non-empty, must have no leading or trailing whitespace, and must be at most 52 bytes of UTF-8 text (`ConfigurationError` `HRS-200`). A queue's NOTIFY channel is `task_queue_<name>`, and PostgreSQL refuses a channel name over 63 bytes
-- `cluster_wide_cap` must be positive if set
+- The `tasks` of a `ClusterCap` must be positive
 - `prefetch_buffer` must be non-negative
 - `claim_lease_ms` is required when `prefetch_buffer > 0`
 - `claim_lease_ms` is optional when `prefetch_buffer = 0` (overrides the default 60s lease)
-- `cluster_wide_cap` cannot be combined with `prefetch_buffer > 0`
-- Each claim value is within the bound of the worker: `prefetch_buffer`, `cluster_wide_cap` and each queue's `max_concurrency` are at most 2,147,483,647, and `claim_lease_ms` and `max_claim_renew_age_ms` are at most 4,294,967,295. A larger value is refused with the code of its field: `HRS-202` for `prefetch_buffer`, `claim_lease_ms` and `max_claim_renew_age_ms`, `HRS-201` for `cluster_wide_cap`, `HRS-200` for `custom_queues[i].max_concurrency`
+- A `ClusterCap` cannot be combined with `prefetch_buffer > 0`
+- Each claim value is within the bound of the worker: `prefetch_buffer`, the `tasks` of a `ClusterCap` and each queue's `max_concurrency` are at most 2,147,483,647, and `claim_lease_ms` and `max_claim_renew_age_ms` are at most 4,294,967,295. A larger value is refused with the code of its field: `HRS-202` for `prefetch_buffer`, `claim_lease_ms` and `max_claim_renew_age_ms`, `HRS-201` for `cluster_wide_cap.tasks`, `HRS-200` for `custom_queues[i].max_concurrency`
 - `payload.warn_bytes` and `payload.reject_bytes` are at most 18,446,744,073,709,551,615 (`ValidationError`)
 - Each worker profile has a valid name, at least one child, claim limits at or below its capacity (seats + `prefetch_buffer`; one seat per isolated child), and, when it sets `ParentPool(max_size=PoolSize(connections=N))`, an N of at least 3 (`PARENT_POOL_MIN_CONNECTIONS`). Each error names the profile and the field path (`ConfigurationError` `HRS-218`). Every profile is validated, not only the one a worker starts with
 
@@ -383,10 +383,10 @@ Multiple validation errors within the same phase are collected and reported toge
 Use `app.check()` to run phased validation before starting a worker or scheduler. This is the programmatic equivalent of the [`horsies check`](/horsies/cli/#horsies-check) CLI command.
 
 ```python
-errors = app.check(live=True)
-if errors:
-    for err in errors:
-        print(err)
+report = app.check(live=True)
+if report.has_errors():
+    for refusal in report.refusals:
+        print(refusal)
 else:
     print("All validations passed")
 ```
@@ -395,7 +395,7 @@ else:
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
-def check(self, *, live: bool = False) -> list[HorsiesError]
+def check(self, *, live: bool = False) -> ValidationReport
 ```
 
 **Phases:**
@@ -406,8 +406,8 @@ def check(self, *, live: bool = False) -> list[HorsiesError]
 | 2. Task imports | Imports all discovered task modules, collects import/registration errors | Errors stop progression to Phases 4-6 |
 | 3. Workflows | `WorkflowSpec` DAG validation (triggered during module imports) | Collected alongside Phase 2 |
 | 3.1 Workflow definitions | Imported `WorkflowDefinition` subclasses declare a valid `definition_key` | Errors stop progression to Phases 3.2-6 |
-| 3.2 Workflow builders | Executes `@app.workflow_builder` functions, validates returned specs | Errors stop progression to Phases 3.3-6 |
-| 3.3 Undecorated builders | Detects top-level functions returning `WorkflowSpec` without `@app.workflow_builder` | Errors stop progression to Phases 5-6 |
+| 3.2 Workflow builders | Executes `@app.check_workflow_builder` functions, validates returned specs | Errors stop progression to Phases 3.3-6 |
+| 3.3 Undecorated builders | Detects top-level functions returning `WorkflowSpec` without `@app.check_workflow_builder` | Errors stop progression to Phases 5-6 |
 | 5. Runtime policy safety | Validates retry/exception-mapper policy metadata after imports | Errors stop progression to Phase 6 |
 | 6. Broker (if `live=True`) | Connects to PostgreSQL and runs `SELECT 1` | Only runs if Phases 2-5 pass |
 | 6.1 Worker connections (if `live=True`) | Compares each worker profile with the server connection limit (`HRS-219`). Skipped with no profiles or with `pgbouncer_transaction_mode=True`. See [Worker Profiles](../../workers/worker-profiles#connections) | Only runs if Phase 6 passes |
@@ -421,17 +421,17 @@ horsies check myapp.instance:app        # Phases 1-5
 horsies check myapp.instance:app --live  # Phases 1-6.1
 ```
 
-### `@app.workflow_builder`
+### `@app.check_workflow_builder`
 
-Register workflow builder functions for check-phase validation. For full API reference and examples, see [Workflow API — @app.workflow_builder](/horsies/concepts/workflows/workflow-api/#appworkflow_builder).
+Register workflow builder functions for check-phase validation. For full API reference and examples, see [Workflow API — @app.check_workflow_builder](/horsies/concepts/workflows/workflow-api/#appcheck_workflow_builder).
 
 ### Guarantee Model
 
 `horsies check` has two validation paths with different guarantee levels:
 
-**Strong guarantee (decorated builders):** Functions registered with `@app.workflow_builder` are executed during check. Every `WorkflowSpec` they produce is fully validated — DAG structure, kwargs against function signatures, `args_from` type compatibility, missing required params, `definition_key`, and more. For the exercised builder cases, this catches structural workflow validity errors before runtime.
+**Strong guarantee (decorated builders):** Functions registered with `@app.check_workflow_builder` are executed during check. Every `WorkflowSpec` they produce is fully validated — DAG structure, kwargs against function signatures, `args_from` type compatibility, missing required params, `definition_key`, and more. For the exercised builder cases, this catches structural workflow validity errors before runtime.
 
-**Best-effort (undecorated builder detection):** Check also scans discovered task modules for top-level functions whose return type annotation is `WorkflowSpec` but lack the `@app.workflow_builder` decorator. These produce HRS-030 check errors. This detection is heuristic:
+**Best-effort (undecorated builder detection):** Check also scans discovered task modules for top-level functions whose return type annotation is `WorkflowSpec` but lack the `@app.check_workflow_builder` decorator. These produce HRS-030 check errors. This detection is heuristic:
 
 - It only scans modules directly listed in `discover_tasks()`, not sub-modules of discovered packages.
 - Functions re-exported in `__init__.py` from sub-modules may not be detected.
@@ -442,7 +442,7 @@ HRS-030 is a safety net, not an absolute proof that no undecorated builders exis
 
 For deterministic, high-confidence workflow validity in CI:
 
-1. Decorate every workflow entrypoint with `@app.workflow_builder(...)`.
+1. Decorate every workflow entrypoint with `@app.check_workflow_builder(...)`.
 2. For parameterized builders, provide `cases=` that cover all meaningful branches and shapes.
 3. Ensure all builder modules are imported by the app used in `horsies check` (no hidden or dynamic registration paths).
 4. Run `horsies check` in CI and fail the pipeline on any errors.
@@ -458,7 +458,7 @@ The limits that these configs set are on [Concurrency](/horsies/workers/concurre
 ```python
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(...),
+    database=PostgresConfig(...),
 )
 ```
 
@@ -474,8 +474,8 @@ The `default` profile holds `isolated=IsolatedChildren(count=8)`.
 ```python
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    cluster_wide_cap=20,
-    broker=PostgresConfig(...),
+    cluster_wide_cap=ClusterCap(tasks=20),
+    database=PostgresConfig(...),
 )
 ```
 
@@ -500,8 +500,8 @@ config = AppConfig(
         CustomQueueConfig(name="email", priority=50, max_concurrency=10),
         CustomQueueConfig(name="reports", priority=100, max_concurrency=2),
     ],
-    cluster_wide_cap=15,
-    broker=PostgresConfig(...),
+    cluster_wide_cap=ClusterCap(tasks=15),
+    database=PostgresConfig(...),
 )
 ```
 
@@ -521,11 +521,11 @@ Output:
 ```
 AppConfig:
   queue_mode: DEFAULT
-  broker:
+  database:
     database_url: postgresql://user:***@localhost/db
     pool_size: 5
     max_overflow: 10
   recovery:
-    auto_requeue_stale_claimed: True
+    requeue_stale_claimed: True
     ...
 ```

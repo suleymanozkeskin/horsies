@@ -54,7 +54,7 @@ class TaskSendSubject:
     """The task send that a span covers."""
 
     task_name: str
-    queue_name: str
+    queue: str
     task_id: UUID
 
 

@@ -1,6 +1,6 @@
 //! Database reads for the execution classes of the fleet: the fleet check
-//! ([`PostgresBroker::get_class_coverage`]) and the class report
-//! ([`PostgresBroker::get_class_report`]).
+//! ([`PostgresBroker::get_execution_class_coverage`]) and the class report
+//! ([`PostgresBroker::get_execution_class_report`]).
 //!
 //! Each read is one autocommit statement, so its parts read one snapshot and
 //! one `now()`.
@@ -28,21 +28,21 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::broker::class_coverage::{
-    class_coverage, class_report, live_worker, refused, ClassCoverage, ClassReadRefused,
-    ClassReport, LiveWorker, StreamHead,
+    class_coverage, class_report, live_worker, refused, ClassReadRefused, ExecutionClassCoverage,
+    ExecutionClassReport, LiveWorker, StreamHead,
 };
 use crate::broker::core_rows::{column, one_row, RowDecodeError};
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
-use crate::broker::result_types::{BrokerOperationError, BrokerOperationSource, BrokerResult};
-use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
+use crate::broker::result_types::{BrokerOperationSource, DatabaseOperationError, DatabaseResult};
+use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_SECONDS;
 use crate::core::task::Execution;
 use crate::db::{
     BoundStatement, CheckoutClass, ParameterType, Row, StatementBound, TypedStatement,
 };
 
 /// The most snapshot rows inside the live window that a read takes. A worker
-/// writes `WORKER_STATE_LIVE_WINDOW_S` / snapshot interval rows into the
+/// writes `WORKER_STATE_LIVE_WINDOW_SECONDS` / snapshot interval rows into the
 /// window: 4 at the default 30 s, 120 at the 1 s floor.
 pub const LIVE_SNAPSHOT_ROW_LIMIT: usize = 20_000;
 
@@ -55,7 +55,7 @@ pub const PENDING_STREAM_LIMIT: usize = 3_000;
 pub const PENDING_HEAD_LIMIT: usize = 10_000;
 
 /// The live window in seconds, as the statements take it (`$1`).
-pub(crate) const LIVE_WINDOW_SECONDS: f64 = WORKER_STATE_LIVE_WINDOW_S as f64;
+pub(crate) const LIVE_WINDOW_SECONDS: f64 = WORKER_STATE_LIVE_WINDOW_SECONDS as f64;
 
 /// Each bounded part reads one row past its limit, so a part at its limit
 /// and a part past it are told apart.
@@ -239,11 +239,11 @@ struct LiveEntry {
 
 impl PostgresBroker {
     /// The fleet check: for each (queue, class) with `PENDING` rows, whether
-    /// a live worker serves it (Python `get_class_coverage_async`,
+    /// a live worker serves it (Python `get_execution_class_coverage_async`,
     /// `clients/python/horsies/core/brokers/postgres.py:3102-3133`).
     ///
     /// A worker is live while its latest snapshot is at most
-    /// `WORKER_STATE_LIVE_WINDOW_S` old. It serves a (queue, class) when the
+    /// `WORKER_STATE_LIVE_WINDOW_SECONDS` old. It serves a (queue, class) when the
     /// queue is one of its queues and one of its budgets serves the class.
     /// One autocommit statement on the main core pool; reads only.
     ///
@@ -256,32 +256,34 @@ impl PostgresBroker {
     ///   that reached its bound ([`LIVE_SNAPSHOT_ROW_LIMIT`],
     ///   [`PENDING_STREAM_LIMIT`]); not retryable, since the same rows give
     ///   the same answer.
-    pub async fn get_class_coverage(&self) -> BrokerResult<ClassCoverage> {
+    pub async fn get_execution_class_coverage(&self) -> DatabaseResult<ExecutionClassCoverage> {
         let row = self
             .coverage_row(CheckoutClass::Batch)
             .await
-            .map_err(|error| class_statement_failed("get_class_coverage", error))?;
-        coverage_from_row(row).map_err(|cause| class_read_refused("get_class_coverage", &cause))
+            .map_err(|error| class_statement_failed("get_execution_class_coverage", error))?;
+        coverage_from_row(row)
+            .map_err(|cause| class_read_refused("get_execution_class_coverage", &cause))
     }
 
     /// The class report: pending streams with the wait of their oldest due
     /// row and their coverage, and the budget load of each live worker
-    /// (Python `get_class_report_async`,
+    /// (Python `get_execution_class_report_async`,
     /// `clients/python/horsies/core/brokers/postgres.py:3135-3162`).
     ///
     /// One autocommit statement on the main core pool; reads only.
     ///
     /// Errors, all `MONITORING_QUERY_FAILED`: as
-    /// [`get_class_coverage`](Self::get_class_coverage) with
+    /// [`get_execution_class_coverage`](Self::get_execution_class_coverage) with
     /// [`PENDING_HEAD_LIMIT`] in place of the stream bound, or a live worker
     /// that holds rows of a class that its recorded budgets do not serve
     /// (not retryable).
-    pub async fn get_class_report(&self) -> BrokerResult<ClassReport> {
+    pub async fn get_execution_class_report(&self) -> DatabaseResult<ExecutionClassReport> {
         let row = self
             .report_row()
             .await
-            .map_err(|error| class_statement_failed("get_class_report", error))?;
-        report_from_row(row).map_err(|cause| class_read_refused("get_class_report", &cause))
+            .map_err(|error| class_statement_failed("get_execution_class_report", error))?;
+        report_from_row(row)
+            .map_err(|cause| class_read_refused("get_execution_class_report", &cause))
     }
 
     /// The row of [`CLASS_COVERAGE_SQL`], read on the main core pool with a
@@ -352,36 +354,41 @@ pub(crate) fn coverage_row_from(rows: Vec<Row>) -> Result<CoverageRow, RowDecode
     })
 }
 
-/// The fleet check of [`PostgresBroker::get_class_coverage`] for the reaper,
+/// The fleet check of [`PostgresBroker::get_execution_class_coverage`] for the reaper,
 /// after each pass: the same statement on the main core pool, checked out as
 /// reserved work ([`CheckoutClass::Reserved`]) as the reaper's other steps.
 /// Same answers and errors; reads only.
-pub(crate) async fn read_class_coverage(broker: &PostgresBroker) -> BrokerResult<ClassCoverage> {
+pub(crate) async fn read_class_coverage(
+    broker: &PostgresBroker,
+) -> DatabaseResult<ExecutionClassCoverage> {
     let row = broker
         .coverage_row(CheckoutClass::Reserved)
         .await
-        .map_err(|error| class_statement_failed("get_class_coverage", error))?;
-    coverage_from_row(row).map_err(|cause| class_read_refused("get_class_coverage", &cause))
+        .map_err(|error| class_statement_failed("get_execution_class_coverage", error))?;
+    coverage_from_row(row)
+        .map_err(|cause| class_read_refused("get_execution_class_coverage", &cause))
 }
 
 /// A class read on the core pool that the database did not answer, or whose
 /// row did not read. `retryable` is the statement layer's classification
 /// ([`BrokerError::is_retryable`]); a row that does not read is not
 /// retryable.
-fn class_statement_failed(operation: &str, error: BrokerError) -> BrokerOperationError {
-    BrokerOperationError::monitoring_query_failed(operation, BrokerOperationSource::Broker(error))
+fn class_statement_failed(operation: &str, error: BrokerError) -> DatabaseOperationError {
+    DatabaseOperationError::monitoring_query_failed(operation, BrokerOperationSource::Broker(error))
 }
 
 /// Stored data that a class read cannot decide on, or a bound it reached.
 /// Not retryable: the same rows give the same answer. Nothing changed
 /// (Python `_class_read_refused`, `postgres.py:408-421`).
-fn class_read_refused(operation: &str, cause: &ClassReadRefused) -> BrokerOperationError {
-    BrokerOperationError::monitoring_query_refused(operation, cause.clone())
+fn class_read_refused(operation: &str, cause: &ClassReadRefused) -> DatabaseOperationError {
+    DatabaseOperationError::monitoring_query_refused(operation, cause.clone())
 }
 
 /// The fleet check from its statement row, checked in Python's order: the
 /// snapshot bound, each live snapshot's budgets, the stream bound.
-pub(crate) fn coverage_from_row(row: CoverageRow) -> Result<ClassCoverage, ClassReadRefused> {
+pub(crate) fn coverage_from_row(
+    row: CoverageRow,
+) -> Result<ExecutionClassCoverage, ClassReadRefused> {
     let workers = live_workers(row.recent_rows, row.live)?;
     let streams = pending_streams(row.streams)?;
     class_coverage(row.checked_at, &workers, streams)
@@ -390,7 +397,7 @@ pub(crate) fn coverage_from_row(row: CoverageRow) -> Result<ClassCoverage, Class
 /// The class report from its statement row, checked in Python's order: the
 /// snapshot bound, each live snapshot's budgets, the head bound, the rows
 /// that each worker holds.
-fn report_from_row(row: ReportRow) -> Result<ClassReport, ClassReadRefused> {
+fn report_from_row(row: ReportRow) -> Result<ExecutionClassReport, ClassReadRefused> {
     let workers = live_workers(row.recent_rows, row.live)?;
     let heads = pending_heads(row.heads)?;
     let in_flight = in_flight_rows(row.in_flight)?;
@@ -404,7 +411,7 @@ pub(crate) fn live_workers(
     if recent_rows > LIVE_SNAPSHOT_ROW_LIMIT as i64 {
         return Err(refused(format!(
             "more than {LIVE_SNAPSHOT_ROW_LIMIT} worker snapshots are inside the live window \
-             of {WORKER_STATE_LIVE_WINDOW_S} s"
+             of {WORKER_STATE_LIVE_WINDOW_SECONDS} s"
         )));
     }
     let entries: Vec<LiveEntry> = decoded_part("live", live)?;

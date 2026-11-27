@@ -37,7 +37,8 @@ from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
     NoRuntimeParameter,
     TakesRuntime,
-    declared_taskresult_ok_type,
+    declared_outcome_code_type,
+    declared_outcome_ok_type,
     decode_kwargs,
     fill_omitted_defaults,
     task_runtime_parameter,
@@ -70,19 +71,20 @@ _ENGINE_KEY_WORKFLOW_CTX = '__h_workflow_ctx__'
 _ENGINE_KEY_WORKFLOW_META = '__h_workflow_meta__'
 _ENGINE_KEY_TASKRESULT_ENVELOPE = '__h_taskresult_envelope__'
 from horsies.core.models.boot_failure import ThreadStartRefusedError
+from horsies.core.models.schema_mode import AppRole
 from horsies.core.models.tasks import (
     MAX_CANCEL_GRACE_MS,
     MAX_TASK_TIMEOUT_MS,
     MIN_CANCEL_GRACE_MS,
     MIN_TASK_TIMEOUT_MS,
-    BuiltInTaskCode,
     ContractCode,
     Execution,
     OutcomeCode,
     RetrievalCode,
-    TaskResult,
+    CustomCodeType,
     TaskError,
-    OperationalErrorCode,
+    OperationalCode,
+    custom_code_text,
 )
 from horsies.core.worker.stored_timeout import (
     CancelGraceInvalid,
@@ -151,7 +153,9 @@ from horsies.core.lifecycle.outcomes import (
     TerminalizationOutcome,
 )
 from horsies.core.task_decorator import TaskBodyKind, await_task_call_in_worker
-from horsies.core.types.result import Err, Ok, is_err
+from horsies.core.models.outcome import Failed, TaskOutcome
+from horsies.core.task_read import typed_outcome
+from horsies.core.types.result import Err, Ok, Result, is_err
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,33 +244,36 @@ def isolated_work_of(work: Literal['RUN'] | core.StoredOptionsRefused) -> Isolat
             assert_never(unreachable)
 
 
-def error_code_text(code: BuiltInTaskCode | str) -> str:
-    """The text of an error code: the value of a built-in code, or the user's
-    code. Pure."""
+def error_code_text(code: object) -> str:
+    """The text of an error code: the value of a built-in code, or the stored
+    text of a custom code (``custom_code_text``: the ``str``, or the value of
+    the member). Pure."""
     match code:
-        case OperationalErrorCode() | ContractCode() | RetrievalCode() | OutcomeCode():
+        case OperationalCode() | ContractCode() | RetrievalCode() | OutcomeCode():
             return code.value
-        case str():
-            return code
+        case _:
+            return custom_code_text(code)
 
 
-def result_outcome_of(out: TaskResult[Any, TaskError]) -> ResultOutcome:
+def result_outcome_of(out: Result[Any, TaskError]) -> ResultOutcome:
     """What the envelope of ``out`` holds: its value, or its task error with
     the code text and the live exception that the error keeps. Pure."""
-    match out.err:
-        case None:
+    match out:
+        case Ok():
             return ResultSucceeded()
-        case TaskError(error_code=code, exception=BaseException() as exception):
-            return ResultFailed(error_code_text(code), RaisedInRun(exception))
-        case TaskError(error_code=code):
-            return ResultFailed(error_code_text(code), NothingRaised())
+        case Err(err_value=error):
+            match error.exception:
+                case BaseException() as exception:
+                    return ResultFailed(error_code_text(error.code), RaisedInRun(exception))
+                case _:
+                    return ResultFailed(error_code_text(error.code), NothingRaised())
 
 
-def _encoded_error(tr: TaskResult[None, TaskError]) -> EncodedResult:
+def _encoded_error(error: TaskError) -> EncodedResult:
     """The envelope of an error that the run built itself, and its outcome."""
     return EncodedResult(
-        ResultEnvelope(serialize_error_payload(tr)),
-        result_outcome_of(tr),
+        ResultEnvelope(serialize_error_payload(error)),
+        result_outcome_of(Err(error)),
     )
 
 
@@ -276,14 +283,12 @@ def _serialization_error_response(
 ) -> EncodedResult:
     """Build a WORKER_SERIALIZATION_ERROR response for a serde failure."""
     logger.error(f'Serialization error for task {task_name}: {error}')
-    tr: TaskResult[None, TaskError] = TaskResult(
-        err=TaskError(
-            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-            message=str(error),
-            data={'task_name': task_name},
-        ),
+    task_error = TaskError(
+        code=OperationalCode.WORKER_SERIALIZATION_ERROR,
+        message=str(error),
+        data={'task_name': task_name},
     )
-    return _encoded_error(tr)
+    return _encoded_error(task_error)
 
 
 def _stored_timeout_refusal_response(
@@ -316,17 +321,15 @@ def _stored_timeout_refusal_response(
         case _ as unreachable:
             assert_never(unreachable)
     logger.error(f'Stored timeout refused for task {task_name}: {reason}')
-    tr: TaskResult[None, TaskError] = TaskResult(
-        err=TaskError(
-            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-            message=reason,
-            data=data,
-        ),
+    task_error = TaskError(
+        code=OperationalCode.WORKER_SERIALIZATION_ERROR,
+        message=reason,
+        data=data,
     )
-    return _encoded_error(tr)
+    return _encoded_error(task_error)
 
 
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.logging import get_logger
 from horsies.core.process_role import mark_process_runs_task_bodies
 from horsies.core.worker.current import get_current_app, set_current_app
@@ -426,7 +429,7 @@ def _locate_app(app_locator: str) -> Horsies:
     if not app_locator or ':' not in app_locator:
         raise ConfigurationError(
             message='invalid app locator format',
-            code=ErrorCode.WORKER_INVALID_LOCATOR,
+            code=HorsiesErrorCode.WORKER_INVALID_LOCATOR,
             notes=[f'got: {app_locator!r}'],
             help_text="use 'module.path:app' or '/path/to/file.py:app'",
         )
@@ -439,7 +442,7 @@ def _locate_app(app_locator: str) -> Horsies:
     if not isinstance(obj, Horsies):
         raise ConfigurationError(
             message='app locator did not resolve to Horsies instance',
-            code=ErrorCode.WORKER_INVALID_LOCATOR,
+            code=HorsiesErrorCode.WORKER_INVALID_LOCATOR,
             notes=[
                 f'locator: {app_locator!r}',
                 f'resolved to: {type(obj).__name__}',
@@ -461,7 +464,7 @@ def _discard_inherited_broker(app: Horsies) -> None:
         logger.warning('Failed to reset the import-time broker in child: %s', exc)
 
 
-# Exit code for a failed/hung on_child_process_start hook. Distinct from
+# Exit code for a failed/hung on_child_start hook. Distinct from
 # generic child crashes so the parent stops the worker instead of
 # restart-looping on an unfixable child boot.
 CHILD_HOOK_FAILURE_EXIT_CODE: Final = PROTOCOL_NUMBERS.child_hook_failed_exit_code
@@ -473,7 +476,7 @@ CHILD_HOOK_TIMEOUT_SECONDS = 10.0
 def _exit_for_hung_hook(hook_name: str) -> None:
     """Watchdog target: a hook exceeded its budget; terminate the child."""
     logger.critical(
-        "on_child_process_start hook '%s' exceeded %.0fs in child %s; "
+        "on_child_start hook '%s' exceeded %.0fs in child %s; "
         'terminating child',
         hook_name,
         CHILD_HOOK_TIMEOUT_SECONDS,
@@ -522,7 +525,7 @@ def _run_child_start_hooks(app: Horsies) -> None:
             before that hook ran. The boot names the cause
             ``ThreadStartRefused``.
     """
-    for hook in app.get_child_process_start_hooks():
+    for hook in app.get_child_start_hooks():
         hook_name = getattr(hook, '__qualname__', repr(hook))
         watchdog = start_hook_watchdog(hook_name)
         try:
@@ -530,7 +533,7 @@ def _run_child_start_hooks(app: Horsies) -> None:
         except BaseException as exc:
             watchdog.cancel()
             logger.critical(
-                "on_child_process_start hook '%s' failed in child %s: %s",
+                "on_child_start hook '%s' failed in child %s: %s",
                 hook_name,
                 os.getpid(),
                 exc,
@@ -538,7 +541,7 @@ def _run_child_start_hooks(app: Horsies) -> None:
             os._exit(CHILD_HOOK_FAILURE_EXIT_CODE)
         watchdog.cancel()
         logger.debug(
-            "[child %s] on_child_process_start hook '%s' completed",
+            "[child %s] on_child_start hook '%s' completed",
             os.getpid(),
             hook_name,
         )
@@ -564,7 +567,7 @@ def import_app_for_child(
     app_locator: str,
     imports: Sequence[str],
     sys_path_roots: Sequence[str],
-    loglevel: int,
+    log_level: int,
     task_send_pool: int,
 ) -> Horsies:
     """Locate the app and import its task modules. Opens no connection.
@@ -583,7 +586,7 @@ def import_app_for_child(
     # Configure logging for this child process before any logging
     from horsies.core.logging import configure_logging
 
-    configure_logging(loglevel)
+    configure_logging(log_level)
 
     # Mark child process to adjust logging behavior during module import
     os.environ['HORSIES_CHILD_PROCESS'] = '1'
@@ -603,9 +606,9 @@ def import_app_for_child(
 
     app = _locate_app(app_locator)  # uses import_by_path -> loads as 'instance'
     # The records from here on take the app's format.
-    configure_logging(loglevel, log_format=app.config.log_format)
+    configure_logging(log_level, log_format=app.config.log_format)
     _discard_inherited_broker(app)
-    app.set_role('worker')
+    app.set_role(AppRole.WORKER)
     app.set_task_send_pool(task_send_pool)
     set_current_app(app)
 
@@ -638,7 +641,7 @@ def finish_child_start(app: Horsies, init: core.InitFrame) -> None:
     these itself, after any fork.
 
     The process runs task bodies from here on, the
-    ``on_child_process_start`` hooks run, the child chooses its attempt
+    ``on_child_start`` hooks run, the child chooses its attempt
     spans from ``AppConfig.tracing`` (``use_attempt_spans``), and the core
     handle of the child is built from ``init``
     (``_initialize_child_core_handle``). Every write of the child goes
@@ -1099,7 +1102,7 @@ def marker_refused(task_id: uuid.UUID, refused: CoreError) -> MarkerEnd:
 def encoded_body_end(
     task_name: str,
     task: Any,
-    out: TaskResult[Any, TaskError],
+    out: Result[Any, TaskError],
 ) -> EncodedResult | BodyInterrupted:
     """The end of a body whose task call returned ``out``.
 
@@ -1108,8 +1111,8 @@ def encoded_body_end(
     as its exception. Any other outcome is encoded for the frame
     (``_encode_task_outcome``), and an exception of the encode propagates.
     """
-    match out.err:
-        case TaskError(exception=CoreStopped() | ForkedAfterCoreStart() as refusal):
+    match out:
+        case Err(err_value=TaskError(exception=CoreStopped() | ForkedAfterCoreStart() as refusal)):
             return BodyInterrupted(refusal)
         case _:
             return _encode_task_outcome(task_name, task, out)
@@ -1155,14 +1158,12 @@ def async_task_presence(app: Horsies) -> AsyncTaskPresence:
 
 def _resolution_failure(task_name: str, message: str) -> EncodedResult:
     """The result of a task the worker cannot resolve: WORKER_RESOLUTION_ERROR."""
-    tr: TaskResult[None, TaskError] = TaskResult(
-        err=TaskError(
-            error_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR,
-            message=message,
-            data={'task_name': task_name},
-        )
+    task_error = TaskError(
+        code=OperationalCode.WORKER_RESOLUTION_ERROR,
+        message=message,
+        data={'task_name': task_name},
     )
-    return _encoded_error(tr)
+    return _encoded_error(task_error)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1246,11 +1247,11 @@ def _why_not_runnable(body_kind: object, place: RunPlace) -> str | None:
 
 def _task_call_result(
     task_name: str,
-    called: TaskResult[Any, TaskError] | Coroutine[Any, Any, TaskResult[Any, TaskError]],
+    called: Result[Any, TaskError] | Coroutine[Any, Any, Result[Any, TaskError]],
     task_loop: TaskLoop,
-    map_exception: Callable[[BaseException], TaskResult[Any, TaskError]],
+    map_exception: Callable[[BaseException], Result[Any, TaskError]],
     cancel: RunCancel,
-) -> TaskResult[Any, TaskError]:
+) -> Result[Any, TaskError]:
     """The result of one call of a task wrapper.
 
     The call of a ``def`` task returns its result. The call of an
@@ -1265,7 +1266,7 @@ def _task_call_result(
     defect in the library: ``AssertionError``.
     """
     match called:
-        case TaskResult():
+        case Ok() | Err():
             return called
         case Coroutine():
             return task_loop.run_watched(
@@ -1360,7 +1361,7 @@ def _prepare_task_call(
             ),
         )
 
-    # Deserialize injected TaskResults from workflow args_from.
+    # Deserialize injected outcomes from workflow args_from.
     # Strict-serde envelope shape (engine.py emit sites):
     #   {
     #     '__h_taskresult_envelope__': True,
@@ -1417,25 +1418,36 @@ def _prepare_task_call(
                     f'(source task {source_task_name!r}): {exc}'
                 ),
             )
-        target_ok_type = declared_taskresult_ok_type(underlying_fn, key)
-        if target_ok_type is None or target_ok_type == source_ok_type:
-            kwargs[key] = decoded_result
-            continue
-        match conform_to_target(decoded_result, target_ok_type):
-            case Ok(ok_value=conformed):
-                kwargs[key] = conformed
-            case Err(err_value=refusal):
+        target_ok_type = declared_outcome_ok_type(underlying_fn, key)
+        if target_ok_type is not None and target_ok_type != source_ok_type:
+            match conform_to_target(decoded_result, target_ok_type):
+                case Ok(ok_value=conformed):
+                    decoded_result = conformed
+                case Err(err_value=refusal):
+                    return _serialization_error_response(
+                        task_name,
+                        SerializationError(
+                            f'kwarg {key!r} does not fit its declared type '
+                            f'(source task {source_task_name!r}): {refusal}'
+                        ),
+                    )
+                case _ as unreachable:
+                    assert_never(unreachable)
+        match typed_outcome(decoded_result, declared_outcome_code_type(underlying_fn, key)):
+            case Ok(ok_value=typed):
+                kwargs[key] = typed
+            case Err(err_value=unknown):
                 return _serialization_error_response(
                     task_name,
                     SerializationError(
                         f'kwarg {key!r} does not fit its declared type '
-                        f'(source task {source_task_name!r}): {refusal}'
+                        f'(source task {source_task_name!r}): {unknown.message}'
                     ),
                 )
             case _ as unreachable:
                 assert_never(unreachable)
 
-    # Handle workflow injection payloads (workflow_ctx / workflow_meta).
+    # Handle workflow injection payloads (workflow_context / workflow_meta).
     workflow_ctx_data = kwargs.pop(_ENGINE_KEY_WORKFLOW_CTX, None)
     workflow_meta_data = kwargs.pop(_ENGINE_KEY_WORKFLOW_META, None)
     if workflow_ctx_data is not None or workflow_meta_data is not None:
@@ -1443,7 +1455,7 @@ def _prepare_task_call(
 
         underlying_fn = underlying_task_fn(task)
         sig = inspect.signature(underlying_fn)
-        if workflow_ctx_data is not None and 'workflow_ctx' in sig.parameters:
+        if workflow_ctx_data is not None and 'workflow_context' in sig.parameters:
             from horsies.core.models.workflow import (
                 WorkflowContext,
                 SubWorkflowSummary,
@@ -1454,18 +1466,18 @@ def _prepare_task_call(
             definition_key_by_id = workflow_ctx_data.get(
                 'definition_key_by_id', {},
             )
-            results_by_id: dict[str, TaskResult[Any, TaskError]] = {}
+            results_by_id: dict[str, TaskOutcome[Any, TaskError[Any]]] = {}
             for node_id, envelope in results_by_id_raw.items():
                 if envelope is None:
                     # Engine couldn't encode this entry (no
                     # registered task or no ok_type); surface as a
                     # sentinel TaskError so the context still has a
                     # typed value.
-                    results_by_id[node_id] = TaskResult(
-                        err=TaskError(
-                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                    results_by_id[node_id] = Failed(
+                        TaskError(
+                            code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
-                                f'workflow_ctx result for node '
+                                f'workflow_context result for node '
                                 f'{node_id!r} unavailable (source '
                                 f'task not registered at encode '
                                 f'time)'
@@ -1476,11 +1488,11 @@ def _prepare_task_call(
                     continue
                 source_task_name = task_name_by_id.get(node_id)
                 if not isinstance(source_task_name, str):
-                    results_by_id[node_id] = TaskResult(
-                        err=TaskError(
-                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                    results_by_id[node_id] = Failed(
+                        TaskError(
+                            code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
-                                f'workflow_ctx missing task_name for '
+                                f'workflow_context missing task_name for '
                                 f'node {node_id!r}; cannot decode'
                             ),
                             data={'node_id': node_id},
@@ -1488,6 +1500,7 @@ def _prepare_task_call(
                     )
                     continue
                 from horsies.core.models.workflow.typing_utils import (
+                    resolve_source_code_type,
                     resolve_source_ok_type as _resolve_src_ok,
                 )
 
@@ -1501,11 +1514,11 @@ def _prepare_task_call(
                     ),
                 )
                 if source_ok_type is None:
-                    results_by_id[node_id] = TaskResult(
-                        err=TaskError(
-                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                    results_by_id[node_id] = Failed(
+                        TaskError(
+                            code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
-                                f'workflow_ctx source '
+                                f'workflow_context source '
                                 f'{source_task_name!r} not '
                                 f'registered in this process (no task '
                                 f'or workflow definition with this name)'
@@ -1518,16 +1531,25 @@ def _prepare_task_call(
                     )
                     continue
                 try:
-                    results_by_id[node_id] = decode_task_result(
-                        envelope, source_ok_type,
+                    results_by_id[node_id] = _context_entry(
+                        node_id,
+                        decode_task_result(envelope, source_ok_type),
+                        resolve_source_code_type(
+                            app, source_task_name,
+                            sub_definition_key=(
+                                _sub_def_key
+                                if isinstance(_sub_def_key, str)
+                                else None
+                            ),
+                        ),
                     )
                 except (StrictJsonError, ValueValidationError) as exc:
-                    results_by_id[node_id] = TaskResult(
-                        err=TaskError(
-                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                    results_by_id[node_id] = Failed(
+                        TaskError(
+                            code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'decode_task_result failed for '
-                                f'workflow_ctx node {node_id!r}: '
+                                f'workflow_context node {node_id!r}: '
                                 f'{exc}'
                             ),
                             data={
@@ -1555,17 +1577,20 @@ def _prepare_task_call(
                             task_name, SerializationError(str(summary_exc))
                         )
 
-            kwargs['workflow_ctx'] = WorkflowContext.from_serialized(
+            # The engine payload keeps its stored keys (`task_index`,
+            # `results_by_id`, `summaries_by_id`): SQL writes them. They map
+            # here to the API names of the context.
+            kwargs['workflow_context'] = WorkflowContext.from_serialized(
                 workflow_id=workflow_ctx_data.get('workflow_id', ''),
-                task_index=workflow_ctx_data.get('task_index', 0),
+                node_index=workflow_ctx_data.get('task_index', 0),
                 task_name=workflow_ctx_data.get('task_name', ''),
-                results_by_id=results_by_id,
-                summaries_by_id=summaries_by_id,
+                results_by_node_id=results_by_id,
+                summaries_by_node_id=summaries_by_id,
             )
-        # If task doesn't declare workflow_ctx, silently skip injection.
+        # If task doesn't declare workflow_context, silently skip injection.
 
         if workflow_meta_data is not None and 'workflow_meta' in sig.parameters:
-            from horsies.core.models.workflow import WorkflowMeta
+            from horsies.core.models.workflow import WorkflowMetadata
 
             if isinstance(workflow_meta_data, dict):
                 meta_dict = cast(dict[str, Any], workflow_meta_data)
@@ -1575,9 +1600,11 @@ def _prepare_task_call(
                 except (TypeError, ValueError):
                     task_index_value = 0
 
-                kwargs['workflow_meta'] = WorkflowMeta(
+                # The stored key `task_index` (written by SQL) maps to the
+                # API name `node_index`.
+                kwargs['workflow_meta'] = WorkflowMetadata(
                     workflow_id=str(meta_dict.get('workflow_id', '')),
-                    task_index=task_index_value,
+                    node_index=task_index_value,
                     task_name=str(meta_dict.get('task_name', '')),
                 )
         # If task doesn't declare workflow_meta, silently skip injection.
@@ -1604,25 +1631,44 @@ def _prepare_task_call(
     return _PreparedCall(task=task, app=app, args=args, kwargs=kwargs)
 
 
+def _context_entry(
+    node_id: str,
+    outcome: TaskOutcome[Any, TaskError],
+    code_type: CustomCodeType,
+) -> TaskOutcome[Any, TaskError[Any]]:
+    """The entry of one node in a workflow context: its outcome with the
+    custom codes of its task (``typed_outcome``). A stored code that the
+    task's ``Enum`` does not name is a failed outcome with
+    ``RESULT_DESERIALIZATION_ERROR``, as a node whose stored value does not
+    read. Pure."""
+    match typed_outcome(outcome, code_type):
+        case Ok(ok_value=typed):
+            return typed
+        case Err(err_value=unknown):
+            return Failed(TaskError(
+                code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
+                message=f'workflow_context node {node_id!r}: {unknown.message}',
+                data={'node_id': node_id, 'custom_code': unknown.custom_code},
+            ))
+
+
 def _task_exception_response(task_name: str, e: BaseException) -> EncodedResult:
     """The result of a task that raised: ``TASK_EXCEPTION``. Logs it."""
     logger.error(f'Task exception: {task_name}: {exception_text(e)}')
     # If the task raised an exception, we wrap it in a TaskError
-    tr: TaskResult[None, TaskError] = TaskResult(
-        err=TaskError(
-            error_code=OperationalErrorCode.TASK_EXCEPTION,
-            message=f'{type(e).__name__}: {exception_text(e)}',
-            data={'task_name': task_name},
-            exception=e,  # pydantic will accept and we flatten on serialization if needed elsewhere
-        )
+    task_error = TaskError(
+        code=OperationalCode.TASK_EXCEPTION,
+        message=f'{type(e).__name__}: {exception_text(e)}',
+        data={'task_name': task_name},
+        exception=e,  # pydantic will accept and we flatten on serialization if needed elsewhere
     )
-    return _encoded_error(tr)
+    return _encoded_error(task_error)
 
 
 def _encode_task_outcome(
     task_name: str,
     task: Any,
-    out: TaskResult[Any, TaskError],
+    out: Result[Any, TaskError],
 ) -> EncodedResult:
     """Encode the result of a task call for the frame, against the declared
     ok type of the task, and read the ok value back with that type
@@ -1748,7 +1794,7 @@ def run_isolated_task(
     the span and the log records of the body.
 
     ``orphan_self_heal`` comes with the run from the worker (the app's
-    ``RecoveryConfig.auto_terminate_orphaned_workflow_tasks``): with it, the
+    ``RecoveryConfig.terminate_orphaned_workflow_tasks``): with it, the
     stop of a workflow task whose node is not linked cancels the task
     (ORPHAN_CANCELLED).
 

@@ -13,8 +13,15 @@
 //   4. the JSON text: an integer of more than 4,300 digits: `SerializationError`.
 //   So with two faults the first step that sees one names the cause.
 
+import {
+  DATA_REFUSED_KEY,
+  DATA_REFUSED_SERIALIZATION_CAUSE,
+  DATA_REFUSED_STRICT_JSON_CAUSE,
+  DATA_REFUSED_VALUE_VALIDATION_CAUSE,
+  MAX_INT_DIGITS,
+  MAX_JSON_DEPTH,
+} from "../_catalog/codec_bounds.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import { DATA_REFUSED_KEY, MAX_INT_DIGITS, MAX_JSON_DEPTH } from "./bounds.ts";
 import { isEngineKey } from "./engine-keys.ts";
 import { type JsonText, writtenJsonText } from "./json-text.ts";
 import { engineKeysKeptText } from "./json-value.ts";
@@ -28,7 +35,10 @@ import { isArray, isPlainObject } from "./values.ts";
 const PYDANTIC_DUMP_DEPTH = 254;
 
 /** The cause of a replaced `data`, as Python and the core store it. */
-export type DataRefusedCause = "StrictJsonError" | "ValueValidationError" | "SerializationError";
+export type DataRefusedCause =
+  | typeof DATA_REFUSED_STRICT_JSON_CAUSE
+  | typeof DATA_REFUSED_VALUE_VALIDATION_CAUSE
+  | typeof DATA_REFUSED_SERIALIZATION_CAUSE;
 
 /** The stored `data` of a task error: its own text, or the replacement and its cause. */
 export type StoredErrorData =
@@ -67,7 +77,7 @@ function storedText(data: unknown): StoredErrorData {
   const written = engineKeysKeptText(data, ROOT_PATH, MAX_JSON_DEPTH);
 
   if (!written.ok) {
-    throw new TypeError(`errorDataText: the writer refused data that the fault walk took (${written.error.kind})`);
+    throw new TypeError(`errorDataText: the writer refused data that the fault walk took (${written.error.refusal})`);
   }
 
   return Object.freeze({ state: "stored", text: writtenJsonText(written.value) });
@@ -88,16 +98,16 @@ function verdictOf(faults: DataFaults): DataVerdict {
   }
 
   if (faults.notJsonNative || faults.nonFinite || faults.textTooDeep) {
-    return { state: "replaced", cause: "StrictJsonError" };
+    return { state: "replaced", cause: DATA_REFUSED_STRICT_JSON_CAUSE };
   }
 
   if (faults.deepest > PYDANTIC_DUMP_DEPTH) {
-    return { state: "replaced", cause: "ValueValidationError" };
+    return { state: "replaced", cause: DATA_REFUSED_VALUE_VALIDATION_CAUSE };
   }
 
   const scanned = faults.loneSurrogate || faults.engineKey;
 
-  return { state: "replaced", cause: scanned ? "StrictJsonError" : "SerializationError" };
+  return { state: "replaced", cause: scanned ? DATA_REFUSED_STRICT_JSON_CAUSE : DATA_REFUSED_SERIALIZATION_CAUSE };
 }
 
 function faultsOf(data: unknown): DataFaults {

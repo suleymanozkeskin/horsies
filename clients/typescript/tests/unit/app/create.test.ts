@@ -18,7 +18,7 @@ import { catalogRefusal, DATABASE_URL, fakeChecks, fakeEnvironment, type FakeEnv
 const ping = defineTask({ name: "ping", input: {}, output: h.string() });
 
 function config(tasks: HorsiesConfig["tasks"]): HorsiesConfig {
-  return { broker: { databaseUrl: DATABASE_URL }, tasks };
+  return { database: { databaseUrl: DATABASE_URL }, tasks };
 }
 
 /** The codes and paths of a refused create. Throws when the create gives an app. */
@@ -40,7 +40,7 @@ function messagesOf(input: HorsiesConfig): string {
 describe("Horsies.create: the config", () => {
   test("an unset environment variable of a secret is HRS-203, and the core checks do not run", () => {
     const environment = fakeEnvironment();
-    const input: HorsiesConfig = { broker: { databaseUrl: { kind: "fromEnv", name: "HORSIES_TEST_UNSET_URL" } }, tasks: [ping] };
+    const input: HorsiesConfig = { database: { databaseUrl: { kind: "fromEnv", name: "HORSIES_TEST_UNSET_URL" } }, tasks: [ping] };
     const created = createHorsies(input, environment);
 
     assert.equal(created.ok, false);
@@ -51,9 +51,23 @@ describe("Horsies.create: the config", () => {
 
   test("a variable that is set gives the secret", () => {
     const environment = fakeEnvironment({ variables: { HORSIES_TEST_URL: "postgresql://127.0.0.1:55432/horsies" } });
-    const input: HorsiesConfig = { broker: { databaseUrl: { kind: "fromEnv", name: "HORSIES_TEST_URL" } }, tasks: [ping] };
+    const input: HorsiesConfig = { database: { databaseUrl: { kind: "fromEnv", name: "HORSIES_TEST_URL" } }, tasks: [ping] };
 
     assert.equal(createHorsies(input, environment).ok, true);
+  });
+
+  test("the core's config check gets the app's schema mode; the default is MIGRATE_AND_VALIDATE", () => {
+    for (const [schemaMode, expected] of [
+      [undefined, "MIGRATE_AND_VALIDATE"],
+      ["OBSERVE_ONLY", "OBSERVE_ONLY"],
+      ["ASSUME_INITIALIZED", "ASSUME_INITIALIZED"],
+    ] as const) {
+      const environment = fakeEnvironment();
+      const input: HorsiesConfig = schemaMode === undefined ? config([ping]) : { ...config([ping]), schemaMode };
+
+      assert.equal(createHorsies(input, environment).ok, true);
+      assert.deepEqual(environment.checks.schemaModes, [expected]);
+    }
   });
 
   test("a core config refusal keeps its catalog code, at the path config", () => {
@@ -111,7 +125,7 @@ describe("Horsies.create: the contract list", () => {
     const queued = defineTask({ name: "queued", queue: "urgent", input: {}, output: h.null() });
 
     const input: HorsiesConfig = {
-      broker: { databaseUrl: { kind: "fromEnv", name: "UNSET_VARIABLE" } },
+      database: { databaseUrl: { kind: "fromEnv", name: "UNSET_VARIABLE" } },
       queueMode: "custom",
       customQueues: [{ name: "urgent", priority: 1 }],
       tasks: [queued],
@@ -125,7 +139,7 @@ describe("Horsies.create: the contract list", () => {
 
   test("no queue in the custom queue mode is HRS-200", () => {
     const input: HorsiesConfig = {
-      broker: { databaseUrl: DATABASE_URL },
+      database: { databaseUrl: DATABASE_URL },
       queueMode: "custom",
       customQueues: [{ name: "standard", priority: 10 }],
       tasks: [ping],
@@ -139,7 +153,7 @@ describe("Horsies.create: the contract list", () => {
     const billing = defineTask({ name: "charge", queue: "billing", input: {}, output: h.null() });
 
     const input: HorsiesConfig = {
-      broker: { databaseUrl: DATABASE_URL },
+      database: { databaseUrl: DATABASE_URL },
       queueMode: "custom",
       customQueues: [{ name: "standard", priority: 10 }],
       tasks: [billing],
@@ -160,7 +174,7 @@ describe("Horsies.create: the contract list", () => {
     const refused = created.ok ? [] : created.error.refusals;
 
     assert.deepEqual(
-      refused.map((each) => [each.code, each.message, each.help]),
+      refused.map((each) => [each.code, each.message, each.helpText]),
       [["HRS-102", "tasks[0] : name: the task name is empty [TaskName]", ["give a task name that is not empty"]]],
     );
   });
@@ -171,7 +185,7 @@ describe("Horsies.create: the contract list", () => {
     const refused = created.ok ? [] : created.error.refusals;
 
     assert.deepEqual(
-      refused.map((each) => [each.code, each.message, each.help]),
+      refused.map((each) => [each.code, each.message, each.helpText]),
       [["HRS-105", "tasks[0] dated: input.at: zod type date is refused [DATE] [ZodSchema]", ["use hz.instant(): a Date holds milliseconds only"]]],
     );
   });
@@ -179,7 +193,7 @@ describe("Horsies.create: the contract list", () => {
 
 describe("Horsies.create: the core's checks of a contract", () => {
   test("a declared code that the core refuses keeps its code (HRS-112)", () => {
-    const coded = defineTask({ name: "coded", input: {}, output: h.null(), errors: ["bad code"] });
+    const coded = defineTask({ name: "coded", input: {}, output: h.null(), errorCodes: ["bad code"] });
     const environment = fakeEnvironment({ checks: fakeChecks({ codes: [catalogRefusal("HRS-112", "not UPPER_SNAKE_CASE")] }) });
 
     assert.deepEqual(refusalsOf(config([coded]), environment), [["HRS-112", "tasks[0] coded"]]);
@@ -188,10 +202,10 @@ describe("Horsies.create: the core's checks of a contract", () => {
   test("the help of a core refusal: its one line, or no line", () => {
     const withHelp = { ...catalogRefusal("HRS-109", "execution SHARED_ASYNC requires timeoutMs"), help: { kind: "help", line: "set timeoutMs" } } as const;
     const environment = fakeEnvironment({ checks: fakeChecks({ options: [withHelp], codes: [catalogRefusal("HRS-112", "bad code")] }) });
-    const coded = defineTask({ name: "coded", input: {}, output: h.null(), errors: ["BAD"] });
+    const coded = defineTask({ name: "coded", input: {}, output: h.null(), errorCodes: ["BAD"] });
     const created = createHorsies(config([coded]), environment);
 
-    assert.deepEqual(created.ok ? [] : created.error.refusals.map((refused) => [refused.code, refused.help]), [
+    assert.deepEqual(created.ok ? [] : created.error.refusals.map((refused) => [refused.code, refused.helpText]), [
       ["HRS-112", []],
       ["HRS-109", ["set timeoutMs"]],
     ]);
@@ -210,21 +224,21 @@ describe("Horsies.create: the core's checks of a contract", () => {
       name: "charge",
       input: {},
       output: h.null(),
-      errors: ["PROVIDER_DOWN"],
+      errorCodes: ["PROVIDER_DOWN"],
       execution: "SHARED_ASYNC",
       timeoutMs: 30_000,
-      retry: { kind: "fixed", intervalsSeconds: [60, 300], jitter: false, autoRetryFor: ["PROVIDER_DOWN"] },
+      retryPolicy: { kind: "fixed", intervalsSeconds: [60, 300], jitter: false, retryFor: ["PROVIDER_DOWN"] },
     });
 
     assert.equal(createHorsies(config([charge]), fakeEnvironment({ checks })).ok, true);
     assert.deepEqual(checks.optionsFacts, [
       {
         taskName: "charge",
-        queueName: "default",
+        queue: "default",
         execution: "SHARED_ASYNC",
         timeout: { kind: "set", milliseconds: 30_000 },
         cancelGrace: { kind: "notSet" },
-        retry: { kind: "fixed", intervalsSeconds: [60, 300], jitter: false, autoRetryFor: ["PROVIDER_DOWN"] },
+        retry: { kind: "fixed", intervalsSeconds: [60, 300], jitter: false, retryFor: ["PROVIDER_DOWN"] },
         declaredCodes: { kind: "declared", codes: ["PROVIDER_DOWN"] },
       },
     ]);

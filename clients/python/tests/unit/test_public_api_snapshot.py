@@ -248,10 +248,10 @@ class TestScopeOfSnapshot:
     def test_the_recorded_names_and_modules(self, tmp_path: Path) -> None:
         path = _write(
             tmp_path / 's.json',
-            '{"scope": {"imported_names": ["horsies.core.errors:ErrorCode"], "imported_modules": ["horsies.x"]}}',
+            '{"scope": {"imported_names": ["horsies.core.errors:HorsiesErrorCode"], "imported_modules": ["horsies.x"]}}',
         )
         assert scope_of_snapshot(path) == Ok(
-            frozenset({ImportedName('horsies.core.errors', 'ErrorCode'), ImportedModule('horsies.x')})
+            frozenset({ImportedName('horsies.core.errors', 'HorsiesErrorCode'), ImportedModule('horsies.x')})
         )
 
     def test_a_file_that_is_not_json(self, tmp_path: Path) -> None:

@@ -45,16 +45,16 @@ export function workflowNode(
   timing: NodeTiming
 ): WorkflowNode {
   return {
-    task_index: taskIndex,
+    node_index: taskIndex,
     node_id: nodeId,
     task_name: `tasks.${nodeId}`,
     node_status: nodeStatus,
-    is_subworkflow: false,
+    is_sub_workflow: false,
     sub_workflow_id: null,
-    allow_failed_deps: false,
+    allow_failed_dependencies: false,
     started_at: null,
     completed_at: null,
-    exec_s: null,
+    execution_seconds: null,
     child_total: null,
     child_failed: null,
     timing,
@@ -68,13 +68,13 @@ export function workflowRun(
 ): WorkflowRunDetail {
   return {
     run: {
-      id: 'run-1',
-      name: 'nightly_rollup',
+      workflow_id: 'run-1',
+      workflow_name: 'nightly_rollup',
       definition_key: null,
       status,
       created_at: '2026-11-22T12:00:00Z',
       completed_at: null,
-      wall_s: null,
+      wall_seconds: null,
     },
     nodes,
     edges: [],
@@ -105,7 +105,7 @@ export function exactTiming(
           ? { kind, reason: 'WORKER_LOST' }
           : { kind },
     started_at: at(start),
-    end: { kind: 'ended', at: at(end) },
+    end: { kind: 'closed', at: at(end) },
     source:
       kind === 'pending' || kind === 'advancing'
         ? { kind: 'node' }
@@ -122,7 +122,7 @@ export const CASCADE_NODES: WorkflowNode[] = [
   workflowNode(1, 'b', 'FAILED', exactTiming([['pending', 0, 3.5], ['running', 3.5, 5]], 'FAILED', 5)),
   workflowNode(2, 'c', 'COMPLETED', exactTiming([['pending', 0, 3.5], ['running', 3.5, 4]], 'COMPLETED', 4)),
   workflowNode(3, 'd', 'SKIPPED', exactTiming([['pending', 0, 5]], 'SKIPPED', 5)),
-  { ...workflowNode(4, 'e', 'COMPLETED', exactTiming([['pending', 0, 5], ['enqueued', 5, 6], ['running', 6, 8]], 'COMPLETED', 8)), allow_failed_deps: true },
+  { ...workflowNode(4, 'e', 'COMPLETED', exactTiming([['pending', 0, 5], ['enqueued', 5, 6], ['running', 6, 8]], 'COMPLETED', 8)), allow_failed_dependencies: true },
   workflowNode(5, 'x', 'COMPLETED', UNAVAILABLE_NODE),
 ];
 

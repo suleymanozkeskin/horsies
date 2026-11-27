@@ -8,7 +8,7 @@
              |- generate_invoice
              \\-> SubWorkflow: shipping(courier, express)
                     \\-> capture_payment  (args_from = authorize_payment)
-                          \\-> send_order_email  (allow_failed_deps=True)
+                          \\-> send_order_email  (allow_failed_dependencies=True)
 
 The shape changes per order: an order with three lines fans out three
 reservations, and the courier and express flag come from the order id. That is
@@ -21,7 +21,7 @@ Failure semantics, all visible in the graph view:
     downstream is SKIPPED;
   * `generate_invoice` running past its deadline fails the shipping join the
     same way;
-  * `send_order_email` sets `allow_failed_deps=True`, so it runs anyway,
+  * `send_order_email` sets `allow_failed_dependencies=True`, so it runs anyway,
     receives the upstream error, and completes — a COMPLETED node underneath a
     FAILED one. The workflow still fails: `OnError.FAIL` accounts for the
     failure regardless of the handler.
@@ -68,13 +68,13 @@ class OrderFulfillment(WorkflowDefinition[PaymentCapture]):
         """Build a fresh spec shaped by this order's lines."""
         order_id = order.order_id
         validate = TaskNode(
-            fn=validate_order,
+            function=validate_order,
             kwargs={'order_id': order_id},
             node_id='validate_order',
         )
         reservations = [
             TaskNode(
-                fn=reserve_stock,
+                function=reserve_stock,
                 kwargs={
                     'order_id': order_id,
                     'line_no': line.line_no,
@@ -87,25 +87,25 @@ class OrderFulfillment(WorkflowDefinition[PaymentCapture]):
             for line in order.lines
         ]
         authorize = TaskNode(
-            fn=authorize_payment,
+            function=authorize_payment,
             kwargs={'order_id': order_id, 'amount_cents': order.total_cents},
             waits_for=reservations,
             node_id='authorize_payment',
         )
         pick = TaskNode(
-            fn=pick_pack,
+            function=pick_pack,
             kwargs={'order_id': order_id},
             waits_for=[authorize],
             node_id='pick_pack',
         )
         invoice = TaskNode(
-            fn=generate_invoice,
+            function=generate_invoice,
             kwargs={'order_id': order_id},
             waits_for=[authorize],
             node_id='generate_invoice',
         )
         shipping = SubWorkflowNode(
-            workflow_def=ShippingWorkflow,
+            workflow_definition=ShippingWorkflow,
             kwargs={
                 'order_id': order_id,
                 'courier': simulate.choice(tuning.COURIERS, order_id, 'courier'),
@@ -115,23 +115,23 @@ class OrderFulfillment(WorkflowDefinition[PaymentCapture]):
             node_id='shipping',
         )
         capture = TaskNode(
-            fn=capture_payment,
+            function=capture_payment,
             kwargs={'order_id': order_id},
             waits_for=[shipping, authorize],
             args_from={'authorization': authorize},
             node_id='capture_payment',
         )
         email = TaskNode(
-            fn=send_order_email,
+            function=send_order_email,
             kwargs={'order_id': order_id},
             waits_for=[capture],
             args_from={'capture': capture},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
             node_id='send_order_email',
         )
         return app.workflow(
             name=cls.name,
-            tasks=[validate, *reservations, authorize, pick, invoice, shipping, capture, email],
+            nodes=[validate, *reservations, authorize, pick, invoice, shipping, capture, email],
             on_error=OnError.FAIL,
             output=capture,
         )
@@ -157,7 +157,7 @@ _CHECK_ORDER: Final[Order] = Order(
 """Widest shape the builder can produce, used by `horsies check`."""
 
 
-@app.workflow_builder(cases=[{'order': _CHECK_ORDER}])
+@app.check_workflow_builder(cases=[{'order': _CHECK_ORDER}])
 def build_order_fulfillment(*, order: Order) -> WorkflowSpec[PaymentCapture]:
     """Build the fulfillment DAG for one order.
 

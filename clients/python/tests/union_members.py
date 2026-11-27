@@ -13,7 +13,7 @@ ALIAS_DEPTH_BOUND: Final = 8
 def union_members(alias: TypeAliasType) -> tuple[Any, ...]:
     """The members of the union that ``alias`` names, in order. A member that
     is itself a ``type`` alias (a generated catalog union such as
-    ``BrokerCoreError``) gives its own members in its place. An alias whose
+    ``DatabaseCoreError``) gives its own members in its place. An alias whose
     value is one class, or another alias, gives that class, or the members of
     that alias. Pure."""
     return _members(alias, 0)

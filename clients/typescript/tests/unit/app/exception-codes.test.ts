@@ -51,10 +51,16 @@ const environment: CreateEnvironment = {
   addonCore: () => {
     throw new TypeError("not called on a worker thread");
   },
+  otelApi: () => {
+    throw new TypeError("not called with no tracing");
+  },
+  scheduleCalls: () => {
+    throw new TypeError("not called on a worker thread");
+  },
 };
 
 const open = defineTask({ name: "open", input: {}, output: h.null() });
-const declared = defineTask({ name: "declared", input: {}, output: h.null(), errors: ["RATE_LIMITED"] });
+const declared = defineTask({ name: "declared", input: {}, output: h.null(), errorCodes: ["RATE_LIMITED"] });
 
 function appWith(...registrations: readonly ((app: ReturnType<typeof created>) => void)[]): ReturnType<typeof created> {
   const app = created();
@@ -68,7 +74,7 @@ function appWith(...registrations: readonly ((app: ReturnType<typeof created>) =
 
 function created() {
   const outcome = createHorsies(
-    { broker: { databaseUrl: { kind: "value", value: "postgresql://127.0.0.1:55432/none" } }, tasks: [open, declared] },
+    { database: { databaseUrl: { kind: "value", value: "postgresql://127.0.0.1:55432/none" } }, tasks: [open, declared] },
     environment,
   );
 
@@ -83,7 +89,7 @@ function created() {
 
 describe("exceptionCodeRefusals", () => {
   test("a code of an open contract that the core refuses is a refusal at its implementation", () => {
-    const app = appWith((target) => target.implement(open, () => open.ok(null), { exceptions: [[RateLimited, "bad code"]] }));
+    const app = appWith((target) => target.implement(open, (_input, { ok }) => ok(null), { exceptionMapper: [[RateLimited, "bad code"]] }));
     const fake = checks();
 
     assert.deepEqual(
@@ -95,7 +101,7 @@ describe("exceptionCodeRefusals", () => {
 
   test("a code that the core accepts gives no refusal", () => {
     const app = appWith((target) =>
-      target.implement(open, () => open.ok(null), { exceptions: [[RateLimited, "RATE_LIMITED"]] }),
+      target.implement(open, (_input, { ok }) => ok(null), { exceptionMapper: [[RateLimited, "RATE_LIMITED"]] }),
     );
 
     assert.deepEqual(exceptionCodeRefusals(appInternals(app), checks()), []);
@@ -103,8 +109,8 @@ describe("exceptionCodeRefusals", () => {
 
   test("a contract with declared codes and an implementation with no exceptions make no core call", () => {
     const app = appWith(
-      (target) => target.implement(declared, () => declared.ok(null), { exceptions: [[RateLimited, "RATE_LIMITED"]] }),
-      (target) => target.implement(open, () => open.ok(null)),
+      (target) => target.implement(declared, (_input, { ok }) => ok(null), { exceptionMapper: [[RateLimited, "RATE_LIMITED"]] }),
+      (target) => target.implement(open, (_input, { ok }) => ok(null)),
     );
 
     const fake = checks();

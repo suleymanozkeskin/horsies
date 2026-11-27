@@ -1,13 +1,20 @@
-// The static check: a refusal of a registration area, a missing implementation, an implementation of a contract
-// that is not in the list, a refused exception code, the first phase that refuses, the scopes of each area, and a
-// passing app.
+// The static check: a refusal of a registration area, the workflow check cases and the nesting check, a missing
+// implementation, an implementation of a contract that is not in the list, a refused exception code, the first phase
+// that refuses, the scopes of each area, and a passing app.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import type { CheckOutcome, CheckReport } from "../../../horsies/src/check/report.ts";
-import { areaScopes, staticCheck } from "../../../horsies/src/check/static-check.ts";
-import { catalogRefusal, fakeChecks } from "../app/support.ts";
+import { HorsiesErrorCode } from "../../../horsies/src/_catalog/error_codes.ts";
+import { createHorsies, type Horsies } from "../../../horsies/src/app.ts";
+import { refusal } from "../../../horsies/src/app/refusal.ts";
+import type { RefusalArea } from "../../../horsies/src/app/refusals.ts";
+import type { CheckOutcome, CheckPhaseName, CheckReport } from "../../../horsies/src/check/report.ts";
+import { areaScopes, type CheckScope, staticCheck } from "../../../horsies/src/check/static-check.ts";
+import { h } from "../../../horsies/src/wire/public.ts";
+import type { AnyWorkflowContract } from "../../../horsies/src/workflow/define.ts";
+import { defineWorkflow, type NodeRef } from "../../../horsies/src/workflow/public.ts";
+import { catalogRefusal, DATABASE_URL, fakeChecks, fakeEnvironment } from "../app/support.ts";
 import { charge, contextOf, implementedApp, ping, testApp, unlisted } from "../worker/support.ts";
 
 class RateLimited extends Error {}
@@ -18,6 +25,79 @@ function report(outcome: CheckOutcome): CheckReport {
   }
 
   return outcome.report;
+}
+
+/** A workflow with params whose one check case throws in its build: `HRS-029` at check, nothing at create. */
+const throwingCase = defineWorkflow(
+  { name: "throwing", definitionKey: "tests.throwing.v1", outputType: h.int(), parameters: { n: h.int() }, checkCases: [{ n: 1 }] },
+  () => {
+    throw new RangeError("no build");
+  },
+);
+
+/** A workflow that includes itself with the same params and no wait between: `HRS-037` at check, nothing at create. */
+const selfNesting: object = defineWorkflow(
+  { name: "loop", definitionKey: "tests.loop.v1", outputType: h.int(), parameters: {} },
+  (w) => {
+    // SAFETY: the workflow nests itself; its contract is complete when the build runs.
+    const again = w.subWorkflow(selfNesting as never, {}, { nodeId: "again" });
+
+    // SAFETY: the child's declared output is `h.int()`; the self reference leaves its type unknown here.
+    return { output: again as NodeRef<number, string, "again"> };
+  },
+);
+
+/** The app of `ping` and `charge` with the two workflows, built with the fakes; a failed create fails the test. */
+function workflowApp(): Horsies {
+  const created = createHorsies(
+    {
+      database: { databaseUrl: DATABASE_URL },
+      tasks: [ping, charge],
+      // SAFETY: `selfNesting` is the workflow contract of `defineWorkflow`, typed `object` for its self reference.
+      workflows: [throwingCase, selfNesting as AnyWorkflowContract],
+    },
+    fakeEnvironment(),
+  );
+
+  if (!created.ok) {
+    assert.fail(`the workflow app was refused: ${created.error.refusals.map((refused) => refused.code).join(", ")}`);
+  }
+
+  return created.value;
+}
+
+/** The scope and the report name of each check: `check`, the worker start, the scheduler start. */
+const EACH_CHECK: readonly (readonly [CheckScope, CheckPhaseName])[] = [
+  ["withSchedules", "check"],
+  ["withoutSchedules", "worker-startup"],
+  ["withSchedules", "scheduler-startup"],
+];
+
+/**
+ * Records one refusal in the list of `area` of a fully implemented app, then checks it in each scope: the check
+ * refuses with that refusal where the area counts (`counted`), and passes where it does not.
+ */
+function assertAreaRefusal(area: RefusalArea, counted: readonly CheckScope[]): void {
+  const path = `${area} entry`;
+
+  for (const [scope, phase] of EACH_CHECK) {
+    const app = implementedApp();
+    const context = contextOf(app);
+
+    context.refusals.record(area, refusal(HorsiesErrorCode.TASK_NOT_REGISTERED, path, "the area refuses", []));
+
+    const outcome = staticCheck(context, fakeChecks(), scope, phase);
+
+    if (counted.includes(scope)) {
+      assert.deepEqual(
+        report(outcome).refusals.map((refused) => [refused.code, refused.path]),
+        [["HRS-300", path]],
+        `${area} in ${scope}`,
+      );
+    } else {
+      assert.equal(outcome.kind, "passed", `${area} in ${scope}`);
+    }
+  }
 }
 
 describe("the static check", () => {
@@ -31,7 +111,7 @@ describe("the static check", () => {
   test("an implementation of a contract that is not in the list is refused (a registration refusal)", () => {
     const app = implementedApp();
 
-    app.implement(unlisted, () => unlisted.ok(null));
+    app.implement(unlisted, (_input, { ok }) => ok(null));
 
     const refused = report(staticCheck(contextOf(app), fakeChecks(), "withoutSchedules", "worker-startup"));
 
@@ -45,7 +125,7 @@ describe("the static check", () => {
   test("a listed contract with no implementation is refused with its place in the list", () => {
     const app = testApp();
 
-    app.implement(ping, ({ n }) => ping.ok(n));
+    app.implement(ping, ({ n }, { ok }) => ok(n));
 
     const refused = report(staticCheck(contextOf(app), fakeChecks(), "withoutSchedules", "worker-startup"));
 
@@ -58,8 +138,8 @@ describe("the static check", () => {
   test("an exception code that the core's code rules refuse is refused", () => {
     const app = testApp();
 
-    app.implement(ping, ({ n }) => ping.ok(n), { exceptions: [[RateLimited, "rate limited"]] });
-    app.implement(charge, async () => charge.ok(null));
+    app.implement(ping, ({ n }, { ok }) => ok(n), { exceptionMapper: [[RateLimited, "rate limited"]] });
+    app.implement(charge, async (_input, { ok }) => ok(null));
 
     const checks = fakeChecks({ codes: [catalogRefusal("HRS-112", "'rate limited' is invalid")] });
     const refused = report(staticCheck(contextOf(app), checks, "withSchedules", "check"));
@@ -73,7 +153,7 @@ describe("the static check", () => {
   test("the check stops at the first phase that refuses", () => {
     const app = testApp();
 
-    app.implement(unlisted, () => unlisted.ok(null));
+    app.implement(unlisted, (_input, { ok }) => ok(null));
 
     const refused = report(staticCheck(contextOf(app), fakeChecks(), "withSchedules", "check"));
 
@@ -83,7 +163,59 @@ describe("the static check", () => {
     );
   });
 
+  test("each check runs the check cases and the nesting check of the listed workflows, in list order", () => {
+    for (const [scope, phase] of EACH_CHECK) {
+      const app = workflowApp();
+
+      app.implement(ping, ({ n }, { ok }) => ok(n));
+      app.implement(charge, async (_input, { ok }) => ok(null));
+
+      const refused = report(staticCheck(contextOf(app), fakeChecks(), scope, phase));
+
+      assert.equal(refused.phase, phase);
+      assert.deepEqual(
+        refused.refusals.map((refusal) => [refusal.code, refusal.path]),
+        [
+          ["HRS-029", "workflow throwing checkCases[0]"],
+          ["HRS-037", "workflow loop > again > again"],
+        ],
+      );
+    }
+  });
+
+  test("the workflows phase comes after the registrations and before the implementations", () => {
+    const registered = workflowApp();
+
+    registered.implement(unlisted, (_input, { ok }) => ok(null));
+
+    const first = report(staticCheck(contextOf(registered), fakeChecks(), "withSchedules", "check"));
+    const second = report(staticCheck(contextOf(workflowApp()), fakeChecks(), "withoutSchedules", "worker-startup"));
+
+    // The registration refusal stops the check before the workflows; the workflow refusals stop it before the
+    // implementation rule, which would refuse `tasks[0] ping` and `tasks[1] charge`.
+    assert.deepEqual(
+      first.refusals.map((refusal) => refusal.path),
+      ["implement unlisted"],
+    );
+    assert.deepEqual(
+      second.refusals.map((refusal) => refusal.path),
+      ["workflow throwing checkCases[0]", "workflow loop > again > again"],
+    );
+  });
+
   test("the refusals of the contracts area count in both scopes", () => {
     assert.deepEqual(areaScopes("contracts"), ["withSchedules", "withoutSchedules"]);
+  });
+
+  test("a refusal in the contracts list is refused in both scopes", () => {
+    assertAreaRefusal("contracts", ["withSchedules", "withoutSchedules"]);
+  });
+
+  test("a refusal in the schedules list is refused with the schedules and passes without them", () => {
+    assertAreaRefusal("schedules", ["withSchedules"]);
+  });
+
+  test("a refusal in the events list is refused in both scopes", () => {
+    assertAreaRefusal("events", ["withSchedules", "withoutSchedules"]);
   });
 });

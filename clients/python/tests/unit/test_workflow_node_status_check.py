@@ -1,4 +1,4 @@
-"""The stored node status is a ``WorkflowTaskStatus`` or a crash.
+"""The stored node status is a ``WorkflowNodeStatus`` or a crash.
 
 The database CHECK ``horsies_workflow_tasks_status_known`` allows only the
 enum values. Both lists are read from code and must stay equal.
@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import horsies._core as core
-from horsies.core.models.workflow.enums import WorkflowTaskStatus, stored_node_status
+from horsies.core.models.workflow.enums import WorkflowNodeStatus, stored_node_status
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.types.result import is_ok
 from tests.baseline_sql import baseline_sql
@@ -41,7 +41,7 @@ class TestCheckMatchesEnum:
         assert check is not None, 'horsies_workflow_tasks_status_known'
         lists = _STATUS_IN_LIST.findall(check.group(1))
         assert len(lists) == 1, lists
-        expected = frozenset(status.value for status in WorkflowTaskStatus)
+        expected = frozenset(status.value for status in WorkflowNodeStatus)
         assert _quoted_values(lists[0]) == expected
 
 
@@ -56,7 +56,7 @@ class TestStoredNodeStatus:
 
         assert str(raised.value) == (
             f"workflow {WORKFLOW_ID} node node-9 stores status 'BOGUS', which is "
-            'not a WorkflowTaskStatus member; the CHECK '
+            'not a WorkflowNodeStatus member; the CHECK '
             'horsies_workflow_tasks_status_known must forbid it'
         )
 
@@ -82,7 +82,7 @@ def _node_row(status: str) -> MagicMock:
         completed_at=None,
         sub_workflow_id=None,
         sub_workflow_summary_json=None,
-        is_subworkflow=False,
+        is_sub_workflow=False,
         sub_definition_key=None,
     )
 
@@ -99,13 +99,13 @@ def _handle_with_rows(rows: list[MagicMock]) -> WorkflowHandle[Any]:
 
 class TestTasksAsync:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize('status', list(WorkflowTaskStatus))
+    @pytest.mark.parametrize('status', list(WorkflowNodeStatus))
     async def test_a_stored_member_value_is_the_node_status(
-        self, status: WorkflowTaskStatus,
+        self, status: WorkflowNodeStatus,
     ) -> None:
         handle = _handle_with_rows([_node_row(status.value)])
 
-        result = await handle.tasks_async()
+        result = await handle.nodes_async()
 
         assert is_ok(result)
         assert [info.status for info in result.ok_value] == [status]
@@ -115,7 +115,7 @@ class TestTasksAsync:
         handle = _handle_with_rows([_node_row('BOGUS')])
 
         with pytest.raises(AssertionError) as raised:
-            await handle.tasks_async()
+            await handle.nodes_async()
 
         message = str(raised.value)
         assert WORKFLOW_ID in message

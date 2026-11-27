@@ -5,31 +5,31 @@ import { readFileSync } from "node:fs";
 import {
   decodeBreakdown,
   decodeBreakdownCounts,
-  decodeBudgetLoadInfo,
-  decodeClassReportInfo,
-  decodeDownSlotInfo,
+  decodeBudgetLoad,
+  decodeDownSlot,
   decodeErrorFacet,
+  decodeExecutionClassReport,
   decodeFacetValue,
   decodeFacets,
   decodeGroupRow,
-  decodeLeafTaskInfo,
   decodeLivenessReport,
-  decodePendingStreamInfo,
+  decodePendingStream,
   decodeScheduleStateInfo,
   decodeStatusCount,
-  decodeTaskAttemptInfo,
+  decodeTaskAttemptDetail,
   decodeTaskDetail,
   decodeTaskListPage,
+  decodeTaskRowInfo,
   decodeTaskSummary,
-  decodeWorkerClassLoadInfo,
+  decodeWorkerExecutionClassLoad,
   decodeWorkerHistoryPoint,
-  decodeWorkerPingInfo,
+  decodeWorkerPong,
   decodeWorkerStateInfo,
   decodeWorkflowEdge,
-  decodeWorkflowNodeInfo,
+  decodeWorkflowNodeDetail,
+  decodeWorkflowNodeSummary,
   decodeWorkflowRunDetail,
   decodeWorkflowRunSummary,
-  decodeWorkflowTaskDetail,
 } from "../../../horsies/src/_catalog/monitoring_models.ts";
 
 import type {
@@ -330,7 +330,7 @@ function sourceText(source: SegmentSourceInfo): string {
 }
 
 function segmentText(segment: TimingSegmentInfo): string {
-  const end = segment.end.kind === "ended" ? `ended(${at(segment.end.at)})` : "open";
+  const end = segment.end.kind === "closed" ? `closed(${at(segment.end.at)})` : "open";
 
   return `${segmentPhaseText(segment.phase)} ${at(segment.startedAt)} ${end} ${sourceText(segment.source)}`;
 }
@@ -391,7 +391,7 @@ function nodeTimingLines(timing: NodeTimingInfo): ReadonlyArray<string> {
 function runConflictText(conflict: RunConflictInfo): string {
   switch (conflict.kind) {
     case "node":
-      return `node(${conflict.taskIndex})`;
+      return `node(${conflict.nodeIndex})`;
     case "pause":
       return `pause(${conflictText(conflict.conflict)})`;
     default: {
@@ -462,31 +462,31 @@ function timingExamples(kind: string): ReadonlyArray<WireJson> {
 const DECODERS: ReadonlyMap<string, ModelDecoder> = new Map<string, ModelDecoder>([
   ["Breakdown", decodeBreakdown],
   ["BreakdownCounts", decodeBreakdownCounts],
-  ["BudgetLoadInfo", decodeBudgetLoadInfo],
-  ["ClassReportInfo", decodeClassReportInfo],
-  ["DownSlotInfo", decodeDownSlotInfo],
+  ["BudgetLoad", decodeBudgetLoad],
+  ["DownSlot", decodeDownSlot],
   ["ErrorFacet", decodeErrorFacet],
+  ["ExecutionClassReport", decodeExecutionClassReport],
   ["FacetValue", decodeFacetValue],
   ["Facets", decodeFacets],
   ["GroupRow", decodeGroupRow],
-  ["LeafTaskInfo", decodeLeafTaskInfo],
   ["LivenessReport", decodeLivenessReport],
-  ["PendingStreamInfo", decodePendingStreamInfo],
+  ["PendingStream", decodePendingStream],
   ["ScheduleStateInfo", decodeScheduleStateInfo],
   ["StatusCount", decodeStatusCount],
-  ["TaskAttemptInfo", decodeTaskAttemptInfo],
+  ["TaskAttemptDetail", decodeTaskAttemptDetail],
   ["TaskDetail", decodeTaskDetail],
   ["TaskListPage", decodeTaskListPage],
+  ["TaskRowInfo", decodeTaskRowInfo],
   ["TaskSummary", decodeTaskSummary],
-  ["WorkerClassLoadInfo", decodeWorkerClassLoadInfo],
+  ["WorkerExecutionClassLoad", decodeWorkerExecutionClassLoad],
   ["WorkerHistoryPoint", decodeWorkerHistoryPoint],
-  ["WorkerPingInfo", decodeWorkerPingInfo],
+  ["WorkerPong", decodeWorkerPong],
   ["WorkerStateInfo", decodeWorkerStateInfo],
   ["WorkflowEdge", decodeWorkflowEdge],
-  ["WorkflowNodeInfo", decodeWorkflowNodeInfo],
+  ["WorkflowNodeDetail", decodeWorkflowNodeDetail],
+  ["WorkflowNodeSummary", decodeWorkflowNodeSummary],
   ["WorkflowRunDetail", decodeWorkflowRunDetail],
   ["WorkflowRunSummary", decodeWorkflowRunSummary],
-  ["WorkflowTaskDetail", decodeWorkflowTaskDetail],
 ]);
 
 void describe("monitoring model decoders", () => {
@@ -506,36 +506,39 @@ void describe("monitoring model decoders", () => {
 
     assert.equal(worker.workerId, "worker-a");
     assert.equal(worker.profile.kind, "notRecorded");
-    assert.equal(worker.slotHealth, "slots_down");
+    assert.equal(worker.slotHealth.kind, "slotsDown");
+    assert.equal(worker.childCount, 4);
     assert.equal(worker.clusterWideCap, null);
     assert.equal(worker.memoryUsageMb, 512.25);
-    assert.equal(worker.uptimeS, 21_550);
+    assert.equal(worker.uptimeSeconds, 21_550);
     assert.deepEqual(worker.queues, ["emails", "reports"]);
     assert.deepEqual([...worker.queueMaxConcurrency], [
       ["emails", 4],
       ["reports", 2],
     ]);
-    assert.equal(worker.downSlots[0]?.failedBoots, 4);
-    assert.equal(worker.downSlots[0]?.cause, "BOOT_FAILED");
+    assert.equal(worker.slotHealth.kind === "slotsDown" ? worker.slotHealth.slots[0]?.failedBoots : null, 4);
+    assert.equal(worker.slotHealth.kind === "slotsDown" ? worker.slotHealth.slots[0]?.cause : null, "BOOT_FAILED");
   });
 
   void test("an integer is a number and a float keeps its fraction", () => {
-    const stream = decoded(decodeClassReportInfo(sample("ClassReportInfo"))).streams[0];
+    const report = decoded(decodeExecutionClassReport(sample("ExecutionClassReport")));
+    const stream = report.streams[0];
 
     assert.ok(stream !== undefined, "the report has a stream");
-    assert.equal(stream.wait.kind === "waiting" ? stream.wait.waitS : null, 30.310417);
+    assert.equal(report.liveWindowSeconds, 120);
+    assert.equal(stream.wait.kind === "due" ? stream.wait.waitSeconds : null, 30.310417);
     assert.equal(stream.coverage.kind === "served" ? stream.coverage.capacity : null, 4);
-    assert.equal(decoded(decodePendingStreamInfo(sample("PendingStreamInfo"))).execution, "ISOLATED");
+    assert.equal(decoded(decodePendingStream(sample("PendingStream"))).execution, "ISOLATED");
     assert.equal(decoded(decodeStatusCount(sample("StatusCount"))).count, 8);
   });
 
   void test("each union variant of the sample models decodes with its tag", () => {
-    const report = decoded(decodeClassReportInfo(sample("ClassReportInfo")));
+    const report = decoded(decodeExecutionClassReport(sample("ExecutionClassReport")));
     const breakdown = decoded(decodeBreakdown(sample("Breakdown")));
 
     assert.deepEqual(
       report.streams.map((stream) => `${stream.wait.kind} ${stream.coverage.kind}`),
-      ["waiting served", "noneDue noCapacity", "noneDue unserved"],
+      ["due served", "noneDue noCapacity", "noneDue unserved"],
     );
     assert.deepEqual(
       breakdown.groups.map((row) => (row.group.kind === "value" ? row.group.value : row.group.kind)),
@@ -544,16 +547,16 @@ void describe("monitoring model decoders", () => {
   });
 
   void test("a nullable field is null or its value", () => {
-    const leaf = decoded(decodeLeafTaskInfo(sample("LeafTaskInfo")));
+    const leaf = decoded(decodeTaskRowInfo(sample("TaskRowInfo")));
     const detail = decoded(decodeTaskDetail(sample("TaskDetail")));
-    const node = decoded(decodeWorkflowTaskDetail(sample("WorkflowTaskDetail")));
+    const node = decoded(decodeWorkflowNodeDetail(sample("WorkflowNodeDetail")));
 
     assert.equal(leaf.failedAt, null);
-    assert.equal(leaf.queueS, 2.310417);
+    assert.equal(leaf.queueSeconds, 2.310417);
     assert.equal(leaf.execution, "SHARED_ASYNC");
-    assert.equal(detail.leaf.execution, null);
-    assert.equal(detail.workflowTaskIndex, null);
-    assert.equal(node.leaf, null);
+    assert.equal(detail.taskRow.execution, null);
+    assert.equal(detail.workflowNodeIndex, null);
+    assert.equal(node.taskRow, null);
     assert.deepEqual(node.attempts, []);
   });
 
@@ -574,13 +577,13 @@ void describe("monitoring model decoders", () => {
 
     assert.ok(Object.isFrozen(page.rows));
     assert.ok(Object.isFrozen(page.rows[0]));
-    assert.equal(page.rows[0]?.id, "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b");
+    assert.equal(page.rows[0]?.taskId, "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b");
   });
 });
 
 void describe("date-time values", () => {
   void test("a date-time keeps its microseconds", () => {
-    const leaf = decoded(decodeLeafTaskInfo(sample("LeafTaskInfo")));
+    const leaf = decoded(decodeTaskRowInfo(sample("TaskRowInfo")));
 
     assert.ok(leaf.startedAt !== null, "the task started");
     assert.equal(at(leaf.startedAt), "2026-11-17T13:59:16.810417Z");
@@ -589,7 +592,7 @@ void describe("date-time values", () => {
       at(decoded(decodeScheduleStateInfo(sample("ScheduleStateInfo"))).updatedAt),
       "2026-11-17T00:00:00.000001Z",
     );
-    assert.equal(at(decoded(decodeDownSlotInfo(sample("DownSlotInfo"))).downSince), "2026-11-17T13:50:00.00025Z");
+    assert.equal(at(decoded(decodeDownSlot(sample("DownSlot"))).downSince), "2026-11-17T13:50:00.00025Z");
   });
 
   void test("a date-time of whole seconds and a leap day decode", () => {
@@ -628,7 +631,7 @@ void describe("date-time values", () => {
 void describe("timing examples of the core", () => {
   void test("every attempt phase example decodes in a task attempt", () => {
     const lines = timingExamples("attempt_phases").map((example) =>
-      phasesText(decoded(decodeTaskAttemptInfo(withMember(sample("TaskAttemptInfo"), "phases", example))).phases),
+      phasesText(decoded(decodeTaskAttemptDetail(withMember(sample("TaskAttemptDetail"), "phases", example))).phases),
     );
 
     assert.deepEqual(lines, [
@@ -644,27 +647,27 @@ void describe("timing examples of the core", () => {
     const task = "00000000-0000-0000-0000-00000000000a";
 
     const lines = timingExamples("node_timings").map((example) =>
-      nodeTimingLines(decoded(decodeWorkflowNodeInfo(withMember(sample("WorkflowNodeInfo"), "timing", example))).timing),
+      nodeTimingLines(decoded(decodeWorkflowNodeSummary(withMember(sample("WorkflowNodeSummary"), "timing", example))).timing),
     );
 
     assert.deepEqual(lines, [
       [
         "exact",
-        "pending 2026-11-22T12:00:00Z ended(2026-11-22T12:00:01Z) node",
-        "ready 2026-11-22T12:00:01Z ended(2026-11-22T12:00:02Z) node",
-        `enqueued 2026-11-22T12:00:02Z ended(2026-11-22T12:00:03Z) attempt(1, ${task}, 1)`,
-        `claimed(earlier(1)) 2026-11-22T12:00:03Z ended(2026-11-22T12:00:04Z) attempt(1, ${task}, 1)`,
-        `claimed(recorded(placed(2026-11-22T12:00:05Z))) 2026-11-22T12:00:04Z ended(2026-11-22T12:00:06Z) attempt(1, ${task}, 1)`,
-        `running 2026-11-22T12:00:06Z ended(2026-11-22T12:00:07Z) attempt(1, ${task}, 1)`,
-        `finalizing 2026-11-22T12:00:07Z ended(2026-11-22T12:00:08Z) attempt(1, ${task}, 1)`,
-        `retryWait 2026-11-22T12:00:08Z ended(2026-11-22T12:00:09Z) attempt(1, ${task}, 2)`,
-        `claimed(notRecorded) 2026-11-22T12:00:09Z ended(2026-11-22T12:00:10Z) attempt(1, ${task}, 2)`,
-        "advancing 2026-11-22T12:00:10Z ended(2026-11-22T12:00:11Z) node",
+        "pending 2026-11-22T12:00:00Z closed(2026-11-22T12:00:01Z) node",
+        "ready 2026-11-22T12:00:01Z closed(2026-11-22T12:00:02Z) node",
+        `enqueued 2026-11-22T12:00:02Z closed(2026-11-22T12:00:03Z) attempt(1, ${task}, 1)`,
+        `claimed(earlier(1)) 2026-11-22T12:00:03Z closed(2026-11-22T12:00:04Z) attempt(1, ${task}, 1)`,
+        `claimed(recorded(placed(2026-11-22T12:00:05Z))) 2026-11-22T12:00:04Z closed(2026-11-22T12:00:06Z) attempt(1, ${task}, 1)`,
+        `running 2026-11-22T12:00:06Z closed(2026-11-22T12:00:07Z) attempt(1, ${task}, 1)`,
+        `finalizing 2026-11-22T12:00:07Z closed(2026-11-22T12:00:08Z) attempt(1, ${task}, 1)`,
+        `retryWait 2026-11-22T12:00:08Z closed(2026-11-22T12:00:09Z) attempt(1, ${task}, 2)`,
+        `claimed(notRecorded) 2026-11-22T12:00:09Z closed(2026-11-22T12:00:10Z) attempt(1, ${task}, 2)`,
+        "advancing 2026-11-22T12:00:10Z closed(2026-11-22T12:00:11Z) node",
         "terminal(COMPLETED, 2026-11-22T12:00:12Z)",
       ],
       [
         "partial(HISTORY_PRUNED, WORKER_LOST)",
-        `unknown(HISTORY_PRUNED) 2026-11-22T12:00:00Z ended(2026-11-22T12:00:05Z) task(1, ${task})`,
+        `unknown(HISTORY_PRUNED) 2026-11-22T12:00:00Z closed(2026-11-22T12:00:05Z) task(1, ${task})`,
         "unknown(WORKER_LOST) 2026-11-22T12:00:05Z open attempt(2, 00000000-0000-0000-0000-00000000000b, 1)",
         "notTerminal",
       ],
@@ -711,7 +714,7 @@ void describe("refusals", () => {
   });
 
   void test("a field that the model does not have is fieldUnknown, in a record and in a variant", () => {
-    const attempt = sample("TaskAttemptInfo");
+    const attempt = sample("TaskAttemptDetail");
 
     assert.deepEqual(refusal(decodeStatusCount(withMember(sample("StatusCount"), "share", 1n))), {
       kind: "fieldUnknown",
@@ -720,11 +723,11 @@ void describe("refusals", () => {
     });
     assert.deepEqual(
       refusal(
-        decodeTaskAttemptInfo(
+        decodeTaskAttemptDetail(
           withMember(attempt, "phases", withMember(member(attempt, "phases"), "enqueued_at", null)),
         ),
       ),
-      { kind: "fieldUnknown", model: "TaskAttemptInfo", path: "$.phases.enqueued_at" },
+      { kind: "fieldUnknown", model: "TaskAttemptDetail", path: "$.phases.enqueued_at" },
     );
   });
 
@@ -751,9 +754,9 @@ void describe("refusals", () => {
       path: "$",
       expected: "object",
     });
-    assert.deepEqual(refusal(decodeWorkerPingInfo(withMember(sample("WorkerPingInfo"), "round_trip_ms", 3n))), {
+    assert.deepEqual(refusal(decodeWorkerPong(withMember(sample("WorkerPong"), "round_trip_ms", 3n))), {
       kind: "kindMismatch",
-      model: "WorkerPingInfo",
+      model: "WorkerPong",
       path: "$.round_trip_ms",
       expected: "number",
     });
@@ -813,25 +816,25 @@ void describe("refusals", () => {
 
   void test("a UUID text that is not the core's form is uuidMalformed", () => {
     for (const text of ["0190A1B2-C3D4-7E5F-8A9B-0C1D2E3F4A5B", "0190a1b2c3d47e5f8a9b0c1d2e3f4a5b", "{0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b}"]) {
-      assert.deepEqual(refusal(decodeTaskSummary(withMember(sample("TaskSummary"), "id", text))), {
+      assert.deepEqual(refusal(decodeTaskSummary(withMember(sample("TaskSummary"), "task_id", text))), {
         kind: "uuidMalformed",
         model: "TaskSummary",
-        path: "$.id",
+        path: "$.task_id",
         text,
       });
     }
   });
 
   void test("a text that is not a value of the enum is enumValueUnknown; another kind is kindMismatch", () => {
-    assert.deepEqual(refusal(decodeBudgetLoadInfo(withMember(sample("BudgetLoadInfo"), "budget", "THREADED"))), {
+    assert.deepEqual(refusal(decodeBudgetLoad(withMember(sample("BudgetLoad"), "budget", "THREADED"))), {
       kind: "enumValueUnknown",
-      model: "BudgetLoadInfo",
+      model: "BudgetLoad",
       path: "$.budget",
       text: "THREADED",
     });
-    assert.deepEqual(refusal(decodeBudgetLoadInfo(withMember(sample("BudgetLoadInfo"), "serves", ["ISOLATED", 1n]))), {
+    assert.deepEqual(refusal(decodeBudgetLoad(withMember(sample("BudgetLoad"), "serves", ["ISOLATED", 1n]))), {
       kind: "kindMismatch",
-      model: "BudgetLoadInfo",
+      model: "BudgetLoad",
       path: "$.serves[1]",
       expected: "string",
     });

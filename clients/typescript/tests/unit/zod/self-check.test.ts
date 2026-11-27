@@ -34,15 +34,15 @@ describe("self-check", () => {
       assert.ok(rules.has(rule), rule);
     }
 
-    for (const rule of ["UNDISCRIMINATED_UNION", "MIXED_UNION", "INT_FLOAT_UNION", "RECORD_KEY", "ENGINE_KEY"]) {
+    for (const rule of ["UNION_FALLBACK", "RECORD_KEY", "ENGINE_KEY"]) {
       assert.ok(rules.has(rule), rule);
     }
 
-    for (const rule of ["INTERSECTION", "OPTIONAL_NOT_A_MEMBER", "CHANGING_DEFAULT", "RECURSIVE", "TUPLE_REST"]) {
+    for (const rule of ["INTERSECTION", "OPTIONAL_NOT_A_MEMBER", "RECURSIVE_PRESENCE"]) {
       assert.ok(rules.has(rule), rule);
     }
 
-    assert.ok(rules.has("LITERAL_MEMBER") && rules.has("UNION_OPTION"));
+    assert.ok(rules.has("LITERAL_MEMBER") && rules.has("UNION_OPTION") && rules.has("DEFAULT_UNDER_NONOPTIONAL"));
   });
 
   test("finds a renamed optional field: a loose object whose catchall field has another name", () => {

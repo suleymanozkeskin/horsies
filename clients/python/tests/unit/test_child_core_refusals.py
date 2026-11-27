@@ -38,7 +38,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import horsies._core as core
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import child_main, child_runner, shared_child, shared_lifecycle
 from horsies.core.worker.child_frames import (
     AttemptStart,
@@ -292,12 +293,12 @@ class TestTheMarkerAfterABody:
         assert exited.value.code == child_main.CORE_STOPPED_EXIT_CODE
 
 
-def _error_with(exception: BaseException | None) -> TaskResult[Any, TaskError]:
-    return TaskResult(err=TaskError(error_code='MAPPED_BY_THE_TASK', exception=exception))
+def _error_with(exception: BaseException | None) -> Result[Any, TaskError]:
+    return Err(TaskError(code='MAPPED_BY_THE_TASK', exception=exception))
 
 
-def _ok(value: str) -> TaskResult[Any, TaskError]:
-    return TaskResult(ok=value)
+def _ok(value: str) -> Result[Any, TaskError]:
+    return Ok(value)
 
 
 class TestTheEndOfABody:
@@ -327,7 +328,7 @@ class TestTheEndOfABody:
             ),
         ],
     )
-    def test_every_other_outcome_is_encoded(self, out: TaskResult[Any, TaskError]) -> None:
+    def test_every_other_outcome_is_encoded(self, out: Result[Any, TaskError]) -> None:
         task = object()
         encoded = EncodedResult(ResultEnvelope(ENVELOPE), ResultSucceeded())
         with patch.object(

@@ -14,26 +14,26 @@ import { defineWorkflow, type WorkflowBuilder } from "../../../horsies/src/workf
 import { checked, DEFAULT_QUEUES, findingCodes, passedSpec, viewOf } from "./support.ts";
 
 const ping = defineTask({ name: "ping", input: {}, output: h.int() });
-const add = defineTask({ name: "add", input: { a: h.int(), b: h.resultOf(h.int()) }, output: h.int() });
-const pair = defineTask({ name: "pair", input: { x: h.resultOf(h.int()), y: h.resultOf(h.int()) }, output: h.int() });
+const add = defineTask({ name: "add", input: { a: h.int(), b: h.taskOutcome(ping) }, output: h.int() });
+const pair = defineTask({ name: "pair", input: { x: h.taskOutcome(ping), y: h.taskOutcome(ping) }, output: h.int() });
 const say = defineTask({ name: "say", input: { text: h.string() }, output: h.string() });
 const audit = defineTask({ name: "audit", input: {}, output: h.null(), workflowContext: true });
-const maybe = defineTask({ name: "maybe", input: { first: h.resultOf(h.int()).optional() }, output: h.int() });
+const maybe = defineTask({ name: "maybe", input: { first: h.taskOutcome(ping).optional() }, output: h.int() });
 const tasks = [ping, add, pair, say, audit, maybe];
 
-const leaf = defineWorkflow({ name: "leaf", definitionKey: "tests.leaf.v1", output: h.int(), params: {} }, (w) => ({
-  output: w.task(ping, {}, { id: "ping" }),
+const leaf = defineWorkflow({ name: "leaf", definitionKey: "tests.leaf.v1", outputType: h.int(), parameters: {} }, (w) => ({
+  output: w.task(ping, {}, { nodeId: "ping" }),
 }));
 
 const region = defineWorkflow(
   {
     name: "region",
     definitionKey: "tests.region.v1",
-    output: h.int(),
-    params: { name: h.string().optional() },
+    outputType: h.int(),
+    parameters: { name: h.string().optional() },
     checkCases: [{}],
   },
-  (w) => ({ output: w.task(ping, {}, { id: "ping" }) }),
+  (w) => ({ output: w.task(ping, {}, { nodeId: "ping" }) }),
 );
 
 const view = viewOf(tasks, [leaf, region]);
@@ -42,15 +42,15 @@ const view = viewOf(tasks, [leaf, region]);
 function flow(build: (w: WorkflowBuilder) => BuildReturn, name = "flow", output: OutputSchema = h.int()): object {
   // SAFETY: the builds of these tests return nodes of several types; the checks compare the output node with the
   // declared output at run time (HRS-025), and each test declares the output of its output node.
-  return defineWorkflow({ name, definitionKey: `tests.${name}.v1`, output, params: {} }, build as never);
+  return defineWorkflow({ name, definitionKey: `tests.${name}.v1`, outputType: output, parameters: {} }, build as never);
 }
 
 describe("the builder", () => {
   test("a build of a record whose error rule create refuses is a defect", () => {
     // SAFETY: the types refuse this error rule; Horsies.create refuses it before any build (HRS-033).
     const refused = defineWorkflow(
-      { name: "rule", definitionKey: "tests.rule.v1", output: h.int(), params: {}, onError: "stop" as never },
-      (w) => ({ output: w.task(ping, {}, { id: "ping" }) }),
+      { name: "rule", definitionKey: "tests.rule.v1", outputType: h.int(), parameters: {}, onError: "stop" as never },
+      (w) => ({ output: w.task(ping, {}, { nodeId: "ping" }) }),
     );
 
     assert.throws(() => checked(refused, {}, view), ClientDefect);
@@ -66,11 +66,11 @@ describe("the builder", () => {
   test("the dependencies: the parameter sources in declaration order, then waitsFor, each node once", () => {
     const spec = passedSpec(
       flow((w) => {
-        const first = w.task(ping, {}, { id: "first" });
-        const second = w.task(ping, {}, { id: "second" });
-        const third = w.task(ping, {}, { id: "third" });
+        const first = w.task(ping, {}, { nodeId: "first" });
+        const second = w.task(ping, {}, { nodeId: "second" });
+        const third = w.task(ping, {}, { nodeId: "third" });
 
-        return { output: w.task(pair, { y: second, x: first }, { id: "pair", waitsFor: [third, first] }) };
+        return { output: w.task(pair, { y: second, x: first }, { nodeId: "pair", waitsFor: [third, first] }) };
       }),
       {},
       view,
@@ -89,9 +89,9 @@ describe("the builder", () => {
   test("a node as a parameter adds a dependency and an args_from member; the static input leaves it out", () => {
     const spec = passedSpec(
       flow((w) => {
-        const source = w.task(ping, {}, { id: "source" });
+        const source = w.task(ping, {}, { nodeId: "source" });
 
-        return { output: w.task(add, { a: 1, b: source }, { id: "add" }) };
+        return { output: w.task(add, { a: 1, b: source }, { nodeId: "add" }) };
       }),
       {},
       view,
@@ -105,9 +105,9 @@ describe("the builder", () => {
   test("a child with params: {} is NOT_GIVEN with {}; a child with params is GIVEN, also with no member", () => {
     const spec = passedSpec(
       flow((w) => {
-        w.subWorkflow(leaf, {}, { id: "leaf" });
+        w.subWorkflow(leaf, {}, { nodeId: "leaf" });
 
-        return { output: w.subWorkflow(region, {}, { id: "region" }) };
+        return { output: w.subWorkflow(region, {}, { nodeId: "region" }) };
       }),
       {},
       view,
@@ -118,7 +118,7 @@ describe("the builder", () => {
     assert.equal(spec.nodes[1]?.staticInput, "{}");
   });
 
-  test("valid node options: join, allowFailedDeps, ctxFrom, queue, priority and goodUntil", () => {
+  test("valid node options: join, allowFailedDependencies, workflowContextFrom, queue, priority and goodUntil", () => {
     const urgentPing = defineTask({ name: "urgent_ping", queue: "urgent", input: {}, output: h.int() });
 
     const urgentAudit = defineTask({
@@ -142,18 +142,18 @@ describe("the builder", () => {
     const spec = passedSpec(
       flow(
         (w) => {
-          const one = w.task(urgentPing, {}, { id: "one" });
-          const two = w.task(urgentPing, {}, { id: "two", queue: "slow", priority: 7, goodUntil: at });
+          const one = w.task(urgentPing, {}, { nodeId: "one" });
+          const two = w.task(urgentPing, {}, { nodeId: "two", queue: "slow", priority: 7, goodUntil: at });
 
           return {
             output: w.task(
               urgentAudit,
               {},
               {
-                id: "audit",
+                nodeId: "audit",
                 waitsFor: [one, two],
-                ctxFrom: [two],
-                allowFailedDeps: true,
+                workflowContextFrom: [two],
+                allowFailedDependencies: true,
                 join: { kind: "quorum", minSuccess: 2 },
               },
             ),
@@ -179,8 +179,8 @@ describe("the builder", () => {
       deadline: { kind: "until", epochMicros: 1_786_525_812_654_321n },
     });
     assert.deepEqual(spec.nodes[2]?.join, { kind: "quorum", minSuccess: 2 });
-    assert.deepEqual(spec.nodes[2]?.ctxFrom, ["two"]);
-    assert.equal(spec.nodes[2]?.allowFailedDeps, true);
+    assert.deepEqual(spec.nodes[2]?.workflowContextFrom, ["two"]);
+    assert.equal(spec.nodes[2]?.allowFailedDependencies, true);
   });
 });
 
@@ -189,10 +189,10 @@ function optionCodes(options: object): readonly string[] {
   return findingCodes(
     flow(
       (w) => {
-        const source = w.task(ping, {}, { id: "source" });
+        const source = w.task(ping, {}, { nodeId: "source" });
 
         // SAFETY: the test gives option values that the types refuse or that only the checks see.
-        return { output: w.task(audit, {}, { id: "node", waitsFor: [source], ...options } as never) };
+        return { output: w.task(audit, {}, { nodeId: "node", waitsFor: [source], ...options } as never) };
       },
       "flow",
       h.null(),
@@ -204,12 +204,12 @@ function optionCodes(options: object): readonly string[] {
 
 describe("refused node options", () => {
   const cases: readonly (readonly [string, object, readonly string[]])[] = [
-    ["an id with a space", { id: "bad id" }, ["HRS-003"]],
-    ["an empty id", { id: "" }, ["HRS-003"]],
-    ["no id", { id: undefined }, ["HRS-003"]],
-    ["an id that is a number", { id: 7 }, ["HRS-003"]],
-    ["an id of 129 characters", { id: "n".repeat(129) }, ["HRS-003"]],
-    ["the id of another node", { id: "source" }, ["HRS-004"]],
+    ["an id with a space", { nodeId: "bad id" }, ["HRS-003"]],
+    ["an empty id", { nodeId: "" }, ["HRS-003"]],
+    ["no id", { nodeId: undefined }, ["HRS-003"]],
+    ["an id that is a number", { nodeId: 7 }, ["HRS-003"]],
+    ["an id of 129 characters", { nodeId: "n".repeat(129) }, ["HRS-003"]],
+    ["the id of another node", { nodeId: "source" }, ["HRS-004"]],
     ["a quorum of 0", { join: { kind: "quorum", minSuccess: 0 } }, ["HRS-013"]],
     ["a quorum above the dependency count", { join: { kind: "quorum", minSuccess: 2 } }, ["HRS-013"]],
     ["a join of another kind", { join: { kind: "most" } }, ["HRS-013"]],
@@ -230,10 +230,10 @@ describe("refused node options", () => {
     for (const id of [undefined, 7]) {
       const outcome = checked(
         flow((w) => {
-          w.task(ping, {}, { id: "source" });
+          w.task(ping, {}, { nodeId: "source" });
 
           // SAFETY: untyped code can give an id that is not a string; the check refuses it.
-          return { output: w.task(ping, {}, { id } as never) };
+          return { output: w.task(ping, {}, { nodeId: id } as never) };
         }),
         {},
         view,
@@ -251,9 +251,9 @@ describe("refused node options", () => {
     const codes = findingCodes(
       flow(
         (w) => {
-          const source = w.task(ping, {}, { id: "source" });
+          const source = w.task(ping, {}, { nodeId: "source" });
 
-          return { output: w.task(audit, {}, { id: "audit", ctxFrom: [source] }) };
+          return { output: w.task(audit, {}, { nodeId: "audit", workflowContextFrom: [source] }) };
         },
         "flow",
         h.null(),
@@ -265,13 +265,13 @@ describe("refused node options", () => {
     assert.deepEqual(codes, ["HRS-009"]);
   });
 
-  test("ctxFrom on a task that takes no workflow context: HRS-010", () => {
+  test("workflowContextFrom on a task that takes no workflow context: HRS-010", () => {
     const codes = findingCodes(
       flow((w) => {
-        const source = w.task(ping, {}, { id: "source" });
+        const source = w.task(ping, {}, { nodeId: "source" });
 
-        // SAFETY: the types refuse ctxFrom here; the check refuses it at run time too.
-        return { output: w.task(ping, {}, { id: "ping", waitsFor: [source], ctxFrom: [source] } as never) };
+        // SAFETY: the types refuse workflowContextFrom here; the check refuses it at run time too.
+        return { output: w.task(ping, {}, { nodeId: "ping", waitsFor: [source], workflowContextFrom: [source] } as never) };
       }),
       {},
       view,
@@ -285,7 +285,7 @@ describe("refused node options", () => {
 
     passedSpec(
       flow((w) => {
-        foreign = w.task(ping, {}, { id: "foreign" });
+        foreign = w.task(ping, {}, { nodeId: "foreign" });
 
         return { output: foreign };
       }),
@@ -304,7 +304,7 @@ describe("the checks", () => {
   test("an empty name: HRS-001", () => {
     assert.deepEqual(
       findingCodes(
-        flow((w) => ({ output: w.task(ping, {}, { id: "a" }) }), " "),
+        flow((w) => ({ output: w.task(ping, {}, { nodeId: "a" }) }), " "),
         {},
         view,
       ),
@@ -327,10 +327,10 @@ describe("the checks", () => {
   test("a build with 10,001 nodes: HRS-038", () => {
     const codes = findingCodes(
       flow((w) => {
-        let last: AnyNode = w.task(ping, {}, { id: "n0" });
+        let last: AnyNode = w.task(ping, {}, { nodeId: "n0" });
 
         for (let index = 1; index <= 10_000; index += 1) {
-          last = w.task(ping, {}, { id: `n${index}` });
+          last = w.task(ping, {}, { nodeId: `n${index}` });
         }
 
         return { output: last };
@@ -346,10 +346,10 @@ describe("the checks", () => {
     const made = MAX_WORKFLOW_NODES + 50;
 
     const run = runBuild((w: WorkflowBuilder) => {
-      let last: AnyNode = w.task(ping, {}, { id: "n0" });
+      let last: AnyNode = w.task(ping, {}, { nodeId: "n0" });
 
       for (let index = 1; index < made; index += 1) {
-        last = w.task(ping, {}, { id: `n${index}` });
+        last = w.task(ping, {}, { nodeId: `n${index}` });
       }
 
       return { output: last };
@@ -361,10 +361,10 @@ describe("the checks", () => {
 
     const outcome = checked(
       flow((w) => {
-        let last: AnyNode = w.task(ping, {}, { id: "n0" });
+        let last: AnyNode = w.task(ping, {}, { nodeId: "n0" });
 
         for (let index = 1; index < made; index += 1) {
-          last = w.task(ping, {}, { id: `n${index}` });
+          last = w.task(ping, {}, { nodeId: `n${index}` });
         }
 
         return { output: last };
@@ -384,7 +384,7 @@ describe("the checks", () => {
     // SAFETY: the types refuse an output that is no node; the check refuses it at run time too.
     assert.deepEqual(
       findingCodes(
-        flow((w) => ({ output: w.task(ping, {}, { id: "a" }) && ({ kind: "node", id: "a" } as AnyNode) })),
+        flow((w) => ({ output: w.task(ping, {}, { nodeId: "a" }) && ({ kind: "node", nodeId: "a" } as AnyNode) })),
         {},
         view,
       ),
@@ -395,7 +395,7 @@ describe("the checks", () => {
   test("a success policy with no case, or a case with no required node: HRS-012", () => {
     const codes = findingCodes(
       flow((w) => {
-        const node = w.task(ping, {}, { id: "a" });
+        const node = w.task(ping, {}, { nodeId: "a" });
 
         return { output: node, successPolicy: { cases: [{ required: [node] }, { required: [] }] } };
       }),
@@ -406,7 +406,7 @@ describe("the checks", () => {
     assert.deepEqual(codes, ["HRS-012"]);
     assert.deepEqual(
       findingCodes(
-        flow((w) => ({ output: w.task(ping, {}, { id: "a" }), successPolicy: { cases: [] } })),
+        flow((w) => ({ output: w.task(ping, {}, { nodeId: "a" }), successPolicy: { cases: [] } })),
         {},
         view,
       ),
@@ -419,7 +419,7 @@ describe("the checks", () => {
 
     assert.deepEqual(
       findingCodes(
-        flow((w) => ({ output: w.task(other, {}, { id: "a" }) })),
+        flow((w) => ({ output: w.task(other, {}, { nodeId: "a" }) })),
         {},
         view,
       ),
@@ -429,15 +429,15 @@ describe("the checks", () => {
 
   test("a child workflow that the app does not list: HRS-020", () => {
     const unlisted = defineWorkflow(
-      { name: "unlisted", definitionKey: "tests.unlisted.v1", output: h.int(), params: {} },
+      { name: "unlisted", definitionKey: "tests.unlisted.v1", outputType: h.int(), parameters: {} },
       (w) => ({
-        output: w.task(ping, {}, { id: "a" }),
+        output: w.task(ping, {}, { nodeId: "a" }),
       }),
     );
 
     assert.deepEqual(
       findingCodes(
-        flow((w) => ({ output: w.subWorkflow(unlisted, {}, { id: "a" }) })),
+        flow((w) => ({ output: w.subWorkflow(unlisted, {}, { nodeId: "a" }) })),
         {},
         view,
       ),
@@ -448,7 +448,7 @@ describe("the checks", () => {
   test("params for a child that takes none: HRS-022", () => {
     // SAFETY: the types refuse a member for a child with params: {}; the check refuses it at run time too.
     const codes = findingCodes(
-      flow((w) => ({ output: w.subWorkflow(leaf, { name: "eu" } as never, { id: "a" }) })),
+      flow((w) => ({ output: w.subWorkflow(leaf, { name: "eu" } as never, { nodeId: "a" }) })),
       {},
       view,
     );
@@ -466,7 +466,7 @@ describe("the checks", () => {
 
     assert.deepEqual(
       findingCodes(
-        flow((w) => ({ output: w.task(say, unknown, { id: "a" }) }), "flow", h.string()),
+        flow((w) => ({ output: w.task(say, unknown, { nodeId: "a" }) }), "flow", h.string()),
         {},
         view,
       ),
@@ -474,7 +474,7 @@ describe("the checks", () => {
     );
     assert.deepEqual(
       findingCodes(
-        flow((w) => ({ output: w.task(say, missing, { id: "a" }) }), "flow", h.string()),
+        flow((w) => ({ output: w.task(say, missing, { nodeId: "a" }) }), "flow", h.string()),
         {},
         view,
       ),
@@ -482,7 +482,7 @@ describe("the checks", () => {
     );
     assert.deepEqual(
       findingCodes(
-        flow((w) => ({ output: w.task(say, wrong, { id: "a" }) }), "flow", h.string()),
+        flow((w) => ({ output: w.task(say, wrong, { nodeId: "a" }) }), "flow", h.string()),
         {},
         view,
       ),
@@ -490,19 +490,19 @@ describe("the checks", () => {
     );
   });
 
-  test("a node for a plain parameter, a value for h.resultOf, a source of another output type: HRS-024", () => {
+  test("a node for a plain parameter, a value for h.taskOutcome, a source of another output type: HRS-024", () => {
     const codes = findingCodes(
       flow((w) => {
-        const number = w.task(ping, {}, { id: "number" });
-        const text = w.task(say, { text: "a" }, { id: "text" });
+        const number = w.task(ping, {}, { nodeId: "number" });
+        const text = w.task(say, { text: "a" }, { nodeId: "text" });
 
         // SAFETY: each input breaks a rule that the types also refuse; the check refuses it at run time too.
-        w.task(say, { text: number } as never, { id: "plain" });
+        w.task(say, { text: number } as never, { nodeId: "plain" });
         // SAFETY: as above.
-        w.task(add, { a: 1, b: 2 } as never, { id: "value" });
+        w.task(add, { a: 1, b: 2 } as never, { nodeId: "value" });
 
         // SAFETY: as above.
-        return { output: w.task(add, { a: 1, b: text } as never, { id: "other" }) };
+        return { output: w.task(add, { a: 1, b: text } as never, { nodeId: "other" }) };
       }),
       {},
       view,
@@ -514,10 +514,10 @@ describe("the checks", () => {
   test("a required node-fed parameter under an any join: HRS-013; an optional one passes", () => {
     const required = findingCodes(
       flow((w) => {
-        const source = w.task(ping, {}, { id: "source" });
+        const source = w.task(ping, {}, { nodeId: "source" });
 
         // SAFETY: the types refuse a required node-fed parameter under an any join; the check refuses it too.
-        return { output: w.task(add, { a: 1, b: source } as never, { id: "add", join: { kind: "any" } }) };
+        return { output: w.task(add, { a: 1, b: source } as never, { nodeId: "add", join: { kind: "any" } }) };
       }),
       {},
       view,
@@ -526,7 +526,7 @@ describe("the checks", () => {
     assert.deepEqual(required, ["HRS-013"]);
     passedSpec(
       flow((w) => ({
-        output: w.task(maybe, { first: w.task(ping, {}, { id: "s" }) }, { id: "m", join: { kind: "any" } }),
+        output: w.task(maybe, { first: w.task(ping, {}, { nodeId: "s" }) }, { nodeId: "m", join: { kind: "any" } }),
       })),
       {},
       view,
@@ -535,7 +535,7 @@ describe("the checks", () => {
 
   test("an output node of another type than the declared output: HRS-025", () => {
     const codes = findingCodes(
-      flow((w) => ({ output: w.task(say, { text: "a" }, { id: "say" }) }), "flow", h.int()),
+      flow((w) => ({ output: w.task(say, { text: "a" }, { nodeId: "say" }) }), "flow", h.int()),
       {},
       view,
     );
@@ -543,15 +543,15 @@ describe("the checks", () => {
     assert.deepEqual(codes, ["HRS-025"]);
   });
 
-  test("a sub-workflow node gives its child's declared output: an h.resultOf parameter of another type is HRS-024", () => {
-    const takesText = defineTask({ name: "takes_text", input: { text: h.resultOf(h.string()) }, output: h.int() });
+  test("a sub-workflow node gives its child's declared output: an h.taskOutcome parameter of another type is HRS-024", () => {
+    const takesText = defineTask({ name: "takes_text", input: { text: h.taskOutcome(say) }, output: h.int() });
 
     const codes = findingCodes(
       flow((w) => {
-        const child = w.subWorkflow(leaf, {}, { id: "leaf" });
+        const child = w.subWorkflow(leaf, {}, { nodeId: "leaf" });
 
         // SAFETY: the types refuse a source of another output type; the check refuses it at run time too.
-        return { output: w.task(takesText, { text: child } as never, { id: "take" }) };
+        return { output: w.task(takesText, { text: child } as never, { nodeId: "take" }) };
       }),
       {},
       viewOf([...tasks, takesText], [leaf, region]),
@@ -563,9 +563,9 @@ describe("the checks", () => {
   test("gate 1 stops before gate 2", () => {
     const codes = findingCodes(
       flow((w) => {
-        w.task(ping, {}, { id: "same", priority: 0 });
+        w.task(ping, {}, { nodeId: "same", priority: 0 });
 
-        return { output: w.task(ping, {}, { id: "same" }) };
+        return { output: w.task(ping, {}, { nodeId: "same" }) };
       }),
       {},
       view,
@@ -577,9 +577,9 @@ describe("the checks", () => {
   test("gate 2 reports every finding together", () => {
     const codes = findingCodes(
       flow((w) => {
-        w.task(ping, {}, { id: "a", priority: 0 });
+        w.task(ping, {}, { nodeId: "a", priority: 0 });
 
-        return { output: w.task(ping, {}, { id: "b", queue: "urgent" }) };
+        return { output: w.task(ping, {}, { nodeId: "b", queue: "urgent" }) };
       }),
       {},
       viewOf(tasks, [], DEFAULT_QUEUES),
@@ -589,16 +589,20 @@ describe("the checks", () => {
   });
 });
 
-/** The codes of a build whose task of output `source` feeds the `h.resultOf(target)` parameter of the output node. */
+/**
+ * The codes of a build whose task of output `source` feeds the `h.taskOutcome` parameter of the output node, declared
+ * with a contract of output `target`.
+ */
 function fitCodes(source: OutputSchema, target: RequiredWire): readonly string[] {
   const from = defineTask({ name: "from", input: {}, output: source });
-  const into = defineTask({ name: "into", input: { value: h.resultOf(target) }, output: h.int() });
+  const declared = defineTask({ name: "declared", input: {}, output: target });
+  const into = defineTask({ name: "into", input: { value: h.taskOutcome(declared) }, output: h.int() });
 
   const workflow = flow((w) => {
-    const value = w.task(from, {}, { id: "from" });
+    const value = w.task(from, {}, { nodeId: "from" });
 
     // SAFETY: the target's type is not inferred here; the check compares the stored forms at run time.
-    return { output: w.task(into, { value } as never, { id: "into" }) };
+    return { output: w.task(into, { value } as never, { nodeId: "into" }) };
   });
 
   const outcome = checked(workflow, {}, viewOf([from, into], []));
@@ -609,14 +613,14 @@ function fitCodes(source: OutputSchema, target: RequiredWire): readonly string[]
 /** The codes of a build whose output node is a task of output `source`, in a workflow that declares `declared`. */
 function outputCodes(source: OutputSchema, declared: OutputSchema): readonly string[] {
   const from = defineTask({ name: "from", input: {}, output: source });
-  const workflow = flow((w) => ({ output: w.task(from, {}, { id: "from" }) }), "flow", declared);
+  const workflow = flow((w) => ({ output: w.task(from, {}, { nodeId: "from" }) }), "flow", declared);
   const outcome = checked(workflow, {}, viewOf([from], []));
 
   return outcome.ok ? [] : outcome.error.map((found) => found.code);
 }
 
 describe("the stored-form fit of a source (HRS-024, HRS-025)", () => {
-  test("a string source fits an h.resultOf of a nullable string", () => {
+  test("a string source fits an h.taskOutcome of a nullable string", () => {
     assert.deepEqual(fitCodes(h.string(), h.string().nullable()), []);
   });
 
@@ -665,4 +669,35 @@ describe("the stored-form fit of a source (HRS-024, HRS-025)", () => {
   test("a nullable output node for a declared output that is not nullable is HRS-025", () => {
     assert.deepEqual(outputCodes(h.string().nullable(), h.string()), ["HRS-025"]);
   });
+
+  test("two recursive types of the same form fit: a pair of lazy nodes met again holds", () => {
+    assert.deepEqual(fitCodes(treeWire(h.int()), treeWire(h.int())), []);
+    assert.deepEqual(outputCodes(treeWire(h.int()), treeWire(h.float())), []);
+  });
+
+  test("a recursive type of another leaf is HRS-024", () => {
+    assert.deepEqual(fitCodes(treeWire(h.string()), treeWire(h.int())), ["HRS-024"]);
+  });
+
+  test("a tuple with a rest item fits one of the same items and a rest item that it fits; another rest is HRS-024", () => {
+    assert.deepEqual(fitCodes(h.tuple([h.string()], h.int()), h.tuple([h.string()], h.float())), []);
+    assert.deepEqual(fitCodes(h.tuple([h.string()], h.int()), h.tuple([h.string()])), ["HRS-024"]);
+    assert.deepEqual(fitCodes(h.tuple([h.string()]), h.tuple([h.string()], h.int())), ["HRS-024"]);
+  });
+
+  test("a computed default fits only the same default function", () => {
+    const factory = (): number => 1;
+
+    assert.deepEqual(fitCodes(h.object({ n: h.int().default(factory) }), h.object({ n: h.int().default(factory) })), []);
+    assert.deepEqual(fitCodes(h.object({ n: h.int().default(factory) }), h.object({ n: h.int().default(() => 1) })), [
+      "HRS-024",
+    ]);
+  });
 });
+
+/** A new recursive wire type: a node with a value of `leaf` and an array of nodes. */
+function treeWire(leaf: RequiredWire): RequiredWire {
+  const node: RequiredWire = h.object({ value: leaf, children: h.array(h.lazy(() => node)) });
+
+  return node;
+}

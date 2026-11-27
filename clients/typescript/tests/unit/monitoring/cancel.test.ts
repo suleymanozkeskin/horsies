@@ -60,17 +60,17 @@ describe("cancelTask", () => {
       ],
       [
         {
-          class: "TaskActionWorkflowTask",
+          class: "TaskActionIsWorkflowTask",
           slots: [textSlot("message", "m"), uuidSlot("task_id", TASK_ID), codeSlot("current_status", "TaskStatus", "PENDING")],
         },
         "TASK_IS_WORKFLOW_TASK",
       ],
       [
         {
-          class: "TaskActionDbOperationFailed",
+          class: "TaskActionDatabaseOperationFailed",
           slots: [textSlot("message", "m"), flagSlot("retryable", true), uuidSlot("task_id", TASK_ID), causeSlot(connectionCause("cancel_task", true))],
         },
-        "DB_OPERATION_FAILED",
+        "DATABASE_OPERATION_FAILED",
       ],
       [
         {
@@ -78,7 +78,7 @@ describe("cancelTask", () => {
           slots: [
             textSlot("message", "m"),
             uuidSlot("task_id", TASK_ID),
-            { name: "exception", value: { kind: "exception", exception: { kind: "generated", class: "OutcomeDecodeError", text: "t" } } },
+            { name: "cause", value: { kind: "exception", exception: { kind: "generated", class: "OutcomeDecodeError", text: "t" } } },
           ],
         },
         "STORED_DATA_INVALID",

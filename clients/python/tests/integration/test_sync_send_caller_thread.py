@@ -24,9 +24,9 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.task_send_types import TaskSendResult
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.task_decorator import TaskFunction, TaskHandle
-from horsies.core.types.result import Ok
+from horsies.core.types.result import Ok, Result
 from tests.integration.conftest import DB_URL
 
 pytestmark = [pytest.mark.integration]
@@ -59,13 +59,13 @@ def _echo_app() -> EchoApp:
     app = Horsies(
         AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=PostgresConfig(database_url=SecretStr(DB_URL)),
+            database=PostgresConfig(database_url=SecretStr(DB_URL)),
         ),
     )
 
     @app.task(TASK_NAME)
-    def caller_thread_echo(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def caller_thread_echo(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     first = caller_thread_echo.send(value=0)
     assert first.is_ok(), first

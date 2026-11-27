@@ -38,9 +38,9 @@ from horsies import (
     NoTaskLimit,
     Ok,
     PostgresConfig,
+    Result,
     TaskError,
     TaskHandle,
-    TaskResult,
     TaskSendResult,
     WorkerProfile,
 )
@@ -87,8 +87,8 @@ DRAIN_COUNT_INTERVAL: Final = timedelta(milliseconds=100)
 WORKER_STOP_TIMEOUT: Final = timedelta(seconds=60)
 """How long a drained worker gets to exit after SIGTERM."""
 
-WORKER_LOGLEVEL: Final = 'WARNING'
-"""The ``--loglevel`` of the worker."""
+WORKER_LOG_LEVEL: Final = 'WARNING'
+"""The ``--log-level`` of the worker."""
 
 CHECKOUT_ROOT: Final = Path(__file__).resolve().parents[2]
 """The repository root: the working directory of the worker and its
@@ -144,8 +144,8 @@ def with_drain_task(app: Horsies) -> DrainApp:
     """Define the no-op task of the drain on ``app``. No I/O."""
 
     @app.task(DRAIN_TASK_NAME)
-    def perf_drain_noop() -> TaskResult[None, TaskError]:
-        return TaskResult(ok=None)
+    def perf_drain_noop() -> Result[None, TaskError]:
+        return Ok(None)
 
     return DrainApp(app=app, send=perf_drain_noop.send)
 
@@ -160,7 +160,7 @@ def drain_app(dsn: str) -> DrainApp:
     return with_drain_task(
         Horsies(
             AppConfig(
-                broker=drain_broker(dsn),
+                database=drain_broker(dsn),
                 worker_profiles=DRAIN_WORKER_PROFILES,
             ),
         ),
@@ -249,7 +249,7 @@ def start_drain_worker(
         script=cli_script(),
         app_locator=telemetry.app_locator(),
         profile=DRAIN_PROFILE_NAME,
-        loglevel=WORKER_LOGLEVEL,
+        log_level=WORKER_LOG_LEVEL,
         extra_arguments=telemetry.worker_arguments(),
         environment={
             DRAIN_DSN_VARIABLE: dsn,

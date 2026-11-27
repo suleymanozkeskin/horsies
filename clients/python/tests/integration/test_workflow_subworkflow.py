@@ -18,16 +18,15 @@ from horsies.core.codec.typed import (
     decode_task_result,
 )
 from horsies.core.errors import WorkflowValidationError
-from horsies.core.models.tasks import (
-    TaskError,
-    TaskResult,
-)
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
     TaskNode,
     SubWorkflowNode,
     WorkflowDefinition,
     OnError,
 )
+from horsies.core.types.result import Ok, Result
 
 from .conftest import finish_task, make_simple_task, start_ok
 
@@ -46,7 +45,7 @@ def _workflow(
 ) -> Any:
     return app.workflow(
         name=name,
-        tasks=tasks,
+        nodes=tasks,
         definition_key=f'tests.integration.{name}.v1',
         **kwargs,
     )
@@ -55,8 +54,8 @@ def _workflow(
 def _decode_task_result(
     value: Any,
     ok_type: Any = Any,
-) -> TaskResult[Any, TaskError] | None:
-    """Decode a stored task-result JSON column into a TaskResult.
+) -> TaskOutcome[Any, TaskError] | None:
+    """Decode a stored task-result JSON column into a TaskOutcome.
 
     Strict-serde phase 7: replaces the legacy ``task_result_from_json``
     helper. The wire is the ``__h_task_result__`` envelope; ``ok_type``
@@ -68,17 +67,21 @@ def _decode_task_result(
     return None
 
 
-def _extract_taskresult_value(
-    value: TaskResult[int, TaskError],
+def _extract_outcome_value(
+    value: TaskOutcome[int, TaskError],
     default: int = 0,
 ) -> int:
-    """Unwrap a TaskResult into the underlying int for build_with paths.
+    """The int of a succeeded outcome for build_with paths, or ``default``
+    for a failed one.
 
-    Strict-serde phase 7 (B3a): the engine passes the typed
-    ``TaskResult`` instance straight to ``build_with`` for args_from
-    kwargs. This helper just unwraps it.
+    The engine passes the typed ``TaskOutcome`` straight to
+    ``build_with`` for args_from kwargs.
     """
-    return value.unwrap() if value.is_ok() else default
+    match value:
+        case Succeeded(value=succeeded_value):
+            return succeeded_value
+        case Failed():
+            return default
 
 
 # =============================================================================
@@ -96,18 +99,18 @@ class ParamChildWorkflow(WorkflowDefinition[int]):
     def build_with(
         cls,
         app: Horsies,
-        value: TaskResult[int, TaskError],
+        value: TaskOutcome[int, TaskError],
     ) -> Any:
-        raw_value = _extract_taskresult_value(value)
+        raw_value = _extract_outcome_value(value)
 
-        @app.task(task_name='param_child_task')
-        def child_task(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        @app.task(name='param_child_task')
+        def child_task(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
-        node = TaskNode(fn=child_task, kwargs={'value': raw_value})
+        node = TaskNode(function=child_task, kwargs={'value': raw_value})
         return app.workflow(
             name=cls.name,
-            tasks=[node],
+            nodes=[node],
             output=node,
             on_error=OnError.FAIL,
         )
@@ -123,18 +126,18 @@ class ConstrainedChildWorkflow(WorkflowDefinition[int]):
     def build_with(
         cls,
         app: Horsies,
-        value: TaskResult[Annotated[int, Field(gt=0)], TaskError],
+        value: TaskOutcome[Annotated[int, Field(gt=0)], TaskError],
     ) -> Any:
-        raw_value = _extract_taskresult_value(value)
+        raw_value = _extract_outcome_value(value)
 
-        @app.task(task_name='constrained_child_task')
-        def child_task(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        @app.task(name='constrained_child_task')
+        def child_task(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
-        node = TaskNode(fn=child_task, kwargs={'value': raw_value})
+        node = TaskNode(function=child_task, kwargs={'value': raw_value})
         return app.workflow(
             name=cls.name,
-            tasks=[node],
+            nodes=[node],
             output=node,
             on_error=OnError.FAIL,
         )
@@ -146,14 +149,14 @@ class StartChildWorkflow(WorkflowDefinition[int]):
 
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-        @app.task(task_name='sub_child_task')
-        def child_task() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        @app.task(name='sub_child_task')
+        def child_task() -> Result[int, TaskError]:
+            return Ok(1)
 
-        node = TaskNode(fn=child_task)
+        node = TaskNode(function=child_task)
         return app.workflow(
             name=cls.name,
-            tasks=[node],
+            nodes=[node],
             output=node,
             on_error=OnError.FAIL,
         )
@@ -172,14 +175,14 @@ class CollisionChildWorkflow(WorkflowDefinition[int]):
 
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-        @app.task(task_name='collision_child_inner_task')
-        def child_task() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=42)
+        @app.task(name='collision_child_inner_task')
+        def child_task() -> Result[int, TaskError]:
+            return Ok(42)
 
-        node = TaskNode(fn=child_task)
+        node = TaskNode(function=child_task)
         return app.workflow(
             name=cls.name,
-            tasks=[node],
+            nodes=[node],
             output=node,
             on_error=OnError.FAIL,
         )
@@ -194,11 +197,11 @@ class MiddleWorkflow(WorkflowDefinition[int]):
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
+            workflow_definition=StartChildWorkflow,
         )
         return app.workflow(
             name=cls.name,
-            tasks=[node_child],
+            nodes=[node_child],
             output=node_child,
             on_error=OnError.FAIL,
         )
@@ -250,7 +253,7 @@ class TestSubworkflowIntegration:
         broker: PostgresBroker,
         parent_workflow_id: str,
         parent_task_index: int,
-        child_result: TaskResult[Any, TaskError],
+        child_result: Result[Any, TaskError],
     ) -> str:
         """Complete a child workflow's first task and return the child workflow ID."""
         row = await self._get_workflow_task_row(session, parent_workflow_id, parent_task_index)
@@ -283,12 +286,12 @@ class TestSubworkflowIntegration:
         session, broker, app = setup
 
         # Register a task whose name collides with the child workflow's name.
-        @app.task(task_name='collision_shared_name')
-        def colliding_task() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='i-am-a-string-task')
+        @app.task(name='collision_shared_name')
+        def colliding_task() -> Result[str, TaskError]:
+            return Ok('i-am-a-string-task')
 
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=CollisionChildWorkflow,
+            workflow_definition=CollisionChildWorkflow,
         )
         spec = _workflow(
             app,
@@ -317,14 +320,13 @@ class TestSubworkflowIntegration:
 
         # Complete the child workflow's inner task (returns int 42).
         await self._complete_child_workflow(
-            session, broker, str(handle.workflow_id), 0, TaskResult(ok=42),
+            session, broker, str(handle.workflow_id), 0, Ok(42),
         )
 
         # result_for must decode via the workflow's definition_key (int),
         # not the colliding task's str type.
         decoded = await asyncio.to_thread(handle.result_for, node_child.key())
-        assert decoded.is_ok(), f'expected Ok(int), got {decoded}'
-        assert decoded.unwrap() == 42
+        assert decoded == Ok(Succeeded(42)), f'expected Ok(Succeeded(42)), got {decoded!r}'
 
     async def test_build_with_refuses_a_value_outside_its_constraint(
         self,
@@ -336,9 +338,9 @@ class TestSubworkflowIntegration:
 
         producer_task = make_simple_task(app, 'sub_constrained_producer')
 
-        node_a: TaskNode[int] = TaskNode(fn=producer_task, kwargs={'value': 7})
+        node_a: TaskNode[int] = TaskNode(function=producer_task, kwargs={'value': 7})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=ConstrainedChildWorkflow,
+            workflow_definition=ConstrainedChildWorkflow,
             waits_for=[node_a],
             args_from={'value': node_a},
         )
@@ -350,7 +352,7 @@ class TestSubworkflowIntegration:
 
         handle = await start_ok(spec, broker)
         await finish_task(
-            session, broker, str(handle.workflow_id), 0, TaskResult(ok=-1)
+            session, broker, str(handle.workflow_id), 0, Ok(-1)
         )
 
         row = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
@@ -358,9 +360,11 @@ class TestSubworkflowIntegration:
         status, child_id, result_json = row
         assert status == 'FAILED'
         assert child_id is None
-        failed = _decode_task_result(result_json)
-        assert failed is not None and failed.is_err()
-        assert 'does not fit the type' in (failed.err_value.message or '')
+        match _decode_task_result(result_json):
+            case Failed(error=error):
+                assert 'does not fit the type' in (error.message or '')
+            case decoded:
+                pytest.fail(f'expected a failed outcome, got {decoded!r}')
 
 
     async def test_depth_tracking_in_nested_workflows(
@@ -371,7 +375,7 @@ class TestSubworkflowIntegration:
         session, broker, app = setup
 
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
+            workflow_definition=StartChildWorkflow,
         )
 
         spec = _workflow(app, 
@@ -410,7 +414,7 @@ class TestSubworkflowIntegration:
         session, broker, app = setup
 
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
+            workflow_definition=StartChildWorkflow,
         )
 
         spec = _workflow(app, 
@@ -448,7 +452,7 @@ class TestSubworkflowIntegration:
         session, broker, app = setup
 
         node_middle: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=MiddleWorkflow,
+            workflow_definition=MiddleWorkflow,
         )
 
         spec = _workflow(app, 
@@ -524,14 +528,14 @@ class TestSubworkflowValidation:
         class CycleA(WorkflowDefinition[int]):
             name = 'cycle_a'
             definition_key = 'tests.cycle_a.v1'
-            sub_b: SubWorkflowNode[int] = SubWorkflowNode(workflow_def=CycleB)
+            sub_b: SubWorkflowNode[int] = SubWorkflowNode(workflow_definition=CycleB)
 
         # Back-reference: CycleB → CycleA. Must override _workflow_nodes because
         # CycleA didn't exist when CycleB's metaclass ran. This is the only way to
         # create mutual references in Python's top-down class definition order.
-        CycleB._workflow_nodes = [('sub_a', SubWorkflowNode(workflow_def=CycleA))]
+        CycleB._workflow_nodes = [('sub_a', SubWorkflowNode(workflow_definition=CycleA))]
 
-        parent_node: SubWorkflowNode[int] = SubWorkflowNode(workflow_def=CycleA)
+        parent_node: SubWorkflowNode[int] = SubWorkflowNode(workflow_definition=CycleA)
 
         with pytest.raises(WorkflowValidationError) as exc:
             _workflow(app, 
@@ -546,9 +550,9 @@ class TestSubworkflowValidation:
         """args_from referencing a node not in waits_for raises WORKFLOW_INVALID_ARGS_FROM."""
         task_a_fn = make_simple_task(app, 'args_from_no_dep_a')
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a_fn, kwargs={'value': 1})
+        node_a: TaskNode[int] = TaskNode(function=task_a_fn, kwargs={'value': 1})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=ParamChildWorkflow,
+            workflow_definition=ParamChildWorkflow,
             # waits_for is empty, but args_from references node_a
             args_from={'value': node_a},
         )
@@ -606,14 +610,14 @@ class TypedKwargsChildWorkflow(WorkflowDefinition[int]):
     ) -> Any:
         cls.received_payload = payload
 
-        @app.task(task_name='typed_kwargs_child_task')
-        def child_task() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=payload.count)
+        @app.task(name='typed_kwargs_child_task')
+        def child_task() -> Result[int, TaskError]:
+            return Ok(payload.count)
 
-        node = TaskNode(fn=child_task)
+        node = TaskNode(function=child_task)
         return app.workflow(
             name=cls.name,
-            tasks=[node],
+            nodes=[node],
             output=node,
             on_error=OnError.FAIL,
         )
@@ -658,7 +662,7 @@ class TestSubworkflowKwargsTypedSerde:
         original_payload = _TypedPayload(stream_id='stream-abc', count=7)
 
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=TypedKwargsChildWorkflow,
+            workflow_definition=TypedKwargsChildWorkflow,
             kwargs={'payload': original_payload},
         )
 
@@ -689,7 +693,7 @@ class TestSubworkflowKwargsTypedSerde:
         original_payload = _TypedPayload(stream_id='stream-xyz', count=42)
 
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=TypedKwargsChildWorkflow,
+            workflow_definition=TypedKwargsChildWorkflow,
             kwargs={'payload': original_payload},
         )
 

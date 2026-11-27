@@ -3,7 +3,9 @@
 //!
 //! The modules go to `src/_catalog/` of the package folder. Each one starts
 //! with [`ts_text::GENERATED_HEADER`]. The output set is in
-//! [`output::render_all`].
+//! [`output::render_package`]: the core's modules and the package version,
+//! which `write` and `check` read from the `package.json` of the package
+//! folder.
 //!
 //! Usage:
 //!
@@ -24,6 +26,7 @@ mod manifest;
 mod model;
 mod monitoring_models;
 mod output;
+mod package_version;
 mod producer_metrics;
 mod retention_class;
 mod task_code;
@@ -35,7 +38,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use output::{check_all, render_all, write_all, CheckReport};
+use output::{check_all, render_package, write_all, CheckReport};
 
 /// The files are written, or they are current.
 const EXIT_DONE: u8 = 0;
@@ -45,6 +48,8 @@ const EXIT_STALE: u8 = 1;
 const EXIT_USAGE: u8 = 2;
 /// A file operation failed.
 const EXIT_FILE_ERROR: u8 = 3;
+/// The `package.json` of the package folder gives no package version.
+const EXIT_PACKAGE_VERSION: u8 = 4;
 
 const USAGE: &str = "usage: horsies-typescript-codegen (write | check) <package-dir>";
 
@@ -90,7 +95,17 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_USAGE);
         }
     };
-    let files = render_all();
+    let package_dir = match &command {
+        Command::Write { package_dir } | Command::Check { package_dir } => package_dir,
+    };
+    let version = match package_version::read_package_version(package_dir) {
+        Ok(version) => version,
+        Err(error) => {
+            report(&error.to_string());
+            return ExitCode::from(EXIT_PACKAGE_VERSION);
+        }
+    };
+    let files = render_package(&version);
     match command {
         Command::Write { package_dir } => match write_all(&package_dir, &files) {
             Ok(written) => {

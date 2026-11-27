@@ -16,6 +16,7 @@ export default defineConfig({
   ignorePatterns: ["lint/anti-slop/**"],
   jsPlugins: [{ name: "anti-slop", specifier: "./lint/anti-slop/index.ts" }],
   rules: {
+    "anti-slop/no-module-mocking": "error",
     "anti-slop/no-runtime-typeof": "error",
     "anti-slop/no-shape-in-symbol-names": "error",
     "anti-slop/no-unknown-parameters": "error",
@@ -48,6 +49,16 @@ export default defineConfig({
       files: ["tests/unit/generated/support/wire-text.ts"],
       rules: {
         "anti-slop/no-runtime-typeof": "off",
+      },
+    },
+    {
+      // The column readers of the showcase's store parse the rows that the
+      // `pg` driver gives (a boundary of the app): they tell the value of a
+      // column apart by its runtime type.
+      files: ["examples/showcase/src/store/columns.ts"],
+      rules: {
+        "anti-slop/no-runtime-typeof": "off",
+        "anti-slop/no-unknown-parameters": "off",
       },
     },
     {

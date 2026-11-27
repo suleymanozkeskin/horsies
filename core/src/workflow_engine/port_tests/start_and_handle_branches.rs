@@ -15,7 +15,7 @@ use super::support::{
     ParentLink, WorkflowSeed,
 };
 use crate::broker::workflow_start::ClientStartError;
-use crate::core::{AnyNode, WorkflowTaskStatus};
+use crate::core::{AnyNode, WorkflowNodeStatus};
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::error::WorkflowError;
@@ -23,40 +23,40 @@ use crate::workflow_engine::query::{NodeResultsRead, NodesRead};
 
 /// Every node status, in the order of the enum. The match does not compile
 /// when a status is added, so the list follows the enum.
-fn every_node_status() -> Vec<WorkflowTaskStatus> {
+fn every_node_status() -> Vec<WorkflowNodeStatus> {
     let every = [
-        WorkflowTaskStatus::Pending,
-        WorkflowTaskStatus::Ready,
-        WorkflowTaskStatus::Enqueued,
-        WorkflowTaskStatus::Running,
-        WorkflowTaskStatus::Completed,
-        WorkflowTaskStatus::Failed,
-        WorkflowTaskStatus::Skipped,
+        WorkflowNodeStatus::Pending,
+        WorkflowNodeStatus::Ready,
+        WorkflowNodeStatus::Enqueued,
+        WorkflowNodeStatus::Running,
+        WorkflowNodeStatus::Completed,
+        WorkflowNodeStatus::Failed,
+        WorkflowNodeStatus::Skipped,
     ];
     for status in every {
         match status {
-            WorkflowTaskStatus::Pending
-            | WorkflowTaskStatus::Ready
-            | WorkflowTaskStatus::Enqueued
-            | WorkflowTaskStatus::Running
-            | WorkflowTaskStatus::Completed
-            | WorkflowTaskStatus::Failed
-            | WorkflowTaskStatus::Skipped => {}
+            WorkflowNodeStatus::Pending
+            | WorkflowNodeStatus::Ready
+            | WorkflowNodeStatus::Enqueued
+            | WorkflowNodeStatus::Running
+            | WorkflowNodeStatus::Completed
+            | WorkflowNodeStatus::Failed
+            | WorkflowNodeStatus::Skipped => {}
         }
     }
     every.to_vec()
 }
 
 /// The text that the enum writes for `status`.
-fn stored_status(status: WorkflowTaskStatus) -> &'static str {
+fn stored_status(status: WorkflowNodeStatus) -> &'static str {
     let text = match status {
-        WorkflowTaskStatus::Pending => "PENDING",
-        WorkflowTaskStatus::Ready => "READY",
-        WorkflowTaskStatus::Enqueued => "ENQUEUED",
-        WorkflowTaskStatus::Running => "RUNNING",
-        WorkflowTaskStatus::Completed => "COMPLETED",
-        WorkflowTaskStatus::Failed => "FAILED",
-        WorkflowTaskStatus::Skipped => "SKIPPED",
+        WorkflowNodeStatus::Pending => "PENDING",
+        WorkflowNodeStatus::Ready => "READY",
+        WorkflowNodeStatus::Enqueued => "ENQUEUED",
+        WorkflowNodeStatus::Running => "RUNNING",
+        WorkflowNodeStatus::Completed => "COMPLETED",
+        WorkflowNodeStatus::Failed => "FAILED",
+        WorkflowNodeStatus::Skipped => "SKIPPED",
     };
     assert_eq!(
         serde_json::to_value(status).expect("a status encodes"),
@@ -428,7 +428,7 @@ async fn tasks_reads_each_stored_node_status_as_its_enum_member() {
     let read = handle(&pool, workflow_id).tasks().await;
 
     end_workflows(&pool, &[workflow_id]).await;
-    let statuses: Vec<WorkflowTaskStatus> = read
+    let statuses: Vec<WorkflowNodeStatus> = read
         .expect("tasks()")
         .into_iter()
         .map(|info| info.status)

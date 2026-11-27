@@ -58,22 +58,22 @@ class FlashSale(WorkflowDefinition[CacheWarm]):
     ) -> WorkflowSpec[CacheWarm]:
         """Build a fresh spec for one campaign."""
         cdn = TaskNode(
-            fn=publish_cdn,
+            function=publish_cdn,
             kwargs={'campaign_id': campaign_id, 'sku': sku},
             node_id='publish_cdn',
         )
         origin = TaskNode(
-            fn=publish_origin,
+            function=publish_origin,
             kwargs={'campaign_id': campaign_id, 'sku': sku},
             node_id='publish_origin',
         )
         search = TaskNode(
-            fn=prewarm_search,
+            function=prewarm_search,
             kwargs={'campaign_id': campaign_id},
             node_id='prewarm_search',
         )
         warm = TaskNode(
-            fn=warm_cache_edge,
+            function=warm_cache_edge,
             kwargs={'campaign_id': campaign_id},
             waits_for=[cdn, origin],
             join='any',
@@ -81,7 +81,7 @@ class FlashSale(WorkflowDefinition[CacheWarm]):
         )
         return app.workflow(
             name=cls.name,
-            tasks=[cdn, origin, search, warm],
+            nodes=[cdn, origin, search, warm],
             on_error=OnError.FAIL,
             output=warm,
             success_policy=SuccessPolicy(
@@ -97,7 +97,7 @@ class FlashSale(WorkflowDefinition[CacheWarm]):
 _CHECK_CAMPAIGN: Final[str] = 'FLASH-CHECK'
 
 
-@app.workflow_builder(
+@app.check_workflow_builder(
     cases=[{'campaign_id': _CHECK_CAMPAIGN, 'sku': 'ACME-SKU-0001'}],
 )
 def build_flash_sale(*, campaign_id: str, sku: str) -> WorkflowSpec[CacheWarm]:

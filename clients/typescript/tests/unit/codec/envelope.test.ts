@@ -4,11 +4,12 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/_catalog/codec_bounds.ts";
 import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
 import { decodeEnvelope, decodeParameters } from "../../../horsies/src/codec/reader.ts";
 import type { DecodeRefused, EnvelopeRule } from "../../../horsies/src/codec/refusal.ts";
 import { encodeParameters } from "../../../horsies/src/codec/writer.ts";
+import { defineTask } from "../../../horsies/src/contract/define-task.ts";
 import { h, parametersKind } from "../../../horsies/src/wire/builders.ts";
 import type { Kind } from "../../../horsies/src/wire/kinds.ts";
 import type { TaskOutcome } from "../../../horsies/src/wire/task-error.ts";
@@ -36,8 +37,7 @@ function refusalOf(okKind: Kind, text: string): DecodeRefused {
 function ruleOf(text: string): EnvelopeRule {
   const refusal = refusalOf(JSON_KIND, text);
 
-  assert.equal(refusal.kind, "EnvelopeRefused", show(refusal));
-  assert(refusal.kind === "EnvelopeRefused");
+  assert(refusal.kind === "envelopeRefused", show(refusal));
 
   return refusal.rule;
 }
@@ -53,8 +53,8 @@ describe("stored task error rules", () => {
     assert.equal(errorRule("[1]"), "ErrorNotAnObject");
   });
 
-  test("ErrorFieldInvalid: a code that is null, a number, a library or reserved name as a user code", () => {
-    for (const code of ["null", "1", '"BROKER_ERROR"', '"WORKFLOW_STOPPED"', '{"__builtin_task_code__":"X","a":1}']) {
+  test("ErrorFieldInvalid: a code that is null, a number, a built-in or reserved name as a custom code", () => {
+    for (const code of ["null", "1", '"DATABASE_ERROR"', '"WORKFLOW_STOPPED"', '{"__builtin_task_code__":"X","a":1}']) {
       assert.equal(errorRule(`{"error_code":${code}}`), "ErrorFieldInvalid", code);
     }
   });
@@ -69,7 +69,8 @@ describe("stored task error rules", () => {
 
     assert(outcome.kind === "failed");
     assert.deepEqual(outcome.error, {
-      code: { kind: "user", code: "X" },
+      kind: "custom",
+      code: "X",
       message: null,
       data: null,
       exception: null,
@@ -89,11 +90,11 @@ describe("stored task error rules", () => {
     const id = "0192f3b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b";
 
     const summary =
-      '{"status":"FAILED","total_tasks":1,"completed_tasks":0,"failed_tasks":1,"skipped_tasks":0,"note":1}';
+      '{"status":"FAILED","total_nodes":1,"completed_nodes":0,"failed_nodes":1,"skipped_nodes":0,"note":1}';
 
-    const floatCount = summary.replace('"total_tasks":1', '"total_tasks":1.0');
+    const floatCount = summary.replace('"total_nodes":1', '"total_nodes":1.0');
     const engineKeyOutput = summary.replace("{", '{"output":{"__h_x":1},');
-    const head = `{"error_code":{"__builtin_task_code__":"SUBWORKFLOW_FAILED"},"sub_workflow_id":"${id}"`;
+    const head = `{"error_code":{"__builtin_task_code__":"SUB_WORKFLOW_FAILED"},"sub_workflow_id":"${id}"`;
     const outcome = outcomeOf(JSON_KIND, `${ERROR_HEAD}${head},"sub_workflow_summary":${summary}}}`);
 
     assert(outcome.kind === "failed" && outcome.error.subWorkflow?.summary.output === null);
@@ -107,7 +108,7 @@ describe("stored task error rules", () => {
   });
 
   test("the sub-workflow id: each form that the core reads gives the lower-case hyphenated form", () => {
-    const summary = '{"status":"FAILED","total_tasks":1,"completed_tasks":0,"failed_tasks":1,"skipped_tasks":0}';
+    const summary = '{"status":"FAILED","total_nodes":1,"completed_nodes":0,"failed_nodes":1,"skipped_nodes":0}';
     const canonical = "0192f3b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b";
 
     for (const id of [
@@ -136,8 +137,9 @@ describe("stored task error rules", () => {
   });
 });
 
-describe("h.resultOf parameters", () => {
-  const parameters = parametersKind({ order: h.resultOf(h.object({ id: h.int() })), note: h.string() });
+describe("h.taskOutcome parameters", () => {
+  const upstream = defineTask({ name: "upstream", input: {}, output: h.object({ id: h.int() }) });
+  const parameters = parametersKind({ order: h.taskOutcome(upstream), note: h.string() });
 
   test("a workflow node's input: the upstream outcome, succeeded or failed", () => {
     const succeeded = decodeParameters(
@@ -154,7 +156,7 @@ describe("h.resultOf parameters", () => {
       "worker",
     );
 
-    const error = { code: { kind: "user", code: "X" }, message: null, data: null, exception: null, subWorkflow: null };
+    const error = { kind: "custom", code: "X", message: null, data: null, exception: null, subWorkflow: null };
 
     assert.deepEqual(failed, { ok: true, value: { order: { kind: "failed", error }, note: "x" } });
   });
@@ -166,14 +168,14 @@ describe("h.resultOf parameters", () => {
       "worker",
     );
 
-    assert(!refused.ok);
-    assert.deepEqual([refused.error.kind, refused.error.path], ["WrongType", "$.order.ok.id"]);
+    assert(!refused.ok && refused.error.kind === "decodeRefused");
+    assert.deepEqual([refused.error.refusal, refused.error.path], ["WrongType", "$.order.ok.id"]);
   });
 
   test("a sender never gives an upstream outcome: WrongType", () => {
     const written = encodeParameters(parameters, { order: { kind: "succeeded", value: { id: 1 } }, note: "x" });
 
     assert(!written.ok);
-    assert.deepEqual([written.error.kind, written.error.path], ["WrongType", "$.order"]);
+    assert.deepEqual([written.error.refusal, written.error.path], ["WrongType", "$.order"]);
   });
 });

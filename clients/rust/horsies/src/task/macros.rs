@@ -7,7 +7,7 @@
 //! `body_result`: the same adapters as the `#[horsies::task]` attribute.
 //! The task records `module_path!()` of the call site, the `module` of the
 //! exception record of a panic, and declares the codes of `E`
-//! (`UserErrorCode::CODES`), which the registration checks. Attach the
+//! (`CustomErrorCode::CODES`), which the registration checks. Attach the
 //! options (queue, retry, timeout, execution class) with
 //! `RegisteredTask::with_task_options`.
 
@@ -63,7 +63,7 @@ macro_rules! async_task_fn {
 
         $crate::__private::RegisteredTask::Async {
             task: ::std::sync::Arc::new(__HorsiesAsyncBody),
-            meta: $crate::__private::TaskMeta::for_input::<$input>()
+            metadata: $crate::__private::TaskMetadata::for_input::<$input>()
                 .in_module(::std::module_path!())
                 .with_error_codes($crate::__private::async_task_codes::<$input, _, _, _, _>(
                     &$function,
@@ -109,7 +109,7 @@ macro_rules! blocking_task_fn {
 
         $crate::__private::RegisteredTask::Blocking {
             task: ::std::sync::Arc::new(__HorsiesBlockingBody),
-            meta: $crate::__private::TaskMeta::for_input::<$input>()
+            metadata: $crate::__private::TaskMetadata::for_input::<$input>()
                 .in_module(::std::module_path!())
                 .with_error_codes($crate::__private::blocking_task_codes::<$input, _, _, _>(
                     &$function,
@@ -123,7 +123,7 @@ mod tests {
     use std::convert::Infallible;
 
     use horsies_core::core::task::fn_trait::TaskModule;
-    use horsies_core::{OperationalErrorCode, RegisteredTask, TaskErrorCode, TaskResult};
+    use horsies_core::{OperationalCode, RegisteredTask, TaskErrorCode, TaskResult};
     use serde::{Deserialize, Serialize};
 
     use crate::TaskError;
@@ -148,20 +148,20 @@ mod tests {
     }
 
     fn worker_serialization_error() -> TaskErrorCode {
-        TaskErrorCode::from(OperationalErrorCode::WorkerSerializationError)
+        TaskErrorCode::from(OperationalCode::WorkerSerializationError)
     }
 
     #[tokio::test]
     async fn an_async_task_decodes_runs_and_encodes() {
-        let RegisteredTask::Async { task, meta } = crate::async_task_fn!(add, AddInput) else {
+        let RegisteredTask::Async { task, metadata } = crate::async_task_fn!(add, AddInput) else {
             panic!("async_task_fn! built a blocking task");
         };
         match task.execute(&input(2, 3)).await {
             TaskResult::Ok(bytes) => assert_eq!(bytes, b"5"),
             TaskResult::Err(error) => panic!("the task failed: {error}"),
         }
-        assert!(meta.expects_input);
-        assert_eq!(meta.module, TaskModule::Path(module_path!()));
+        assert!(metadata.expects_input);
+        assert_eq!(metadata.module, TaskModule::Path(module_path!()));
     }
 
     #[test]
@@ -202,10 +202,10 @@ mod tests {
         DivideByZero,
     }
 
-    impl crate::UserErrorCode for MathCode {
+    impl crate::CustomErrorCode for MathCode {
         const CODES: &'static [&'static str] = &["OVERFLOW", "DIVIDE_BY_ZERO"];
 
-        fn code(&self) -> &str {
+        fn as_str(&self) -> &str {
             match self {
                 Self::Overflow => "OVERFLOW",
                 Self::DivideByZero => "DIVIDE_BY_ZERO",
@@ -225,7 +225,7 @@ mod tests {
         input
             .a
             .checked_add(input.b)
-            .ok_or_else(|| TaskError::user(MathCode::Overflow, "the sum overflows"))
+            .ok_or_else(|| TaskError::custom(MathCode::Overflow, "the sum overflows"))
     }
 
     #[allow(clippy::needless_pass_by_value)]
@@ -233,7 +233,7 @@ mod tests {
         input
             .a
             .checked_div(input.b)
-            .ok_or_else(|| TaskError::user(MathCode::DivideByZero, "the divisor is 0"))
+            .ok_or_else(|| TaskError::custom(MathCode::DivideByZero, "the divisor is 0"))
     }
 
     #[test]

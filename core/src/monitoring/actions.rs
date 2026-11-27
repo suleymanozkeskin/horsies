@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::broker::{BrokerError, PostgresBroker};
 use crate::catalog::CodeEnum;
-use crate::core::workflow::handle_types::HandleOperationError;
+use crate::core::workflow::handle_types::WorkflowHandleError;
 use crate::core::workflow::status::WorkflowStatus;
 use crate::db::Transience;
 use crate::workflow_engine::child_spec::{ChildSpecSource, ChildSpecUnavailable};
@@ -13,7 +13,7 @@ use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::lifecycle::ResumeFailure;
 
 use super::failure_status::database_failure_status;
-use super::models::ActionResponse;
+use super::models::{ActionResponse, CancelPolicy};
 use super::task_actions::{
     cancel_task, TaskActionError, TaskActionErrorCode, TaskActionResult, TaskCancelled,
 };
@@ -157,7 +157,7 @@ fn workflow_not_found(workflow_id: Uuid) -> ActionOutcome {
 fn task_action_failed(error: TaskActionError) -> ActionOutcome {
     match error {
         TaskActionError::NotFound { message, .. } => detail(404, message),
-        TaskActionError::WorkflowTask { .. } => ActionOutcome {
+        TaskActionError::IsWorkflowTask { .. } => ActionOutcome {
             status_code: 400,
             body: ActionBody::Code {
                 code: TaskActionErrorCode::TaskIsWorkflowTask,
@@ -167,7 +167,7 @@ fn task_action_failed(error: TaskActionError) -> ActionOutcome {
             ActionConflictCode::TaskNotCancellable,
             Some(current_status.to_string()),
         ),
-        TaskActionError::DbOperationFailed {
+        TaskActionError::DatabaseOperationFailed {
             message, retryable, ..
         } => database_failed(Transience::of_retryable(retryable), message),
         // The request was valid, and a repeat gives the same answer until the
@@ -176,26 +176,24 @@ fn task_action_failed(error: TaskActionError) -> ActionOutcome {
     }
 }
 
-fn handle_failed(error: HandleOperationError) -> ActionOutcome {
+fn handle_failed(error: WorkflowHandleError) -> ActionOutcome {
     match error {
-        HandleOperationError::WorkflowNotFound { workflow_id, .. } => {
-            workflow_not_found(workflow_id)
-        }
-        HandleOperationError::DbOperationFailed {
+        WorkflowHandleError::NotFound { workflow_id, .. } => workflow_not_found(workflow_id),
+        WorkflowHandleError::DatabaseOperationFailed {
             message, retryable, ..
         } => database_failed(Transience::of_retryable(retryable), message),
         // Only a resume returns it, and `resume_failure` answers it as resumed.
         // Not retryable: the resume committed, and a repeat answers 409.
-        HandleOperationError::ResumeRecoveryFailed { message, .. } => {
+        WorkflowHandleError::ResumeRecoveryFailed { message, .. } => {
             database_failed(Transience::Permanent, message)
         }
         // Stored data that does not parse: the request was valid, and a repeat gets the same
         // answer.
-        HandleOperationError::StoredDataInvalid { message, .. } => detail(500, message),
+        WorkflowHandleError::StoredDataInvalid { message, .. } => detail(500, message),
         // Only a sync or blocking form returns it. The web actions call the core's async
         // workflow functions, which never do, so reaching it is a defect (Python raises
         // `AssertionError` in `_handle_failed`).
-        HandleOperationError::AsyncContext { workflow_id, .. } => panic!(
+        WorkflowHandleError::AsyncContext { workflow_id, .. } => panic!(
             "web workflow action for workflow {workflow_id} got ASYNC_CONTEXT; the core's workflow \
              functions never return it"
         ),
@@ -241,9 +239,9 @@ pub fn task_action_outcome(result: TaskActionResult<TaskCancelled>) -> ActionOut
 pub async fn cancel_task_action(
     broker: &PostgresBroker,
     task_id: Uuid,
-    include_running: bool,
+    policy: CancelPolicy,
 ) -> ActionOutcome {
-    task_action_outcome(cancel_task(broker, task_id, include_running).await)
+    task_action_outcome(cancel_task(broker, task_id, policy).await)
 }
 
 pub async fn pause_workflow_action(broker: &PostgresBroker, workflow_id: Uuid) -> ActionOutcome {
@@ -267,15 +265,15 @@ pub async fn pause_workflow_action(broker: &PostgresBroker, workflow_id: Uuid) -
 /// workflow was resumed and the answer says so with a warning. Every other
 /// error is answered as for the other workflow actions. No second status read
 /// guesses whether a failed resume committed.
-fn resume_failure(error: HandleOperationError) -> ActionOutcome {
+fn resume_failure(error: WorkflowHandleError) -> ActionOutcome {
     match error {
-        HandleOperationError::ResumeRecoveryFailed { .. } => {
+        WorkflowHandleError::ResumeRecoveryFailed { .. } => {
             succeeded("resumed", None, Some(RESUME_RECOVERY_WARNING.to_owned()))
         }
-        HandleOperationError::WorkflowNotFound { .. }
-        | HandleOperationError::DbOperationFailed { .. }
-        | HandleOperationError::StoredDataInvalid { .. }
-        | HandleOperationError::AsyncContext { .. } => handle_failed(error),
+        WorkflowHandleError::NotFound { .. }
+        | WorkflowHandleError::DatabaseOperationFailed { .. }
+        | WorkflowHandleError::StoredDataInvalid { .. }
+        | WorkflowHandleError::AsyncContext { .. } => handle_failed(error),
     }
 }
 
@@ -346,7 +344,7 @@ pub async fn cancel_workflow_action(broker: &PostgresBroker, workflow_id: Uuid) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::workflow::handle_types::HandleErrorCode;
+    use crate::core::workflow::handle_types::WorkflowHandleErrorCode;
 
     /// The result word of the log line is Python's: the outcome, else the
     /// code, else `error`.
@@ -361,7 +359,7 @@ mod tests {
             conflict(ActionConflictCode::TaskNotCancellable, None).result_word(),
             "TASK_NOT_CANCELLABLE"
         );
-        let workflow_task = TaskActionError::WorkflowTask {
+        let workflow_task = TaskActionError::IsWorkflowTask {
             message: "a workflow task".to_owned(),
             task_id: Uuid::nil(),
             current_status: crate::TaskStatus::Pending,
@@ -475,7 +473,7 @@ mod tests {
                 crate::core::workflow::handle_types::HandleOperation::Resume,
                 crate::core::workflow::handle_types::HandleOperation::Cancel,
             ] {
-                let error = HandleOperationError::connect_failed(
+                let error = WorkflowHandleError::connect_failed(
                     &operation,
                     workflow_id,
                     refused_statement(&server_error),
@@ -487,7 +485,7 @@ mod tests {
 
     #[test]
     fn resume_failure_mapping_is_exhaustive() {
-        let error = |code: HandleErrorCode| {
+        let error = |code: WorkflowHandleErrorCode| {
             let message = "recovery failed".to_owned();
             let workflow_id = Uuid::nil();
             let cause = || {
@@ -496,54 +494,61 @@ mod tests {
                 ))
             };
             match code {
-                HandleErrorCode::WorkflowNotFound => HandleOperationError::WorkflowNotFound {
+                WorkflowHandleErrorCode::WorkflowNotFound => WorkflowHandleError::NotFound {
                     message,
                     workflow_id,
                 },
-                HandleErrorCode::DbOperationFailed => HandleOperationError::DbOperationFailed {
-                    message,
-                    retryable: true,
-                    workflow_id,
-                    cause: cause(),
-                },
-                HandleErrorCode::StoredDataInvalid => HandleOperationError::StoredDataInvalid {
-                    message,
-                    workflow_id,
-                    cause: cause(),
-                },
-                HandleErrorCode::ResumeRecoveryFailed => {
-                    HandleOperationError::ResumeRecoveryFailed {
+                WorkflowHandleErrorCode::DatabaseOperationFailed => {
+                    WorkflowHandleError::DatabaseOperationFailed {
+                        message,
+                        retryable: true,
+                        workflow_id,
+                        cause: cause(),
+                    }
+                }
+                WorkflowHandleErrorCode::StoredDataInvalid => {
+                    WorkflowHandleError::StoredDataInvalid {
                         message,
                         workflow_id,
                         cause: cause(),
                     }
                 }
-                HandleErrorCode::AsyncContext => HandleOperationError::AsyncContext {
+                WorkflowHandleErrorCode::ResumeRecoveryFailed => {
+                    WorkflowHandleError::ResumeRecoveryFailed {
+                        message,
+                        workflow_id,
+                        cause: cause(),
+                    }
+                }
+                WorkflowHandleErrorCode::AsyncContext => WorkflowHandleError::AsyncContext {
                     message,
                     workflow_id,
                 },
+                WorkflowHandleErrorCode::InvalidWorkflowId => {
+                    panic!("no handle operation gives {code}")
+                }
             }
         };
         assert_eq!(
-            handle_failed(error(HandleErrorCode::WorkflowNotFound)).status_code(),
+            handle_failed(error(WorkflowHandleErrorCode::WorkflowNotFound)).status_code(),
             404
         );
         assert_eq!(
-            handle_failed(error(HandleErrorCode::DbOperationFailed)).status_code(),
+            handle_failed(error(WorkflowHandleErrorCode::DatabaseOperationFailed)).status_code(),
             503
         );
         assert_eq!(
-            handle_failed(error(HandleErrorCode::ResumeRecoveryFailed)).status_code(),
+            handle_failed(error(WorkflowHandleErrorCode::ResumeRecoveryFailed)).status_code(),
             500
         );
         assert_eq!(
-            handle_failed(error(HandleErrorCode::StoredDataInvalid)).status_code(),
+            handle_failed(error(WorkflowHandleErrorCode::StoredDataInvalid)).status_code(),
             500
         );
 
         // Python `test_web_api.py::TestResumeCommittedThenFailed`: the resume
         // committed and its recovery pass failed, so the workflow was resumed.
-        let outcome = resume_failure(error(HandleErrorCode::ResumeRecoveryFailed));
+        let outcome = resume_failure(error(WorkflowHandleErrorCode::ResumeRecoveryFailed));
         assert_eq!(outcome.status_code(), 200);
         assert_eq!(
             serde_json::to_value(outcome.body()).unwrap(),
@@ -557,7 +562,7 @@ mod tests {
         // Any other failure of a resume is not a resume, whatever another actor
         // did to the workflow meanwhile.
         {
-            let code = HandleErrorCode::DbOperationFailed;
+            let code = WorkflowHandleErrorCode::DatabaseOperationFailed;
             let outcome = resume_failure(error(code));
             assert_eq!(outcome.status_code(), 503);
             assert_eq!(
@@ -566,11 +571,11 @@ mod tests {
             );
         }
         assert_eq!(
-            resume_failure(error(HandleErrorCode::WorkflowNotFound)).status_code(),
+            resume_failure(error(WorkflowHandleErrorCode::WorkflowNotFound)).status_code(),
             404
         );
         assert_eq!(
-            resume_failure(error(HandleErrorCode::StoredDataInvalid)).status_code(),
+            resume_failure(error(WorkflowHandleErrorCode::StoredDataInvalid)).status_code(),
             500
         );
     }
@@ -596,7 +601,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "got ASYNC_CONTEXT")]
     fn async_context_is_a_defect_of_the_web_workflow_actions() {
-        let _outcome = handle_failed(HandleOperationError::AsyncContext {
+        let _outcome = handle_failed(WorkflowHandleError::AsyncContext {
             message: "sync call inside a loop".to_owned(),
             workflow_id: Uuid::nil(),
         });

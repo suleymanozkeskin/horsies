@@ -121,7 +121,7 @@ BASELINE_COLUMNS_BY_SOURCE: Final = (
     ('tableoid of the two partitioned parents', 2),
 )
 """The columns that the baseline catalog has a rule for, by the migration
-that adds them. Migrations 1003, 1005 and 1006 add no column. A migration
+that adds them. Migrations 1003, 1005, 1006, 1007 and 1008 add no column. A migration
 that adds a column adds a line here."""
 
 

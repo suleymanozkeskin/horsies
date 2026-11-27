@@ -1,5 +1,6 @@
 // The worker run with fakes at the addon boundary: the order of the first steps, each run error, the stop handlers
-// around the run, and the text of each error.
+// around the run, the text of each error, and the facts of the app in the start members (the event handlers and the
+// worker-ended spans) and in the run (the core handle that holds the child spec source).
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
@@ -10,13 +11,20 @@ import type { WorkerLogLevel } from "../../../horsies/src/_catalog/worker_manife
 import type { AppContext } from "../../../horsies/src/app/context.ts";
 import { checkReport } from "../../../horsies/src/check/report.ts";
 import { refusal } from "../../../horsies/src/app/refusal.ts";
-import type { NativePreparedWorker, WorkerPreparation, WorkerRunEnded } from "../../../horsies/src/native/worker/addon.ts";
-import { ClientDefect, CoreStartFailed, CoreStopped } from "../../../horsies/src/thrown-errors.ts";
+import type {
+  NativePreparedWorker,
+  SeatIsolateMemory,
+  WorkerPreparation,
+  WorkerRunEnded,
+} from "../../../horsies/src/native/worker/addon.ts";
+import { ClientDefect, RuntimeStartFailed, CoreStopped } from "../../../horsies/src/thrown-errors.ts";
 import { createHorsies } from "../../../horsies/src/app.ts";
 import type { CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import type { LaunchFacts } from "../../../horsies/src/worker/child-command.ts";
 import {
   processWorkerRunDeps,
+  runtimeNameOf,
+  seatIsolateMemoryOf,
   runWorkerOf,
   type WorkerRunDeps,
   type WorkerRunError,
@@ -24,6 +32,7 @@ import {
   type WorkerStart,
 } from "../../../horsies/src/worker/run.ts";
 import { catalogRefusal, DATABASE_URL, fakeChecks, fakeCoreHandle, fakeEnvironment } from "../app/support.ts";
+import { API } from "../telemetry/support.ts";
 import { contextOf, implementedApp, testApp } from "./support.ts";
 
 const START: WorkerStart = {
@@ -99,6 +108,17 @@ function fakeDeps(script: Script = {}): { readonly deps: WorkerRunDeps; readonly
   };
 
   return { deps, steps };
+}
+
+/** The member `name` of the start members of the one preparation in `steps`. */
+function startMember(steps: readonly Step[], name: string): unknown {
+  const prepares = steps.flatMap((step) => (step.kind === "prepare" ? [step.startJson] : []));
+
+  assert.equal(prepares.length, 1);
+
+  const members: unknown = JSON.parse(prepares[0] ?? "null");
+
+  return Reflect.get(Object(members), name);
 }
 
 async function runError(context: AppContext, script: Script): Promise<WorkerRunError> {
@@ -199,7 +219,7 @@ describe("the worker run", () => {
   test("a core refusal of the preparation or of the run is coreRefused", async () => {
     const context = contextOf(implementedApp());
     const stopped = new CoreStopped({ subject: "forwarder", cause: "panic", stateAfter: "noChange" });
-    const failed = new CoreStartFailed({ cause: "no threads" });
+    const failed = new RuntimeStartFailed({ cause: "no threads" });
 
     assert.deepEqual(
       await runError(context, {
@@ -248,18 +268,18 @@ describe("the worker run", () => {
       workerRunErrorText({ kind: "manifestBound", path: "claim.prefetchBuffer", min: 0n, max: 2_147_483_647n }),
       workerRunErrorText({ kind: "connectionSettingsRefused", cause: "no session URL" }),
       workerRunErrorText({ kind: "sharedThreadUnavailable", profile: "cpu" }),
-      workerRunErrorText({ kind: "coreRefused", error: new CoreStartFailed({ cause: "no threads" }) }),
+      workerRunErrorText({ kind: "coreRefused", error: new RuntimeStartFailed({ cause: "no threads" }) }),
       workerRunErrorText({ kind: "bootFailed", cause: "SCHEMA_REFUSED", message: "schema" }),
       workerRunErrorText({ kind: "failed", cause: "CLAIM_FAILED", message: "claim" }),
     ];
 
     assert.equal(texts[3], "claim.prefetchBuffer: outside 0 to 2147483647, the bound of its worker manifest field");
-    assert.ok(texts[5]?.startsWith('workerProfiles["cpu"].sharedThread: '));
+    assert.ok(texts[5]?.startsWith('workerProfiles["cpu"].sharedThread: SHARED_THREAD children run on Node only'));
     assert.equal(texts[7], "worker start failed (SCHEMA_REFUSED): schema");
     assert.equal(texts[8], "worker failed (CLAIM_FAILED): claim");
     assert.ok(texts[0]?.startsWith("error[HRS-300]: tasks[0] ping: no implementation"));
   });
-  test("a profile with SHARED_THREAD children is refused with its name", async () => {
+  test("a profile with SHARED_THREAD children is refused with its name where worker threads have no memory cap", async () => {
     assert.deepEqual(
       await runError(contextOf(implementedApp()), { prepare: () => ({ kind: "sharedThreadUnavailable", profile: "cpu" }) }),
       { kind: "sharedThreadUnavailable", profile: "cpu" },
@@ -270,30 +290,44 @@ describe("the worker run", () => {
     await assert.rejects(runWorkerOf(contextOf(implementedApp()), START, fakeDeps({ prepare: () => ({ kind: "profileRefused", refusals: [] }) }).deps), ClientDefect);
   });
 
-  test("the start members take the event handlers and the tracing of the app", async () => {
+  test("the handlers of the start members are the handlers that app.onEvent registered", async () => {
+    const { deps, steps } = fakeDeps();
+    const app = implementedApp();
+
+    app.onEvent("AttemptEnded", { name: "alerts" }, () => undefined);
+    app.onEvent("TaskClaimed", { name: "claims" }, () => undefined);
+
+    assert.deepEqual(await runWorkerOf(contextOf(app), START, deps), { ok: true, value: { kind: "stopped" } });
+    assert.deepEqual(startMember(steps, "handlers"), {
+      kind: "HANDLERS",
+      handlers: [
+        { name: "alerts", event_type: "AttemptEnded" },
+        { name: "claims", event_type: "TaskClaimed" },
+      ],
+    });
+  });
+
+  test("the worker-ended spans of the start members follow the tracing of Horsies.create", async () => {
     const { deps, steps } = fakeDeps();
 
-    const context: AppContext = {
-      ...contextOf(implementedApp()),
-      telemetry: { handlers: () => [{ name: "alerts", eventType: "AttemptEnded" }], tracing: "otel" },
-    };
-
-    void (await runWorkerOf(context, START, deps));
-
-    const prepared = steps.find((step) => step.kind === "prepare");
-    const members: unknown = JSON.parse(prepared?.kind === "prepare" ? prepared.startJson : "null");
-
-    assert.deepEqual(
-      [Reflect.get(Object(members), "handlers"), Reflect.get(Object(members), "worker_ended_spans")],
-      [{ kind: "HANDLERS", handlers: [{ name: "alerts", event_type: "AttemptEnded" }] }, "MAKE_SPANS"],
+    const created = createHorsies(
+      { database: { databaseUrl: DATABASE_URL }, tracing: { kind: "otelTracing" }, tasks: [] },
+      fakeEnvironment({ otelApi: () => ({ kind: "loaded", api: API }) }),
     );
+
+    if (!created.ok) {
+      assert.fail("the app is created");
+    }
+
+    assert.deepEqual(await runWorkerOf(contextOf(created.value), START, deps), { ok: true, value: { kind: "stopped" } });
+    assert.equal(startMember(steps, "worker_ended_spans"), "MAKE_SPANS");
   });
 });
 
 describe("the worker run of this process", () => {
   test("the run gets the core handle that Horsies.create built for the app", async () => {
     const handle = fakeCoreHandle();
-    const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [] }, fakeEnvironment({ handle }));
+    const created = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [] }, fakeEnvironment({ handle }));
 
     if (!created.ok) {
       assert.fail("the app is created");
@@ -317,9 +351,47 @@ describe("the worker run of this process", () => {
     assert.equal(appCoreHandle(contextOf(created.value).core), handle);
   });
 
+  test("the preparation gets the heap cap of the worker threads of the runtime of this process", () => {
+    const created = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [] }, fakeEnvironment());
+
+    if (!created.ok) {
+      assert.fail("the app is created");
+    }
+
+    const given: SeatIsolateMemory[] = [];
+
+    const deps = processWorkerRunDeps(contextOf(created.value), () => undefined, {
+      prepareWorker: (_config, _start, seatIsolates) => {
+        given.push(seatIsolates);
+
+        return { kind: "prepared", worker: WORKER };
+      },
+      runWorker: async () => ({ kind: "stopped" }),
+      requestWorkerStop: () => undefined,
+    });
+
+    assert.deepEqual(deps.prepare("{}", "{}"), { kind: "prepared", worker: WORKER });
+    assert.deepEqual(given, [seatIsolateMemoryOf(runtimeNameOf(process.versions))]);
+  });
+
+  test("each runtime by its version facts: Node by its own version only; Bun and Deno by theirs; else unknown", () => {
+    assert.equal(runtimeNameOf({ node: "26.13.1" }), "node");
+    assert.equal(runtimeNameOf({ node: "26.3.0", bun: "1.4.4" }), "bun");
+    assert.equal(runtimeNameOf({ node: "24.0.0", deno: "2.5.0" }), "deno");
+    assert.equal(runtimeNameOf({}), "unknown");
+  });
+
+  test("the worker threads of Node have a heap cap; those of every other runtime do not", () => {
+    assert.equal(seatIsolateMemoryOf("node"), "CAPPED");
+
+    for (const runtime of ["bun", "deno", "unknown"] as const) {
+      assert.equal(seatIsolateMemoryOf(runtime), "NOT_CAPPED");
+    }
+  });
+
   test("the handle of an app without the addon is a defect", () => {
     const created = createHorsies(
-      { broker: { databaseUrl: DATABASE_URL }, tasks: [] },
+      { database: { databaseUrl: DATABASE_URL }, tasks: [] },
       fakeEnvironment({ mainThread: false }),
     );
 

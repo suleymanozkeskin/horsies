@@ -1,13 +1,15 @@
-// `defineTask`: the frozen contract, its kept facts, the result constructors, and the refusals that the definition
-// alone shows.
+// `defineTask`: the frozen contract, its kept facts, the result constructors that a body gets, and the refusals that
+// the definition alone shows.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { z } from "zod";
 
-import { defineTask, type UserFailure } from "../../../horsies/src/contract/public.ts";
+import { defineTask, type CustomFailure } from "../../../horsies/src/contract/public.ts";
+import { resultConstructorsOf } from "../../../horsies/src/contract/define-task.ts";
 import { contractRecord } from "../../../horsies/src/contract/definition.ts";
+import type { OutputSchema } from "../../../horsies/src/contract/schema.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 
 /** A Standard Schema of another vendor. */
@@ -23,6 +25,12 @@ describe("defineTask", () => {
     assert.equal(contract.kind, "task");
     assert.equal(contract.name, "ping");
     assert.equal(Object.isFrozen(contract), true);
+  });
+
+  test("the contract holds no result constructors: a body gets ok and err in its second argument", () => {
+    const contract = defineTask({ name: "ping", input: {}, output: h.string() });
+
+    assert.deepEqual(Object.keys(contract).toSorted(), ["kind", "name"]);
   });
 
   test("the kept facts: no queue, ISOLATED, no timeout, open codes, no retry", () => {
@@ -48,11 +56,11 @@ describe("defineTask", () => {
         queue: "billing",
         input: { order: z.object({ id: z.int() }) },
         output: h.null(),
-        errors: ["PROVIDER_DOWN"],
+        errorCodes: ["PROVIDER_DOWN"],
         execution: "SHARED_ASYNC",
         timeoutMs: 30_000,
         cancelGraceMs: 2_000,
-        retry: { kind: "exponential", baseSeconds: 30, maxRetries: 5, autoRetryFor: ["PROVIDER_DOWN"] },
+        retryPolicy: { kind: "exponential", baseSeconds: 30, maxRetries: 5, retryFor: ["PROVIDER_DOWN"] },
       }),
     );
 
@@ -66,7 +74,7 @@ describe("defineTask", () => {
       maxRetries: 5,
       jitter: true,
       maxDelay: { kind: "noCap" },
-      autoRetryFor: ["PROVIDER_DOWN"],
+      retryFor: ["PROVIDER_DOWN"],
     });
     assert.equal(record.parameters[0]?.schema.kind, "zod");
   });
@@ -77,22 +85,27 @@ describe("defineTask", () => {
 });
 
 describe("result constructors", () => {
-  const contract = defineTask({
-    name: "validate_order",
-    input: {},
-    output: h.object({ id: h.int() }),
-    errors: ["EMPTY_ORDER"],
+  const output = h.object({ id: h.int() });
+  const constructors = resultConstructorsOf<typeof output, "EMPTY_ORDER">("validate_order");
+
+  test("the constructors are frozen own members, usable apart from their object", () => {
+    const { ok, err } = constructors;
+
+    assert.equal(Object.isFrozen(constructors), true);
+    assert.deepEqual(Object.keys(constructors), ["ok", "err"]);
+    assert.deepEqual(ok({ id: 1 }), { ok: true, value: { id: 1 } });
+    assert.deepEqual(err({ code: "EMPTY_ORDER" }), { ok: false, error: { code: "EMPTY_ORDER" } });
   });
 
   test("ok gives a frozen success", () => {
-    const value = contract.ok({ id: 1 });
+    const value = constructors.ok({ id: 1 });
 
     assert.deepEqual(value, { ok: true, value: { id: 1 } });
     assert.equal(Object.isFrozen(value), true);
   });
 
   test("err gives a frozen error with the code, the message and the data", () => {
-    const value = contract.err({ code: "EMPTY_ORDER", message: "no lines", data: { lines: 0 } });
+    const value = constructors.err({ code: "EMPTY_ORDER", message: "no lines", data: { lines: 0 } });
 
     assert.deepEqual(value, { ok: false, error: { code: "EMPTY_ORDER", message: "no lines", data: { lines: 0 } } });
     assert.equal(Object.isFrozen(value), true);
@@ -101,24 +114,27 @@ describe("result constructors", () => {
 
   test("err with data: undefined gives an error with no data member, as a left-out data does", () => {
     // SAFETY: a project without exactOptionalPropertyTypes, or a JavaScript caller, can pass `data: undefined`.
-    const failure = { code: "EMPTY_ORDER", message: "no lines", data: undefined } as unknown as UserFailure<"EMPTY_ORDER">;
-    const value = contract.err(failure);
+    const failure = { code: "EMPTY_ORDER", message: "no lines", data: undefined } as unknown as CustomFailure<"EMPTY_ORDER">;
+    const value = constructors.err(failure);
 
     assert.deepEqual(value, { ok: false, error: { code: "EMPTY_ORDER", message: "no lines" } });
     assert.equal(value.ok ? true : Object.hasOwn(value.error, "data"), false);
     assert.equal(Object.isFrozen(value.ok ? value : value.error), true);
   });
 
-  test("err with a built-in name throws TypeError", () => {
-    const open = defineTask({ name: "ping", input: {}, output: h.null() });
+  test("err with a built-in name throws TypeError that names the task and the code", () => {
+    const open = resultConstructorsOf<OutputSchema, string>("ping");
     // SAFETY: a JavaScript caller, or a code read at run time, can pass a built-in name that the type refuses.
     const code = "TASK_TIMEOUT" as string;
 
-    assert.throws(() => open.err({ code }), TypeError);
+    assert.throws(() => open.err({ code }), {
+      name: "TypeError",
+      message: 'err of ping: "TASK_TIMEOUT" is a built-in error code; a task cannot return it',
+    });
   });
 
   test("err with the reserved name WORKFLOW_STOPPED throws TypeError", () => {
-    const open = defineTask({ name: "ping", input: {}, output: h.null() });
+    const open = resultConstructorsOf<OutputSchema, string>("ping");
     // SAFETY: as above, a code that the type refuses.
     const code = "WORKFLOW_STOPPED" as string;
 
@@ -156,7 +172,7 @@ describe("definition refusals", () => {
     const record = contractRecord(
       defineTask({
         name: "t",
-        input: { "first name": h.string(), workflow_ctx: h.json(), __h_x: h.int() },
+        input: { "first name": h.string(), workflow_context: h.json(), __h_x: h.int() },
         output: h.null(),
       }),
     );
@@ -165,7 +181,7 @@ describe("definition refusals", () => {
       record.refusals.map((refused) => [refused.rule, refused.path]),
       [
         ["ParameterName", "input.first name"],
-        ["ParameterName", "input.workflow_ctx"],
+        ["ParameterName", "input.workflow_context"],
         ["ParameterName", "input.__h_x"],
       ],
     );

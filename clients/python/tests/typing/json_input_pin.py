@@ -20,9 +20,10 @@ from horsies import (
     JsonInput,
     JsonList,
     JsonValue,
-    SubWorkflowError,
+    Ok,
+    Result,
+    SubWorkflowFailure,
     TaskError,
-    TaskResult,
 )
 from horsies.core.models.workflow import SubWorkflowSummary
 
@@ -61,54 +62,54 @@ _open: _Open = {'n': 1}
 
 def writes_that_pass() -> list[TaskError]:
     return [
-        TaskError(error_code='X'),
-        TaskError(error_code='X', data=None),
-        TaskError(error_code='X', data=_ids),
-        TaskError(error_code='X', data=_counts),
-        TaskError(error_code='X', data=_nested),
-        TaskError(error_code='X', data=_deep),
-        TaskError(error_code='X', data=_union),
-        TaskError(error_code='X', data=_ordered),
-        TaskError(error_code='X', data=_default),
-        TaskError(error_code='X', data=_tally),
-        TaskError(error_code='X', data=_keyed),
-        TaskError(error_code='X', data=_exact),
-        TaskError(error_code='X', data=_wide),
-        TaskError(error_code='X', data={'ids': _ids, 'm': _counts, 'n': 1}),
-        TaskError(error_code='X', data=[_ids, _counts, None]),
+        TaskError(code='X'),
+        TaskError(code='X', data=None),
+        TaskError(code='X', data=_ids),
+        TaskError(code='X', data=_counts),
+        TaskError(code='X', data=_nested),
+        TaskError(code='X', data=_deep),
+        TaskError(code='X', data=_union),
+        TaskError(code='X', data=_ordered),
+        TaskError(code='X', data=_default),
+        TaskError(code='X', data=_tally),
+        TaskError(code='X', data=_keyed),
+        TaskError(code='X', data=_exact),
+        TaskError(code='X', data=_wide),
+        TaskError(code='X', data={'ids': _ids, 'm': _counts, 'n': 1}),
+        TaskError(code='X', data=[_ids, _counts, None]),
     ]
 
 
 def writes_that_are_flagged(mapping: Mapping[str, int]) -> list[TaskError]:
     return [
-        TaskError(error_code='X', data=_pair),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_raw),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_queue),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_items),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_price),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_proxy),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_user_dict),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_chain),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=mapping),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_int_keys),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_bad_inner),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_bad_nested),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data={'a': (1,)}),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_pair),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_raw),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_queue),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_items),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_price),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_proxy),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_user_dict),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_chain),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=mapping),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_int_keys),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_bad_inner),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_bad_nested),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data={'a': (1,)}),  # pyright: ignore[reportArgumentType]
         # An open TypedDict can hold keys that it does not declare.
-        TaskError(error_code='X', data=_open),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_open),  # pyright: ignore[reportArgumentType]
     ]
 
 
-def a_subclass_has_both_types(summary: SubWorkflowSummary[int]) -> list[SubWorkflowError]:
+def a_subclass_has_both_types(summary: SubWorkflowSummary[int]) -> list[SubWorkflowFailure]:
     return [
-        SubWorkflowError(
-            error_code='X',
+        SubWorkflowFailure(
+            code='X',
             sub_workflow_id='s',
             sub_workflow_summary=summary,
             data=_ids,
         ),
-        SubWorkflowError(
-            error_code='X',
+        SubWorkflowFailure(
+            code='X',
             sub_workflow_id='s',
             sub_workflow_summary=summary,
             data=_pair,  # pyright: ignore[reportArgumentType]
@@ -136,7 +137,7 @@ def a_read_is_exact_and_exhaustive(err: TaskError) -> int:
             assert_never(unreachable)
 
 
-def a_read_of_a_subclass_is_exact(err: SubWorkflowError) -> JsonValue:
+def a_read_of_a_subclass_is_exact(err: SubWorkflowFailure) -> JsonValue:
     if isinstance(err.data, dict):
         return err.data['a']
     return err.data
@@ -190,14 +191,14 @@ def a_pyright_limit(err: TaskError) -> JsonValue:
 
 def task_parameters(app: Horsies) -> None:
     @app.task('pin.pass_on')
-    def pass_on(*, payload: JsonInput) -> TaskResult[int, TaskError]:
+    def pass_on(*, payload: JsonInput) -> Result[int, TaskError]:
         _ = payload
-        return TaskResult(ok=1)
+        return Ok(1)
 
     @app.task('pin.reads')
-    def reads(*, payload: JsonValue) -> TaskResult[int, TaskError]:
+    def reads(*, payload: JsonValue) -> Result[int, TaskError]:
         _ = payload
-        return TaskResult(ok=1)
+        return Ok(1)
 
     _ = pass_on.send(payload=_ids)
     _ = reads.send(payload=_exact)

@@ -1,13 +1,19 @@
 // The log output of the core in this process.
 //
-// The core writes its records to 18 named loggers of the `horsies` namespace. Each logger forwards
+// The core writes its records to 19 named loggers of the `horsies` namespace. Each logger forwards
 // the records at or above its threshold. The default threshold is WARNING, and the default sink
 // writes one line per record to stderr. `configureLogging` sets the thresholds and the sink for the
 // whole process; a change applies to later records.
 //
 // Thresholds follow the dotted names, as Python's `logging` does: a threshold set for
 // `horsies.workflow` applies to `horsies.workflow.engine` unless that logger has its own.
+//
+// The worker, the scheduler, `check` and each worker child write the stderr lines in the app's `logFormat`
+// (`configureCommandLogging`, `applyLogFormat`).
 
+import type { WorkerLogLevel } from "./_catalog/worker_manifest.ts";
+import { processStart } from "./app/suppression.ts";
+import type { LogFormat } from "./config/process-settings.ts";
 import { nativeValue } from "./native/call/envelope.ts";
 import { thrownFacts } from "./native/call/thrown-facts.ts";
 import { loggingAddon } from "./native/logging/addon.ts";
@@ -29,6 +35,7 @@ export const LOGGER_NAMES = [
   "horsies.scheduler",
   "horsies.scheduler.state",
   "horsies.sql",
+  "horsies.telemetry",
   "horsies.web",
   "horsies.worker",
   "horsies.workflow.engine",
@@ -99,19 +106,89 @@ export interface LogLevels {
   readonly loggers?: Readonly<Partial<Record<LoggerKey, LogThreshold>>>;
 }
 
+/** Where the core log records go: one line per record on stderr (the default), or a sink function. */
+export type LogSinkSetting = { readonly kind: "stderr" } | { readonly kind: "function"; readonly sink: LogSink };
+
 /** What `configureLogging` changes. An absent member keeps its setting. */
 export interface LoggingOptions {
-  /** A sink function, or `"stderr"` for one line per record on stderr (the default). */
-  readonly sink?: LogSink | "stderr";
+  readonly sink?: LogSinkSetting;
   readonly levels?: LogLevels;
 }
 
 /**
  * Set the thresholds and the sink of the core log records of this process. It can run before the
  * first core call and at any later time; it starts no core. The thresholds apply first: if the sink
- * step then throws, the thresholds stay as set.
+ * step then throws, the thresholds stay as set. In a seat isolate of a `SHARED_THREAD` child it does
+ * nothing: no core runs there, and the child's main thread holds the core log of the process (the
+ * entry runs there too).
  */
 export function configureLogging(options: LoggingOptions): void {
+  const thread = loggingThread();
+
+  switch (thread) {
+    case "seatIsolate":
+      return;
+    case "processCore":
+      configureCoreLogging(options);
+
+      return;
+    default: {
+      const unexpected: never = thread;
+
+      throw new TypeError(`configureLogging: a thread outside its type: ${String(unexpected)}`);
+    }
+  }
+}
+
+/** The log setup of a command that loads the app: the default threshold `level` and the app's log format. */
+export type CommandLogging = (level: WorkerLogLevel, format: LogFormat) => void;
+
+/**
+ * The log setup of a command that loads the app (the worker, the scheduler, `check`): the default threshold `level`,
+ * then the format of the app's `logFormat`. Loads the addon. Not exported from an entry point.
+ */
+export function configureCommandLogging(level: WorkerLogLevel, format: LogFormat): void {
+  configureLogging({ levels: { default: level } });
+  applyLogFormat(format);
+}
+
+/**
+ * Write the stderr lines of later core log records in `format`. Loads the addon. In a seat isolate it does nothing,
+ * as `configureLogging`. Not exported from an entry point.
+ */
+export function applyLogFormat(format: LogFormat): void {
+  const thread = loggingThread();
+
+  switch (thread) {
+    case "seatIsolate":
+      return;
+    case "processCore":
+      nativeValue("setLogFormat", () => loggingAddon().setLogFormat(format.kind));
+
+      return;
+    default: {
+      const unexpected: never = thread;
+
+      throw new TypeError(`applyLogFormat: a thread outside its type: ${String(unexpected)}`);
+    }
+  }
+}
+
+/**
+ * Write `message` as a WARNING record of `logger` in the core log of this process: it reaches the sink in force at the
+ * threshold of that logger. Loads the addon. Not exported from an entry point.
+ */
+export function logWarning(logger: LoggerName, message: string): void {
+  nativeValue("logClientWarning", () => loggingAddon().logClientWarning(logger, message));
+}
+
+/** Where `configureLogging` applies: the core log of the process, or nothing in a seat isolate. */
+function loggingThread(): "processCore" | "seatIsolate" {
+  return processStart().seatIsolate ? "seatIsolate" : "processCore";
+}
+
+/** The thresholds and the sink of the core log of this process. Loads the addon. */
+function configureCoreLogging(options: LoggingOptions): void {
   const addon = loggingAddon();
   const levels = options.levels;
 
@@ -121,19 +198,29 @@ export function configureLogging(options: LoggingOptions): void {
 
   const sink = options.sink;
 
-  switch (sink) {
-    case undefined:
-      return;
+  if (sink === undefined) {
+    return;
+  }
+
+  switch (sink.kind) {
     case "stderr":
       nativeValue("resetLogSink", () => addon.resetLogSink());
       keepLogSink({ kind: "stderr" });
 
       return;
-    default: {
-      const guarded = guardedSink(sink, writeStderr);
+    case "function": {
+      const guarded = guardedSink(sink.sink, writeStderr);
 
       nativeValue("setLogSink", () => addon.setLogSink(guarded));
       keepLogSink({ kind: "function", sink: guarded });
+
+      return;
+    }
+
+    default: {
+      const unexpected: never = sink;
+
+      throw new TypeError(`configureLogging: a sink outside its type: ${String(unexpected)}`);
     }
   }
 }

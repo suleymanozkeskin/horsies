@@ -46,12 +46,12 @@ class CustomerWinback(WorkflowDefinition[MarketingBlast]):
     ) -> WorkflowSpec[MarketingBlast]:
         """Build a fresh spec for one winback campaign."""
         sweep = TaskNode(
-            fn=abandoned_cart_sweep,
+            function=abandoned_cart_sweep,
             kwargs={'older_than_minutes': older_than_minutes},
             node_id='abandoned_cart_sweep',
         )
         blast = TaskNode(
-            fn=winback_blast,
+            function=winback_blast,
             kwargs={'segment': segment},
             waits_for=[sweep],
             args_from={'sweep': sweep},
@@ -59,7 +59,7 @@ class CustomerWinback(WorkflowDefinition[MarketingBlast]):
         )
         return app.workflow(
             name=cls.name,
-            tasks=[sweep, blast],
+            nodes=[sweep, blast],
             on_error=OnError.FAIL,
             output=blast,
         )
@@ -68,7 +68,7 @@ class CustomerWinback(WorkflowDefinition[MarketingBlast]):
 _CHECK_SEGMENT: Final[str] = 'winback-check'
 
 
-@app.workflow_builder(
+@app.check_workflow_builder(
     cases=[
         {
             'segment': _CHECK_SEGMENT,

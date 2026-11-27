@@ -33,7 +33,7 @@ use crate::core::config::bounded::BoundedU32;
 use crate::core::config::no_member_after_the_tag;
 use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::core::config::worker_profile::{
-    select_worker_profile, ChildPreload, ClaimLimits, DrainTimeout, ExecutorThreadCount,
+    input, select_worker_profile, ChildPreload, ClaimLimits, DrainTimeout, ExecutorThreadCount,
     ExecutorThreadsSetting, IsolatedChildCount, IsolatedChildren, IsolatedPool, IsolatedRecycle,
     IsolatedSetting, MemoryLimitSetting, MemoryMb, ParentCpu, ParentPool, PoolConnectionCount,
     PoolMinSize, PoolSize, PoolSizeSetting, ProfileRequest, ProfileSelectionRefused,
@@ -473,7 +473,7 @@ impl MetricsEndpoint {
 pub struct TaskManifest {
     /// How a worker runs the task.
     pub execution: Execution,
-    /// The user error codes that the task declares, each once: the values
+    /// The custom error codes that the task declares, each once: the values
     /// of its `error_code` metric label besides the built-in codes and
     /// `undeclared` (`error_code_label`). Empty when it declares none. The
     /// parser refuses a code that fails the code-text rule, the name of a
@@ -507,15 +507,13 @@ pub struct WorkerDatabaseManifest {
     /// (`PostgresConfig.worker_pool_pre_ping`).
     pub worker_pool_pre_ping: bool,
     /// The longest a checkout waits for a free connection; 0 does not wait.
-    pub pool_timeout: WholeSeconds,
+    pub pool_timeout_seconds: WholeSeconds,
     pub pool_recycle: PoolRecycle,
     /// Log every statement through the log bridge.
     pub echo: bool,
-    /// TCP keepalives of every core connection (Python `tcp_keepalives` and
-    /// its three values).
+    /// TCP keepalives of every core connection (Python `tcp_keepalives`).
     pub tcp_keepalives: TcpKeepalivesConfig,
-    /// TCP user timeout of every core connection (Python
-    /// `tcp_user_timeout_ms`; its 0 is `SYSTEM_DEFAULT`).
+    /// TCP user timeout of every core connection (Python `tcp_user_timeout`).
     pub tcp_user_timeout: TcpUserTimeoutConfig,
 }
 
@@ -602,7 +600,7 @@ pub struct IsolatedPoolManifest {
     /// The most connections of the pool.
     pub max_size: ChildPoolConnections,
     /// Check each connection when a write takes it from the pool.
-    pub check: bool,
+    pub pre_ping: bool,
 }
 
 /// The connection pool that each shared child opens. Its seats share it.
@@ -615,7 +613,7 @@ pub struct SharedPoolManifest {
     pub min_size: ChildPoolMinSize,
     pub max_size: PoolMaxSize,
     /// Check each connection when a write takes it from the pool.
-    pub check: bool,
+    pub pre_ping: bool,
 }
 
 /// The isolated children of a profile.
@@ -856,7 +854,7 @@ pub enum ChildProgram {
     Rust,
 }
 
-/// The log level of the worker and its children (`horsies worker --loglevel`).
+/// The log level of the worker and its children (`horsies worker --log-level`).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -920,6 +918,15 @@ impl WorkerManifest {
             .collect()
     }
 
+    /// Every profile of the manifest in the config form, by name: the form
+    /// that `AppConfig.worker_profiles` holds, with the same values. Pure.
+    pub fn config_profiles(&self) -> BTreeMap<String, input::WorkerProfile> {
+        self.profile_set()
+            .into_iter()
+            .map(|(name, profile)| (name, input::WorkerProfile::from(profile)))
+            .collect()
+    }
+
     /// The profile that the worker runs: the profile set is checked as
     /// AppConfig validation checks it, then the request picks one
     /// ([`select_worker_profile`]). Pure.
@@ -949,13 +956,15 @@ impl WorkerManifest {
     /// Pure.
     pub fn app_broker_config(&self, selected: &SelectedProfile) -> PostgresConfig {
         let database = &self.database;
-        let session_database_url = match &database.session_database {
-            SessionDatabase::SameAsDatabaseUrl => None,
-            SessionDatabase::Separate { url } => Some(url.expose().to_owned()),
+        let session_database = match &database.session_database {
+            SessionDatabase::SameAsDatabaseUrl => crate::core::SessionDatabase::SameAsDatabaseUrl,
+            SessionDatabase::Separate { url } => crate::core::SessionDatabase::Separate {
+                url: url.expose().to_owned(),
+            },
         };
         PostgresConfig {
             database_url: database.database_url.expose().to_owned(),
-            session_database_url,
+            session_database,
             pgbouncer_transaction_mode: database.pgbouncer_transaction_mode,
             pool_pre_ping: database.pool_pre_ping,
             worker_pool_pre_ping: database.worker_pool_pre_ping,
@@ -963,11 +972,11 @@ impl WorkerManifest {
             pool_size: selected.profile.resolved_parent_pool().get(),
             max_overflow: 0,
             retain_rerun_input_default: self.send.retain_rerun_input_default,
-            pool_timeout: database.pool_timeout.get(),
+            pool_timeout_seconds: database.pool_timeout_seconds.get(),
             pool_recycle: database.pool_recycle,
             echo: database.echo,
-            tcp_keepalives: database.tcp_keepalives,
-            tcp_user_timeout: database.tcp_user_timeout,
+            tcp_keepalives: database.tcp_keepalives.into(),
+            tcp_user_timeout: database.tcp_user_timeout.into(),
         }
     }
 }
@@ -1026,7 +1035,7 @@ impl SharedPoolManifest {
         SharedPool {
             min_size: self.min_size.0,
             max_size: self.max_size.setting(),
-            check: self.check,
+            pre_ping: self.pre_ping,
         }
     }
 }
@@ -1048,7 +1057,7 @@ impl Isolated {
                 pool: IsolatedPool {
                     min_size: pool.min_size.0,
                     max_size: PoolSize::new(pool.max_size.0),
-                    check: pool.check,
+                    pre_ping: pool.pre_ping,
                 },
                 task_send_pool: PoolSize::new(task_send_pool.0),
             }),

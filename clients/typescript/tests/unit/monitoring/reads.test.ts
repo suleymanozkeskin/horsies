@@ -17,7 +17,7 @@ import {
   taskBreakdown,
   taskDetail,
   taskFacets,
-  taskStats,
+  taskStatusCounts,
   workflowNames,
   workflowNode,
   workflowRun,
@@ -25,6 +25,7 @@ import {
 } from "../../../horsies/src/monitoring/reads.ts";
 import type { WireJson } from "../../../horsies/src/_catalog/wire_json.ts";
 import type { RawCatalogError } from "../../../horsies/src/native/values/records.ts";
+import type { RelayedAddon } from "../../../horsies/src/monitoring/seat-calls.ts";
 import {
   coreText,
   fakeHandle,
@@ -61,7 +62,7 @@ function fakeTarget(
   };
 
   const addon: MonitoringReadsAddon = {
-    readTaskStats: read("readTaskStats"),
+    readTaskStatusCounts: read("readTaskStatusCounts"),
     readTaskFacets: read("readTaskFacets"),
     readTaskBreakdown: read("readTaskBreakdown"),
     readTaskList: read("readTaskList"),
@@ -87,9 +88,9 @@ function jsonOutcome(value: WireJson): MonitoringReadOutcome {
 }
 
 describe("each read decodes the core's text", () => {
-  test("taskStats gives the status counts", async () => {
+  test("taskStatusCounts gives the status counts", async () => {
     const { target } = fakeTarget(jsonOutcome([sample("StatusCount"), sample("StatusCount")]));
-    const read = await taskStats(target, {});
+    const read = await taskStatusCounts(target, {});
 
     assert.ok(read.ok);
     assert.equal(read.value.length, 2);
@@ -135,7 +136,7 @@ describe("found and not found", () => {
     const read = await taskDetail(fakeTarget(jsonOutcome(null)).target, TASK_ID);
 
     assert.ok(read.ok && read.value.kind === "found");
-    assert.ok(Array.isArray(read.value.detail.attempts));
+    assert.ok(Array.isArray(read.value.taskDetail.attempts));
   });
 
   test("taskDetail of a task that no table holds is notFound with its reason", async () => {
@@ -154,29 +155,36 @@ describe("found and not found", () => {
   });
 
   test("workflowNode found and not found", async () => {
-    const found = await workflowNode(fakeTarget(jsonOutcome(sample("WorkflowTaskDetail"))).target, WORKFLOW_ID, 2);
+    const found = await workflowNode(fakeTarget(jsonOutcome(sample("WorkflowNodeDetail"))).target, WORKFLOW_ID, 2);
     const missing = await workflowNode(fakeTarget(jsonOutcome(null)).target, WORKFLOW_ID, 2);
 
     assert.ok(found.ok && found.value.kind === "found");
-    assert.deepEqual(missing, { ok: true, value: { kind: "notFound", workflowId: WORKFLOW_ID, taskIndex: 2 } });
+    assert.deepEqual(missing, { ok: true, value: { kind: "notFound", workflowId: WORKFLOW_ID, nodeIndex: 2 } });
   });
 });
 
 describe("expected failures are values", () => {
-  test("a refusal of the core is QUERY_REFUSED with its field and reason", async () => {
+  test("a refusal of the core is invalidInput with its field and reason", async () => {
     const outcome: MonitoringReadOutcome = { kind: "refused", field: "window", reason: "the window exceeds the 30-day maximum" };
     const read = await listTasks(fakeTarget(outcome).target, {});
 
     assert.deepEqual(read, {
       ok: false,
-      error: { code: "QUERY_REFUSED", retryable: false, field: "window", reason: "the window exceeds the 30-day maximum" },
+      error: {
+        kind: "invalidInput",
+        code: "INVALID_INPUT",
+        retryable: false,
+        message: "window: the window exceeds the 30-day maximum",
+        field: "window",
+        reason: "the window exceeds the 30-day maximum",
+      },
     });
   });
 
-  test("a failed read is DB_OPERATION_FAILED with the retry rule of its cause", async () => {
+  test("a failed read is DATABASE_OPERATION_FAILED with the retry rule of its cause", async () => {
     const read = await listTasks(fakeTarget({ kind: "failed", error: monitoringDbFailed("task list query", true) }).target, {});
 
-    assert.ok(!read.ok && read.error.code === "DB_OPERATION_FAILED");
+    assert.ok(!read.ok && read.error.code === "DATABASE_OPERATION_FAILED");
     assert.equal(read.error.retryable, true);
     assert.equal(read.error.message, "task list query failed: connection refused");
   });
@@ -187,7 +195,7 @@ describe("expected failures are values", () => {
       slots: [
         textSlot("message", "history contract violation: status DONE"),
         {
-          name: "exception",
+          name: "cause",
           value: { kind: "exception", exception: { kind: "generated", class: "HistoryContractError", text: "status DONE" } },
         },
       ],
@@ -197,7 +205,7 @@ describe("expected failures are values", () => {
 
     assert.ok(!read.ok && read.error.code === "HISTORY_CONTRACT_VIOLATION");
     assert.equal(read.error.retryable, false);
-    assert.deepEqual(read.error.exception, { kind: "historyContract", message: "status DONE" });
+    assert.deepEqual(read.error.cause, { kind: "historyContract", message: "status DONE" });
   });
 
   test("a read with no query to refuse makes a refusal of the bridge a defect", async () => {
@@ -210,26 +218,26 @@ describe("expected failures are values", () => {
     const failed: TaskDetailOutcome = { kind: "failed", error: monitoringDbFailed("task detail query", false) };
     const read = await taskDetail(fakeTarget(jsonOutcome(null), failed).target, TASK_ID);
 
-    assert.ok(!read.ok && read.error.code === "DB_OPERATION_FAILED" && !read.error.retryable);
+    assert.ok(!read.ok && read.error.code === "DATABASE_OPERATION_FAILED" && !read.error.retryable);
   });
 });
 
 describe("refusals before the call", () => {
-  test("a task index outside 32 bits or with a fraction is QUERY_REFUSED", async () => {
+  test("a task index outside 32 bits or with a fraction is invalidInput", async () => {
     for (const index of [2 ** 31, -(2 ** 31) - 1, 1.5]) {
       const { target, calls } = fakeTarget(jsonOutcome(null));
       const read = await workflowNode(target, WORKFLOW_ID, index);
 
-      assert.ok(!read.ok && read.error.code === "QUERY_REFUSED" && read.error.field === "taskIndex", `${index}`);
+      assert.ok(!read.ok && read.error.kind === "invalidInput" && "field" in read.error && read.error.field === "nodeIndex", `${index}`);
       assert.equal(calls.size, 0);
     }
   });
 
-  test("a page that is not a whole number is QUERY_REFUSED and the addon is not called", async () => {
+  test("a page that is not a whole number is invalidInput and the addon is not called", async () => {
     const { target, calls } = fakeTarget(jsonOutcome(null));
     const read = await listTasks(target, { offset: -0.5 });
 
-    assert.ok(!read.ok && read.error.code === "QUERY_REFUSED" && read.error.field === "page");
+    assert.ok(!read.ok && read.error.kind === "invalidInput" && "field" in read.error && read.error.field === "page");
     assert.equal(calls.size, 0);
   });
 });
@@ -238,7 +246,7 @@ describe("thrown and defect ends", () => {
   test("a thrown envelope throws its class", async () => {
     const { target } = fakeTarget(jsonOutcome(null));
 
-    const thrown: MonitoringReadsAddon = {
+    const thrown: RelayedAddon<MonitoringReadsAddon> = {
       ...target.addon,
       readSchedules: async () => ({
         kind: "thrown",
@@ -250,21 +258,21 @@ describe("thrown and defect ends", () => {
   });
 
   test("a text that does not decode is a defect", async () => {
-    await assert.rejects(taskStats(fakeTarget(jsonOutcome([new Map([["status", "PENDING"]])])).target, {}), { name: "ClientDefect" });
+    await assert.rejects(taskStatusCounts(fakeTarget(jsonOutcome([new Map([["status", "PENDING"]])])).target, {}), { name: "ClientDefect" });
   });
 });
 
 describe("the timing variants of the core decode through the reads", () => {
   test("every attempt phases variant of a task detail", async () => {
     const detail = sample("TaskDetail");
-    const attempts = withMember(detail, "attempts", [sample("TaskAttemptInfo")]);
+    const attempts = withMember(detail, "attempts", [sample("TaskAttemptDetail")]);
 
     for (const phases of timingExamples("attempt_phases")) {
-      const text = coreText(withMember(attempts, "attempts", [withMember(sample("TaskAttemptInfo"), "phases", phases)]));
+      const text = coreText(withMember(attempts, "attempts", [withMember(sample("TaskAttemptDetail"), "phases", phases)]));
       const read = await taskDetail(fakeTarget(jsonOutcome(null), { kind: "json", text }).target, TASK_ID);
 
       assert.ok(read.ok && read.value.kind === "found");
-      assert.equal(read.value.detail.attempts.length, 1);
+      assert.equal(read.value.taskDetail.attempts.length, 1);
     }
   });
 
@@ -278,7 +286,7 @@ describe("the timing variants of the core decode through the reads", () => {
     }
 
     for (const timing of timingExamples("node_timings")) {
-      const node = withMember(sample("WorkflowNodeInfo"), "timing", timing);
+      const node = withMember(sample("WorkflowNodeSummary"), "timing", timing);
       const read = await workflowRun(fakeTarget(jsonOutcome(withMember(run, "nodes", [node]))).target, WORKFLOW_ID);
 
       assert.ok(read.ok && read.value.kind === "found" && read.value.run.nodes.length === 1);

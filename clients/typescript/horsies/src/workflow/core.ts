@@ -1,13 +1,16 @@
 // The core operations of workflow starts and handles in this thread: the addon on a main thread, the seat relay in a
 // seat isolate, or no core in any other worker thread (where an operation is a defect).
 //
-// A start sends a checked spec: on a main thread the conversion to spec data (with the core's facts), the core's parse
-// and the start run here; a seat isolate sends the checked spec to its child's main thread, which runs the same steps.
+// A start runs in two calls. `prepare` converts a checked spec to spec data (with the core's facts) and runs the core's
+// parse, with no I/O; `start` parses that text again and writes the tree. A seat isolate sends each call to its child's
+// main thread, which runs the same steps. So a spec that the conversion or the parse refuses is refused before the
+// start observer opens its span, as in the Rust client.
 
 import { threadId } from "node:worker_threads";
 
 import { DEFAULT_QUEUE_ROUTE } from "../app/contract-list.ts";
 import type { CoreAccess, SeatRelay } from "../app/core-access.ts";
+import type { SeatRelayFullOutcome } from "../seats/relay-full.ts";
 import type { QueueSetup } from "../config/queues.ts";
 import { addonSettlement, addonTake, settlingCallback, takingCallback } from "../native/call/callback.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
@@ -37,48 +40,61 @@ import { specDataTextOf } from "./spec-data.ts";
 import type { SpecTextRefused } from "./spec-text.ts";
 import type { WorkflowsSeatOperation, WorkflowsSeatReply } from "./seat-operations.ts";
 
-/** One start of a checked spec. */
+/** One start of a prepared spec data text: a new start, or a retry of a start that failed. */
 export type StartRequest = {
-  readonly spec: CheckedSpec;
-  readonly workflowId: string;
-  readonly sentAtMicros: bigint;
-  readonly trace: TraceArgument;
-};
-
-/** One start of a spec data text again (a retry of a start that failed). */
-export type RestartRequest = {
   readonly specData: string;
   readonly workflowId: string;
   readonly sentAtMicros: bigint;
   readonly trace: TraceArgument;
 };
 
+/** The parse of the core refused the spec data; nothing was sent. */
+export type SpecParseRefused = { readonly kind: "specRefused"; readonly fieldPath: string; readonly cause: string };
+
+/**
+ * Why a spec has no spec data that the core takes:
+ * - `textRefused`: a string of the spec has no text (a lone surrogate);
+ * - `specRefused`: the core's parse refused the spec data.
+ */
+export type SpecRefusal = { readonly kind: "textRefused"; readonly refused: SpecTextRefused } | SpecParseRefused;
+
+/** The end of one prepare call: the spec data text that the core's parse takes, or why the spec has none. */
+export type SpecPrepare = { readonly kind: "prepared"; readonly specData: string } | SpecRefusal;
+
 /**
  * The end of one start call:
  * - `outcome`: the core's outcome, with the spec data text that it started;
- * - `textRefused`: a string of the spec has no text (a lone surrogate); nothing was sent;
- * - `specRefused`: the core's parse refused the spec data; nothing was sent.
+ * - `specRefused`: the core's parse refused the spec data; nothing was sent (a text that `prepare` gave parses).
  */
-export type StartCall =
-  | { readonly kind: "outcome"; readonly specData: string; readonly outcome: WorkflowStartOutcome }
-  | { readonly kind: "textRefused"; readonly refused: SpecTextRefused }
-  | { readonly kind: "specRefused"; readonly fieldPath: string; readonly cause: string };
+export type StartCall = { readonly kind: "outcome"; readonly specData: string; readonly outcome: WorkflowStartOutcome } | SpecParseRefused;
 
-/** The core operations of workflow starts and handles. Each is async, so every form has one shape. */
-export interface WorkflowCore {
-  start(request: StartRequest): Promise<StartCall>;
-  restart(request: RestartRequest): Promise<StartCall>;
-  status(workflowId: string): Promise<WorkflowStatusRead>;
-  nodeResults(workflowId: string): Promise<NodeResultsRead>;
-  nodes(workflowId: string): Promise<NodesRead>;
-  cancel(workflowId: string): Promise<HandleDone>;
-  pause(workflowId: string): Promise<HandleChange>;
-  resume(workflowId: string): Promise<HandleChange>;
+/**
+ * The core operations of workflow starts and handles. Each is async, so every form has one shape. `Relay` is what a
+ * relayed operation adds to its answer: nothing on a main thread (`never`), and `seatRelayFull` in a seat isolate,
+ * whose relay sends nothing past its bound. `waitEnd` and `processRole` are never relayed.
+ */
+export interface WorkflowCoreOf<Relay> {
+  /** The spec data of `spec` that the core's parse takes, or why it has none. No I/O. */
+  prepare(spec: CheckedSpec): Promise<SpecPrepare | Relay>;
+  /** Parse the spec data of `request` and write the tree. */
+  start(request: StartRequest): Promise<StartCall | Relay>;
+  status(workflowId: string): Promise<WorkflowStatusRead | Relay>;
+  nodeResults(workflowId: string): Promise<NodeResultsRead | Relay>;
+  nodes(workflowId: string): Promise<NodesRead | Relay>;
+  cancel(workflowId: string): Promise<HandleDone | Relay>;
+  pause(workflowId: string): Promise<HandleChange | Relay>;
+  resume(workflowId: string): Promise<HandleChange | Relay>;
   waitEnd(workflowId: string, wait: WaitBound): Promise<WorkflowWaitRead>;
-  nodeResult(workflowId: string, nodeId: string): Promise<NodeResultRead>;
+  nodeResult(workflowId: string, nodeId: string): Promise<NodeResultRead | Relay>;
   /** Whether this process runs task bodies: a wait for a result is refused there. */
   processRole(): Promise<ProcessRoleName>;
 }
+
+/** The workflow core of a main thread: the addon's answers. */
+export type AddonWorkflowCore = WorkflowCoreOf<never>;
+
+/** The workflow core of a thread: in a seat isolate, a relayed operation can answer `seatRelayFull`. */
+export type WorkflowCore = WorkflowCoreOf<SeatRelayFullOutcome>;
 
 /** The facts of the app that the main-thread core reads. */
 export type MainThreadFacts = {
@@ -88,7 +104,7 @@ export type MainThreadFacts = {
   readonly options: ReadonlyMap<string, NativeTaskOptions>;
   /** The queues that the app admits: the class of each is read once. */
   readonly queueNames: readonly string[];
-  readonly resendOnTransientErr: boolean;
+  readonly resendOnTransientError: boolean;
 };
 
 /** The conversion facts of a main thread, from the core. Reads the queue classes and priorities once. */
@@ -132,11 +148,11 @@ export function addonConversionFacts(facts: MainThreadFacts): ConversionFacts {
 }
 
 /** The core operations on a main thread: the addon on `facts.handle`. */
-export function addonWorkflowCore(facts: MainThreadFacts, conversion: ConversionFacts): WorkflowCore {
+export function addonWorkflowCore(facts: MainThreadFacts, conversion: ConversionFacts): AddonWorkflowCore {
   const handle = facts.handle;
 
-  const startText = async (specData: string, request: Omit<RestartRequest, "specData">): Promise<StartCall> => {
-    const prepared = native.prepareClientSpec(specData);
+  const start = async (request: StartRequest): Promise<StartCall> => {
+    const prepared = native.prepareClientSpec(request.specData);
 
     switch (prepared.kind) {
       case "refused":
@@ -148,24 +164,20 @@ export function addonWorkflowCore(facts: MainThreadFacts, conversion: Conversion
           request.workflowId,
           request.sentAtMicros,
           request.trace,
-          facts.resendOnTransientErr,
+          facts.resendOnTransientError,
         );
 
-        return { kind: "outcome", specData, outcome };
+        return { kind: "outcome", specData: request.specData, outcome };
       }
 
       default:
-        return unreachable(prepared, "startText");
+        return unreachable(prepared, "addonWorkflowCore.start");
     }
   };
 
-  const core: WorkflowCore = {
-    start: async (request) => {
-      const text = specDataTextOf(request.spec, conversion);
-
-      return text.ok ? startText(text.value, request) : { kind: "textRefused", refused: text.error };
-    },
-    restart: async (request) => startText(request.specData, request),
+  const core: AddonWorkflowCore = {
+    prepare: async (spec) => preparedSpec(spec, conversion),
+    start,
     status: async (workflowId) => native.workflowStatus(handle, workflowId),
     nodeResults: async (workflowId) => native.workflowNodeResults(handle, workflowId),
     nodes: async (workflowId) => native.workflowNodes(handle, workflowId),
@@ -180,16 +192,36 @@ export function addonWorkflowCore(facts: MainThreadFacts, conversion: Conversion
   return Object.freeze(core);
 }
 
+/** The spec data of `spec` and the core's parse of it, with no I/O. Pure apart from the addon's pure parse. */
+function preparedSpec(spec: CheckedSpec, conversion: ConversionFacts): SpecPrepare {
+  const text = specDataTextOf(spec, conversion);
+
+  if (!text.ok) {
+    return { kind: "textRefused", refused: text.error };
+  }
+
+  const parsed = native.prepareClientSpec(text.value);
+
+  switch (parsed.kind) {
+    case "refused":
+      return { kind: "specRefused", fieldPath: parsed.fieldPath, cause: parsed.cause };
+    case "prepared":
+      return { kind: "prepared", specData: text.value };
+    default:
+      return unreachable(parsed, "preparedSpec");
+  }
+}
+
 /** The main-thread side of one seat operation: the same calls as a main-thread call. */
 export async function serveWorkflowsSeatOperation(
-  core: WorkflowCore,
+  core: AddonWorkflowCore,
   operation: WorkflowsSeatOperation,
 ): Promise<WorkflowsSeatReply> {
   switch (operation.kind) {
+    case "prepare":
+      return { kind: "prepare", prepared: await core.prepare(operation.spec) };
     case "start":
       return { kind: "start", call: await core.start(operation.request) };
-    case "restart":
-      return { kind: "restart", call: await core.restart(operation.request) };
     case "status":
       return { kind: "status", read: await core.status(operation.workflowId) };
     case "nodeResults":
@@ -214,77 +246,65 @@ export async function serveWorkflowsSeatOperation(
  * a result is refused there before any message (`processRole`), and `waitEnd` is never relayed.
  */
 export function relayedWorkflowCore(relay: SeatRelay): WorkflowCore {
-  const ask = async (operation: WorkflowsSeatOperation): Promise<WorkflowsSeatReply> =>
-    relay.request("workflows", operation);
+  const ask = async (operation: WorkflowsSeatOperation): Promise<WorkflowsSeatReply | SeatRelayFullOutcome> => {
+    const answer = await relay.request("workflows", operation);
+
+    return answer.kind === "reply" ? answer.reply : answer;
+  };
 
   const wrong = (asked: WorkflowsSeatOperation["kind"], reply: WorkflowsSeatReply): never => {
     throw new ClientDefect({ subject: "seat relay", rule: `the reply to ${asked} is ${reply.kind}` });
   };
 
   const core: WorkflowCore = {
-    start: async (request) => {
-      const reply = await ask({ kind: "start", request });
-
-      return reply.kind === "start" ? reply.call : wrong("start", reply);
-    },
-    restart: async (request) => {
-      const reply = await ask({ kind: "restart", request });
-
-      return reply.kind === "restart" ? reply.call : wrong("restart", reply);
-    },
-    status: async (workflowId) => {
-      const reply = await ask({ kind: "status", workflowId });
-
-      return reply.kind === "status" ? reply.read : wrong("status", reply);
-    },
-    nodeResults: async (workflowId) => {
-      const reply = await ask({ kind: "nodeResults", workflowId });
-
-      return reply.kind === "nodeResults" ? reply.read : wrong("nodeResults", reply);
-    },
-    nodes: async (workflowId) => {
-      const reply = await ask({ kind: "nodes", workflowId });
-
-      return reply.kind === "nodes" ? reply.read : wrong("nodes", reply);
-    },
-    cancel: async (workflowId) => {
-      const reply = await ask({ kind: "cancel", workflowId });
-
-      return reply.kind === "cancel" ? reply.done : wrong("cancel", reply);
-    },
-    pause: async (workflowId) => {
-      const reply = await ask({ kind: "pause", workflowId });
-
-      return reply.kind === "pause" ? reply.change : wrong("pause", reply);
-    },
-    resume: async (workflowId) => {
-      const reply = await ask({ kind: "resume", workflowId });
-
-      return reply.kind === "resume" ? reply.change : wrong("resume", reply);
-    },
+    prepare: async (spec) =>
+      fullOr(await ask({ kind: "prepare", spec }), (reply) => (reply.kind === "prepare" ? reply.prepared : wrong("prepare", reply))),
+    start: async (request) =>
+      fullOr(await ask({ kind: "start", request }), (reply) => (reply.kind === "start" ? reply.call : wrong("start", reply))),
+    status: async (workflowId) =>
+      fullOr(await ask({ kind: "status", workflowId }), (reply) => (reply.kind === "status" ? reply.read : wrong("status", reply))),
+    nodeResults: async (workflowId) =>
+      fullOr(await ask({ kind: "nodeResults", workflowId }), (reply) =>
+        reply.kind === "nodeResults" ? reply.read : wrong("nodeResults", reply),
+      ),
+    nodes: async (workflowId) =>
+      fullOr(await ask({ kind: "nodes", workflowId }), (reply) => (reply.kind === "nodes" ? reply.read : wrong("nodes", reply))),
+    cancel: async (workflowId) =>
+      fullOr(await ask({ kind: "cancel", workflowId }), (reply) => (reply.kind === "cancel" ? reply.done : wrong("cancel", reply))),
+    pause: async (workflowId) =>
+      fullOr(await ask({ kind: "pause", workflowId }), (reply) => (reply.kind === "pause" ? reply.change : wrong("pause", reply))),
+    resume: async (workflowId) =>
+      fullOr(await ask({ kind: "resume", workflowId }), (reply) => (reply.kind === "resume" ? reply.change : wrong("resume", reply))),
     waitEnd: async () => {
       throw new ClientDefect({ subject: "seat relay", rule: "a seat isolate refuses a wait before it asks the core" });
     },
-    nodeResult: async (workflowId, nodeId) => {
-      const reply = await ask({ kind: "nodeResult", workflowId, nodeId });
-
-      return reply.kind === "nodeResult" ? reply.read : wrong("nodeResult", reply);
-    },
+    nodeResult: async (workflowId, nodeId) =>
+      fullOr(await ask({ kind: "nodeResult", workflowId, nodeId }), (reply) =>
+        reply.kind === "nodeResult" ? reply.read : wrong("nodeResult", reply),
+      ),
     processRole: async () => "RUNS_TASK_BODIES",
   };
 
   return Object.freeze(core);
 }
 
+/** `answer` when the relay sent nothing (`seatRelayFull`), else the reply that `read` reads. */
+function fullOr<T>(
+  answer: WorkflowsSeatReply | SeatRelayFullOutcome,
+  read: (reply: WorkflowsSeatReply) => T,
+): T | SeatRelayFullOutcome {
+  return answer.kind === "seatRelayFull" ? answer : read(answer);
+}
+
 /** The core operations in a worker thread with no core: each throws `AddonOutsideMainThread`. */
-export function noWorkflowCore(): WorkflowCore {
+export function noWorkflowCore(): AddonWorkflowCore {
   const refuse = async (): Promise<never> => {
     throw new AddonOutsideMainThread({ threadId });
   };
 
   return Object.freeze({
+    prepare: refuse,
     start: refuse,
-    restart: refuse,
     status: refuse,
     nodeResults: refuse,
     nodes: refuse,
@@ -302,7 +322,7 @@ export function noWorkflowCore(): WorkflowCore {
  * spec source registered on `facts.handle`, so the core's workflow steps in this process build sub-workflow children
  * with the app's builds. Effects: reads the queue classes; registers the source.
  */
-export function mainThreadWorkflowCore(facts: MainThreadFacts, registry: WorkflowRegistry): WorkflowCore {
+export function mainThreadWorkflowCore(facts: MainThreadFacts, registry: WorkflowRegistry): AddonWorkflowCore {
   const conversion = addonConversionFacts(facts);
 
   const source = takingCallback(

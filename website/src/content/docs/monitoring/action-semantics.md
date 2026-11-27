@@ -38,7 +38,7 @@ against a cancelled row and cannot overwrite it.
 
 ### Cancelling a RUNNING task
 
-With `include_running`, one statement does these steps in one transaction:
+With the policy `INCLUDE_RUNNING`, one statement does these steps in one transaction:
 
 - It writes one attempt row for the run: outcome `CANCELLED`, `will_retry`
   false, the start time of the run, `finished_at` at the time of the cancel,
@@ -97,12 +97,17 @@ The task API is on the client pages:
 curl -X POST "$BASE/api/tasks/$TASK_ID/cancel" \
   -H 'Content-Type: application/json' \
   -H 'X-Horsies-Intent: action' \
-  -d '{"include_running": true}'
+  -d '{"policy": "INCLUDE_RUNNING"}'
 ```
 
-Without `include_running`, a `RUNNING` task is refused with 409 like any other
-ineligible state. The flag keeps a cancel of running code deliberate; the UI
-gates it behind a checkbox.
+The body key `policy` is `PENDING_OR_CLAIMED_ONLY` or `INCLUDE_RUNNING`. An
+empty body, and a body with no `policy` key, cancel with
+`PENDING_OR_CLAIMED_ONLY`: a `RUNNING` task is then refused with 409 like any
+other ineligible state. The policy keeps a cancel of running code deliberate;
+the UI gates it behind a checkbox. Python: `cancel_task(app, task_id,
+policy=CancelPolicy.INCLUDE_RUNNING)`. Rust: `cancel_task(&app, task_id,
+CancelPolicy::IncludeRunning)`. A key other than `policy` is refused with
+422, and nothing changes (see [Request bodies](#request-bodies)).
 
 **Settled when:** the task reads `CANCELLED` with its `CANCELLED` attempt. That
 is immediate. The task code stops when it reads the cancel, or at the kill of an
@@ -126,7 +131,9 @@ source (`rerun_of_task_id`, and `rerun_root_task_id` for a chain).
 | History row does not decode (for example a stored status that is not a task status) | Refused, source corrupt; nothing is written |
 | Not found in live or history | Refused, source absent, with a `TaskAbsenceReason` that says whether retention can explain the absence |
 | Row is a workflow node | Refused, not eligible (workflow task) |
-| Caller key already used | Key replay (same request: the id of the task it enqueued) or key conflict (a different request under that key) |
+| Idempotency key already used | Key replay (same request: the id of the task it enqueued) or key conflict (a different request under that key) |
+| The stored `retry_for` names a custom code that the task does not declare in the calling app | Refused with the error `RETRY_CODE_NOT_DECLARED`; nothing is written |
+| The stored `retry_for` names a custom code, and the calling app does not register the task | Refused with the error `TASK_NOT_REGISTERED`; nothing is written |
 
 Whether a task can be rerun is decided **at enqueue**, not at rerun time: the
 `retain_rerun_input_default` broker setting (with a per-task override)
@@ -134,6 +141,12 @@ decides whether the enqueue input is preserved with the record. A task
 enqueued without a retained input cannot be rerun later.
 
 Every outcome other than enqueued writes nothing.
+
+The calling app supplies the declared codes of its tasks. The rerun checks
+the stored retry list of the source against them: a built-in code passes for
+every task, and a custom code passes when the app registers the task and the
+task declares the code. A stored list of built-in codes only, or no retry
+policy, needs no registered task.
 
 The caller supplies the enqueue policy of the new request, because enqueue
 policy lives in configuration, not in the rerun contract: the **new** request
@@ -193,7 +206,7 @@ Compare-and-swap `PAUSED` → `RUNNING`, then re-enqueue synchronously.
 
 Resume runs a scoped recovery pass in a second transaction after the resume
 itself has committed. That pass can fail on its own. When it does, the resume
-has still happened: `resume_workflow()` returns `HandleResumeRecoveryFailed`,
+has still happened: `resume_workflow()` returns `WorkflowHandleResumeRecoveryFailed`,
 and the response is 200 with `warning: "post_resume_recovery_failed"`. Treat
 that as *resumed, check worker logs* — not as a failed resume. The worker
 reaper runs the same recovery pass over all workflows. A database failure
@@ -248,7 +261,7 @@ the expected steady state after cancelling a run with work in flight.
 ## No workflow restart
 
 There is no restart or retry action for a workflow run, because no such
-primitive exists. `retry_start` retries a failed *start call*, not a run. To
+primitive exists. `resend_start` repeats a failed *start call*, not a run. To
 re-execute a workflow, send it again.
 
 ## What the reads see
@@ -271,6 +284,37 @@ active, a planner estimate on the unfiltered view.** An unfiltered total is
 therefore approximate by design on both sides of the split; narrow with any
 filter to get an exact count.
 
+## Request bodies
+
+Each action route reads its JSON body before the path id and before any
+statement of the action. The body is optional.
+
+| Route | Body | Keys |
+|---|---|---|
+| `POST /api/tasks/{id}/cancel` | No body, or a JSON object | `policy`: `PENDING_OR_CLAIMED_ONLY` (the default) or `INCLUDE_RUNNING` |
+| `POST /api/workflows/{id}/pause`, `/resume`, `/cancel` | No body, or `{}` | None |
+
+- The route reads a body only when the `Content-Type` starts with
+  `application/json`.
+- A body over 1 MiB is refused with 413 before any other check of the body.
+- A key that the route does not know is refused with 422, and the action does
+  not run. The response names the first unknown key in body order, its value,
+  and the known keys:
+
+  ```json
+  {"detail": [{
+    "type": "extra_forbidden",
+    "loc": ["body", "include_running"],
+    "msg": "Unknown key \"include_running\". Known keys: \"policy\".",
+    "input": true,
+    "ctx": {"known_keys": ["policy"]}
+  }]}
+  ```
+
+- A body that is not JSON, JSON that is not an object, and a known key with a
+  value of the wrong type or a value that is not one of its texts are refused
+  with 422 `value_error` at `["body"]`.
+
 ## Conflict handling
 
 There is no optimistic-concurrency token on any action. The CAS is the
@@ -283,6 +327,8 @@ concurrency control.
 | 400 | A task id in the path of a task route, or a workflow id in the path of a workflow action (`pause`, `resume`, `cancel`), is not a UUID (`INVALID_INPUT`, with a `detail`); nothing was read or changed | Send the id as UUID text |
 | 404 | The row no longer exists. On the workflow read routes also a workflow id that is not a UUID, and a node index outside the 32-bit node index column; nothing was read | Retention may have removed it |
 | 409 | Another change won the race, or the schema does not match this build | Re-read the entity; the body carries `current_status` |
+| 413 | The request body is over 1 MiB; the action did not run | Send a smaller body |
+| 422 | The request body is not valid: not JSON, not a JSON object, a known key with a value of the wrong type, or an unknown key (`extra_forbidden`, with the key and the known keys). The action did not run | Send only the keys of [Request bodies](#request-bodies) |
 | 500 | Stored data that does not parse (`STORED_DATA_INVALID`): a stored value of the workflow run, or, on a task cancel, a history status that is not a task status. Or a database failure that stays (see below). Or a server defect | Check the server logs and re-read the entity. A repeat gets the same answer until the stored row, the schema or the connection settings change. For `STORED_DATA_INVALID`, nothing was committed |
 | 503 | A database failure that may clear (see below) | The action may or may not have committed; re-read before retrying |
 

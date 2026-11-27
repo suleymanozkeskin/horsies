@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::Deserialize;
 
 use crate::core::config::bounded::BoundedU32;
-use crate::core::workflow::node::{AnyNode, JoinType, SubWorkflowParams};
+use crate::core::workflow::node::{AnyNode, JoinType, SubWorkflowParameters};
 use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
 use crate::core::workflow::spec::MAX_WORKFLOW_NODES;
 use crate::core::{OnError, WorkflowSpec};
@@ -211,9 +211,9 @@ pub struct SpecNode {
     pub args_from: BTreeMap<String, NodeIndex>,
     /// The node ids of the dependencies whose results the node's workflow
     /// context takes; empty when the node takes no context.
-    pub workflow_ctx_from: Vec<String>,
+    pub workflow_context_from: Vec<String>,
     /// The node runs when a dependency failed.
-    pub allow_failed_deps: bool,
+    pub allow_failed_dependencies: bool,
     pub join: SpecJoin,
     pub body: SpecNodeBody,
 }
@@ -428,13 +428,13 @@ fn any_node(
         input_json: node.input_json,
         dependencies,
         args_from,
-        workflow_ctx_from: match node.workflow_ctx_from.is_empty() {
+        workflow_context_from: match node.workflow_context_from.is_empty() {
             true => None,
-            false => Some(node.workflow_ctx_from),
+            false => Some(node.workflow_context_from),
         },
         queue: body.queue,
         priority: body.priority,
-        allow_failed_deps: node.allow_failed_deps,
+        allow_failed_dependencies: node.allow_failed_dependencies,
         join,
         min_success,
         // The deadline is merged into the task options already.
@@ -455,7 +455,7 @@ struct NodeBody {
     task_options_json: Option<String>,
     is_subworkflow: bool,
     sub_definition_key: Option<String>,
-    sub_workflow_params: SubWorkflowParams,
+    sub_workflow_params: SubWorkflowParameters,
 }
 
 impl NodeBody {
@@ -476,7 +476,7 @@ impl NodeBody {
                 },
                 is_subworkflow: false,
                 sub_definition_key: None,
-                sub_workflow_params: SubWorkflowParams::NotGiven,
+                sub_workflow_params: SubWorkflowParameters::NotGiven,
             },
             SpecNodeBody::SubWorkflow {
                 definition_key,
@@ -488,8 +488,8 @@ impl NodeBody {
                 is_subworkflow: true,
                 sub_definition_key: Some(definition_key),
                 sub_workflow_params: match params {
-                    SpecSubWorkflowParams::Given => SubWorkflowParams::Given,
-                    SpecSubWorkflowParams::NotGiven => SubWorkflowParams::NotGiven,
+                    SpecSubWorkflowParams::Given => SubWorkflowParameters::Given,
+                    SpecSubWorkflowParams::NotGiven => SubWorkflowParameters::NotGiven,
                 },
             },
         }

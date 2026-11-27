@@ -19,7 +19,8 @@ pub struct TaskInfo<R> {
     pub task_id: Uuid,
     pub task_name: String,
     pub status: TaskStatus,
-    pub queue_name: String,
+    /// The queue of the task.
+    pub queue: String,
     pub priority: i32,
     pub retry_count: u32,
     pub max_retries: u32,
@@ -28,7 +29,8 @@ pub struct TaskInfo<R> {
     pub next_retry_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<DateTime<Utc>>,
-    pub enqueued_at: DateTime<Utc>,
+    /// When the task became due: a worker may claim it from this time.
+    pub due_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claimed_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -75,13 +77,13 @@ impl<R> TaskInfo<R> {
             task_id: self.task_id,
             task_name: self.task_name,
             status: self.status,
-            queue_name: self.queue_name,
+            queue: self.queue,
             priority: self.priority,
             retry_count: self.retry_count,
             max_retries: self.max_retries,
             next_retry_at: self.next_retry_at,
             sent_at: self.sent_at,
-            enqueued_at: self.enqueued_at,
+            due_at: self.due_at,
             claimed_at: self.claimed_at,
             started_at: self.started_at,
             completed_at: self.completed_at,
@@ -140,13 +142,13 @@ mod tests {
             task_id: Uuid::nil(),
             task_name: "my_task".to_owned(),
             status: TaskStatus::Completed,
-            queue_name: "default".to_owned(),
+            queue: "default".to_owned(),
             priority: 0,
             retry_count: 0,
             max_retries: 3,
             next_retry_at: None,
             sent_at: None,
-            enqueued_at: Utc::now(),
+            due_at: Utc::now(),
             claimed_at: None,
             started_at: None,
             completed_at: None,
@@ -192,11 +194,11 @@ mod tests {
             "task_id": "00000000-0000-0000-0000-000000000002",
             "task_name": "another_task",
             "status": "PENDING",
-            "queue_name": "default",
+            "queue": "default",
             "priority": 5,
             "retry_count": 1,
             "max_retries": 3,
-            "enqueued_at": "2025-01-01T00:00:00Z",
+            "due_at": "2025-01-01T00:00:00Z",
             "execution": "SHARED_ASYNC"
         });
         let info: ReadInfo = serde_json::from_value(json).unwrap();
@@ -214,11 +216,11 @@ mod tests {
             "task_id": "00000000-0000-0000-0000-000000000003",
             "task_name": "result_task",
             "status": "COMPLETED",
-            "queue_name": "high",
+            "queue": "high",
             "priority": 10,
             "retry_count": 0,
             "max_retries": 1,
-            "enqueued_at": "2025-01-01T00:00:00Z",
+            "due_at": "2025-01-01T00:00:00Z",
             "result": {"__h_task_result__": true, "ok": "hello world", "err": null},
             "execution": "NOT_KEPT_IN_HISTORY"
         });
@@ -262,11 +264,11 @@ mod tests {
             "task_id": "00000000-0000-0000-0000-000000000004",
             "task_name": "no_class",
             "status": "PENDING",
-            "queue_name": "default",
+            "queue": "default",
             "priority": 5,
             "retry_count": 0,
             "max_retries": 0,
-            "enqueued_at": "2025-01-01T00:00:00Z"
+            "due_at": "2025-01-01T00:00:00Z"
         });
         assert!(serde_json::from_value::<ReadInfo>(json).is_err());
     }

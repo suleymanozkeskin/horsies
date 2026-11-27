@@ -41,7 +41,7 @@ function fakeAddons(handle: NativeCoreHandle, called: string[]): MonitoringAddon
   };
 
   const reads: MonitoringReadsAddon = {
-    readTaskStats: json("readTaskStats", "[]"),
+    readTaskStatusCounts: json("readTaskStatusCounts", "[]"),
     readTaskFacets: json("readTaskFacets", coreText(sample("Facets"))),
     readTaskBreakdown: json("readTaskBreakdown", coreText(sample("Breakdown"))),
     readTaskList: json("readTaskList", coreText(sample("TaskListPage"))),
@@ -68,8 +68,8 @@ function fakeAddons(handle: NativeCoreHandle, called: string[]): MonitoringAddon
       return done("getStaleTasks", { kind: "complete" as const, rows: [] })(given);
     },
     getExpiredTasks: done("getExpiredTasks", { kind: "complete" as const, rows: [] }),
-    getClassCoverage: done("getClassCoverage", { checkedAtMicros: 0n, liveWorkers: 0n, streams: [] }),
-    getClassReport: done("getClassReport", { checkedAtMicros: 0n, streams: [], workers: [] }),
+    getExecutionClassCoverage: done("getExecutionClassCoverage", { checkedAtMicros: 0n, liveWorkers: 0n, streams: [] }),
+    getExecutionClassReport: done("getExecutionClassReport", { checkedAtMicros: 0n, liveWindowMicros: 0n, streams: [], workers: [] }),
   };
 
   const cancel: CancelAddon = {
@@ -87,23 +87,23 @@ describe("createMonitoringArea", () => {
     const { monitoring } = area;
 
     const answers = [
-      await monitoring.taskStats(),
+      await monitoring.taskStatusCounts(),
       await monitoring.taskFacets(),
       await monitoring.taskBreakdown({ groupBy: "taskName" }),
       await monitoring.listTasks(),
-      await monitoring.taskDetail(TASK_ID),
-      await monitoring.workflowNames(),
-      await monitoring.workflowRuns(),
-      await monitoring.workflowRun(WORKFLOW_ID),
-      await monitoring.workflowNode(WORKFLOW_ID, 0),
-      await monitoring.schedules(),
-      await monitoring.workers(),
-      await monitoring.worker("w1"),
-      await monitoring.workerHistory("w1"),
-      await monitoring.staleTasks({ thresholdMinutes: 15 }),
-      await monitoring.expiredTasks(),
-      await monitoring.classCoverage(),
-      await monitoring.classReport(),
+      await monitoring.getTaskDetail(TASK_ID),
+      await monitoring.listWorkflowNames(),
+      await monitoring.listWorkflowRuns(),
+      await monitoring.getWorkflowRun(WORKFLOW_ID),
+      await monitoring.getWorkflowNode(WORKFLOW_ID, 0),
+      await monitoring.listSchedules(),
+      await monitoring.listWorkerStates(),
+      await monitoring.getWorkerState("w1"),
+      await monitoring.getWorkerStateHistory("w1"),
+      await monitoring.getStaleTasks({ thresholdMinutes: 15 }),
+      await monitoring.getExpiredTasks(),
+      await monitoring.getExecutionClassCoverage(),
+      await monitoring.getExecutionClassReport(),
       await monitoring.cancelTask(TASK_ID, { policy: "includeRunning" }),
       await area.pingWorkers(),
       await area.pingDatabase(),
@@ -111,7 +111,7 @@ describe("createMonitoringArea", () => {
 
     assert.ok(answers.every((answer) => answer.ok));
     assert.deepEqual(called, [
-      "readTaskStats",
+      "readTaskStatusCounts",
       "readTaskFacets",
       "readTaskBreakdown",
       "readTaskList",
@@ -126,8 +126,8 @@ describe("createMonitoringArea", () => {
       "getWorkerStateHistory",
       "getStaleTasks",
       "getExpiredTasks",
-      "getClassCoverage",
-      "getClassReport",
+      "getExecutionClassCoverage",
+      "getExecutionClassReport",
       "cancelTask",
       "pingWorkers",
     ]);

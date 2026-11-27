@@ -117,7 +117,7 @@ export type NodeResultsRead =
   | { readonly kind: "workflowAbsent" }
   | { readonly kind: "failed"; readonly error: RawCatalogError };
 
-/** One stored node of a workflow. `status` is the stored text: the package maps it to `WorkflowTaskStatus`. */
+/** One stored node of a workflow. `status` is the stored text: the package maps it to `WorkflowNodeStatus`. */
 export interface StoredNodeRecord {
   readonly nodeId: RecordedText;
   readonly index: number;
@@ -199,7 +199,7 @@ export interface WorkflowsAddon {
     workflowId: string,
     sentAtMicros: bigint,
     trace: TraceArgument,
-    resendOnTransientErr: boolean,
+    resendOnTransientError: boolean,
   ): Promise<NativeEnvelope<WorkflowStartOutcome>>;
   workflowStatus(handle: NativeCoreHandle, workflowId: string): Promise<NativeEnvelope<WorkflowStatusRead>>;
   workflowNodeResults(handle: NativeCoreHandle, workflowId: string): Promise<NativeEnvelope<NodeResultsRead>>;

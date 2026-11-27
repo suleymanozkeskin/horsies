@@ -137,12 +137,12 @@ def test_catalog_covers_every_column_of_a_fresh_install(
     rows = {table.name: len(table.rows) for table in raw.tables}
     assert tuple(rows) == tuple(table.name for table in BASELINE_CATALOG.tables)
     # The core install with the default retention: one bookkeeping row per
-    # migration of the chain (1000 to 1006); the classes forever,
+    # migration of the chain (1000 to 1008); the classes forever,
     # heartbeats and standard_30d; the forever leaf, 7 hourly heartbeat leaves (this hour
     # and a horizon of 6) and 4 daily standard_30d leaves (today and a horizon
     # of 3); the lookup manifest of the forever leaf and the 4 daily leaves.
     assert {name: count for name, count in rows.items() if count} == {
-        'horsies_migrations': 7,
+        'horsies_migrations': 9,
         'horsies_schema_version': 1,
         'horsies_client_family': 1,
         'horsies_retention_classes': 3,

@@ -33,10 +33,11 @@ from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.tasks import (
     MIN_TASK_TIMEOUT_MS,
     Execution,
-    OperationalErrorCode,
+    OperationalCode,
     TaskError,
-    TaskResult,
 )
+from horsies.core.models.outcome import Failed, Succeeded
+from horsies.core.types.result import Ok, Result
 from horsies import _core as core
 from horsies._catalog.child_bounds import CANCELLED_WRITE_END_SECONDS
 from horsies.core.worker import shared_lifecycle
@@ -174,9 +175,26 @@ type _Run = tuple[str, datetime, dict[str, object]]
 """A run of ``_run_on_seats``: the task, the claim time and the work."""
 
 
-def _task_result(payload: str) -> TaskResult[str, TaskError]:
-    """The task result of a wire payload, with a ``str`` ok value."""
-    return decode_task_result(loads_json(payload).unwrap(), str)
+def _succeeded_value(payload: str) -> str:
+    """The ``str`` value of a wire payload that holds a success; another
+    outcome fails the test."""
+    outcome = decode_task_result(loads_json(payload).unwrap(), str)
+    match outcome:
+        case Succeeded(value=value):
+            return value
+        case Failed():
+            pytest.fail(f'expected a succeeded outcome, got {outcome!r}')
+
+
+def _failed_error(payload: str) -> TaskError:
+    """The error of a wire payload that holds a failure; another outcome
+    fails the test."""
+    outcome = decode_task_result(loads_json(payload).unwrap(), str)
+    match outcome:
+        case Failed(error=error):
+            return error
+        case Succeeded():
+            pytest.fail(f'expected a failed outcome, got {outcome!r}')
 
 
 class _RecordingWriter:
@@ -237,11 +255,11 @@ async def thread_app(app: Horsies, broker: PostgresBroker) -> Horsies:
     of the suite has fewer connections than ``SEATS``
     (``TEST_CHILD_POOL``)."""
 
-    @app.task(task_name=TASK_NAME, execution=Execution.SHARED_THREAD, timeout_ms=30_000)
-    def thread_lifecycle_sleep() -> TaskResult[str, TaskError]:
+    @app.task(name=TASK_NAME, execution=Execution.SHARED_THREAD, timeout_ms=30_000)
+    def thread_lifecycle_sleep() -> Result[str, TaskError]:
         started = time.time()
         time.sleep(BODY_S)
-        return TaskResult(ok=f'{started}:{time.time()}')
+        return Ok(f'{started}:{time.time()}')
 
     _ = broker
     set_current_app(app)
@@ -266,7 +284,7 @@ async def test_seat_threads_share_a_pool_smaller_than_the_seats(
 
     spans: list[tuple[float, float]] = []
     for end in ends:
-        started, ended = _task_result(_envelope(end).text).unwrap().split(':')
+        started, ended = _succeeded_value(_envelope(end).text).split(':')
         spans.append((float(started), float(ended)))
     assert max(start for start, _end in spans) < min(end for _start, end in spans)
     for task_id in task_ids:
@@ -303,8 +321,8 @@ async def test_a_refusal_sets_the_row_running_and_fails_before_resolve(
     task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
     [end] = _run_on_seats([(task_id, claimed_at, REFUSAL)])
 
-    error = _task_result(_envelope(end).text).unwrap_err()
-    assert error.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+    error = _failed_error(_envelope(end).text)
+    assert error.code == OperationalCode.WORKER_SERIALIZATION_ERROR
     row = await _row(session, task_id)
     assert row.status == 'RUNNING'
     assert row.finalizing_at is not None
@@ -420,7 +438,7 @@ async def test_a_seat_that_gets_its_connection_after_the_deadline_leaves_the_row
     deadlines = threading.Thread(target=table.serve_deadlines, daemon=True)
     deadlines.start()
     seats = ThreadSeats(2, table, PostgresThreadSeats(), lambda: RssMb(1.0))
-    one_connection = ResolvedPool(min_size=0, max_size=1, check=False)
+    one_connection = ResolvedPool(min_size=0, max_size=1, pre_ping=False)
     with child_core_handle_for(broker.config.effective_session_database_url, one_connection):
         assert seats.start().is_ok()
         try:

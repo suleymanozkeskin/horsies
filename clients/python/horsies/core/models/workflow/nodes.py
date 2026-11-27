@@ -10,11 +10,13 @@ from typing import (
     Any,
     Generic,
     Literal,
+    assert_never,
 )
 
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 
 from .enums import (
+    CodeT_co,
     OkT_co,
 )
 
@@ -25,7 +27,8 @@ if TYPE_CHECKING:
         RuntimeTaskFunction,
         TaskFunction,
     )
-    from horsies.core.models.tasks import TaskResult, TaskError
+    from horsies.core.models.outcome import TaskOutcome
+    from horsies.core.models.tasks import TaskError
     from .definition import WorkflowDefinition
 
 
@@ -35,8 +38,9 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class NodeKey(Generic[OkT_co]):
-    """Typed stable identifier for a TaskNode."""
+class NodeKey(Generic[OkT_co, CodeT_co]):
+    """Typed stable identifier for a TaskNode: its value type and the type
+    of its custom codes."""
 
     node_id: str
 
@@ -47,30 +51,30 @@ class NodeKey(Generic[OkT_co]):
 
 
 @dataclass
-class TaskNode(Generic[OkT_co]):
+class TaskNode(Generic[OkT_co, CodeT_co]):
     """
     A node in the workflow DAG representing a single task execution.
 
-    Generic parameter OkT represents the success type of the task's TaskResult.
+    Generic parameter OkT represents the success type of the task's Result.
     This enables type-safe access to results via WorkflowContext.result_for(node).
 
     Example:
         ```python
-        fetch = TaskNode(fn=fetch_data, kwargs={"url": "https://example.com"})
+        fetch = TaskNode(function=fetch_data, kwargs={"url": "https://example.com"})
         process = TaskNode(
-            fn=process_data,
+            function=process_data,
             waits_for=[fetch],           # wait for fetch to be terminal
-            args_from={"raw": fetch},     # inject fetch's TaskResult as 'raw' kwarg
-            allow_failed_deps=True,       # run even if fetch failed
+            args_from={"raw": fetch},     # inject fetch's TaskOutcome as 'raw' kwarg
+            allow_failed_dependencies=True,  # run even if fetch failed
         )
         ```
     """
 
-    fn: (
-        TaskFunction[Any, OkT_co]
-        | AsyncTaskFunction[Any, OkT_co]
-        | RuntimeTaskFunction[Any, OkT_co]
-        | AsyncRuntimeTaskFunction[Any, OkT_co]
+    function: (
+        TaskFunction[Any, OkT_co, CodeT_co]
+        | AsyncTaskFunction[Any, OkT_co, CodeT_co]
+        | RuntimeTaskFunction[Any, OkT_co, CodeT_co]
+        | AsyncRuntimeTaskFunction[Any, OkT_co, CodeT_co]
     )
     """
     - The task to run: a `def` task or an `async def` task, with or without a
@@ -88,7 +92,7 @@ class TaskNode(Generic[OkT_co]):
       tuple and a dict is a mappingproxy. It does not fit the declared types, so code
       that uses the values reads `wire_kwargs`
     """
-    waits_for: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] = field(
+    waits_for: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]] = field(
         default_factory=lambda: [],
     )
     """
@@ -96,19 +100,19 @@ class TaskNode(Generic[OkT_co]):
     - The node with the dependencies will wait for all dependencies to be terminal (COMPLETED/FAILED/SKIPPED)
     """
 
-    args_from: Mapping[str, TaskNode[Any] | SubWorkflowNode[Any]] = field(
+    args_from: Mapping[str, TaskNode[Any, Any] | SubWorkflowNode[Any]] = field(
         default_factory=lambda: {},
     )
     """
-    - Data flow: inject dependency TaskResults as kwargs (keyword-only)
+    - Data flow: inject dependency TaskOutcomes as kwargs (keyword-only)
     - Example: args_from={"validated": validate_node, "transformed": transform_node}
-    - Task receives: def my_task(validated: TaskResult[A, E], transformed: TaskResult[B, E])
+    - Task receives: def my_task(validated: TaskOutcome[A, E], transformed: TaskOutcome[B, E])
     """
 
-    workflow_ctx_from: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] | None = None
+    workflow_context_from: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]] | None = None
     """
     - Optional context: subset of dependencies to include in WorkflowContext
-    - Only injected if task declares `workflow_ctx: WorkflowContext | None` parameter
+    - Only injected if task declares `workflow_context: WorkflowContext | None` parameter
 
     """
     # Queue/priority overrides (if None, use task decorator defaults)
@@ -121,9 +125,9 @@ class TaskNode(Generic[OkT_co]):
     - Priority overrides (if None, use task decorator defaults)
     """
 
-    allow_failed_deps: bool = False
+    allow_failed_dependencies: bool = False
     """
-    - If True, this task runs even if dependencies failed (receives failed TaskResults)
+    - If True, this task runs even if dependencies failed (receives Failed outcomes)
     - If False (default), task is SKIPPED when any dependency fails
     """
 
@@ -155,7 +159,7 @@ class TaskNode(Generic[OkT_co]):
     node_id: str | None = field(default=None, repr=False)
     """
     Optional stable identifier for this task within the workflow.
-    If None, auto-assigned as '{slugify(workflow_name)}:{task_index}'.
+    If None, auto-assigned as '{node_id_from_text(workflow_name)}:{index}'.
     Must be unique within the workflow.
     Must match pattern: [A-Za-z0-9_\\-:.]+
     """
@@ -202,17 +206,17 @@ class TaskNode(Generic[OkT_co]):
         object.__delattr__(self, name)
 
     @property
-    def name(self) -> str:
-        """Get the task name from the wrapped function."""
-        return self.fn.task_name
+    def task_name(self) -> str:
+        """The task name of the wrapped function."""
+        return self.function.task_name
 
-    def key(self) -> NodeKey[OkT_co]:
+    def key(self) -> NodeKey[OkT_co, CodeT_co]:
         """Return a typed NodeKey for this task node."""
         if self.node_id is None:
             raise WorkflowValidationError(
                 'TaskNode node_id is not set. Ensure WorkflowSpec assigns node_id '
                 'or provide an explicit node_id.',
-                code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
+                code=HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID,
                 help_text='set node_id on the node, or read its key after a WorkflowSpec holds it',
             )
         return NodeKey(self.node_id)
@@ -232,21 +236,21 @@ class SubWorkflowNode(Generic[OkT_co]):
     derived from WorkflowDefinition[OkT].
 
     When the child workflow completes:
-    - COMPLETED: parent node receives TaskResult[OkT, TaskError] with child's output
-    - FAILED: parent node receives TaskResult with SubWorkflowError containing SubWorkflowSummary
+    - COMPLETED: parent node receives Succeeded(output), a TaskOutcome[OkT, TaskError]
+    - FAILED: parent node receives Failed(SubWorkflowFailure) with its SubWorkflowSummary
 
     Example:
         class DataPipeline(WorkflowDefinition[ProcessedData]):
             ...
 
         pipeline: SubWorkflowNode[ProcessedData] = SubWorkflowNode(
-            workflow_def=DataPipeline,
+            workflow_definition=DataPipeline,
             kwargs={"source_url": "https://..."},  # passed to build_with()
         )
-        # Downstream: args_from={"data": pipeline} → TaskResult[ProcessedData, TaskError]
+        # Downstream: args_from={"data": pipeline} → TaskOutcome[ProcessedData, TaskError]
     """
 
-    workflow_def: type[WorkflowDefinition[OkT_co]]
+    workflow_definition: type[WorkflowDefinition[OkT_co]]
     """
     - The WorkflowDefinition subclass to run as a child workflow
     - Must implement build_with() for parameterization
@@ -260,14 +264,14 @@ class SubWorkflowNode(Generic[OkT_co]):
 
     kwargs: Mapping[str, Any] = field(default_factory=lambda: {})
     """
-    - Keyword arguments passed to workflow_def.build_with(app, **kwargs)
+    - Keyword arguments passed to workflow_definition.build_with(app, **kwargs)
     - Use with args_from to inject upstream results as parameters
     - A spec replaces them with a frozen snapshot for inspection, where a list is a
       tuple and a dict is a mappingproxy. It does not fit the declared types, so code
       that uses the values reads `wire_kwargs`
     """
 
-    waits_for: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] = field(
+    waits_for: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]] = field(
         default_factory=lambda: [],
     )
     """
@@ -276,16 +280,16 @@ class SubWorkflowNode(Generic[OkT_co]):
     - Same semantics as TaskNode.waits_for
     """
 
-    args_from: Mapping[str, TaskNode[Any] | SubWorkflowNode[Any]] = field(
+    args_from: Mapping[str, TaskNode[Any, Any] | SubWorkflowNode[Any]] = field(
         default_factory=lambda: {},
     )
     """
     - Maps kwarg names to upstream nodes for data injection
-    - Injected as TaskResult into build_with() kwargs
-    - Example: args_from={"input_data": fetch_node} → kwargs["input_data"] = TaskResult[T, E]
+    - Injected as TaskOutcome into build_with() kwargs
+    - Example: args_from={"input_data": fetch_node} → kwargs["input_data"] = TaskOutcome[T, E]
     """
 
-    workflow_ctx_from: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] | None = None
+    workflow_context_from: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]] | None = None
     """
     - Optional context: subset of dependencies to include in WorkflowContext
     - For SubWorkflowNodes: access via ctx.summary_for(node) → SubWorkflowSummary
@@ -303,10 +307,10 @@ class SubWorkflowNode(Generic[OkT_co]):
     - Required for join="quorum": minimum dependencies that must succeed
     """
 
-    allow_failed_deps: bool = False
+    allow_failed_dependencies: bool = False
     """
     - False (default): SKIPPED if any dependency failed
-    - True: starts regardless, failed deps passed as TaskResult(err=...) via args_from
+    - True: starts regardless, failed deps passed as Failed(task_error) via args_from
     """
 
     index: int | None = field(default=None, repr=False)
@@ -317,7 +321,7 @@ class SubWorkflowNode(Generic[OkT_co]):
     node_id: str | None = field(default=None, repr=False)
     """
     Optional stable identifier for this subworkflow within the parent workflow.
-    If None, auto-assigned as '{slugify(workflow_name)}:{task_index}'.
+    If None, auto-assigned as '{node_id_from_text(workflow_name)}:{index}'.
     Must be unique within the workflow.
     Must match pattern: [A-Za-z0-9_\\-:.]+
     """
@@ -364,9 +368,9 @@ class SubWorkflowNode(Generic[OkT_co]):
         object.__delattr__(self, name)
 
     @property
-    def name(self) -> str:
-        """Get the subworkflow name."""
-        return self.workflow_def.name
+    def workflow_name(self) -> str:
+        """The workflow name of the child workflow definition."""
+        return self.workflow_definition.name
 
     def key(self) -> NodeKey[OkT_co]:
         """Return a typed NodeKey for this subworkflow node."""
@@ -374,16 +378,27 @@ class SubWorkflowNode(Generic[OkT_co]):
             raise WorkflowValidationError(
                 'SubWorkflowNode node_id is not set. Ensure WorkflowSpec assigns node_id '
                 'or provide an explicit node_id.',
-                code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
+                code=HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID,
                 help_text='set node_id on the node, or read its key after a WorkflowSpec holds it',
             )
         return NodeKey(self.node_id)
 
 
-AnyNode = TaskNode[Any] | SubWorkflowNode[Any]
+AnyNode = TaskNode[Any, Any] | SubWorkflowNode[Any]
 """
 Type alias for any node type
 """
+
+
+def node_target_name(node: AnyNode) -> str:
+    """The task name of a task node, or the workflow name of a sub-workflow node. Pure."""
+    match node:
+        case TaskNode():
+            return node.task_name
+        case SubWorkflowNode():
+            return node.workflow_name
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def stored_kwargs(node: AnyNode) -> dict[str, Any]:
@@ -393,7 +408,7 @@ def stored_kwargs(node: AnyNode) -> dict[str, Any]:
     node without it is a defect.
     """
     assert node.wire_kwargs is not None, (
-        f'node {node.name!r} did not pass through a WorkflowSpec'
+        f'node {node_target_name(node)!r} did not pass through a WorkflowSpec'
     )
     return dict(node.wire_kwargs)
 
@@ -493,7 +508,7 @@ class SuccessPolicy:
         object.__delattr__(self, name)
 
 
-WorkflowTerminalResults = dict[str, 'TaskResult[Any, TaskError] | None']
+WorkflowTerminalResults = dict[str, 'TaskOutcome[Any, TaskError[Any]] | None']
 """
 Aggregated terminal results returned by workflow get()/get_async() when no explicit
 output node is configured.

@@ -32,6 +32,9 @@ import type {
   RawRecordField,
   TraceArgument,
 } from "../../../horsies/src/native/values/records.ts";
+import type { OtelApiLoader } from "../../../horsies/src/telemetry/otel-api.ts";
+import type { SchemaMode } from "../../../horsies/src/_catalog/manifest.ts";
+import type { ScheduleCoreCalls } from "../../../horsies/src/schedules/app-member.ts";
 
 /** A canonical task id of the fakes. */
 export const TASK_ID = "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b";
@@ -63,6 +66,8 @@ export function fakeSendRules(): NativeSendRules {
 export type FakeChecks = CoreChecks & {
   readonly calls: { configs: number; codes: number; options: number };
   readonly optionsFacts: TaskOptionsFacts[];
+  /** The schema mode of each config check, in order. */
+  readonly schemaModes: SchemaMode[];
 };
 
 /** The scripted answers of the fake core checks. Each answer left out accepts. */
@@ -76,12 +81,15 @@ export type CheckScript = {
 export function fakeChecks(script: CheckScript = {}): FakeChecks {
   const calls = { configs: 0, codes: 0, options: 0 };
   const optionsFacts: TaskOptionsFacts[] = [];
+  const schemaModes: SchemaMode[] = [];
 
   return {
     calls,
     optionsFacts,
-    checkAppConfig: (_json: string): AppConfigCheck => {
+    schemaModes,
+    checkAppConfig: (_json: string, schemaMode: SchemaMode): AppConfigCheck => {
       calls.configs += 1;
+      schemaModes.push(schemaMode);
 
       return script.config === undefined
         ? {
@@ -232,6 +240,9 @@ export type EnvironmentParts = {
   readonly checks?: FakeChecks;
   readonly producer?: FakeProducer;
   readonly handle?: CoreHandle;
+  readonly otelApi?: OtelApiLoader;
+  /** The core's checks of a schedule declaration. Left out: calls that fail the test (an app with no `schedule`). */
+  readonly scheduleCalls?: ScheduleCoreCalls;
 };
 
 /** The environment of a fake create, and the counter of the loads of the core checks. */
@@ -269,6 +280,23 @@ export function fakeEnvironment(parts: EnvironmentParts = {}): FakeEnvironment {
 
       return { producer, handle };
     },
+    otelApi: parts.otelApi ?? (() => ({ kind: "otelApiMissing", cause: "the fake environment loads no API" })),
+    scheduleCalls: () => parts.scheduleCalls ?? uncalledScheduleCalls(),
+  };
+}
+
+/** Schedule calls whose every call fails the test: an app with no `schedule` section calls none of them. */
+function uncalledScheduleCalls(): ScheduleCoreCalls {
+  const notCalled = (call: string): never => {
+    throw new TypeError(`fakeEnvironment: ${call} is called with no schedule calls given`);
+  };
+
+  return {
+    checkPattern: () => notCalled("checkPattern"),
+    checkTimezone: () => notCalled("checkTimezone"),
+    configFacts: () => notCalled("configFacts"),
+    optionsText: () => notCalled("optionsText"),
+    prepare: () => notCalled("prepare"),
   };
 }
 
@@ -304,7 +332,7 @@ export function rawEnqueueFailed(taskName: string, retryable: boolean): RawCatal
       { name: "message", value: { kind: "text", text: "connection refused" } },
       { name: "retryable", value: { kind: "flag", value: retryable } },
       {
-        name: "exception",
+        name: "cause",
         value: {
           kind: "exception",
           exception: {
@@ -360,7 +388,7 @@ export function rawValidationFailed(message: string): RawCatalogError {
     class: "TaskSendValidationFailed",
     slots: [
       { name: "message", value: { kind: "text", text: message } },
-      { name: "exception", value: { kind: "exception", exception: { kind: "clientClass", class: "valueError", text: message } } },
+      { name: "cause", value: { kind: "exception", exception: { kind: "clientClass", class: "valueError", text: message } } },
     ],
   };
 }

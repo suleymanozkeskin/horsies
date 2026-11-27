@@ -6,22 +6,22 @@ export {
   type ContextUse,
   type ContextUseOf,
   type ContractTypes,
+  type CustomCode,
+  type CustomFailure,
   defineTask,
-  type ExecutionClass,
   type ExecutionRules,
   type ReservedCode,
+  type ResultConstructors,
   type RetryCodes,
   type RetryPolicy,
   type TaskContract,
   type TaskDefinition,
-  type UserCode,
-  type UserFailure,
   type WidenedCodes,
 } from "./define-task.ts";
 
 export { type IdRefused, TaskId, WorkflowId } from "./ids.ts";
 
-export { RESERVED_NON_TASK_CODES } from "../codec/bounds.ts";
+export { RESERVED_NON_TASK_CODES } from "../_catalog/task_code.ts";
 
 export type { RoleOf } from "../wire/infer.ts";
 
@@ -49,6 +49,7 @@ export type {
   AnyImplementation,
   BodyFor,
   BodyRuntimes,
+  ContextBodyRuntimes,
   ErrorClass,
   ExceptionMapping,
   Implementation,

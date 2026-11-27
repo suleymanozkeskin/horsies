@@ -15,7 +15,14 @@
 //! is left out of every interface, union and converter: every call of the
 //! TypeScript client is async, so no call gives it.
 //!
-//! A field with `SlotRepr::Hidden` and the `exception` field are
+//! Each class has `kind` first, the variant name of the class in camelCase:
+//! the class name without the family prefix that every class name of its
+//! catalog starts with (`TaskSendSuppressed` gives `suppressed`). A class
+//! whose code is a subset of the code catalog has one `kind` per code, the
+//! code in camelCase (`DATABASE_PING_FAILED` gives `databasePingFailed`):
+//! its type is a union by code, and a type maps each code to its `kind`.
+//!
+//! A field with `SlotRepr::Hidden` and the `cause` field are
 //! non-enumerable properties of the value: `JSON.stringify`, `console.log`
 //! and `structuredClone` do not show them, as the Python client's `repr`
 //! does not show them.
@@ -53,7 +60,22 @@ const CODE_SLOT: &str = "code";
 const RETRYABLE_SLOT: &str = "retryable";
 
 /// The member and the instance slot of the cause.
-const EXCEPTION_SLOT: &str = "exception";
+const CAUSE_SLOT: &str = "cause";
+
+/// The member of the variant name of a class.
+const KIND_SLOT: &str = "kind";
+
+/// The suffix of the type that maps each code of a subset to its `kind`.
+const KIND_MAP_SUFFIX: &str = "Kind";
+
+/// The type parameter of a class whose code is a subset: its codes.
+const CODE_PARAMETER: &str = "Code";
+
+/// The key of the mapped type of a class whose code is a subset: one code.
+const CODE_MEMBER_KEY: &str = "Member";
+
+/// The module function that throws on a code that the build does not know.
+const UNKNOWN_CODE_FUNCTION: &str = "unknownCode";
 
 /// The member of a native value that names its class.
 const NATIVE_CLASS_MEMBER: &str = "class";
@@ -93,6 +115,9 @@ const NATIVE_UNION_COMMENT: &str =
 
 const CONVERTER_COMMENT: &str =
     "/** The frozen value of `raw`. A class name that this build does not know throws. */";
+
+const SUBSET_CONVERTER_COMMENT: &str =
+    "/** The frozen value of `raw`, its `kind` named after its code. A code that this build does not know throws. */";
 
 /// The error modules, in name order. Pure.
 pub fn generated_files() -> Vec<GeneratedFile> {
@@ -139,10 +164,112 @@ fn error_modules(
     modules
 }
 
-/// One catalog and the classes of it that the TypeScript client renders.
+/// One catalog, the classes of it that the TypeScript client renders, and
+/// the family prefix of its class names.
 struct RenderedCatalog {
     catalog: ErrorCatalog,
     classes: Vec<&'static ErrorClass>,
+    family_prefix: String,
+}
+
+/// The words that every class name of `catalog` starts with: the family
+/// prefix of the variant names (`WorkflowHandle` of `WorkflowHandleNotFound`
+/// and `WorkflowHandleAsyncContext`). Pure.
+///
+/// A catalog with fewer than two classes, or whose class names share no
+/// first word, is a defect of the model: its prefix is not known.
+fn family_prefix(catalog: &ErrorCatalog) -> String {
+    let names: Vec<Vec<&str>> = catalog
+        .classes
+        .iter()
+        .map(|class| pascal_words(error_class_type_name(class)))
+        .collect();
+    match names.as_slice() {
+        [] | [_] => panic!(
+            "the catalog {} has fewer than two classes, so its family prefix is not known",
+            catalog.union
+        ),
+        [first, rest @ ..] => {
+            let shared = first
+                .iter()
+                .enumerate()
+                .take_while(|(position, word)| {
+                    rest.iter().all(|name| name.get(*position) == Some(*word))
+                })
+                .count();
+            assert!(
+                shared > 0,
+                "the class names of the catalog {} share no first word",
+                catalog.union
+            );
+            first[..shared].concat()
+        }
+    }
+}
+
+/// The words of a PascalCase name: `WorkflowHandleNotFound` gives
+/// `Workflow`, `Handle`, `Not`, `Found`. Pure.
+fn pascal_words(name: &str) -> Vec<&str> {
+    let mut words = Vec::new();
+    let mut start = 0;
+    for (index, character) in name.char_indices().skip(1) {
+        if character.is_ascii_uppercase() {
+            words.push(&name[start..index]);
+            start = index;
+        }
+    }
+    words.push(&name[start..]);
+    words
+}
+
+/// The `kind` of a class whose code is one member: its name without
+/// `prefix`, in camelCase. Pure.
+///
+/// A name that is only the prefix is a defect of the model.
+fn class_kind(class: &ErrorClass, prefix: &str) -> String {
+    let name = error_class_type_name(class);
+    let variant = name
+        .strip_prefix(prefix)
+        .unwrap_or_else(|| panic!("the class {name} does not start with {prefix}"));
+    assert!(
+        !variant.is_empty(),
+        "the class {name} is only the family prefix of its catalog"
+    );
+    camel_case_of_pascal(variant)
+}
+
+/// The `kind` of one code of a subset: the code in camelCase
+/// (`DATABASE_PING_FAILED` gives `databasePingFailed`). Pure.
+fn code_kind(value: &str) -> String {
+    camel_case_of_snake(&value.to_ascii_lowercase())
+}
+
+/// The name of the type that maps each code of `subset` to its `kind`.
+/// Pure.
+fn kind_map_name(subset: &str) -> String {
+    format!("{subset}{KIND_MAP_SUFFIX}")
+}
+
+/// The code subset of `class`, or `None` for a class whose code is one
+/// member. Pure.
+fn class_code_subset(class: &ErrorClass) -> Option<&'static str> {
+    class_slots(class).into_iter().find_map(|slot| match slot {
+        ClassSlot::CodeSubset { subset } => Some(subset),
+        ClassSlot::CodeMember { .. }
+        | ClassSlot::NeverRetryable
+        | ClassSlot::AlwaysRetryable
+        | ClassSlot::Field { .. }
+        | ClassSlot::Cause { .. } => None,
+    })
+}
+
+/// The subset named `subset_name` of `subsets`. Pure. A missing subset is a
+/// defect of the model.
+fn subset_named<'a>(subsets: &'a [CodeSubset], subset_name: &str) -> &'a CodeSubset {
+    subsets
+        .iter()
+        .find(|known| known.name == subset_name)
+        .unwrap_or_else(|| panic!("the code subset {subset_name} is not a subset of its module"))
 }
 
 /// The call forms that give `class`: the forms of the member of its code
@@ -160,7 +287,12 @@ fn class_call_forms(class: &ErrorClass, codes: &CodeCatalog, subsets: &[CodeSubs
         Some(ClassSlot::CodeSubset { subset }) => {
             subset_call_forms(class_name, subset, codes, subsets)
         }
-        Some(ClassSlot::NeverRetryable | ClassSlot::Field { .. } | ClassSlot::Cause { .. })
+        Some(
+            ClassSlot::NeverRetryable
+            | ClassSlot::AlwaysRetryable
+            | ClassSlot::Field { .. }
+            | ClassSlot::Cause { .. },
+        )
         | None => panic!("the class {class_name} does not start with its code slot"),
     }
 }
@@ -231,6 +363,7 @@ fn rendered_catalog(catalog: &ErrorCatalog, subsets: &[CodeSubset]) -> RenderedC
     RenderedCatalog {
         catalog: *catalog,
         classes,
+        family_prefix: family_prefix(catalog),
     }
 }
 
@@ -274,6 +407,7 @@ fn assert_payload_records_in_module(classes: &[&ErrorClass], records: &[RecordCl
                 ClassSlot::CodeMember { .. }
                 | ClassSlot::CodeSubset { .. }
                 | ClassSlot::NeverRetryable
+                | ClassSlot::AlwaysRetryable
                 | ClassSlot::Cause { .. } => false,
             };
             assert!(
@@ -350,9 +484,10 @@ fn slot_imports(slot: ClassSlot) -> Vec<(&'static str, &'static str)> {
             | SlotType::UuidText
             | SlotType::TaskSendPayload => Vec::new(),
         },
-        ClassSlot::CodeMember { .. } | ClassSlot::CodeSubset { .. } | ClassSlot::NeverRetryable => {
-            Vec::new()
-        }
+        ClassSlot::CodeMember { .. }
+        | ClassSlot::CodeSubset { .. }
+        | ClassSlot::NeverRetryable
+        | ClassSlot::AlwaysRetryable => Vec::new(),
     }
 }
 
@@ -361,18 +496,24 @@ fn task_status_reference() -> (&'static str, &'static str) {
     catalog_type_reference(&<TaskStatus as CodeEnum>::CATALOG)
 }
 
-/// The public types: subsets, records, classes, catalog unions, then the
-/// unions of `ERROR_UNIONS`. Pure.
+/// The public types: subsets with their kind maps, records, classes,
+/// catalog unions, then the unions of `ERROR_UNIONS`. Pure.
 fn type_sections(contents: &ErrorModule, rendered: &[RenderedCatalog]) -> Vec<String> {
-    let mut sections: Vec<String> = contents.subsets.iter().map(subset_type).collect();
+    let mut sections: Vec<String> = contents
+        .subsets
+        .iter()
+        .flat_map(|subset| [subset_type(subset), subset_kind_map(subset)])
+        .collect();
     sections.extend(contents.records.iter().map(record_interface));
     for entry in rendered {
-        sections.extend(
-            entry
-                .classes
-                .iter()
-                .map(|class| class_interface(class, &entry.catalog.code_catalog)),
-        );
+        sections.extend(entry.classes.iter().map(|class| {
+            class_type(
+                class,
+                &entry.catalog.code_catalog,
+                &entry.family_prefix,
+                &contents.subsets,
+            )
+        }));
     }
     for entry in rendered {
         let members: Vec<String> = entry
@@ -432,13 +573,69 @@ fn error_union(union: &ErrorUnion, rendered: &[RenderedCatalog]) -> String {
     union_alias(union.name, &members)
 }
 
-/// The interface of one class: its slots in model order. Pure.
-fn class_interface(class: &ErrorClass, codes: &CodeCatalog) -> String {
-    let members: Vec<InterfaceMember> = class_slots(class)
-        .into_iter()
-        .map(|slot| public_member(class, slot, codes))
+/// The type that maps each code of a subset to its `kind`. Pure.
+fn subset_kind_map(subset: &CodeSubset) -> String {
+    let members: Vec<InterfaceMember> = subset
+        .members
+        .iter()
+        .map(|value| InterfaceMember::new(property_key(value), string_literal(&code_kind(value))))
         .collect();
-    interface_text(error_class_type_name(class), &members)
+    interface_text(&kind_map_name(subset.name), &members)
+}
+
+/// The type of one class: an interface with `kind` and its slots in model
+/// order, or for a class whose code is a subset, the union by code of
+/// [`subset_class_type`]. Pure.
+fn class_type(
+    class: &ErrorClass,
+    codes: &CodeCatalog,
+    prefix: &str,
+    subsets: &[CodeSubset],
+) -> String {
+    match class_code_subset(class) {
+        Some(subset) => subset_class_type(class, subset_named(subsets, subset), codes),
+        None => {
+            let mut members = vec![InterfaceMember::new(
+                KIND_SLOT,
+                string_literal(&class_kind(class, prefix)),
+            )];
+            members.extend(
+                class_slots(class)
+                    .into_iter()
+                    .map(|slot| public_member(class, slot, codes)),
+            );
+            interface_text(error_class_type_name(class), &members)
+        }
+    }
+}
+
+/// The type of a class whose code is the subset `subset`: generic over its
+/// codes, one object type per code with the `kind` of that code. Pure.
+fn subset_class_type(class: &ErrorClass, subset: &CodeSubset, codes: &CodeCatalog) -> String {
+    let name = error_class_type_name(class);
+    let mut text = format!(
+        "export type {name}<{CODE_PARAMETER} extends {subset_name} = {subset_name}> = {{\n  \
+         readonly [{CODE_MEMBER_KEY} in {CODE_PARAMETER}]: {{\n    \
+         readonly {KIND_SLOT}: {kind_map}[{CODE_MEMBER_KEY}];\n",
+        subset_name = subset.name,
+        kind_map = kind_map_name(subset.name),
+    );
+    for slot in class_slots(class) {
+        let member = match slot {
+            ClassSlot::CodeSubset { .. } => InterfaceMember::new(CODE_SLOT, CODE_MEMBER_KEY),
+            ClassSlot::CodeMember { .. }
+            | ClassSlot::NeverRetryable
+            | ClassSlot::AlwaysRetryable
+            | ClassSlot::Field { .. }
+            | ClassSlot::Cause { .. } => public_member(class, slot, codes),
+        };
+        text.push_str(&format!(
+            "    readonly {}: {};\n",
+            member.name, member.type_text
+        ));
+    }
+    text.push_str(&format!("  }};\n}}[{CODE_PARAMETER}];"));
+    text
 }
 
 /// The member of one slot in the public interface. Pure.
@@ -450,11 +647,12 @@ fn public_member(class: &ErrorClass, slot: ClassSlot, codes: &CodeCatalog) -> In
         ),
         ClassSlot::CodeSubset { subset } => InterfaceMember::new(CODE_SLOT, subset),
         ClassSlot::NeverRetryable => InterfaceMember::new(RETRYABLE_SLOT, "false"),
+        ClassSlot::AlwaysRetryable => InterfaceMember::new(RETRYABLE_SLOT, "true"),
         ClassSlot::Field {
             name, slot_type, ..
         } => InterfaceMember::new(public_name(name), public_field_type(slot_type)),
         ClassSlot::Cause { cause_type } => {
-            InterfaceMember::new(EXCEPTION_SLOT, cause_type_text(cause_type))
+            InterfaceMember::new(CAUSE_SLOT, cause_type_text(cause_type))
         }
     }
 }
@@ -622,7 +820,9 @@ fn native_class_interface(class: &ErrorClass) -> String {
 /// class value (the code of one member, a fixed `retryable`). Pure.
 fn native_slot(slot: ClassSlot) -> Option<InterfaceMember> {
     match slot {
-        ClassSlot::CodeMember { .. } | ClassSlot::NeverRetryable => None,
+        ClassSlot::CodeMember { .. } | ClassSlot::NeverRetryable | ClassSlot::AlwaysRetryable => {
+            None
+        }
         ClassSlot::CodeSubset { subset } => Some(InterfaceMember::new(CODE_SLOT, subset)),
         ClassSlot::Field {
             name, slot_type, ..
@@ -631,7 +831,7 @@ fn native_slot(slot: ClassSlot) -> Option<InterfaceMember> {
             native_field_type(slot_type),
         )),
         ClassSlot::Cause { cause_type } => Some(InterfaceMember::new(
-            EXCEPTION_SLOT,
+            CAUSE_SLOT,
             cause_type_text(cause_type),
         )),
     }
@@ -660,12 +860,24 @@ fn function_sections(contents: &ErrorModule, rendered: &[RenderedCatalog]) -> Ve
         [] => {}
         [_, ..] => sections.push(unknown_class_function()),
     }
+    let subset_classes: Vec<(&ErrorClass, &CodeSubset)> = rendered
+        .iter()
+        .flat_map(|entry| entry.classes.iter().copied())
+        .filter_map(|class| {
+            class_code_subset(class).map(|subset| (class, subset_named(&contents.subsets, subset)))
+        })
+        .collect();
+    match subset_classes.as_slice() {
+        [] => {}
+        [_, ..] => sections.push(unknown_code_function()),
+    }
     sections.extend(contents.records.iter().map(record_converter));
     sections.extend(
-        rendered
+        subset_classes
             .iter()
-            .map(|entry| catalog_converter(&entry.catalog, &entry.classes)),
+            .map(|(class, subset)| subset_class_converter(class, subset)),
     );
+    sections.extend(rendered.iter().map(catalog_converter));
     sections
 }
 
@@ -713,6 +925,15 @@ fn unknown_class_function() -> String {
     )
 }
 
+/// The module function that throws on a code of a subset that this build
+/// does not know. Pure.
+fn unknown_code_function() -> String {
+    format!(
+        "function {UNKNOWN_CODE_FUNCTION}(converter: string, code: string): never {{\n  \
+         throw new Error(`${{converter}}: unknown code ${{code}}`);\n}}"
+    )
+}
+
 /// The converter of a record: each field by its camelCase name, an instant
 /// from its epoch microseconds; the value is frozen. Pure.
 fn record_converter(record: &RecordClass) -> String {
@@ -749,8 +970,9 @@ fn record_value(field: &RecordField) -> String {
 
 /// The converter of a catalog: one `case` per rendered class, and a
 /// `default` arm that throws on a class name that this build does not know.
-/// Pure.
-fn catalog_converter(catalog: &ErrorCatalog, classes: &[&ErrorClass]) -> String {
+/// A class whose code is a subset is converted by its own converter. Pure.
+fn catalog_converter(entry: &RenderedCatalog) -> String {
+    let catalog = &entry.catalog;
     let function = converter_name(catalog.union);
     let mut text = format!(
         "{CONVERTER_COMMENT}\nexport function {function}({RAW_PARAMETER}: {}): {} {{\n  \
@@ -758,8 +980,23 @@ fn catalog_converter(catalog: &ErrorCatalog, classes: &[&ErrorClass]) -> String 
         native_name(catalog.union),
         catalog.union
     );
-    for class in classes {
-        text.push_str(&converter_case(class, &catalog.code_catalog));
+    for class in &entry.classes {
+        let class_name = error_class_type_name(class);
+        let case = match class_code_subset(class) {
+            Some(_) => format!(
+                "    case {}:\n      return {}({RAW_PARAMETER});",
+                string_literal(class_name),
+                converter_name(class_name)
+            ),
+            None => value_case(
+                &string_literal(class_name),
+                class_name,
+                &class_kind(class, &entry.family_prefix),
+                class,
+                &catalog.code_catalog,
+            ),
+        };
+        text.push_str(&case);
         text.push_str("\n\n");
     }
     text.push_str(&format!(
@@ -770,14 +1007,50 @@ fn catalog_converter(catalog: &ErrorCatalog, classes: &[&ErrorClass]) -> String 
     text
 }
 
-/// The `case` of one class: the value with its slots in model order, then
-/// the frozen value with its hidden slots non-enumerable. Pure.
-fn converter_case(class: &ErrorClass, codes: &CodeCatalog) -> String {
+/// The converter of a class whose code is the subset `subset`: one `case`
+/// per code, with the `kind` of that code, and a `default` arm that throws
+/// on a code that this build does not know. Pure.
+fn subset_class_converter(class: &ErrorClass, subset: &CodeSubset) -> String {
     let class_name = error_class_type_name(class);
+    let function = converter_name(class_name);
+    let code_read = property_access(&format!("{RAW_PARAMETER}.{NATIVE_SLOTS_MEMBER}"), CODE_SLOT);
+    let mut text = format!(
+        "{SUBSET_CONVERTER_COMMENT}\nfunction {function}({RAW_PARAMETER}: {}): {class_name} {{\n  \
+         switch ({code_read}) {{\n",
+        native_name(class_name),
+    );
+    for value in &subset.members {
+        text.push_str(&value_case(
+            &string_literal(value),
+            &format!("{class_name}<{}>", string_literal(value)),
+            &code_kind(value),
+            class,
+            &subset.code_catalog,
+        ));
+        text.push_str("\n\n");
+    }
+    text.push_str(&format!(
+        "    default: {{\n      const unreachable: never = {code_read};\n\n      \
+         return {UNKNOWN_CODE_FUNCTION}({}, unreachable);\n    }}\n  }}\n}}",
+        string_literal(&function)
+    ));
+    text
+}
+
+/// The `case` `label` of one value: `kind`, then the slots in model order,
+/// then the frozen value with its hidden slots non-enumerable. Pure.
+fn value_case(
+    label: &str,
+    value_type: &str,
+    kind: &str,
+    class: &ErrorClass,
+    codes: &CodeCatalog,
+) -> String {
     let slots = class_slots(class);
     let mut text = format!(
-        "    case {}: {{\n      const value: {class_name} = {{\n",
-        string_literal(class_name)
+        "    case {label}: {{\n      const value: {value_type} = {{\n        \
+         {KIND_SLOT}: {},\n",
+        string_literal(kind)
     );
     for slot in &slots {
         let (member, value) = slot_value(class, *slot, codes);
@@ -803,14 +1076,15 @@ fn slot_value(class: &ErrorClass, slot: ClassSlot, codes: &CodeCatalog) -> (Stri
         ),
         ClassSlot::CodeSubset { .. } => (CODE_SLOT.to_owned(), property_access(&slots, CODE_SLOT)),
         ClassSlot::NeverRetryable => (RETRYABLE_SLOT.to_owned(), "false".to_owned()),
+        ClassSlot::AlwaysRetryable => (RETRYABLE_SLOT.to_owned(), "true".to_owned()),
         ClassSlot::Field {
             name, slot_type, ..
         } => (public_name(name), field_value(&slots, name, slot_type)),
         ClassSlot::Cause { .. } => (
-            EXCEPTION_SLOT.to_owned(),
+            CAUSE_SLOT.to_owned(),
             format!(
                 "Object.freeze({{ ...{} }})",
-                property_access(&slots, EXCEPTION_SLOT)
+                property_access(&slots, CAUSE_SLOT)
             ),
         ),
     }
@@ -838,14 +1112,15 @@ fn field_value(slots: &str, name: &str, slot_type: SlotType) -> String {
 /// cause. Pure.
 fn hidden_member(slot: ClassSlot) -> Option<String> {
     match slot {
-        ClassSlot::CodeMember { .. } | ClassSlot::CodeSubset { .. } | ClassSlot::NeverRetryable => {
-            None
-        }
+        ClassSlot::CodeMember { .. }
+        | ClassSlot::CodeSubset { .. }
+        | ClassSlot::NeverRetryable
+        | ClassSlot::AlwaysRetryable => None,
         ClassSlot::Field { name, display, .. } => match display {
             SlotRepr::Shown => None,
             SlotRepr::Hidden => Some(public_name(name)),
         },
-        ClassSlot::Cause { .. } => Some(EXCEPTION_SLOT.to_owned()),
+        ClassSlot::Cause { .. } => Some(CAUSE_SLOT.to_owned()),
     }
 }
 

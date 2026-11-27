@@ -38,8 +38,11 @@ pub struct WorkflowTaskRow {
     pub priority: i32,
     pub dependencies: Vec<i32>,
     pub args_from: Option<serde_json::Value>,
-    pub workflow_ctx_from: Option<Vec<String>>,
-    pub allow_failed_deps: bool,
+    // The columns are `workflow_ctx_from` and `allow_failed_deps`. The stored
+    // names differ from the public names on purpose: a rename of a column
+    // needs a migration, and the row keeps the stored form.
+    pub workflow_context_from: Option<Vec<String>>,
+    pub allow_failed_dependencies: bool,
     pub join_type: String,
     pub min_success: Option<i32>,
     pub task_options: Option<String>,

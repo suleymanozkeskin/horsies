@@ -8,7 +8,7 @@ right and is now history: how long its record survives, how partitions
 are kept ahead of writes, and how the maintenance owner ages them out.
 A knob that decides when a record is deleted was never a recovery knob.
 
-`paused_workflow_auto_cancel_after` moves here with them: expiring a
+`paused_workflow_cancel_after` moves here with them: expiring a
 workflow that has sat paused past a declared age is a data-lifecycle
 policy on workflow rows, not a response to a crash.
 """
@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from horsies._catalog.worker_manifest import PAUSED_AGE_MICROS_MAX
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     ValidationReport,
     raise_collected,
 )
@@ -43,7 +43,7 @@ from horsies.core.history.periods import (
 from horsies.core.types.result import Err, Ok
 
 PAUSED_WORKFLOW_AGE_MAX: Final = timedelta(microseconds=PAUSED_AGE_MICROS_MAX)
-"""The longest `paused_workflow_auto_cancel_after`: 365,000 days (1,000
+"""The longest `paused_workflow_cancel_after`: 365,000 days (1,000
 years of 365 days), the core's bound (`PausedWorkflowAge::MAX_DAYS`).
 
 The expiry reads `updated_at < now() - <age>`. PostgreSQL's lowest
@@ -73,7 +73,7 @@ def resolve_queue_retention_class(
     """
     match retention:
         case RetentionConfig() as config:
-            return config.queue_class(queue_name)
+            return config.resolve_queue_retention_class(queue_name)
         case _:
             return DEFAULT_RETENTION_CLASS_KEY
 
@@ -98,7 +98,7 @@ def _period_error(subject: str, refused: PeriodRefused) -> ConfigurationError:
     """The refusal of a period that is not whole days within the bounds."""
     return ConfigurationError(
         message=f'{subject}: {refused.reason}',
-        code=ErrorCode.CONFIG_INVALID_RETENTION,
+        code=HorsiesErrorCode.CONFIG_INVALID_RETENTION,
         notes=[
             'a retention class is identified by its period, and '
             'history partitions are daily',
@@ -136,7 +136,7 @@ class RetentionConfig(BaseModel):
         ),
     )
 
-    paused_workflow_auto_cancel_after: timedelta | None = Field(
+    paused_workflow_cancel_after: timedelta | None = Field(
         default=None,
         description=(
             'Age past which a PAUSED workflow is expired by policy '
@@ -185,7 +185,7 @@ class RetentionConfig(BaseModel):
         ),
     )
 
-    partition_maintenance_interval_s: Annotated[
+    partition_maintenance_interval_seconds: Annotated[
         int, Field(ge=60, le=3_600),
     ] = Field(
         default=900,
@@ -196,7 +196,7 @@ class RetentionConfig(BaseModel):
         ),
     )
 
-    retention_sweep_interval_s: Annotated[int, Field(ge=30, le=86_400)] = Field(
+    retention_sweep_interval_seconds: Annotated[int, Field(ge=30, le=86_400)] = Field(
         default=300,
         description=(
             'Seconds between retention sweep passes (30s-24h). Frequent small '
@@ -216,11 +216,11 @@ class RetentionConfig(BaseModel):
     def paused_expiry_age_is_positive(self) -> Self:
         """A zero or negative age would expire every pause instantly."""
         if (
-            self.paused_workflow_auto_cancel_after is not None
-            and self.paused_workflow_auto_cancel_after <= timedelta(0)
+            self.paused_workflow_cancel_after is not None
+            and self.paused_workflow_cancel_after <= timedelta(0)
         ):
             raise ValueError(
-                'paused_workflow_auto_cancel_after must be a positive '
+                'paused_workflow_cancel_after must be a positive '
                 'duration; use None to disable the sweep'
             )
         return self
@@ -232,14 +232,14 @@ class RetentionConfig(BaseModel):
         The expiry subtracts the age from `now()`; a longer age can leave
         PostgreSQL's timestamp range, and every sweep would then fail.
         """
-        match self.paused_workflow_auto_cancel_after:
+        match self.paused_workflow_cancel_after:
             case timedelta() as age if age > PAUSED_WORKFLOW_AGE_MAX:
                 raise ConfigurationError(
                     message=(
-                        f'paused_workflow_auto_cancel_after ({age}) is longer '
+                        f'paused_workflow_cancel_after ({age}) is longer '
                         f'than {PAUSED_WORKFLOW_AGE_MAX.days} days'
                     ),
-                    code=ErrorCode.CONFIG_INVALID_RETENTION,
+                    code=HorsiesErrorCode.CONFIG_INVALID_RETENTION,
                     notes=[
                         'the expiry subtracts the age from now(), and the '
                         "result must stay inside PostgreSQL's timestamp range",
@@ -273,10 +273,11 @@ class RetentionConfig(BaseModel):
             case _:
                 return data
 
-    def registrable_classes(
+    def registrable_periods(
         self,
     ) -> tuple[tuple[RetentionClassKey, timedelta], ...]:
-        """Every finite class the maintenance owner must register.
+        """Every finite period the maintenance owner must register, with
+        the key of its class.
 
         One class for each distinct finite period that a send can stamp:
         the mapped periods and ``retention_periods``. Queues with the same
@@ -302,18 +303,18 @@ class RetentionConfig(BaseModel):
             | {DEFAULT_RETENTION_DAYS}
         )
 
-    def queue_class(self, queue_name: str) -> RetentionClassKey | None:
+    def resolve_queue_retention_class(self, queue: str) -> RetentionClassKey | None:
         """The class a send on this queue stamps when it chooses none.
 
         The mapped period's class, None for a queue mapped to forever, or
         the default class for an unmapped queue.
         """
-        match queue_name in self.queue_retention:
+        match queue in self.queue_retention:
             case False:
                 return DEFAULT_RETENTION_CLASS_KEY
             case True:
                 pass
-        match self.queue_retention[queue_name]:
+        match self.queue_retention[queue]:
             case None:
                 return None
             case period:
@@ -367,7 +368,7 @@ class RetentionConfig(BaseModel):
                     report.add(
                         ConfigurationError(
                             message=f'retention period {period} listed twice',
-                            code=ErrorCode.CONFIG_INVALID_RETENTION,
+                            code=HorsiesErrorCode.CONFIG_INVALID_RETENTION,
                             notes=['a period has exactly one class'],
                             help_text='remove the repeated period',
                         )

@@ -60,8 +60,10 @@ class RerunErrorCode(str, Enum):
     period first. Nothing was written.
     """
 
-    CALLER_KEY_REFUSED = 'CALLER_KEY_REFUSED'
-    """The caller key is not a valid idempotency key. Nothing was written."""
+    IDEMPOTENCY_KEY_REFUSED = 'IDEMPOTENCY_KEY_REFUSED'
+    """The idempotency key of the command is not a valid idempotency key.
+    Nothing was written.
+    """
 
     ID_MINT_REFUSED = 'ID_MINT_REFUSED'
     """The task id source refused to mint the id of the new task. Nothing
@@ -99,4 +101,15 @@ class RerunErrorCode(str, Enum):
     """The caller's driver gave a result column in a format other than
     text, for example a `pg` client with `binary: true`. The statement
     ran: roll the caller's transaction back.
+    """
+
+    RETRY_CODE_NOT_DECLARED = 'RETRY_CODE_NOT_DECLARED'
+    """The stored retry list of the source names a custom code that the
+    task does not declare in the calling app. Nothing was written.
+    """
+
+    TASK_NOT_REGISTERED = 'TASK_NOT_REGISTERED'
+    """The stored retry list of the source names a custom code, and the
+    calling app does not register the task, so the code cannot be
+    checked. Nothing was written.
     """

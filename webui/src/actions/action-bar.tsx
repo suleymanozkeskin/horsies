@@ -133,7 +133,7 @@ function ManagedByWorkflowNote({ detail }: { detail: TaskDetail }) {
       </p>
     );
   }
-  const nodeIndex = detail.workflow_task_index;
+  const nodeIndex = detail.workflow_node_index;
   return (
     <p className="text-xs text-muted-foreground">
       {MANAGED_BY_WORKFLOW_PREFIX}{' '}
@@ -171,8 +171,8 @@ export function TaskActionBar({ view }: { view: TaskActionsView }) {
   const dialogOpen =
     controls.state.phase === 'confirming' || controls.state.phase === 'submitting';
   const confirmContext = {
-    status: detail.leaf.status,
-    workerHostname: detail.leaf.worker_hostname,
+    status: detail.task_row.status,
+    workerHostname: detail.task_row.worker_hostname,
   };
   const copy: ConfirmCopy | null =
     pending === 'task-cancel' ? taskCancelConfirm(confirmContext) : null;
@@ -194,12 +194,12 @@ export function TaskActionBar({ view }: { view: TaskActionsView }) {
         <ActionConfirmDialog
           open={dialogOpen}
           copy={copy}
-          currentStatus={detail.leaf.status}
+          currentStatus={detail.task_row.status}
           availability={availability}
           submitting={controls.state.phase === 'submitting'}
           onConfirm={() =>
             controls.confirm({
-              includeRunning: detail.leaf.status === 'RUNNING',
+              includeRunning: detail.task_row.status === 'RUNNING',
             })
           }
           onDismiss={controls.dismiss}

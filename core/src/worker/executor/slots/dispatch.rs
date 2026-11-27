@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::broker::attempt_writes::RetryPlacement;
-use crate::core::task::error::OperationalErrorCode;
+use crate::core::task::error::OperationalCode;
 use crate::events::{AttemptNumber, AttemptStart, OperatorCancelEnd, RunTrace};
 use crate::telemetry::trace_carrier::StoredTraceId;
 use crate::worker::executor::protocol::{
@@ -159,10 +159,10 @@ pub enum LoopKillCode {
 }
 
 impl LoopKillCode {
-    pub fn code(self) -> OperationalErrorCode {
+    pub fn code(self) -> OperationalCode {
         match self {
-            Self::TaskBlockedLoop => OperationalErrorCode::TaskBlockedLoop,
-            Self::NeighbourBlockedLoop => OperationalErrorCode::NeighbourBlockedLoop,
+            Self::TaskBlockedLoop => OperationalCode::TaskBlockedLoop,
+            Self::NeighbourBlockedLoop => OperationalCode::NeighbourBlockedLoop,
         }
     }
 }
@@ -316,8 +316,8 @@ pub enum AttemptEnd {
     /// The child was killed and its exit was not seen. Nothing is written:
     /// stale recovery or the claim lease decides the row.
     EndUnknown { pid: ProcessId },
-    /// An operator cancelled the task while it ran (`cancel_task` with
-    /// `include_running`). The cancel statement wrote the `CANCELLED`
+    /// An operator cancelled the task while it ran (`cancel_task` with the
+    /// policy `INCLUDE_RUNNING`). The cancel statement wrote the `CANCELLED`
     /// attempt and moved the row; nothing is written.
     Cancelled(CancelledEnd),
 }

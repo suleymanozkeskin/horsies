@@ -1,13 +1,15 @@
 // The nodes of a workflow build: the node reference that `w.task` and `w.subWorkflow` give, the node options, the
 // input of a node (a value or an upstream node per parameter), and the object that a build returns.
 //
-// A node reference is a frozen `{ kind: "node", id }`. Its build and its place in the build are kept out of its public
-// members, so a reference of another build is a check finding, not a type error (one TypeScript type serves every
-// build).
+// A node reference is a frozen `{ kind: "node", nodeId }`. Its build and its place in the build are kept out of its
+// public members, so a reference of another build is a check finding, not a type error (one TypeScript type serves
+// every build).
 
+import type { JsonValue } from "../codec/json-value.ts";
 import type { ContextUse } from "../contract/define-task.ts";
 import type { IsUpstreamOutcome, ParameterSchemas } from "../contract/schema.ts";
 import type { AnyWire, EmptyObject, Flat, ValueOf } from "../wire/infer.ts";
+import type { TaskError, TaskOutcome } from "../wire/task-error.ts";
 import type { ParameterSent, SenderMayLeaveOut } from "../zod/infer.ts";
 
 /** Type-only key of the types of a node. It does not exist at run time. */
@@ -20,7 +22,7 @@ export type NodeTypes<O, E extends string> = { readonly output: O; readonly code
 export interface NodeRef<O, E extends string, Id extends string> {
   readonly kind: "node";
   /** The node id: the key of the node in the stored workflow and in `resultFor`. */
-  readonly id: Id;
+  readonly nodeId: Id;
   readonly [nodeTypes]: NodeTypes<O, E>;
 }
 
@@ -28,7 +30,7 @@ export interface NodeRef<O, E extends string, Id extends string> {
 export type AnyNode = NodeRef<unknown, string, string>;
 
 /** When a node with dependencies runs: all of them ended, any one succeeded, or `minSuccess` of them succeeded. */
-export type Join =
+export type JoinType =
   | { readonly kind: "all" }
   | { readonly kind: "any" }
   | { readonly kind: "quorum"; readonly minSuccess: number };
@@ -40,7 +42,7 @@ export type DefaultJoin = { readonly kind: "all" };
 export type JoinNeedsOptional<K> =
   `horsies: under an "any" or "quorum" join, parameter '${K & string}' must be declared .optional()`;
 
-/** The success value of an upstream outcome parameter: `h.resultOf(T)` gives `T`. */
+/** The success value of an upstream outcome parameter: `h.taskOutcome(contract)` gives the contract's output. */
 export type UpstreamValue<S> = S extends AnyWire
   ? Extract<ValueOf<S>, { readonly kind: "succeeded" }> extends { readonly value: infer T }
     ? T
@@ -48,21 +50,31 @@ export type UpstreamValue<S> = S extends AnyWire
   : never;
 
 /**
- * The value of one parameter of a node: a value of the parameter's type, or, for a parameter declared
- * `h.resultOf(T)`, a node whose output is a `T`. Under an `any` or `quorum` join, such a parameter must be optional:
- * its source may not have ended.
+ * The custom codes of an upstream outcome parameter: `h.taskOutcome(contract)` gives the codes of a task contract, or
+ * any code (`string`) for a workflow contract or a task with no `errorCodes`.
  */
-export type NodeParameter<S, J extends Join, K> =
+export type UpstreamCode<S> = S extends AnyWire
+  ? Extract<ValueOf<S>, { readonly kind: "failed" }> extends { readonly error: TaskError<infer E> }
+    ? E
+    : never
+  : never;
+
+/**
+ * The value of one parameter of a node: a value of the parameter's type, or, for a parameter declared
+ * `h.taskOutcome(contract)`, a node whose output and codes fit those of the contract. Under an `any` or `quorum` join,
+ * such a parameter must be optional: its source may not have ended.
+ */
+export type NodeParameter<S, J extends JoinType, K> =
   IsUpstreamOutcome<S> extends true
     ? J extends { readonly kind: "any" } | { readonly kind: "quorum" }
       ? SenderMayLeaveOut<S> extends true
-        ? NodeRef<UpstreamValue<S>, string, string>
+        ? NodeRef<UpstreamValue<S>, UpstreamCode<S>, string>
         : JoinNeedsOptional<K>
-      : NodeRef<UpstreamValue<S>, string, string>
+      : NodeRef<UpstreamValue<S>, UpstreamCode<S>, string>
     : ParameterSent<S>;
 
 /** The input of a node: one member per parameter; an optional or defaulted one may be left out. */
-export type NodeInput<P extends ParameterSchemas, J extends Join> = keyof P extends never
+export type NodeInput<P extends ParameterSchemas, J extends JoinType> = keyof P extends never
   ? EmptyObject
   : Flat<
       {
@@ -73,19 +85,19 @@ export type NodeInput<P extends ParameterSchemas, J extends Join> = keyof P exte
     >;
 
 /** The options of every node. */
-export interface NodeOptionsBase<Id extends string, J extends Join> {
+export interface NodeOptionsBase<Id extends string, J extends JoinType> {
   /** The node id: `[A-Za-z0-9_\-:.]+`, at most 128 characters, unique in the build. */
-  readonly id: Id;
+  readonly nodeId: Id;
   /** Nodes of this build that this node waits for, besides the sources of its parameters. */
   readonly waitsFor?: readonly AnyNode[];
   /** When the node runs. Left out: `{ kind: "all" }`. */
   readonly join?: J;
   /** Run the node when a dependency failed (its parameter gets the failure). Left out: the node is `SKIPPED`. */
-  readonly allowFailedDeps?: boolean;
+  readonly allowFailedDependencies?: boolean;
 }
 
-/** The options of a task node. `ctxFrom` exists only for a task that takes the workflow context. */
-export type TaskNodeOptions<Id extends string, J extends Join, C extends ContextUse> = NodeOptionsBase<Id, J> & {
+/** The options of a task node. `workflowContextFrom` exists only for a task that takes the workflow context. */
+export type TaskNodeOptions<Id extends string, J extends JoinType, C extends ContextUse> = NodeOptionsBase<Id, J> & {
   /** A queue that the app admits. Left out: the task's queue. */
   readonly queue?: string;
   /** An integer 1 to 100. Left out: the priority of the queue. */
@@ -95,12 +107,12 @@ export type TaskNodeOptions<Id extends string, J extends Join, C extends Context
 } & ([C] extends ["takesContext"]
     ? {
         /** Nodes of `waitsFor` whose results the task's workflow context holds. */
-        readonly ctxFrom?: readonly AnyNode[];
+        readonly workflowContextFrom?: readonly AnyNode[];
       }
-    : { readonly ctxFrom?: never });
+    : { readonly workflowContextFrom?: never });
 
 /** The options of a sub-workflow node. */
-export type SubWorkflowNodeOptions<Id extends string, J extends Join> = NodeOptionsBase<Id, J>;
+export type SubWorkflowNodeOptions<Id extends string, J extends JoinType> = NodeOptionsBase<Id, J>;
 
 /** One way for a workflow to succeed: every node of `required` completed. */
 export interface SuccessCase {
@@ -116,12 +128,38 @@ export interface SuccessPolicy {
   readonly optional?: readonly AnyNode[];
 }
 
-/** What a build returns: the output node, and a success policy. */
+/**
+ * What a build returns: the output node when the workflow declares `outputType`, and a success policy. A build of a
+ * workflow with no `outputType` returns no output node.
+ */
 export interface BuildReturn {
   /** The node whose result is the workflow's result. */
-  readonly output: AnyNode;
+  readonly output?: AnyNode;
   readonly successPolicy?: SuccessPolicy;
 }
+
+/** What a build of a workflow with no `outputType` returns: no output node, and a success policy. */
+export interface BuildReturnWithoutOutput extends BuildReturn {
+  /** No output node: the workflow's result is the outcome of each terminal node. */
+  readonly output?: never;
+}
+
+/**
+ * The result of a workflow with no output node, as `get` reads it: the outcome of each terminal node, by node id
+ * (Python's `WorkflowTerminalResults`, Rust's `OutputlessResults`). Each value is untyped JSON and each custom code is
+ * open, because the nodes run many tasks. A node entry that does not read is a failed outcome with the built-in code
+ * `RESULT_DESERIALIZATION_ERROR` and the node id in `data.node_id`; the other entries stay readable.
+ */
+export type WorkflowTerminalResults = {
+  readonly kind: "terminalResults";
+  readonly byNodeId: ReadonlyMap<string, TaskOutcome<JsonValue, string>>;
+};
+
+/**
+ * The success value of a sub-workflow node whose child has no output node, and of an `h.taskOutcome` parameter of
+ * such a workflow: the child completed and gives no value (the core stores `null`, Python reads `None`).
+ */
+export type NoWorkflowOutput = { readonly kind: "noWorkflowOutput" };
 
 /** The output type of a node. */
 export type NodeOutput<N> = N extends NodeRef<infer O, string, string> ? O : never;
@@ -136,14 +174,39 @@ export type PolicyNodes<S> = S extends SuccessPolicy
       | (S extends { readonly optional: infer Q extends readonly AnyNode[] } ? Q[number] : never)
   : never;
 
+/** The output node of a build return, or none for a build of a workflow with no `outputType`. */
+export type OutputNode<R extends BuildReturn> = R extends { readonly output: infer N extends AnyNode }
+  ? N
+  : R extends BuildReturnWithoutOutput
+    ? never
+    : NonNullable<R["output"]>;
+
 /** The nodes in the object that a build returns: the typed set of `resultFor`. */
 export type ReturnedNodes<R extends BuildReturn> =
-  | R["output"]
+  | OutputNode<R>
   | (R extends { readonly successPolicy: infer S } ? PolicyNodes<S> : never);
 
 /** The node of `N` with the id `Id`. */
 export type NodeById<N, Id extends string> =
   N extends NodeRef<unknown, string, infer NodeId> ? (Id extends NodeId ? N : never) : never;
 
-/** The output type of a workflow: the output type of its output node. */
-export type WorkflowOutput<R extends BuildReturn> = NodeOutput<R["output"]>;
+/**
+ * The output value that `get` reads for a workflow: the output type of its output node, or `WorkflowTerminalResults`
+ * for a workflow with no `outputType`. For a build return that may or may not hold an output node, either one.
+ */
+export type WorkflowOutput<R extends BuildReturn> = R extends { readonly output: AnyNode }
+  ? NodeOutput<R["output"]>
+  : R extends BuildReturnWithoutOutput
+    ? WorkflowTerminalResults
+    : NodeOutput<OutputNode<R>> | WorkflowTerminalResults;
+
+/**
+ * The success value of a sub-workflow node of a workflow, and of an `h.taskOutcome` parameter of it: the output type
+ * of its output node, or `NoWorkflowOutput` for a workflow with no `outputType`. For a build return that may or may
+ * not hold an output node, either one.
+ */
+export type SubWorkflowOutput<R extends BuildReturn> = R extends { readonly output: AnyNode }
+  ? NodeOutput<R["output"]>
+  : R extends BuildReturnWithoutOutput
+    ? NoWorkflowOutput
+    : NodeOutput<OutputNode<R>> | NoWorkflowOutput;

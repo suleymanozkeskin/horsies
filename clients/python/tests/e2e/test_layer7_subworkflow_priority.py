@@ -30,7 +30,7 @@ from horsies.core.codec.json_io import dumps_json
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import is_err
 
-from tests.e2e.helpers.assertions import start_ok_in_thread, unwrap_send
+from tests.e2e.helpers.assertions import read_succeeded, start_ok_in_thread, unwrap_send
 from tests.e2e.helpers.db import uuid_of_column, wait_for_all_terminal, wait_for_status
 from tests.e2e.tasks import priority_binding as pb
 from tests.e2e.tasks.instance_priority_binding import app  # noqa: F401
@@ -57,7 +57,7 @@ def _ready_check():
             if is_err(result):
                 return False
             handle = result.ok_value
-        return handle.get(timeout_ms=2000).is_ok()
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 

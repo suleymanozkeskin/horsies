@@ -19,6 +19,7 @@ import { DATABASE_URL, fakeEnvironment } from "../app/support.ts";
 import { ping } from "../worker/support.ts";
 import { FakeChildNative, settled } from "./child-native.ts";
 import { FakeRunNative, RecordingMarks, RUN_TASK_ID, tableRun } from "./support.ts";
+import { unusedSeatHost } from "../seats/support.ts";
 
 const CHILD_ARGUMENTS = ["--horsies-child", "3", "4242"] as const;
 
@@ -50,6 +51,7 @@ function deps(native: FakeChildNative, lines: string[], defects: CoreDefect[]): 
     culprit: { kind: "none" },
     settlement: { returned: () => undefined, threw: () => undefined },
     hostname: "host-1",
+    seats: unusedSeatHost(),
     writeLine: (line) => lines.push(line),
     wait: async () => undefined,
     exit: (code) => {
@@ -73,22 +75,25 @@ function runBodyPost(runKey: bigint): ChildPost {
 describe("a served child", () => {
   test("a send from a body is not suppressed once the child serves", async () => {
     const environment = fakeEnvironment({ start: { argumentAfterScript: "--horsies-child", seatIsolate: false } });
-    const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [ping] }, environment);
+    const created = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [ping] }, environment);
     const app = created.ok ? created.value : assert.fail("the test app was refused");
     const sends: string[] = [];
 
     assert.equal(appInternals(app).suppression.current().kind, "suppressed");
-    app.implement(ping, async ({ n }) => {
+    app.implement(ping, async ({ n }, { ok }) => {
       const sent = await app.send(ping, { n: n + 1 });
 
       sends.push(sent.ok ? "sent" : sent.error.code);
 
-      return ping.ok(n);
+      return ok(n);
     });
 
     const native = new FakeChildNative();
     const running = runChildMode(app, CHILD_ARGUMENTS, deps(native, [], []));
 
+    await settled();
+    // The core runs the start hooks before it posts a run: hook 0 gives the start facts.
+    native.serves[0]?.hook(1n, { index: 0, facts: { kind: "isolated" } });
     await settled();
     native.serves[0]?.post(runBodyPost(1n));
     await settled();
@@ -117,7 +122,7 @@ describe("a served child", () => {
 });
 
 function createdApp(): Horsies {
-  const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [ping] }, fakeEnvironment());
+  const created = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [ping] }, fakeEnvironment());
 
   return created.ok ? created.value : assert.fail("the test app was refused");
 }

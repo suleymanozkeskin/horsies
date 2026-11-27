@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/_catalog/codec_bounds.ts";
 import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
 import { encodeWithReadBack } from "../../../horsies/src/codec/read-back.ts";
 import { decodeValue } from "../../../horsies/src/codec/reader.ts";
@@ -18,7 +18,7 @@ import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
 function written<V>(wire: AnyWire, value: V): string {
   const result = encodeValue(kindOf(wire), value);
 
-  assert(result.ok, result.ok ? "" : `refused ${result.error.kind} at ${result.error.path}`);
+  assert(result.ok, result.ok ? "" : `refused ${JSON.stringify(result.error)}`);
 
   return result.value;
 }
@@ -27,7 +27,7 @@ function refused<V>(wire: AnyWire, value: V): EncodeRefused {
   const result = encodeValue(kindOf(wire), value);
 
   assert(!result.ok, "encoded a refused value");
-  assert.equal(result.error.side, "encode");
+  assert.equal(result.error.kind, "encodeRefused");
 
   return result.error;
 }
@@ -160,12 +160,12 @@ describe("writer: containers", () => {
 describe("writer: each refusal", () => {
   test("ExplicitUndefined: a value, a member and an array hole", () => {
     for (const wire of [h.null(), h.boolean(), h.string(), h.int(), h.bigint(), h.float()]) {
-      assert.equal(refused(wire, undefined).kind, "ExplicitUndefined");
+      assert.equal(refused(wire, undefined).refusal, "ExplicitUndefined");
     }
 
     const member = refused(h.object({ a: h.int().optional() }), { a: undefined });
 
-    assert.deepEqual([member.kind, member.path], ["ExplicitUndefined", "$.a"]);
+    assert.deepEqual([member.refusal, member.path], ["ExplicitUndefined", "$.a"]);
 
     const holes: number[] = [1];
 
@@ -175,64 +175,79 @@ describe("writer: each refusal", () => {
   });
 
   test("WrongType: a value of another JavaScript type", () => {
-    assert.equal(refused(h.null(), 0).kind, "WrongType");
-    assert.equal(refused(h.boolean(), "true").kind, "WrongType");
-    assert.equal(refused(h.string(), 1).kind, "WrongType");
-    assert.equal(refused(h.int(), 7n).kind, "WrongType");
-    assert.equal(refused(h.bigint(), 7).kind, "WrongType");
-    assert.equal(refused(h.float(), 7n).kind, "WrongType");
-    assert.equal(refused(h.object({}), []).kind, "WrongType");
-    assert.equal(refused(h.array(h.int()), {}).kind, "WrongType");
-    assert.equal(refused(h.record(h.int()), "a").kind, "WrongType");
+    assert.equal(refused(h.null(), 0).refusal, "WrongType");
+    assert.equal(refused(h.boolean(), "true").refusal, "WrongType");
+    assert.equal(refused(h.string(), 1).refusal, "WrongType");
+    assert.equal(refused(h.int(), 7n).refusal, "WrongType");
+    assert.equal(refused(h.bigint(), 7).refusal, "WrongType");
+    assert.equal(refused(h.float(), 7n).refusal, "WrongType");
+    assert.equal(refused(h.object({}), []).refusal, "WrongType");
+    assert.equal(refused(h.array(h.int()), {}).refusal, "WrongType");
+    assert.equal(refused(h.record(h.int()), "a").refusal, "WrongType");
   });
 
   test("WrongType: a tuple of another length", () => {
     const error = refused(h.tuple([h.int(), h.int()]), [1]);
 
-    assert.deepEqual([error.kind, error.detail], ["WrongType", "expected an array of 2 items"]);
+    assert.deepEqual([error.refusal, error.detail], ["WrongType", "expected an array of 2 items"]);
   });
 
   test("NotSafeInteger: a fraction, 2^53 and NaN under h.int()", () => {
-    assert.equal(refused(h.int(), 1.5).kind, "NotSafeInteger");
-    assert.equal(refused(h.int(), 2 ** 53).kind, "NotSafeInteger");
-    assert.equal(refused(h.int(), Number.NaN).kind, "NotSafeInteger");
+    assert.equal(refused(h.int(), 1.5).refusal, "NotSafeInteger");
+    assert.equal(refused(h.int(), 2 ** 53).refusal, "NotSafeInteger");
+    assert.equal(refused(h.int(), Number.NaN).refusal, "NotSafeInteger");
+  });
+
+  test("NotSafeInteger: a fraction, NaN and an infinity get the whole-number text, with no builder name", () => {
+    for (const value of [7.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.equal(refused(h.int(), value).detail, "the integer kind takes a whole number");
+    }
+  });
+
+  test("NotSafeInteger: a whole number outside the safe range gets the range text, with no builder name", () => {
+    for (const value of [2 ** 53, -(2 ** 53), 1e300]) {
+      assert.equal(
+        refused(h.int(), value).detail,
+        "the integer kind takes a whole number from -(2^53 - 1) to 2^53 - 1; the bigint kind takes a larger one",
+      );
+    }
   });
 
   test("IntegerTooLong: an integer of 4,301 digits", () => {
-    assert.equal(refused(h.bigint(), 10n ** 4300n).kind, "IntegerTooLong");
+    assert.equal(refused(h.bigint(), 10n ** 4300n).refusal, "IntegerTooLong");
   });
 
   test("NonFiniteFloat: NaN and the infinities", () => {
     for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
-      assert.equal(refused(h.float(), value).kind, "NonFiniteFloat");
+      assert.equal(refused(h.float(), value).refusal, "NonFiniteFloat");
     }
   });
 
   test("LoneSurrogate: a string and a record key that are not well formed", () => {
-    assert.equal(refused(h.string(), "a\ud800b").kind, "LoneSurrogate");
-    assert.equal(refused(h.string(), "\udc00").kind, "LoneSurrogate");
-    assert.equal(refused(h.record(h.int()), { "\ud800": 1 }).kind, "LoneSurrogate");
+    assert.equal(refused(h.string(), "a\ud800b").refusal, "LoneSurrogate");
+    assert.equal(refused(h.string(), "\udc00").refusal, "LoneSurrogate");
+    assert.equal(refused(h.record(h.int()), { "\ud800": 1 }).refusal, "LoneSurrogate");
   });
 
   test("UnknownMember: a key that the type does not declare, at every depth; the key is not in the path", () => {
     const top = refused(h.object({ a: h.int() }), { a: 1, b: 2 });
 
-    assert.deepEqual([top.kind, top.path], ["UnknownMember", "$.<input>"]);
+    assert.deepEqual([top.refusal, top.path], ["UnknownMember", "$.<input>"]);
 
     const nested = refused(h.object({ inner: h.object({ a: h.int() }) }), { inner: { a: 1, secret: 2 } });
 
-    assert.deepEqual([nested.kind, nested.path], ["UnknownMember", "$.inner.<input>"]);
+    assert.deepEqual([nested.refusal, nested.path], ["UnknownMember", "$.inner.<input>"]);
   });
 
   test("MissingMember: a required member that the value leaves out", () => {
     const error = refused(h.object({ a: h.int(), b: h.int() }), { a: 1 });
 
-    assert.deepEqual([error.kind, error.path], ["MissingMember", "$.b"]);
+    assert.deepEqual([error.refusal, error.path], ["MissingMember", "$.b"]);
   });
 
   test("EngineKey: a record key that only the engine writes, at any depth", () => {
     for (const key of ["__h_task_result__", "__horsies_x", "__builtin_task_code__"]) {
-      assert.equal(refused(h.record(h.int()), { [key]: 1 }).kind, "EngineKey");
+      assert.equal(refused(h.record(h.int()), { [key]: 1 }).refusal, "EngineKey");
     }
 
     assert.equal(refused(h.array(h.record(h.int())), [{ __h_x: 1 }]).path, "$[0].<input>");
@@ -241,15 +256,15 @@ describe("writer: each refusal", () => {
   test(`TooDeep: more than ${MAX_VALUE_JSON_DEPTH} levels`, () => {
     const levels = MAX_VALUE_JSON_DEPTH + 1;
 
-    assert.equal(refused(nestedArrays(levels), nestedValue(levels)).kind, "TooDeep");
+    assert.equal(refused(nestedArrays(levels), nestedValue(levels)).refusal, "TooDeep");
   });
 
   test("NotJsonNative: a Date, a Map, a class instance, a function and a symbol key", () => {
-    assert.equal(refused(h.object({}), new Date(0)).kind, "NotJsonNative");
-    assert.equal(refused(h.record(h.int()), new Map()).kind, "NotJsonNative");
-    assert.equal(refused(h.object({ x: h.int() }), new Point()).kind, "NotJsonNative");
-    assert.equal(refused(h.object({}), () => 1).kind, "NotJsonNative");
-    assert.equal(refused(h.record(h.int()), { [Symbol("k")]: 1 }).kind, "NotJsonNative");
+    assert.equal(refused(h.object({}), new Date(0)).refusal, "NotJsonNative");
+    assert.equal(refused(h.record(h.int()), new Map()).refusal, "NotJsonNative");
+    assert.equal(refused(h.object({ x: h.int() }), new Point()).refusal, "NotJsonNative");
+    assert.equal(refused(h.object({}), () => 1).refusal, "NotJsonNative");
+    assert.equal(refused(h.record(h.int()), { [Symbol("k")]: 1 }).refusal, "NotJsonNative");
   });
 });
 

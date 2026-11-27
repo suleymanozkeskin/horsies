@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::core::history::enqueue::{prepare_workflow_task_facts, WorkflowTaskFacts};
 use crate::core::{
-    AnyNode, ErrorCategory, HorsiesError, OperationalErrorCode, TaskError, WorkflowSpec,
+    AnyNode, HorsiesError, HorsiesErrorCategory, OperationalCode, TaskError, WorkflowSpec,
 };
 
 use crate::workflow_engine::error::WorkflowError;
@@ -78,8 +78,8 @@ pub(crate) fn child_workflow_depth(
                 "workflow_id": parent_workflow_id.to_string(),
                 "task_index": task_index,
             }))),
-            ..TaskError::builtin(
-                OperationalErrorCode::SubworkflowDepthLimitReached,
+            ..TaskError::built_in(
+                OperationalCode::SubworkflowDepthLimitReached,
                 format!(
                     "Subworkflow not started: the child workflow would have depth {child_depth}, \
                      and the limit is {MAX_SUBWORKFLOW_DEPTH} (workflow {parent_workflow_name}:{task_index})"
@@ -140,15 +140,15 @@ pub(crate) fn stored_queue_and_priority(node: &AnyNode) -> Result<(&str, i32), W
     }
 }
 
-/// The `workflow_ctx_from` that a node row stores: the node ids of the node's context sources, or
-/// `None` (SQL NULL) when the node takes no context.
+/// The `workflow_context_from` that a node row stores: the node ids of the node's context
+/// sources, or `None` (SQL NULL) when the node takes no context.
 ///
 /// A node defined with an empty list takes no context, and its row stores NULL, as for no list
 /// (Python `_graph_columns`, `clients/python/horsies/core/workflows/child_build.py:479-485`). The task input of
 /// the baseline mint adds the context member for any stored array, an empty one included
 /// (`horsies_workflow_task_input`). Pure.
-pub(crate) fn stored_workflow_ctx_from(node: &AnyNode) -> Option<&[String]> {
-    match node.workflow_ctx_from.as_deref() {
+pub(crate) fn stored_workflow_context_from(node: &AnyNode) -> Option<&[String]> {
+    match node.workflow_context_from.as_deref() {
         None | Some([]) => None,
         Some(node_ids) => Some(node_ids),
     }
@@ -175,19 +175,19 @@ fn resolve_insert_priority(node: &AnyNode) -> Result<i32, WorkflowError> {
 /// What names a failed child build in the node error. A builder failure takes the Python exception
 /// class, Python's `type(exc).__name__` (`core/workflows/engine.py:1196-1211`): a [`HorsiesError`]
 /// takes the class of its error category, the subclass of Python's `HorsiesError` that the category
-/// stands for ([`ErrorCategory`]); an error with no code takes the base class. A stored node input
+/// stands for ([`HorsiesErrorCategory`]); an error with no code takes the base class. A stored node input
 /// that the core refuses ([`Self::StoredInputRefused`]) names no class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChildSpecErrorType {
     /// A [`HorsiesError`] with no error code.
     HorsiesError,
-    /// A [`HorsiesError`] whose code is of [`ErrorCategory::Workflow`].
+    /// A [`HorsiesError`] whose code is of [`HorsiesErrorCategory::Workflow`].
     WorkflowValidationError,
-    /// A [`HorsiesError`] whose code is of [`ErrorCategory::Task`].
+    /// A [`HorsiesError`] whose code is of [`HorsiesErrorCategory::Task`].
     TaskDefinitionError,
-    /// A [`HorsiesError`] whose code is of [`ErrorCategory::Config`].
+    /// A [`HorsiesError`] whose code is of [`HorsiesErrorCategory::Config`].
     ConfigurationError,
-    /// A [`HorsiesError`] whose code is of [`ErrorCategory::Registry`].
+    /// A [`HorsiesError`] whose code is of [`HorsiesErrorCategory::Registry`].
     RegistryError,
     /// A stored node input from which the core cannot make the builder input
     /// ([`child_build_input`](crate::workflow_engine::args_merge::child_build_input)): the text
@@ -201,10 +201,10 @@ impl ChildSpecErrorType {
     pub(crate) fn of(error: &HorsiesError) -> Self {
         match error.category() {
             None => Self::HorsiesError,
-            Some(ErrorCategory::Workflow) => Self::WorkflowValidationError,
-            Some(ErrorCategory::Task) => Self::TaskDefinitionError,
-            Some(ErrorCategory::Config) => Self::ConfigurationError,
-            Some(ErrorCategory::Registry) => Self::RegistryError,
+            Some(HorsiesErrorCategory::Workflow) => Self::WorkflowValidationError,
+            Some(HorsiesErrorCategory::Task) => Self::TaskDefinitionError,
+            Some(HorsiesErrorCategory::Config) => Self::ConfigurationError,
+            Some(HorsiesErrorCategory::Registry) => Self::RegistryError,
         }
     }
 
@@ -311,10 +311,10 @@ mod tests {
             input_json: "{}".to_owned(),
             dependencies: vec![],
             args_from: std::collections::HashMap::new(),
-            workflow_ctx_from: None,
+            workflow_context_from: None,
             queue: Some("default".to_owned()),
             priority,
-            allow_failed_deps: false,
+            allow_failed_dependencies: false,
             join: crate::core::workflow::node::JoinType::All,
             min_success: None,
             good_until: None,
@@ -323,7 +323,7 @@ mod tests {
             task_options_json: None,
             is_subworkflow,
             sub_definition_key: None,
-            sub_workflow_params: crate::core::workflow::node::SubWorkflowParams::NotGiven,
+            sub_workflow_params: crate::core::workflow::node::SubWorkflowParameters::NotGiven,
         }
     }
 
@@ -416,12 +416,12 @@ mod tests {
     #[test]
     fn an_empty_context_list_is_no_context() {
         let mut node = node_with(false, Some(10));
-        assert_eq!(stored_workflow_ctx_from(&node), None);
-        node.workflow_ctx_from = Some(Vec::new());
-        assert_eq!(stored_workflow_ctx_from(&node), None);
-        node.workflow_ctx_from = Some(vec!["a".to_owned(), "b".to_owned()]);
+        assert_eq!(stored_workflow_context_from(&node), None);
+        node.workflow_context_from = Some(Vec::new());
+        assert_eq!(stored_workflow_context_from(&node), None);
+        node.workflow_context_from = Some(vec!["a".to_owned(), "b".to_owned()]);
         assert_eq!(
-            stored_workflow_ctx_from(&node),
+            stored_workflow_context_from(&node),
             Some(["a".to_owned(), "b".to_owned()].as_slice())
         );
     }
@@ -537,24 +537,24 @@ mod tests {
     /// `HorsiesError` (Python `type(exc).__name__`, `core/workflows/engine.py:1196-1211`).
     #[test]
     fn a_builder_error_takes_the_python_class_of_its_category() {
-        use crate::core::ErrorCode;
+        use crate::core::HorsiesErrorCode;
 
         for (error, class) in [
             (HorsiesError::new("no code"), "HorsiesError"),
             (
-                HorsiesError::new("cycle").with_code(ErrorCode::WorkflowCycleDetected),
+                HorsiesError::new("cycle").with_code(HorsiesErrorCode::WorkflowCycleDetected),
                 "WorkflowValidationError",
             ),
             (
-                HorsiesError::new("options").with_code(ErrorCode::TaskInvalidOptions),
+                HorsiesError::new("options").with_code(HorsiesErrorCode::TaskInvalidOptions),
                 "TaskDefinitionError",
             ),
             (
-                HorsiesError::new("queue mode").with_code(ErrorCode::ConfigInvalidQueueMode),
+                HorsiesError::new("queue mode").with_code(HorsiesErrorCode::ConfigInvalidQueueMode),
                 "ConfigurationError",
             ),
             (
-                HorsiesError::new("not registered").with_code(ErrorCode::TaskNotRegistered),
+                HorsiesError::new("not registered").with_code(HorsiesErrorCode::TaskNotRegistered),
                 "RegistryError",
             ),
         ] {
@@ -699,8 +699,8 @@ mod tests {
         let task_name = "start_refused_retry_policy_node";
         let exponential = |max_retries: &str| {
             format!(
-                r#"{{"retry_policy": {{"max_retries": {max_retries}, "intervals": [60],
-                    "backoff_strategy": "exponential", "jitter": true, "auto_retry_for": ["X"]}}}}"#
+                r#"{{"retry_policy": {{"max_retries": {max_retries}, "intervals_seconds": [60],
+                    "backoff_strategy": "exponential", "jitter": true, "retry_for": ["X"]}}}}"#
             )
         };
         // The detail of Python's refusal, where the case pins it
@@ -853,8 +853,8 @@ mod tests {
         let mut root = node_with(false, Some(17));
         root.task_name = "start_fitting_retry_policy_node".to_owned();
         root.task_options_json = Some(
-            r#"{"retry_policy": {"max_retries": 4, "intervals": [60],
-                "backoff_strategy": "exponential", "jitter": true, "auto_retry_for": ["X"]}}"#
+            r#"{"retry_policy": {"max_retries": 4, "intervals_seconds": [60],
+                "backoff_strategy": "exponential", "jitter": true, "retry_for": ["X"]}}"#
                 .to_owned(),
         );
         let spec = keyed_spec(Some("tests.start.fitting_retry_policy.v1"), vec![root]);
@@ -912,7 +912,7 @@ mod tests {
         slow.node_id = Some("slow".to_owned());
         slow.index = 1;
         // A root that names a context source takes the per-row slow path.
-        slow.workflow_ctx_from = Some(vec!["fast".to_owned()]);
+        slow.workflow_context_from = Some(vec!["fast".to_owned()]);
         let spec = keyed_spec(Some("tests.enqueue_time.root.v1"), vec![fast, slow]);
         let broker = Arc::new(PostgresBroker::from_test_url(
             pool.url(),

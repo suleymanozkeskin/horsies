@@ -1,13 +1,29 @@
 # clients/python/horsies/core/models/schedule.py
 from __future__ import annotations
-from datetime import time as datetime_time
-from typing import Annotated, ClassVar, Generic, Literal, TypeVar, Union, Optional, Any
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from datetime import time as datetime_time, timedelta
+from typing import (
+    Annotated,
+    ClassVar,
+    Final,
+    Generic,
+    Literal,
+    TypeVar,
+    Union,
+    Optional,
+    Any,
+)
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 from typing_extensions import Self
 from enum import Enum
+from horsies._catalog.schedule_defaults import (
+    DEFAULT_MAX_CATCH_UP_RUNS,
+    DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS,
+    DEFAULT_SCHEDULE_ENABLED,
+    DEFAULT_SCHEDULE_TIMEZONE,
+)
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     ValidationReport,
     raise_collected,
 )
@@ -25,65 +41,109 @@ class Weekday(str, Enum):
     SUNDAY = 'sunday'
 
 
+INTERVAL_EVERY_SECONDS_MIN: Final = 1
+"""The shortest interval, in seconds (horsies-core `INTERVAL_EVERY_SECONDS`)."""
+
+INTERVAL_EVERY_SECONDS_MAX: Final = 31_536_000
+"""The longest interval, in seconds: 365 days (horsies-core `INTERVAL_EVERY_SECONDS`)."""
+
+_SECONDS_PER_DAY: Final = 86_400
+_SECONDS_PER_HOUR: Final = 3_600
+_SECONDS_PER_MINUTE: Final = 60
+
+
+def _interval_parts(every: timedelta) -> tuple[int, int, int, int]:
+    """The days, hours, minutes and seconds of `every`, a whole number of
+    seconds above zero, the largest unit first."""
+    assert every.microseconds == 0 and every > timedelta(0), (
+        f'every is a checked interval length, got {every!r}'
+    )
+    total = every.days * _SECONDS_PER_DAY + every.seconds
+    days, rest = divmod(total, _SECONDS_PER_DAY)
+    hours, rest = divmod(rest, _SECONDS_PER_HOUR)
+    minutes, seconds = divmod(rest, _SECONDS_PER_MINUTE)
+    return days, hours, minutes, seconds
+
+
+def _interval_text(every: timedelta) -> str:
+    """The ISO 8601 text of `every`, the form that horsies-core reads.
+
+    Days, hours, minutes and seconds only, the largest unit first, no zero
+    part: `PT30S`, `PT1M30S`, `P1DT2H`, `P365D`. Pydantic's own form writes
+    years for 365 days (`P1Y`), which the core refuses.
+    """
+    days, hours, minutes, seconds = _interval_parts(every)
+    date_text = f'{days}D' if days else ''
+    time_text = ''.join(
+        f'{value}{unit}'
+        for value, unit in ((hours, 'H'), (minutes, 'M'), (seconds, 'S'))
+        if value
+    )
+    return f'P{date_text}T{time_text}' if time_text else f'P{date_text}'
+
+
+def interval_summary(every: timedelta) -> str:
+    """`every` for config logging: `1h 30m`, `2d`, `45s`."""
+    parts = zip(_interval_parts(every), ('d', 'h', 'm', 's'))
+    return ' '.join(f'{value}{unit}' for value, unit in parts if value)
+
+
 class IntervalSchedule(BaseModel):
     """
-    Run task every N seconds/minutes/hours/days.
+    Run task every `every`: a length in whole seconds, from 1 second to 365
+    days.
 
-    At least one time unit must be specified.
-    Total interval is the sum of all specified units.
+    A length with microseconds, a length of zero or less, and a length above
+    365 days are refused with `CONFIG_INVALID_SCHEDULE`. The JSON form writes
+    `every` as ISO 8601 text with days, hours, minutes and seconds
+    (`{"kind": "interval", "every": "PT1M30S"}`).
 
     Examples:
-        - Every 30 seconds: IntervalSchedule(seconds=30)
-        - Every 5 minutes: IntervalSchedule(minutes=5)
-        - Every 6 hours: IntervalSchedule(hours=6)
-        - Every 2 days: IntervalSchedule(days=2)
-        - Every 1.5 hours: IntervalSchedule(hours=1, minutes=30)
+        - Every 30 seconds: IntervalSchedule(every=timedelta(seconds=30))
+        - Every 5 minutes: IntervalSchedule(every=timedelta(minutes=5))
+        - Every 6 hours: IntervalSchedule(every=timedelta(hours=6))
+        - Every 2 days: IntervalSchedule(every=timedelta(days=2))
+        - Every 1.5 hours: IntervalSchedule(every=timedelta(hours=1, minutes=30))
     """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
-    type: Literal['interval'] = 'interval'
-    seconds: Optional[int] = Field(
-        default=None, ge=1, le=86400, description='Seconds component (1-86400)'
-    )
-    minutes: Optional[int] = Field(
-        default=None, ge=1, le=1440, description='Minutes component (1-1440)'
-    )
-    hours: Optional[int] = Field(
-        default=None, ge=1, le=168, description='Hours component (1-168)'
-    )
-    days: Optional[int] = Field(
-        default=None, ge=1, le=365, description='Days component (1-365)'
+    kind: Literal['interval'] = 'interval'
+    every: timedelta = Field(
+        description='Length of the interval (whole seconds, 1 second to 365 days)',
     )
 
     @model_validator(mode='after')
-    def validate_at_least_one_unit(self) -> Self:
-        """Ensure at least one time unit is specified."""
+    def validate_every(self) -> Self:
+        """Refuse a length with microseconds or outside 1 second to 365 days."""
         report = ValidationReport('schedule')
-        if not any([self.seconds, self.minutes, self.hours, self.days]):
+        if self.every.microseconds != 0:
             report.add(
                 ConfigurationError(
-                    message='IntervalSchedule requires at least one time unit',
-                    code=ErrorCode.CONFIG_INVALID_SCHEDULE,
-                    notes=['all time units (seconds, minutes, hours, days) are None'],
-                    help_text='specify at least one: seconds, minutes, hours, or days',
+                    message='IntervalSchedule every has microseconds',
+                    code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
+                    notes=[f'every: {self.every}'],
+                    help_text='schedules fire at whole seconds; give every in whole seconds',
+                )
+            )
+        shortest = timedelta(seconds=INTERVAL_EVERY_SECONDS_MIN)
+        longest = timedelta(seconds=INTERVAL_EVERY_SECONDS_MAX)
+        if not (shortest <= self.every <= longest):
+            report.add(
+                ConfigurationError(
+                    message='IntervalSchedule every is outside 1 second to 365 days',
+                    code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
+                    notes=[f'every: {self.every}'],
+                    help_text='give every from 1 second to 365 days',
                 )
             )
         raise_collected(report)
         return self
 
-    def total_seconds(self) -> int:
-        """Calculate total interval in seconds."""
-        total = 0
-        if self.seconds:
-            total += self.seconds
-        if self.minutes:
-            total += self.minutes * 60
-        if self.hours:
-            total += self.hours * 3600
-        if self.days:
-            total += self.days * 86400
-        return total
+    @field_serializer('every', when_used='json')
+    def serialize_every(self, every: timedelta) -> str:
+        """The ISO 8601 text of `every` (`PT30S`, `P1DT2H`, `P365D`)."""
+        return _interval_text(every)
 
 
 class HourlySchedule(BaseModel):
@@ -97,7 +157,7 @@ class HourlySchedule(BaseModel):
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
-    type: Literal['hourly'] = 'hourly'
+    kind: Literal['hourly'] = 'hourly'
     minute: int = Field(ge=0, le=59, description='Minute of the hour (0-59)')
     second: int = Field(
         default=0, ge=0, le=59, description='Second of the minute (0-59)'
@@ -119,7 +179,7 @@ def _validate_time_of_day(
         report.add(
             ConfigurationError(
                 message=f'{pattern_name} time has a time zone',
-                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
                 notes=[f'time: {value.isoformat()}'],
                 help_text=(
                     "give the time without tzinfo and set the zone in the schedule's "
@@ -131,7 +191,7 @@ def _validate_time_of_day(
         report.add(
             ConfigurationError(
                 message=f'{pattern_name} time has microseconds',
-                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
                 notes=[f'time: {value.isoformat()}'],
                 help_text=(
                     'schedules fire at whole seconds; give the time without microseconds'
@@ -155,7 +215,7 @@ class DailySchedule(BaseModel):
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
-    type: Literal['daily'] = 'daily'
+    kind: Literal['daily'] = 'daily'
     time: datetime_time = Field(description='Time of day to run (HH:MM:SS)')
 
     @model_validator(mode='after')
@@ -177,28 +237,30 @@ class WeeklySchedule(BaseModel):
 
     Examples:
         - Monday and Friday at 9 AM:
-          WeeklySchedule(days=[Weekday.MONDAY, Weekday.FRIDAY], time=time(9, 0, 0))
-        - Weekdays at 5 PM:
-          WeeklySchedule(days=[...weekdays...], time=time(17, 0, 0))
+          WeeklySchedule(weekdays=[Weekday.MONDAY, Weekday.FRIDAY], time=time(9, 0, 0))
+        - Monday to Friday at 5 PM:
+          WeeklySchedule(weekdays=[...five weekdays...], time=time(17, 0, 0))
     """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
-    type: Literal['weekly'] = 'weekly'
-    days: list[Weekday] = Field(min_length=1, description='Days of week to run')
+    kind: Literal['weekly'] = 'weekly'
+    weekdays: list[Weekday] = Field(
+        min_length=1, description='Days of the week to run'
+    )
     time: datetime_time = Field(description='Time of day to run (HH:MM:SS)')
 
     @model_validator(mode='after')
-    def validate_unique_days(self) -> Self:
-        """Ensure no duplicate days."""
+    def validate_unique_weekdays(self) -> Self:
+        """Ensure no duplicate weekdays."""
         report = ValidationReport('schedule')
-        if len(self.days) != len(set(self.days)):
+        if len(self.weekdays) != len(set(self.weekdays)):
             report.add(
                 ConfigurationError(
-                    message='WeeklySchedule has duplicate days',
-                    code=ErrorCode.CONFIG_INVALID_SCHEDULE,
-                    notes=[f'days: {[d.value for d in self.days]}'],
-                    help_text='each day should appear only once in the list',
+                    message='WeeklySchedule has duplicate weekdays',
+                    code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
+                    notes=[f'weekdays: {[d.value for d in self.weekdays]}'],
+                    help_text='each weekday should appear only once in the list',
                 )
             )
         raise_collected(report)
@@ -217,8 +279,8 @@ class MonthlySchedule(BaseModel):
     """
     Run task on a specific day of the month at a specific time.
 
-    Note: If day > days in month (e.g., day=31 in February),
-    the schedule will be skipped for that month.
+    Note: If day_of_month > days in month (e.g., day_of_month=31 in
+    February), the schedule will be skipped for that month.
 
     `time` is a time of day in the schedule's `timezone`, in whole seconds.
     A time with `tzinfo` or with microseconds is refused with
@@ -226,15 +288,15 @@ class MonthlySchedule(BaseModel):
 
     Examples:
         - First day of month at midnight:
-          MonthlySchedule(day=1, time=time(0, 0, 0))
+          MonthlySchedule(day_of_month=1, time=time(0, 0, 0))
         - 15th of each month at 3 PM:
-          MonthlySchedule(day=15, time=time(15, 0, 0))
+          MonthlySchedule(day_of_month=15, time=time(15, 0, 0))
     """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
-    type: Literal['monthly'] = 'monthly'
-    day: int = Field(ge=1, le=31, description='Day of month (1-31)')
+    kind: Literal['monthly'] = 'monthly'
+    day_of_month: int = Field(ge=1, le=31, description='Day of month (1-31)')
     time: datetime_time = Field(description='Time of day to run (HH:MM:SS)')
 
     @model_validator(mode='after')
@@ -478,7 +540,7 @@ def _numeric_config_error(field_name: str, detail: str) -> ConfigurationError:
     """Build a CONFIG_INVALID_SCHEDULE error scoped to a named field."""
     return ConfigurationError(
         message=f"invalid cron '{field_name}' field: {detail}",
-        code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+        code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
         notes=[f'field: {field_name}'],
         help_text=f'every {field_name} value must satisfy the field domain',
     )
@@ -673,7 +735,7 @@ def _validate_satisfiable(
                 report.add(
                     ConfigurationError(
                         message='cron schedule can never fire',
-                        code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                        code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
                         notes=[
                             f'months: {sorted(month_set)}',
                             f'days-of-month: {sorted(dom_set)}',
@@ -753,7 +815,7 @@ class CronSchedule(BaseModel):
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
-    type: Literal['cron'] = 'cron'
+    kind: Literal['cron'] = 'cron'
     minute: list[CronNumericTerm] = Field(
         min_length=1, description='Minute field terms (0-59)'
     )
@@ -808,7 +870,7 @@ class TaskSchedule(BaseModel):
         - task_name: Name of the task to execute (must be registered via @app.task)
         - pattern: Schedule pattern defining when the task runs
         - kwargs: Keyword arguments to pass to the task (schedules are kwargs-only)
-        - queue_name: Target queue (None = default queue)
+        - queue: Target queue (None = the task's queue)
         - enabled: Whether this schedule is active
         - timezone: Timezone for schedule evaluation (default: UTC)
         - catch_up_missed: If scheduler was down, should missed runs be executed?
@@ -822,14 +884,18 @@ class TaskSchedule(BaseModel):
     kwargs: dict[str, Any] = Field(
         default_factory=dict, description='Task keyword arguments (kwargs-only)'
     )
-    queue_name: Optional[str] = Field(default=None, description='Target queue name')
-    enabled: bool = Field(default=True, description='Whether schedule is active')
-    timezone: str = Field(default='UTC', description='Timezone for schedule evaluation')
+    queue: Optional[str] = Field(default=None, description='Target queue name')
+    enabled: bool = Field(
+        default=DEFAULT_SCHEDULE_ENABLED, description='Whether schedule is active'
+    )
+    timezone: str = Field(
+        default=DEFAULT_SCHEDULE_TIMEZONE, description='Timezone for schedule evaluation'
+    )
     catch_up_missed: bool = Field(
         default=False, description='Execute missed runs if scheduler was down'
     )
     max_catch_up_runs: int = Field(
-        default=100,
+        default=DEFAULT_MAX_CATCH_UP_RUNS,
         ge=1,
         le=10000,
         description='Maximum runs to enqueue per scheduler tick when catch_up_missed=True',
@@ -853,7 +919,10 @@ class ScheduleConfig(BaseModel):
         default_factory=list, description='List of scheduled tasks'
     )
     check_interval_seconds: int = Field(
-        default=1, ge=1, le=60, description='Scheduler check interval (1-60 seconds)'
+        default=DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS,
+        ge=1,
+        le=60,
+        description='Scheduler check interval (1-60 seconds)',
     )
 
     @model_validator(mode='after')
@@ -865,7 +934,7 @@ class ScheduleConfig(BaseModel):
             report.add(
                 ConfigurationError(
                     message='duplicate schedule names',
-                    code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                    code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
                     notes=[f'schedule names: {names}'],
                     help_text='each schedule must have a unique name',
                 )

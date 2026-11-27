@@ -3,8 +3,11 @@
 // - A value that may be missing is a variant that names the missing state, not `null`.
 // - A count of 64 bits is a `bigint`; an instant is a `Temporal.Instant`; a length of time is a `Temporal.Duration`.
 
+import type { ShortageErrno } from "../_catalog/events.ts";
 import type { Execution } from "../_catalog/monitoring_models.ts";
 import type { JsonValue } from "../codec/json-value.ts";
+import type { ClusterCapSetting } from "../config/app-config.ts";
+import type { TaskLimit } from "../config/worker-profiles.ts";
 import type { TaskId } from "../contract/ids.ts";
 import type { Recorded } from "../read/info.ts";
 
@@ -30,8 +33,8 @@ export type MinResponses = { readonly kind: "fullWindow" } | { readonly kind: "a
 /** The options of a worker ping. The defaults: every worker, a window of 2,000 ms, the full window. */
 export interface PingWorkersOptions {
   readonly target?: PingTarget;
-  /** The window of the ping, a whole number of milliseconds above 0. */
-  readonly timeoutMs?: number;
+  /** How long the ping waits for replies, a whole number of milliseconds above 0. */
+  readonly waitMs?: number;
   readonly minResponses?: MinResponses;
 }
 
@@ -41,8 +44,9 @@ export type WorkerHistoryLimit = { readonly kind: "allRetained" } | { readonly k
 /** The worker profile that a snapshot names. `notRecorded`: a worker of a build before schema migration 1004. */
 export type SnapshotProfile = { readonly kind: "named"; readonly name: string } | { readonly kind: "notRecorded" };
 
-/** The errno of a resource shortage. */
-export type ShortageErrno = "EMFILE" | "ENFILE" | "ENOMEM" | "EAGAIN";
+// The errno of a resource shortage: the type of the generated event catalog, so the main entry point has one
+// `ShortageErrno` for the health reads and the events.
+export type { ShortageErrno };
 
 /** A boot failure cause that can clear by itself. */
 export type ClearableBootCause =
@@ -63,8 +67,8 @@ export type SlotHealth =
   | { readonly kind: "allSlotsServing" }
   | { readonly kind: "slotsDown"; readonly slots: readonly DownSlot[] };
 
-/** One claim budget of a worker: its capacity in service and the classes whose rows it claims. */
-export interface ClassBudget {
+/** One execution class budget of a worker: its capacity in service and the classes whose rows it claims. */
+export interface ExecutionClassBudget {
   readonly budget: Execution;
   readonly capacity: bigint;
   readonly serves: readonly Execution[];
@@ -73,8 +77,16 @@ export interface ClassBudget {
 /** A measure of a snapshot (memory or CPU), or the state that the worker could not take it. */
 export type Measure = { readonly kind: "measured"; readonly value: number } | { readonly kind: "notMeasured" };
 
-/** The cluster-wide cap of a worker's claims. */
-export type ClusterWideCap = { readonly kind: "capped"; readonly cap: number } | { readonly kind: "uncapped" };
+/**
+ * The claim limits of a worker. `claimedPerWorker` is the limit that the worker resolved: the seat count of the worker
+ * when its profile sets none.
+ */
+export interface ClaimLimits {
+  /** The most tasks that one claim pass takes from one queue. */
+  readonly perQueuePerPass: TaskLimit;
+  /** The most `CLAIMED` tasks that the worker holds. */
+  readonly claimedPerWorker: TaskLimit;
+}
 
 /**
  * The recovery settings and the health of a worker's maintenance passes, as the worker wrote them in its snapshot:
@@ -88,10 +100,11 @@ export interface WorkerStateSnapshot {
   readonly snapshotAt: Temporal.Instant;
   readonly hostname: string;
   readonly pid: number;
-  readonly processes: number;
-  readonly maxClaimBatch: number;
-  readonly maxClaimPerWorker: number;
-  readonly clusterWideCap: ClusterWideCap;
+  /** The children of the worker. */
+  readonly childCount: number;
+  readonly claimLimits: ClaimLimits;
+  /** The cluster-wide cap that the worker ran with. */
+  readonly clusterWideCap: ClusterCapSetting;
   readonly queues: readonly string[];
   readonly queuePriorities: ReadonlyMap<string, bigint>;
   readonly queueMaxConcurrency: ReadonlyMap<string, bigint>;
@@ -106,7 +119,7 @@ export interface WorkerStateSnapshot {
   readonly childrenMemoryMb: Measure;
   readonly workerStartedAt: Temporal.Instant;
   readonly slotHealth: SlotHealth;
-  readonly classCapacity: readonly ClassBudget[];
+  readonly executionClassBudgets: readonly ExecutionClassBudget[];
   readonly profile: SnapshotProfile;
 }
 
@@ -120,18 +133,18 @@ export type LastBeat = { readonly kind: "beat"; readonly at: Temporal.Instant } 
 
 /** A `RUNNING` task whose latest beat, or its start, is older than the threshold. */
 export interface StaleTaskRow {
-  readonly id: TaskId;
+  readonly taskId: TaskId;
   readonly taskName: string;
   readonly workerHostname: Recorded<string>;
   readonly workerPid: Recorded<number>;
   readonly workerProcessName: Recorded<string>;
   readonly startedAt: Temporal.Instant;
-  readonly lastHeartbeat: LastBeat;
+  readonly lastHeartbeatAt: LastBeat;
 }
 
 /** A `PENDING` task past its `goodUntil`: no worker claims it. */
 export interface ExpiredTaskRow {
-  readonly id: TaskId;
+  readonly taskId: TaskId;
   readonly taskName: string;
   readonly queueName: string;
   readonly priority: number;
@@ -142,7 +155,10 @@ export interface ExpiredTaskRow {
   readonly expiredFor: Temporal.Duration;
 }
 
-/** A task list, and whether it stopped at its bound: `truncated` holds the first `bound` rows, and more rows match. */
+/**
+ * A task list, and whether it stopped at its bound: `truncated` holds the first `bound` rows (`TASK_LIST_ROW_BOUND`),
+ * and more rows match.
+ */
 export type BoundedTaskList<T> =
   | { readonly kind: "complete"; readonly rows: readonly T[] }
   | { readonly kind: "truncated"; readonly rows: readonly T[]; readonly bound: number };
@@ -155,29 +171,33 @@ export type StreamCoverageState =
 
 /** The coverage of one pending stream: the `PENDING` rows of one queue and one class. */
 export interface StreamCoverage {
-  readonly queueName: string;
+  readonly queue: string;
   readonly execution: Execution;
-  readonly state: StreamCoverageState;
+  readonly coverage: StreamCoverageState;
 }
 
 /** The fleet check: the coverage of every pending stream, read at `checkedAt` (database time). */
-export interface ClassCoverage {
+export interface ExecutionClassCoverage {
   readonly checkedAt: Temporal.Instant;
   readonly liveWorkers: bigint;
   readonly streams: readonly StreamCoverage[];
 }
 
-/** How long the rows of a pending stream wait. */
+/**
+ * How long the rows of a pending stream wait. `due`: at least one row is due; `oldestDueAt` is the due time of the
+ * oldest due row (its send time, or the time its retry became due), and `wait` is how long it has waited.
+ * `noneDue`: every row is due later, the earliest at `nextDueAt`.
+ */
 export type StreamWait =
-  | { readonly kind: "oldestWaiting"; readonly enqueuedAt: Temporal.Instant; readonly wait: Temporal.Duration }
+  | { readonly kind: "due"; readonly oldestDueAt: Temporal.Instant; readonly wait: Temporal.Duration }
   | { readonly kind: "noneDue"; readonly nextDueAt: Temporal.Instant };
 
 /** One pending stream: how long its rows wait, and whether a live worker serves it. */
 export interface PendingStream {
-  readonly queueName: string;
+  readonly queue: string;
   readonly execution: Execution;
   readonly wait: StreamWait;
-  readonly state: StreamCoverageState;
+  readonly coverage: StreamCoverageState;
 }
 
 /** One claim budget of a live worker, with its rows in flight. */
@@ -189,17 +209,21 @@ export interface BudgetLoad {
 }
 
 /** The claim budgets of one live worker. */
-export interface WorkerClassLoad {
+export interface WorkerExecutionClassLoad {
   readonly workerId: string;
   readonly snapshotAt: Temporal.Instant;
   readonly budgets: readonly BudgetLoad[];
 }
 
-/** The class report: pending streams and the budget load of each live worker, read at `checkedAt`. */
-export interface ClassReport {
+/**
+ * The execution class report: pending streams and the budget load of each live worker, read at `checkedAt`. A worker
+ * is live when its latest snapshot is younger than `liveWindow`.
+ */
+export interface ExecutionClassReport {
   readonly checkedAt: Temporal.Instant;
+  readonly liveWindow: Temporal.Duration;
   readonly streams: readonly PendingStream[];
-  readonly workers: readonly WorkerClassLoad[];
+  readonly workers: readonly WorkerExecutionClassLoad[];
 }
 
 /** The task that a cancel moved to `CANCELLED`, and the status that it left. */

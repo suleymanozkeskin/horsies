@@ -18,6 +18,7 @@ use crate::core::config::child_sizing::{
     parent_pool_connections, shared_async_pool_connections, shared_thread_pool_connections,
     DEFAULT_TASK_SEND_POOL_CONNECTIONS, PARENT_POOL_CONNECTIONS_FLOOR,
 };
+use crate::core::config::worker_profile::input;
 use crate::core::config::worker_profile::{
     IsolatedChildren, ParentPool, PoolSizeSetting, SharedAsyncChildren, SharedPool,
     SharedThreadChildren, MAX_CHILD_POOL_CONNECTIONS,
@@ -86,7 +87,7 @@ fn isolated_only(children: u32) -> WorkerProfile {
 /// A broker config whose session work uses the worker pool (no separate
 /// session URL).
 fn direct() -> PostgresConfig {
-    PostgresConfig::from_url("postgresql://postgres:none@127.0.0.1:1/none")
+    PostgresConfig::from_database_url("postgresql://postgres:none@127.0.0.1:1/none")
 }
 
 fn limit(max_connections: i32, superuser_reserved: i32, reserved: i32) -> ServerConnectionLimit {
@@ -219,10 +220,13 @@ fn a_separate_session_url_adds_a_session_pool_sized_as_the_worker_pool() {
     let profile = isolated_only(1);
     let parent = profile.resolved_parent_pool().get();
     let mut separate = direct();
-    separate.session_database_url =
-        Some("postgresql://postgres:none@127.0.0.1:1/none?application_name=session".to_owned());
+    separate.session_database = crate::core::config::SessionDatabase::Separate {
+        url: "postgresql://postgres:none@127.0.0.1:1/none?application_name=session".to_owned(),
+    };
     let mut same_url = direct();
-    same_url.session_database_url = Some(same_url.database_url.clone());
+    same_url.session_database = crate::core::config::SessionDatabase::Separate {
+        url: same_url.database_url.clone(),
+    };
 
     let need = worker_connection_need(&profile, &separate);
 
@@ -323,7 +327,7 @@ fn a_profile_above_the_usable_slots_is_refused_with_the_formula_and_the_task_sen
     let [error] = errors.as_slice() else {
         panic!("expected one error, got {errors:?}");
     };
-    assert_eq!(error.code, Some(ErrorCode::CheckWorkerConnections));
+    assert_eq!(error.code, Some(HorsiesErrorCode::CheckWorkerConnections));
     assert_eq!(
         error.message,
         format!(
@@ -362,36 +366,63 @@ fn every_profile_that_does_not_fit_is_reported_in_name_order() {
 #[tokio::test]
 async fn no_profile_or_transaction_mode_reads_nothing() {
     let broker = unreachable_broker();
-    let mut config = AppConfig::for_database_url("postgresql://postgres:none@127.0.0.1:1/none");
+    let mut config = AppConfig::from_database_url("postgresql://postgres:none@127.0.0.1:1/none");
 
     assert!(check_worker_connections(&config, &broker).await.is_empty());
 
-    config
+    let _replaced = config
         .worker_profiles
-        .insert("default".to_owned(), isolated_only(1));
-    config.broker.pgbouncer_transaction_mode = true;
-    config.broker.session_database_url =
-        Some("postgresql://postgres:none@127.0.0.1:2/none".to_owned());
+        .insert("default".to_owned(), isolated_only(1).into());
+    config.database.pgbouncer_transaction_mode = true;
+    config.database.session_database = crate::core::config::SessionDatabase::Separate {
+        url: "postgresql://postgres:none@127.0.0.1:2/none".to_owned(),
+    };
     assert!(check_worker_connections(&config, &broker).await.is_empty());
+}
+
+/// A profile value outside its bound is refused with its path, as
+/// `AppConfig::validate` refuses it, and nothing is read: the broker
+/// cannot connect, so a read would be an error of its own.
+#[tokio::test]
+async fn a_profile_value_outside_its_bound_is_refused_and_nothing_is_read() {
+    let broker = unreachable_broker();
+    let mut config = AppConfig::from_database_url("postgresql://postgres:none@127.0.0.1:1/none");
+    let outside = input::WorkerProfile {
+        isolated: input::IsolatedChildren::new(0).into(),
+        ..input::WorkerProfile::default()
+    };
+    let _replaced = config.worker_profiles.insert("web".to_owned(), outside);
+
+    let errors = check_worker_connections(&config, &broker).await;
+
+    let messages: Vec<&str> = errors.iter().map(|error| error.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        ["worker_profiles['web'].isolated.count: 0 is outside the bounds 1 to 1024"],
+    );
+    assert_eq!(
+        errors[0].code,
+        Some(HorsiesErrorCode::ConfigInvalidWorkerProfile)
+    );
 }
 
 #[tokio::test]
 async fn an_unreadable_limit_is_one_error_and_no_profile_is_compared() {
     let broker = unreachable_broker();
-    let mut config = AppConfig::for_database_url("postgresql://postgres:none@127.0.0.1:1/none");
-    config
+    let mut config = AppConfig::from_database_url("postgresql://postgres:none@127.0.0.1:1/none");
+    let _replaced = config
         .worker_profiles
-        .insert("a".to_owned(), isolated_only(1));
-    config
+        .insert("a".to_owned(), isolated_only(1).into());
+    let _replaced = config
         .worker_profiles
-        .insert("b".to_owned(), isolated_only(1));
+        .insert("b".to_owned(), isolated_only(1).into());
 
     let errors = check_worker_connections(&config, &broker).await;
 
     let [error] = errors.as_slice() else {
         panic!("expected one error, got {errors:?}");
     };
-    assert_eq!(error.code, Some(ErrorCode::CheckWorkerConnections));
+    assert_eq!(error.code, Some(HorsiesErrorCode::CheckWorkerConnections));
     assert_eq!(
         error.message,
         "the server connection limit could not be read"
@@ -410,7 +441,7 @@ async fn an_unreadable_limit_is_one_error_and_no_profile_is_compared() {
 
 /// A Python handle of an unreachable server. In PgBouncer transaction mode
 /// the session URL is a separate, also unreachable, server.
-fn unreachable_handle(pgbouncer_transaction_mode: bool) -> CoreHandle {
+fn unreachable_handle(pgbouncer_transaction_mode: bool) -> CoreConnection {
     let session_database = match pgbouncer_transaction_mode {
         true => json!({"kind": "SEPARATE", "url": "postgresql://postgres:none@127.0.0.1:2/none"}),
         false => json!({"kind": "SAME_AS_DATABASE_URL"}),
@@ -424,7 +455,7 @@ fn unreachable_handle(pgbouncer_transaction_mode: bool) -> CoreHandle {
             "pool_pre_ping": true,
             "pool_size": 2,
             "max_overflow": 0,
-            "pool_timeout": 1,
+            "pool_timeout_seconds": 1,
             "pool_recycle": {"kind": "AFTER_SECONDS", "seconds": 1800},
             "echo": false,
             "tcp_keepalives": {"kind": "OFF"},
@@ -438,7 +469,7 @@ fn unreachable_handle(pgbouncer_transaction_mode: bool) -> CoreHandle {
     });
     let manifest =
         parse_producer_manifest(&manifest.to_string()).expect("the manifest is complete");
-    CoreHandle::new(manifest, PoolProfile::Producer, ClientFamily::Python)
+    CoreConnection::new(manifest, PoolProfile::Producer, ClientFamily::Python)
 }
 
 /// The rule of [`check_worker_connections`] on a handle: with no profiles,
@@ -480,7 +511,7 @@ async fn on_a_handle_an_unreachable_server_is_one_unreadable_limit_error() {
     let [error] = errors.as_slice() else {
         panic!("expected one error, got {errors:?}");
     };
-    assert_eq!(error.code, Some(ErrorCode::CheckWorkerConnections));
+    assert_eq!(error.code, Some(HorsiesErrorCode::CheckWorkerConnections));
     assert_eq!(
         error.message,
         "the server connection limit could not be read"
@@ -505,10 +536,13 @@ async fn each_child_kind_counts_its_own_pool_against_the_server() {
         shared_thread: shared_thread(1, THREAD_SEATS),
         ..WorkerProfile::default()
     };
-    let mut config = AppConfig::for_database_url(migrated_database_url().await);
+    let mut config = AppConfig::from_database_url(migrated_database_url().await);
     config.worker_profiles = BTreeMap::from([
-        ("big".to_owned(), big),
-        ("small".to_owned(), isolated_only(1)),
+        ("big".to_owned(), input::WorkerProfile::from(big)),
+        (
+            "small".to_owned(),
+            input::WorkerProfile::from(isolated_only(1)),
+        ),
     ]);
     let broker = PostgresBroker::from_test_url(migrated_pool().await.url(), ClientFamily::Rust);
 
@@ -527,7 +561,7 @@ async fn each_child_kind_counts_its_own_pool_against_the_server() {
     let [error] = errors.as_slice() else {
         panic!("expected one error, got {errors:?}");
     };
-    assert_eq!(error.code, Some(ErrorCode::CheckWorkerConnections));
+    assert_eq!(error.code, Some(HorsiesErrorCode::CheckWorkerConnections));
     assert!(
         error.message.starts_with(&format!(
             "worker_profiles['big']: one worker opens up to {total} Postgres connections itself"
@@ -573,10 +607,11 @@ async fn the_parent_pool_of_the_profile_is_counted_against_the_server() {
         },
         ..WorkerProfile::default()
     };
-    let mut config = AppConfig::for_database_url(migrated_database_url().await);
-    config.broker.pool_size = 1;
-    config.broker.max_overflow = 0;
-    config.worker_profiles = BTreeMap::from([("parent".to_owned(), profile)]);
+    let mut config = AppConfig::from_database_url(migrated_database_url().await);
+    config.database.pool_size = 1;
+    config.database.max_overflow = 0;
+    config.worker_profiles =
+        BTreeMap::from([("parent".to_owned(), input::WorkerProfile::from(profile))]);
     let broker = PostgresBroker::from_test_url(migrated_pool().await.url(), ClientFamily::Rust);
 
     let errors = check_worker_connections(&config, &broker).await;
@@ -586,7 +621,7 @@ async fn the_parent_pool_of_the_profile_is_counted_against_the_server() {
     let [error] = errors.as_slice() else {
         panic!("expected one error, got {errors:?}");
     };
-    assert_eq!(error.code, Some(ErrorCode::CheckWorkerConnections));
+    assert_eq!(error.code, Some(HorsiesErrorCode::CheckWorkerConnections));
     assert_eq!(
         error.notes.first().map(String::as_str),
         Some(
@@ -609,7 +644,7 @@ fn with_application_name(url: &str, application_name: &str) -> String {
     format!("{url}{separator}application_name={application_name}")
 }
 
-/// A `session_database_url` that differs from `database_url` adds the
+/// A separate session database URL that differs from `database_url` adds the
 /// session pool that the core's worker broker opens on it, sized as the
 /// worker pool, to the sum against the server. The worker pool, the
 /// listener, the runner heartbeat, the liveness lock and one isolated child
@@ -636,12 +671,12 @@ async fn a_separate_session_url_counts_its_session_pool_against_the_server() {
     assert_eq!(without_session_pool, u64::from(usable));
     assert!(total > u64::from(usable));
     let database_url = migrated_database_url().await;
-    let mut config = AppConfig::for_database_url(database_url.clone());
-    config.broker.session_database_url = Some(with_application_name(
-        &database_url,
-        "horsies_session_pool_check",
-    ));
-    config.worker_profiles = BTreeMap::from([("session".to_owned(), profile)]);
+    let mut config = AppConfig::from_database_url(database_url.clone());
+    config.database.session_database = crate::core::config::SessionDatabase::Separate {
+        url: with_application_name(&database_url, "horsies_session_pool_check"),
+    };
+    config.worker_profiles =
+        BTreeMap::from([("session".to_owned(), input::WorkerProfile::from(profile))]);
     let broker = PostgresBroker::from_test_url(migrated_pool().await.url(), ClientFamily::Rust);
 
     let errors = check_worker_connections(&config, &broker).await;
@@ -649,7 +684,7 @@ async fn a_separate_session_url_counts_its_session_pool_against_the_server() {
     let [error] = errors.as_slice() else {
         panic!("expected one error, got {errors:?}");
     };
-    assert_eq!(error.code, Some(ErrorCode::CheckWorkerConnections));
+    assert_eq!(error.code, Some(HorsiesErrorCode::CheckWorkerConnections));
     assert!(
         error.message.starts_with(&format!(
             "worker_profiles['session']: one worker opens up to {total} Postgres connections \
@@ -670,7 +705,8 @@ async fn a_separate_session_url_counts_its_session_pool_against_the_server() {
         )
     );
 
-    config.broker.session_database_url = Some(database_url);
+    config.database.session_database =
+        crate::core::config::SessionDatabase::Separate { url: database_url };
     let errors = check_worker_connections(&config, &broker).await;
     assert!(errors.is_empty(), "{errors:?}");
 }
@@ -737,7 +773,9 @@ async fn boot_through_a_transaction_pooler_reads_nothing() {
     let broker = unreachable_broker();
     let mut config = direct();
     config.pgbouncer_transaction_mode = true;
-    config.session_database_url = Some("postgresql://postgres:none@127.0.0.1:2/none".to_owned());
+    config.session_database = crate::core::config::SessionDatabase::Separate {
+        url: "postgresql://postgres:none@127.0.0.1:2/none".to_owned(),
+    };
 
     let fit = boot_connection_fit(&isolated_only(1), &config, &broker).await;
 
@@ -1222,9 +1260,12 @@ fn a_set_worker_pool_is_counted_as_set() {
 #[tokio::test]
 async fn profiles_that_fit_have_no_error() {
     let usable = usable_slots_of_the_test_server().await;
-    let mut config = AppConfig::for_database_url(migrated_database_url().await);
-    config.worker_profiles = BTreeMap::from([("small".to_owned(), isolated_only(1))]);
-    let need = worker_connection_need(&isolated_only(1), &config.broker).total();
+    let mut config = AppConfig::from_database_url(migrated_database_url().await);
+    config.worker_profiles = BTreeMap::from([(
+        "small".to_owned(),
+        input::WorkerProfile::from(isolated_only(1)),
+    )]);
+    let need = worker_connection_need(&isolated_only(1), &config.database).total();
     assert!(
         need <= u64::from(usable),
         "the test server has {usable} usable slots, fewer than the {need} of one small worker"

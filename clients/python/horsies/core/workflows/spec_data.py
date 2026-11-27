@@ -157,8 +157,8 @@ def _node(row: NodeRow) -> SpecNode:
         input_json=row.input_json,
         dependencies=row.dependencies,
         args_from=dict(row.args_from),
-        workflow_ctx_from=row.workflow_ctx_from or (),
-        allow_failed_deps=row.allow_failed_deps,
+        workflow_context_from=row.workflow_context_from or (),
+        allow_failed_dependencies=row.allow_failed_dependencies,
         join=_join(row),
         body=_body(row),
     )

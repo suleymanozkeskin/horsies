@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { ERROR_DATA_DEPTH_LIMIT, MAX_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
+import { ERROR_DATA_DEPTH_LIMIT, MAX_JSON_DEPTH } from "../../../horsies/src/_catalog/codec_bounds.ts";
 import { errorDataText, type StoredErrorData } from "../../../horsies/src/codec/error-data.ts";
 
 function nested(levels: number): unknown {

@@ -134,7 +134,7 @@ pub enum TaskRowEnd {
 ///
 /// Errors: [`BrokerError::Serialization`] when the result does not encode.
 pub(crate) fn pending_expiry_result() -> Result<String, BrokerError> {
-    let task_error = TaskError::builtin(OutcomeCode::TaskExpired, EXPIRY_MESSAGE);
+    let task_error = TaskError::built_in(OutcomeCode::TaskExpired, EXPIRY_MESSAGE);
     Ok(serde_json::to_string(
         &TaskResult::<serde_json::Value>::Err(task_error),
     )?)
@@ -149,7 +149,7 @@ pub(crate) fn prestart_expiry_result(
     task_id: Uuid,
     worker_id: &str,
 ) -> Result<String, BrokerError> {
-    let mut task_error = TaskError::builtin(OutcomeCode::TaskExpired, EXPIRY_MESSAGE);
+    let mut task_error = TaskError::built_in(OutcomeCode::TaskExpired, EXPIRY_MESSAGE);
     task_error.data = Some(crate::core::codec::JsonText::of_engine_value(
         &serde_json::json!({
             "task_id": task_id.to_string(),

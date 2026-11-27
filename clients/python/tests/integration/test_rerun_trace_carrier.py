@@ -1,9 +1,9 @@
 """The trace carrier of a rerun on PostgreSQL.
 
-`Horsies.rerun_task_async` and `Horsies.rerun_task` of an app with
+`Horsies.rerun_task_in_async` and `Horsies.rerun_task_in` of an app with
 `OtelTracing` store, on the new task, the carrier that the configured
 propagator injects for the caller's current span, and its trace id. Outside
-a span, with `NoTracing`, and through the free `rerun_task`, the new task
+a span, with `NoTracing`, and through the free `rerun_task_in_async`, the new task
 stores none. With `NoTracing` the app rerun runs in a child interpreter that
 refuses every `opentelemetry` module, and loads none.
 
@@ -35,10 +35,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from horsies.core.app import Horsies
 from horsies.core.history.rerun.operations import (
+    RerunCommand,
     RerunEnqueued,
     RerunOutcome,
-    RerunTask,
-    rerun_task,
+    rerun_task_in_async,
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
@@ -133,14 +133,14 @@ def inside_caller_span() -> Generator[None]:
 def app_with(tracing: OtelTracing | NoTracing) -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_BROKER_URL)),
+            database=PostgresConfig(database_url=SecretStr(UNREACHABLE_BROKER_URL)),
             tracing=tracing,
         ),
     )
 
 
-def command(source: str) -> RerunTask:
-    return RerunTask(source_task_id=UUID(source), deadline=None)
+def command(source: str) -> RerunCommand:
+    return RerunCommand(source_task_id=UUID(source), good_until=None)
 
 
 def enqueued(outcome: RerunOutcome, source: str) -> UUID:
@@ -198,7 +198,7 @@ class TestAppRerunCarrier:
         async with terminalization_schema.engine.begin() as connection:
             source = await seeded_source(connection)
             with inside_caller_span():
-                outcome = await app.rerun_task_async(connection, command(source), policy())
+                outcome = await app.rerun_task_in_async(connection, command(source), policy())
 
             new_task_id = enqueued(outcome, source)
             assert await stored_trace(connection, new_task_id) == CALLER_TRACE
@@ -217,7 +217,7 @@ class TestAppRerunCarrier:
         try:
             with engine.begin() as connection:
                 with inside_caller_span():
-                    outcome = app.rerun_task(connection, command(source), policy())
+                    outcome = app.rerun_task_in(connection, command(source), policy())
 
                 new_task_id = enqueued(outcome, source)
                 assert stored_trace_blocking(connection, new_task_id) == CALLER_TRACE
@@ -231,7 +231,7 @@ class TestAppRerunCarrier:
         app = app_with(OtelTracing())
         async with terminalization_schema.engine.begin() as connection:
             source = await seeded_source(connection)
-            outcome = await app.rerun_task_async(connection, command(source), policy())
+            outcome = await app.rerun_task_in_async(connection, command(source), policy())
 
             new_task_id = enqueued(outcome, source)
             assert await stored_trace(connection, new_task_id) == NO_STORED_TRACE
@@ -244,7 +244,7 @@ class TestAppRerunCarrier:
         async with terminalization_schema.engine.begin() as connection:
             source = await seeded_source(connection)
             with inside_caller_span():
-                outcome = await app.rerun_task_async(connection, command(source), policy())
+                outcome = await app.rerun_task_in_async(connection, command(source), policy())
 
             new_task_id = enqueued(outcome, source)
             assert await stored_trace(connection, new_task_id) == NO_STORED_TRACE
@@ -256,7 +256,12 @@ class TestAppRerunCarrier:
         async with terminalization_schema.engine.begin() as connection:
             source = await seeded_source(connection)
             with inside_caller_span():
-                outcome = await rerun_task(connection, command(source), policy())
+                outcome = await rerun_task_in_async(
+                    connection,
+                    command(source),
+                    policy(),
+                    registered_task_codes={},
+                )
 
             new_task_id = enqueued(outcome, source)
             assert await stored_trace(connection, new_task_id) == NO_STORED_TRACE
@@ -287,14 +292,14 @@ _NO_TRACING_RERUN = textwrap.dedent(
         AppConfig,
         Horsies,
         PostgresConfig,
+        RerunCommand,
         RerunEnqueued,
         RerunEnqueuePolicy,
-        RerunTask,
     )
 
     app = Horsies(
         AppConfig(
-            broker=PostgresConfig(database_url=SecretStr(os.environ['RERUN_BROKER_URL'])),
+            database=PostgresConfig(database_url=SecretStr(os.environ['RERUN_BROKER_URL'])),
         ),
     )
     engine = create_engine(
@@ -302,9 +307,9 @@ _NO_TRACING_RERUN = textwrap.dedent(
         connect_args={'options': '-csearch_path=' + os.environ['RERUN_SCHEMA']},
     )
     with engine.begin() as connection:
-        outcome = app.rerun_task(
+        outcome = app.rerun_task_in(
             connection,
-            RerunTask(source_task_id=UUID(os.environ['RERUN_SOURCE']), deadline=None),
+            RerunCommand(source_task_id=UUID(os.environ['RERUN_SOURCE']), good_until=None),
             RerunEnqueuePolicy(
                 retention=timedelta(days=int(os.environ['RERUN_DAYS'])),
                 retain_rerun_input=True,

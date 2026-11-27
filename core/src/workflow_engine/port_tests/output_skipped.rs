@@ -4,7 +4,7 @@
 //! COMPLETED while that node is SKIPPED or FAILED. A sub-workflow node is
 //! COMPLETED only when its child's output is ok: an err output, or a stored
 //! child result that does not parse, makes a FAILED node, so
-//! `allow_failed_deps = false`, `join` and a success case hold by status.
+//! `allow_failed_dependencies = false`, `join` and a success case hold by status.
 //!
 //! A test that leaves a live task row runs in a database of its own
 //! (`IsolatedDatabase`).
@@ -258,7 +258,7 @@ async fn an_err_output_fails_the_node_and_skips_a_default_dependent() {
 
 /// `test_allow_failed_deps_dependent_receives_the_err` (skipped output, failed output)
 #[tokio::test]
-async fn an_allow_failed_deps_dependent_receives_the_err() {
+async fn an_allow_failed_dependencies_dependent_receives_the_err() {
     let db = IsolatedDatabase::create().await;
     let pool = db.pool.clone();
     let child_specs = output_children();
@@ -266,7 +266,7 @@ async fn an_allow_failed_deps_dependent_receives_the_err() {
         let mut dependent = task_node(1, "output_skipped_recover");
         dependent.dependencies = vec![0];
         dependent.args_from.insert("upstream".to_owned(), 0);
-        dependent.allow_failed_deps = true;
+        dependent.allow_failed_dependencies = true;
         let mut parent = spec(
             "output_skipped_recover_parent",
             vec![sub_workflow_node(0, &child.spec()), dependent],
@@ -297,8 +297,8 @@ async fn the_workflow_context_holds_the_named_outcome() {
     let child_specs = output_children();
     let mut dependent = task_node(1, "output_skipped_ctx_consume");
     dependent.dependencies = vec![0];
-    dependent.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
-    dependent.allow_failed_deps = true;
+    dependent.workflow_context_from = Some(vec!["node_0".to_owned()]);
+    dependent.allow_failed_dependencies = true;
     let mut parent = spec(
         "output_skipped_ctx_parent",
         vec![sub_workflow_node(0, &skipped_output_child()), dependent],
@@ -516,7 +516,7 @@ async fn two_levels_with_the_default_policy_give_subworkflow_failed() {
     assert_eq!(workflow_status(&pool, workflow_id).await, "FAILED");
     assert_eq!(
         get_code(&pool, workflow_id).await.as_deref(),
-        Some("SUBWORKFLOW_FAILED")
+        Some("SUB_WORKFLOW_FAILED")
     );
 }
 
@@ -655,7 +655,7 @@ async fn child_result_text_that_does_not_parse_fails_the_node() {
         let mut dependent = NodeSeed::task(parent_id, 1, "PENDING")
             .deps(&[0])
             .args_from("upstream", 0)
-            .allow_failed_deps();
+            .allow_failed_dependencies();
         dependent.task_name = "output_skipped_stored_data_recover".to_owned();
         seed_node(&pool, &dependent).await;
 

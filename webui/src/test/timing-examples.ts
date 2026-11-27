@@ -100,7 +100,7 @@ export const TIMING_EXAMPLES: TimingExamples = {
           },
           started_at: '2026-11-22T12:00:00Z',
           end: {
-            kind: 'ended',
+            kind: 'closed',
             at: '2026-11-22T12:00:01Z',
           },
           source: {
@@ -113,7 +113,7 @@ export const TIMING_EXAMPLES: TimingExamples = {
           },
           started_at: '2026-11-22T12:00:01Z',
           end: {
-            kind: 'ended',
+            kind: 'closed',
             at: '2026-11-22T12:00:02Z',
           },
           source: {
@@ -126,7 +126,7 @@ export const TIMING_EXAMPLES: TimingExamples = {
           },
           started_at: '2026-11-22T12:00:02Z',
           end: {
-            kind: 'ended',
+            kind: 'closed',
             at: '2026-11-22T12:00:03Z',
           },
           source: {
@@ -146,7 +146,7 @@ export const TIMING_EXAMPLES: TimingExamples = {
           },
           started_at: '2026-11-22T12:00:03Z',
           end: {
-            kind: 'ended',
+            kind: 'closed',
             at: '2026-11-22T12:00:04Z',
           },
           source: {
@@ -169,7 +169,7 @@ export const TIMING_EXAMPLES: TimingExamples = {
           },
           started_at: '2026-11-22T12:00:04Z',
           end: {
-            kind: 'ended',
+            kind: 'closed',
             at: '2026-11-22T12:00:06Z',
           },
           source: {
@@ -185,7 +185,7 @@ export const TIMING_EXAMPLES: TimingExamples = {
           },
           started_at: '2026-11-22T12:00:06Z',
           end: {
-            kind: 'ended',
+            kind: 'closed',
             at: '2026-11-22T12:00:07Z',
           },
           source: {
@@ -201,7 +201,7 @@ export const TIMING_EXAMPLES: TimingExamples = {
           },
           started_at: '2026-11-22T12:00:07Z',
           end: {
-            kind: 'ended',
+            kind: 'closed',
             at: '2026-11-22T12:00:08Z',
           },
           source: {
@@ -217,7 +217,7 @@ export const TIMING_EXAMPLES: TimingExamples = {
           },
           started_at: '2026-11-22T12:00:08Z',
           end: {
-            kind: 'ended',
+            kind: 'closed',
             at: '2026-11-22T12:00:09Z',
           },
           source: {
@@ -236,7 +236,7 @@ export const TIMING_EXAMPLES: TimingExamples = {
           },
           started_at: '2026-11-22T12:00:09Z',
           end: {
-            kind: 'ended',
+            kind: 'closed',
             at: '2026-11-22T12:00:10Z',
           },
           source: {
@@ -252,7 +252,7 @@ export const TIMING_EXAMPLES: TimingExamples = {
           },
           started_at: '2026-11-22T12:00:10Z',
           end: {
-            kind: 'ended',
+            kind: 'closed',
             at: '2026-11-22T12:00:11Z',
           },
           source: {
@@ -280,7 +280,7 @@ export const TIMING_EXAMPLES: TimingExamples = {
           },
           started_at: '2026-11-22T12:00:00Z',
           end: {
-            kind: 'ended',
+            kind: 'closed',
             at: '2026-11-22T12:00:05Z',
           },
           source: {
@@ -404,7 +404,7 @@ export const TIMING_EXAMPLES: TimingExamples = {
         conflicts: [
           {
             kind: 'node',
-            task_index: 2,
+            node_index: 2,
           },
           {
             kind: 'pause',

@@ -1,6 +1,6 @@
 """The monitoring reads that run in the core: the record of the core decides the answer.
 
-Every read of ``horsies.monitoring`` calls the broker's core handle. The tests run on a mocked handle: the record of each call is the
+Every read of ``horsies.monitoring`` calls the core handle of the app's broker. The tests run on a mocked handle: the record of each call is the
 seam. ``MonitoringJson`` is validated into the response model; a failure is
 the core's generated class, which every read returns as it is; a core
 boundary error of the call is a database failure. The decoding of the
@@ -24,13 +24,13 @@ from pydantic import ValidationError
 
 from horsies._core import (
     CoreConnectionError,
-    CoreStartFailed,
+    RuntimeStartFailed,
     MonitoringJson,
     TaskBreakdownQuery,
     TaskDetailAbsent,
     TaskFacetsQuery,
     TaskListQuery,
-    TaskStatsQuery,
+    TaskStatusCountsQuery,
     TooManyPendingCalls,
     WorkflowRunsQuery,
 )
@@ -41,11 +41,11 @@ from horsies.core.types.status import TaskStatus
 from horsies.monitoring import (
     Breakdown,
     BreakdownLimit,
-    BreakdownUnclaimedGroup,
-    BreakdownValueGroup,
+    BreakdownGroupUnclaimed,
+    BreakdownGroupValue,
     ErrorCategory,
     Facets,
-    MonitoringQueryDbOperationFailed,
+    MonitoringQueryDatabaseOperationFailed,
     MonitoringQueryHistoryContractViolation,
     MonitoringResult,
     MonitoringWindow,
@@ -55,6 +55,7 @@ from horsies.monitoring import (
     TaskListPage,
     TaskPage,
     ScheduleStateInfo,
+    SortDirection,
     StatusCount,
     WorkflowRunDetail,
     WorkflowRunsLimit,
@@ -68,7 +69,7 @@ from horsies.monitoring import (
     list_workflow_runs,
     task_breakdown,
     task_facets,
-    task_stats,
+    task_status_counts,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -79,30 +80,30 @@ WINDOW: Final = MonitoringWindow(lower=UPPER - timedelta(days=1), upper=UPPER)
 MESSAGE: Final = 'task list query failed: message-marker-4c1e'
 
 PAGE_JSON: Final = (
-    '{"rows": [{"id": "0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b", "task_name": "t", '
-    '"queue_name": "default", "status": "FAILED", "priority": 100, "retry_count": 1, '
+    '{"rows": [{"task_id": "0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b", "task_name": "t", '
+    '"queue": "default", "status": "FAILED", "priority": 100, "retry_count": 1, '
     '"max_retries": 3, "is_workflow_task": false, "error_code": "ORDER_REJECTED", '
-    '"error_category": "DOMAIN", "worker_hostname": "host-1", "worker_id": "worker-1", '
+    '"error_category": "CUSTOM", "worker_hostname": "host-1", "worker_id": "worker-1", '
     '"enqueued_at": "2026-11-17T11:00:00Z", "started_at": "2026-11-17T11:00:05.250000Z", '
-    '"completed_at": null, "failed_at": "2026-11-17T11:00:09Z", "queue_s": 5.25, "exec_s": 3.75}], '
+    '"completed_at": null, "failed_at": "2026-11-17T11:00:09Z", "queue_seconds": 5.25, "execution_seconds": 3.75}], '
     '"total": 7}'
 )
 FACETS_JSON: Final = (
     '{"workers": [{"value": "worker-1", "count": 2}], "task_names": [], '
     '"queues": [{"value": "default", "count": 2}], '
-    '"error_codes": [{"value": "ORDER_REJECTED", "count": 1, "category": "DOMAIN"}], '
-    '"error_category_totals": {"DOMAIN": 1}}'
+    '"error_codes": [{"value": "ORDER_REJECTED", "count": 1, "category": "CUSTOM"}], '
+    '"error_category_totals": {"CUSTOM": 1}}'
 )
 DETAIL_JSON: Final = (
-    '{"leaf": {"task_id": "0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b", "status": "RUNNING", '
+    '{"task_row": {"task_id": "0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b", "status": "RUNNING", '
     '"error_code": null, "failed_reason": null, "retry_count": 0, "max_retries": 3, '
     '"enqueued_at": "2026-11-17T11:00:00Z", "started_at": "2026-11-17T11:00:01Z", '
-    '"completed_at": null, "failed_at": null, "queue_s": 1.0, "exec_s": 42.5, '
+    '"completed_at": null, "failed_at": null, "queue_seconds": 1.0, "execution_seconds": 42.5, '
     '"worker_hostname": "host-1", "good_until": null, "execution": "SHARED_THREAD", '
     '"trace_id": "0af7651916cd43dd8448eb211c80319c"}, '
-    '"task_name": "t", "queue_name": "default", "priority": 100, "is_workflow_task": true, '
+    '"task_name": "t", "queue": "default", "priority": 100, "is_workflow_task": true, '
     '"error_category": null, "attempts": [], '
-    '"workflow_id": "0190a1b2-c3d4-7e5f-8a6b-000000000001", "workflow_task_index": 2}'
+    '"workflow_id": "0190a1b2-c3d4-7e5f-8a6b-000000000001", "workflow_node_index": 2}'
 )
 
 
@@ -115,9 +116,9 @@ def _record(record_class: type, **fields: object) -> MagicMock:
     return record
 
 
-def _broker(method: str, answer: object) -> tuple[MagicMock, AsyncMock]:
-    """A broker whose core handle answers ``method`` with ``answer``: a record,
-    or an exception that the call raises."""
+def _app(method: str, answer: object) -> tuple[MagicMock, AsyncMock]:
+    """An app whose broker's core handle answers ``method`` with ``answer``:
+    a record, or an exception that the call raises."""
     match answer:
         case BaseException():
             call = AsyncMock(side_effect=answer)
@@ -127,7 +128,9 @@ def _broker(method: str, answer: object) -> tuple[MagicMock, AsyncMock]:
     setattr(handle, method, call)
     broker = MagicMock()
     broker._core_handle = handle
-    return broker, call
+    app = MagicMock()
+    app.get_broker.return_value = broker
+    return app, call
 
 
 def _only_argument(call: AsyncMock) -> object:
@@ -139,19 +142,19 @@ def _only_argument(call: AsyncMock) -> object:
 
 
 async def _list(answer: object) -> tuple[MonitoringResult[TaskListPage], AsyncMock]:
-    broker, call = _broker('monitoring_list_tasks_async', answer)
+    app, call = _app('monitoring_list_tasks_async', answer)
     result = await list_tasks(
-        broker,
+        app,
         window=WINDOW,
         statuses=[TaskStatus.FAILED],
         task_names=['t'],
         queues=[],
         workers=[],
         error_codes=[],
-        error_categories=[ErrorCategory.DOMAIN],
+        error_categories=[ErrorCategory.CUSTOM],
         retried_only=False,
-        sort_by='enqueued_at',
-        sort_dir='desc',
+        sort_field='enqueued_at',
+        sort_direction=SortDirection.DESCENDING,
         page=TaskPage(offset=0, limit=50),
     )
     return result, call
@@ -165,22 +168,22 @@ class TestAnswers:
         assert result == Ok(TaskListPage.model_validate_json(PAGE_JSON))
         match result:
             case Ok(TaskListPage(rows=[row], total=7)):
-                assert row.id == TASK_ID
+                assert row.task_id == TASK_ID
                 assert row.started_at == datetime(2026, 11, 17, 11, 0, 5, 250000, tzinfo=UTC)
-                assert (row.queue_s, row.exec_s) == (5.25, 3.75)
+                assert (row.queue_seconds, row.execution_seconds) == (5.25, 3.75)
             case _:
                 raise AssertionError(f'expected one row and the total: {result!r}')
         assert _only_argument(call).__class__ is TaskListQuery
 
     @pytest.mark.asyncio
     async def test_the_facets_are_the_json_of_the_core_model(self) -> None:
-        broker, call = _broker('monitoring_task_facets_async', _record(MonitoringJson, json=FACETS_JSON))
+        app, call = _app('monitoring_task_facets_async', _record(MonitoringJson, json=FACETS_JSON))
 
         result = await task_facets(
-            broker,
+            app,
             window=WINDOW,
             statuses=[],
-            error_categories=[ErrorCategory.DOMAIN],
+            error_categories=[ErrorCategory.CUSTOM],
             retried_only=True,
         )
 
@@ -189,14 +192,14 @@ class TestAnswers:
 
     @pytest.mark.asyncio
     async def test_the_detail_is_the_json_of_the_core_model_with_the_class(self) -> None:
-        broker, call = _broker('monitoring_task_detail_async', _record(MonitoringJson, json=DETAIL_JSON))
+        app, call = _app('monitoring_task_detail_async', _record(MonitoringJson, json=DETAIL_JSON))
 
-        result = await get_task_detail(broker, TASK_ID)
+        result = await get_task_detail(app, TASK_ID)
 
         match result:
-            case Ok(TaskDetail(leaf=leaf, workflow_id=workflow_id)):
-                assert leaf.execution is Execution.SHARED_THREAD
-                assert leaf.trace_id == '0af7651916cd43dd8448eb211c80319c'
+            case Ok(TaskDetail(task_row=task_row, workflow_id=workflow_id)):
+                assert task_row.execution is Execution.SHARED_THREAD
+                assert task_row.trace_id == '0af7651916cd43dd8448eb211c80319c'
                 assert workflow_id == '0190a1b2-c3d4-7e5f-8a6b-000000000001'
             case _:
                 raise AssertionError(f'expected the task: {result!r}')
@@ -205,73 +208,73 @@ class TestAnswers:
     @pytest.mark.parametrize('reason', list(TaskAbsenceReason))
     @pytest.mark.asyncio
     async def test_an_absent_task_keeps_its_reason(self, reason: TaskAbsenceReason) -> None:
-        broker, _ = _broker(
+        app, _ = _app(
             'monitoring_task_detail_async',
             _record(TaskDetailAbsent, task_id=TASK_ID, reason=reason.value),
         )
 
-        result = await get_task_detail(broker, TASK_ID)
+        result = await get_task_detail(app, TASK_ID)
 
         assert result == Ok(TaskDetailNotFound(task_id=TASK_ID, reason=reason))
 
 
-def _core_failures() -> list[MonitoringQueryDbOperationFailed | MonitoringQueryHistoryContractViolation]:
+def _core_failures() -> list[MonitoringQueryDatabaseOperationFailed | MonitoringQueryHistoryContractViolation]:
     """One value of each class that the core builds for a failed read."""
     return [
-        MonitoringQueryDbOperationFailed(
+        MonitoringQueryDatabaseOperationFailed(
             message=MESSAGE,
             retryable=True,
-            exception=CoreConnectionError('task list query', 'connection refused', True),
+            cause=CoreConnectionError('task list query', 'connection refused', True),
         ),
         MonitoringQueryHistoryContractViolation(
             message='task detail query failed: history row has status BOGUS',
-            exception=HistoryContractError('history row has status BOGUS'),
+            cause=HistoryContractError('history row has status BOGUS'),
         ),
     ]
 
 
-#: Each read of ``horsies.monitoring``: its core method, and its call on a broker.
+#: Each read of ``horsies.monitoring``: its core method, and its call on a app.
 READS: Final[tuple[tuple[str, Callable[[MagicMock], Awaitable[MonitoringResult[Any]]]], ...]] = (
     (
-        'monitoring_task_stats_async',
-        lambda broker: task_stats(
-            broker, window=WINDOW, task_names=[], queues=[], workers=[], error_codes=[],
+        'monitoring_task_status_counts_async',
+        lambda app: task_status_counts(
+            app, window=WINDOW, task_names=[], queues=[], workers=[], error_codes=[],
             error_categories=[], retried_only=False,
         ),
     ),
     (
         'monitoring_task_facets_async',
-        lambda broker: task_facets(
-            broker, window=WINDOW, statuses=[], error_categories=[], retried_only=False,
+        lambda app: task_facets(
+            app, window=WINDOW, statuses=[], error_categories=[], retried_only=False,
         ),
     ),
     (
         'monitoring_task_breakdown_async',
-        lambda broker: task_breakdown(
-            broker, window=WINDOW, group_by='worker', statuses=[], task_names=[], queues=[],
+        lambda app: task_breakdown(
+            app, window=WINDOW, group_by='worker', statuses=[], task_names=[], queues=[],
             workers=[], error_codes=[], error_categories=[], retried_only=False,
             limit=BreakdownLimit(value=50),
         ),
     ),
     (
         'monitoring_list_tasks_async',
-        lambda broker: list_tasks(
-            broker, window=WINDOW, statuses=[], task_names=[], queues=[], workers=[],
-            error_codes=[], error_categories=[], retried_only=False, sort_by='enqueued_at',
-            sort_dir='desc', page=TaskPage(offset=0, limit=50),
+        lambda app: list_tasks(
+            app, window=WINDOW, statuses=[], task_names=[], queues=[], workers=[],
+            error_codes=[], error_categories=[], retried_only=False, sort_field='enqueued_at',
+            sort_direction=SortDirection.DESCENDING, page=TaskPage(offset=0, limit=50),
         ),
     ),
-    ('monitoring_task_detail_async', lambda broker: get_task_detail(broker, TASK_ID)),
-    ('monitoring_workflow_names_async', lambda broker: list_workflow_names(broker)),
+    ('monitoring_task_detail_async', lambda app: get_task_detail(app, TASK_ID)),
+    ('monitoring_workflow_names_async', lambda app: list_workflow_names(app)),
     (
         'monitoring_workflow_runs_async',
-        lambda broker: list_workflow_runs(
-            broker, name=None, status=None, limit=WorkflowRunsLimit(value=30),
+        lambda app: list_workflow_runs(
+            app, workflow_name=None, status=None, limit=WorkflowRunsLimit(value=30),
         ),
     ),
-    ('monitoring_workflow_run_async', lambda broker: get_workflow_run(broker, RUN_ID)),
-    ('monitoring_workflow_node_async', lambda broker: get_workflow_node(broker, RUN_ID, 7)),
-    ('monitoring_schedules_async', lambda broker: list_schedules(broker)),
+    ('monitoring_workflow_run_async', lambda app: get_workflow_run(app, RUN_ID)),
+    ('monitoring_workflow_node_async', lambda app: get_workflow_node(app, RUN_ID, 7)),
+    ('monitoring_schedules_async', lambda app: list_schedules(app)),
 )
 
 
@@ -282,12 +285,12 @@ class TestFailures:
     async def test_every_read_returns_the_core_s_failure_as_it_is(
         self,
         read: tuple[str, Callable[[MagicMock], Awaitable[MonitoringResult[Any]]]],
-        failure: MonitoringQueryDbOperationFailed | MonitoringQueryHistoryContractViolation,
+        failure: MonitoringQueryDatabaseOperationFailed | MonitoringQueryHistoryContractViolation,
     ) -> None:
         method, call = read
-        broker, _ = _broker(method, failure)
+        app, _ = _app(method, failure)
 
-        result = await call(broker)
+        result = await call(app)
 
         match result:
             case Err(error):
@@ -311,7 +314,7 @@ class TestFailures:
         ('raised', 'retryable'),
         [
             (TooManyPendingCalls('CoreHandle.monitoring_list_tasks_async', 65_536), True),
-            (CoreStartFailed('the core runtime could not start'), False),
+            (RuntimeStartFailed('the core runtime could not start'), False),
         ],
         ids=['too-many-calls', 'start-failed'],
     )
@@ -322,8 +325,8 @@ class TestFailures:
         result, _ = await _list(raised)
 
         match result:
-            case Err(MonitoringQueryDbOperationFailed() as error):
-                assert error.exception is raised
+            case Err(MonitoringQueryDatabaseOperationFailed() as error):
+                assert error.cause is raised
                 assert error.retryable is retryable
                 assert error.message.startswith('task list query failed: ')
             case _:
@@ -342,14 +345,14 @@ BREAKDOWN_JSON: Final = (
     '"group_count": 2}'
 )
 RUNS_JSON: Final = (
-    '[{"id": "0190a1b2-c3d4-7e5f-8a6b-000000000001", "name": "alpha.flow", '
+    '[{"workflow_id": "0190a1b2-c3d4-7e5f-8a6b-000000000001", "workflow_name": "alpha.flow", '
     '"definition_key": null, "status": "RUNNING", "created_at": "2026-11-17T11:00:00Z", '
-    '"completed_at": null, "wall_s": 60.5}]'
+    '"completed_at": null, "wall_seconds": 60.5}]'
 )
 RUN_JSON: Final = (
-    '{"run": {"id": "0190a1b2-c3d4-7e5f-8a6b-000000000001", "name": "alpha.flow", '
+    '{"run": {"workflow_id": "0190a1b2-c3d4-7e5f-8a6b-000000000001", "workflow_name": "alpha.flow", '
     '"definition_key": null, "status": "RUNNING", "created_at": "2026-11-17T11:00:00Z", '
-    '"completed_at": null, "wall_s": 60.5}, "nodes": [], "edges": [], "failed_count": 0, '
+    '"completed_at": null, "wall_seconds": 60.5}, "nodes": [], "edges": [], "failed_count": 0, '
     '"failed_indices": [], "trace_id": null, "timing": {"kind": "unavailable", '
     '"as_of": "2026-11-17T11:01:00Z", "captured_since": "2026-11-17T12:00:00Z", '
     '"reason": "RUN_BEFORE_CAPTURE"}}'
@@ -363,10 +366,10 @@ SCHEDULES_JSON: Final = (
 class TestAggregateAndWorkflowAnswers:
     @pytest.mark.asyncio
     async def test_the_stats_are_the_json_list_of_the_core(self) -> None:
-        broker, call = _broker('monitoring_task_stats_async', _record(MonitoringJson, json=STATS_JSON))
+        app, call = _app('monitoring_task_status_counts_async', _record(MonitoringJson, json=STATS_JSON))
 
-        result = await task_stats(
-            broker,
+        result = await task_status_counts(
+            app,
             window=WINDOW,
             task_names=[],
             queues=[],
@@ -377,16 +380,16 @@ class TestAggregateAndWorkflowAnswers:
         )
 
         assert result == Ok([StatusCount(status='PENDING', count=2), StatusCount(status='FAILED', count=1)])
-        assert _only_argument(call).__class__ is TaskStatsQuery
+        assert _only_argument(call).__class__ is TaskStatusCountsQuery
 
     @pytest.mark.asyncio
     async def test_the_breakdown_keeps_both_group_kinds(self) -> None:
-        broker, call = _broker(
+        app, call = _app(
             'monitoring_task_breakdown_async', _record(MonitoringJson, json=BREAKDOWN_JSON),
         )
 
         result = await task_breakdown(
-            broker,
+            app,
             window=WINDOW,
             group_by='worker',
             statuses=[],
@@ -401,33 +404,33 @@ class TestAggregateAndWorkflowAnswers:
 
         match result:
             case Ok(Breakdown(groups=[first, second], group_count=2)):
-                assert first.group == BreakdownValueGroup(value='worker-1')
-                assert second.group == BreakdownUnclaimedGroup()
+                assert first.group == BreakdownGroupValue(value='worker-1')
+                assert second.group == BreakdownGroupUnclaimed()
             case _:
                 raise AssertionError(f'expected two groups: {result!r}')
         assert _only_argument(call).__class__ is TaskBreakdownQuery
 
     @pytest.mark.asyncio
     async def test_the_names_runs_and_schedules_are_the_json_lists_of_the_core(self) -> None:
-        names_broker, _ = _broker(
+        names_app, _ = _app(
             'monitoring_workflow_names_async', _record(MonitoringJson, json='["alpha.flow"]'),
         )
-        runs_broker, runs_call = _broker(
+        runs_app, runs_call = _app(
             'monitoring_workflow_runs_async', _record(MonitoringJson, json=RUNS_JSON),
         )
-        schedules_broker, _ = _broker(
+        schedules_app, _ = _app(
             'monitoring_schedules_async', _record(MonitoringJson, json=SCHEDULES_JSON),
         )
 
-        names = await list_workflow_names(names_broker)
+        names = await list_workflow_names(names_app)
         runs = await list_workflow_runs(
-            runs_broker, name='alpha.flow', status=None, limit=WorkflowRunsLimit(value=30),
+            runs_app, workflow_name='alpha.flow', status=None, limit=WorkflowRunsLimit(value=30),
         )
-        schedules = await list_schedules(schedules_broker)
+        schedules = await list_schedules(schedules_app)
 
         assert names == Ok(['alpha.flow'])
         match runs:
-            case Ok([WorkflowRunSummary(id=run_id, wall_s=60.5)]):
+            case Ok([WorkflowRunSummary(workflow_id=run_id, wall_seconds=60.5)]):
                 assert run_id == RUN_ID
             case _:
                 raise AssertionError(f'expected one run: {runs!r}')
@@ -440,15 +443,15 @@ class TestAggregateAndWorkflowAnswers:
 
     @pytest.mark.asyncio
     async def test_a_run_is_its_json_and_null_is_no_run(self) -> None:
-        found_broker, found_call = _broker(
+        found_app, found_call = _app(
             'monitoring_workflow_run_async', _record(MonitoringJson, json=RUN_JSON),
         )
-        absent_broker, _ = _broker(
+        absent_app, _ = _app(
             'monitoring_workflow_run_async', _record(MonitoringJson, json='null'),
         )
 
-        found = await get_workflow_run(found_broker, RUN_ID)
-        absent = await get_workflow_run(absent_broker, RUN_ID)
+        found = await get_workflow_run(found_app, RUN_ID)
+        absent = await get_workflow_run(absent_app, RUN_ID)
 
         assert found == Ok(WorkflowRunDetail.model_validate_json(RUN_JSON))
         found_call.assert_awaited_once_with(uuid.UUID(RUN_ID))
@@ -458,37 +461,37 @@ class TestAggregateAndWorkflowAnswers:
     async def test_an_id_text_that_is_not_a_uuid_names_no_run_or_node_and_calls_nothing(
         self,
     ) -> None:
-        run_broker, run_call = _broker(
+        run_app, run_call = _app(
             'monitoring_workflow_run_async', _record(MonitoringJson, json='null'),
         )
-        node_broker, node_call = _broker(
+        node_app, node_call = _app(
             'monitoring_workflow_node_async', _record(MonitoringJson, json='null'),
         )
 
-        assert await get_workflow_run(run_broker, 'not-a-uuid') == Ok(None)
-        assert await get_workflow_node(node_broker, 'not-a-uuid', 0) == Ok(None)
+        assert await get_workflow_run(run_app, 'not-a-uuid') == Ok(None)
+        assert await get_workflow_node(node_app, 'not-a-uuid', 0) == Ok(None)
         run_call.assert_not_awaited()
         node_call.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_a_node_index_reaches_the_core_and_null_is_no_node(self) -> None:
-        broker, call = _broker('monitoring_workflow_node_async', _record(MonitoringJson, json='null'))
+        app, call = _app('monitoring_workflow_node_async', _record(MonitoringJson, json='null'))
 
-        result = await get_workflow_node(broker, RUN_ID, 7)
+        result = await get_workflow_node(app, RUN_ID, 7)
 
         assert result == Ok(None)
-        call.assert_awaited_once_with(uuid.UUID(RUN_ID), task_index=7)
+        call.assert_awaited_once_with(uuid.UUID(RUN_ID), node_index=7)
 
-    @pytest.mark.parametrize('task_index', [-(2**31) - 1, 2**31, 10**30])
+    @pytest.mark.parametrize('node_index', [-(2**31) - 1, 2**31, 10**30])
     @pytest.mark.asyncio
     async def test_a_node_index_outside_the_integer_column_names_no_node(
-        self, task_index: int,
+        self, node_index: int,
     ) -> None:
         """An index that the integer column cannot hold names no node: ``Ok(None)``,
         with no call. A client value is not a database failure."""
-        broker, call = _broker('monitoring_workflow_node_async', _record(MonitoringJson, json='null'))
+        app, call = _app('monitoring_workflow_node_async', _record(MonitoringJson, json='null'))
 
-        result = await get_workflow_node(broker, RUN_ID, task_index)
+        result = await get_workflow_node(app, RUN_ID, node_index)
 
         assert result == Ok(None)
         call.assert_not_awaited()

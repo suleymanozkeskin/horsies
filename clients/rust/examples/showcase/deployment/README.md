@@ -147,7 +147,7 @@ WantedBy=multi-user.target
 
 ### `acme-rust-web.service`
 
-`--auth none` is valid only for loopback. A proxy must strip and set the
+`--authorization none` is valid only for loopback. A proxy must strip and set the
 trusted header before forwarding a request. The web process is read-only by
 default. Enable actions only when the proxy and operator policy require it.
 
@@ -162,7 +162,7 @@ Type=simple
 User=acme-rust
 WorkingDirectory=/opt/acme-rust
 EnvironmentFile=/etc/acme-rust/web.env
-ExecStart=/opt/acme-rust/bin/acme web --host 127.0.0.1 --port 8600 --auth trusted-header --trusted-header X-Forwarded-User
+ExecStart=/opt/acme-rust/bin/acme web --host 127.0.0.1 --port 8600 --authorization trusted-header --trusted-header X-Forwarded-User
 Restart=always
 RestartSec=3
 NoNewPrivileges=true

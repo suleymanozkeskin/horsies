@@ -27,7 +27,7 @@ use horsies_core::core::config::payload::{enforce_payload_policy, PayloadKind};
 use horsies_core::core::task::send_types::{
     send_error_from_enqueue, send_failure_exception, SendFailureException,
 };
-use horsies_core::handle::CoreHandle as LazyHandle;
+use horsies_core::handle::CoreConnection as LazyHandle;
 use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
     BrokerError, CheckedSend, CustomQueueConfig, EnqueueRetention, FailureCause, PayloadPolicy,
@@ -136,10 +136,7 @@ impl QueuePriorities {
                     priority: configured.priority,
                 })
                 .ok_or_else(|| {
-                    BoundaryRefusal::new(
-                        "options.queueName",
-                        "a custom queue of the accepted config",
-                    )
+                    BoundaryRefusal::new("options.queue", "a custom queue of the accepted config")
                 }),
         }
     }
@@ -272,7 +269,7 @@ impl SendRules {
     /// on its queue. Mints a task id; the fork and stop rules apply, as for
     /// every core call. Starts the log bridge of the process (the forwarder thread), so
     /// that the payload warning reaches the log sink; starts no core. A
-    /// forwarder thread that cannot start throws `CORE_START_FAILED`, as the
+    /// forwarder thread that cannot start throws `RUNTIME_START_FAILED`, as the
     /// first core call would.
     #[napi(ts_return_type = "NativeEnvelope<PreparedSend>")]
     #[allow(
@@ -322,7 +319,7 @@ impl SendRules {
         let deadline = facts.deadline.instant()?;
         let input_bytes = byte_count("inputBytes", facts.input_bytes)?;
         let task_name = options.task_name.as_str();
-        let queue = options.queue_name.as_deref().ok_or_else(|| {
+        let queue = options.queue.as_deref().ok_or_else(|| {
             BoundaryRefusal::new("options", "checked options that name the queue of the task")
         })?;
         let priority = self.queues.priority_of(queue)?;
@@ -669,7 +666,7 @@ fn enqueue_failed(command: &EnqueueCommand, error: &BrokerError) -> EnqueueOutco
 
 /// The raw record of the send error of a failed enqueue of `command`: the
 /// class by the core's one rule (`send_error_from_enqueue`), and in the
-/// `exception` slot the exception that Python stores for `error`
+/// `cause` slot the exception that Python stores for `error`
 /// (`send_failure_exception`). The send error holds no rule text, no
 /// reader text and no data check, so its own slot is not exact for each
 /// error. Pure.
@@ -747,9 +744,9 @@ mod tests {
     fn options() -> TaskOptions {
         TaskOptions {
             task_name: "report".to_owned(),
-            queue_name: Some("default".to_owned()),
+            queue: Some("default".to_owned()),
             good_until: None,
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: None,
             timeout_ms: None,
             execution: horsies_core::Execution::Isolated,
@@ -795,7 +792,7 @@ mod tests {
             }
         );
         let audit = TaskOptions {
-            queue_name: Some("audit".to_owned()),
+            queue: Some("audit".to_owned()),
             ..options()
         };
         let prepared = rules()
@@ -955,11 +952,11 @@ mod tests {
     fn a_send_on_a_custom_queue_takes_the_priority_of_the_core_config() {
         let rules = custom_rules();
         let billing = TaskOptions {
-            queue_name: Some("billing".to_owned()),
+            queue: Some("billing".to_owned()),
             ..options()
         };
         let bulk = TaskOptions {
-            queue_name: Some("bulk".to_owned()),
+            queue: Some("bulk".to_owned()),
             ..options()
         };
         assert_eq!(
@@ -976,7 +973,7 @@ mod tests {
     #[test]
     fn a_queue_that_the_custom_config_does_not_hold_is_a_boundary_refusal() {
         let unknown = TaskOptions {
-            queue_name: Some("unknown".to_owned()),
+            queue: Some("unknown".to_owned()),
             ..options()
         };
         let refused = custom_rules().prepared(
@@ -984,9 +981,9 @@ mod tests {
             &facts(RetentionChoice::Forever, 10.0),
             &unknown,
         );
-        assert!(matches!(refused, Err(refusal) if refusal.subject == "options.queueName"));
+        assert!(matches!(refused, Err(refusal) if refusal.subject == "options.queue"));
         let no_queue = TaskOptions {
-            queue_name: None,
+            queue: None,
             ..options()
         };
         let refused = rules().prepared(
@@ -1091,7 +1088,7 @@ mod tests {
 
     /// A connect or a schema install that fails (here: the listener closed)
     /// is the send error `ENQUEUE_FAILED`, retryable, with the core's class
-    /// in the `exception` slot.
+    /// in the `cause` slot.
     #[test]
     fn a_failed_connect_or_install_is_enqueue_failed() {
         let command = report_command();
@@ -1130,7 +1127,7 @@ mod tests {
         })
     }
 
-    /// The class and the `exception` slot of the raw record of a failed
+    /// The class and the `cause` slot of the raw record of a failed
     /// enqueue of `error`.
     fn failure_exception(error: &BrokerError) -> (String, ExceptionRecord) {
         let raw = enqueue_failure_record(&report_command(), error);
@@ -1237,7 +1234,7 @@ mod tests {
         );
     }
 
-    /// A task id with another command has no `exception` slot: the record
+    /// A task id with another command has no `cause` slot: the record
     /// is the send error's own.
     #[test]
     fn a_payload_mismatch_is_the_record_of_the_send_error() {

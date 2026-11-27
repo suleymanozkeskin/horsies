@@ -20,31 +20,31 @@ export type WorkflowStatus =
 
 /** One workflow run (root or subworkflow). */
 export interface WorkflowRunSummary {
-  id: string;
-  name: string;
+  workflow_id: string;
+  workflow_name: string;
   definition_key: string | null;
   status: WorkflowStatus;
   created_at: string | null;
   completed_at: string | null;
   /** Wall-clock seconds, exact to the microsecond: completed_at (or now)
    * minus created_at. */
-  wall_s: number | null;
+  wall_seconds: number | null;
 }
 
-/** A single DAG node. `task_index` is the stable key; `node_id` is a label. */
+/** A single DAG node. `node_index` is the stable key; `node_id` is a label. */
 export interface WorkflowNode {
-  task_index: number;
+  node_index: number;
   node_id: string | null;
   task_name: string;
   node_status: WorkflowStatus;
-  is_subworkflow: boolean;
+  is_sub_workflow: boolean;
   sub_workflow_id: string | null;
-  allow_failed_deps: boolean;
+  allow_failed_dependencies: boolean;
   started_at: string | null;
   completed_at: string | null;
   /** Execution time only, in seconds, exact to the microsecond; null until
    * the node actually starts running. */
-  exec_s: number | null;
+  execution_seconds: number | null;
   /** Direct-child task count for subworkflow nodes; null for leaf nodes. */
   child_total: number | null;
   /** FAILED direct-child task count for subworkflow nodes; null for leaf nodes. */
@@ -66,7 +66,7 @@ export interface WorkflowRunDetail {
   edges: WorkflowEdge[];
   /** Number of FAILED nodes in this run. */
   failed_count: number;
-  /** `task_index` of every FAILED node, ascending — for failure navigation. */
+  /** `node_index` of every FAILED node, ascending — for failure navigation. */
   failed_indices: number[];
   /** Trace id of the span that started the run (32 hex digits); null when
    * the start carried no trace. */
@@ -91,7 +91,7 @@ export interface TaskAttempt {
 }
 
 /** The leaf task execution backing a task node. */
-export interface LeafTask {
+export interface TaskRow {
   task_id: string;
   status: WorkflowStatus;
   error_code: string | null;
@@ -103,10 +103,10 @@ export interface LeafTask {
   completed_at: string | null;
   failed_at: string | null;
   /** Queue wait (enqueued -> started), in seconds, exact to the microsecond. */
-  queue_s: number | null;
+  queue_seconds: number | null;
   /** Execution time (started -> completed), in seconds, exact to the
    * microsecond. */
-  exec_s: number | null;
+  execution_seconds: number | null;
   worker_hostname: string | null;
   /** Absolute expiry. */
   good_until: string | null;
@@ -116,13 +116,13 @@ export interface LeafTask {
 }
 
 /** Per-node failure detail: node error, leaf task, and full attempt history. */
-export interface WorkflowTaskDetail {
-  task_index: number;
+export interface WorkflowNodeDetail {
+  node_index: number;
   node_id: string | null;
   task_name: string;
   node_status: WorkflowStatus;
-  is_subworkflow: boolean;
+  is_sub_workflow: boolean;
   node_error: string | null;
-  leaf: LeafTask | null;
+  task_row: TaskRow | null;
   attempts: TaskAttempt[];
 }

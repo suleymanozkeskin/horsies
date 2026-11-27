@@ -20,11 +20,16 @@
 //! blocking tasks at once, each on a thread of its own. The number of
 //! children of a worker is the sum of the counts of its modes.
 //!
-//! Each value is bounded where it is parsed. The checks that need more than
-//! one value (at least one child, claim limits against capacity, the
-//! `min_size` of a child pool against its resolved `max_size`, the minimum of
-//! the worker pool) run in AppConfig validation, which knows the profile name
-//! and reports the field path, for example
+//! A profile has two forms. The config form ([`input`]) is what
+//! `AppConfig.worker_profiles` holds: each count, size and limit is a plain
+//! number. The checked form (the types of this module) carries each bound
+//! in its type: the worker manifest and the worker use it. AppConfig
+//! validation checks the config form ([`worker_profiles_shape_errors`]): it
+//! refuses each value outside its bound, then runs the checks that need
+//! more than one value (at least one child, claim limits against capacity,
+//! the `min_size` of a child pool against its resolved `max_size`, the
+//! minimum of the worker pool) on the checked form. Each refusal names the
+//! field path, for example
 //! `worker_profiles['batch'].claim.claimed_per_worker`.
 //!
 //! The JSON form of each choice is an object with a `kind` key, as Python's
@@ -43,7 +48,11 @@ use super::child_sizing::{
     DEFAULT_TASK_SEND_POOL_CONNECTIONS, FINALIZE_BATCH_FLUSHERS, PARENT_POOL_CLAIM_CONNECTIONS,
     PARENT_POOL_MIN_CONNECTIONS, PARENT_POOL_RESERVE,
 };
-use crate::core::error::{ErrorCode, HorsiesError};
+use crate::core::error::{HorsiesError, HorsiesErrorCode};
+
+pub mod input;
+
+use input::ProfileValueRefused;
 
 /// The most isolated children that one profile starts.
 pub const MAX_ISOLATED_CHILDREN: u32 = 1024;
@@ -195,13 +204,13 @@ impl PoolSize {
 
 /// The connection pool of one child as it opens: from `min_size` to
 /// `max_size` connections, and a check of each connection on checkout when
-/// `check` is true. `min_size <= max_size` holds: only [`ResolvedPool::new`]
+/// `pre_ping` is true. `min_size <= max_size` holds: only [`ResolvedPool::new`]
 /// builds one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedPool {
     min_size: PoolMinSize,
     max_size: PoolConnectionCount,
-    check: bool,
+    pre_ping: bool,
 }
 
 /// A pool whose `min_size` is above its resolved `max_size`. AppConfig
@@ -217,13 +226,13 @@ impl ResolvedPool {
     pub fn new(
         min_size: PoolMinSize,
         max_size: PoolConnectionCount,
-        check: bool,
+        pre_ping: bool,
     ) -> Result<Self, PoolMinAboveMax> {
         match min_size.get() <= max_size.get() {
             true => Ok(Self {
                 min_size,
                 max_size,
-                check,
+                pre_ping,
             }),
             false => Err(PoolMinAboveMax { min_size, max_size }),
         }
@@ -237,8 +246,8 @@ impl ResolvedPool {
         self.max_size
     }
 
-    pub const fn check(self) -> bool {
-        self.check
+    pub const fn pre_ping(self) -> bool {
+        self.pre_ping
     }
 }
 
@@ -248,7 +257,7 @@ impl ResolvedPool {
 ///   opens at its first use.
 /// - `max_size`: the most connections. An isolated child has one seat, so no
 ///   size follows the seats.
-/// - `check`: check each connection when a write takes it from the pool. Off
+/// - `pre_ping`: check each connection when a write takes it from the pool. Off
 ///   by default: a write of the child is one statement in autocommit, so a
 ///   check doubles its round trips. With it off, a dead pooled connection
 ///   fails the write that takes it: the RUNNING update ends as
@@ -261,7 +270,7 @@ pub struct IsolatedPool {
     #[serde(default = "default_isolated_pool_size")]
     pub max_size: PoolSize,
     #[serde(default)]
-    pub check: bool,
+    pub pre_ping: bool,
 }
 
 impl Default for IsolatedPool {
@@ -269,7 +278,7 @@ impl Default for IsolatedPool {
         Self {
             min_size: no_open_connections(),
             max_size: default_isolated_pool_size(),
-            check: false,
+            pre_ping: false,
         }
     }
 }
@@ -277,7 +286,7 @@ impl Default for IsolatedPool {
 impl IsolatedPool {
     /// The pool as each isolated child opens it.
     pub fn resolved(&self) -> Result<ResolvedPool, PoolMinAboveMax> {
-        ResolvedPool::new(self.min_size, self.max_size.connections, self.check)
+        ResolvedPool::new(self.min_size, self.max_size.connections, self.pre_ping)
     }
 }
 
@@ -286,7 +295,7 @@ impl IsolatedPool {
 /// - `min_size`: connections that the pool keeps open.
 /// - `max_size`: the most connections: a set size, or one that follows the
 ///   seats of the child (the default).
-/// - `check`: as for [`IsolatedPool`].
+/// - `pre_ping`: as for [`IsolatedPool`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SharedPool {
@@ -295,7 +304,7 @@ pub struct SharedPool {
     #[serde(default = "pool_size_from_seats")]
     pub max_size: PoolSizeSetting,
     #[serde(default)]
-    pub check: bool,
+    pub pre_ping: bool,
 }
 
 impl Default for SharedPool {
@@ -303,7 +312,7 @@ impl Default for SharedPool {
         Self {
             min_size: no_open_connections(),
             max_size: pool_size_from_seats(),
-            check: false,
+            pre_ping: false,
         }
     }
 }
@@ -326,7 +335,7 @@ impl SharedPool {
         ResolvedPool::new(
             self.min_size,
             self.resolved_max_size(from_seats),
-            self.check,
+            self.pre_ping,
         )
     }
 }
@@ -725,7 +734,6 @@ pub enum ChildPreload {
     App,
     /// No preload parent. Every child starts with `exec`.
     #[default]
-    #[serde(rename = "none")]
     NoPreload,
 }
 
@@ -735,7 +743,7 @@ impl ChildPreload {
         match self {
             Self::Library => "library",
             Self::App => "app",
-            Self::NoPreload => "none",
+            Self::NoPreload => "no_preload",
         }
     }
 }
@@ -960,15 +968,15 @@ impl SizeOrigin {
 fn describe_pool(
     min_size: PoolMinSize,
     max_size: PoolConnectionCount,
-    check: bool,
+    pre_ping: bool,
     origin: SizeOrigin,
 ) -> String {
-    let check = match check {
+    let pre_ping = match pre_ping {
         true => "on",
         false => "off",
     };
     format!(
-        "pool {} to {} connections{}, check {check}",
+        "pool {} to {} connections{}, pre_ping {pre_ping}",
         min_size.get(),
         max_size.get(),
         origin.text(),
@@ -992,7 +1000,7 @@ fn describe_isolated(isolated: IsolatedSetting) -> String {
             describe_pool(
                 children.pool.min_size,
                 children.pool.max_size.connections,
-                children.pool.check,
+                children.pool.pre_ping,
                 SizeOrigin::Profile,
             ),
             describe_task_send_pool(children.task_send_pool),
@@ -1013,7 +1021,7 @@ fn describe_shared_async(shared_async: SharedAsyncSetting) -> String {
             describe_pool(
                 children.pool.min_size,
                 children.resolved_max_pool_size(),
-                children.pool.check,
+                children.pool.pre_ping,
                 SizeOrigin::of_pool_size(children.pool.max_size),
             ),
             children.resolved_executor_threads().get(),
@@ -1035,7 +1043,7 @@ fn describe_shared_thread(shared_thread: SharedThreadSetting) -> String {
             describe_pool(
                 children.pool.min_size,
                 children.resolved_max_pool_size(),
-                children.pool.check,
+                children.pool.pre_ping,
                 SizeOrigin::of_pool_size(children.pool.max_size),
             ),
             describe_task_send_pool(children.task_send_pool),
@@ -1088,7 +1096,8 @@ pub fn quoted_profile_name(name: &str) -> String {
 }
 
 fn profile_error(message: String, notes: &[String], help: String) -> HorsiesError {
-    let refusal = HorsiesError::new(message).with_code(ErrorCode::ConfigInvalidWorkerProfile);
+    let refusal =
+        HorsiesError::new(message).with_code(HorsiesErrorCode::ConfigInvalidWorkerProfile);
     notes
         .iter()
         .fold(refusal, |refusal, note| refusal.with_note(note.as_str()))
@@ -1253,19 +1262,90 @@ fn profile_parent_pool_error(name: &str, profile: &WorkerProfile) -> Option<Hors
     }
 }
 
-/// The name, children, child pool and worker pool refusals of every profile,
-/// in name order. Pure.
+/// The children, child pool and worker pool refusals of one checked
+/// profile. Pure.
+fn profile_shape_errors(name: &str, profile: &WorkerProfile) -> Vec<HorsiesError> {
+    let mut errors = Vec::new();
+    errors.extend(profile_children_error(name, profile));
+    errors.extend(profile_pool_errors(name, profile));
+    errors.extend(profile_parent_pool_error(name, profile));
+    errors
+}
+
+/// The shape refusals of every profile of the config, in name order
+/// (AppConfig validation). Pure.
+///
+/// For each profile: the name refusal; then the refusal of each value
+/// outside its bound ([`input::WorkerProfile::checked`]), or, when every
+/// value is inside its bound, the children, child pool and worker pool
+/// refusals of the checked profile. A profile with a value outside its
+/// bound has no checked form, so its other checks do not run.
 pub fn worker_profiles_shape_errors(
-    profiles: &BTreeMap<String, WorkerProfile>,
+    profiles: &BTreeMap<String, input::WorkerProfile>,
 ) -> Vec<HorsiesError> {
     let mut errors = Vec::new();
     for (name, profile) in profiles {
         errors.extend(profile_name_error(name));
-        errors.extend(profile_children_error(name, profile));
-        errors.extend(profile_pool_errors(name, profile));
-        errors.extend(profile_parent_pool_error(name, profile));
+        match profile.checked(name) {
+            Ok(checked) => errors.extend(profile_shape_errors(name, &checked)),
+            Err(refusals) => {
+                errors.extend(refusals.iter().map(ProfileValueRefused::to_horsies_error));
+            }
+        }
     }
     errors
+}
+
+/// The name, children, child pool and worker pool refusals of every
+/// checked profile, in name order. Pure.
+fn profile_set_shape_errors(profiles: &BTreeMap<String, WorkerProfile>) -> Vec<HorsiesError> {
+    let mut errors = Vec::new();
+    for (name, profile) in profiles {
+        errors.extend(profile_name_error(name));
+        errors.extend(profile_shape_errors(name, profile));
+    }
+    errors
+}
+
+/// Every profile of the config as the checked form, by name. Pure.
+///
+/// Errors: the refusal of each value outside its bound, in name order and
+/// then in field order. It does not check the names or what needs more
+/// than one value: [`worker_profiles_shape_errors`] does.
+pub fn checked_worker_profiles(
+    profiles: &BTreeMap<String, input::WorkerProfile>,
+) -> Result<BTreeMap<String, WorkerProfile>, Vec<ProfileValueRefused>> {
+    let mut checked = BTreeMap::new();
+    let mut refusals = Vec::new();
+    for (name, profile) in profiles {
+        match profile.checked(name) {
+            Ok(profile) => {
+                let _first_of_its_name = checked.insert(name.clone(), profile);
+            }
+            Err(refused) => refusals.extend(refused),
+        }
+    }
+    match refusals.is_empty() {
+        true => Ok(checked),
+        false => Err(refusals),
+    }
+}
+
+/// One line that states every setting of the profile `name` of the config,
+/// for logs: the line of [`describe_worker_profile`] for the checked
+/// profile, or the path of each value outside its bound. Pure.
+pub fn describe_config_profile(name: &str, profile: &input::WorkerProfile) -> String {
+    match profile.checked(name) {
+        Ok(checked) => describe_worker_profile(&checked),
+        Err(refusals) => format!(
+            "values outside their bounds: {}",
+            refusals
+                .iter()
+                .map(ProfileValueRefused::path)
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+    }
 }
 
 /// The capacity of a worker of this profile, term by term.
@@ -1332,10 +1412,10 @@ fn profile_claim_errors(
     errors
 }
 
-/// The claim refusals of every profile with children, in name order. A
-/// profile with no children is skipped: the shape check refuses it, and it
-/// has no capacity to compare with. Pure.
-pub fn worker_profiles_claim_errors(
+/// The claim refusals of every checked profile with children, in name
+/// order. A profile with no children is skipped: the shape check refuses
+/// it, and it has no capacity to compare with. Pure.
+fn profile_set_claim_errors(
     profiles: &BTreeMap<String, WorkerProfile>,
     prefetch_buffer: u32,
 ) -> Vec<HorsiesError> {
@@ -1344,6 +1424,25 @@ pub fn worker_profiles_claim_errors(
         .filter(|(_, profile)| profile.child_count() >= 1)
         .flat_map(|(name, profile)| profile_claim_errors(name, profile, prefetch_buffer))
         .collect()
+}
+
+/// The claim refusals of every profile of the config with children, in
+/// name order (AppConfig validation). A profile with a value outside its
+/// bound is skipped: [`worker_profiles_shape_errors`] refuses each such
+/// value, and the profile has no capacity to compare with. A profile with
+/// no children is skipped too. Pure.
+pub fn worker_profiles_claim_errors(
+    profiles: &BTreeMap<String, input::WorkerProfile>,
+    prefetch_buffer: u32,
+) -> Vec<HorsiesError> {
+    let checked: BTreeMap<String, WorkerProfile> = profiles
+        .iter()
+        .filter_map(|(name, profile)| match profile.checked(name) {
+            Ok(checked) => Some((name.clone(), checked)),
+            Err(_refused_by_the_shape_check) => None,
+        })
+        .collect();
+    profile_set_claim_errors(&checked, prefetch_buffer)
 }
 
 /// The profile that a worker runs, by its name in the profile set (Python
@@ -1390,7 +1489,7 @@ impl ProfileSelectionRefused {
         match self {
             Self::InvalidProfiles { errors } => errors.clone(),
             Self::NotGiven { defined } => vec![HorsiesError::new("--profile is required")
-                .with_code(ErrorCode::CliInvalidArgs)
+                .with_code(HorsiesErrorCode::CliInvalidArgs)
                 .with_note(
                     "a worker takes its settings from a named profile in \
                      AppConfig.worker_profiles; there is no default profile",
@@ -1401,7 +1500,7 @@ impl ProfileSelectionRefused {
                 "unknown worker profile {}",
                 quoted_profile_name(requested)
             ))
-            .with_code(ErrorCode::CliInvalidArgs)
+            .with_code(HorsiesErrorCode::CliInvalidArgs)
             .with_note(defined_profiles_note(defined))
             .with_help(profile_help(defined))],
         }
@@ -1440,8 +1539,8 @@ pub fn select_worker_profile(
     request: &ProfileRequest,
     prefetch_buffer: u32,
 ) -> Result<SelectedProfile, ProfileSelectionRefused> {
-    let mut errors = worker_profiles_shape_errors(profiles);
-    errors.extend(worker_profiles_claim_errors(profiles, prefetch_buffer));
+    let mut errors = profile_set_shape_errors(profiles);
+    errors.extend(profile_set_claim_errors(profiles, prefetch_buffer));
     match errors.is_empty() {
         true => {}
         false => return Err(ProfileSelectionRefused::InvalidProfiles { errors }),
@@ -1534,7 +1633,10 @@ mod tests {
     fn only_refusal(errors: Vec<HorsiesError>) -> HorsiesError {
         assert_eq!(errors.len(), 1, "{:?}", messages(&errors));
         let refusal = errors.into_iter().next().expect("one refusal");
-        assert_eq!(refusal.code, Some(ErrorCode::ConfigInvalidWorkerProfile));
+        assert_eq!(
+            refusal.code,
+            Some(HorsiesErrorCode::ConfigInvalidWorkerProfile)
+        );
         refusal
     }
 
@@ -1702,7 +1804,7 @@ mod tests {
         );
         assert_eq!(isolated_children.pool.min_size.get(), 0);
         assert_eq!(isolated_children.pool.max_size.connections.get(), 1);
-        assert!(!isolated_children.pool.check);
+        assert!(!isolated_children.pool.pre_ping);
         assert_eq!(isolated_children.task_send_pool.connections.get(), 2);
         assert_eq!(
             parsed(json!({"isolated": {"kind": "isolated_children", "count": 1}})).isolated,
@@ -1748,7 +1850,7 @@ mod tests {
             "shared_thread": {"kind": "no_shared_thread_children"},
             "pool": {"max_size": {"kind": "pool_size", "connections": 12}},
             "claim": {"per_queue_per_pass": {"kind": "task_limit", "tasks": 2}},
-            "preload": "none",
+            "preload": "no_preload",
             "parent_cpu": "OWN_CORE",
         }));
 
@@ -1872,7 +1974,7 @@ mod tests {
             let pool = children.resolved_pool().expect("min_size 0 fits");
             assert_eq!(pool.max_size(), derived, "{seats} seats");
             assert_eq!(pool.min_size().get(), 0);
-            assert!(!pool.check());
+            assert!(!pool.pre_ping());
         }
         for seats in [1, 3, 4, 5, 39, 256] {
             let children = SharedThreadChildren::new(bounded(1), bounded(seats));
@@ -1911,7 +2013,7 @@ mod tests {
         isolated_children.pool = IsolatedPool {
             min_size: bounded(2),
             max_size: PoolSize::new(bounded(5)),
-            check: false,
+            pre_ping: false,
         };
         let pool = isolated_children.resolved_pool().expect("2 is at most 5");
         assert_eq!((pool.min_size().get(), pool.max_size().get()), (2, 5));
@@ -1978,15 +2080,15 @@ mod tests {
             ("default", isolated_profile(4)),
             ("batch", isolated_profile(1)),
         ]);
-        assert!(worker_profiles_shape_errors(&profiles).is_empty());
-        assert!(worker_profiles_claim_errors(&profiles, 0).is_empty());
-        assert!(worker_profiles_shape_errors(&BTreeMap::new()).is_empty());
+        assert!(profile_set_shape_errors(&profiles).is_empty());
+        assert!(profile_set_claim_errors(&profiles, 0).is_empty());
+        assert!(profile_set_shape_errors(&BTreeMap::new()).is_empty());
     }
 
     /// Python `test_worker_profile.py::TestAppConfigProfileChecks::test_a_profile_with_no_children_names_the_profile`.
     #[test]
     fn a_profile_with_no_children_is_refused_by_name() {
-        let refusal = only_refusal(worker_profiles_shape_errors(&named(&[(
+        let refusal = only_refusal(profile_set_shape_errors(&named(&[(
             "empty",
             WorkerProfile::default(),
         )])));
@@ -1999,8 +2101,7 @@ mod tests {
             ["a worker needs at least one child to run a task"],
         );
         assert!(
-            worker_profiles_claim_errors(&named(&[("empty", WorkerProfile::default())]), 0)
-                .is_empty()
+            profile_set_claim_errors(&named(&[("empty", WorkerProfile::default())]), 0).is_empty()
         );
     }
 
@@ -2017,7 +2118,7 @@ mod tests {
             "a/b",
             too_long.as_str(),
         ] {
-            let refusal = only_refusal(worker_profiles_shape_errors(&named(&[(
+            let refusal = only_refusal(profile_set_shape_errors(&named(&[(
                 name,
                 isolated_profile(1),
             )])));
@@ -2035,7 +2136,7 @@ mod tests {
             longest.as_str(),
         ] {
             assert!(
-                worker_profiles_shape_errors(&named(&[(name, isolated_profile(1))])).is_empty(),
+                profile_set_shape_errors(&named(&[(name, isolated_profile(1))])).is_empty(),
                 "{name} is valid",
             );
         }
@@ -2051,7 +2152,7 @@ mod tests {
             children.pool.min_size = bounded(3);
         }
 
-        let refusal = only_refusal(worker_profiles_shape_errors(&named(&[("p", profile)])));
+        let refusal = only_refusal(profile_set_shape_errors(&named(&[("p", profile)])));
 
         assert_eq!(
             refusal.message,
@@ -2072,7 +2173,7 @@ mod tests {
         if let IsolatedSetting::IsolatedChildren(children) = &mut profile.isolated {
             children.pool.min_size = bounded(1);
         }
-        assert!(worker_profiles_shape_errors(&named(&[("p", profile)])).is_empty());
+        assert!(profile_set_shape_errors(&named(&[("p", profile)])).is_empty());
     }
 
     /// Python `test_worker_profile.py::TestAppConfigPoolChecks::test_a_shared_async_min_size_above_the_derived_size_names_the_seats`,
@@ -2088,7 +2189,7 @@ mod tests {
                 ..WorkerProfile::default()
             }
         };
-        let refusal = only_refusal(worker_profiles_shape_errors(&named(&[("p", with_min(3))])));
+        let refusal = only_refusal(profile_set_shape_errors(&named(&[("p", with_min(3))])));
         assert_eq!(
             refusal.message,
             "worker_profiles['p'].shared_async.pool.min_size: 3 is above the pool max_size (2)",
@@ -2097,7 +2198,7 @@ mod tests {
             refusal.notes[0],
             "max_size=PoolSizeFromSeats() resolves to 2 connections for 1 seats",
         );
-        assert!(worker_profiles_shape_errors(&named(&[("p", with_min(2))])).is_empty());
+        assert!(profile_set_shape_errors(&named(&[("p", with_min(2))])).is_empty());
 
         let mut threads = SharedThreadChildren::new(bounded(1), bounded(4));
         threads.pool = SharedPool {
@@ -2105,13 +2206,13 @@ mod tests {
             max_size: PoolSizeSetting::PoolSize {
                 connections: bounded(4),
             },
-            check: false,
+            pre_ping: false,
         };
         let profile = WorkerProfile {
             shared_thread: SharedThreadSetting::SharedThreadChildren(threads),
             ..WorkerProfile::default()
         };
-        let refusal = only_refusal(worker_profiles_shape_errors(&named(&[("p", profile)])));
+        let refusal = only_refusal(profile_set_shape_errors(&named(&[("p", profile)])));
         assert_eq!(
             refusal.message,
             "worker_profiles['p'].shared_thread.pool.min_size: 5 is above the pool max_size (4)",
@@ -2127,7 +2228,7 @@ mod tests {
             max_size: PoolSizeSetting::PoolSize {
                 connections: bounded(5),
             },
-            check: false,
+            pre_ping: false,
         };
         let mut isolated_children = IsolatedChildren::new(bounded(1));
         isolated_children.pool.min_size = bounded(3);
@@ -2142,7 +2243,7 @@ mod tests {
             ..WorkerProfile::default()
         };
 
-        let errors = worker_profiles_shape_errors(&named(&[("p", profile)]));
+        let errors = profile_set_shape_errors(&named(&[("p", profile)]));
 
         let paths: Vec<&str> = messages(&errors)
             .into_iter()
@@ -2167,7 +2268,7 @@ mod tests {
             named(&[("p", profile)])
         };
 
-        let refusal = only_refusal(worker_profiles_shape_errors(&with_pool(
+        let refusal = only_refusal(profile_set_shape_errors(&with_pool(
             PoolSizeSetting::PoolSize {
                 connections: bounded(4),
             },
@@ -2194,14 +2295,13 @@ mod tests {
             Some("set max_size=PoolSize(connections=5) or more, or max_size=PoolSizeFromSeats()"),
         );
         assert!(
-            worker_profiles_shape_errors(&with_pool(PoolSizeSetting::PoolSize {
+            profile_set_shape_errors(&with_pool(PoolSizeSetting::PoolSize {
                 connections: bounded(5),
             }))
             .is_empty()
         );
         assert!(
-            worker_profiles_shape_errors(&with_pool(PoolSizeSetting::PoolSizeFromSeats {}))
-                .is_empty()
+            profile_set_shape_errors(&with_pool(PoolSizeSetting::PoolSizeFromSeats {})).is_empty()
         );
     }
 
@@ -2219,7 +2319,7 @@ mod tests {
                 named(&[("small", profile)])
             };
 
-            let refusal = only_refusal(worker_profiles_claim_errors(&with_limit(3), 0));
+            let refusal = only_refusal(profile_set_claim_errors(&with_limit(3), 0));
 
             assert_eq!(
                 refusal.message,
@@ -2232,7 +2332,7 @@ mod tests {
                 refusal.help_text.as_deref(),
                 Some("set the limit to 2 or less, or use NoTaskLimit()"),
             );
-            assert!(worker_profiles_claim_errors(&with_limit(2), 0).is_empty());
+            assert!(profile_set_claim_errors(&with_limit(2), 0).is_empty());
         }
     }
 
@@ -2250,8 +2350,8 @@ mod tests {
             profile.claim.claimed_per_worker = task_limit(tasks);
             named(&[("split", profile)])
         };
-        assert!(worker_profiles_claim_errors(&split(21), 0).is_empty());
-        let refusal = only_refusal(worker_profiles_claim_errors(&split(22), 0));
+        assert!(profile_set_claim_errors(&split(21), 0).is_empty());
+        let refusal = only_refusal(profile_set_claim_errors(&split(22), 0));
         assert_eq!(
             refusal.message,
             "worker_profiles['split'].claim.claimed_per_worker: 22 tasks is above the capacity \
@@ -2270,7 +2370,7 @@ mod tests {
             ..WorkerProfile::default()
         };
         with_threads.claim.claimed_per_worker = task_limit(20);
-        let refusal = only_refusal(worker_profiles_claim_errors(
+        let refusal = only_refusal(profile_set_claim_errors(
             &named(&[("split", with_threads)]),
             0,
         ));
@@ -2290,14 +2390,14 @@ mod tests {
             profile.claim.claimed_per_worker = task_limit(tasks);
             named(&[("soft", profile)])
         };
-        assert!(worker_profiles_claim_errors(&soft(5), 3).is_empty());
-        let refusal = only_refusal(worker_profiles_claim_errors(&soft(6), 3));
+        assert!(profile_set_claim_errors(&soft(5), 3).is_empty());
+        let refusal = only_refusal(profile_set_claim_errors(&soft(6), 3));
         assert!(
             refusal.message.contains("capacity of the worker (5)"),
             "{}",
             refusal.message,
         );
-        assert!(worker_profiles_claim_errors(&soft(6), u32::MAX).is_empty());
+        assert!(profile_set_claim_errors(&soft(6), u32::MAX).is_empty());
     }
 
     /// Python `test_worker_profile.py::TestAppConfigProfileChecks::test_every_profile_is_reported_in_name_order`.
@@ -2311,8 +2411,8 @@ mod tests {
             ("ok", isolated_profile(4)),
         ]);
 
-        let mut errors = worker_profiles_shape_errors(&profiles);
-        errors.extend(worker_profiles_claim_errors(&profiles, 0));
+        let mut errors = profile_set_shape_errors(&profiles);
+        errors.extend(profile_set_claim_errors(&profiles, 0));
 
         assert_eq!(
             messages(&errors),
@@ -2345,8 +2445,9 @@ mod tests {
 
         assert_eq!(
             describe_worker_profile(&profile),
-            "isolated=8 (recycle after no limit, above 1024 MB; pool 0 to 1 connections, check \
-             off; task_send_pool 2 connections), shared_async=none, shared_thread=none, pool=5 \
+            "isolated=8 (recycle after no limit, above 1024 MB; pool 0 to 1 connections, \
+             pre_ping off; task_send_pool 2 connections), shared_async=none, shared_thread=none, \
+             pool=5 \
              connections (derived from 8 seats), claim per queue per pass: 4 tasks, claimed per \
              worker: no limit, drain_timeout=90s, preload=app, parent_cpu=OWN_CORE",
         );
@@ -2371,7 +2472,7 @@ mod tests {
         assert!(
             described.contains(
                 "shared_async=3x25 seats (recycle after 40 tasks per seat, above 2048 MB; pool 0 \
-                 to 3 connections, derived from seats, check off; executor 25 threads, derived \
+                 to 3 connections, derived from seats, pre_ping off; executor 25 threads, derived \
                  from seats; task_send_pool 2 connections), "
             ),
             "{described}",
@@ -2390,7 +2491,8 @@ mod tests {
         assert!(
             described.contains(
                 "shared_thread=2x8 seats (recycle after no limit per seat, above 1024 MB; pool 0 \
-                 to 2 connections, derived from seats, check off; task_send_pool 2 connections), "
+                 to 2 connections, derived from seats, pre_ping off; task_send_pool 2 \
+                 connections), "
             ),
             "{described}",
         );
@@ -2417,7 +2519,7 @@ mod tests {
         isolated_children.pool = IsolatedPool {
             min_size: bounded(1),
             max_size: PoolSize::new(bounded(4)),
-            check: false,
+            pre_ping: false,
         };
         isolated_children.task_send_pool = PoolSize::new(bounded(3));
         let mut async_children = SharedAsyncChildren::new(bounded(1), bounded(50));
@@ -2426,7 +2528,7 @@ mod tests {
             max_size: PoolSizeSetting::PoolSize {
                 connections: bounded(9),
             },
-            check: true,
+            pre_ping: true,
         };
         async_children.executor = ExecutorThreadsSetting::ExecutorThreads {
             threads: bounded(7),
@@ -2450,15 +2552,139 @@ mod tests {
         let described = describe_worker_profile(&profile);
 
         for part in [
-            "isolated=1 (recycle after 100 tasks, above no limit; pool 1 to 4 connections, check \
-             off; task_send_pool 3 connections), ",
+            "isolated=1 (recycle after 100 tasks, above no limit; pool 1 to 4 connections, \
+             pre_ping off; task_send_pool 3 connections), ",
             "shared_async=1x50 seats (recycle after 100 tasks per seat, above no limit; pool 2 \
-             to 9 connections, check on; executor 7 threads; task_send_pool 5 connections), ",
+             to 9 connections, pre_ping on; executor 7 threads; task_send_pool 5 connections), ",
             "shared_thread=1x6 seats (recycle after 100 tasks per seat, above no limit; pool 0 \
-             to 3 connections, check off; task_send_pool 1 connections), ",
+             to 3 connections, pre_ping off; task_send_pool 1 connections), ",
             ", pool=11 connections, claim per queue per pass: ",
         ] {
             assert!(described.contains(part), "{described}");
         }
+    }
+
+    /// A config profile of `count` isolated children.
+    fn isolated_input(count: u32) -> input::WorkerProfile {
+        input::WorkerProfile {
+            isolated: input::IsolatedChildren::new(count).into(),
+            ..input::WorkerProfile::default()
+        }
+    }
+
+    fn named_inputs(
+        entries: &[(&str, input::WorkerProfile)],
+    ) -> BTreeMap<String, input::WorkerProfile> {
+        entries
+            .iter()
+            .map(|(name, profile)| ((*name).to_owned(), *profile))
+            .collect()
+    }
+
+    /// AppConfig validation: each value outside its bound is refused with
+    /// its path, in place of the other checks of its profile; a profile
+    /// inside every bound gets the other checks; the name check runs on
+    /// every profile.
+    #[test]
+    fn the_config_check_refuses_each_value_outside_its_bound_with_its_path() {
+        let mut two_outside = isolated_input(0);
+        two_outside.drain_timeout = Duration::ZERO;
+        let profiles = named_inputs(&[
+            ("bad name!", isolated_input(0)),
+            ("empty", input::WorkerProfile::default()),
+            ("two", two_outside),
+        ]);
+
+        let errors = profile_errors_of_the_config(&profiles);
+
+        assert_eq!(
+            messages(&errors),
+            [
+                "worker_profiles['bad name!']: the profile name is not valid",
+                "worker_profiles['bad name!'].isolated.count: 0 is outside the bounds 1 to 1024",
+                "worker_profiles['empty']: the profile starts no children",
+                "worker_profiles['two'].isolated.count: 0 is outside the bounds 1 to 1024",
+                "worker_profiles['two'].drain_timeout: a drain timeout of 0 is refused; a \
+                 stopping worker needs a deadline",
+            ],
+        );
+        assert!(errors
+            .iter()
+            .all(|error| error.code == Some(HorsiesErrorCode::ConfigInvalidWorkerProfile)));
+    }
+
+    /// The shape and claim refusals of the config, as AppConfig validation
+    /// collects them.
+    fn profile_errors_of_the_config(
+        profiles: &BTreeMap<String, input::WorkerProfile>,
+    ) -> Vec<HorsiesError> {
+        let mut errors = worker_profiles_shape_errors(profiles);
+        errors.extend(worker_profiles_claim_errors(profiles, 0));
+        errors
+    }
+
+    /// The claim check of the config skips a profile with a value outside
+    /// its bound, and checks a profile inside every bound.
+    #[test]
+    fn the_config_claim_check_skips_a_profile_with_a_value_outside_its_bound() {
+        let mut over = isolated_input(1);
+        over.claim.claimed_per_worker = input::TaskLimitSetting::TaskLimit { tasks: 2 };
+        let mut outside = over;
+        outside.drain_timeout = Duration::ZERO;
+        let profiles = named_inputs(&[("outside", outside), ("over", over)]);
+
+        assert_eq!(
+            messages(&worker_profiles_claim_errors(&profiles, 0)),
+            [
+                "worker_profiles['over'].claim.claimed_per_worker: 2 tasks is above the capacity \
+              of the worker (1)"
+            ],
+        );
+    }
+
+    /// The checked set has every profile, or the refusal of every value
+    /// outside its bound in name order.
+    #[test]
+    fn the_checked_profile_set_has_every_profile_or_every_refusal() {
+        let valid = named_inputs(&[("a", isolated_input(2)), ("b", isolated_input(3))]);
+        assert_eq!(
+            checked_worker_profiles(&valid),
+            Ok(named(&[
+                ("a", isolated_profile(2)),
+                ("b", isolated_profile(3))
+            ])),
+        );
+
+        let refused = named_inputs(&[
+            ("a", isolated_input(0)),
+            ("b", isolated_input(2)),
+            ("c", isolated_input(MAX_ISOLATED_CHILDREN + 1)),
+        ]);
+        let refusals = checked_worker_profiles(&refused).expect_err("two values are outside");
+        let paths: Vec<&str> = refusals.iter().map(ProfileValueRefused::path).collect();
+        assert_eq!(
+            paths,
+            [
+                "worker_profiles['a'].isolated.count",
+                "worker_profiles['c'].isolated.count",
+            ],
+        );
+    }
+
+    /// The log line of a config profile is the line of its checked profile,
+    /// or the path of each value outside its bound.
+    #[test]
+    fn the_config_description_is_the_checked_description_or_the_refused_paths() {
+        assert_eq!(
+            describe_config_profile("p", &isolated_input(8)),
+            describe_worker_profile(&isolated_profile(8)),
+        );
+        let mut outside = isolated_input(0);
+        outside.drain_timeout = Duration::ZERO;
+        assert_eq!(
+            describe_config_profile("p", &outside),
+            "values outside their bounds: worker_profiles['p'].isolated.count, \
+             worker_profiles['p'].drain_timeout",
+        );
     }
 }

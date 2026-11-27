@@ -93,20 +93,20 @@ Not drawn: an operator cancel moves a `PENDING` or `CLAIMED` task to
 
 ### RUNNING → COMPLETED
 
-- Task returns `TaskResult(ok=value)`
+- Task returns `Ok(value)`
 - Child marks the row with `finalizing_at` as it exits user code
 - Worker stores serialized result
 - Sets `completed_at=NOW()`
 
-`COMPLETED` means the task succeeded (returned `TaskResult.ok`). Execution that ends with `TaskResult.err` or an exception is `FAILED`, not `COMPLETED`.
+`COMPLETED` means the task succeeded (returned `Ok`). Execution that ends with `Err` or an exception is `FAILED`, not `COMPLETED`.
 
 ### RUNNING → FAILED
 
-- Task returns `TaskResult(err=TaskError(...))` **or**
+- Task returns `Err(TaskError(...))` **or**
 - Task raises unhandled exception **or**
 - A child process died (the worker sees it at once), or the worker died (detected via missing heartbeats)
 - Sets `failed_at=NOW()`, stores error in `result`
-- Worker/process failures synthesize a `TaskResult(err=TaskError(...))` where
+- Worker/process failures synthesize an error result (`TaskError`) where
   possible so downstream workflow completion and capacity notifications still run
 
 ### PENDING or CLAIMED → CANCELLED
@@ -118,7 +118,7 @@ Not drawn: an operator cancel moves a `PENDING` or `CLAIMED` task to
 
 ### RUNNING → CANCELLED
 
-- An operator cancel with `include_running`
+- An operator cancel with the policy `INCLUDE_RUNNING`
 - One statement writes the attempt row with outcome `CANCELLED` and moves the
   task to history
 - The worker that holds the run gives the cancel to the task code. The code
@@ -160,7 +160,7 @@ Each task records timing information:
 
 | Field | Set When |
 |-------|----------|
-| `sent_at` | Immutable call-site timestamp -- when `.send()` or `.schedule()` was called. Captured inside the `TaskSendResult` flow before enqueue. |
+| `sent_at` | Immutable call-site timestamp -- when `.send()` was called. Captured inside the `TaskSendResult` flow before enqueue. |
 | `enqueued_at` | When task becomes eligible for claiming (updated on retry) |
 | `claimed_at` | Worker claims task |
 | `started_at` | Execution begins in child process |

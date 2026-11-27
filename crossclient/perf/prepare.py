@@ -12,13 +12,13 @@ from __future__ import annotations
 import asyncio
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.result_types import BrokerOperationFailed
+from horsies.core.brokers.result_types import DatabaseOperationFailed
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import Result
 from pydantic import SecretStr
 
 
-def apply_schema(dsn: str) -> Result[None, BrokerOperationFailed]:
+def apply_schema(dsn: str) -> Result[None, DatabaseOperationFailed]:
     """Install the schema at `dsn`, or check it, then close the broker. Writes.
 
     Returns the result of ``PostgresBroker.ensure_schema_initialized``: ``Err``
@@ -28,7 +28,7 @@ def apply_schema(dsn: str) -> Result[None, BrokerOperationFailed]:
     return asyncio.run(_apply(dsn))
 
 
-async def _apply(dsn: str) -> Result[None, BrokerOperationFailed]:
+async def _apply(dsn: str) -> Result[None, DatabaseOperationFailed]:
     broker = PostgresBroker(PostgresConfig(database_url=SecretStr(dsn)))
     try:
         return await broker.ensure_schema_initialized()

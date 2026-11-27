@@ -23,7 +23,7 @@ use crate::workflow_engine::start_fingerprint::StartFingerprint;
 use crate::workflow_engine::start_statement::{client_start_arguments, start_tree, StartArguments};
 use crate::workflow_engine::steps::advance_parents;
 
-/// Retries of a start with `resend_on_transient_err` after a retryable
+/// Retries of a start with `resend_on_transient_error` after a retryable
 /// failure (Python `_START_RETRY_COUNT`).
 pub const START_RETRY_COUNT: u32 = 3;
 
@@ -137,7 +137,7 @@ impl PostgresBroker {
     /// carrier that breaks a bound is not stored, the tree keeps no carrier,
     /// and the process logs one warning. It never refuses the start.
     ///
-    /// `resend_on_transient_err`: a retryable failure of step 2 runs the
+    /// `resend_on_transient_error`: a retryable failure of step 2 runs the
     /// step again, at most [`START_RETRY_COUNT`] times, after a wait of
     /// [`START_RETRY_INITIAL`] that doubles up to [`START_RETRY_MAX`].
     ///
@@ -149,7 +149,7 @@ impl PostgresBroker {
         workflow_id: Uuid,
         sent_at: DateTime<Utc>,
         trace: SendTrace,
-        resend_on_transient_err: bool,
+        resend_on_transient_error: bool,
         source: &dyn ChildSpecSource,
     ) -> Result<ClientStartOutcome, ClientStartError> {
         let arguments = client_start_arguments(spec, workflow_id, source)
@@ -168,7 +168,7 @@ impl PostgresBroker {
         resend_while_transient(
             spec.name(),
             workflow_id,
-            resend_on_transient_err,
+            resend_on_transient_error,
             || self.client_start_attempt(&attempt, source),
             tokio::time::sleep,
         )
@@ -247,7 +247,7 @@ fn log_start_outcome(workflow_name: &str, workflow_id: Uuid, outcome: &ClientSta
     }
 }
 
-/// Runs `attempt` once. With `resend_on_transient_err`, runs it again after
+/// Runs `attempt` once. With `resend_on_transient_error`, runs it again after
 /// each retryable failure, at most [`START_RETRY_COUNT`] more times, and
 /// waits through `wait` for [`retry_wait`] of that retry before each run.
 /// Returns the first success, or the failure of the last run. A failure that
@@ -255,7 +255,7 @@ fn log_start_outcome(workflow_name: &str, workflow_id: Uuid, outcome: &ClientSta
 async fn resend_while_transient<T, Attempt, AttemptFuture, Wait, WaitFuture>(
     workflow_name: &str,
     workflow_id: Uuid,
-    resend_on_transient_err: bool,
+    resend_on_transient_error: bool,
     mut attempt: Attempt,
     mut wait: Wait,
 ) -> Result<T, ClientStartError>
@@ -265,7 +265,7 @@ where
     Wait: FnMut(Duration) -> WaitFuture,
     WaitFuture: Future<Output = ()>,
 {
-    let attempts = match resend_on_transient_err {
+    let attempts = match resend_on_transient_error {
         true => 1 + START_RETRY_COUNT,
         false => 1,
     };
@@ -313,7 +313,7 @@ mod tests {
     /// The runs of [`resend_while_transient`] over `answers` (one per run, in
     /// order), with the waits it asked for and the number of runs.
     fn resend_over(
-        resend_on_transient_err: bool,
+        resend_on_transient_error: bool,
         answers: Vec<Result<&'static str, ClientStartError>>,
     ) -> (Result<&'static str, ClientStartError>, Vec<Duration>, usize) {
         let answers = RefCell::new(VecDeque::from(answers));
@@ -322,7 +322,7 @@ mod tests {
         let result = futures::executor::block_on(resend_while_transient(
             "resend_wf",
             Uuid::nil(),
-            resend_on_transient_err,
+            resend_on_transient_error,
             || {
                 runs.set(runs.get() + 1);
                 let answer = answers

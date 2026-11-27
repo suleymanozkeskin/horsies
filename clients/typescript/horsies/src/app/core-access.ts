@@ -16,10 +16,12 @@ import type {
 } from "../native/sends/addon.ts";
 import { raiseDefect } from "../native/call/defect.ts";
 import { unreachable } from "../native/call/never.ts";
+import type { FacadesSeatOperation, FacadesSeatReply } from "../monitoring/seat-calls.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
+import type { SeatRelayFullOutcome } from "../seats/relay-full.ts";
 import type { TraceArgument } from "../native/values/records.ts";
 import { AddonOutsideMainThread, ClientDefect } from "../thrown-errors.ts";
-import type { WorkflowCore } from "../workflow/core.ts";
+import type { AddonWorkflowCore } from "../workflow/core.ts";
 
 /**
  * The core operations of sends and task reads. On a main thread the addon runs them; in a seat isolate the relay
@@ -34,7 +36,7 @@ export interface ProducerCore {
   taskInfo(taskId: string): Promise<TaskInfoRead>;
   processRole(): Promise<ProcessRoleName>;
   /** The core operations of workflow starts and handles. */
-  readonly workflows: WorkflowCore;
+  readonly workflows: AddonWorkflowCore;
 }
 
 /**
@@ -43,6 +45,8 @@ export interface ProducerCore {
  */
 export interface SeatOperationMap {
   readonly sends: { readonly operation: SendsSeatOperation; readonly reply: SendsSeatReply };
+  /** The monitoring and health reads, the database ping, the cancel and the rerun (`monitoring/seat-calls.ts`). */
+  readonly facades: { readonly operation: FacadesSeatOperation; readonly reply: FacadesSeatReply };
 }
 
 /** One send or task read that a seat isolate asks for. */
@@ -62,12 +66,18 @@ export type SendsSeatReply =
   | { readonly kind: "enqueue"; readonly outcome: EnqueueOutcome }
   | { readonly kind: "taskInfo"; readonly read: TaskInfoRead };
 
+/**
+ * The answer of the seat relay to one operation: the reply of the main thread, or `seatRelayFull` when the relay held
+ * its bound of waiting operations and did not send it.
+ */
+export type RelayAnswer<R> = { readonly kind: "reply"; readonly reply: R } | SeatRelayFullOutcome;
+
 /** The channel of a seat isolate to its child's main thread. */
 export interface SeatRelay {
   request<A extends keyof SeatOperationMap>(
     area: A,
     operation: SeatOperationMap[A]["operation"],
-  ): Promise<SeatOperationMap[A]["reply"]>;
+  ): Promise<RelayAnswer<SeatOperationMap[A]["reply"]>>;
 }
 
 /**

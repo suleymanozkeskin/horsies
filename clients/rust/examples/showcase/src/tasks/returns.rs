@@ -28,7 +28,7 @@ const WRITTEN_OFF: &str = "written_off";
     "receive_return",
     queue = "fulfillment",
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn receive_return(
     rt: TaskRuntime,
@@ -64,7 +64,7 @@ pub async fn receive_return(
     "inspect_item",
     queue = "fulfillment",
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn inspect_item(
     rt: TaskRuntime,
@@ -82,7 +82,7 @@ pub async fn inspect_item(
         .await
         .map_err(|error| store_failure("record_inspection", error))?;
     match damaged {
-        true => Err(TaskError::user(
+        true => Err(TaskError::custom(
             AcmeCode::DamagedItem,
             format!("{} came back damaged and cannot be resold", case.sku),
         )
@@ -106,7 +106,7 @@ pub async fn inspect_item(
     "restock_or_writeoff",
     queue = "fulfillment",
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn restock_or_writeoff(
     rt: TaskRuntime,
@@ -146,7 +146,9 @@ async fn return_case(store: &Store, return_id: &str) -> Result<ReturnCase, TaskE
         .get_return(return_id)
         .await
         .map_err(|error| store_failure("get_return", error))?
-        .ok_or_else(|| TaskError::user(AcmeCode::ReturnNotFound, format!("no return {return_id}")))
+        .ok_or_else(|| {
+            TaskError::custom(AcmeCode::ReturnNotFound, format!("no return {return_id}"))
+        })
 }
 
 /// Register the return tasks on `app`.

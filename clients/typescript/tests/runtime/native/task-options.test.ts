@@ -15,7 +15,8 @@ import { DEFAULT_QUEUE_ROUTE } from "../../../horsies/src/app/contract-list.ts";
 import { taskOptionsFacts } from "../../../horsies/src/app/core-checks.ts";
 import { parseAppConfig } from "../../../horsies/src/config/app-config.ts";
 import { contractRecord } from "../../../horsies/src/contract/definition.ts";
-import { defineTask, type ExecutionClass } from "../../../horsies/src/contract/public.ts";
+import { defineTask } from "../../../horsies/src/contract/public.ts";
+import type { Execution } from "../../../horsies/src/monitoring/public.ts";
 import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import type { NativeSendRules, NativeTaskOptions } from "../../../horsies/src/native/sends/addon.ts";
 import {
@@ -42,11 +43,11 @@ const UNUSED_DATABASE_URL = "postgresql://horsies@127.0.0.1:1/none";
 /** The retry policy of a vector, as Python's `RetryPolicy` stores it. */
 type RetryNotation = {
   readonly max_retries: number;
-  readonly intervals: readonly number[];
+  readonly intervals_seconds: readonly number[];
   readonly backoff_strategy: "fixed" | "exponential";
   readonly jitter: boolean;
   readonly max_delay_seconds: number | null;
-  readonly auto_retry_for: readonly string[];
+  readonly retry_for: readonly string[];
 };
 
 /** One vector: the facts of the options, the deadline of a send or a node, and Python's text. */
@@ -56,7 +57,7 @@ type OptionsVector = {
   readonly options: {
     readonly retry_policy: RetryNotation | null;
     readonly timeout_ms: number | null;
-    readonly execution: ExecutionClass;
+    readonly execution: Execution;
     readonly cancel_grace_ms: number | null;
   };
   readonly deadline: string | null;
@@ -68,17 +69,17 @@ function vectors(): readonly OptionsVector[] {
   return (JSON.parse(readFileSync(VECTOR_FILE, "utf8")) as { readonly vectors: readonly OptionsVector[] }).vectors;
 }
 
-/** The `retry` field of `defineTask` of a vector's policy. */
+/** The `retryPolicy` field of `defineTask` of a vector's policy. */
 function retryOf(policy: RetryNotation): object {
-  const [base] = policy.intervals;
+  const [base] = policy.intervals_seconds;
 
   switch (policy.backoff_strategy) {
     case "fixed":
       return {
         kind: "fixed",
-        intervalsSeconds: policy.intervals,
+        intervalsSeconds: policy.intervals_seconds,
         jitter: policy.jitter,
-        autoRetryFor: policy.auto_retry_for,
+        retryFor: policy.retry_for,
       };
     case "exponential":
       return {
@@ -87,7 +88,7 @@ function retryOf(policy: RetryNotation): object {
         maxRetries: policy.max_retries,
         jitter: policy.jitter,
         ...(policy.max_delay_seconds === null ? {} : { maxDelaySeconds: policy.max_delay_seconds }),
-        autoRetryFor: policy.auto_retry_for,
+        retryFor: policy.retry_for,
       };
     default: {
       const unexpected: never = policy.backoff_strategy;
@@ -108,7 +109,7 @@ function checkedOptions(vector: OptionsVector): NativeTaskOptions {
     execution: options.execution,
     ...(options.timeout_ms === null ? {} : { timeoutMs: options.timeout_ms }),
     ...(options.cancel_grace_ms === null ? {} : { cancelGraceMs: options.cancel_grace_ms }),
-    ...(options.retry_policy === null ? {} : { retry: retryOf(options.retry_policy) }),
+    ...(options.retry_policy === null ? {} : { retryPolicy: retryOf(options.retry_policy) }),
   };
 
   // SAFETY: the fields come from a vector at run time, so their static types are wide; `defineTask` keeps them as
@@ -125,13 +126,13 @@ function checkedOptions(vector: OptionsVector): NativeTaskOptions {
 
 /** The send rules of a config with only a database URL. */
 function sendRules(): NativeSendRules {
-  const config = parseAppConfig({ broker: { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } } }, () => undefined);
+  const config = parseAppConfig({ database: { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } } }, () => undefined);
 
   if (!config.ok) {
     assert.fail(`the minimal config is refused: ${JSON.stringify(config.error)}`);
   }
 
-  const checked = checkAppConfig(config.value.coreConfigJson);
+  const checked = checkAppConfig(config.value.coreConfigJson, config.value.schemaMode);
 
   if (checked.kind !== "accepted") {
     assert.fail(`the core refuses the minimal config: ${JSON.stringify(checked.refusals)}`);

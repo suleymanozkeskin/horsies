@@ -6,7 +6,7 @@ subscription, `_ping_responder_loop`, `_handle_ping`, and worker-state writes.
 A worker that fails to subscribe to the ping channel at startup — or leaks/
 crashes during start — would not reply here.
 
-The class reads (`get_class_report_async`, `get_class_coverage_async`)
+The class reads (`get_execution_class_report_async`, `get_execution_class_coverage_async`)
 read the snapshot that a real worker of a shared profile writes: its budgets
 and the classes each one serves.
 """
@@ -21,19 +21,20 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.health_reads import MinResponsesAtLeast
 from horsies.core.models.class_coverage import (
     BudgetLoad,
     StreamCoverage,
-    StreamServed,
-    StreamUnserved,
-    WorkerClassLoad,
+    StreamCoverageStateServed,
+    StreamCoverageStateUnserved,
+    WorkerExecutionClassLoad,
 )
 from horsies.core.models.tasks import Execution
 from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.types.status import TaskStatus
 
 from tests.broker_resources_support import current_resources
-from tests.e2e.helpers.assertions import unwrap_send
+from tests.e2e.helpers.assertions import read_succeeded, unwrap_send
 from tests.e2e.helpers.db import wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
@@ -87,7 +88,7 @@ async def test_ping_workers_reaches_real_worker(broker: PostgresBroker) -> None:
         # but allow for ping-subscription/dispatcher warmup.
         pongs: list = []
         for _ in range(10):
-            result = await broker.ping_workers_async(timeout_seconds=2.0)
+            result = await broker.ping_workers_async(wait_ms=2_000)
             assert is_ok(result)
             pongs = result.ok_value
             if pongs:
@@ -100,14 +101,16 @@ async def test_ping_workers_reaches_real_worker(broker: PostgresBroker) -> None:
         assert pong.pid > 0
         assert pong.round_trip_ms >= 0.0
 
-        # Fast gate: min_responses=1 returns well before the timeout window.
+        # Fast gate: one reply returns well before the wait ends.
         loop = asyncio.get_running_loop()
         start = loop.time()
-        gate = await broker.ping_workers_async(timeout_seconds=5.0, min_responses=1)
+        gate = await broker.ping_workers_async(
+            wait_ms=5_000, min_responses=MinResponsesAtLeast(count=1),
+        )
         elapsed = loop.time() - start
         assert is_ok(gate)
         assert len(gate.ok_value) == 1
-        assert elapsed < 4.0, 'min_responses=1 should not wait the full window'
+        assert elapsed < 4.0, 'MinResponsesAtLeast(1) should not wait the full window'
 
 
 @pytest.mark.e2e
@@ -119,7 +122,7 @@ async def test_ping_and_worker_state_correlate(broker: PostgresBroker) -> None:
         # Get a responsive worker id via ping.
         responsive_id: str | None = None
         for _ in range(10):
-            ping = await broker.ping_workers_async(timeout_seconds=2.0)
+            ping = await broker.ping_workers_async(wait_ms=2_000)
             assert is_ok(ping)
             if ping.ok_value:
                 responsive_id = ping.ok_value[0].worker_id
@@ -160,14 +163,14 @@ def _make_shared_ready_check():
         nonlocal handle
         if handle is None:
             handle = unwrap_send(shared_async_tasks.shared_sleep.send(seconds=0))
-        return handle.get(timeout_ms=2000).is_ok()
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
 
 async def _forget_other_workers(session: AsyncSession) -> None:
     """Delete the snapshots of the workers of earlier tests, which stay live
-    for `WORKER_STATE_LIVE_WINDOW_S` after their exit, so the class reads
+    for `WORKER_STATE_LIVE_WINDOW_SECONDS` after their exit, so the class reads
     see only the worker of this test."""
     await session.execute(text('DELETE FROM horsies_worker_states'))
     await session.commit()
@@ -220,7 +223,7 @@ async def test_the_report_gives_the_seats_of_the_shared_budget(
         ).scalar_one()
         await session.commit()
 
-        match await broker.get_class_report_async():
+        match await broker.get_execution_class_report_async():
             case Ok(report):
                 pass
             case Err(error):
@@ -228,7 +231,7 @@ async def test_the_report_gives_the_seats_of_the_shared_budget(
 
     seats = 2 * SPLIT_SHARED_SEATS
     (worker,) = report.workers
-    assert worker == WorkerClassLoad(
+    assert worker == WorkerExecutionClassLoad(
         worker_id=worker_id,
         snapshot_at=worker.snapshot_at,
         budgets=(
@@ -237,8 +240,8 @@ async def test_the_report_gives_the_seats_of_the_shared_budget(
         ),
     )
     (stream,) = report.streams
-    assert (stream.queue_name, stream.execution) == ('default', ASYNC)
-    assert stream.state == StreamServed(workers=1, capacity=seats)
+    assert (stream.queue, stream.execution) == ('default', ASYNC)
+    assert stream.coverage == StreamCoverageStateServed(workers=1, capacity=seats)
 
 
 @pytest.mark.e2e
@@ -259,7 +262,7 @@ async def test_a_worker_with_only_shared_children_serves_only_shared_rows(
         profile=SHARED_ONLY_1X4,
         ready_check=_make_shared_ready_check(),
     ):
-        match await broker.get_class_coverage_async():
+        match await broker.get_execution_class_coverage_async():
             case Ok(coverage):
                 pass
             case Err(error):
@@ -274,6 +277,6 @@ async def test_a_worker_with_only_shared_children_serves_only_shared_rows(
 
     assert status == 'PENDING'
     assert coverage.streams == (
-        StreamCoverage('default', ISOLATED, StreamUnserved()),
-        StreamCoverage('default', ASYNC, StreamServed(workers=1, capacity=4)),
+        StreamCoverage('default', ISOLATED, StreamCoverageStateUnserved()),
+        StreamCoverage('default', ASYNC, StreamCoverageStateServed(workers=1, capacity=4)),
     )

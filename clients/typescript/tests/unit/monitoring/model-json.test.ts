@@ -41,16 +41,16 @@ describe("jsonValueOfCoreText", () => {
 
 describe("decodeCoreModel", () => {
   test("gives the decoded model", () => {
-    assert.deepEqual(decodeCoreModel("taskStats", '{"status": "PENDING", "count": 3}', decodeStatusCount), {
+    assert.deepEqual(decodeCoreModel("taskStatusCounts", '{"status": "PENDING", "count": 3}', decodeStatusCount), {
       status: "PENDING",
       count: 3,
     });
   });
 
   test("a text that does not decode is a defect that names the model and the place", () => {
-    assert.throws(() => decodeCoreModel("taskStats", '{"status": "PENDING"}', decodeStatusCount), {
+    assert.throws(() => decodeCoreModel("taskStatusCounts", '{"status": "PENDING"}', decodeStatusCount), {
       name: "ClientDefect",
-      subject: "taskStats",
+      subject: "taskStatusCounts",
       rule: "the core's StatusCount does not decode: fieldMissing at $.count",
     });
   });

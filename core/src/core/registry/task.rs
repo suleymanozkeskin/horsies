@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::core::error::{ErrorCode, HorsiesError};
+use crate::core::error::{HorsiesError, HorsiesErrorCode};
 use crate::core::task::fn_trait::RegisteredTask;
 
 /// Registry mapping task names to their registered implementations.
@@ -31,13 +31,13 @@ impl TaskRegistry {
 
         if name.is_empty() {
             return Err(HorsiesError::new("task name must not be empty")
-                .with_code(ErrorCode::TaskInvalidOptions));
+                .with_code(HorsiesErrorCode::TaskInvalidOptions));
         }
 
         if self.tasks.contains_key(&name) {
             return Err(
                 HorsiesError::new(format!("duplicate task name: '{}'", name))
-                    .with_code(ErrorCode::TaskDuplicateName)
+                    .with_code(HorsiesErrorCode::TaskDuplicateName)
                     .with_note(format!("task '{}' is already registered", name))
                     .with_help("each task must have a unique name"),
             );
@@ -51,7 +51,7 @@ impl TaskRegistry {
     pub fn get(&self, name: &str) -> Result<&RegisteredTask, HorsiesError> {
         self.tasks.get(name).ok_or_else(|| {
             HorsiesError::new(format!("task '{}' not registered", name))
-                .with_code(ErrorCode::TaskNotRegistered)
+                .with_code(HorsiesErrorCode::TaskNotRegistered)
                 .with_help("register the task with app.register() before sending")
         })
     }
@@ -105,7 +105,7 @@ impl std::fmt::Debug for TaskRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMeta};
+    use crate::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMetadata};
 
     struct DummyTask;
 
@@ -118,7 +118,7 @@ mod tests {
     fn dummy_registered() -> RegisteredTask {
         RegisteredTask::Blocking {
             task: std::sync::Arc::new(DummyTask),
-            meta: TaskMeta::default(),
+            metadata: TaskMetadata::default(),
         }
     }
 
@@ -138,7 +138,7 @@ mod tests {
         let result = registry.register("dup", dummy_registered());
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.code, Some(ErrorCode::TaskDuplicateName));
+        assert_eq!(err.code, Some(HorsiesErrorCode::TaskDuplicateName));
     }
 
     #[test]
@@ -154,7 +154,7 @@ mod tests {
         let result = registry.get("missing");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.code, Some(ErrorCode::TaskNotRegistered));
+        assert_eq!(err.code, Some(HorsiesErrorCode::TaskNotRegistered));
     }
 
     #[test]

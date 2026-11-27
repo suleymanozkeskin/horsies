@@ -36,16 +36,18 @@ from horsies.core.codec.json_value import StrictJsonError, escape_lone_surrogate
 from horsies.core.codec.kwargs import (
     decode_subworkflow_kwargs,
     fill_build_with_defaults,
+    subworkflow_target_code_type,
     subworkflow_target_ok_type,
 )
 from horsies.core.codec.typed import conform_to_target
+from horsies.core.task_read import typed_outcome
 from horsies.core.codec.validation_errors import ValueValidationError
-from horsies.core.errors import ConfigurationError, ErrorCode, WorkflowValidationError
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode, WorkflowValidationError
 from horsies.core.logging import get_logger
+from horsies.core.models.outcome import TaskOutcome
 from horsies.core.models.tasks import (
-    OperationalErrorCode,
+    OperationalCode,
     TaskError,
-    TaskResult,
 )
 from horsies.core.models.workflow import (
     SubWorkflowNode,
@@ -54,7 +56,7 @@ from horsies.core.models.workflow import (
     validate_workflow_generic_output_match,
 )
 from horsies.core.models.workflow.limits import MAX_SUBWORKFLOW_DEPTH
-from horsies.core.models.workflow.nodes import stored_kwargs
+from horsies.core.models.workflow.nodes import node_target_name, stored_kwargs
 from horsies.core.types.result import Err, Ok
 from horsies.core.workflows.retention import queue_retention_class
 from horsies.core.workflows.sql import (
@@ -138,9 +140,9 @@ class NodeRow:
     dependencies: tuple[int, ...]
     args_from: tuple[tuple[str, int], ...]
     """``args_from`` keys and the index of the node each names, in spec order."""
-    workflow_ctx_from: tuple[str, ...] | None
+    workflow_context_from: tuple[str, ...] | None
     """Node ids of the context nodes; ``None`` when the node takes no context."""
-    allow_failed_deps: bool
+    allow_failed_dependencies: bool
     join_type: str
     min_success: int | None
     task_options: str | None
@@ -188,7 +190,7 @@ def node_error(
     workflow_id: str,
     task_index: int,
     message: str,
-    error_code: OperationalErrorCode,
+    error_code: OperationalCode,
 ) -> TaskError:
     """The error of a node whose task or child cannot be built. Pure.
 
@@ -196,7 +198,7 @@ def node_error(
     escaped: the node result must encode.
     """
     return TaskError(
-        error_code=error_code,
+        code=error_code,
         message=escape_lone_surrogates(message),
         data={'workflow_id': workflow_id, 'task_index': task_index},
     )
@@ -204,11 +206,11 @@ def node_error(
 
 def node_failure_result(error: TaskError) -> str:
     """The stored result of a node that fails with ``error``. Pure."""
-    return serialize_error_payload(TaskResult(err=error))
+    return serialize_error_payload(error)
 
 
 def _failed(
-    node: ChildOfNode, message: str, error_code: OperationalErrorCode,
+    node: ChildOfNode, message: str, error_code: OperationalCode,
 ) -> ChildBuildFailed:
     return ChildBuildFailed(
         error=node_error(node.workflow_id, node.task_index, message, error_code),
@@ -218,7 +220,7 @@ def _failed(
 def _load_failed(node: ChildOfNode) -> ChildBuildFailed:
     return ChildBuildFailed(
         error=TaskError(
-            error_code=OperationalErrorCode.SUBWORKFLOW_LOAD_FAILED,
+            code=OperationalCode.SUBWORKFLOW_LOAD_FAILED,
             message=(
                 f'Failed to load subworkflow definition for '
                 f'{node.workflow_name}:{node.task_index}'
@@ -275,7 +277,7 @@ def _args_from_map(
         return _failed(
             node,
             f'Corrupt args_from JSON for subworkflow task {node.task_index}',
-            OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            OperationalCode.WORKER_SERIALIZATION_ERROR,
         )
     if not isinstance(raw, dict):
         return {}
@@ -290,7 +292,7 @@ def _args_from_map(
             return _failed(
                 node,
                 f'args_from has non-int values for subworkflow task {node.task_index}',
-                OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                OperationalCode.WORKER_SERIALIZATION_ERROR,
             )
         validated[key] = value
     return validated
@@ -299,7 +301,7 @@ def _args_from_map(
 def _input_kwargs(
     node: ChildOfNode,
     workflow_def: type[WorkflowDefinition[Any]],
-    dependency_results: Mapping[int, TaskResult[Any, TaskError]],
+    dependency_results: Mapping[int, TaskOutcome[Any, TaskError]],
 ) -> dict[str, Any] | ChildBuildFailed:
     """The kwargs of ``build_with``: the decoded node input and the args_from members.
 
@@ -319,7 +321,7 @@ def _input_kwargs(
         return _failed(
             node,
             f'Corrupt kwargs JSON for subworkflow task {node.task_index}',
-            OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            OperationalCode.WORKER_SERIALIZATION_ERROR,
         )
     raw_kwargs_dict: dict[str, Any] = (
         cast(dict[str, Any], raw_kwargs) if isinstance(raw_kwargs, dict) else {}
@@ -330,7 +332,7 @@ def _input_kwargs(
         return _failed(
             node,
             f'Typed decode of subworkflow kwargs failed for task {node.task_index}: {exc}',
-            OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            OperationalCode.WORKER_SERIALIZATION_ERROR,
         )
     match _args_from_map(node):
         case ChildBuildFailed() as failed:
@@ -345,31 +347,61 @@ def _input_kwargs(
                     f"args_from key '{kwarg_name}' conflicts with static kwarg "
                     f'(subworkflow task {node.task_index})'
                 ),
-                OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
+                OperationalCode.WORKFLOW_ENQUEUE_FAILED,
             )
         dependency_result = dependency_results.get(dependency_index)
         if dependency_result is None:
             continue
-        target_ok_type = subworkflow_target_ok_type(workflow_def, kwarg_name)
-        if target_ok_type is None:
-            kwargs[kwarg_name] = dependency_result
-            continue
+        match _dependency_input(node, workflow_def, kwarg_name, dependency_result):
+            case ChildBuildFailed() as failed:
+                return failed
+            case dependency_input:
+                kwargs[kwarg_name] = dependency_input
+    return kwargs
+
+
+def _dependency_input(
+    node: ChildOfNode,
+    workflow_def: type[WorkflowDefinition[Any]],
+    kwarg_name: str,
+    dependency_result: TaskOutcome[Any, TaskError],
+) -> TaskOutcome[Any, TaskError[Any]] | ChildBuildFailed:
+    """The value of one ``args_from`` parameter of ``build_with``: the
+    dependency's outcome, validated with the value type and read with the
+    custom code type that the parameter declares. Pure apart from the
+    validators of the declared type.
+
+    A value that does not fit, or a custom code that the declared ``Enum``
+    does not name, fails the node with ``WORKER_SERIALIZATION_ERROR``.
+    """
+    outcome = dependency_result
+    target_ok_type = subworkflow_target_ok_type(workflow_def, kwarg_name)
+    refusal_text: str | None = None
+    if target_ok_type is not None:
         match conform_to_target(dependency_result, target_ok_type):
             case Ok(ok_value=conformed):
-                kwargs[kwarg_name] = conformed
+                outcome = conformed
             case Err(err_value=refusal):
-                return _failed(
-                    node,
-                    (
-                        f"args_from value for '{kwarg_name}' does not fit the type "
-                        f'that build_with declares (subworkflow task {node.task_index}): '
-                        f'{escape_lone_surrogates(str(refusal))[:BUILD_FAILURE_TEXT_CHARS]}'
-                    ),
-                    OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                )
+                refusal_text = str(refusal)
             case _ as unreachable:
                 assert_never(unreachable)
-    return kwargs
+    if refusal_text is None:
+        match typed_outcome(outcome, subworkflow_target_code_type(workflow_def, kwarg_name)):
+            case Ok(ok_value=typed):
+                return typed
+            case Err(err_value=unknown):
+                refusal_text = unknown.message
+            case _ as unreachable:
+                assert_never(unreachable)
+    return _failed(
+        node,
+        (
+            f"args_from value for '{kwarg_name}' does not fit the type "
+            f'that build_with declares (subworkflow task {node.task_index}): '
+            f'{escape_lone_surrogates(refusal_text)[:BUILD_FAILURE_TEXT_CHARS]}'
+        ),
+        OperationalCode.WORKER_SERIALIZATION_ERROR,
+    )
 
 
 def _built_spec(
@@ -387,7 +419,7 @@ def _built_spec(
         if app is None:
             raise WorkflowValidationError(
                 message='Broker missing app reference for subworkflow',
-                code=ErrorCode.WORKFLOW_SUBWORKFLOW_APP_MISSING,
+                code=HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_APP_MISSING,
                 notes=[
                     'Subworkflows require a Horsies app instance to build the child spec',
                     'Ensure broker.app is set (Horsies.get_broker() does this automatically)',
@@ -420,7 +452,7 @@ def _built_spec(
                 f'{str(exc)[:BUILD_FAILURE_TEXT_CHARS]} '
                 f'(workflow {node.workflow_name}:{node.task_index})'
             ),
-            OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
+            OperationalCode.WORKFLOW_ENQUEUE_FAILED,
         )
     return child_spec
 
@@ -428,7 +460,7 @@ def _built_spec(
 def build_child_within_depth(
     broker: PostgresBroker,
     node: ChildOfNode,
-    dependency_results: Mapping[int, TaskResult[Any, TaskError]],
+    dependency_results: Mapping[int, TaskOutcome[Any, TaskError]],
     child_depth: int,
 ) -> ChildBuild:
     """The child of ``node`` at ``child_depth``, which the core checked against
@@ -483,24 +515,24 @@ def _serialized(value: object, context: str) -> str:
             assert_never(unreachable)
 
 
-def _index_of(node: TaskNode[Any] | SubWorkflowNode[Any]) -> int:
+def _index_of(node: TaskNode[Any, Any] | SubWorkflowNode[Any]) -> int:
     assert node.index is not None, (
-        f'node {node.name!r} has no index; a WorkflowSpec assigns one to every node'
+        f'node {node_target_name(node)!r} has no index; a WorkflowSpec assigns one to every node'
     )
     return node.index
 
 
 def _graph_columns(
-    node: TaskNode[Any] | SubWorkflowNode[Any],
+    node: TaskNode[Any, Any] | SubWorkflowNode[Any],
 ) -> tuple[tuple[int, ...], tuple[tuple[str, int], ...], tuple[str, ...] | None]:
     """Dependencies, args_from pairs and context node ids of a spec node. Pure."""
     dependencies = tuple(_index_of(dependency) for dependency in node.waits_for)
     args_from = tuple((key, _index_of(source)) for key, source in node.args_from.items())
     context: tuple[str, ...] | None = None
-    if node.workflow_ctx_from:
+    if node.workflow_context_from:
         context = tuple(
             context_node.node_id
-            for context_node in node.workflow_ctx_from
+            for context_node in node.workflow_context_from
             if context_node.node_id is not None
         )
     return dependencies, args_from, context
@@ -518,28 +550,28 @@ def subworkflow_node_row(node: SubWorkflowNode[Any], owner: NodeOwner) -> NodeRo
     return NodeRow(
         task_index=_index_of(node),
         node_id=node.node_id,
-        task_name=node.name,
+        task_name=node.workflow_name,
         input_json=_serialized(
-            stored_kwargs(node), f"kwargs for {owner.kwargs_label('sub')} {node.name}",
+            stored_kwargs(node), f"kwargs for {owner.kwargs_label('sub')} {node.workflow_name}",
         ),
         queue_name=SUBWORKFLOW_NODE_QUEUE,
         priority=SUBWORKFLOW_NODE_PRIORITY,
         dependencies=dependencies,
         args_from=args_from,
-        workflow_ctx_from=context,
-        allow_failed_deps=node.allow_failed_deps,
+        workflow_context_from=context,
+        allow_failed_dependencies=node.allow_failed_dependencies,
         join_type=node.join,
         min_success=node.min_success,
         task_options=None,
         kind=SubWorkflowNodeKind(
-            sub_workflow_name=node.workflow_def.name,
-            sub_definition_key=node.workflow_def._require_definition_key(),  # pyright: ignore[reportPrivateUsage]
+            sub_workflow_name=node.workflow_definition.name,
+            sub_definition_key=node.workflow_definition._require_definition_key(),  # pyright: ignore[reportPrivateUsage]
             params=subworkflow_params_of(node),
         ),
     )
 
 
-def task_options_with_good_until(node: TaskNode[Any], owner: NodeOwner) -> str | None:
+def task_options_with_good_until(node: TaskNode[Any, Any], owner: NodeOwner) -> str | None:
     """The task options JSON of a task node, with its ``good_until`` set.
 
     The options are the task decorator's own serialization of a validated
@@ -550,7 +582,7 @@ def task_options_with_good_until(node: TaskNode[Any], owner: NodeOwner) -> str |
         SerializationError: the options do not parse to a JSON object, or
             the merged options do not serialize.
     """
-    options_json = node.fn.task_options_json
+    options_json = node.function.task_options_json
     if node.good_until is None:
         return options_json
     base_options: dict[str, Any] = {}
@@ -560,23 +592,23 @@ def task_options_with_good_until(node: TaskNode[Any], owner: NodeOwner) -> str |
                 base_options = cast(dict[str, Any], parsed_options)
             case Ok(not_an_object):
                 raise SerializationError(
-                    f'Task options for {owner.options_label()} {node.name} are not '
+                    f'Task options for {owner.options_label()} {node.task_name} are not '
                     f'a JSON object: got {type(not_an_object).__name__}',
                 )
             case Err(parse_error):
                 raise SerializationError(
-                    f'Corrupt task_options for {owner.options_label()} {node.name}: '
+                    f'Corrupt task_options for {owner.options_label()} {node.task_name}: '
                     f'{parse_error}',
                 )
             case _ as unreachable:
                 assert_never(unreachable)
     base_options['good_until'] = node.good_until.isoformat()
-    return _serialized(base_options, f'task_options for {owner.options_label()} {node.name}')
+    return _serialized(base_options, f'task_options for {owner.options_label()} {node.task_name}')
 
 
 def task_node_row(
     broker: PostgresBroker,
-    node: TaskNode[Any],
+    node: TaskNode[Any, Any],
     owner: NodeOwner,
     queue_name: str,
     priority: int,
@@ -602,16 +634,16 @@ def task_node_row(
     return NodeRow(
         task_index=_index_of(node),
         node_id=node.node_id,
-        task_name=node.name,
+        task_name=node.task_name,
         input_json=_serialized(
-            stored_kwargs(node), f"kwargs for {owner.kwargs_label('task')} {node.name}",
+            stored_kwargs(node), f"kwargs for {owner.kwargs_label('task')} {node.task_name}",
         ),
         queue_name=queue_name,
         priority=priority,
         dependencies=dependencies,
         args_from=args_from,
-        workflow_ctx_from=context,
-        allow_failed_deps=node.allow_failed_deps,
+        workflow_context_from=context,
+        allow_failed_dependencies=node.allow_failed_dependencies,
         join_type=node.join,
         min_success=node.min_success,
         task_options=task_options,
@@ -638,18 +670,18 @@ def child_node_rows(
     from horsies.core.workflows.lifecycle import guard_no_positional_args
 
     rows: list[NodeRow] = []
-    for child_node in child_spec.tasks:
+    for child_node in child_spec.nodes:
         try:
-            guard_no_positional_args(child_node.name, child_node.args)
+            guard_no_positional_args(node_target_name(child_node), child_node.args)
         except ValueError as exc:
             kind_text = 'subworkflow' if isinstance(child_node, SubWorkflowNode) else 'task'
             return _failed(
                 node,
                 (
-                    f'Invalid child {kind_text} node args for {child_node.name}: '
+                    f'Invalid child {kind_text} node args for {node_target_name(child_node)}: '
                     f'{str(exc)[:BUILD_FAILURE_TEXT_CHARS]}'
                 ),
-                OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
+                OperationalCode.WORKFLOW_ENQUEUE_FAILED,
             )
         match child_node:
             case SubWorkflowNode():
@@ -657,7 +689,7 @@ def child_node_rows(
             case TaskNode():
                 _ = task_options_with_good_until(child_node, NodeOwner.CHILD)
                 _ = _serialized(
-                    stored_kwargs(child_node), f'kwargs for child task {child_node.name}',
+                    stored_kwargs(child_node), f'kwargs for child task {child_node.task_name}',
                 )
                 assert broker.app is not None, (
                     'a built child spec implies an app: build_with refuses a broker without one'
@@ -667,8 +699,8 @@ def child_node_rows(
                 except ConfigurationError as exc:
                     return _failed(
                         node,
-                        f'Invalid queue/priority for child task {child_node.name}: {exc}',
-                        OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
+                        f'Invalid queue/priority for child task {child_node.task_name}: {exc}',
+                        OperationalCode.WORKFLOW_ENQUEUE_FAILED,
                     )
                 rows.append(
                     task_node_row(

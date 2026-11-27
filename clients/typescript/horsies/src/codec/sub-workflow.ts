@@ -2,19 +2,37 @@
 // `SubWorkflowFailure` and `SubWorkflowSummary`, `core/src/core/workflow/summary.rs`). A summary key that the core
 // does not name is ignored, as the core ignores it.
 
+import { SUMMARY_OUTPUT_DEPTH_LIMIT } from "../_catalog/codec_bounds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
-import type { SubWorkflowFailure, SubWorkflowSummary, WorkflowStatus } from "../wire/task-error.ts";
-import { SUMMARY_COUNT_MAX, SUMMARY_COUNT_MIN, SUMMARY_OUTPUT_DEPTH_LIMIT, WORKFLOW_STATUSES } from "./bounds.ts";
+import {
+  type SubWorkflowFailure,
+  type SubWorkflowSummary,
+  WORKFLOW_STATUSES,
+  type WorkflowStatus,
+} from "../wire/task-error.ts";
 import { decodeJsonNode } from "./json-value.ts";
 import { isTreeObject, type TreeObject, type TreeValue } from "./number-text.ts";
-import { type DecodeRefused, type EnvelopeRefused, envelopeRefused, type EnvelopeRule, memberPath } from "./refusal.ts";
+import {
+  type DecodeRefused,
+  type EnvelopeRefused,
+  envelopeRefused,
+  type EnvelopeRule,
+  memberPath,
+  refusalName,
+} from "./refusal.ts";
 import { isNumber, isString } from "./values.ts";
 
 const SUB_WORKFLOW_ID_KEY = "sub_workflow_id";
 const SUB_WORKFLOW_SUMMARY_KEY = "sub_workflow_summary";
-const COUNT_KEYS = ["total_tasks", "completed_tasks", "failed_tasks", "skipped_tasks"] as const;
+const COUNT_KEYS = ["total_nodes", "completed_nodes", "failed_nodes", "skipped_nodes"] as const;
 
 const STATUSES: ReadonlySet<string> = new Set(WORKFLOW_STATUSES);
+
+/** The largest count of a sub-workflow summary: the core stores each count as an `i32`. */
+const SUMMARY_COUNT_MAX = 2_147_483_647;
+
+/** The smallest count of a sub-workflow summary (the `i32` range). */
+const SUMMARY_COUNT_MIN = -2_147_483_648;
 
 /**
  * The forms of a UUID that the core reads (the `uuid` crate's `Uuid::parse_str`): 32 hex digits, the hyphenated
@@ -97,7 +115,9 @@ export function readSubWorkflowSummary(node: TreeValue, path: string): Result<Su
   const output = decodeJsonNode(node["output"] ?? null, outputPath, 0, SUMMARY_OUTPUT_DEPTH_LIMIT);
 
   if (!output.ok) {
-    return refuse("ErrorDataRefused", outputPath, `the output breaks a rule of a user value: ${output.error.kind}`);
+    const name = refusalName(output.error);
+
+    return refuse("ErrorDataRefused", outputPath, `the output breaks a rule of a user value: ${name}`);
   }
 
   const counts = readCounts(node, path);
@@ -105,7 +125,7 @@ export function readSubWorkflowSummary(node: TreeValue, path: string): Result<Su
   return counts.ok ? ok(Object.freeze({ status, output: output.value, errorSummary, ...counts.value })) : counts;
 }
 
-type Counts = Pick<SubWorkflowSummary, "totalTasks" | "completedTasks" | "failedTasks" | "skippedTasks">;
+type Counts = Pick<SubWorkflowSummary, "totalNodes" | "completedNodes" | "failedNodes" | "skippedNodes">;
 
 /** The four counts: each an integer in the range that the core stores (`i32`). */
 function readCounts(node: TreeObject, path: string): Result<Counts, EnvelopeRefused> {
@@ -121,7 +141,7 @@ function readCounts(node: TreeObject, path: string): Result<Counts, EnvelopeRefu
     values.push(count);
   }
 
-  const [totalTasks = 0, completedTasks = 0, failedTasks = 0, skippedTasks = 0] = values;
+  const [totalNodes = 0, completedNodes = 0, failedNodes = 0, skippedNodes = 0] = values;
 
-  return ok({ totalTasks, completedTasks, failedTasks, skippedTasks });
+  return ok({ totalNodes, completedNodes, failedNodes, skippedNodes });
 }

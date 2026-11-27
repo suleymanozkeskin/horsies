@@ -1,14 +1,14 @@
 """Unit tests for lifecycle pause/resume Result typing.
 
-pause_workflow / resume_workflow return ``HandleResult[bool]``. A database
-error is a ``HandleOperationError`` variant; any other exception propagates.
+pause_workflow_async / resume_workflow_async return ``HandleResult[bool]``. A database
+error is a ``WorkflowHandleError`` variant; any other exception propagates.
 The pause is one ``horsies_workflow_pause`` statement that the core runs;
 its record decides the result, and a failure is the core's generated
 handle error class, returned as it is.
 The resume runs in the core too (``CoreHandle.resume_workflow_async``): its
 record decides the result, and a recovery that failed after the commit is
-``HandleResumeRecoveryFailed``. The sync wrappers return a
-core boundary error of the blocking call as ``HandleDbOperationFailed`` and
+``WorkflowHandleResumeRecoveryFailed``. The sync wrappers return a
+core boundary error of the blocking call as ``WorkflowHandleDatabaseOperationFailed`` and
 let other exceptions propagate.
 """
 
@@ -23,17 +23,17 @@ import horsies._core as core
 
 from horsies.core.types.result import is_ok, is_err
 from horsies.core.models.workflow.handle_types import (
-    HandleDbOperationFailed,
-    HandleResumeRecoveryFailed,
-    HandleStoredDataInvalid,
-    HandleWorkflowNotFound,
+    WorkflowHandleDatabaseOperationFailed,
+    WorkflowHandleResumeRecoveryFailed,
+    WorkflowHandleStoredDataInvalid,
+    WorkflowHandleNotFound,
 )
 
 WORKFLOW_ID = 'wf-1'
 
 
 # ===========================================================================
-# pause_workflow async
+# pause_workflow_async
 # ===========================================================================
 
 
@@ -63,15 +63,15 @@ def _pause_broker(answer: object = None, *, raises: BaseException | None = None)
 
 @pytest.mark.unit
 class TestPauseWorkflowResult:
-    """pause_workflow returns HandleResult[bool] from the core's record."""
+    """pause_workflow_async returns HandleResult[bool] from the core's record."""
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_pause_running_returns_ok_true(self) -> None:
         """WorkflowPaused -> Ok(True); one call with the id as a UUID."""
-        from horsies.core.workflows.lifecycle import pause_workflow
+        from horsies.core.workflows.lifecycle import pause_workflow_async
 
         broker = _pause_broker(_record(core.WorkflowPaused))
-        result = await pause_workflow(broker, PAUSE_WORKFLOW_KEY)
+        result = await pause_workflow_async(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_ok(result)
         assert result.ok_value is True
@@ -82,10 +82,10 @@ class TestPauseWorkflowResult:
     @pytest.mark.asyncio(loop_scope='function')
     async def test_pause_wrong_state_returns_ok_false(self) -> None:
         """WorkflowNotRunning -> Ok(False)."""
-        from horsies.core.workflows.lifecycle import pause_workflow
+        from horsies.core.workflows.lifecycle import pause_workflow_async
 
         broker = _pause_broker(_record(core.WorkflowNotRunning))
-        result = await pause_workflow(broker, PAUSE_WORKFLOW_KEY)
+        result = await pause_workflow_async(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_ok(result)
         assert result.ok_value is False
@@ -93,80 +93,80 @@ class TestPauseWorkflowResult:
     @pytest.mark.asyncio(loop_scope='function')
     async def test_pause_not_found_returns_err(self) -> None:
         """WorkflowAbsent -> Err(WORKFLOW_NOT_FOUND)."""
-        from horsies.core.workflows.lifecycle import pause_workflow
+        from horsies.core.workflows.lifecycle import pause_workflow_async
 
         broker = _pause_broker(_record(core.WorkflowAbsent))
-        result = await pause_workflow(broker, PAUSE_WORKFLOW_KEY)
+        result = await pause_workflow_async(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, HandleWorkflowNotFound)
+        assert isinstance(err, WorkflowHandleNotFound)
         assert err.workflow_id == PAUSE_WORKFLOW_ID
         assert err.retryable is False
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_pause_db_failure_is_the_core_s_class_as_it_is(self) -> None:
-        """The core's HandleDbOperationFailed -> Err of the same object, with
+        """The core's WorkflowHandleDatabaseOperationFailed -> Err of the same object, with
         the core's message, cause and retry rule."""
-        from horsies.core.workflows.lifecycle import pause_workflow
+        from horsies.core.workflows.lifecycle import pause_workflow_async
 
-        failed = HandleDbOperationFailed(
+        failed = WorkflowHandleDatabaseOperationFailed(
             message=(
                 f'Pause failed for workflow {PAUSE_WORKFLOW_ID}: '
                 'connection failed: connection refused'
             ),
             retryable=True,
             workflow_id=PAUSE_WORKFLOW_ID,
-            exception=core.CoreConnectionError(
+            cause=core.CoreConnectionError(
                 'pause_workflow', 'connection failed: connection refused', True,
             ),
         )
         broker = _pause_broker(failed)
-        result = await pause_workflow(broker, PAUSE_WORKFLOW_KEY)
+        result = await pause_workflow_async(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         assert result.err_value is failed
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_pause_stored_data_invalid_is_the_core_s_class_as_it_is(self) -> None:
-        """The core's HandleStoredDataInvalid -> Err of the same object."""
-        from horsies.core.workflows.lifecycle import pause_workflow
+        """The core's WorkflowHandleStoredDataInvalid -> Err of the same object."""
+        from horsies.core.workflows.lifecycle import pause_workflow_async
 
-        invalid = HandleStoredDataInvalid(
+        invalid = WorkflowHandleStoredDataInvalid(
             message=(
                 f'Pause failed for workflow {PAUSE_WORKFLOW_ID}: invalid status: BOGUS'
             ),
             workflow_id=PAUSE_WORKFLOW_ID,
-            exception=core.CoreContractViolation(
+            cause=core.CoreContractViolation(
                 'pause_workflow', 'invalid status: BOGUS',
             ),
         )
         broker = _pause_broker(invalid)
-        result = await pause_workflow(broker, PAUSE_WORKFLOW_KEY)
+        result = await pause_workflow_async(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         assert result.err_value is invalid
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_pause_core_boundary_error_returns_db_operation_failed(self) -> None:
-        """A core boundary error raised by the call -> Err(HandleDbOperationFailed),
+        """A core boundary error raised by the call -> Err(WorkflowHandleDatabaseOperationFailed),
         retryable by the core's rule."""
-        from horsies.core.workflows.lifecycle import pause_workflow
+        from horsies.core.workflows.lifecycle import pause_workflow_async
 
         refused = core.TooManyPendingCalls('CoreHandle.pause_workflow_async', 64)
         broker = _pause_broker(raises=refused)
-        result = await pause_workflow(broker, PAUSE_WORKFLOW_KEY)
+        result = await pause_workflow_async(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, HandleDbOperationFailed)
-        assert err.exception is refused
+        assert isinstance(err, WorkflowHandleDatabaseOperationFailed)
+        assert err.cause is refused
         assert err.retryable is True
 
 
 
 # ===========================================================================
-# resume_workflow through the core
+# resume_workflow_async through the core
 # ===========================================================================
 
 
@@ -183,14 +183,14 @@ def _resume_broker(answer: object = None, *, raises: BaseException | None = None
 
 @pytest.mark.unit
 class TestResumeThroughCore:
-    """resume_workflow returns HandleResult[bool] from the core's record."""
+    """resume_workflow_async returns HandleResult[bool] from the core's record."""
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_resumed_returns_ok_true_with_the_id_as_a_uuid(self) -> None:
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from horsies.core.workflows.lifecycle import resume_workflow_async
 
         broker = _resume_broker(_record(core.WorkflowResumed))
-        result = await resume_workflow(broker, PAUSE_WORKFLOW_KEY)
+        result = await resume_workflow_async(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_ok(result)
         assert result.ok_value is True
@@ -200,42 +200,42 @@ class TestResumeThroughCore:
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_not_paused_returns_ok_false(self) -> None:
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from horsies.core.workflows.lifecycle import resume_workflow_async
 
         broker = _resume_broker(_record(core.WorkflowNotPaused))
-        result = await resume_workflow(broker, PAUSE_WORKFLOW_KEY)
+        result = await resume_workflow_async(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_ok(result)
         assert result.ok_value is False
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_absent_returns_workflow_not_found(self) -> None:
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from horsies.core.workflows.lifecycle import resume_workflow_async
 
         broker = _resume_broker(_record(core.WorkflowAbsent))
-        result = await resume_workflow(broker, PAUSE_WORKFLOW_KEY)
+        result = await resume_workflow_async(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
-        assert isinstance(result.err_value, HandleWorkflowNotFound)
+        assert isinstance(result.err_value, WorkflowHandleNotFound)
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_recovery_failed_after_the_commit_is_the_core_s_class_as_it_is(
         self,
     ) -> None:
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from horsies.core.workflows.lifecycle import resume_workflow_async
 
-        recovery_failed = HandleResumeRecoveryFailed(
+        recovery_failed = WorkflowHandleResumeRecoveryFailed(
             message=(
                 f'Workflow {PAUSE_WORKFLOW_ID} resumed; the recovery pass for its '
                 'tree failed: broker error: connection failed: connection refused'
             ),
             workflow_id=PAUSE_WORKFLOW_ID,
-            exception=core.CoreConnectionError(
+            cause=core.CoreConnectionError(
                 'resume_workflow', 'connection failed: connection refused', True,
             ),
         )
         broker = _resume_broker(recovery_failed)
-        result = await resume_workflow(broker, PAUSE_WORKFLOW_KEY)
+        result = await resume_workflow_async(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         assert result.err_value is recovery_failed
@@ -243,46 +243,46 @@ class TestResumeThroughCore:
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_a_failure_of_the_core_is_its_class_as_it_is(self) -> None:
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from horsies.core.workflows.lifecycle import resume_workflow_async
 
-        failed = HandleDbOperationFailed(
+        failed = WorkflowHandleDatabaseOperationFailed(
             message=(
                 f'Resume failed for workflow {PAUSE_WORKFLOW_ID}: '
                 'child spec source: build of the child did not run: queue full'
             ),
             retryable=True,
             workflow_id=PAUSE_WORKFLOW_ID,
-            exception=core.CorePreconditionFailed(
+            cause=core.CorePreconditionFailed(
                 'resume_workflow',
                 'child spec source: build of the child did not run: queue full',
                 True,
             ),
         )
         broker = _resume_broker(failed)
-        result = await resume_workflow(broker, PAUSE_WORKFLOW_KEY)
+        result = await resume_workflow_async(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         assert result.err_value is failed
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_a_core_boundary_error_returns_db_operation_failed(self) -> None:
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from horsies.core.workflows.lifecycle import resume_workflow_async
 
         broker = _resume_broker(raises=core.TooManyPendingCalls('too many calls'))
-        result = await resume_workflow(broker, PAUSE_WORKFLOW_KEY)
+        result = await resume_workflow_async(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
-        assert isinstance(result.err_value, HandleDbOperationFailed)
+        assert isinstance(result.err_value, WorkflowHandleDatabaseOperationFailed)
         assert result.err_value.retryable is True
 
 
 # ===========================================================================
-# resume_workflow async
+# resume_workflow_async
 # ===========================================================================
 
 
 # ===========================================================================
-# resume_workflow: the commit splits the failure states
+# resume_workflow_async: the commit splits the failure states
 # ===========================================================================
 
 
@@ -305,15 +305,15 @@ def _blocking_broker(method: str, answer: object) -> MagicMock:
 
 @pytest.mark.unit
 class TestPauseSyncWrapper:
-    """pause_workflow_sync calls CoreHandle.pause_workflow on the calling
-    thread: a core boundary error is HandleDbOperationFailed, and other
+    """pause_workflow calls CoreHandle.pause_workflow on the calling
+    thread: a core boundary error is WorkflowHandleDatabaseOperationFailed, and other
     exceptions propagate."""
 
     def test_the_record_decides_the_result(self) -> None:
-        from horsies.core.workflows.lifecycle import pause_workflow_sync
+        from horsies.core.workflows.lifecycle import pause_workflow
 
         broker = _blocking_broker('pause_workflow', _record(core.WorkflowPaused))
-        result = pause_workflow_sync(broker, PAUSE_WORKFLOW_KEY)
+        result = pause_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_ok(result)
         assert result.ok_value is True
@@ -323,43 +323,43 @@ class TestPauseSyncWrapper:
         broker._core_handle.pause_workflow_async.assert_not_called()
 
     def test_core_boundary_error_returns_err(self) -> None:
-        """A CoreError of the blocking call -> Err(HandleDbOperationFailed)."""
-        from horsies.core.workflows.lifecycle import pause_workflow_sync
+        """A CoreError of the blocking call -> Err(WorkflowHandleDatabaseOperationFailed)."""
+        from horsies.core.workflows.lifecycle import pause_workflow
 
         refused = core.TooManyPendingCalls('CoreHandle.pause_workflow', 64)
         broker = _blocking_broker('pause_workflow', refused)
-        result = pause_workflow_sync(broker, PAUSE_WORKFLOW_KEY)
+        result = pause_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, HandleDbOperationFailed)
+        assert isinstance(err, WorkflowHandleDatabaseOperationFailed)
         assert err.workflow_id == PAUSE_WORKFLOW_ID
         assert err.retryable is True
-        assert err.exception is refused
+        assert err.cause is refused
 
     def test_unexpected_exception_propagates(self) -> None:
         """An exception that is not a CoreError propagates unchanged."""
-        from horsies.core.workflows.lifecycle import pause_workflow_sync
+        from horsies.core.workflows.lifecycle import pause_workflow
 
         defect = RuntimeError('boom')
         broker = _blocking_broker('pause_workflow', defect)
         with pytest.raises(RuntimeError) as exc_info:
-            pause_workflow_sync(broker, PAUSE_WORKFLOW_KEY)
+            pause_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert exc_info.value is defect
 
 
 @pytest.mark.unit
 class TestResumeSyncWrapper:
-    """resume_workflow_sync calls CoreHandle.resume_workflow on the calling
-    thread: a core boundary error is HandleDbOperationFailed, and other
+    """resume_workflow calls CoreHandle.resume_workflow on the calling
+    thread: a core boundary error is WorkflowHandleDatabaseOperationFailed, and other
     exceptions propagate."""
 
     def test_the_record_decides_the_result(self) -> None:
-        from horsies.core.workflows.lifecycle import resume_workflow_sync
+        from horsies.core.workflows.lifecycle import resume_workflow
 
         broker = _blocking_broker('resume_workflow', _record(core.WorkflowNotPaused))
-        result = resume_workflow_sync(broker, PAUSE_WORKFLOW_KEY)
+        result = resume_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_ok(result)
         assert result.ok_value is False
@@ -369,27 +369,27 @@ class TestResumeSyncWrapper:
         broker._core_handle.resume_workflow_async.assert_not_called()
 
     def test_core_boundary_error_returns_err(self) -> None:
-        """A CoreError of the blocking call -> Err(HandleDbOperationFailed)."""
-        from horsies.core.workflows.lifecycle import resume_workflow_sync
+        """A CoreError of the blocking call -> Err(WorkflowHandleDatabaseOperationFailed)."""
+        from horsies.core.workflows.lifecycle import resume_workflow
 
         refused = core.TooManyPendingCalls('CoreHandle.resume_workflow', 64)
         broker = _blocking_broker('resume_workflow', refused)
-        result = resume_workflow_sync(broker, PAUSE_WORKFLOW_KEY)
+        result = resume_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, HandleDbOperationFailed)
+        assert isinstance(err, WorkflowHandleDatabaseOperationFailed)
         assert err.workflow_id == PAUSE_WORKFLOW_ID
         assert err.retryable is True
-        assert err.exception is refused
+        assert err.cause is refused
 
     def test_unexpected_exception_propagates(self) -> None:
         """An exception that is not a CoreError propagates unchanged."""
-        from horsies.core.workflows.lifecycle import resume_workflow_sync
+        from horsies.core.workflows.lifecycle import resume_workflow
 
         defect = RuntimeError('boom')
         broker = _blocking_broker('resume_workflow', defect)
         with pytest.raises(RuntimeError) as exc_info:
-            resume_workflow_sync(broker, PAUSE_WORKFLOW_KEY)
+            resume_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert exc_info.value is defect

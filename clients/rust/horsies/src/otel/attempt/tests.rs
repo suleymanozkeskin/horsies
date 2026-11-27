@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use horsies_core::events::AttemptNumber;
 use horsies_core::{
-    BodyCarrier, Execution, OperationalErrorCode, TaskErrorCode, UserCode, WorkflowNodeIndex,
+    BodyCarrier, CustomCode, Execution, OperationalCode, TaskErrorCode, WorkflowNodeIndex,
     MAX_WORKFLOW_NODE_INDEX,
 };
 use opentelemetry::trace::{SpanId, SpanKind, TraceId, TracerProvider as _};
@@ -133,7 +133,7 @@ fn the_attempt_span_is_a_child_of_the_send_span_with_the_task_attributes() {
     for key in ["horsies.workflow.id", "horsies.workflow.node"] {
         assert_eq!(attribute(attempt, key), None, "{key}");
     }
-    assert_eq!(attempt.status, Status::Ok);
+    assert_eq!(attempt.status, Status::Unset);
     assert_eq!(
         attribute(attempt, LabelName::ErrorCode.attribute_key()),
         None
@@ -288,8 +288,9 @@ fn an_instrumented_function_of_an_async_body_nests_under_the_attempt_span() {
 /// status ERROR with `error.type` the code; a returned value sets OK.
 #[test]
 fn the_end_of_the_body_sets_the_status_of_the_attempt_span() {
-    let declined = TaskErrorCode::User(UserCode::parse("DECLINED").expect("a free user code"));
-    let unhandled = TaskErrorCode::BuiltIn(OperationalErrorCode::UnhandledException.into());
+    let declined =
+        TaskErrorCode::Custom(CustomCode::parse("DECLINED").expect("a free custom code"));
+    let unhandled = TaskErrorCode::BuiltIn(OperationalCode::UnhandledException.into());
     let carrier = send_carrier();
     let error_type = LabelName::ErrorCode.attribute_key();
     for (end, expected) in [
@@ -320,7 +321,7 @@ fn the_end_of_the_body_sets_the_status_of_the_attempt_span() {
         );
         match expected {
             Some(_) => assert_eq!(attempt.status, Status::error(""), "{end:?}"),
-            None => assert_eq!(attempt.status, Status::Ok, "{end:?}"),
+            None => assert_eq!(attempt.status, Status::Unset, "{end:?}"),
         }
     }
 }

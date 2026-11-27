@@ -1,4 +1,4 @@
-"""E2E: @app.on_child_process_start through real workers.
+"""E2E: @app.on_child_start through real workers.
 
 Graduates tests/spike/conn_accum: the documented hook body (dispose +
 NullPool rebind) must drop the post-burst app-owned connection floor to
@@ -20,7 +20,7 @@ from horsies.core.models.task_send_types import TaskSendResult
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import is_err
 
-from tests.e2e.helpers.assertions import unwrap_send
+from tests.e2e.helpers.assertions import read_succeeded, unwrap_send
 from tests.e2e.helpers.db import wait_for_all_terminal
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import instance_child_hook
@@ -53,8 +53,7 @@ def _make_ready_check(task_func: _HealthcheckTask):
             if is_err(r):
                 return False
             handle = r.ok_value
-        result = handle.get(timeout_ms=2000)
-        return result.is_ok()
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
@@ -162,7 +161,7 @@ def test_failing_hook_stops_worker_at_boot() -> None:
 
     message = str(exc_info.value)
     assert 'exited before becoming ready' in message
-    assert 'on_child_process_start' in message
+    assert 'on_child_start' in message
     # A restart loop would burn the full ready timeout; a fail-closed boot
     # failure surfaces well before it.
     assert time.monotonic() - started < 25.0

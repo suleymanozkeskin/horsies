@@ -16,7 +16,7 @@ use super::scripted::{
 };
 use super::*;
 use crate::core::boot_failure::ShortageErrno;
-use crate::events::{Event, ReplaceReason, SlotDownCause};
+use crate::events::{AnyEvent, ReplaceReason, SlotDownCause};
 use crate::telemetry::catalog::MetricId;
 use crate::telemetry::registry::SampleValue;
 use crate::test_support::telemetry::WatchedTelemetry;
@@ -53,12 +53,13 @@ fn watched_isolated(
 /// The one `ChildReplaced` of `events`, between the `ChildStarted` of the
 /// child it replaced and the `ChildStarted` of the next child, checked for
 /// both pids, slot 0 and `kind`.
-fn replaced_once(events: &[Event], kind: ExecutionClass) -> ReplaceReason {
+fn replaced_once(events: &[AnyEvent], kind: ExecutionClass) -> ReplaceReason {
     match events {
-        [Event::ChildStarted(old), Event::ChildReplaced(replaced), Event::ChildStarted(new)] => {
+        [AnyEvent::ChildStarted(old), AnyEvent::ChildReplaced(replaced), AnyEvent::ChildStarted(new)] =>
+        {
             assert_eq!(replaced.child_pid, old.child_pid);
             assert_ne!(new.child_pid, old.child_pid);
-            assert_eq!(replaced.child_kind, kind);
+            assert_eq!(replaced.child_execution, kind);
             assert_eq!(replaced.slot.get(), 0);
             replaced.reason
         }
@@ -87,7 +88,7 @@ async fn stop_without_replacement(
     assert!(
         !after_stop
             .iter()
-            .any(|event| matches!(event, Event::ChildReplaced(_))),
+            .any(|event| matches!(event, AnyEvent::ChildReplaced(_))),
         "the stop of the pool replaced a child: {after_stop:?}"
     );
     let _stopped = spawner.stop(SPAWNER_STOP_WAIT);
@@ -95,7 +96,7 @@ async fn stop_without_replacement(
 
 /// The events that the points emit, read until there are `count` of them
 /// (a point emits after the board changed), within [`STATE_WAIT`].
-async fn events_until(watched: &mut WatchedTelemetry, count: usize) -> Vec<Event> {
+async fn events_until(watched: &mut WatchedTelemetry, count: usize) -> Vec<AnyEvent> {
     let deadline = tokio::time::Instant::now() + STATE_WAIT;
     let mut events = Vec::new();
     while events.len() < count {
@@ -133,8 +134,8 @@ async fn a_child_that_sends_its_ready_frame_is_started_once() {
     let pid = serving(&board, 0).await;
 
     match events_until(&mut watched, 1).await.as_slice() {
-        [Event::ChildStarted(started)] => {
-            assert_eq!(started.child_kind, ExecutionClass::Isolated);
+        [AnyEvent::ChildStarted(started)] => {
+            assert_eq!(started.child_execution, ExecutionClass::Isolated);
             assert_eq!(started.slot.get(), 0);
             assert_eq!(started.child_pid, pid);
         }
@@ -171,7 +172,8 @@ async fn a_slot_down_after_a_shortage_is_down_once_then_started_and_recovered_on
     let pid = serving(&board, 0).await;
 
     match events_until(&mut watched, 3).await.as_slice() {
-        [Event::SlotDown(down), Event::ChildStarted(started), Event::SlotRecovered(recovered)] => {
+        [AnyEvent::SlotDown(down), AnyEvent::ChildStarted(started), AnyEvent::SlotRecovered(recovered)] =>
+        {
             assert_eq!(
                 down.cause,
                 SlotDownCause::ResourceShortage {
@@ -181,7 +183,7 @@ async fn a_slot_down_after_a_shortage_is_down_once_then_started_and_recovered_on
             assert_eq!(down.slot.get(), 0);
             assert_eq!(started.child_pid, pid);
             assert_eq!(recovered.slot.get(), 0);
-            assert_eq!(recovered.child_kind, ExecutionClass::Isolated);
+            assert_eq!(recovered.child_execution, ExecutionClass::Isolated);
         }
         other => panic!("SlotDown, ChildStarted, SlotRecovered, not {other:?}"),
     }
@@ -329,7 +331,7 @@ async fn a_shared_child_killed_for_a_blocked_loop_is_replaced_once_as_loop_block
     assert!(!watched
         .events()
         .iter()
-        .any(|event| matches!(event, Event::ChildReplaced(_))));
+        .any(|event| matches!(event, AnyEvent::ChildReplaced(_))));
     let _stopped = spawner.stop(SPAWNER_STOP_WAIT);
 }
 

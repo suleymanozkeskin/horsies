@@ -8,18 +8,20 @@
 //!   refusal never throws.
 //! - The app config check also gives what the accepted config resolves to:
 //!   the send rules of each send (retention, payload bounds and the priority
-//!   of each queue), the producer manifest of its broker settings (the
-//!   resolution of the Rust client, `config::producer_manifest`) and the
-//!   coverage values of its retention (`CoverageRequest::of_retention`).
+//!   of each queue), the producer manifest of its broker settings and of the
+//!   schema mode that the caller names (the resolution of the Rust client,
+//!   `config::producer_manifest`) and the coverage values of its retention
+//!   (`CoverageRequest::of_retention`).
 
+use horsies_core::core::config::SessionDatabase as CoreSessionDatabase;
 use horsies_core::manifest::{
     DatabaseManifest, DatabaseUrl, ManifestVersion, PoolConnections, PoolSize as ManifestPoolSize,
     ProducerManifest, ReservationWindowMicros, SchemaMode, SendManifest, SessionDatabase,
     WholeSeconds,
 };
 use horsies_core::{
-    AppConfig, AppConfigError, CoverageRequest, DeclaredErrorCodes, ErrorCode, PostgresConfig,
-    RetentionConfig,
+    AppConfig, AppConfigError, CoverageRequest, DeclaredErrorCodes, HorsiesErrorCode,
+    PostgresConfig, RetentionConfig,
 };
 use napi_derive::napi;
 
@@ -39,10 +41,31 @@ const CORE_URL_SCHEME: &str = "postgresql://";
 /// The short form of [`CORE_URL_SCHEME`] that the config also admits.
 const SHORT_URL_SCHEME: &str = "postgres://";
 
-/// The schema mode of the producer manifest of an app: the migrations run
-/// at the first operation that needs the schema, as the Python and Rust
-/// clients do for an app (`SchemaMode::MigrateAndValidate`).
-const APP_SCHEMA_MODE: SchemaMode = SchemaMode::MigrateAndValidate;
+/// What the core handle of a producer manifest does with the schema: the
+/// three members of the core's `SchemaMode`, with the manifest texts as the
+/// JavaScript values (`HorsiesConfig.schemaMode`).
+#[napi(string_enum = "UPPER_SNAKE")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppSchemaMode {
+    /// The first operation that needs the schema applies the migrations and
+    /// checks the schema version.
+    MigrateAndValidate,
+    /// The handle never runs schema statements.
+    ObserveOnly,
+    /// The handle never runs schema statements and uses no listener.
+    AssumeInitialized,
+}
+
+impl AppSchemaMode {
+    /// The core's mode of this value. Pure.
+    const fn core_mode(self) -> SchemaMode {
+        match self {
+            Self::MigrateAndValidate => SchemaMode::MigrateAndValidate,
+            Self::ObserveOnly => SchemaMode::ObserveOnly,
+            Self::AssumeInitialized => SchemaMode::AssumeInitialized,
+        }
+    }
+}
 
 /// The values of the coverage pass of a schema install: the history and the
 /// heartbeat horizons and the registrable retention periods of the config.
@@ -92,17 +115,21 @@ pub enum DeclaredCodesCheck {
 
 /// Check the JSON text of the core's `AppConfig`: every rule of
 /// `AppConfig::validate`, the manifest bounds of the broker settings and the
-/// coverage bounds of the retention. A text that the core's config reader
-/// refuses throws `CLIENT_DEFECT` ([`read_app_config`]). Starts nothing.
+/// coverage bounds of the retention. The producer manifest of an accepted
+/// config has `schema_mode`. A text that the core's config reader refuses
+/// throws `CLIENT_DEFECT` ([`read_app_config`]). Starts nothing.
 #[napi(ts_return_type = "NativeEnvelope<AppConfigCheck>")]
 #[allow(
     clippy::needless_pass_by_value,
     reason = "napi-rs passes the arguments of a JavaScript call by value"
 )]
-pub fn check_app_config(app_config_json: String) -> Envelope<AppConfigCheck> {
+pub fn check_app_config(
+    app_config_json: String,
+    schema_mode: AppSchemaMode,
+) -> Envelope<AppConfigCheck> {
     sync_call("check_app_config", || {
         match read_app_config(&app_config_json) {
-            Ok(config) => Envelope::Value(app_config_check(config)),
+            Ok(config) => Envelope::Value(app_config_check(config, schema_mode.core_mode())),
             Err(defect) => Envelope::Thrown(defect),
         }
     })
@@ -173,15 +200,24 @@ impl CoverageCheck {
     }
 }
 
-/// The check of an app config. Pure.
+/// The check of an app config, with `schema` as the schema mode of its
+/// producer manifest. Pure.
 ///
 /// Order of the refusals: the rules of `AppConfig::validate` in its order,
 /// then the manifest bounds of the broker settings, then the coverage
 /// bounds of the retention.
-fn app_config_check(config: AppConfig) -> AppConfigCheck {
+fn app_config_check(mut config: AppConfig, schema: SchemaMode) -> AppConfigCheck {
+    // The producer manifest writes `postgres://` as `postgresql://`, and the worker start validates the settings
+    // from the manifest. Both URLs are compared in that form, so the same refusals hold at create and at start.
+    config.database.database_url = core_scheme_url(&config.database.database_url);
+
+    if let CoreSessionDatabase::Separate { url } = &mut config.database.session_database {
+        *url = core_scheme_url(url);
+    }
+
     let errors = config.validate();
     let mut refusals: Vec<CoreRefusal> = errors.iter().map(CoreRefusal::of_config_error).collect();
-    let manifest = producer_manifest(&config.broker);
+    let manifest = producer_manifest(&config.database, schema);
     let coverage = match errors
         .iter()
         .any(|error| matches!(error, AppConfigError::Retention(_)))
@@ -208,6 +244,10 @@ fn app_config_check(config: AppConfig) -> AppConfigCheck {
         (_, manifest, coverage) => {
             refusals.extend(manifest.err().into_iter().flatten());
             refusals.extend(coverage.refusal());
+            assert!(
+                !refusals.is_empty(),
+                "a refused config check holds a refusal: a socket value that the manifest refuses is a refusal of AppConfig::validate"
+            );
             AppConfigCheck::Refused { refusals }
         }
     }
@@ -227,7 +267,7 @@ fn coverage_check(retention: &RetentionConfig) -> CoverageCheck {
                 .collect(),
         }),
         Err(refused) => CoverageCheck::Refused(CoreRefusal::coded(
-            ErrorCode::ConfigInvalidRetention,
+            HorsiesErrorCode::ConfigInvalidRetention,
             format!("invalid retention config: {refused}"),
             vec!["the schema install creates the history leaves of these horizons".to_owned()],
             RefusalHelp::Help {
@@ -237,16 +277,19 @@ fn coverage_check(retention: &RetentionConfig) -> CoverageCheck {
     }
 }
 
-/// The producer manifest of the broker settings `config`, or every refusal
-/// of a pool size outside 1 to 10,000 and of an overflow above 10,000, which
-/// the manifest bounds and `PostgresConfig::validate` does not. Each refusal
-/// has the code of a broker pool value (`HRS-213`), as Python's pool field
-/// checks. Pure.
-fn producer_manifest(config: &PostgresConfig) -> Result<ProducerManifest, Vec<CoreRefusal>> {
+/// The producer manifest of the broker settings `config` with the schema
+/// mode `schema`, or every refusal of a pool size outside 1 to 10,000 and of
+/// an overflow above 10,000, which the manifest bounds and
+/// `PostgresConfig::validate` does not. Each refusal has the code of a
+/// broker pool value (`HRS-213`), as Python's pool field checks. Pure.
+fn producer_manifest(
+    config: &PostgresConfig,
+    schema: SchemaMode,
+) -> Result<ProducerManifest, Vec<CoreRefusal>> {
     Ok(ProducerManifest {
         manifest_version: ManifestVersion::CURRENT,
         database: database_manifest(config)?,
-        schema: APP_SCHEMA_MODE,
+        schema,
         send: SendManifest {
             retain_rerun_input_default: config.retain_rerun_input_default,
             idempotency_reservation_window: ReservationWindowMicros::try_from(
@@ -258,32 +301,39 @@ fn producer_manifest(config: &PostgresConfig) -> Result<ProducerManifest, Vec<Co
 }
 
 /// The database section of the manifest, or the refusal of each pool
-/// setting outside its manifest bound, in field order. Pure.
+/// setting outside its manifest bound, in field order. A TCP keepalive or
+/// user timeout value outside its bound gives no refusal here:
+/// `AppConfig::validate` refuses it (`CONFIG_INVALID_KEEPALIVE`) with the
+/// same check, so the refusal list holds it already. Pure.
 fn database_manifest(config: &PostgresConfig) -> Result<DatabaseManifest, Vec<CoreRefusal>> {
     let pool_size = ManifestPoolSize::try_from(config.pool_size)
-        .map_err(|cause| broker_setting_refused("pool_size", &cause));
+        .map_err(|cause| database_setting_refused("pool_size", &cause));
     let max_overflow = PoolConnections::try_from(config.max_overflow)
-        .map_err(|cause| broker_setting_refused("max_overflow", &cause));
-    match (pool_size, max_overflow) {
-        (Ok(pool_size), Ok(max_overflow)) => Ok(DatabaseManifest {
-            database_url: core_database_url(&config.database_url),
-            session_database: match &config.session_database_url {
-                None => SessionDatabase::SameAsDatabaseUrl,
-                Some(url) => SessionDatabase::Separate {
-                    url: core_database_url(url),
+        .map_err(|cause| database_setting_refused("max_overflow", &cause));
+    let keepalives = config.tcp_keepalives.checked();
+    let user_timeout = config.tcp_user_timeout.checked();
+    match (pool_size, max_overflow, keepalives, user_timeout) {
+        (Ok(pool_size), Ok(max_overflow), Ok(tcp_keepalives), Ok(tcp_user_timeout)) => {
+            Ok(DatabaseManifest {
+                database_url: core_database_url(&config.database_url),
+                session_database: match &config.session_database {
+                    CoreSessionDatabase::SameAsDatabaseUrl => SessionDatabase::SameAsDatabaseUrl,
+                    CoreSessionDatabase::Separate { url } => SessionDatabase::Separate {
+                        url: core_database_url(url),
+                    },
                 },
-            },
-            pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
-            pool_pre_ping: config.pool_pre_ping,
-            pool_size,
-            max_overflow,
-            pool_timeout: WholeSeconds::from_secs(config.pool_timeout),
-            pool_recycle: config.pool_recycle,
-            echo: config.echo,
-            tcp_keepalives: config.tcp_keepalives,
-            tcp_user_timeout: config.tcp_user_timeout,
-        }),
-        (pool_size, max_overflow) => Err(pool_size
+                pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
+                pool_pre_ping: config.pool_pre_ping,
+                pool_size,
+                max_overflow,
+                pool_timeout_seconds: WholeSeconds::from_secs(config.pool_timeout_seconds),
+                pool_recycle: config.pool_recycle,
+                echo: config.echo,
+                tcp_keepalives,
+                tcp_user_timeout,
+            })
+        }
+        (pool_size, max_overflow, _, _) => Err(pool_size
             .err()
             .into_iter()
             .chain(max_overflow.err())
@@ -291,25 +341,30 @@ fn database_manifest(config: &PostgresConfig) -> Result<DatabaseManifest, Vec<Co
     }
 }
 
-/// The refusal of a broker pool setting outside a manifest bound
+/// The refusal of a database pool setting outside a manifest bound
 /// (`HRS-213`). The cause names the bound, never the value. Pure.
-fn broker_setting_refused(field: &str, cause: &str) -> CoreRefusal {
+fn database_setting_refused(field: &str, cause: &str) -> CoreRefusal {
     CoreRefusal::coded(
-        ErrorCode::ConfigInvalidBrokerPool,
-        format!("invalid broker config: broker.{field}: {cause}"),
+        HorsiesErrorCode::ConfigInvalidDatabasePool,
+        format!("invalid database config: database.{field}: {cause}"),
         Vec::new(),
         RefusalHelp::NoHelp,
     )
+}
+
+/// The text of `url` with the scheme that the core reads. Pure.
+fn core_scheme_url(url: &str) -> String {
+    match url.strip_prefix(SHORT_URL_SCHEME) {
+        Some(rest) => format!("{CORE_URL_SCHEME}{rest}"),
+        None => url.to_owned(),
+    }
 }
 
 /// `url` with the scheme that the core reads: `postgres://` becomes
 /// `postgresql://`, the rest is kept (Python `core_database_url`).
 /// `PostgresConfig::validate` admits only these two schemes. Pure.
 fn core_database_url(url: &str) -> DatabaseUrl {
-    let text = match url.strip_prefix(SHORT_URL_SCHEME) {
-        Some(rest) => format!("{CORE_URL_SCHEME}{rest}"),
-        None => url.to_owned(),
-    };
+    let text = core_scheme_url(url);
     // A `DatabaseUrl` is built only from its serde form, one JSON string, so
     // that no code path holds an unchecked URL type. A string always reads.
     serde_json::from_value(serde_json::Value::String(text))
@@ -322,14 +377,28 @@ mod tests {
 
     /// The JSON text of an app config with `broker` as its broker section.
     fn config_text(broker: &str) -> String {
-        format!(r#"{{"broker": {broker}}}"#)
+        format!(r#"{{"database": {broker}}}"#)
     }
 
     const BROKER: &str = r#"{"database_url": "postgres://user:secret@127.0.0.1:55432/horsies"}"#;
 
-    /// The check of a config text that the core's config reader reads.
+    /// The check of a config text that the core's config reader reads, with
+    /// the default schema mode of an app.
     fn check_of(text: &str) -> AppConfigCheck {
-        app_config_check(read_app_config(text).expect("the config text reads"))
+        app_config_check(
+            read_app_config(text).expect("the config text reads"),
+            SchemaMode::MigrateAndValidate,
+        )
+    }
+
+    /// The schema mode of the producer manifest of an accepted check.
+    fn manifest_schema_of(check: AppConfigCheck) -> SchemaMode {
+        let AppConfigCheck::Accepted { manifest_json, .. } = check else {
+            panic!("the config is accepted");
+        };
+        horsies_core::manifest::parse_producer_manifest(&manifest_json)
+            .expect("the manifest reads back")
+            .schema
     }
 
     fn refusals_of(check: AppConfigCheck) -> Vec<CoreRefusal> {
@@ -364,9 +433,30 @@ mod tests {
     }
 
     #[test]
+    fn the_producer_manifest_has_the_schema_mode_that_the_caller_names() {
+        for (mode, core) in [
+            (
+                AppSchemaMode::MigrateAndValidate,
+                SchemaMode::MigrateAndValidate,
+            ),
+            (AppSchemaMode::ObserveOnly, SchemaMode::ObserveOnly),
+            (
+                AppSchemaMode::AssumeInitialized,
+                SchemaMode::AssumeInitialized,
+            ),
+        ] {
+            let config = read_app_config(&config_text(BROKER)).expect("the config text reads");
+            assert_eq!(
+                manifest_schema_of(app_config_check(config, mode.core_mode())),
+                core
+            );
+        }
+    }
+
+    #[test]
     fn a_text_that_the_config_reader_refuses_is_a_client_defect() {
         let Err(NativeThrown::ClientDefect { subject, rule }) =
-            read_app_config(&format!(r#"{{"broker": {BROKER}, "unknown_key": 1}}"#))
+            read_app_config(&format!(r#"{{"database": {BROKER}, "unknown_key": 1}}"#))
         else {
             panic!("a text with an unknown key is a client defect");
         };
@@ -379,14 +469,55 @@ mod tests {
 
     #[test]
     fn a_rule_of_the_core_validation_is_refused_with_its_catalog_code() {
-        let text = format!(r#"{{"broker": {BROKER}, "queue_mode": "custom"}}"#);
+        let text = format!(r#"{{"database": {BROKER}, "queue_mode": "custom"}}"#);
         let refusals = refusals_of(check_of(&text));
         assert_eq!(refusals[0].code, "HRS-200");
     }
 
     #[test]
+    fn a_session_url_equal_to_the_main_url_after_the_scheme_rewrite_is_refused_at_the_check() {
+        for (database, session) in [
+            (
+                "postgres://127.0.0.1:6432/horsies",
+                "postgresql://127.0.0.1:6432/horsies",
+            ),
+            (
+                "postgresql://127.0.0.1:6432/horsies",
+                "postgres://127.0.0.1:6432/horsies",
+            ),
+            (
+                "postgres://127.0.0.1:6432/horsies",
+                "postgres://127.0.0.1:6432/horsies",
+            ),
+            (
+                "postgresql://127.0.0.1:6432/horsies",
+                "postgresql://127.0.0.1:6432/horsies",
+            ),
+        ] {
+            let text = format!(
+                r#"{{"database": {{"database_url": "{database}", "session_database": {{"kind": "SEPARATE", "url": "{session}"}}, "pgbouncer_transaction_mode": true}}}}"#
+            );
+            let refusals = refusals_of(check_of(&text));
+            assert_eq!(refusals.len(), 1, "{database} {session}: {refusals:?}");
+            assert!(
+                refusals[0]
+                    .message
+                    .contains("must not use the transaction-pool URL"),
+                "{:?}",
+                refusals[0]
+            );
+        }
+    }
+
+    #[test]
+    fn two_urls_of_different_hosts_are_accepted_in_transaction_mode() {
+        let text = r#"{"database": {"database_url": "postgres://127.0.0.1:6432/horsies", "session_database": {"kind": "SEPARATE", "url": "postgresql://127.0.0.1:5432/horsies"}, "pgbouncer_transaction_mode": true}}"#;
+        assert!(matches!(check_of(text), AppConfigCheck::Accepted { .. }));
+    }
+
+    #[test]
     fn a_payload_rule_is_refused_with_hrs_227() {
-        let text = format!(r#"{{"broker": {BROKER}, "payload": {{"warn_bytes": 0}}}}"#);
+        let text = format!(r#"{{"database": {BROKER}, "payload": {{"warn_bytes": 0}}}}"#);
         let refusals = refusals_of(check_of(&text));
         assert_eq!(refusals.len(), 1, "{refusals:?}");
         assert_eq!(refusals[0].code, "HRS-227");
@@ -400,8 +531,8 @@ mod tests {
     #[test]
     fn a_pool_size_or_overflow_above_the_manifest_bound_is_refused_with_hrs_213() {
         for (setting, field) in [
-            (r#""pool_size": 10001"#, "broker.pool_size"),
-            (r#""max_overflow": 10001"#, "broker.max_overflow"),
+            (r#""pool_size": 10001"#, "database.pool_size"),
+            (r#""max_overflow": 10001"#, "database.max_overflow"),
         ] {
             let broker =
                 format!(r#"{{"database_url": "postgresql://127.0.0.1/horsies", {setting}}}"#);
@@ -425,8 +556,8 @@ mod tests {
             .map(|refusal| refusal.message.as_str())
             .collect();
         assert_eq!(pool.len(), 2, "{refusals:?}");
-        assert!(pool[0].contains("broker.pool_size"), "{}", pool[0]);
-        assert!(pool[1].contains("broker.max_overflow"), "{}", pool[1]);
+        assert!(pool[0].contains("database.pool_size"), "{}", pool[0]);
+        assert!(pool[1].contains("database.max_overflow"), "{}", pool[1]);
     }
 
     #[test]
@@ -452,7 +583,7 @@ mod tests {
     #[test]
     fn a_retention_refusal_leaves_the_coverage_not_checked() {
         let text =
-            format!(r#"{{"broker": {BROKER}, "retention": {{"history_leaf_horizon_days": 1}}}}"#);
+            format!(r#"{{"database": {BROKER}, "retention": {{"history_leaf_horizon_days": 1}}}}"#);
         let refusals = refusals_of(check_of(&text));
         assert_eq!(refusals.len(), 1, "{refusals:?}");
         assert_eq!(refusals[0].code, "HRS-216");

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { fileSystemCall, readRoot, WALK_BOUNDS, walkFailedText } from "./pages.ts";
+import { fileSystemCall, readDocRoot, readRoot, WALK_BOUNDS, walkFailedText } from "./pages.ts";
 
 const repository = realpathSync(mkdtempSync(join(tmpdir(), "horsies-docs-pages-test-")));
 
@@ -76,6 +76,31 @@ describe("readRoot", () => {
     expect(readRoot(repository, "large", { ...WALK_BOUNDS, pageBytes: 4 })).toEqual({
       ok: false,
       error: { kind: "PageTooLarge", path: "large/page.md", bytes: 5, bound: 4 },
+    });
+  });
+});
+
+describe("readDocRoot", () => {
+  test("mayBeAbsent, no folder: the root is absent", () => {
+    expect(readDocRoot(repository, { path: "held/docs", presence: "mayBeAbsent" })).toEqual({
+      ok: true,
+      value: { state: "absent", root: "held/docs" },
+    });
+  });
+
+  test("required, no folder: RequiredRootAbsent, with the path in its text", () => {
+    const read = readDocRoot(repository, { path: "moved/skill", presence: "required" });
+
+    expect(read).toEqual({ ok: false, error: { kind: "RequiredRootAbsent", path: "moved/skill" } });
+    expect(!read.ok && walkFailedText(read.error)).toBe("moved/skill: no folder, and the docs check needs it");
+  });
+
+  test("required, with a folder: the pages are read", () => {
+    writeFiles({ "skill/SKILL.md": "S" });
+
+    expect(readDocRoot(repository, { path: "skill", presence: "required" })).toEqual({
+      ok: true,
+      value: { state: "read", root: "skill", pages: [{ path: "skill/SKILL.md", kind: "md", text: "S" }] },
     });
   });
 });

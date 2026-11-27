@@ -3,8 +3,8 @@
 
 ``ForkedAfterCoreStart`` (this process was forked without exec after the
 core started) and ``CoreStopped`` (a core background task panicked) are
-states of the process, not of one send. The four sends, the four retry
-methods and ``PostgresBroker.enqueue`` / ``enqueue_async`` raise them; none
+states of the process, not of one send. The four sends, the four resend
+calls and ``PostgresBroker.enqueue`` / ``enqueue_async`` raise them; none
 answers them as ``ENQUEUE_FAILED``. Every other core error keeps its
 ``ENQUEUE_FAILED`` mapping. The core handle is a stand-in; touches no
 database.
@@ -25,7 +25,7 @@ from horsies.core.telemetry.send_telemetry import NO_SEND_TELEMETRY
 from horsies._core import (
     CoreCallTimedOut,
     CoreError,
-    CoreStartFailed,
+    RuntimeStartFailed,
     CoreStopped,
     ForkedAfterCoreStart,
     TooManyPendingCalls,
@@ -33,24 +33,24 @@ from horsies._core import (
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
-    BrokerEnqueueError,
-    BrokerEnqueueFailed,
-    BrokerSyncCallError,
+    DatabaseEnqueueError,
+    DatabaseEnqueueFailed,
+    DatabaseSyncCallError,
 )
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendEnqueueFailed, TaskSendPayload
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.error_detail import NoCause
-from horsies.core.types.result import Result, is_err
+from horsies.core.types.result import Ok, Result, is_err
 
 pytestmark = [pytest.mark.unit]
 
 _URL: Final = 'postgresql://u:p@localhost:5432/db'
 _TASK_NAME: Final = 'test.refused_fn'
 _TASK_ID: Final = UUID('0198c0de-0000-7000-8000-0000000019a8')
-_SCHEDULE_DELAY_S: Final = 5
+_SEND_DELAY_S: Final = 5
 
 
 def _refusals() -> list[Any]:
@@ -78,24 +78,24 @@ def _app_with(broker: PostgresBroker) -> MagicMock:
     the send at its first enqueue all the same."""
     app = MagicMock()
     app.config.queue_mode.name = 'DEFAULT'
-    app.config.resend_on_transient_err = True
+    app.config.resend_on_transient_error = True
     app.config.payload = PayloadPolicy()
     app.are_sends_suppressed.return_value = False
     app.send_telemetry.return_value = NO_SEND_TELEMETRY
-    app.validate_queue_name.return_value = 'default'
+    app.validate_queue.return_value = 'default'
     app.get_broker.return_value = broker
     return app
 
 
 def _wrapper(app: MagicMock) -> Any:
-    def refused_fn(*, x: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=x)
+    def refused_fn(*, x: int) -> Result[int, TaskError]:
+        return Ok(x)
 
     return create_task_wrapper(refused_fn, app, _TASK_NAME)
 
 
 def _failed_send(delay_seconds: int | None) -> TaskSendEnqueueFailed:
-    """The error of an earlier send, as a retry method takes it."""
+    """The error of an earlier send, as a resend method takes it."""
     return TaskSendEnqueueFailed(
         task_id=_TASK_ID,
         payload=TaskSendPayload(
@@ -110,7 +110,7 @@ def _failed_send(delay_seconds: int | None) -> TaskSendEnqueueFailed:
         ),
         message='Failed to enqueue task test.refused_fn: connection lost',
         retryable=True,
-        exception=NoCause(),
+        cause=NoCause(),
     )
 
 
@@ -121,27 +121,28 @@ def _run_send(wrapper: Any, form: str) -> object:
             return wrapper.send(x=1)
         case 'send_async':
             return asyncio.run(wrapper.send_async(x=1))
-        case 'schedule':
-            return wrapper.schedule(_SCHEDULE_DELAY_S, x=1)
-        case 'schedule_async':
-            return asyncio.run(wrapper.schedule_async(_SCHEDULE_DELAY_S, x=1))
+        case 'delayed_send':
+            return wrapper.with_options(delay_seconds=_SEND_DELAY_S).send(x=1)
+        case 'delayed_send_async':
+            return asyncio.run(wrapper.with_options(delay_seconds=_SEND_DELAY_S).send_async(x=1))
         case _:
             raise AssertionError(f'unknown send form: {form}')
 
 
-def _run_retry(wrapper: Any, form: str) -> object:
-    """Call one retry method of ``wrapper`` with the error it accepts."""
+def _run_resend(wrapper: Any, form: str) -> object:
+    """Call one resend method of ``wrapper`` with the error it accepts: of
+    a send now, or of a send with a delay."""
     match form:
-        case 'retry_send':
-            return wrapper.retry_send(_failed_send(None))
-        case 'retry_send_async':
-            return asyncio.run(wrapper.retry_send_async(_failed_send(None)))
-        case 'retry_schedule':
-            return wrapper.retry_schedule(_failed_send(_SCHEDULE_DELAY_S))
-        case 'retry_schedule_async':
-            return asyncio.run(wrapper.retry_schedule_async(_failed_send(_SCHEDULE_DELAY_S)))
+        case 'resend':
+            return wrapper.resend(_failed_send(None))
+        case 'resend_async':
+            return asyncio.run(wrapper.resend_async(_failed_send(None)))
+        case 'delayed_resend':
+            return wrapper.resend(_failed_send(_SEND_DELAY_S))
+        case 'delayed_resend_async':
+            return asyncio.run(wrapper.resend_async(_failed_send(_SEND_DELAY_S)))
         case _:
-            raise AssertionError(f'unknown retry form: {form}')
+            raise AssertionError(f'unknown resend form: {form}')
 
 
 def _enqueue_calls(handle: MagicMock, form: str) -> int:
@@ -154,7 +155,7 @@ def _enqueue_calls(handle: MagicMock, form: str) -> int:
             return handle.enqueue.call_count
 
 
-async def _broker_enqueue_async(broker: PostgresBroker) -> Result[UUID, BrokerEnqueueError]:
+async def _broker_enqueue_async(broker: PostgresBroker) -> Result[UUID, DatabaseEnqueueError]:
     return await broker.enqueue_async(
         _TASK_NAME,
         'default',
@@ -167,7 +168,7 @@ async def _broker_enqueue_async(broker: PostgresBroker) -> Result[UUID, BrokerEn
 
 def _broker_enqueue(
     broker: PostgresBroker,
-) -> Result[UUID, BrokerEnqueueError | BrokerSyncCallError]:
+) -> Result[UUID, DatabaseEnqueueError | DatabaseSyncCallError]:
     return broker.enqueue(
         _TASK_NAME,
         'default',
@@ -212,7 +213,7 @@ class TestBrokerEnqueue:
                 id='call-timed-out',
             ),
             pytest.param(
-                CoreStartFailed('the OS refused the runtime threads'), False,
+                RuntimeStartFailed('the OS refused the runtime threads'), False,
                 id='start-failed',
             ),
         ],
@@ -222,7 +223,7 @@ class TestBrokerEnqueue:
     ) -> None:
         broker, _handle = _broker_raising(error)
 
-        result: Result[UUID, BrokerEnqueueError | BrokerSyncCallError]
+        result: Result[UUID, DatabaseEnqueueError | DatabaseSyncCallError]
         match form:
             case 'enqueue':
                 result = _broker_enqueue(broker)
@@ -233,13 +234,13 @@ class TestBrokerEnqueue:
 
         assert is_err(result)
         failed = result.err_value
-        assert isinstance(failed, BrokerEnqueueFailed)
-        assert failed.exception is error
+        assert isinstance(failed, DatabaseEnqueueFailed)
+        assert failed.cause is error
         assert failed.retryable is retryable
 
 
 class TestTaskSends:
-    @pytest.mark.parametrize('form', ['send', 'send_async', 'schedule', 'schedule_async'])
+    @pytest.mark.parametrize('form', ['send', 'send_async', 'delayed_send', 'delayed_send_async'])
     @pytest.mark.parametrize('refusal', _refusals())
     def test_a_send_raises_the_refusal_of_the_enqueue(
         self, form: str, refusal: CoreError,
@@ -253,7 +254,7 @@ class TestTaskSends:
         assert raised.value is refusal
         assert _enqueue_calls(handle, form) == 1
 
-    @pytest.mark.parametrize('form', ['send', 'send_async', 'schedule', 'schedule_async'])
+    @pytest.mark.parametrize('form', ['send', 'send_async', 'delayed_send', 'delayed_send_async'])
     @pytest.mark.parametrize('refusal', _refusals())
     def test_a_send_raises_the_refusal_of_the_id_mint(
         self, form: str, refusal: CoreError,
@@ -274,19 +275,19 @@ class TestTaskSends:
         handle.enqueue_async.assert_not_awaited()
 
 
-class TestRetryMethods:
+class TestResendMethods:
     @pytest.mark.parametrize(
-        'form', ['retry_send', 'retry_send_async', 'retry_schedule', 'retry_schedule_async'],
+        'form', ['resend', 'resend_async', 'delayed_resend', 'delayed_resend_async'],
     )
     @pytest.mark.parametrize('refusal', _refusals())
-    def test_a_retry_raises_the_refusal_of_the_enqueue(
+    def test_a_resend_raises_the_refusal_of_the_enqueue(
         self, form: str, refusal: CoreError,
     ) -> None:
         broker, handle = _broker_raising(refusal)
         wrapper = _wrapper(_app_with(broker))
 
         with pytest.raises(type(refusal)) as raised:
-            _ = _run_retry(wrapper, form)
+            _ = _run_resend(wrapper, form)
 
         assert raised.value is refusal
         assert _enqueue_calls(handle, form) == 1

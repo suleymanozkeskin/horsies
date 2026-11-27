@@ -23,11 +23,10 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use horsies::monitoring::{cancel_task, list_workflow_names, pause_workflow_action};
-use horsies::rerun::{RerunEnqueuePolicy, RerunTask};
+use horsies::monitoring::{cancel_task, list_workflow_names, pause_workflow_action, CancelPolicy};
+use horsies::rerun::{RerunCommand, RerunEnqueuePolicy};
 use horsies::{
     task, AppConfig, Horsies, TaskError, TaskInfoParts, WaitLimit, WorkflowHandle, WorkflowSpec,
-    WorkflowSpecBuilder,
 };
 use horsies_core::process_runtime::process_runtime;
 use uuid::Uuid;
@@ -90,9 +89,11 @@ fn first_poll<F: Future>(future: F) -> Poll<F::Output> {
 /// A workflow of one node whose output is `answer`.
 fn one_node_spec(app: &mut Horsies) -> WorkflowSpec {
     let answer_function = answer::register(app).expect("register the workflow task");
-    let mut builder = WorkflowSpecBuilder::new("fork_refusal_flow");
+    let mut builder = app.workflow_builder("fork_refusal_flow");
     builder.definition_key("tests.fork_refusal.flow.v1");
-    let output = builder.task(answer_function.node());
+    let output = builder
+        .task(answer_function.node())
+        .expect("the app registers answer");
     builder.output(output);
     builder.build().expect("the spec builds")
 }
@@ -102,7 +103,7 @@ fn one_node_spec(app: &mut Horsies) -> WorkflowSpec {
 fn child_report(app: &mut Horsies) -> Vec<String> {
     let echo_function = echo::register(app).expect("register the task");
     let spec = one_node_spec(app);
-    let task_handle = app.task_handle_of::<u32, Infallible>(TASK_ID);
+    let task_handle = app.task_handle::<u32, Infallible>(TASK_ID);
     let workflow: WorkflowHandle<u32> = app.workflow_handle(WORKFLOW_ID);
     let app = &*app;
     let calls: [Option<String>; 18] = [
@@ -152,14 +153,18 @@ fn child_report(app: &mut Horsies) -> Vec<String> {
             let _never = first_poll(list_workflow_names(app));
         }),
         refusal_of("monitoring::cancel_task", || {
-            let _never = first_poll(cancel_task(app, TASK_ID, false));
+            let _never = first_poll(cancel_task(
+                app,
+                TASK_ID,
+                CancelPolicy::PendingOrClaimedOnly,
+            ));
         }),
         refusal_of("monitoring::pause_workflow_action", || {
             let _never = first_poll(pause_workflow_action(app, WORKFLOW_ID));
         }),
         refusal_of("Horsies::rerun_task", || {
             let _never = first_poll(app.rerun_task(
-                RerunTask::new(TASK_ID, None, None),
+                RerunCommand::new(TASK_ID, None, None),
                 RerunEnqueuePolicy::standard(false),
             ));
         }),
@@ -178,7 +183,7 @@ fn run_child(mut app: Horsies, mut report: UnixStream) -> i32 {
 
 #[test]
 fn every_call_family_panics_in_a_fork() {
-    let app = Horsies::new(AppConfig::for_database_url(
+    let app = Horsies::new(AppConfig::from_database_url(
         "postgresql://127.0.0.1:1/fork_refusal",
     ))
     .expect("build the app");

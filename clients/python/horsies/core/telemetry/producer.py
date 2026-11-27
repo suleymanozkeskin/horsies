@@ -131,11 +131,11 @@ class OtelSendRecorder:
             MESSAGING_SYSTEM_KEY: MESSAGING_SYSTEM,
             MESSAGING_OPERATION_TYPE_KEY: SEND_OPERATION,
             MESSAGING_OPERATION_NAME_KEY: SEND_OPERATION,
-            MESSAGING_DESTINATION_NAME_KEY: subject.queue_name,
+            MESSAGING_DESTINATION_NAME_KEY: subject.queue,
             MESSAGING_MESSAGE_ID_KEY: task_id,
             TASK_ID_KEY: task_id,
             TASK_ATTRIBUTE: subject.task_name,
-            QUEUE_ATTRIBUTE: subject.queue_name,
+            QUEUE_ATTRIBUTE: subject.queue,
         }
         span = self._tracer.start_span(
             f'send {subject.task_name}',
@@ -204,13 +204,13 @@ class OtelTaskSend:
             1,
             {
                 TASK_ATTRIBUTE: self.subject.task_name,
-                QUEUE_ATTRIBUTE: self.subject.queue_name,
+                QUEUE_ATTRIBUTE: self.subject.queue,
                 RESULT_ATTRIBUTE: result,
             },
         )
         self.recorder.send_duration.record(
             elapsed_seconds,
-            {QUEUE_ATTRIBUTE: self.subject.queue_name},
+            {QUEUE_ATTRIBUTE: self.subject.queue},
         )
         self.span.end()
 

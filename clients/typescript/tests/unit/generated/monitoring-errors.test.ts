@@ -16,15 +16,15 @@ import {
 const MESSAGE = "the monitoring read failed";
 
 describe("monitoringQueryCoreErrorFromNative", () => {
-  test("MonitoringQueryDbOperationFailed", () => {
+  test("MonitoringQueryDatabaseOperationFailed", () => {
     const value = monitoringQueryCoreErrorFromNative({
-      class: "MonitoringQueryDbOperationFailed",
-      slots: { message: MESSAGE, retryable: true, exception: SERVER_FAILURE },
+      class: "MonitoringQueryDatabaseOperationFailed",
+      slots: { message: MESSAGE, retryable: true, cause: SERVER_FAILURE },
     });
 
     expectConverted(value, {
-      shown: { code: "DB_OPERATION_FAILED", retryable: true },
-      hidden: ["message", "exception"],
+      shown: { kind: "databaseOperationFailed", code: "DATABASE_OPERATION_FAILED", retryable: true },
+      hidden: ["message", "cause"],
       message: MESSAGE,
       cause: SERVER_FAILURE,
     });
@@ -33,12 +33,12 @@ describe("monitoringQueryCoreErrorFromNative", () => {
   test("MonitoringQueryHistoryContractViolation", () => {
     const value = monitoringQueryCoreErrorFromNative({
       class: "MonitoringQueryHistoryContractViolation",
-      slots: { message: MESSAGE, exception: HISTORY_CONTRACT },
+      slots: { message: MESSAGE, cause: HISTORY_CONTRACT },
     });
 
     expectConverted(value, {
-      shown: { code: "HISTORY_CONTRACT_VIOLATION", retryable: false },
-      hidden: ["message", "exception"],
+      shown: { kind: "historyContractViolation", code: "HISTORY_CONTRACT_VIOLATION", retryable: false },
+      hidden: ["message", "cause"],
       message: MESSAGE,
       cause: HISTORY_CONTRACT,
     });
@@ -59,7 +59,7 @@ describe("taskActionCoreErrorFromNative", () => {
     });
 
     expectConverted(value, {
-      shown: { code: "TASK_NOT_FOUND", retryable: false, taskId: TASK_ID },
+      shown: { kind: "notFound", code: "TASK_NOT_FOUND", retryable: false, taskId: TASK_ID },
       hidden: ["message"],
       message: MESSAGE,
       cause: null,
@@ -74,6 +74,7 @@ describe("taskActionCoreErrorFromNative", () => {
 
     expectConverted(value, {
       shown: {
+        kind: "notCancellable",
         code: "TASK_NOT_CANCELLABLE",
         retryable: false,
         taskId: TASK_ID,
@@ -85,14 +86,15 @@ describe("taskActionCoreErrorFromNative", () => {
     });
   });
 
-  test("TaskActionWorkflowTask", () => {
+  test("TaskActionIsWorkflowTask", () => {
     const value = taskActionCoreErrorFromNative({
-      class: "TaskActionWorkflowTask",
+      class: "TaskActionIsWorkflowTask",
       slots: { message: MESSAGE, task_id: TASK_ID, current_status: TaskStatus.RUNNING },
     });
 
     expectConverted(value, {
       shown: {
+        kind: "isWorkflowTask",
         code: "TASK_IS_WORKFLOW_TASK",
         retryable: false,
         taskId: TASK_ID,
@@ -104,15 +106,15 @@ describe("taskActionCoreErrorFromNative", () => {
     });
   });
 
-  test("TaskActionDbOperationFailed", () => {
+  test("TaskActionDatabaseOperationFailed", () => {
     const value = taskActionCoreErrorFromNative({
-      class: "TaskActionDbOperationFailed",
-      slots: { message: MESSAGE, retryable: false, task_id: TASK_ID, exception: SERVER_FAILURE },
+      class: "TaskActionDatabaseOperationFailed",
+      slots: { message: MESSAGE, retryable: false, task_id: TASK_ID, cause: SERVER_FAILURE },
     });
 
     expectConverted(value, {
-      shown: { code: "DB_OPERATION_FAILED", retryable: false, taskId: TASK_ID },
-      hidden: ["message", "exception"],
+      shown: { kind: "databaseOperationFailed", code: "DATABASE_OPERATION_FAILED", retryable: false, taskId: TASK_ID },
+      hidden: ["message", "cause"],
       message: MESSAGE,
       cause: SERVER_FAILURE,
     });
@@ -121,12 +123,12 @@ describe("taskActionCoreErrorFromNative", () => {
   test("TaskActionStoredDataInvalid", () => {
     const value = taskActionCoreErrorFromNative({
       class: "TaskActionStoredDataInvalid",
-      slots: { message: MESSAGE, task_id: TASK_ID, exception: CONTRACT_VIOLATION },
+      slots: { message: MESSAGE, task_id: TASK_ID, cause: CONTRACT_VIOLATION },
     });
 
     expectConverted(value, {
-      shown: { code: "STORED_DATA_INVALID", retryable: false, taskId: TASK_ID },
-      hidden: ["message", "exception"],
+      shown: { kind: "storedDataInvalid", code: "STORED_DATA_INVALID", retryable: false, taskId: TASK_ID },
+      hidden: ["message", "cause"],
       message: MESSAGE,
       cause: CONTRACT_VIOLATION,
     });

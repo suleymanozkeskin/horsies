@@ -10,6 +10,8 @@ use crate::core::lifecycle::OutcomeDecodeError;
 use crate::core::types::status::TaskStatus;
 use crate::failure_cause::FailureCause;
 
+use super::models::CancelPolicy;
+
 /// Why a task action did not apply.
 ///
 /// Each member names one variant of `TaskActionError`.
@@ -22,7 +24,7 @@ pub enum TaskActionErrorCode {
     TaskNotFound,
     TaskNotCancellable,
     TaskIsWorkflowTask,
-    DbOperationFailed,
+    DatabaseOperationFailed,
     /// Stored task data does not parse: a history status that is not a task
     /// status, or a cancel outcome row that does not decode. Nothing changed:
     /// the cancel refused the task. Not retryable: a repeat gives the same
@@ -64,8 +66,8 @@ pub enum TaskActionError {
     /// The task's status does not admit the cancel. Nothing changed.
     ///
     /// ``current_status`` is the status that the cancel found: a terminal
-    /// status, or ``RUNNING`` when ``include_running`` is ``False``. A call
-    /// with ``include_running=True`` cancels a ``RUNNING`` task.
+    /// status, or ``RUNNING`` with the policy ``PENDING_OR_CLAIMED_ONLY``. A
+    /// call with the policy ``INCLUDE_RUNNING`` cancels a ``RUNNING`` task.
     #[error("{message}")]
     #[error_class(
         class = "TaskActionNotCancellable",
@@ -86,11 +88,11 @@ pub enum TaskActionError {
     /// cancel on its workflow. ``current_status`` is the task's status.
     #[error("{message}")]
     #[error_class(
-        class = "TaskActionWorkflowTask",
+        class = "TaskActionIsWorkflowTask",
         code = "TaskIsWorkflowTask",
         never_retryable
     )]
-    WorkflowTask {
+    IsWorkflowTask {
         #[error_slot(python = "Str", hidden)]
         message: String,
         #[error_slot(python = "Uuid")]
@@ -102,7 +104,7 @@ pub enum TaskActionError {
     /// core of this process could not run it.
     ///
     /// ``retryable`` is the core's classification of the cause: ``True`` when
-    /// the condition may clear, for example a lost connection. ``exception``
+    /// the condition may clear, for example a lost connection. ``cause``
     /// is the core's class of the cause (a ``CoreFailure`` leaf class, with the
     /// subject ``cancel_task``), or the ``CoreCallRefusal`` of the core boundary. The statement wrote nothing, or it
     /// committed and its reply was lost: a repeated cancel tells which,
@@ -110,11 +112,11 @@ pub enum TaskActionError {
     /// ``CANCELLED``.
     #[error("{message}")]
     #[error_class(
-        class = "TaskActionDbOperationFailed",
-        code = "DbOperationFailed",
+        class = "TaskActionDatabaseOperationFailed",
+        code = "DatabaseOperationFailed",
         exception = "BaseException"
     )]
-    DbOperationFailed {
+    DatabaseOperationFailed {
         #[error_slot(python = "Str", hidden)]
         message: String,
         #[error_slot(python = "Bool")]
@@ -128,7 +130,7 @@ pub enum TaskActionError {
     },
     /// Stored task data does not parse. Nothing changed: the cancel refused the task.
     ///
-    /// ``exception`` is an ``OutcomeDecodeError`` with the core's message, for
+    /// ``cause`` is an ``OutcomeDecodeError`` with the core's message, for
     /// example a history status that is not a task status. A repeat gives the
     /// same result until the stored row changes.
     #[error("{message}")]
@@ -155,7 +157,7 @@ impl TaskActionError {
     /// check or statement. Nothing was written, or the statement's outcome
     /// is unknown. `retryable` is the cause's retry rule. Pure.
     pub fn cancel_failed(task_id: Uuid, cause: BrokerError) -> Self {
-        Self::DbOperationFailed {
+        Self::DatabaseOperationFailed {
             message: format!("Task cancel failed: {cause}"),
             retryable: cause.is_retryable(),
             task_id,
@@ -173,8 +175,8 @@ impl TaskActionError {
         match self {
             Self::NotFound { message, .. }
             | Self::NotCancellable { message, .. }
-            | Self::WorkflowTask { message, .. }
-            | Self::DbOperationFailed { message, .. }
+            | Self::IsWorkflowTask { message, .. }
+            | Self::DatabaseOperationFailed { message, .. }
             | Self::StoredDataInvalid { message, .. } => message,
         }
     }
@@ -183,10 +185,10 @@ impl TaskActionError {
     /// of the cause of a database failure; every refusal stays. Pure.
     pub fn retryable(&self) -> bool {
         match self {
-            Self::DbOperationFailed { retryable, .. } => *retryable,
+            Self::DatabaseOperationFailed { retryable, .. } => *retryable,
             Self::NotFound { .. }
             | Self::NotCancellable { .. }
-            | Self::WorkflowTask { .. }
+            | Self::IsWorkflowTask { .. }
             | Self::StoredDataInvalid { .. } => false,
         }
     }
@@ -196,8 +198,8 @@ impl TaskActionError {
         match self {
             Self::NotFound { task_id, .. }
             | Self::NotCancellable { task_id, .. }
-            | Self::WorkflowTask { task_id, .. }
-            | Self::DbOperationFailed { task_id, .. }
+            | Self::IsWorkflowTask { task_id, .. }
+            | Self::DatabaseOperationFailed { task_id, .. }
             | Self::StoredDataInvalid { task_id, .. } => *task_id,
         }
     }
@@ -207,9 +209,9 @@ impl TaskActionError {
     /// precondition that does not hold. Pure.
     pub fn failure_cause(&self) -> FailureCause {
         match self {
-            Self::DbOperationFailed { cause, .. } => cause.failure_cause(),
+            Self::DatabaseOperationFailed { cause, .. } => cause.failure_cause(),
             Self::StoredDataInvalid { .. } => FailureCause::ContractViolation,
-            Self::NotFound { .. } | Self::NotCancellable { .. } | Self::WorkflowTask { .. } => {
+            Self::NotFound { .. } | Self::NotCancellable { .. } | Self::IsWorkflowTask { .. } => {
                 FailureCause::PreconditionFailed
             }
         }
@@ -234,7 +236,7 @@ fn not_found(task_id: Uuid) -> TaskActionError {
 }
 
 fn workflow_bound(task_id: Uuid, current_status: TaskStatus) -> TaskActionError {
-    TaskActionError::WorkflowTask {
+    TaskActionError::IsWorkflowTask {
         message: format!("Task {task_id} belongs to a workflow; use the workflow actions instead."),
         task_id,
         current_status,
@@ -262,10 +264,10 @@ fn stored_data_invalid(task_id: Uuid, cause: OutcomeDecodeError) -> TaskActionEr
 /// Move a non-workflow live task to CANCELLED (Python
 /// `horsies.monitoring.task_actions.cancel_task`).
 ///
-/// PENDING and CLAIMED are eligible. RUNNING is eligible only when
-/// `include_running` is true: the same statement records the running attempt
-/// with the outcome `CANCELLED`, and the worker that runs it gets the cancel
-/// notice and gives the cancel to the task code. A workflow task, live or
+/// PENDING and CLAIMED are eligible. RUNNING is eligible only with
+/// [`CancelPolicy::IncludeRunning`]: the same statement records the running
+/// attempt with the outcome `CANCELLED`, and the worker that runs it gets the
+/// cancel notice and gives the cancel to the task code. A workflow task, live or
 /// finished, is `TaskIsWorkflowTask`; a finished plain task is
 /// `TaskNotCancellable` with its terminal status; a task held nowhere is
 /// `TaskNotFound`.
@@ -275,8 +277,13 @@ fn stored_data_invalid(task_id: Uuid, cause: OutcomeDecodeError) -> TaskActionEr
 pub async fn cancel_task(
     broker: &PostgresBroker,
     task_id: Uuid,
-    include_running: bool,
+    policy: CancelPolicy,
 ) -> TaskActionResult<TaskCancelled> {
+    // The SQL function keeps its schema parameter `p_include_running`.
+    let include_running = match policy {
+        CancelPolicy::IncludeRunning => true,
+        CancelPolicy::PendingOrClaimedOnly => false,
+    };
     match broker.cancel_task(task_id, include_running).await {
         Ok(CancelAnswer::Cancelled { was_status }) => Ok(TaskCancelled {
             task_id,
@@ -333,7 +340,7 @@ mod tests {
         assert_eq!(failed.failure_cause(), FailureCause::Connection);
         assert!(matches!(
             &failed,
-            TaskActionError::DbOperationFailed { cause, .. }
+            TaskActionError::DatabaseOperationFailed { cause, .. }
                 if matches!(**cause, BrokerError::ConnectionFailed(_))
         ));
 

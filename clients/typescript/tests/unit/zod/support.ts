@@ -4,9 +4,9 @@ import assert from "node:assert/strict";
 
 import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
 import { type DecodeForm, decodeValue } from "../../../horsies/src/codec/reader.ts";
-import type { DecodeRefused, EncodeRefused } from "../../../horsies/src/codec/refusal.ts";
+import type { DecodeRefused, EncodeRefused, ValueRefused } from "../../../horsies/src/codec/refusal.ts";
 import { encodeValue } from "../../../horsies/src/codec/writer.ts";
-import type { Kind } from "../../../horsies/src/wire/kinds.ts";
+import type { Kind, MemberPresence } from "../../../horsies/src/wire/kinds.ts";
 import type { Result } from "../../../horsies/src/wire/result.ts";
 import { compileMember, compileValue, type ZodMemberKind } from "../../../horsies/src/zod/adapter.ts";
 import { readDefinition, type ZodSchema } from "../../../horsies/src/zod/definition.ts";
@@ -35,7 +35,7 @@ export function acceptedMember(schema: ZodSchema): ZodMemberKind {
 export function storedText<V>(kind: Kind, value: V): string {
   const written = encodeValue(kind, value);
 
-  assert.ok(written.ok, written.ok ? "" : `${written.error.kind} at ${written.error.path}: ${written.error.detail}`);
+  assert.ok(written.ok, written.ok ? "" : `refused ${JSON.stringify(written.error)}`);
 
   return written.value;
 }
@@ -58,16 +58,17 @@ export function decoded(kind: Kind, text: string, form: DecodeForm): Result<unkn
 export function workerValue(kind: Kind, text: string): unknown {
   const read = decoded(kind, text, "worker");
 
-  assert.ok(read.ok, read.ok ? "" : `${read.error.kind} at ${read.error.path}: ${read.error.detail}`);
+  assert.ok(read.ok, read.ok ? "" : `refused ${JSON.stringify(read.error)}`);
 
   return read.value;
 }
 
-/** The refusal of a stored text in a form, which the test expects. */
-export function decodeRefusal(kind: Kind, text: string, form: DecodeForm): DecodeRefused {
+/** The refusal of a stored value in a form, which the test expects. */
+export function decodeRefusal(kind: Kind, text: string, form: DecodeForm): ValueRefused {
   const read = decoded(kind, text, form);
 
   assert.ok(!read.ok, "expected a refusal");
+  assert.ok(read.error.kind === "decodeRefused", `expected a value refusal: ${JSON.stringify(read.error)}`);
 
   return read.error;
 }
@@ -90,4 +91,13 @@ export function runsOfCodec(schema: ZodSchema): CodecRuns {
   return definition.form === "codec"
     ? codecRuns(definition.output, definition.decode, definition.encode)
     : { decode: () => assert.fail("not a codec"), encode: () => assert.fail("not a codec") };
+}
+
+/** The text of one read of a computed default: its stored text, or the refusal kind; another presence fails the test. */
+export function computedDefaultText(presence: MemberPresence): string {
+  assert.ok(presence.mode === "defaulted" && presence.fallback.state === "computed", "expected a computed default");
+
+  const text = presence.fallback.compute();
+
+  return text.ok ? text.value : text.error.refusal;
 }

@@ -1,5 +1,6 @@
 // The info of a task: its status, times, failed reason and every attempt, newest first. The result is read by `get`.
 
+import type { Execution } from "../_catalog/monitoring_models.ts";
 import type { TaskAttemptOutcome, TaskStatus } from "../_catalog/status.ts";
 import type {
   ExecutionRecord,
@@ -9,14 +10,13 @@ import type {
   TaskAttemptRecord,
   TaskInfoRecord,
 } from "../native/sends/addon.ts";
-import type { ExecutionClass } from "../contract/define-task.ts";
 import { type TaskId, taskIdFromCore } from "../contract/ids.ts";
 
 /** A fact that a task row may not hold. */
 export type Recorded<T> = { readonly kind: "recorded"; readonly value: T } | { readonly kind: "notRecorded" };
 
 /** How a worker runs the task: the class of a live task; a task read from history does not keep it. */
-export type ExecutionFact = { readonly kind: "class"; readonly execution: ExecutionClass } | { readonly kind: "notKeptInHistory" };
+export type ExecutionFact = { readonly kind: "class"; readonly execution: Execution } | { readonly kind: "notKeptInHistory" };
 
 /** One attempt of a task. */
 export interface TaskAttempt {
@@ -39,13 +39,13 @@ export interface TaskInfo {
   readonly taskId: TaskId;
   readonly taskName: string;
   readonly status: TaskStatus;
-  readonly queueName: string;
+  readonly queue: string;
   readonly priority: number;
   readonly retryCount: number;
   readonly maxRetries: number;
   readonly nextRetryAt: Recorded<Temporal.Instant>;
   readonly sentAt: Recorded<Temporal.Instant>;
-  readonly enqueuedAt: Temporal.Instant;
+  readonly dueAt: Temporal.Instant;
   readonly claimedAt: Recorded<Temporal.Instant>;
   readonly startedAt: Recorded<Temporal.Instant>;
   readonly completedAt: Recorded<Temporal.Instant>;
@@ -75,13 +75,13 @@ export function taskInfoOf(record: TaskInfoRecord): TaskInfo {
     taskId: taskIdFromCore(record.taskId, "taskInfo"),
     taskName: record.taskName,
     status: record.status,
-    queueName: record.queueName,
+    queue: record.queue,
     priority: record.priority,
     retryCount: record.retryCount,
     maxRetries: record.maxRetries,
     nextRetryAt: recordedInstant(record.nextRetryAt),
     sentAt: recordedInstant(record.sentAt),
-    enqueuedAt: instantOfMicros(record.enqueuedAtMicros),
+    dueAt: instantOfMicros(record.dueAtMicros),
     claimedAt: recordedInstant(record.claimedAt),
     startedAt: recordedInstant(record.startedAt),
     completedAt: recordedInstant(record.completedAt),

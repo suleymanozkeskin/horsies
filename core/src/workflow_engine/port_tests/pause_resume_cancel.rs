@@ -22,7 +22,7 @@ use crate::core::lifecycle::outcomes::{GuardEvidence, ObservedWorkflowState};
 use crate::core::lifecycle::{
     OwnedClaim, OwnedClaimBatch, TerminalizationCommand, TerminalizationOutcome,
 };
-use crate::core::workflow::handle_types::HandleErrorCode;
+use crate::core::workflow::handle_types::WorkflowHandleErrorCode;
 use crate::core::{OnError, TaskResult, WorkflowSpec, WorkflowStatus};
 use crate::failure_cause::{FailureCause, ServerErrorFacts};
 use crate::test_support::child_specs::TestChildSpecs;
@@ -66,7 +66,7 @@ async fn cancel_skips_a_pending_node() {
     let tasks = workflow_handle.tasks().await.expect("tasks()");
     assert_eq!(
         tasks[1].status,
-        crate::core::WorkflowTaskStatus::Skipped,
+        crate::core::WorkflowNodeStatus::Skipped,
         "{tasks:?}"
     );
 }
@@ -294,7 +294,7 @@ async fn cancel_of_an_unknown_id_is_workflow_not_found() {
         .await
         .expect_err("an unknown id cannot be cancelled");
 
-    assert_eq!(error.code(), HandleErrorCode::WorkflowNotFound);
+    assert_eq!(error.code(), WorkflowHandleErrorCode::WorkflowNotFound);
     assert!(!error.retryable());
 }
 
@@ -335,8 +335,8 @@ async fn pause_and_resume_of_an_unknown_id_are_workflow_not_found() {
         .await
         .expect_err("resume of an unknown id");
 
-    assert_eq!(paused.code(), HandleErrorCode::WorkflowNotFound);
-    assert_eq!(resumed.code(), HandleErrorCode::WorkflowNotFound);
+    assert_eq!(paused.code(), WorkflowHandleErrorCode::WorkflowNotFound);
+    assert_eq!(resumed.code(), WorkflowHandleErrorCode::WorkflowNotFound);
 }
 
 /// `TestResumeCommitSplit.test_db_error_before_the_commit_returns_db_operation_failed`:
@@ -384,7 +384,10 @@ async fn a_database_error_before_the_resume_commit_keeps_the_workflow_paused() {
         .await
         .expect_err("the resume meets the refused node write");
 
-    assert_eq!(error.code(), HandleErrorCode::DbOperationFailed);
+    assert_eq!(
+        error.code(),
+        WorkflowHandleErrorCode::DatabaseOperationFailed
+    );
     assert!(error.retryable());
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "PAUSED");
     assert_eq!(node_status(&db.pool, workflow_id, 1).await, "PENDING");
@@ -445,7 +448,7 @@ async fn a_database_error_after_the_resume_commit_is_resume_recovery_failed() {
         .await
         .expect_err("the recovery pass after the commit meets the lost search path");
 
-    assert_eq!(error.code(), HandleErrorCode::ResumeRecoveryFailed);
+    assert_eq!(error.code(), WorkflowHandleErrorCode::ResumeRecoveryFailed);
     assert!(!error.retryable());
     assert_eq!(error.workflow_id(), workflow_id);
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "RUNNING");
@@ -521,7 +524,7 @@ async fn a_failed_parent_advance_after_the_resume_commit_is_resume_recovery_fail
         .await
         .expect_err("the parent advance after the commit meets the refused node write");
 
-    assert_eq!(error.code(), HandleErrorCode::ResumeRecoveryFailed);
+    assert_eq!(error.code(), WorkflowHandleErrorCode::ResumeRecoveryFailed);
     assert!(!error.retryable());
     assert_eq!(error.workflow_id(), child);
     assert_eq!(
@@ -892,10 +895,10 @@ async fn a_paused_workflow_cancels_and_skips_its_pending_node() {
 
 /// `clients/python/tests/e2e/test_layer6_workflow_advanced.py::test_workflow_recovers_after_worker_crash`:
 /// the reaper fails the two running nodes of a crashed worker with
-/// `WORKER_CRASHED`; the `allow_failed_deps` node and its dependent then run
+/// `WORKER_CRASHED`; the `allow_failed_dependencies` node and its dependent then run
 /// on their own queue, and the workflow ends FAILED.
 #[tokio::test]
-async fn a_crashed_worker_fails_its_nodes_and_allow_failed_deps_nodes_run() {
+async fn a_crashed_worker_fails_its_nodes_and_allow_failed_dependencies_nodes_run() {
     let db = IsolatedDatabase::create().await;
     let child_specs = TestChildSpecs::empty();
     let done = serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the result");
@@ -934,7 +937,7 @@ async fn a_crashed_worker_fails_its_nodes_and_allow_failed_deps_nodes_run() {
     .expect("age the crashed tasks");
     let mut recovery_node = NodeSeed::task(workflow_id, 4, "PENDING")
         .deps(&[2, 3])
-        .allow_failed_deps();
+        .allow_failed_dependencies();
     recovery_node.queue_name = "recovery";
     seed_node(&db.pool, &recovery_node).await;
     let mut after = NodeSeed::task(workflow_id, 5, "PENDING").deps(&[4]);

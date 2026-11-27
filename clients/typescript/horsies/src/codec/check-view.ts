@@ -8,10 +8,13 @@
 
 import type { DefaultText, Kind, MemberPresence, ObjectKind, TaggedUnionKind } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
+import { lazyTarget } from "../wire/lazy.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import { MAX_VALUE_JSON_DEPTH } from "./bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../_catalog/codec_bounds.ts";
+import type { JsonText } from "./json-text.ts";
 import { decodeValue } from "./reader.ts";
 import { encodeRefused, type EncodeRefused, entryPath, itemPath, memberPath, refusalText } from "./refusal.ts";
+import { tupleItem } from "./tuple-items.ts";
 import { isArray, isPlainObject, isString, setOwn } from "./values.ts";
 
 type Viewed = Result<unknown, EncodeRefused>;
@@ -45,17 +48,19 @@ export function checkView(kind: Kind, value: unknown, path: string, depth: numbe
     case "literal":
     case "union":
     case "json":
-    case "resultOf":
+    case "taskOutcome":
     case "conversion":
       return ok(value);
     case "nullable":
       return value === null ? ok(value) : checkView(kind.inner, value, path, depth);
     case "checked":
       return checkView(kind.inner, value, path, depth);
+    case "lazy":
+      return checkView(lazyTarget(kind, `checkView at ${path}`), value, path, depth);
     case "array":
       return viewItems(() => kind.item, value, path, depth);
     case "tuple":
-      return viewItems((index) => tupleKind(kind.items, index), value, path, depth);
+      return viewItems((index) => tupleItem(kind, index), value, path, depth);
     case "record":
       return viewRecord(kind.value, value, path, depth);
     case "object":
@@ -65,16 +70,6 @@ export function checkView(kind: Kind, value: unknown, path: string, depth: numbe
     default:
       return unreachable(kind, "checkView");
   }
-}
-
-function tupleKind(items: readonly Kind[], index: number): Kind {
-  const kind = items[index];
-
-  if (kind === undefined) {
-    throw new TypeError(`checkView: the tuple has no item ${index}`);
-  }
-
-  return kind;
 }
 
 function viewItems(kinds: (index: number) => Kind, value: unknown, path: string, depth: number): Viewed {
@@ -178,14 +173,19 @@ function absentMember(kind: Kind, presence: MemberPresence, path: string): Resul
   }
 }
 
+/**
+ * The default as the worker form reads it. A computed default calls its function once: a value that does not encode
+ * is `DefaultRefused`; a function that throws is not caught.
+ */
 function filledDefault(kind: Kind, fallback: DefaultText, path: string): Viewed {
   switch (fallback.state) {
-    case "stored": {
-      const read = decodeValue(kind, fallback.text, "worker");
+    case "stored":
+      return readDefault(kind, fallback.text, path);
+    case "computed": {
+      const text = fallback.compute();
+      const detail = text.ok ? "" : `the default function gave a value that does not encode: ${refusalText(text.error)}`;
 
-      return read.ok
-        ? read
-        : err(encodeRefused("CheckFailed", path, `the default does not read back: ${refusalText(read.error)}`));
+      return text.ok ? readDefault(kind, text.value, path) : err(encodeRefused("DefaultRefused", path, detail));
     }
 
     case "refused":
@@ -193,4 +193,13 @@ function filledDefault(kind: Kind, fallback: DefaultText, path: string): Viewed 
     default:
       return unreachable(fallback, "filledDefault");
   }
+}
+
+/** The value of the stored text of a default in the worker form, or `CheckFailed` when it does not read back. */
+function readDefault(kind: Kind, text: JsonText, path: string): Viewed {
+  const read = decodeValue(kind, text, "worker");
+
+  return read.ok
+    ? read
+    : err(encodeRefused("CheckFailed", path, `the default does not read back: ${refusalText(read.error)}`));
 }

@@ -1,7 +1,7 @@
 """The type contract at send, at return, in workflow wiring and at the receiver.
 
 - `.send()` refuses a call that cannot run.
-- A return that is not a `TaskResult` is a named refusal, not an exception.
+- A return that is not a `Result` (`Ok` or `Err`) is a named refusal, not an exception.
 - `Annotated` metadata on the return type holds at run time.
 - Wiring compares types only, at every depth.
 - A receiver of `args_from` gets the type that it declares.
@@ -18,24 +18,32 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
-from horsies import AppConfig, Horsies, PostgresConfig, TaskError, TaskResult
+from horsies import (
+    AppConfig,
+    Failed,
+    Horsies,
+    PostgresConfig,
+    Succeeded,
+    TaskError,
+    TaskOutcome,
+)
 from horsies.core.codec.kwargs import (
     MissingKwargs,
-    declared_taskresult_ok_type,
+    declared_outcome_ok_type,
     missing_required_kwargs,
 )
 from horsies.core.codec.signature_check import _DOCS_URL
 from horsies.core.codec.typed import conform_to_target, encode_task_result
 from horsies.core.codec.validation_errors import ValueValidationError
-from horsies.core.errors import ErrorCode, TaskDefinitionError
+from horsies.core.errors import HorsiesErrorCode, TaskDefinitionError
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendValidationFailed
-from horsies.core.models.tasks import ContractCode, OperationalErrorCode
+from horsies.core.models.tasks import ContractCode, OperationalCode
 from horsies.core.models.workflow import TaskNode, WorkflowContext, WorkflowSpec
 from horsies.core.models.workflow.typing_utils import _is_ok_type_compatible
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.error_detail import NoCause
-from horsies.core.types.result import Err, Ok, is_err, is_ok
+from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
 from horsies.core.worker import child_runner
 from horsies.core.worker.task_loop import TaskLoop
 from horsies.core.worker.child_frames import NoTraceCarrier
@@ -52,19 +60,19 @@ Upper = Annotated[str, AfterValidator(str.upper)]
 def _mock_app() -> MagicMock:
     app = MagicMock()
     app.config.queue_mode.name = 'DEFAULT'
-    app.config.resend_on_transient_err = False
+    app.config.resend_on_transient_error = False
     app.config.payload = PayloadPolicy()
     app.config.exception_mapper = {}
     app.config.default_unhandled_error_code = 'UNHANDLED_EXCEPTION'
     app.are_sends_suppressed.return_value = False
-    app.validate_queue_name.return_value = 'default'
+    app.validate_queue.return_value = 'default'
     return app
 
 
 def _real_app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://user:password@localhost/unused',
             ),
         ),
@@ -74,21 +82,21 @@ def _real_app() -> Horsies:
 @pytest.mark.unit
 class TestMissingRequiredKwargs:
     def test_a_missing_parameter_is_refused_with_nothing_sent(self) -> None:
-        def charge(*, amount: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=amount)
+        def charge(*, amount: int) -> Result[int, TaskError]:
+            return Ok(amount)
 
         app = _mock_app()
         result = create_task_wrapper(charge, app, 'test.charge').send()
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert result.err_value.exception == NoCause()
+        assert result.err_value.cause == NoCause()
         assert 'amount' in result.err_value.message
         app.get_broker.assert_not_called()
 
     def test_a_partial_call_is_refused(self) -> None:
-        def charge(*, amount: int, currency: str) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=amount)
+        def charge(*, amount: int, currency: str) -> Result[int, TaskError]:
+            return Ok(amount)
 
         app = _mock_app()
         result = create_task_wrapper(charge, app, 'test.charge').send(amount=1)
@@ -99,38 +107,38 @@ class TestMissingRequiredKwargs:
         app.get_broker.assert_not_called()
 
     def test_a_parameter_with_a_default_may_be_omitted(self) -> None:
-        def charge(*, amount: int = 1) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=amount)
+        def charge(*, amount: int = 1) -> Result[int, TaskError]:
+            return Ok(amount)
 
         assert missing_required_kwargs(charge, ()) == MissingKwargs((), ())
 
     def test_a_required_workflow_ctx_needs_a_workflow(self) -> None:
-        def step(*, workflow_ctx: WorkflowContext) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def step(*, workflow_context: WorkflowContext) -> Result[int, TaskError]:
+            return Ok(1)
 
         app = _mock_app()
         result = create_task_wrapper(step, app, 'test.step').send()
 
         assert is_err(result)
-        assert 'workflow_ctx' in result.err_value.message
+        assert 'workflow_context' in result.err_value.message
         assert 'workflow node' in result.err_value.message
         app.get_broker.assert_not_called()
 
     def test_a_required_args_from_slot_needs_a_workflow(self) -> None:
         def step(
             *,
-            value: TaskResult[int, TaskError],
-        ) -> TaskResult[int, TaskError]:
-            return value
+            value: TaskOutcome[int, TaskError],
+        ) -> Result[int, TaskError]:
+            return Ok(1)
 
         assert missing_required_kwargs(step, ()) == MissingKwargs((), ('value',))
 
     def test_an_optional_args_from_slot_may_be_omitted(self) -> None:
         def step(
             *,
-            value: TaskResult[int, TaskError] | None = None,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+            value: TaskOutcome[int, TaskError] | None = None,
+        ) -> Result[int, TaskError]:
+            return Ok(1)
 
         assert missing_required_kwargs(step, ()) == MissingKwargs((), ())
 
@@ -143,7 +151,7 @@ class _NotAResult:
 
 
 @pytest.mark.unit
-class TestReturnThatIsNotATaskResult:
+class TestReturnThatIsNotAResult:
     @pytest.mark.parametrize(
         ('returned', 'name'),
         [
@@ -151,7 +159,7 @@ class TestReturnThatIsNotATaskResult:
             ('secret-marker', 'str'),
             ({'ok': 1}, 'dict'),
             (None, 'None'),
-            (TaskResult, 'type'),
+            (Ok, 'type'),
             (MagicMock(), 'MagicMock'),
         ],
         ids=['int', 'str', 'dict', 'none', 'the-class', 'mock'],
@@ -161,14 +169,14 @@ class TestReturnThatIsNotATaskResult:
         returned: object,
         name: str,
     ) -> None:
-        def task() -> TaskResult[int, TaskError]:
+        def task() -> Result[int, TaskError]:
             return returned  # type: ignore[return-value]
 
         result = create_task_wrapper(task, _mock_app(), 'test.task')()
 
-        assert result.is_err()
+        assert isinstance(result, Err)
         err = result.err_value
-        assert err.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert err.code == ContractCode.RETURN_TYPE_MISMATCH
         assert err.data is not None
         assert err.data['variant'] == 'not_a_task_result'
         assert err.data['actual_type'] == name
@@ -177,76 +185,82 @@ class TestReturnThatIsNotATaskResult:
         assert 'secret-marker' not in (err.message or '')
 
     def test_a_returned_task_error_names_its_code(self) -> None:
-        def task() -> TaskResult[int, TaskError]:
-            return TaskError(error_code='RATE_LIMITED')  # type: ignore[return-value]
+        def task() -> Result[int, TaskError]:
+            return TaskError(code='RATE_LIMITED')  # type: ignore[return-value]
 
         result = create_task_wrapper(task, _mock_app(), 'test.task')()
 
-        assert result.err_value.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert isinstance(result, Err)
+        assert result.err_value.code == ContractCode.RETURN_TYPE_MISMATCH
         assert 'RATE_LIMITED' in (result.err_value.message or '')
 
     def test_a_copy_of_the_class_is_named_with_its_module(self) -> None:
-        copy = type('TaskResult', (), {})
+        copy = type('Ok', (), {})
 
-        def task() -> TaskResult[int, TaskError]:
+        def task() -> Result[int, TaskError]:
             return copy()  # type: ignore[return-value]
 
         result = create_task_wrapper(task, _mock_app(), 'test.task')()
 
-        assert result.err_value.data['actual_type'] == f'{__name__}.TaskResult'
+        assert isinstance(result, Err)
+        assert result.err_value.data is not None
+        assert result.err_value.data['actual_type'] == f'{__name__}.Ok'
 
-    def test_a_task_result_subclass_passes(self) -> None:
-        class Kept(TaskResult[int, TaskError]):
+    def test_an_ok_subclass_passes(self) -> None:
+        class Kept(Ok[int]):
             pass
 
-        def task() -> TaskResult[int, TaskError]:
-            return Kept(ok=1)
+        def task() -> Result[int, TaskError]:
+            return Kept(1)
 
         result = create_task_wrapper(task, _mock_app(), 'test.task')()
 
-        assert result.is_ok()
+        assert result == Ok(1)
 
     def test_an_exception_mapper_does_not_apply(self) -> None:
         app = _mock_app()
         app.config.exception_mapper = {AttributeError: 'MAPPED'}
 
-        def task() -> TaskResult[int, TaskError]:
+        def task() -> Result[int, TaskError]:
             return 5  # type: ignore[return-value]
 
         result = create_task_wrapper(task, app, 'test.task')()
 
-        assert result.err_value.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert isinstance(result, Err)
+        assert result.err_value.code == ContractCode.RETURN_TYPE_MISMATCH
 
     def test_the_default_unhandled_code_does_not_apply(self) -> None:
         app = _mock_app()
         app.config.default_unhandled_error_code = 'MY_DEFAULT'
 
-        def task() -> TaskResult[int, TaskError]:
+        def task() -> Result[int, TaskError]:
             return 5  # type: ignore[return-value]
 
         result = create_task_wrapper(task, app, 'test.task')()
 
-        assert result.err_value.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert isinstance(result, Err)
+        assert result.err_value.code == ContractCode.RETURN_TYPE_MISMATCH
 
     def test_an_exception_from_the_body_still_maps(self) -> None:
         app = _mock_app()
         app.config.exception_mapper = {ValueError: 'MAPPED'}
 
-        def task() -> TaskResult[int, TaskError]:
+        def task() -> Result[int, TaskError]:
             raise ValueError('boom')
 
         result = create_task_wrapper(task, app, 'test.task')()
 
-        assert result.err_value.error_code == 'MAPPED'
+        assert isinstance(result, Err)
+        assert result.err_value.code == 'MAPPED'
 
     def test_a_generator_function_is_refused_at_definition(self) -> None:
-        def task() -> TaskResult[int, TaskError]:
+        def task() -> Result[int, TaskError]:
             yield 1  # type: ignore[misc]
 
         with pytest.raises(TaskDefinitionError) as refused:
             create_task_wrapper(task, _mock_app(), 'test.task')
 
-        assert refused.value.code == ErrorCode.TASK_INVALID_RETURN_TYPE
+        assert refused.value.code == HorsiesErrorCode.TASK_INVALID_RETURN_TYPE
 
 
 class _KindA(BaseModel):
@@ -265,25 +279,25 @@ _Tagged = Annotated[_KindA | _KindB, Field(discriminator='kind')]
 @pytest.mark.unit
 class TestAnnotatedReturn:
     def test_a_constraint_on_the_return_is_enforced(self) -> None:
-        def task(*, n: int) -> TaskResult[Positive, TaskError]:
-            return TaskResult(ok=n)
+        def task(*, n: int) -> Result[Positive, TaskError]:
+            return Ok(n)
 
         wrapper = create_task_wrapper(task, _mock_app(), 'test.task')
 
-        assert wrapper(n=5).ok_value == 5
+        assert wrapper(n=5) == Ok(5)
         refused = wrapper(n=-1)
-        assert refused.is_err()
-        assert refused.err_value.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert isinstance(refused, Err)
+        assert refused.err_value.code == ContractCode.RETURN_TYPE_MISMATCH
 
     def test_a_validator_on_the_return_runs(self) -> None:
-        def task() -> TaskResult[Upper, TaskError]:
-            return TaskResult(ok='abc')
+        def task() -> Result[Upper, TaskError]:
+            return Ok('abc')
 
-        assert create_task_wrapper(task, _mock_app(), 'test.task')().ok_value == 'ABC'
+        assert create_task_wrapper(task, _mock_app(), 'test.task')() == Ok('ABC')
 
     def test_the_ok_type_keeps_the_discriminator(self) -> None:
-        def task() -> TaskResult[_Tagged, TaskError]:
-            return TaskResult(ok=_KindA(kind='a', n=1))
+        def task() -> Result[_Tagged, TaskError]:
+            return Ok(_KindA(kind='a', n=1))
 
         wrapper = create_task_wrapper(task, _mock_app(), 'test.task')
 
@@ -291,14 +305,14 @@ class TestAnnotatedReturn:
         envelope = encode_task_result(wrapper(), wrapper.task_ok_type)
         assert envelope['ok'] == {'kind': 'a', 'n': 1}
 
-    def test_annotated_around_task_result_stays_refused(self) -> None:
-        def task() -> Annotated[TaskResult[int, TaskError], 'note']:
-            return TaskResult(ok=1)
+    def test_annotated_around_result_stays_refused(self) -> None:
+        def task() -> Annotated[Result[int, TaskError], 'note']:
+            return Ok(1)
 
         with pytest.raises(TaskDefinitionError) as refused:
             create_task_wrapper(task, _mock_app(), 'test.task')
 
-        assert refused.value.code == ErrorCode.TASK_INVALID_RETURN_TYPE
+        assert refused.value.code == HorsiesErrorCode.TASK_INVALID_RETURN_TYPE
 
 
 @pytest.mark.unit
@@ -340,19 +354,19 @@ class TestWiringCompare:
         app = _real_app()
 
         @app.task('wiring_source')
-        def source() -> TaskResult[Positive, TaskError]:
-            return TaskResult(ok=1)
+        def source() -> Result[Positive, TaskError]:
+            return Ok(1)
 
         @app.task('wiring_target')
-        def target(*, value: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
-            return value
+        def target(*, value: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
+            return Ok(1)
 
-        first = TaskNode(fn=source)
-        second = TaskNode(fn=target, waits_for=[first], args_from={'value': first})
+        first = TaskNode(function=source)
+        second = TaskNode(function=target, waits_for=[first], args_from={'value': first})
 
-        spec = WorkflowSpec(name='wiring', tasks=[first, second])
+        spec = WorkflowSpec(name='wiring', nodes=[first, second])
 
-        assert len(spec.tasks) == 2
+        assert len(spec.nodes) == 2
 
 
 class _Base(BaseModel):
@@ -375,7 +389,7 @@ class _ClosedSub(_Closed):
 @pytest.mark.unit
 class TestConformToTarget:
     def test_a_constraint_refuses_the_value(self) -> None:
-        match conform_to_target(TaskResult(ok=-1), Positive):
+        match conform_to_target(Succeeded(-1), Positive):
             case Err(err_value=refusal):
                 assert isinstance(refusal, ValueValidationError)
                 assert '-1' not in str(refusal)
@@ -383,29 +397,29 @@ class TestConformToTarget:
                 pytest.fail('a value outside the constraint passed')
 
     def test_a_nested_constraint_refuses_the_value(self) -> None:
-        assert is_err(conform_to_target(TaskResult(ok=[1, -1]), list[Positive]))
+        assert is_err(conform_to_target(Succeeded([1, -1]), list[Positive]))
 
     def test_the_receiver_gets_the_transformed_value(self) -> None:
-        result = conform_to_target(TaskResult(ok='abc'), Upper)
+        result = conform_to_target(Succeeded('abc'), Upper)
 
-        assert is_ok(result)
-        assert result.ok_value.ok_value == 'ABC'
+        assert result == Ok(Succeeded('ABC'))
 
     def test_a_subclass_stays_a_subclass(self) -> None:
-        result = conform_to_target(TaskResult(ok=_Sub(n=1, secret='keep')), _Base)
-
-        assert is_ok(result)
-        assert isinstance(result.ok_value.ok_value, _Sub)
+        match conform_to_target(Succeeded(_Sub(n=1, secret='keep')), _Base):
+            case Ok(ok_value=Succeeded(value=value)):
+                assert isinstance(value, _Sub)
+            case other:
+                pytest.fail(f'expected a succeeded outcome, got {other!r}')
 
     def test_a_forbid_target_takes_a_subclass_that_the_wiring_accepts(self) -> None:
-        assert is_ok(conform_to_target(TaskResult(ok=_ClosedSub(n=1)), _Closed))
+        assert is_ok(conform_to_target(Succeeded(_ClosedSub(n=1)), _Closed))
 
     def test_validation_is_strict(self) -> None:
-        assert is_err(conform_to_target(TaskResult(ok='7'), int))
+        assert is_err(conform_to_target(Succeeded('7'), int))
 
-    def test_an_error_result_passes_unchanged(self) -> None:
-        failed: TaskResult[Any, TaskError] = TaskResult(
-            err=TaskError(error_code='FAILED'),
+    def test_a_failed_outcome_passes_unchanged(self) -> None:
+        failed: TaskOutcome[Any, TaskError] = Failed(
+            TaskError(code='FAILED'),
         )
 
         result = conform_to_target(failed, Positive)
@@ -415,30 +429,39 @@ class TestConformToTarget:
 
 
 @pytest.mark.unit
-class TestDeclaredTaskResultOkType:
+class TestDeclaredOutcomeOkType:
     def test_it_keeps_annotated(self) -> None:
         def target(
             *,
-            value: TaskResult[Positive, TaskError],
-        ) -> TaskResult[int, TaskError]:
-            return value
+            value: TaskOutcome[Positive, TaskError],
+        ) -> Result[int, TaskError]:
+            return Ok(1)
 
-        assert declared_taskresult_ok_type(target, 'value') == Positive
+        assert declared_outcome_ok_type(target, 'value') == Positive
 
     def test_it_reads_through_none(self) -> None:
         def target(
             *,
-            value: TaskResult[Positive, TaskError] | None = None,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+            value: TaskOutcome[Positive, TaskError] | None = None,
+        ) -> Result[int, TaskError]:
+            return Ok(1)
 
-        assert declared_taskresult_ok_type(target, 'value') == Positive
+        assert declared_outcome_ok_type(target, 'value') == Positive
 
     def test_a_plain_parameter_has_none(self) -> None:
-        def target(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        def target(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
-        assert declared_taskresult_ok_type(target, 'value') is None
+        assert declared_outcome_ok_type(target, 'value') is None
+
+
+def _succeeded_value(outcome: TaskOutcome[Any, TaskError]) -> object:
+    """The value of a succeeded `args_from` outcome; a failed one is a defect."""
+    match outcome:
+        case Succeeded(value=value):
+            return value
+        case Failed(error=error):
+            raise AssertionError(f'the receiver got a failed outcome: {error!r}')
 
 
 def _run_child(
@@ -490,44 +513,44 @@ class TestReceiverOfArgsFrom:
         app = _real_app()
 
         @app.task('source_int')
-        def source_int() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def source_int() -> Result[int, TaskError]:
+            return Ok(1)
 
         @app.task('source_str')
-        def source_str() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='abc')
+        def source_str() -> Result[str, TaskError]:
+            return Ok('abc')
 
         @app.task('target_positive')
         def target_positive(
             *,
-            x: TaskResult[Positive, TaskError],
-        ) -> TaskResult[int, TaskError]:
-            seen.append(x.ok_value)
-            return TaskResult(ok=1)
+            x: TaskOutcome[Positive, TaskError],
+        ) -> Result[int, TaskError]:
+            seen.append(_succeeded_value(x))
+            return Ok(1)
 
         @app.task('target_optional')
         def target_optional(
             *,
-            x: TaskResult[Positive, TaskError] | None = None,
-        ) -> TaskResult[int, TaskError]:
-            seen.append(x.ok_value if x is not None else None)
-            return TaskResult(ok=1)
+            x: TaskOutcome[Positive, TaskError] | None = None,
+        ) -> Result[int, TaskError]:
+            seen.append(_succeeded_value(x) if x is not None else None)
+            return Ok(1)
 
         @app.task('target_upper')
         def target_upper(
             *,
-            x: TaskResult[Upper, TaskError],
-        ) -> TaskResult[int, TaskError]:
-            seen.append(x.ok_value)
-            return TaskResult(ok=1)
+            x: TaskOutcome[Upper, TaskError],
+        ) -> Result[int, TaskError]:
+            seen.append(_succeeded_value(x))
+            return Ok(1)
 
         @app.task('target_same')
         def target_same(
             *,
-            x: TaskResult[int, TaskError],
-        ) -> TaskResult[int, TaskError]:
-            seen.append(x.ok_value)
-            return TaskResult(ok=1)
+            x: TaskOutcome[int, TaskError],
+        ) -> Result[int, TaskError]:
+            seen.append(_succeeded_value(x))
+            return Ok(1)
 
         return app
 
@@ -537,7 +560,7 @@ class TestReceiverOfArgsFrom:
         target: str,
     ) -> None:
         seen: list[object] = []
-        inner = encode_task_result(TaskResult(ok=-1), int)
+        inner = encode_task_result(Ok(-1), int)
 
         _, payload, reason = _run_child(self._app(seen), target, 'source_int', inner)
 
@@ -545,12 +568,12 @@ class TestReceiverOfArgsFrom:
         assert reason is None
         code = json.loads(payload)['err']['error_code']
         assert code == {
-            '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+            '__builtin_task_code__': OperationalCode.WORKER_SERIALIZATION_ERROR.value,
         }
 
     def test_a_value_inside_the_constraint_runs(self) -> None:
         seen: list[object] = []
-        inner = encode_task_result(TaskResult(ok=5), int)
+        inner = encode_task_result(Ok(5), int)
 
         _run_child(self._app(seen), 'target_positive', 'source_int', inner)
 
@@ -558,7 +581,7 @@ class TestReceiverOfArgsFrom:
 
     def test_a_transforming_target_gets_the_transformed_value(self) -> None:
         seen: list[object] = []
-        inner = encode_task_result(TaskResult(ok='abc'), str)
+        inner = encode_task_result(Ok('abc'), str)
 
         _run_child(self._app(seen), 'target_upper', 'source_str', inner)
 
@@ -566,7 +589,7 @@ class TestReceiverOfArgsFrom:
 
     def test_equal_types_run_no_second_validation(self) -> None:
         seen: list[object] = []
-        inner = encode_task_result(TaskResult(ok=5), int)
+        inner = encode_task_result(Ok(5), int)
 
         with patch.object(child_runner, 'conform_to_target') as conform:
             _run_child(self._app(seen), 'target_same', 'source_int', inner)

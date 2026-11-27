@@ -9,8 +9,8 @@ PAUSED, no further node is enqueued, and it stays that way until someone
 resumes or cancels it from the dashboard.
 
 Resuming runs `restock_or_writeoff`, which is reachable on the damaged branch
-only because its node declares `allow_failed_deps=True`. It receives the
-inspection's `TaskResult`, sees the error, and writes the item off. Cancelling
+only because its node declares `allow_failed_dependencies=True`. It receives the
+inspection's `TaskOutcome`, sees the error, and writes the item off. Cancelling
 instead leaves the return open — which is also a legitimate answer, and the
 reason the decision is a person's.
 """
@@ -51,7 +51,7 @@ class ReturnsReview(WorkflowDefinition[RestockDecision]):
     ) -> WorkflowSpec[RestockDecision]:
         """Build a fresh spec for one return."""
         receive = TaskNode(
-            fn=receive_return,
+            function=receive_return,
             kwargs={
                 'return_id': return_id,
                 'order_id': order_id,
@@ -61,28 +61,28 @@ class ReturnsReview(WorkflowDefinition[RestockDecision]):
             node_id='receive_return',
         )
         inspect = TaskNode(
-            fn=inspect_item,
+            function=inspect_item,
             kwargs={'return_id': return_id},
             waits_for=[receive],
             node_id='inspect_item',
         )
         settle = TaskNode(
-            fn=restock_or_writeoff,
+            function=restock_or_writeoff,
             kwargs={'return_id': return_id},
             waits_for=[inspect],
             args_from={'inspection': inspect},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
             node_id='restock_or_writeoff',
         )
         return app.workflow(
             name=cls.name,
-            tasks=[receive, inspect, settle],
+            nodes=[receive, inspect, settle],
             on_error=OnError.PAUSE,
             output=settle,
         )
 
 
-@app.workflow_builder(
+@app.check_workflow_builder(
     cases=[
         {
             'return_id': 'RET-CHECK',

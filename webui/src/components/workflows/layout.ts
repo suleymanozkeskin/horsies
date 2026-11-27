@@ -1,6 +1,6 @@
 // Longest-path layered DAG layout: a layer with many nodes (a wide fan-out)
 // wraps into several sub-columns instead of one tall column, so any workflow
-// shape lays out readably. Pure — returns absolute positions by task_index.
+// shape lays out readably. Pure — returns absolute positions by node_index.
 
 import type { WorkflowEdge, WorkflowNode } from '@/types/workflows';
 
@@ -31,7 +31,7 @@ function computeLayers(
 ): { layer: Map<number, number>; preds: Map<number, number[]> } {
   const preds = new Map<number, number[]>();
   for (const node of nodes) {
-    preds.set(node.task_index, []);
+    preds.set(node.node_index, []);
   }
   for (const edge of edges) {
     const target = preds.get(edge.to_index);
@@ -57,14 +57,14 @@ function computeLayers(
     return value;
   };
   for (const node of nodes) {
-    depth(node.task_index);
+    depth(node.node_index);
   }
   return { layer, preds };
 }
 
 /** Order nodes within each layer by the mean position of their predecessors in
  * the previous layer (barycenter heuristic) to reduce edge crossings. Roots
- * keep a stable task_index order. */
+ * keep a stable node_index order. */
 function orderWithinLayers(
   orderedLayers: number[],
   byLayer: Map<number, WorkflowNode[]>,
@@ -72,23 +72,23 @@ function orderWithinLayers(
 ): void {
   const position = new Map<number, number>();
   const barycenter = (node: WorkflowNode): number => {
-    const positions = (preds.get(node.task_index) ?? [])
+    const positions = (preds.get(node.node_index) ?? [])
       .map(parent => position.get(parent))
       .filter((value): value is number => value !== undefined);
     return positions.length
       ? positions.reduce((sum, value) => sum + value, 0) / positions.length
-      : node.task_index;
+      : node.node_index;
   };
   orderedLayers.forEach((layerKey, layerIdx) => {
     const members = byLayer.get(layerKey) ?? [];
     if (layerIdx === 0) {
-      members.sort((a, b) => a.task_index - b.task_index);
+      members.sort((a, b) => a.node_index - b.node_index);
     } else {
       members.sort(
-        (a, b) => barycenter(a) - barycenter(b) || a.task_index - b.task_index
+        (a, b) => barycenter(a) - barycenter(b) || a.node_index - b.node_index
       );
     }
-    members.forEach((node, row) => position.set(node.task_index, row));
+    members.forEach((node, row) => position.set(node.node_index, row));
   });
 }
 
@@ -105,7 +105,7 @@ export function layoutWorkflow(
   const { layer, preds } = computeLayers(nodes, edges);
   const byLayer = new Map<number, WorkflowNode[]>();
   for (const node of nodes) {
-    const key = layer.get(node.task_index) ?? 0;
+    const key = layer.get(node.node_index) ?? 0;
     const bucket = byLayer.get(key);
     if (bucket === undefined) {
       byLayer.set(key, [node]);
@@ -136,7 +136,7 @@ export function layoutWorkflow(
     entry.members.forEach((node, index) => {
       const subColumn = Math.floor(index / entry.rowsPerCol);
       const row = index % entry.rowsPerCol;
-      positions.set(node.task_index, {
+      positions.set(node.node_index, {
         x: layerX + subColumn * (NODE_W + SUBGAP_X),
         y: topPad + row * (NODE_H + GAP_Y),
       });

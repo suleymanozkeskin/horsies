@@ -2,7 +2,7 @@
 // of the notification listener (the core's `WorkerResilienceConfig`, `core/src/core/config/resilience.rs`). A refusal
 // of a resilience field has the code of the resilience config (`HRS-208`).
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import {
   accepted,
@@ -22,16 +22,16 @@ export type RetryAttempts = { readonly kind: "attempts"; readonly attempts: numb
 
 /** The resilience settings. Each field left out has the core's default; the core checks each range. */
 export interface ResilienceConfigInput {
-  readonly dbRetryInitialMs?: number;
-  readonly dbRetryMaxMs?: number;
-  readonly dbRetryMaxAttempts?: RetryAttempts;
+  readonly databaseRetryInitialMs?: number;
+  readonly databaseRetryMaxMs?: number;
+  readonly databaseRetryMaxAttempts?: RetryAttempts;
   readonly notifyPollIntervalMs?: number;
 }
 
 /** A `u64` field of the resilience config. */
-const RESILIENCE_U64 = u64Field(ErrorCode.CONFIG_INVALID_RESILIENCE);
+const RESILIENCE_U64 = u64Field(HorsiesErrorCode.CONFIG_INVALID_RESILIENCE);
 
-/** The core's value of "no limit" in `db_retry_max_attempts`. */
+/** The core's value of "no limit" in `database_retry_max_attempts`. */
 const NO_ATTEMPT_LIMIT = 0;
 
 /**
@@ -41,20 +41,20 @@ const NO_ATTEMPT_LIMIT = 0;
 const ATTEMPT_COUNT: IntegerBound = Object.freeze({
   min: 1,
   max: U64_SAFE_MAX,
-  code: ErrorCode.CONFIG_INVALID_RESILIENCE,
+  code: HorsiesErrorCode.CONFIG_INVALID_RESILIENCE,
 });
 
 /** The core's `resilience` object of `input`. Pure. */
 export function resilienceJson(input: ResilienceConfigInput, path: string): Checked<ConfigJson> {
   return checkedObject([
-    optionalEntry("db_retry_initial_ms", input.dbRetryInitialMs, (value) =>
-      checkedInteger(value, RESILIENCE_U64, memberPath(path, "dbRetryInitialMs")),
+    optionalEntry("database_retry_initial_ms", input.databaseRetryInitialMs, (value) =>
+      checkedInteger(value, RESILIENCE_U64, memberPath(path, "databaseRetryInitialMs")),
     ),
-    optionalEntry("db_retry_max_ms", input.dbRetryMaxMs, (value) =>
-      checkedInteger(value, RESILIENCE_U64, memberPath(path, "dbRetryMaxMs")),
+    optionalEntry("database_retry_max_ms", input.databaseRetryMaxMs, (value) =>
+      checkedInteger(value, RESILIENCE_U64, memberPath(path, "databaseRetryMaxMs")),
     ),
-    optionalEntry("db_retry_max_attempts", input.dbRetryMaxAttempts, (attempts) =>
-      attemptsJson(attempts, memberPath(path, "dbRetryMaxAttempts.attempts")),
+    optionalEntry("database_retry_max_attempts", input.databaseRetryMaxAttempts, (attempts) =>
+      attemptsJson(attempts, memberPath(path, "databaseRetryMaxAttempts.attempts")),
     ),
     optionalEntry("notify_poll_interval_ms", input.notifyPollIntervalMs, (value) =>
       checkedInteger(value, RESILIENCE_U64, memberPath(path, "notifyPollIntervalMs")),

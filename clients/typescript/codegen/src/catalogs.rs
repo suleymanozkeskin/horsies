@@ -123,6 +123,8 @@ mod tests {
     use horsies_core::catalog::{CallForms, CatalogMember, CodeEnum, PythonEnumBase};
     use horsies_core::{RetrievalCode, TaskStatus};
 
+    use std::path::Path;
+
     use super::*;
     use crate::ts_text::GENERATED_HEADER;
 
@@ -223,7 +225,7 @@ mod tests {
     fn catalogs_group_by_module_in_name_order() {
         let modules = catalog_modules(&[
             catalog("status", "TaskStatus"),
-            catalog("broker", "BrokerErrorCode"),
+            catalog("broker", "DatabaseErrorCode"),
             catalog("status", "WorkflowStatus"),
         ]);
         let names: Vec<&str> = modules.keys().copied().collect();
@@ -274,39 +276,52 @@ mod tests {
         }
     }
 
-    /// Every member of every catalog has its line, the members that only a
-    /// blocking form gives included.
+    /// The member lines of the catalog object `name` in `module_text`, in
+    /// their order: the lines between its opening line and `} as const;`.
+    fn rendered_member_lines<'text>(module_text: &'text str, name: &str) -> Vec<&'text str> {
+        let opening = format!("\nexport const {name} = {{\n");
+        let start = module_text
+            .find(&opening)
+            .unwrap_or_else(|| panic!("the module renders the catalog object {name}"))
+            + opening.len();
+        let body = &module_text[start..];
+        let end = body
+            .find("\n} as const;")
+            .unwrap_or_else(|| panic!("the catalog object {name} ends with `}} as const;`"));
+        body[..end].lines().collect()
+    }
+
+    /// The object of every catalog renders the members of the model, one
+    /// line each, in the model's order: no member left out (the members
+    /// that only a blocking form gives included) and no other line.
     #[test]
     fn the_model_renders_every_member_of_every_catalog() {
-        let texts: Vec<String> = generated_files()
-            .iter()
-            .map(|file| file.text().to_owned())
-            .collect();
-        let all_text = texts.concat();
-        let mut members = 0;
+        let files = generated_files();
         for catalog in CODE_CATALOGS {
-            for member in catalog.members {
-                let line = format!(
-                    "\n  {}: {},\n",
-                    property_key(member.name),
-                    string_literal(member.value)
-                );
-                assert!(
-                    all_text.contains(&line),
-                    "{}.{}",
-                    catalog_type_name(catalog),
-                    member.name
-                );
-                members += 1;
-            }
+            let name = catalog_type_name(catalog);
+            let stem = catalog_module(catalog);
+            let file = files
+                .iter()
+                .find(|file| file.relative_path() == Path::new(&format!("src/_catalog/{stem}.ts")))
+                .unwrap_or_else(|| panic!("the module {stem} of {name} is rendered"));
+            let expected: Vec<String> = catalog
+                .members
+                .iter()
+                .map(|member| {
+                    format!(
+                        "  {}: {},",
+                        property_key(member.name),
+                        string_literal(member.value)
+                    )
+                })
+                .collect();
+            assert_eq!(rendered_member_lines(file.text(), name), expected, "{name}");
         }
-        assert_eq!(members, 205);
         let retrieval = <RetrievalCode as CodeEnum>::CATALOG;
         let async_context = retrieval
             .member_named("ASYNC_CONTEXT")
             .expect("RetrievalCode has ASYNC_CONTEXT");
         assert_eq!(async_context.forms, CallForms::BlockingFormOnly);
-        assert!(all_text.contains("\n  ASYNC_CONTEXT: \"ASYNC_CONTEXT\",\n"));
     }
 
     #[test]
@@ -326,7 +341,7 @@ mod tests {
             .text()
             .contains("\nexport const WORKFLOW_TERMINAL_STATES: ReadonlySet<WorkflowStatus> = "));
         assert!(status.text().contains(
-            "\nexport const WORKFLOW_TASK_TERMINAL_STATES: ReadonlySet<WorkflowTaskStatus> = "
+            "\nexport const WORKFLOW_NODE_TERMINAL_STATES: ReadonlySet<WorkflowNodeStatus> = "
         ));
         assert_eq!(status.text().matches(": ReadonlySet<").count(), 3);
     }

@@ -25,19 +25,23 @@ from horsies._catalog.error_detail import NoCause
 from horsies._core import (
     AllSlotsServingRecord,
     BudgetLoadRecord,
-    ClassCoverageRecord,
-    ClassReportRecord,
+    ExecutionClassCoverageRecord,
+    ExecutionClassReportRecord,
     CoreConnectionError,
-    CoreStartFailed,
+    RuntimeStartFailed,
     DatabasePingRecord,
+    ExpiredTaskListComplete,
+    ExpiredTaskListTruncated,
     HandleClosed,
     OldestWaitingRecord,
     PendingStreamRecord,
+    StaleTaskListComplete,
+    StaleTaskListTruncated,
     StreamCoverageRecord,
     StreamServedRecord,
     StreamUnservedRecord,
     TooManyPendingCalls,
-    WorkerClassLoadRecord,
+    WorkerExecutionClassLoadRecord,
     WorkerPongRecord,
     WorkerPongsRecord,
     WorkerStateAbsent,
@@ -45,19 +49,24 @@ from horsies._core import (
 )
 from horsies.core.app import Horsies
 from horsies.core.brokers.result_types import (
-    BrokerErrorCode,
-    BrokerInvalidInput,
-    BrokerListenerDisabled,
-    BrokerOperationFailed,
-    BrokerOperationFailedCode,
-    BrokerResult,
-    RawResultRecord,
+    DatabaseErrorCode,
+    DatabaseInvalidInput,
+    DatabaseListenerDisabled,
+    DatabaseOperationFailed,
+    DatabaseOperationFailedCode,
+    DatabaseResult,
+    StoredResult,
 )
 from horsies.core.codec.json_io import Json
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskError, TaskInfo, TaskResult
-from horsies.core.types.result import Err, Ok
+from horsies.core.models.health_reads import (
+    MinResponsesAtLeast,
+    PingTargetWorker,
+    WorkerHistoryLimitNewest,
+)
+from horsies.core.models.tasks import TaskError, TaskInfo
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
 from tests.sync_facade_support import outcome_shape
 from tests.unit.test_broker_postgres import _make_broker
@@ -93,11 +102,11 @@ def _returning(make_answer: Callable[[], _T]) -> Callable[..., _T]:
 
 def _app() -> Horsies:
     """An app whose broker cannot connect, with one task whose ok type is int."""
-    app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))))
+    app = Horsies(AppConfig(database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))))
 
     @app.task(REGISTERED_TASK)
-    def number(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def number(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     _ = number
     return app
@@ -131,7 +140,7 @@ def _malformed_envelope() -> dict[str, Json]:
     return {
         '__h_task_result__': True,
         'err': {
-            'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+            'error_code': {'__builtin_task_code__': 'DATABASE_ERROR'},
             'message': 'smuggled',
             'data': None,
             'exception': None,
@@ -153,21 +162,21 @@ def _undecodable_err_envelope() -> dict[str, Json]:
     }
 
 
-def _read_failed() -> BrokerResult[Any]:
+def _read_failed() -> DatabaseResult[Any]:
     return Err(
-        BrokerOperationFailed(
-            code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+        DatabaseOperationFailed(
+            code=DatabaseErrorCode.TASK_INFO_QUERY_FAILED,
             message='connection lost',
             retryable=True,
-            exception=CONNECTION_LOST,
+            cause=CONNECTION_LOST,
         ),
     )
 
 
 def _record(
     status: TaskStatus, raw_result: dict[str, Json] | None, task_name: str,
-) -> RawResultRecord:
-    return RawResultRecord(
+) -> StoredResult:
+    return StoredResult(
         task_id=TASK_ID,
         task_name=task_name,
         status=status,
@@ -179,7 +188,7 @@ def _record(
 # Horsies.get_result: PostgresBroker.get_raw_result_record
 # =============================================================================
 
-RAW_RESULT_ANSWERS: Final[dict[str, Callable[[], BrokerResult[RawResultRecord | None]]]] = {
+RAW_RESULT_ANSWERS: Final[dict[str, Callable[[], DatabaseResult[StoredResult | None]]]] = {
     'read_failed': _read_failed,
     'task_absent': lambda: Ok(None),
     'cancelled': lambda: Ok(_record(TaskStatus.CANCELLED, None, REGISTERED_TASK)),
@@ -232,13 +241,13 @@ def _task_info(task_name: str, raw_result: dict[str, Json] | None) -> TaskInfo:
         task_id=TASK_ID,
         task_name=task_name,
         status=TaskStatus.FAILED,
-        queue_name='default',
+        queue='default',
         priority=0,
         retry_count=0,
         max_retries=0,
         next_retry_at=None,
         sent_at=_AT,
-        enqueued_at=_AT,
+        due_at=_AT,
         claimed_at=_AT,
         started_at=_AT,
         completed_at=None,
@@ -250,7 +259,7 @@ def _task_info(task_name: str, raw_result: dict[str, Json] | None) -> TaskInfo:
     )
 
 
-TASK_INFO_ANSWERS: Final[dict[str, Callable[[], BrokerResult[TaskInfo | None]]]] = {
+TASK_INFO_ANSWERS: Final[dict[str, Callable[[], DatabaseResult[TaskInfo | None]]]] = {
     'read_failed': _read_failed,
     'task_absent': lambda: Ok(None),
     'no_stored_result': lambda: Ok(_task_info(REGISTERED_TASK, None)),
@@ -302,19 +311,19 @@ def test_get_task_info_gives_the_outcome_of_get_task_info_async(
 # =============================================================================
 
 
-def _failure(code: BrokerOperationFailedCode) -> BrokerOperationFailed:
+def _failure(code: DatabaseOperationFailedCode) -> DatabaseOperationFailed:
     """The core's class of a failed operation of ``code``."""
-    return BrokerOperationFailed(
+    return DatabaseOperationFailed(
         code=code,
         message=f'{code}: connection refused',
         retryable=True,
-        exception=CONNECTION_LOST,
+        cause=CONNECTION_LOST,
     )
 
 
 PING_ANSWERS: Final[dict[str, object]] = {
     'pinged': MagicMock(spec=DatabasePingRecord, latency_ms=1.5),
-    'ping_failed': _failure(BrokerErrorCode.DB_PING_FAILED),
+    'ping_failed': _failure(DatabaseErrorCode.DATABASE_PING_FAILED),
     'core_cannot_run_the_call': CORE_REFUSAL,
 }
 
@@ -356,7 +365,7 @@ def test_ping_database_gives_the_outcome_of_ping_database_async(answer: str) -> 
 
 def test_ping_database_refuses_another_code_as_its_async_form_does() -> None:
     """A failure code outside the ping's catalog is a defect in both forms."""
-    handle = _answering('ping_database', _failure(BrokerErrorCode.CLEANUP_FAILED))
+    handle = _answering('ping_database', _failure(DatabaseErrorCode.CLEANUP_FAILED))
     app = _app_with_core_handle(handle)
 
     with pytest.raises(AssertionError, match='CLEANUP_FAILED') as blocking:
@@ -383,7 +392,7 @@ def _closing_broker(core_answer: object) -> Any:
 CLOSE_CASES: Final[dict[str, Callable[[], Any]]] = {
     'closed': lambda: _closing_broker(MagicMock(spec=HandleClosed)),
     'core_cannot_run_the_close': lambda: _closing_broker(
-        CoreStartFailed('the core runtime could not start'),
+        RuntimeStartFailed('the core runtime could not start'),
     ),
 }
 
@@ -419,14 +428,14 @@ def test_close_with_nothing_open_runs_no_event_loop(monkeypatch: pytest.MonkeyPa
 # =============================================================================
 
 
-def _refused_input() -> BrokerInvalidInput:
+def _refused_input() -> DatabaseInvalidInput:
     """The core's class of an argument that a check refused."""
-    return BrokerInvalidInput(message='INVALID_INPUT: refused', exception=NoCause())
+    return DatabaseInvalidInput(message='INVALID_INPUT: refused', cause=NoCause())
 
 
-def _listener_disabled() -> BrokerListenerDisabled:
+def _listener_disabled() -> DatabaseListenerDisabled:
     """The core's class of a ping on a broker with no listener."""
-    return BrokerListenerDisabled(message='LISTENER_DISABLED: no listener')
+    return DatabaseListenerDisabled(message='LISTENER_DISABLED: no listener')
 
 
 _STATES: Final = _core_record(
@@ -437,33 +446,34 @@ _STATES: Final = _core_record(
     ],
 )
 _COVERAGE: Final = _core_record(
-    ClassCoverageRecord,
+    ExecutionClassCoverageRecord,
     checked_at=_AT,
     live_workers=1,
     streams=[
         _core_record(
             StreamCoverageRecord,
-            queue_name='a',
+            queue='a',
             execution='ISOLATED',
-            state=_core_record(StreamServedRecord, workers=1, capacity=4),
+            coverage=_core_record(StreamServedRecord, workers=1, capacity=4),
         ),
     ],
 )
 _REPORT: Final = _core_record(
-    ClassReportRecord,
+    ExecutionClassReportRecord,
     checked_at=_AT,
+    live_window=timedelta(seconds=120),
     streams=[
         _core_record(
             PendingStreamRecord,
-            queue_name='a',
+            queue='a',
             execution='ISOLATED',
-            wait=_core_record(OldestWaitingRecord, enqueued_at=_AT, wait=timedelta(seconds=90)),
-            state=_core_record(StreamUnservedRecord),
+            coverage=_core_record(StreamUnservedRecord),
+            wait=_core_record(OldestWaitingRecord, oldest_due_at=_AT, wait=timedelta(seconds=90)),
         ),
     ],
     workers=[
         _core_record(
-            WorkerClassLoadRecord,
+            WorkerExecutionClassLoadRecord,
             worker_id='w1',
             snapshot_at=_AT,
             budgets=[
@@ -497,14 +507,18 @@ class MonitoringFacade:
 MONITORING_FACADES: Final[dict[str, MonitoringFacade]] = {
     'ping_workers': MonitoringFacade(
         blocking=lambda app: app.ping_workers(
-            target_worker_id='w1', timeout_seconds=0.5, min_responses=1,
+            target=PingTargetWorker(worker_id='w1'),
+            wait_ms=500,
+            min_responses=MinResponsesAtLeast(count=1),
         ),
         awaited=lambda app: app.ping_workers_async(
-            target_worker_id='w1', timeout_seconds=0.5, min_responses=1,
+            target=PingTargetWorker(worker_id='w1'),
+            wait_ms=500,
+            min_responses=MinResponsesAtLeast(count=1),
         ),
         blocking_form='ping_workers',
         arguments=(),
-        keywords={'target_worker_id': 'w1', 'timeout_seconds': 0.5, 'min_responses': 1},
+        keywords={'target_worker_id': 'w1', 'wait_ms': 500, 'min_responses': 1},
         answers={
             'pongs': _core_record(
                 WorkerPongsRecord,
@@ -520,7 +534,7 @@ MONITORING_FACADES: Final[dict[str, MonitoringFacade]] = {
             ),
             'invalid_input': _refused_input(),
             'listener_disabled': _listener_disabled(),
-            'ping_failed': _failure(BrokerErrorCode.WORKER_PING_FAILED),
+            'ping_failed': _failure(DatabaseErrorCode.WORKER_PING_FAILED),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
@@ -532,7 +546,7 @@ MONITORING_FACADES: Final[dict[str, MonitoringFacade]] = {
         keywords={},
         answers={
             'states': _STATES,
-            'read_failed': _failure(BrokerErrorCode.MONITORING_QUERY_FAILED),
+            'read_failed': _failure(DatabaseErrorCode.MONITORING_QUERY_FAILED),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
@@ -545,44 +559,75 @@ MONITORING_FACADES: Final[dict[str, MonitoringFacade]] = {
         answers={
             'state': _state_record('w1', _SLOTS_DOWN_RECORD),
             'absent': _core_record(WorkerStateAbsent),
-            'read_failed': _failure(BrokerErrorCode.MONITORING_QUERY_FAILED),
+            'read_failed': _failure(DatabaseErrorCode.MONITORING_QUERY_FAILED),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
     'get_worker_state_history': MonitoringFacade(
-        blocking=lambda app: app.get_worker_state_history('w1', limit=5),
-        awaited=lambda app: app.get_worker_state_history_async('w1', limit=5),
+        blocking=lambda app: app.get_worker_state_history(
+            'w1', limit=WorkerHistoryLimitNewest(count=5),
+        ),
+        awaited=lambda app: app.get_worker_state_history_async(
+            'w1', limit=WorkerHistoryLimitNewest(count=5),
+        ),
         blocking_form='worker_state_history',
         arguments=('w1',),
         keywords={'limit': 5},
         answers={
             'states': _STATES,
             'invalid_input': _refused_input(),
-            'read_failed': _failure(BrokerErrorCode.MONITORING_QUERY_FAILED),
+            'read_failed': _failure(DatabaseErrorCode.MONITORING_QUERY_FAILED),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
-    'get_class_coverage': MonitoringFacade(
-        blocking=lambda app: app.get_class_coverage(),
-        awaited=lambda app: app.get_class_coverage_async(),
-        blocking_form='class_coverage',
+    'get_execution_class_coverage': MonitoringFacade(
+        blocking=lambda app: app.get_execution_class_coverage(),
+        awaited=lambda app: app.get_execution_class_coverage_async(),
+        blocking_form='execution_class_coverage',
         arguments=(),
         keywords={},
         answers={
             'coverage': _COVERAGE,
-            'read_failed': _failure(BrokerErrorCode.MONITORING_QUERY_FAILED),
+            'read_failed': _failure(DatabaseErrorCode.MONITORING_QUERY_FAILED),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
-    'get_class_report': MonitoringFacade(
-        blocking=lambda app: app.get_class_report(),
-        awaited=lambda app: app.get_class_report_async(),
-        blocking_form='class_report',
+    'get_execution_class_report': MonitoringFacade(
+        blocking=lambda app: app.get_execution_class_report(),
+        awaited=lambda app: app.get_execution_class_report_async(),
+        blocking_form='execution_class_report',
         arguments=(),
         keywords={},
         answers={
             'report': _REPORT,
-            'read_failed': _failure(BrokerErrorCode.MONITORING_QUERY_FAILED),
+            'read_failed': _failure(DatabaseErrorCode.MONITORING_QUERY_FAILED),
+            'core_cannot_run_the_call': CORE_REFUSAL,
+        },
+    ),
+    'get_stale_tasks': MonitoringFacade(
+        blocking=lambda app: app.get_stale_tasks(7),
+        awaited=lambda app: app.get_stale_tasks_async(7),
+        blocking_form='stale_tasks',
+        arguments=(7,),
+        keywords={},
+        answers={
+            'complete': _core_record(StaleTaskListComplete, rows=[]),
+            'truncated': _core_record(StaleTaskListTruncated, rows=[], bound=10_000),
+            'invalid_input': _refused_input(),
+            'read_failed': _failure(DatabaseErrorCode.MONITORING_QUERY_FAILED),
+            'core_cannot_run_the_call': CORE_REFUSAL,
+        },
+    ),
+    'get_expired_tasks': MonitoringFacade(
+        blocking=lambda app: app.get_expired_tasks(),
+        awaited=lambda app: app.get_expired_tasks_async(),
+        blocking_form='expired_tasks',
+        arguments=(),
+        keywords={},
+        answers={
+            'complete': _core_record(ExpiredTaskListComplete, rows=[]),
+            'truncated': _core_record(ExpiredTaskListTruncated, rows=[], bound=10_000),
+            'read_failed': _failure(DatabaseErrorCode.MONITORING_QUERY_FAILED),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
@@ -619,7 +664,7 @@ def test_a_monitoring_facade_gives_the_outcome_of_its_async_form(
 def test_a_monitoring_facade_refuses_another_code_as_its_async_form_does(facade: str) -> None:
     """A failure code outside the facade's catalog is a defect in both forms."""
     entry = MONITORING_FACADES[facade]
-    handle = _answering(entry.blocking_form, _failure(BrokerErrorCode.CLEANUP_FAILED))
+    handle = _answering(entry.blocking_form, _failure(DatabaseErrorCode.CLEANUP_FAILED))
     app = _app_with_core_handle(handle)
 
     with pytest.raises(AssertionError, match='CLEANUP_FAILED') as blocking:

@@ -42,7 +42,7 @@ from typing import Annotated, Final, Literal, Union, assert_never
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.models.child_sizing import (
     DEFAULT_ISOLATED_POOL_CONNECTIONS,
     DEFAULT_TASK_SEND_POOL_CONNECTIONS,
@@ -251,7 +251,7 @@ ExecutorThreadsSetting = Annotated[
 class ResolvedPool:
     """The connection pool of one child as it opens: from ``min_size`` to
     ``max_size`` connections, and a check of each connection on checkout
-    when ``check`` is true.
+    when ``pre_ping`` is true.
 
     ``0 <= min_size <= max_size <= MAX_CHILD_POOL_CONNECTIONS`` and
     ``max_size >= 1``: AppConfig validation refuses a profile that resolves
@@ -260,7 +260,7 @@ class ResolvedPool:
 
     min_size: int
     max_size: int
-    check: bool
+    pre_ping: bool
 
 
 def _default_isolated_pool_size() -> PoolSize:
@@ -278,7 +278,7 @@ class IsolatedPool(BaseModel):
       ``MAX_CHILD_POOL_CONNECTIONS``. With 0, a connection opens at its
       first use.
     - ``max_size``: the most connections of the pool.
-    - ``check``: check each connection when a write takes it from the pool.
+    - ``pre_ping``: check each connection when a write takes it from the pool.
       Off by default. Each check is a database round trip, and a write of
       the child is one statement in autocommit, so a check doubles its round
       trips. With it off, a dead pooled connection fails the write that takes
@@ -298,7 +298,7 @@ class IsolatedPool(BaseModel):
         description='Connections that the pool keeps open',
     )
     max_size: PoolSize = Field(default_factory=_default_isolated_pool_size)
-    check: bool = Field(
+    pre_ping: bool = Field(
         default=False,
         description='Check each connection on checkout',
     )
@@ -308,7 +308,7 @@ class IsolatedPool(BaseModel):
         return ResolvedPool(
             min_size=self.min_size,
             max_size=self.max_size.connections,
-            check=self.check,
+            pre_ping=self.pre_ping,
         )
 
 
@@ -320,7 +320,7 @@ class SharedPool(BaseModel):
       first use.
     - ``max_size``: the most connections of the pool: ``PoolSize``, or
       ``PoolSizeFromSeats()`` to derive it from the seats of the child.
-    - ``check``: check each connection when a write takes it from the pool,
+    - ``pre_ping``: check each connection when a write takes it from the pool,
       as for ``IsolatedPool``.
 
     AppConfig validation refuses a ``min_size`` above the resolved
@@ -336,7 +336,7 @@ class SharedPool(BaseModel):
         description='Connections that the pool keeps open',
     )
     max_size: PoolSizeSetting = Field(default_factory=PoolSizeFromSeats)
-    check: bool = Field(
+    pre_ping: bool = Field(
         default=False,
         description='Check each connection on checkout',
     )
@@ -354,7 +354,7 @@ class SharedPool(BaseModel):
         return ResolvedPool(
             min_size=self.min_size,
             max_size=max_size,
-            check=self.check,
+            pre_ping=self.pre_ping,
         )
 
 
@@ -796,10 +796,10 @@ def _origin_text(origin: _SizeOrigin) -> str:
 
 def _describe_pool(pool: ResolvedPool, origin: _SizeOrigin) -> str:
     """The resolved pool of one child, and where its max size comes from."""
-    check = 'on' if pool.check else 'off'
+    pre_ping = 'on' if pool.pre_ping else 'off'
     return (
         f'pool {pool.min_size} to {pool.max_size} connections'
-        f'{_origin_text(origin)}, check {check}'
+        f'{_origin_text(origin)}, pre_ping {pre_ping}'
     )
 
 
@@ -932,7 +932,7 @@ def _profile_error(
 ) -> ConfigurationError:
     return ConfigurationError(
         message=message,
-        code=ErrorCode.CONFIG_INVALID_WORKER_PROFILE,
+        code=HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE,
         notes=notes,
         help_text=help_text,
     )

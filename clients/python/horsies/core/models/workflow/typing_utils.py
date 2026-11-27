@@ -13,19 +13,21 @@ from typing import (
     TypeVar,
     Callable,
     Union,
+    assert_never,
     get_args,
     get_origin,
     get_type_hints,
 )
 
 from horsies.core.errors import (
-    ErrorCode,
+    HorsiesErrorCode,
     WorkflowValidationError,
 )
 
 from .nodes import TaskNode, SubWorkflowNode
 
 if TYPE_CHECKING:
+    from horsies.core.models.tasks import CustomCodeType
     from .definition import WorkflowDefinition
     from .spec import WorkflowSpec
 
@@ -33,7 +35,7 @@ if TYPE_CHECKING:
 NODE_ID_PATTERN = re.compile(r'^[A-Za-z0-9_\-:.]+$')
 
 
-def slugify(value: str) -> str:
+def node_id_from_text(value: str) -> str:
     """
     Convert a string to a valid node_id by replacing invalid characters.
 
@@ -41,35 +43,35 @@ def slugify(value: str) -> str:
     Result matches NODE_ID_PATTERN: [A-Za-z0-9_\\-:.]+
 
     Example:
-        slugify("My Workflow Name")  # "My_Workflow_Name"
-        slugify("task:v2.0")         # "task:v2.0" (unchanged)
+        node_id_from_text("My Workflow Name")  # "My_Workflow_Name"
+        node_id_from_text("task:v2.0")         # "task:v2.0" (unchanged)
     """
     result = value.replace(' ', '_')
     result = re.sub(r'[^A-Za-z0-9_\-:.]', '', result)
     return result or '_'
 
 
-def _get_inspect_target(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Return underlying function for introspection when wrappers expose _original_fn."""
-    inspect_target: Callable[..., Any] = fn
-    original = getattr(fn, '_original_fn', None)
+def _get_inspect_target(function: Callable[..., Any]) -> Callable[..., Any]:
+    """Return underlying function for introspection when wrappers expose _original_function."""
+    inspect_target: Callable[..., Any] = function
+    original = getattr(function, '_original_function', None)
     if callable(original):
         inspect_target = original
     return inspect_target
 
 
-def _task_accepts_workflow_ctx(fn: Callable[..., Any]) -> bool:
-    inspect_target: Callable[..., Any] = _get_inspect_target(fn)
+def _task_accepts_workflow_ctx(function: Callable[..., Any]) -> bool:
+    inspect_target: Callable[..., Any] = _get_inspect_target(function)
     try:
         sig = inspect.signature(inspect_target)
     except (TypeError, ValueError):
         return False
-    return 'workflow_ctx' in sig.parameters
+    return 'workflow_context' in sig.parameters
 
 
-def _get_signature(fn: Callable[..., Any]) -> inspect.Signature | None:
+def _get_signature(function: Callable[..., Any]) -> inspect.Signature | None:
     """Return an inspectable signature for a callable, or None if unavailable."""
-    inspect_target: Callable[..., Any] = _get_inspect_target(fn)
+    inspect_target: Callable[..., Any] = _get_inspect_target(function)
     try:
         return inspect.signature(inspect_target)
     except (TypeError, ValueError):
@@ -118,37 +120,80 @@ def _hint_source(target: Callable[..., Any]) -> Callable[..., Any]:
             return target.__call__
 
 
-def _resolved_type_hints(fn: Callable[..., Any]) -> dict[str, Any]:
+def _resolved_type_hints(function: Callable[..., Any]) -> dict[str, Any]:
     """Return resolved type hints for a callable, or {} when unavailable."""
-    inspect_target: Callable[..., Any] = _get_inspect_target(fn)
+    inspect_target: Callable[..., Any] = _get_inspect_target(function)
     try:
         return get_type_hints(_hint_source(inspect_target))
     except Exception:
         return {}
 
 
-def _extract_taskresult_ok_type(annotation: Any) -> Any | None:
-    """Extract Ok type from TaskResult[Ok, Err], including Optional/Union wrappers."""
+def _extract_outcome_ok_type(annotation: Any) -> Any | None:
+    """Extract the T of an args_from slot: TaskOutcome[T, E], including
+    Optional/Union wrappers."""
     if annotation is None:
         return None
 
-    from horsies.core.models.tasks import TaskResult
+    from horsies.core.models.outcome import TaskOutcome
 
     origin = get_origin(annotation)
-    if origin is TaskResult:
+    if origin is TaskOutcome:
         args = get_args(annotation)
         if len(args) == 2:
             return args[0]
         return None
 
     if origin in (Union, UnionType):
-        extracted = [_extract_taskresult_ok_type(member) for member in get_args(annotation)]
+        extracted = [_extract_outcome_ok_type(member) for member in get_args(annotation)]
         non_none = [value for value in extracted if value is not None]
         if len(non_none) == 1:
             return non_none[0]
         return None
 
     return None
+
+
+def _extract_outcome_error_type(annotation: Any) -> Any | None:
+    """Extract the E of an args_from slot: TaskOutcome[T, E], including
+    Optional/Union wrappers."""
+    if annotation is None:
+        return None
+
+    from horsies.core.models.outcome import TaskOutcome
+
+    origin = get_origin(annotation)
+    if origin is TaskOutcome:
+        args = get_args(annotation)
+        if len(args) == 2:
+            return args[1]
+        return None
+
+    if origin in (Union, UnionType):
+        extracted = [_extract_outcome_error_type(member) for member in get_args(annotation)]
+        non_none = [value for value in extracted if value is not None]
+        if len(non_none) == 1:
+            return non_none[0]
+        return None
+
+    return None
+
+
+def _extract_return_ok_type(annotation: Any) -> Any | None:
+    """Extract the T of a task return annotation: Result[T, E]."""
+    from horsies.core.types.result import (
+        NotAResultAnnotation,
+        ResultTypeArguments,
+        result_type_arguments,
+    )
+
+    match result_type_arguments(annotation):
+        case ResultTypeArguments(ok_type=ok_type):
+            return ok_type
+        case NotAResultAnnotation():
+            return None
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _normalize_resolved_ok_type(value: Any | None) -> Any | None:
@@ -160,28 +205,28 @@ def _normalize_resolved_ok_type(value: Any | None) -> Any | None:
     return value
 
 
-def _resolve_task_fn_ok_type(fn: Callable[..., Any]) -> Any | None:
+def _resolve_task_fn_ok_type(function: Callable[..., Any]) -> Any | None:
     """
-    Resolve TaskResult ok-type produced by a task function wrapper.
+    Resolve the ok type of the Result that a task function wrapper returns.
 
     Prefers explicit wrapper metadata (task_ok_type), then falls back to
     return-type annotations.
     """
-    explicit_ok = getattr(fn, 'task_ok_type', None)
+    explicit_ok = getattr(function, 'task_ok_type', None)
     normalized = _normalize_resolved_ok_type(explicit_ok)
     if normalized is not None:
         return normalized
 
-    hints = _resolved_type_hints(fn)
-    ok_from_hints = _extract_taskresult_ok_type(hints.get('return'))
+    hints = _resolved_type_hints(function)
+    ok_from_hints = _extract_return_ok_type(hints.get('return'))
     normalized = _normalize_resolved_ok_type(ok_from_hints)
     if normalized is not None:
         return normalized
 
-    sig = _get_signature(fn)
+    sig = _get_signature(function)
     if sig is None or sig.return_annotation is inspect.Parameter.empty:
         return None
-    ok_from_sig = _extract_taskresult_ok_type(sig.return_annotation)
+    ok_from_sig = _extract_return_ok_type(sig.return_annotation)
     return _normalize_resolved_ok_type(ok_from_sig)
 
 
@@ -243,11 +288,39 @@ def resolve_source_ok_type(
     return _normalize_resolved_ok_type(getattr(source_task, 'task_ok_type', None))
 
 
-def _resolve_source_node_ok_type(node: TaskNode[Any] | SubWorkflowNode[Any]) -> Any | None:
+def resolve_source_code_type(
+    app: Any | None,
+    task_name: str,
+    *,
+    sub_definition_key: str | None = None,
+) -> CustomCodeType:
+    """The custom code type of the source of a persisted node. Pure apart
+    from the registry lookup.
+
+    A TaskNode source has the code type of its registered task
+    (``task_code_type``): ``EnumCodes(E)`` for a task that returns
+    ``TaskError[E]``. A SubWorkflowNode source (``sub_definition_key``
+    given), a task that this process does not register, and a task that
+    returns ``TaskError`` give ``TextCodes()``: a child workflow holds the
+    codes of many tasks, and an unknown task has no declared ``Enum``.
+    """
+    from horsies.core.models.tasks import EnumCodes, TextCodes
+
+    if sub_definition_key is not None or app is None:
+        return TextCodes()
+    source_task = app.tasks.get(task_name)
+    match getattr(source_task, 'task_code_type', None):
+        case EnumCodes() as enum_codes:
+            return enum_codes
+        case _:
+            return TextCodes()
+
+
+def _resolve_source_node_ok_type(node: TaskNode[Any, Any] | SubWorkflowNode[Any]) -> Any | None:
     """Resolve output ok-type for TaskNode/SubWorkflowNode source used in args_from."""
     if isinstance(node, TaskNode):
-        return _resolve_task_fn_ok_type(node.fn)
-    return _resolve_workflow_def_ok_type(node.workflow_def)
+        return _resolve_task_fn_ok_type(node.function)
+    return _resolve_workflow_def_ok_type(node.workflow_definition)
 
 
 def validate_workflow_generic_output_match(
@@ -272,7 +345,7 @@ def validate_workflow_generic_output_match(
         if declared_ok is type(None):
             return
         raise WorkflowValidationError(
-            code=ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
+            code=HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
             message=(
                 f"workflow '{spec.name}' declares WorkflowDefinition"
                 f'[{_format_type_name(declared_ok)}] but has no '
@@ -296,7 +369,7 @@ def validate_workflow_generic_output_match(
 
     if not _is_ok_type_compatible(actual_ok, declared_ok):
         raise WorkflowValidationError(
-            code=ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
+            code=HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
             message=(
                 f"workflow '{spec.name}' declares WorkflowDefinition"
                 f'[{_format_type_name(declared_ok)}] but config.output produces '
@@ -345,7 +418,7 @@ def _without_annotated(annotation: Any) -> Any:
 
 def _is_ok_type_compatible(source_ok: Any, expected_ok: Any) -> bool:
     """
-    Return True if source TaskResult ok-type can be injected into expected type.
+    Return True if the ok type of a source outcome can be injected into the expected type.
 
     This compares types only. `Annotated` metadata is removed from both sides,
     at every depth. A constraint on the target is enforced on the value at run

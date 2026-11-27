@@ -3,21 +3,25 @@
 //
 // Steps:
 // 1. The core reads the arguments. Bad arguments print the cause and end the process with 73.
-// 2. The panic rule of a worker process: a defect goes to stderr, then to the log sink, then the process aborts.
+// 2. The panic rule of a worker process: a defect goes to stderr, then to the log sink, then the process aborts. The
+//    stderr lines of the core log records take the app's `logFormat`.
 // 3. The process events: no-op `SIGINT` and `SIGTERM`; the detached throws and rejections (`process-events.ts`).
 // 4. The plan: each implementation by its task name and body form; the start hooks (the child's own, the providers,
-//    the `onChildStart` hooks); the producer manifest of the app; the host name; the body facts; the flush bound.
+//    the `onChildStart` hooks); the producer manifest of the app; the host name; the body facts; the flush bound. The
+//    handler slot: the event handlers, the start hooks of the handler child and the worker-ended span maker.
 // 5. The serve: sends from task code are no longer suppressed; the core posts each body, cancel and stop request to
 //    the post dispatcher, and runs each start hook through the hook runner. The turn timer starts at hook 0 (a host
-//    that started); the culprit method of Node starts there in a shared async child.
-// 6. The exit rule: the flush of the body observer, at most its bound, then the end of the process with the host's
-//    code. The child never waits for its event loop to empty.
+//    that started); the culprit method of Node starts there in a shared async child. In a `SHARED_THREAD` child hook 0
+//    boots the seat isolates, and each post goes to the seat pool (`src/seats/router.ts`): the main thread runs no
+//    body and sets no run mark, and its turns keep the core's main-thread watch fed.
+// 6. The exit rule: the flush of the body observer and, in a `SHARED_THREAD` child, of each seat isolate (the router
+//    asks the pool), at most its bound, then the end of the process with the host's code. The child never waits for
+//    its event loop to empty.
 
 import { hostname } from "node:os";
 
 import type { Horsies } from "../app.ts";
 import type { AppContext } from "../app/context.ts";
-import type { TracingKind } from "../app/telemetry.ts";
 import { appInternals } from "../app/internals.ts";
 import { addonSettlement, settlingCallback, type CallbackSettlement } from "../native/call/callback.ts";
 import { reportDefect } from "../native/call/defect.ts";
@@ -34,6 +38,10 @@ import {
   settleBodyValue,
 } from "../native/child/child.ts";
 import { setPanicRule } from "../native/process-core/process-core.ts";
+import { fillHandlerChild } from "../native/handler-child/handler-child.ts";
+import { fillHandlerChildOf, type HandlerChildNative } from "../events/handler-child.ts";
+import { processSpansNotMade } from "../telemetry/not-made.ts";
+import type { TracingSetting } from "../telemetry/tracing-config.ts";
 import { buildTaskError, checkAppConfig } from "../native/sends/sends.ts";
 import type {
   BodyFactsMode,
@@ -44,6 +52,14 @@ import type {
   StartHookCall,
 } from "../native/child/addon.ts";
 import type { AppConfigCheck } from "../native/sends/addon.ts";
+import type { SchemaMode } from "../_catalog/manifest.ts";
+import type { LogFormat } from "../config/process-settings.ts";
+import { applyLogFormat } from "../logging.ts";
+import { seatBodyObserverOf } from "../seats/body-observer.ts";
+import { processSeatHost } from "../seats/node-isolates.ts";
+import { serveSeatOperation } from "../seats/operations.ts";
+import type { SeatHost } from "../seats/pool.ts";
+import { SeatRouter } from "../seats/router.ts";
 import type { PanicRule } from "../thrown-errors.ts";
 import { ClientDefect, CoreDefect } from "../thrown-errors.ts";
 import { unreachable } from "../wire/unreachable.ts";
@@ -64,11 +80,20 @@ import { installProcessEvents, processEventHooks, type ProcessEventHooks, UNCAUG
 import { thrownRecord } from "./thrown-error.ts";
 import { currentRun } from "./run-store.ts";
 import { RunTable } from "./run-table.ts";
-import { bodyFormOf, hookRunner, postDispatcher, type ServeNative, startHookNames } from "./serve.ts";
+import {
+  bodyFormOf,
+  type ChildServe,
+  hookRunner,
+  postDispatcher,
+  type ServeNative,
+  settleRun,
+  startHookNames,
+  taskContextUseOf,
+} from "./serve.ts";
 import { StateValues } from "./state.ts";
 
 /** The calls of the addon in child mode. */
-export interface ChildNative extends ServeNative, LoopNative {
+export interface ChildNative extends ServeNative, LoopNative, HandlerChildNative {
   childArguments(processArguments: readonly string[]): ChildArgumentsCheck;
   serveChild(
     plan: ChildHostPlan,
@@ -76,7 +101,9 @@ export interface ChildNative extends ServeNative, LoopNative {
     hook: (callId: bigint, call: StartHookCall) => void,
   ): Promise<ChildServeEnd>;
   setPanicRule(rule: PanicRule): void;
-  checkAppConfig(appConfigJson: string): AppConfigCheck;
+  /** Write the stderr lines of later core log records in `format`. */
+  applyLogFormat(format: LogFormat): void;
+  checkAppConfig(appConfigJson: string, schemaMode: SchemaMode): AppConfigCheck;
 }
 
 /** What child mode does that has effects. */
@@ -88,6 +115,8 @@ export interface ChildModeDeps {
   /** Where the start hook runner settles its calls. */
   readonly settlement: CallbackSettlement;
   readonly hostname: string;
+  /** The seat isolates of a `SHARED_THREAD` child, its clock and its timers. */
+  readonly seats: SeatHost;
   readonly writeLine: (line: string) => void;
   /** Wait `milliseconds`; the wait does not keep the process alive. */
   readonly wait: (milliseconds: number) => Promise<void>;
@@ -103,13 +132,13 @@ export interface ChildModeDeps {
  * through the exit rule. So an entry that does not await `cli.run` (a CommonJS entry) does not exit 0 or hang.
  */
 export async function runChildMode(app: Horsies, processArguments: readonly string[], deps: ChildModeDeps): Promise<never> {
-  const observer = observerOfApp(app);
-  const childEnd = new ChildEnd({ flush: async () => observer.flush(), wait: deps.wait, exit: deps.exit });
+  const flushes = new ExitFlushes(observerOfApp(app));
+  const childEnd = new ChildEnd({ flush: async () => flushes.flush(), wait: deps.wait, exit: deps.exit });
 
   let ended: ChildModeEnd;
 
   try {
-    ended = await childMode(app, processArguments, deps, childEnd);
+    ended = await childMode(app, processArguments, deps, { childEnd, flushes });
   } catch (cause) {
     return failedChildMode(cause, deps, childEnd);
   }
@@ -129,6 +158,43 @@ type ChildModeEnd = { readonly kind: "badArguments"; readonly code: number } | {
 
 /** The exit code of a child whose child mode failed outside every run: the code of an uncaught throw there. */
 export const CHILD_MODE_FAILED_EXIT_CODE: number = UNCAUGHT_EXIT_CODE;
+
+/** The end of a child: its exit rule, and the flushes that the rule awaits. */
+type ChildEnding = { readonly childEnd: ChildEnd; readonly flushes: ExitFlushes };
+
+/** Where the exit rule finds the seat isolates of the child: none until the serve made the router. */
+type RouterSlot = { readonly kind: "noRouter" } | { readonly kind: "router"; readonly router: SeatRouter };
+
+/** The flushes that the exit rule awaits: the body observer's, and the seat isolates' once the serve made the router. */
+class ExitFlushes {
+  readonly #observer: BodyObserver;
+  #router: RouterSlot = { kind: "noRouter" };
+
+  constructor(observer: BodyObserver) {
+    this.#observer = observer;
+  }
+
+  /** The router of the serve: from here on the flush asks it for the seat isolates too. */
+  route(router: SeatRouter): void {
+    this.#router = { kind: "router", router };
+  }
+
+  /** The flush of the body observer and of the seat isolates, at once. */
+  async flush(): Promise<void> {
+    const router = this.#router;
+
+    switch (router.kind) {
+      case "noRouter":
+        return this.#observer.flush();
+      case "router":
+        await Promise.all([this.#observer.flush(), router.router.flush()]);
+
+        return;
+      default:
+        unreachable(router, "ExitFlushes.flush");
+    }
+  }
+}
 
 /** The body observer of `app`, or the one that does nothing when `app` is not an app (child mode then fails). */
 function observerOfApp(app: Horsies): BodyObserver {
@@ -158,7 +224,7 @@ async function childMode(
   app: Horsies,
   processArguments: readonly string[],
   deps: ChildModeDeps,
-  childEnd: ChildEnd,
+  ending: ChildEnding,
 ): Promise<ChildModeEnd> {
   const checked = deps.native.childArguments(processArguments);
 
@@ -168,7 +234,7 @@ async function childMode(
 
       return { kind: "badArguments", code: checked.code };
     case "child":
-      return servedChild(appInternals(app), processArguments, deps, childEnd);
+      return servedChild(appInternals(app), processArguments, deps, ending);
     default:
       return unreachable(checked, "runChildMode");
   }
@@ -179,14 +245,15 @@ async function servedChild(
   context: AppContext,
   processArguments: readonly string[],
   deps: ChildModeDeps,
-  childEnd: ChildEnd,
+  ending: ChildEnding,
 ): Promise<ChildModeEnd> {
   deps.native.setPanicRule("ABORT_PROCESS");
+  deps.native.applyLogFormat(context.config.logFormat);
   installProcessEvents({
     hooks: deps.events,
     writeLine: deps.writeLine,
     end: (code) => {
-      void childEnd.end(code);
+      void ending.childEnd.end(code);
     },
     currentRun,
   });
@@ -196,26 +263,35 @@ async function servedChild(
   const marks = loopMarksOf(deps.native);
   const table = new RunTable(deps.native, marks, states);
 
-  const post = postDispatcher({
+  const serve: ChildServe = {
     implementations: context.implementations,
     table,
     observer: bodyObserverOf(context),
     native: deps.native,
     marks,
     reportDefect: deps.reportDefect,
-  });
+  };
+
+  const router = seatRouterOf(context, serve, deps, ending);
+
+  const post = router.posts(postDispatcher(serve));
 
   // Hook 0 runs only in a host that started, after it made the loop: the turns start there.
-  const hooks = hookRunner(members, states, (facts) => {
+  const hooks = hookRunner(members, states, async (facts) => {
     // The turns and the culprit marks run until the process ends.
     void startTurns(deps.native, deps.timer);
 
     if (facts.kind === "sharedAsync") {
       void startCulpritMarks(deps.culprit, marks);
     }
+
+    await router.start(facts);
   });
 
   const plan = childPlan(context, members, processArguments, deps);
+
+  // The handler slot of the core, which a handler child reads at the serve.
+  fillHandlerChildOf(context, deps.native, deps.settlement);
 
   // Task code may send and start workflows from here on: the providers, the hooks and the bodies.
   context.suppression.startServing();
@@ -225,33 +301,70 @@ async function servedChild(
   return { kind: "served", code: end.code };
 }
 
+/**
+ * The router of the posts of the child: the seat pool of a thread child settles its runs through `serve`, ends the
+ * child through the exit rule, and writes the span reports of its isolates once per process. The exit rule flushes the
+ * seat isolates through it from here on.
+ */
+function seatRouterOf(context: AppContext, serve: ChildServe, deps: ChildModeDeps, ending: ChildEnding): SeatRouter {
+  const router = new SeatRouter({
+    ...deps.seats,
+    settle: (runKey, taskName, outcome) => {
+      settleRun(serve, runKey, taskName, outcome);
+    },
+    isolateEnded: (run) => {
+      seatBodyObserverOf(context).isolateEnded(run);
+    },
+    serve: async (request) => serveSeatOperation(context.core, request),
+    endChild: (code) => {
+      void ending.childEnd.end(code);
+    },
+    writeLine: deps.writeLine,
+    spanNotMade: (span, cause) => {
+      processSpansNotMade.reportText(span, cause);
+    },
+    reportDefect: deps.reportDefect,
+  });
+
+  ending.flushes.route(router);
+
+  return router;
+}
+
 /** The body facts that a child of an app with `tracing` records: the facts of each run for its spans, or none. Pure. */
-export function bodyFactsMode(tracing: TracingKind): BodyFactsMode {
-  switch (tracing) {
-    case "otel":
+export function bodyFactsMode(tracing: TracingSetting): BodyFactsMode {
+  switch (tracing.kind) {
+    case "otelTracing":
       return "SPANS";
-    case "none":
+    case "noTracing":
       return "NO_SCOPE";
     default:
       return unreachable(tracing, "bodyFactsMode");
   }
 }
 
-/** The plan of the child of `context`. A config that the core refuses again is a defect: `ClientDefect`. */
+/**
+ * The plan of the child of `context`. The producer manifest of the task sends has the app's schema mode, as the task
+ * sends of a Python child do (`Horsies.get_broker`). A config that the core refuses again is a defect: `ClientDefect`.
+ */
 export function childPlan(
   context: AppContext,
   members: ChildMembersView,
   processArguments: readonly string[],
   deps: Pick<ChildModeDeps, "native" | "hostname">,
 ): ChildHostPlan {
-  const checked = deps.native.checkAppConfig(context.config.coreConfigJson);
+  const checked = deps.native.checkAppConfig(context.config.coreConfigJson, context.config.schemaMode);
 
   if (checked.kind === "refused") {
     throw new ClientDefect({ subject: "childPlan", rule: "the config check refuses the config that Horsies.create accepted" });
   }
 
   return {
-    tasks: [...context.implementations].map(([name, parts]) => ({ name, form: bodyFormOf(parts.contract) })),
+    tasks: [...context.implementations].map(([name, parts]) => ({
+      name,
+      form: bodyFormOf(parts.contract),
+      context: taskContextUseOf(parts.contract),
+    })),
     startHooks: startHookNames(members),
     producerManifestJson: checked.manifestJson,
     hostname: deps.hostname,
@@ -276,7 +389,9 @@ export function processChildNative(): ChildNative {
     loopRelease,
     buildTaskError,
     setPanicRule,
+    applyLogFormat,
     checkAppConfig,
+    fillHandlerChild,
   };
 }
 
@@ -289,6 +404,7 @@ export function processChildModeDeps(): ChildModeDeps {
     culprit: runtimeCulpritMethod(),
     settlement: addonSettlement,
     hostname: hostname(),
+    seats: processSeatHost(),
     writeLine: (line) => {
       process.stderr.write(`${line}\n`);
     },

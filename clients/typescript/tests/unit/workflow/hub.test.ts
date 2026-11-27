@@ -1,5 +1,5 @@
 // The workflows of the app hub: `Horsies.create({ workflows })` with its refusals after the contract refusals, on a
-// main thread and on a worker thread, and `app.start`, `app.retryStart` and `app.workflowHandle` through the app.
+// main thread and on a worker thread, and `app.start`, `app.resendStart` and `app.workflowHandle` through the app.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
@@ -19,24 +19,24 @@ const hello = defineWorkflow(
   {
     name: "hello",
     definitionKey: "tests.hello.v1",
-    output: h.string(),
-    params: { who: h.string() },
+    outputType: h.string(),
+    parameters: { who: h.string() },
     checkCases: [{ who: "a" }],
   },
-  (w, { who }) => ({ output: w.task(greet, { who }, { id: "greet" }) }),
+  (w, { who }) => ({ output: w.task(greet, { who }, { nodeId: "greet" }) }),
 );
 
 const broken = defineWorkflow(
-  { name: "broken", definitionKey: "tests.broken.v1", output: h.string(), params: {} },
+  { name: "broken", definitionKey: "tests.broken.v1", outputType: h.string(), parameters: {} },
   (w) => {
-    w.task(greet, { who: "a" }, { id: "same" });
+    w.task(greet, { who: "a" }, { nodeId: "same" });
 
-    return { output: w.task(greet, { who: "b" }, { id: "same" }) };
+    return { output: w.task(greet, { who: "b" }, { nodeId: "same" }) };
   },
 );
 
 function config(workflows: readonly AnyWorkflowContract[], tasks: HorsiesConfig["tasks"] = [greet]): HorsiesConfig {
-  return { broker: { databaseUrl: DATABASE_URL }, tasks, workflows };
+  return { database: { databaseUrl: DATABASE_URL }, tasks, workflows };
 }
 
 function appWith(core: FakeCore): Horsies {
@@ -73,17 +73,17 @@ describe("Horsies.create with workflows", () => {
   });
 });
 
-describe("app.start, app.retryStart and app.workflowHandle", () => {
+describe("app.start, app.resendStart and app.workflowHandle", () => {
   test("a start goes to the producer's workflow core and gives a handle", async () => {
     const core = fakeCore();
     const started = await appWith(core).start(hello, { who: "eu" });
 
     assert(started.ok);
     assert.equal(core.starts.length, 1);
-    assert.equal(core.starts[0]?.spec.name, "hello");
+    assert.equal(core.prepares[0]?.name, "hello");
   });
 
-  test("retryStart sends the kept spec again", async () => {
+  test("resendStart sends the kept spec again", async () => {
     const core = fakeCore({
       started: [{ kind: "failed", error: rawStartEnqueueFailed("hello", true) }, { kind: "started" }],
     });
@@ -92,8 +92,8 @@ describe("app.start, app.retryStart and app.workflowHandle", () => {
     const started = await app.start(hello, { who: "eu" });
 
     assert(!started.ok && started.error.code === "ENQUEUE_FAILED");
-    assert((await app.retryStart(started.error)).ok);
-    assert.equal(core.restarts.length, 1);
+    assert((await app.resendStart(started.error)).ok);
+    assert.equal(core.starts.length, 2);
   });
 
   test("a handle by id reads through the same core, with no I/O before a call", async () => {

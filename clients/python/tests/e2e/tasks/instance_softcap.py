@@ -16,7 +16,8 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.utils.url import to_psycopg_url
 
 from tests.e2e.helpers.env import e2e_database_url
@@ -28,7 +29,7 @@ config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
     prefetch_buffer=2,
     claim_lease_ms=2_000,
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=DB_URL,
         pool_size=5,
         max_overflow=5,
@@ -40,7 +41,7 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 
@@ -55,31 +56,31 @@ app.discover_tasks(
 )
 
 
-@app.task(task_name='e2e_softcap_healthcheck')
-def healthcheck() -> TaskResult[str, TaskError]:
-    return TaskResult(ok='ready')
+@app.task(name='e2e_softcap_healthcheck')
+def healthcheck() -> Result[str, TaskError]:
+    return Ok('ready')
 
 
-@app.task(task_name='e2e_softcap_slow')
-def slow_task(*, duration_ms: int) -> TaskResult[str, TaskError]:
+@app.task(name='e2e_softcap_slow')
+def slow_task(*, duration_ms: int) -> Result[str, TaskError]:
     """Task that sleeps for specified duration."""
     import time
 
     time.sleep(duration_ms / 1000)
-    return TaskResult(ok=f'slept_{duration_ms}')
+    return Ok(f'slept_{duration_ms}')
 
 
-@app.task(task_name='e2e_softcap_blocker')
-def blocker_task(*, duration_ms: int) -> TaskResult[str, TaskError]:
+@app.task(name='e2e_softcap_blocker')
+def blocker_task(*, duration_ms: int) -> Result[str, TaskError]:
     """Single-process blocker used to keep a worker process busy during reclaim races."""
     import time
 
     time.sleep(duration_ms / 1000)
-    return TaskResult(ok=f'blocked_{duration_ms}')
+    return Ok(f'blocked_{duration_ms}')
 
 
-@app.task(task_name='e2e_softcap_slow_idempotent')
-def slow_idempotent_task(*, token: str, duration_ms: int) -> TaskResult[str, TaskError]:
+@app.task(name='e2e_softcap_slow_idempotent')
+def slow_idempotent_task(*, token: str, duration_ms: int) -> Result[str, TaskError]:
     """Slow task with atomic file detection for double-execution testing.
 
     Sleeps first (creating process pool bottleneck that causes lease expiry),
@@ -91,9 +92,9 @@ def slow_idempotent_task(*, token: str, duration_ms: int) -> TaskResult[str, Tas
 
     log_dir = os.environ.get('E2E_IDEMPOTENT_LOG_DIR')
     if not log_dir:
-        return TaskResult(
-            err=TaskError(
-                error_code='CONFIG_ERROR',
+        return Err(
+            TaskError(
+                code='CONFIG_ERROR',
                 message='E2E_IDEMPOTENT_LOG_DIR not set',
             )
         )
@@ -103,18 +104,18 @@ def slow_idempotent_task(*, token: str, duration_ms: int) -> TaskResult[str, Tas
         fd = os.open(token_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         os.write(fd, b'executed')
         os.close(fd)
-        return TaskResult(ok=f'executed:{token}')
+        return Ok(f'executed:{token}')
     except FileExistsError:
-        return TaskResult(
-            err=TaskError(
-                error_code='DOUBLE_EXECUTION',
+        return Err(
+            TaskError(
+                code='DOUBLE_EXECUTION',
                 message=f'Token {token} already executed',
             )
         )
 
 
-@app.task(task_name='e2e_softcap_db_ledger')
-def db_ledger_task(*, token: str) -> TaskResult[str, TaskError]:
+@app.task(name='e2e_softcap_db_ledger')
+def db_ledger_task(*, token: str) -> Result[str, TaskError]:
     """Record task-body entry in DB and enforce a single winner via unique token."""
     import psycopg
 
@@ -144,21 +145,21 @@ def db_ledger_task(*, token: str) -> TaskResult[str, TaskError]:
                 winner_row = cur.fetchone()
             conn.commit()
     except Exception as exc:
-        return TaskResult(
-            err=TaskError(
-                error_code='LEDGER_DB_ERROR',
+        return Err(
+            TaskError(
+                code='LEDGER_DB_ERROR',
                 message=f'{type(exc).__name__}: {exc}',
                 data={'token': token, 'worker_identity': worker_identity},
             )
         )
 
     if winner_row is None:
-        return TaskResult(
-            err=TaskError(
-                error_code='DOUBLE_EXECUTION',
+        return Err(
+            TaskError(
+                code='DOUBLE_EXECUTION',
                 message=f'Token {token} already won by another worker',
                 data={'token': token, 'worker_identity': worker_identity},
             )
         )
 
-    return TaskResult(ok=f'winner:{token}:{worker_identity}')
+    return Ok(f'winner:{token}:{worker_identity}')

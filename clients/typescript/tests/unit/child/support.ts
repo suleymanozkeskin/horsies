@@ -6,11 +6,11 @@ import { runBody, type StoredBodyOutcome } from "../../../horsies/src/child/body
 import type { BodyEnd, BodyObservation } from "../../../horsies/src/child/body-observer.ts";
 import { attemptFromCore } from "../../../horsies/src/child/attempt.ts";
 import { type LoopHolder, type LoopMarks, type RunNative, RunTable } from "../../../horsies/src/child/run-table.ts";
-import { taskRuntimeOf, type TaskRuntime } from "../../../horsies/src/child/runtime.ts";
+import { type RunControls, taskRuntimeOf, type TaskRuntime } from "../../../horsies/src/child/runtime.ts";
 import { StateValues } from "../../../horsies/src/child/state.ts";
 import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
 import { compileContract } from "../../../horsies/src/contract/compile.ts";
-import { taskIdFromCore } from "../../../horsies/src/contract/ids.ts";
+import { type TaskId, taskIdFromCore } from "../../../horsies/src/contract/ids.ts";
 import type { ImplementationParts } from "../../../horsies/src/contract/implementation.ts";
 import type {
   CancelCauseName,
@@ -18,9 +18,10 @@ import type {
   SpawnEnd,
   SpawnRegistration,
 } from "../../../horsies/src/native/child/addon.ts";
+import { NO_WORKFLOW_CONTEXT } from "../../../horsies/src/workflow/context.ts";
 
 /** The task id of the runs of the tests. */
-export const RUN_TASK_ID = "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b";
+export const RUN_TASK_ID: TaskId = taskIdFromCore("0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b", "the child tests");
 
 /** A fake of the addon calls of a run: answers that a test sets, and the calls it made. */
 export class FakeRunNative implements RunNative {
@@ -87,14 +88,18 @@ export class RecordingObservation implements BodyObservation {
     this.calls.push("end");
     this.ends.push(end);
   }
+
+  cancelled(cause: CancelCauseName): void {
+    this.calls.push(`cancelled ${cause}`);
+  }
 }
 
-/** A run table with the fakes, and one run of it. */
+/** A run table with the fakes, and one run of it: its controls, and its runtime with no workflow context. */
 export function tableRun(
   native: FakeRunNative = new FakeRunNative(),
   marks: LoopMarks = new RecordingMarks(),
   states: StateValues = new StateValues([]),
-): { readonly table: RunTable; readonly runtime: TaskRuntime; readonly runKey: bigint } {
+): { readonly table: RunTable; readonly controls: RunControls; readonly runtime: TaskRuntime; readonly runKey: bigint } {
   const table = new RunTable(native, marks, states);
   const runKey = 7n;
 
@@ -105,10 +110,10 @@ export function tableRun(
     attempt: attemptFromCore(2, "test"),
   });
 
-  return { table, runtime: taskRuntimeOf(controls), runKey };
+  return { table, controls, runtime: taskRuntimeOf(controls, NO_WORKFLOW_CONTEXT), runKey };
 }
 
-/** One run of the body of `implementation` with the stored input `inputJson`, and what the fakes saw. */
+/** One run of the body of `implementation` with the posted input `inputJson`, and what the fakes saw. */
 export async function adapterRun(
   implementation: ImplementationParts,
   inputJson: string,
@@ -126,17 +131,16 @@ export async function adapterRun(
 
   const marks = new RecordingMarks();
   const observation = new RecordingObservation();
-  const { table, runtime, runKey } = tableRun(new FakeRunNative(), marks);
+  const { table, controls, runKey } = tableRun(new FakeRunNative(), marks);
 
   if (cancel !== undefined) {
     table.cancel(runKey, cancel);
   }
 
   const outcome = await runBody({
-    inputJson: jsonTextCheckedByCore(inputJson),
+    start: { kind: "posted", inputJson: jsonTextCheckedByCore(inputJson), controls },
     implementation,
     compiled: compiled.value,
-    runtime,
     mark: { taskId: RUN_TASK_ID, taskName: compiled.value.record.name, attempt: 2 },
     marks,
     observation,

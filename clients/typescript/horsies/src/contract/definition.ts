@@ -3,15 +3,16 @@
 
 import { isEngineKey } from "../codec/engine-keys.ts";
 import { memberPath } from "../codec/refusal.ts";
+import type { Execution } from "../_catalog/monitoring_models.ts";
 import type { AnyWire } from "../wire/infer.ts";
-import type { ContextUse, ExecutionClass } from "./define-task.ts";
+import type { ContextUse } from "./define-task.ts";
 import type { ParameterSchema, StandardSchemaMarker, ZodSchemaLike } from "./schema.ts";
 
 /** The Standard Schema vendor name of zod. */
 const ZOD_VENDOR = "zod";
 
 /** The parameter names that the engine fills in a workflow: a sender and a task never declare them. */
-const ENGINE_PARAMETER_NAMES: ReadonlySet<string> = new Set(["workflow_ctx", "workflow_meta"]);
+const ENGINE_PARAMETER_NAMES: ReadonlySet<string> = new Set(["workflow_context", "workflow_meta"]);
 
 /** A parameter name: a letter or `_`, then letters, digits and `_` (an identifier of every client). */
 const PARAMETER_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -46,13 +47,13 @@ export type RetrySetting =
       readonly maxRetries: number;
       readonly jitter: boolean;
       readonly maxDelay: MaxDelaySetting;
-      readonly autoRetryFor: readonly string[];
+      readonly retryFor: readonly string[];
     }
   | {
       readonly kind: "fixed";
       readonly intervalsSeconds: readonly number[];
       readonly jitter: boolean;
-      readonly autoRetryFor: readonly string[];
+      readonly retryFor: readonly string[];
     };
 
 /** The longest wait between two retries of an exponential policy: no cap, or a number of seconds. */
@@ -75,7 +76,7 @@ export type ContractRecord = {
   readonly parameters: readonly ParameterSource[];
   readonly output: SchemaSource;
   readonly codes: DeclaredCodes;
-  readonly execution: ExecutionClass;
+  readonly execution: Execution;
   readonly timeout: MillisecondsSetting;
   readonly cancelGrace: MillisecondsSetting;
   readonly retry: RetrySetting;
@@ -90,9 +91,9 @@ export type DefinitionFields = {
   readonly queue?: string;
   readonly input: { readonly [name: string]: ParameterSchema };
   readonly output: ParameterSchema;
-  readonly errors?: readonly string[];
-  readonly execution?: ExecutionClass;
-  readonly retry?: RetryFields;
+  readonly errorCodes?: readonly string[];
+  readonly execution?: Execution;
+  readonly retryPolicy?: RetryFields;
   readonly timeoutMs?: number;
   readonly cancelGraceMs?: number;
   readonly workflowContext?: boolean;
@@ -106,13 +107,13 @@ type RetryFields =
       readonly maxRetries: number;
       readonly jitter?: boolean;
       readonly maxDelaySeconds?: number;
-      readonly autoRetryFor: readonly string[];
+      readonly retryFor: readonly string[];
     }
   | {
       readonly kind: "fixed";
       readonly intervalsSeconds: readonly number[];
       readonly jitter?: boolean;
-      readonly autoRetryFor: readonly string[];
+      readonly retryFor: readonly string[];
     };
 
 /** `jitter` of a retry policy that leaves it out (the Python client's `RetryPolicy.jitter` default). */
@@ -155,11 +156,14 @@ function recordOf(fields: DefinitionFields): ContractRecord {
     queue: fields.queue === undefined ? { kind: "noQueue" } : { kind: "named", name: fields.queue },
     parameters: Object.freeze(parameters),
     output,
-    codes: fields.errors === undefined ? { kind: "open" } : { kind: "declared", codes: Object.freeze([...fields.errors]) },
+    codes:
+      fields.errorCodes === undefined
+        ? { kind: "open" }
+        : { kind: "declared", codes: Object.freeze([...fields.errorCodes]) },
     execution: fields.execution ?? "ISOLATED",
     timeout: millisecondsSetting(fields.timeoutMs),
     cancelGrace: millisecondsSetting(fields.cancelGraceMs),
-    retry: retrySetting(fields.retry),
+    retry: retrySetting(fields.retryPolicy),
     context: fields.workflowContext === true ? "takesContext" : "noContext",
     refusals: Object.freeze(refusals),
   };
@@ -249,14 +253,14 @@ function retrySetting(retry: RetryFields | undefined): RetrySetting {
         maxRetries: retry.maxRetries,
         jitter: retry.jitter ?? DEFAULT_JITTER,
         maxDelay: maxDelaySetting(retry.maxDelaySeconds),
-        autoRetryFor: Object.freeze([...retry.autoRetryFor]),
+        retryFor: Object.freeze([...retry.retryFor]),
       });
     case "fixed":
       return Object.freeze({
         kind: "fixed",
         intervalsSeconds: Object.freeze([...retry.intervalsSeconds]),
         jitter: retry.jitter ?? DEFAULT_JITTER,
-        autoRetryFor: Object.freeze([...retry.autoRetryFor]),
+        retryFor: Object.freeze([...retry.retryFor]),
       });
     default: {
       const unexpected: never = retry;

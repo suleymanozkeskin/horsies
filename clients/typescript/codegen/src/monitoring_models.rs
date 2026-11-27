@@ -12,7 +12,7 @@
 //!   spelling.
 //! - Each model, union, variant and enum has the name that the contract
 //!   gives it: the name of its Python and Rust type (`AttemptPhasesInfo`),
-//!   the Python class name for a variant (`PhasesNotCapturedInfo`). A type
+//!   the Python class name for a variant (`AttemptPhasesNotCapturedInfo`). A type
 //!   that several fields hold is rendered once; two kinds of one name with
 //!   different shapes are a defect of the contract.
 //! - `string` and `uuid` are `string`; `integer` and `number` are `number`;
@@ -1114,17 +1114,22 @@ function readSample(
             .map(|named| named.name().to_owned())
             .collect();
 
-        assert_eq!(names.len(), 113);
+        assert_eq!(names.len(), 118);
         for expected in [
-            "TaskAttemptInfo",
+            "TaskAttemptDetail",
             "AttemptPhasesInfo",
-            "PhasesNotCapturedInfo",
+            "AttemptPhasesNotCapturedInfo",
             "AttemptPlacementInfo",
             "TimingSegmentInfo",
-            "SnapshotProfileInfo",
+            "SnapshotProfile",
             "Execution",
-            "StreamCoverageInfo",
-            "SlotHealthKind",
+            "StreamCoverageState",
+            "StreamWait",
+            "SlotHealth",
+            "DatabaseLiveness",
+            "DownSlot",
+            "ErrorFacet",
+            "ExecutionClassReport",
             "TerminalNodeStatus",
         ] {
             assert!(names.iter().any(|name| name == expected), "{expected}");

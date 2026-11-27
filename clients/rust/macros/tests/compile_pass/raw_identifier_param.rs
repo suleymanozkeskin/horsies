@@ -9,8 +9,8 @@ async fn labelled(r#type: String, count: u32) -> Result<String, TaskError<Infall
 }
 
 fn main() {
-    let _ = labelled::params::r#type();
-    let _ = labelled::params::count();
+    let _ = labelled::fields::r#type();
+    let _ = labelled::fields::count();
     let _ = labelled::Input {
         r#type: "invoice".to_owned(),
         count: 1,

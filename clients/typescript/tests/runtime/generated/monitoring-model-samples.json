@@ -4,7 +4,10 @@
     "group_count": 2,
     "groups": [
       {
-        "group": { "kind": "value", "value": "emails" },
+        "group": {
+          "kind": "value",
+          "value": "emails"
+        },
         "total": 12,
         "pending": 3,
         "claimed": 1,
@@ -16,7 +19,9 @@
         "retried": 2
       },
       {
-        "group": { "kind": "unclaimed" },
+        "group": {
+          "kind": "unclaimed"
+        },
         "total": 5,
         "pending": 5,
         "claimed": 0,
@@ -51,57 +56,16 @@
     "expired": 1,
     "retried": 2
   },
-  "BudgetLoadInfo": {
+  "BudgetLoad": {
     "budget": "SHARED_ASYNC",
     "capacity": 32,
     "in_flight": 5,
-    "free": 27,
-    "serves": ["SHARED_ASYNC", "SHARED_THREAD"]
-  },
-  "ClassReportInfo": {
-    "checked_at": "2026-11-17T13:59:14.500000Z",
-    "live_window_s": 120,
-    "workers": [
-      {
-        "worker_id": "worker-a",
-        "snapshot_at": "2026-11-17T13:59:10Z",
-        "budgets": [
-          {
-            "budget": "ISOLATED",
-            "capacity": 4,
-            "in_flight": 4,
-            "free": 0,
-            "serves": ["ISOLATED"]
-          }
-        ]
-      }
-    ],
-    "streams": [
-      {
-        "queue_name": "emails",
-        "execution": "ISOLATED",
-        "wait": {
-          "kind": "waiting",
-          "oldest_due_at": "2026-11-17T13:58:44.189583Z",
-          "wait_s": 30.310417
-        },
-        "coverage": { "kind": "served", "workers": 1, "capacity": 4 }
-      },
-      {
-        "queue_name": "reports",
-        "execution": "SHARED_THREAD",
-        "wait": { "kind": "none_due", "next_due_at": "2026-11-17T14:30:00Z" },
-        "coverage": { "kind": "no_capacity", "workers": 2 }
-      },
-      {
-        "queue_name": "archive",
-        "execution": "SHARED_ASYNC",
-        "wait": { "kind": "none_due", "next_due_at": "2026-11-18T00:00:00Z" },
-        "coverage": { "kind": "unserved" }
-      }
+    "serves": [
+      "SHARED_ASYNC",
+      "SHARED_THREAD"
     ]
   },
-  "DownSlotInfo": {
+  "DownSlot": {
     "slot": 3,
     "down_since": "2026-11-17T13:50:00.000250Z",
     "cause": "BOOT_FAILED",
@@ -113,19 +77,101 @@
     "category": "timeout",
     "count": 7
   },
+  "ExecutionClassReport": {
+    "checked_at": "2026-11-17T13:59:14.500000Z",
+    "live_window_seconds": 120.0,
+    "workers": [
+      {
+        "worker_id": "worker-a",
+        "snapshot_at": "2026-11-17T13:59:10Z",
+        "budgets": [
+          {
+            "budget": "ISOLATED",
+            "capacity": 4,
+            "in_flight": 4,
+            "serves": [
+              "ISOLATED"
+            ]
+          }
+        ]
+      }
+    ],
+    "streams": [
+      {
+        "queue": "emails",
+        "execution": "ISOLATED",
+        "wait": {
+          "kind": "due",
+          "oldest_due_at": "2026-11-17T13:58:44.189583Z",
+          "wait_seconds": 30.310417
+        },
+        "coverage": {
+          "kind": "served",
+          "workers": 1,
+          "capacity": 4
+        }
+      },
+      {
+        "queue": "reports",
+        "execution": "SHARED_THREAD",
+        "wait": {
+          "kind": "none_due",
+          "next_due_at": "2026-11-17T14:30:00Z"
+        },
+        "coverage": {
+          "kind": "no_capacity",
+          "workers": 2
+        }
+      },
+      {
+        "queue": "archive",
+        "execution": "SHARED_ASYNC",
+        "wait": {
+          "kind": "none_due",
+          "next_due_at": "2026-11-18T00:00:00Z"
+        },
+        "coverage": {
+          "kind": "unserved"
+        }
+      }
+    ]
+  },
   "FacetValue": {
     "value": "emails",
     "count": 12
   },
   "Facets": {
-    "task_names": [{ "value": "send_email", "count": 10 }],
-    "queues": [{ "value": "emails", "count": 12 }],
+    "task_names": [
+      {
+        "value": "send_email",
+        "count": 10
+      }
+    ],
+    "queues": [
+      {
+        "value": "emails",
+        "count": 12
+      }
+    ],
     "workers": [],
-    "error_codes": [{ "value": "TASK_TIMEOUT", "category": "timeout", "count": 7 }],
-    "error_category_totals": { "timeout": 7, "user": 2, "library": 0 }
+    "error_codes": [
+      {
+        "value": "TASK_TIMEOUT",
+        "category": "timeout",
+        "count": 7
+      }
+    ],
+    "error_category_totals": {
+      "timeout": 7,
+      "user": 2,
+      "library": 0
+    }
   },
   "GroupRow": {
-    "group": { "kind": "value", "value": "worker-a" },
+    "group": {
+      "kind": "value",
+      "value": "worker-a"
+    },
     "total": 4,
     "pending": 0,
     "claimed": 0,
@@ -136,40 +182,33 @@
     "expired": 0,
     "retried": 0
   },
-  "LeafTaskInfo": {
-    "task_id": "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
-    "status": "COMPLETED",
-    "retry_count": 0,
-    "max_retries": 3,
-    "enqueued_at": "2026-11-17T13:59:14.500000Z",
-    "started_at": "2026-11-17T13:59:16.810417Z",
-    "completed_at": "2026-11-17T13:59:19Z",
-    "failed_at": null,
-    "good_until": null,
-    "queue_s": 2.310417,
-    "exec_s": 2.189583,
-    "worker_hostname": "host-1",
-    "error_code": null,
-    "failed_reason": null,
-    "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
-    "execution": "SHARED_ASYNC"
-  },
   "LivenessReport": {
-    "db_reachable": true,
-    "db_latency_ms": 1.25,
+    "database": {
+      "kind": "ping",
+      "latency_ms": 1.25
+    },
     "workers": [
-      { "worker_id": "worker-a", "hostname": "host-1", "pid": 4242, "round_trip_ms": 3.5 }
+      {
+        "worker_id": "worker-a",
+        "hostname": "host-1",
+        "pid": 4242,
+        "round_trip_ms": 3.5
+      }
     ]
   },
-  "PendingStreamInfo": {
-    "queue_name": "emails",
+  "PendingStream": {
+    "queue": "emails",
     "execution": "ISOLATED",
     "wait": {
-      "kind": "waiting",
+      "kind": "due",
       "oldest_due_at": "2026-11-17T13:58:44.189583Z",
-      "wait_s": 30.0
+      "wait_seconds": 30.0
     },
-    "coverage": { "kind": "served", "workers": 1, "capacity": 4 }
+    "coverage": {
+      "kind": "served",
+      "workers": 1,
+      "capacity": 4
+    }
   },
   "ScheduleStateInfo": {
     "schedule_name": "nightly-report",
@@ -183,7 +222,7 @@
     "status": "PENDING",
     "count": 8
   },
-  "TaskAttemptInfo": {
+  "TaskAttemptDetail": {
     "attempt": 1,
     "outcome": "COMPLETED",
     "will_retry": false,
@@ -193,10 +232,12 @@
     "error_message": null,
     "failed_reason": null,
     "worker_hostname": "host-1",
-    "phases": { "kind": "not_captured" }
+    "phases": {
+      "kind": "not_captured"
+    }
   },
   "TaskDetail": {
-    "leaf": {
+    "task_row": {
       "task_id": "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
       "status": "FAILED",
       "retry_count": 1,
@@ -206,8 +247,8 @@
       "completed_at": null,
       "failed_at": "2026-11-22T12:00:08Z",
       "good_until": "2026-11-23T12:00:00Z",
-      "queue_s": 3.0,
-      "exec_s": 5.0,
+      "queue_seconds": 3.0,
+      "execution_seconds": 5.0,
       "worker_hostname": "host-1",
       "error_code": "TASK_TIMEOUT",
       "failed_reason": "the task ran past its timeout",
@@ -215,12 +256,12 @@
       "execution": null
     },
     "task_name": "send_email",
-    "queue_name": "emails",
+    "queue": "emails",
     "priority": 100,
     "error_category": "timeout",
     "is_workflow_task": false,
     "workflow_id": null,
-    "workflow_task_index": null,
+    "workflow_node_index": null,
     "attempts": [
       {
         "attempt": 1,
@@ -241,10 +282,15 @@
             "count": 1,
             "first_claimed_at": "2026-11-22T12:00:02Z"
           },
-          "finalizing": { "kind": "not_marked" },
+          "finalizing": {
+            "kind": "not_marked"
+          },
           "recorded_by": {
             "kind": "worker",
-            "placement": { "kind": "placed", "placed_at": "2026-11-22T12:00:03Z" }
+            "placement": {
+              "kind": "placed",
+              "placed_at": "2026-11-22T12:00:03Z"
+            }
           }
         }
       }
@@ -253,9 +299,9 @@
   "TaskListPage": {
     "rows": [
       {
-        "id": "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+        "task_id": "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
         "task_name": "send_email",
-        "queue_name": "emails",
+        "queue": "emails",
         "priority": 100,
         "status": "RUNNING",
         "retry_count": 0,
@@ -264,8 +310,8 @@
         "started_at": "2026-11-22T12:00:03Z",
         "completed_at": null,
         "failed_at": null,
-        "queue_s": 3.0,
-        "exec_s": null,
+        "queue_seconds": 3.0,
+        "execution_seconds": null,
         "worker_id": "worker-a",
         "worker_hostname": "host-1",
         "error_code": null,
@@ -275,10 +321,28 @@
     ],
     "total": 1
   },
+  "TaskRowInfo": {
+    "task_id": "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+    "status": "COMPLETED",
+    "retry_count": 0,
+    "max_retries": 3,
+    "enqueued_at": "2026-11-17T13:59:14.500000Z",
+    "started_at": "2026-11-17T13:59:16.810417Z",
+    "completed_at": "2026-11-17T13:59:19Z",
+    "failed_at": null,
+    "good_until": null,
+    "queue_seconds": 2.310417,
+    "execution_seconds": 2.189583,
+    "worker_hostname": "host-1",
+    "error_code": null,
+    "failed_reason": null,
+    "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "execution": "SHARED_ASYNC"
+  },
   "TaskSummary": {
-    "id": "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+    "task_id": "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
     "task_name": "send_email",
-    "queue_name": "emails",
+    "queue": "emails",
     "priority": 100,
     "status": "PENDING",
     "retry_count": 0,
@@ -287,15 +351,15 @@
     "started_at": null,
     "completed_at": null,
     "failed_at": null,
-    "queue_s": null,
-    "exec_s": null,
+    "queue_seconds": null,
+    "execution_seconds": null,
     "worker_id": null,
     "worker_hostname": null,
     "error_code": null,
     "error_category": null,
     "is_workflow_task": false
   },
-  "WorkerClassLoadInfo": {
+  "WorkerExecutionClassLoad": {
     "worker_id": "worker-a",
     "snapshot_at": "2026-11-17T13:59:10Z",
     "budgets": [
@@ -303,8 +367,9 @@
         "budget": "SHARED_THREAD",
         "capacity": 8,
         "in_flight": 0,
-        "free": 8,
-        "serves": ["SHARED_THREAD"]
+        "serves": [
+          "SHARED_THREAD"
+        ]
       }
     ]
   },
@@ -316,7 +381,7 @@
     "memory_usage_mb": null,
     "memory_percent": null
   },
-  "WorkerPingInfo": {
+  "WorkerPong": {
     "worker_id": "worker-a",
     "hostname": "host-1",
     "pid": 4242,
@@ -327,78 +392,109 @@
     "snapshot_at": "2026-11-17T13:59:10Z",
     "hostname": "host-1",
     "pid": 4242,
-    "processes": 4,
-    "profile": { "kind": "not_recorded" },
+    "child_count": 4,
+    "profile": {
+      "kind": "not_recorded"
+    },
     "worker_started_at": "2026-11-17T08:00:00Z",
-    "uptime_s": 21550.0,
-    "snapshot_age_s": 4.5,
+    "uptime_seconds": 21550.0,
+    "snapshot_age_seconds": 4.5,
     "stale": false,
     "tasks_running": 2,
     "tasks_claimed": 1,
-    "queues": ["emails", "reports"],
-    "queue_max_concurrency": { "emails": 4, "reports": 2 },
+    "queues": [
+      "emails",
+      "reports"
+    ],
+    "queue_max_concurrency": {
+      "emails": 4,
+      "reports": 2
+    },
     "cluster_wide_cap": null,
     "memory_usage_mb": 512.25,
     "memory_percent": 3.125,
     "cpu_percent": 12.5,
-    "slot_health": "slots_down",
-    "down_slots": [
-      {
-        "slot": 3,
-        "down_since": "2026-11-17T13:50:00Z",
-        "cause": "BOOT_FAILED",
-        "detail": "the child exited with code 173",
-        "failed_boots": 4
-      }
-    ]
+    "slot_health": {
+      "kind": "slots_down",
+      "slots": [
+        {
+          "slot": 3,
+          "down_since": "2026-11-17T13:50:00Z",
+          "cause": "BOOT_FAILED",
+          "detail": "the child exited with code 173",
+          "failed_boots": 4
+        }
+      ]
+    }
   },
   "WorkflowEdge": {
     "from_index": 0,
     "to_index": 1
   },
-  "WorkflowNodeInfo": {
-    "task_index": 1,
+  "WorkflowNodeDetail": {
+    "node_index": 1,
+    "node_id": "charge",
+    "task_name": "charge_card",
+    "node_status": "FAILED",
+    "node_error": "the card was declined",
+    "is_sub_workflow": false,
+    "task_row": null,
+    "attempts": []
+  },
+  "WorkflowNodeSummary": {
+    "node_index": 1,
     "node_id": "charge",
     "task_name": "charge_card",
     "node_status": "COMPLETED",
     "started_at": "2026-11-22T12:00:03Z",
     "completed_at": "2026-11-22T12:00:12Z",
-    "exec_s": 9.0,
-    "is_subworkflow": false,
+    "execution_seconds": 9.0,
+    "is_sub_workflow": false,
     "sub_workflow_id": null,
     "child_total": null,
     "child_failed": null,
-    "allow_failed_deps": false,
-    "timing": { "kind": "unavailable", "reason": "RUN_BEFORE_CAPTURE" }
+    "allow_failed_dependencies": false,
+    "timing": {
+      "kind": "unavailable",
+      "reason": "RUN_BEFORE_CAPTURE"
+    }
   },
   "WorkflowRunDetail": {
     "run": {
-      "id": "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a60",
-      "name": "checkout",
+      "workflow_id": "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a60",
+      "workflow_name": "checkout",
       "status": "COMPLETED",
       "definition_key": "checkout:v2",
       "created_at": "2026-11-22T12:00:00Z",
       "completed_at": "2026-11-22T12:00:12Z",
-      "wall_s": 12.0
+      "wall_seconds": 12.0
     },
     "nodes": [
       {
-        "task_index": 0,
+        "node_index": 0,
         "node_id": null,
         "task_name": "reserve_stock",
         "node_status": "COMPLETED",
         "started_at": "2026-11-22T12:00:01Z",
         "completed_at": "2026-11-22T12:00:02Z",
-        "exec_s": 1.0,
-        "is_subworkflow": true,
+        "execution_seconds": 1.0,
+        "is_sub_workflow": true,
         "sub_workflow_id": "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a61",
         "child_total": 3,
         "child_failed": 0,
-        "allow_failed_deps": true,
-        "timing": { "kind": "unavailable", "reason": "TIMING_BOUND_EXCEEDED" }
+        "allow_failed_dependencies": true,
+        "timing": {
+          "kind": "unavailable",
+          "reason": "TIMING_BOUND_EXCEEDED"
+        }
       }
     ],
-    "edges": [{ "from_index": 0, "to_index": 1 }],
+    "edges": [
+      {
+        "from_index": 0,
+        "to_index": 1
+      }
+    ],
     "failed_count": 0,
     "failed_indices": [],
     "trace_id": null,
@@ -410,22 +506,12 @@
     }
   },
   "WorkflowRunSummary": {
-    "id": "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a60",
-    "name": "checkout",
+    "workflow_id": "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a60",
+    "workflow_name": "checkout",
     "status": "RUNNING",
     "definition_key": null,
     "created_at": "2026-11-22T12:00:00Z",
     "completed_at": null,
-    "wall_s": null
-  },
-  "WorkflowTaskDetail": {
-    "task_index": 1,
-    "node_id": "charge",
-    "task_name": "charge_card",
-    "node_status": "FAILED",
-    "node_error": "the card was declined",
-    "is_subworkflow": false,
-    "leaf": null,
-    "attempts": []
+    "wall_seconds": null
   }
 }

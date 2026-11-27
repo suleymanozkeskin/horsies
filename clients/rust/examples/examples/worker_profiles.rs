@@ -13,25 +13,23 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use horsies::{
-    blocking_task, task, AppConfig, ChildPreload, Horsies, HorsiesError, IsolatedChildCount,
-    IsolatedChildren, IsolatedSetting, SharedAsyncChildCount, SharedAsyncChildren,
-    SharedAsyncSeats, SharedAsyncSetting, SharedThreadChildCount, SharedThreadChildren,
-    SharedThreadSeats, SharedThreadSetting, TaskError, TaskOutcome, TaskRuntime, UserErrorCode,
-    WaitLimit, WorkerProfile,
+    blocking_task, task, AppConfig, ChildPreload, CustomErrorCode, Horsies, HorsiesError,
+    IsolatedChildren, SharedAsyncChildren, SharedThreadChildren, TaskError, TaskOutcome,
+    TaskRuntime, WaitLimit, WorkerProfile,
 };
 use horsies_examples::{app_refused, database_url, main_of, DemoResult};
 
 /// The profile that `worker --profile mixed` runs.
 const PROFILE: &str = "mixed";
 
-const ISOLATED_CHILDREN: IsolatedChildCount = IsolatedChildCount::from_constant(1);
-const ASYNC_CHILDREN: SharedAsyncChildCount = SharedAsyncChildCount::from_constant(1);
-const ASYNC_SEATS: SharedAsyncSeats = SharedAsyncSeats::from_constant(20);
-const THREAD_CHILDREN: SharedThreadChildCount = SharedThreadChildCount::from_constant(1);
-const THREAD_SEATS: SharedThreadSeats = SharedThreadSeats::from_constant(4);
+const ISOLATED_CHILDREN: u32 = 1;
+const ASYNC_CHILDREN: u32 = 1;
+const ASYNC_SEATS: u32 = 20;
+const THREAD_CHILDREN: u32 = 1;
+const THREAD_SEATS: u32 = 4;
 
 /// The codes of `fetch_page`'s own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum FetchCode {
     Interrupted,
 }
@@ -53,7 +51,7 @@ fn checksum(data: Vec<u8>) -> Result<u64, TaskError<Infallible>> {
 async fn fetch_page(rt: TaskRuntime, path: String) -> Result<usize, TaskError<FetchCode>> {
     tokio::select! {
         () = tokio::time::sleep(Duration::from_millis(100)) => Ok(path.len()),
-        () = rt.cancelled() => Err(TaskError::user(FetchCode::Interrupted, "cancelled at the deadline")),
+        () = rt.cancelled() => Err(TaskError::custom(FetchCode::Interrupted, "cancelled at the deadline")),
     }
 }
 
@@ -66,22 +64,16 @@ fn resize(width: u32, height: u32) -> Result<u32, TaskError<Infallible>> {
 /// One child of each class.
 fn mixed_profile() -> WorkerProfile {
     WorkerProfile {
-        isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(ISOLATED_CHILDREN)),
-        shared_async: SharedAsyncSetting::SharedAsyncChildren(SharedAsyncChildren::new(
-            ASYNC_CHILDREN,
-            ASYNC_SEATS,
-        )),
-        shared_thread: SharedThreadSetting::SharedThreadChildren(SharedThreadChildren::new(
-            THREAD_CHILDREN,
-            THREAD_SEATS,
-        )),
+        isolated: IsolatedChildren::new(ISOLATED_CHILDREN).into(),
+        shared_async: SharedAsyncChildren::new(ASYNC_CHILDREN, ASYNC_SEATS).into(),
+        shared_thread: SharedThreadChildren::new(THREAD_CHILDREN, THREAD_SEATS).into(),
         preload: ChildPreload::NoPreload,
         ..WorkerProfile::default()
     }
 }
 
 fn build_app() -> Result<Horsies, HorsiesError> {
-    let mut config = AppConfig::for_database_url(database_url());
+    let mut config = AppConfig::from_database_url(database_url());
     config.worker_profiles = BTreeMap::from([(PROFILE.to_owned(), mixed_profile())]);
     let mut app = Horsies::new(config)?;
     let _checksum = checksum::register(&mut app)?;
@@ -90,14 +82,14 @@ fn build_app() -> Result<Horsies, HorsiesError> {
     Ok(app)
 }
 
-async fn demo(_app: Horsies) -> DemoResult {
-    let limit = WaitLimit::parse(Some(Duration::from_secs(30)))?;
-    let sum = checksum::send(vec![1, 2, 3]).await?;
+async fn demo(app: Horsies) -> DemoResult {
+    let limit = WaitLimit::Within(Duration::from_secs(30));
+    let sum = checksum::send(&app, vec![1, 2, 3]).await?;
     let mut pages = Vec::new();
     for path in ["/", "/docs", "/docs/rust"] {
-        pages.push(fetch_page::send(path.to_owned()).await?);
+        pages.push(fetch_page::send(&app, path.to_owned()).await?);
     }
-    let thumbnail = resize::send(1920, 1080).await?;
+    let thumbnail = resize::send(&app, 1920, 1080).await?;
 
     match sum.get(limit).await? {
         TaskOutcome::Succeeded(value) => println!("checksum: {value}"),

@@ -21,6 +21,7 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from horsies.core.cli import check_command
+from horsies.core.errors import ValidationReport
 from horsies.core.logging import (
     TASK_CONTEXT_FIELDS,
     ColoredFormatter,
@@ -243,18 +244,18 @@ class TestConfigureLogging:
 
 class TestTheSetting:
     def test_an_app_config_writes_text_by_default(self) -> None:
-        assert AppConfig(broker=_BROKER).log_format == TextLogs()
+        assert AppConfig(database=_BROKER).log_format == TextLogs()
 
     def test_json_logs_are_accepted_in_both_forms(self) -> None:
-        assert AppConfig(broker=_BROKER, log_format=JsonLogs()).log_format == JsonLogs()
+        assert AppConfig(database=_BROKER, log_format=JsonLogs()).log_format == JsonLogs()
         assert AppConfig.model_validate(
-            {'broker': _BROKER, 'log_format': {'kind': 'json_logs'}},
+            {'database': _BROKER, 'log_format': {'kind': 'json_logs'}},
         ).log_format == JsonLogs()
 
     def test_another_kind_is_refused(self) -> None:
         with pytest.raises(ValidationError):
             _ = AppConfig.model_validate(
-                {'broker': _BROKER, 'log_format': {'kind': 'xml_logs'}},
+                {'database': _BROKER, 'log_format': {'kind': 'xml_logs'}},
             )
 
 
@@ -267,12 +268,12 @@ class TestTheCliUsesTheFormatOfTheApp:
         mock_logging: MagicMock,
     ) -> None:
         app = MagicMock()
-        app.check.return_value = []
-        app.list_tasks.return_value = []
+        app.check.return_value = ValidationReport('check')
+        app.registered_task_names.return_value = []
         app.declared_error_codes.return_value = {}
-        app.config = AppConfig(broker=_BROKER, log_format=JsonLogs())
+        app.config = AppConfig(database=_BROKER, log_format=JsonLogs())
         mock_discover.return_value = (app, 'app', 'my.mod', None)
-        args = argparse.Namespace(module='my.mod:app', module_pos=None, loglevel='INFO', live=False)
+        args = argparse.Namespace(module='my.mod:app', module_positional=None, log_level='INFO', live=False)
 
         with pytest.raises(SystemExit):
             check_command(args)

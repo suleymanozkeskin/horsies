@@ -31,8 +31,8 @@ pub struct WorkerConfig {
 
     /// Log level for this worker. Stored in the config so that it can be
     /// propagated or inspected at runtime (mirrors Python's
-    /// `WorkerConfig.loglevel`). Defaults to `Info`.
-    pub loglevel: LogLevel,
+    /// `WorkerConfig.log_level`). Defaults to `Info`.
+    pub log_level: LogLevel,
 }
 
 impl Default for WorkerConfig {
@@ -42,7 +42,7 @@ impl Default for WorkerConfig {
             queue_priorities: HashMap::new(),
             queue_max_concurrency: HashMap::new(),
             coalesce_notifies: 100,
-            loglevel: LogLevel::Info,
+            log_level: LogLevel::Info,
         }
     }
 }
@@ -124,22 +124,22 @@ mod tests {
                     max_concurrency: Some(5),
                 },
             ]),
-            broker: PostgresConfig {
+            database: PostgresConfig {
                 database_url: "postgresql://localhost/test".to_owned(),
-                session_database_url: None,
+                session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
-                pool_timeout: 30,
+                pool_timeout_seconds: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
                 tcp_keepalives: Default::default(),
                 tcp_user_timeout: Default::default(),
             },
-            cluster_wide_cap: None,
+            cluster_wide_cap: crate::core::config::ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -148,7 +148,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         }
     }
 
@@ -221,22 +221,22 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: PostgresConfig {
+            database: PostgresConfig {
                 database_url: "postgresql://localhost/test".to_owned(),
-                session_database_url: None,
+                session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
-                pool_timeout: 30,
+                pool_timeout_seconds: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
                 tcp_keepalives: Default::default(),
                 tcp_user_timeout: Default::default(),
             },
-            cluster_wide_cap: None,
+            cluster_wide_cap: crate::core::config::ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -245,7 +245,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
 
         let mut worker = WorkerConfig::default();

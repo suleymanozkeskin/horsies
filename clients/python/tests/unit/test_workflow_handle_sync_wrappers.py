@@ -2,10 +2,11 @@
 
 Each sync method calls a blocking form of the core handle. A core boundary
 error of that call (``CoreError``) is the method's own failure: the
-wrap-strategy methods return ``Err(HandleDbOperationFailed)`` with the error,
-retryable by the core's rule; the fold-strategy methods return
-``TaskResult(err=BROKER_ERROR)`` with the error's type and text. Any other
-exception propagates unchanged, and a record passes to the method's answer.
+wrap-strategy methods return ``Err(WorkflowHandleDatabaseOperationFailed)`` with the error,
+retryable by the core's rule; the read-strategy methods return
+``Err(ReadDatabaseError)`` with the error, its type and text, retryable by the same
+rule. Any other exception propagates unchanged, and a record passes to the
+method's answer.
 """
 
 from __future__ import annotations
@@ -18,15 +19,15 @@ from unittest.mock import MagicMock
 import pytest
 
 import horsies._core as core
-from horsies.core.models.tasks import OperationalErrorCode
+from horsies.core.models.outcome import ReadDatabaseError, Succeeded
 from horsies.core.models.workflow import NodeKey
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow.handle_types import (
-    HandleDbOperationFailed,
-    HandleErrorCode,
+    WorkflowHandleDatabaseOperationFailed,
+    WorkflowHandleErrorCode,
 )
 from horsies.core.models.workflow.enums import WorkflowStatus
-from horsies.core.types.result import is_err, is_ok
+from horsies.core.types.result import Err, Ok, is_err, is_ok
 
 WORKFLOW_ID: Final = '2b4d6f8a-0c2e-4a6c-9e1a-3c5e7a9c1e3a'
 WORKFLOW_KEY: Final = uuid.UUID(WORKFLOW_ID)
@@ -55,7 +56,7 @@ WRAP_METHODS: Final[dict[str, tuple[str, Callable[[WorkflowHandle[Any]], Any]]]]
     'pause': ('pause_workflow', lambda handle: handle.pause()),
     'resume': ('resume_workflow', lambda handle: handle.resume()),
     'results': ('workflow_node_results', lambda handle: handle.results()),
-    'tasks': ('workflow_nodes', lambda handle: handle.tasks()),
+    'nodes': ('workflow_nodes', lambda handle: handle.nodes()),
 }
 
 
@@ -73,11 +74,11 @@ class TestWrapStrategy:
 
         assert is_err(result)
         error = result.err_value
-        assert isinstance(error, HandleDbOperationFailed)
-        assert error.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert isinstance(error, WorkflowHandleDatabaseOperationFailed)
+        assert error.code == WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED
         assert error.retryable is True
         assert error.workflow_id == WORKFLOW_ID
-        assert error.exception is refused
+        assert error.cause is refused
         getattr(broker._core_handle, f'{method}_async').assert_not_called()
 
     @pytest.mark.parametrize('name', list(WRAP_METHODS))
@@ -104,36 +105,38 @@ class TestWrapStrategy:
 
 
 # =============================================================================
-# Fold strategy
+# Read strategy
 # =============================================================================
 
-FOLD_METHODS: Final[dict[str, tuple[str, Callable[[WorkflowHandle[Any]], Any]]]] = {
-    'get': ('wait_workflow_result', lambda handle: handle.get(timeout_ms=100)),
+READ_METHODS: Final[dict[str, tuple[str, Callable[[WorkflowHandle[Any]], Any]]]] = {
+    'get': ('wait_workflow_result', lambda handle: handle.get(wait_ms=100)),
     'result_for': ('workflow_node_result', lambda handle: handle.result_for(NODE_KEY)),
 }
 
 
 @pytest.mark.unit
-class TestFoldStrategy:
-    """The fold-strategy sync methods and a core boundary error."""
+class TestReadStrategy:
+    """The read-strategy sync methods and a core boundary error."""
 
-    @pytest.mark.parametrize('name', list(FOLD_METHODS))
+    @pytest.mark.parametrize('name', list(READ_METHODS))
     def test_a_core_boundary_error_is_broker_error(self, name: str) -> None:
-        method, call = FOLD_METHODS[name]
+        method, call = READ_METHODS[name]
         refused = core.TooManyPendingCalls(f'CoreHandle.{method}', 65_536)
         handle, broker = _make_handle(method, refused)
 
         result = call(handle)
 
-        assert result.is_err()
-        error = result.unwrap_err()
-        assert error.error_code == OperationalErrorCode.BROKER_ERROR
-        assert 'TooManyPendingCalls' in (error.message or '')
+        assert isinstance(result, Err)
+        error = result.err_value
+        assert isinstance(error, ReadDatabaseError)
+        assert 'TooManyPendingCalls' in error.message
+        assert error.retryable is True
+        assert error.cause is refused
         getattr(broker._core_handle, f'{method}_async').assert_not_called()
 
-    @pytest.mark.parametrize('name', list(FOLD_METHODS))
+    @pytest.mark.parametrize('name', list(READ_METHODS))
     def test_an_unexpected_exception_propagates(self, name: str) -> None:
-        method, call = FOLD_METHODS[name]
+        method, call = READ_METHODS[name]
         defect = RuntimeError('something unexpected')
         handle, _ = _make_handle(method, defect)
 
@@ -146,12 +149,11 @@ class TestFoldStrategy:
         completed = MagicMock(spec=core.WorkflowCompletedRead)
         completed.result_json = '{"__h_task_result__": true, "ok": 42, "err": null}'
         handle, broker = _make_handle('wait_workflow_result', completed)
-        handle.out_type = int
+        handle.output_type = int
 
-        result = handle.get(timeout_ms=100)
+        result = handle.get(wait_ms=100)
 
-        assert result.is_ok()
-        assert result.unwrap() == 42
+        assert result == Ok(Succeeded(42))
         broker._core_handle.wait_workflow_result.assert_called_once_with(
             WORKFLOW_KEY, timeout_ms=100,
         )

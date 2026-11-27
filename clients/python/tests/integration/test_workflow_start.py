@@ -15,7 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
     TaskNode,
     WorkflowSpec,
@@ -28,7 +29,7 @@ from horsies.core.workflows.start_types import (
     WorkflowStartErrorCode,
     WorkflowStartIdConflict,
 )
-from horsies.core.types.result import is_err, is_ok
+from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
 
 from .conftest import (
     finish_task,
@@ -67,7 +68,7 @@ class TestWorkflowStart:
         session, broker, app = setup
         simple_task = make_simple_task(app, 'simple_a')
 
-        node_a = TaskNode(fn=simple_task, kwargs={'value': 5})
+        node_a = TaskNode(function=simple_task, kwargs={'value': 5})
         spec = make_workflow_spec(broker=broker, name='test_wf', tasks=[node_a])
 
         handle = await start_ok(spec, broker)
@@ -91,8 +92,8 @@ class TestWorkflowStart:
         task_a = make_simple_task(app, 'task_a')
         task_b = make_simple_task(app, 'task_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
         spec = make_workflow_spec(
             broker=broker, name='multi_task', tasks=[node_a, node_b]
         )
@@ -115,7 +116,7 @@ class TestWorkflowStart:
         session, broker, app = setup
         simple_task = make_simple_task(app, 'sent_at_task')
 
-        node_a = TaskNode(fn=simple_task, kwargs={'value': 5})
+        node_a = TaskNode(function=simple_task, kwargs={'value': 5})
         spec = make_workflow_spec(broker=broker, name='sent_at_wf', tasks=[node_a])
 
         before_start = datetime.now(timezone.utc)
@@ -145,7 +146,7 @@ class TestWorkflowStart:
         session, broker, app = setup
         task_a = make_simple_task(app, 'root_task')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(broker=broker, name='root_test', tasks=[node_a])
 
         handle = await start_ok(spec, broker)
@@ -176,8 +177,8 @@ class TestWorkflowStart:
         task_a = make_simple_task(app, 'root')
         task_b = make_simple_task(app, 'child')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
         spec = make_workflow_spec(
             broker=broker, name='pending_test', tasks=[node_a, node_b]
         )
@@ -204,7 +205,7 @@ class TestWorkflowStart:
         session, broker, app = setup
         task_a = make_simple_task(app, 'custom_id_task')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(broker=broker, name='custom_id', tasks=[node_a])
 
         custom_id = '11111111-2222-4333-8444-555555555555'
@@ -228,7 +229,7 @@ class TestWorkflowStart:
         session, broker, app = setup
         task_a = make_simple_task(app, 'error_policy_task')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
 
         # Test FAIL
         spec_fail = make_workflow_spec(
@@ -246,7 +247,7 @@ class TestWorkflowStart:
 
         # Test PAUSE (need fresh node)
         task_b = make_simple_task(app, 'pause_policy_task')
-        node_b = TaskNode(fn=task_b, kwargs={'value': 5})
+        node_b = TaskNode(function=task_b, kwargs={'value': 5})
         spec_pause = make_workflow_spec(
             broker=broker, name='pause_policy', tasks=[node_b], on_error=OnError.PAUSE
         )
@@ -269,8 +270,8 @@ class TestWorkflowStart:
         task_a = make_simple_task(app, 'output_a')
         task_b = make_simple_task(app, 'output_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='with_output', tasks=[node_a, node_b], output=node_b
@@ -296,9 +297,9 @@ class TestWorkflowStart:
         task_b = make_simple_task(app, 'dep_b')
         task_c = make_simple_task(app, 'dep_c')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2})
-        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a, node_b])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2})
+        node_c = TaskNode(function=task_c, kwargs={'value': 3}, waits_for=[node_a, node_b])
 
         spec = make_workflow_spec(
             broker=broker, name='deps_test', tasks=[node_a, node_b, node_c]
@@ -325,12 +326,12 @@ class TestWorkflowStart:
         """args_from mapping stored correctly."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'args_from_a')
-        # args_from injects TaskResult[...] so the receiver must accept TaskResult.
+        # args_from injects TaskOutcome[...] so the receiver must accept TaskOutcome.
         task_b = make_args_receiver_task(app, 'args_from_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         node_b = TaskNode(
-            fn=task_b,
+            function=task_b,
             waits_for=[node_a],
             args_from={'input_result': node_a},
         )
@@ -353,20 +354,20 @@ class TestWorkflowStart:
         args_from = row[0]
         assert args_from == {'input_result': 0}  # Maps to task_index 0
 
-    async def test_workflow_ctx_from_stored(
+    async def test_workflow_context_from_stored(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """workflow_ctx_from node_ids stored correctly."""
+        """workflow_context_from node_ids stored correctly."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'ctx_a')
         task_b = make_ctx_receiver_task(app, 'ctx_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         node_b = TaskNode(
-            fn=task_b,
+            function=task_b,
             waits_for=[node_a],
-            workflow_ctx_from=[node_a],
+            workflow_context_from=[node_a],
         )
 
         spec = make_workflow_spec(
@@ -387,20 +388,20 @@ class TestWorkflowStart:
         ctx_from = row[0]
         assert ctx_from == [f'{spec.name}:0']
 
-    async def test_allow_failed_deps_stored(
+    async def test_allow_failed_dependencies_stored(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """allow_failed_deps flag stored per task."""
+        """allow_failed_dependencies flag stored per task."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'afd_a')
         task_b = make_identity_task(app, 'afd_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         node_b = TaskNode(
-            fn=task_b,
+            function=task_b,
             waits_for=[node_a],
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
 
         spec = make_workflow_spec(
@@ -441,7 +442,7 @@ class TestWorkflowStart:
         session, broker, app = setup
         retryable = make_retryable_task(app, 'retry_wf_task', max_retries=5)
 
-        node_a = TaskNode(fn=retryable, kwargs={'value': 10})
+        node_a = TaskNode(function=retryable, kwargs={'value': 10})
         spec = make_workflow_spec(
             broker=broker, name='retry_policy_test', tasks=[node_a]
         )
@@ -485,8 +486,8 @@ class TestWorkflowStart:
         root = make_simple_task(app, 'retry_root')
         retryable = make_retryable_task(app, 'retry_child', max_retries=4)
 
-        node_a = TaskNode(fn=root, kwargs={'value': 10})
-        node_b = TaskNode(fn=retryable, kwargs={'value': 20}, waits_for=[node_a])
+        node_a = TaskNode(function=root, kwargs={'value': 10})
+        node_b = TaskNode(function=retryable, kwargs={'value': 20}, waits_for=[node_a])
         spec = make_workflow_spec(
             broker=broker, name='retry_non_root', tasks=[node_a, node_b]
         )
@@ -494,7 +495,7 @@ class TestWorkflowStart:
         handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
         await session.commit()
 
         # Verify B task row has retry settings
@@ -520,7 +521,7 @@ class TestWorkflowStart:
         session, broker, app = setup
         task_a = make_simple_task(app, 'idempotent_a')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker, name='idempotent_wf', tasks=[node_a],
         )
@@ -562,17 +563,17 @@ class TestWorkflowStart:
         first = make_workflow_spec(
             broker=broker,
             name='idempotent_command_wf',
-            tasks=[TaskNode(fn=task_a, kwargs={'value': 1})],
+            tasks=[TaskNode(function=task_a, kwargs={'value': 1})],
         )
         other_kwargs = make_workflow_spec(
             broker=broker,
             name='idempotent_command_wf',
-            tasks=[TaskNode(fn=task_a, kwargs={'value': 2})],
+            tasks=[TaskNode(function=task_a, kwargs={'value': 2})],
         )
         other_nodes = make_workflow_spec(
             broker=broker,
             name='idempotent_command_wf',
-            tasks=[TaskNode(fn=task_b, kwargs={'value': 1})],
+            tasks=[TaskNode(function=task_b, kwargs={'value': 1})],
         )
 
         custom_id = '51111111-2222-4333-8444-555555555555'
@@ -620,7 +621,7 @@ class TestWorkflowStart:
         spec = make_workflow_spec(
             broker=broker,
             name='unrecorded_command_wf',
-            tasks=[TaskNode(fn=task_a, kwargs={'value': 1})],
+            tasks=[TaskNode(function=task_a, kwargs={'value': 1})],
         )
         custom_id = '61111111-2222-4333-8444-555555555555'
         await session.execute(
@@ -663,12 +664,12 @@ class TestWorkflowStart:
         first = make_workflow_spec(
             broker=broker,
             name='idempotent_name_guard_first',
-            tasks=[TaskNode(fn=task_a, kwargs={'value': 1})],
+            tasks=[TaskNode(function=task_a, kwargs={'value': 1})],
         )
         second = make_workflow_spec(
             broker=broker,
             name='idempotent_name_guard_second',
-            tasks=[TaskNode(fn=task_b, kwargs={'value': 2})],
+            tasks=[TaskNode(function=task_b, kwargs={'value': 2})],
         )
 
         custom_id = '31111111-2222-4333-8444-555555555555'
@@ -689,7 +690,7 @@ class TestWorkflowStart:
         session, broker, app = setup
         task_a = make_simple_task(app, 'idempotent_concurrent_a')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker, name='idempotent_wf_concurrent', tasks=[node_a],
         )
@@ -726,14 +727,14 @@ class TestWorkflowStart:
         one_node = make_workflow_spec(
             broker=broker,
             name='command_race_wf',
-            tasks=[TaskNode(fn=task_a, kwargs={'value': 1})],
+            tasks=[TaskNode(function=task_a, kwargs={'value': 1})],
         )
         two_nodes = make_workflow_spec(
             broker=broker,
             name='command_race_wf',
             tasks=[
-                TaskNode(fn=task_a, kwargs={'value': 1}),
-                TaskNode(fn=task_a, kwargs={'value': 2}),
+                TaskNode(function=task_a, kwargs={'value': 1}),
+                TaskNode(function=task_a, kwargs={'value': 2}),
             ],
         )
 
@@ -768,7 +769,7 @@ class TestWorkflowStart:
         session, broker, app = setup
         task_a = make_simple_task(app, 'auto_id_concurrent_a')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker, name='auto_id_wf', tasks=[node_a],
         )
@@ -812,7 +813,7 @@ class TestWorkflowStart:
         session, broker, app = setup
         task_a = make_simple_task(app, 'no_output_task')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker, name='no_output_wf', tasks=[node_a],
         )
@@ -836,7 +837,7 @@ class TestWorkflowStart:
         task_a = make_simple_task(app, 'good_until_task')
 
         deadline = datetime(2099, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1}, good_until=deadline)
+        node_a = TaskNode(function=task_a, kwargs={'value': 1}, good_until=deadline)
         spec = make_workflow_spec(
             broker=broker, name='good_until_wf', tasks=[node_a],
         )
@@ -867,9 +868,9 @@ class TestWorkflowStart:
         task_b = make_simple_task(app, 'multi_root_b')
         task_c = make_simple_task(app, 'multi_root_c')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2})
-        node_c = TaskNode(fn=task_c, kwargs={'value': 3})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2})
+        node_c = TaskNode(function=task_c, kwargs={'value': 3})
         spec = make_workflow_spec(
             broker=broker, name='multi_root_wf', tasks=[node_a, node_b, node_c],
         )
@@ -915,9 +916,9 @@ class TestNodeBuilder:
         """The .node() method creates a valid TaskNode that can be used in workflows."""
         session, broker, app = setup
 
-        @app.task(task_name='node_builder_task')
-        def compute(*, value: int, multiplier: float = 1.0) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=int(value * multiplier))
+        @app.task(name='node_builder_task')
+        def compute(*, value: int, multiplier: float = 1.0) -> Result[int, TaskError]:
+            return Ok(int(value * multiplier))
 
         # Use .node() to create TaskNode
         node_a = compute.node(node_id='compute_a')(value=10, multiplier=2.5)
@@ -962,13 +963,13 @@ class TestNodeBuilder:
         """The .node() method respects waits_for dependencies."""
         session, broker, app = setup
 
-        @app.task(task_name='node_builder_root')
-        def root_task(*, x: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=x * 2)
+        @app.task(name='node_builder_root')
+        def root_task(*, x: int) -> Result[int, TaskError]:
+            return Ok(x * 2)
 
-        @app.task(task_name='node_builder_child')
-        def child_task(*, y: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=y + 1)
+        @app.task(name='node_builder_child')
+        def child_task(*, y: int) -> Result[int, TaskError]:
+            return Ok(y + 1)
 
         # Create nodes using .node() with dependencies
         root = root_task.node(node_id='root')(x=5)
@@ -1012,17 +1013,17 @@ class TestNodeBuilder:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """The .node() method preserves all node options like allow_failed_deps."""
+        """The .node() method preserves all node options like allow_failed_dependencies."""
         session, broker, app = setup
 
-        @app.task(task_name='node_opts_task')
-        def opts_task(*, val: str) -> TaskResult[str, TaskError]:
-            return TaskResult(ok=val.upper())
+        @app.task(name='node_opts_task')
+        def opts_task(*, val: str) -> Result[str, TaskError]:
+            return Ok(val.upper())
 
         # Create node with various options
         node_a = opts_task.node(
             node_id='opts_node',
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
             join='all',
         )(val='hello')
 
@@ -1034,7 +1035,7 @@ class TestNodeBuilder:
 
         handle = await start_ok(spec, broker)
 
-        # Verify allow_failed_deps was persisted
+        # Verify allow_failed_dependencies was persisted
         result = await session.execute(
             text("""
                 SELECT allow_failed_deps FROM horsies_workflow_tasks
@@ -1053,15 +1054,19 @@ class TestNodeBuilder:
         """.node(args_from=...) stores index-based mapping in DB."""
         session, broker, app = setup
 
-        @app.task(task_name='nb_producer')
-        def producer(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        @app.task(name='nb_producer')
+        def producer(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
-        @app.task(task_name='nb_consumer')
+        @app.task(name='nb_consumer')
         def consumer(
-            *, upstream: TaskResult[int, TaskError],
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=upstream.unwrap() + 1)
+            *, upstream: TaskOutcome[int, TaskError],
+        ) -> Result[int, TaskError]:
+            match upstream:
+                case Succeeded(value=value):
+                    return Ok(value + 1)
+                case Failed(error=error):
+                    return Err(error)
 
         root = producer.node(node_id='prod')(value=42)
         # upstream is provided at runtime via args_from, not at build time
@@ -1092,16 +1097,16 @@ class TestNodeBuilder:
         # Maps kwarg name → task_index of producer
         assert args_from == {'upstream': 0}
 
-    async def test_node_builder_with_workflow_ctx_from(
+    async def test_node_builder_with_workflow_context_from(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """.node(workflow_ctx_from=...) stores ctx_from node references."""
+        """.node(workflow_context_from=...) stores ctx_from node references."""
         session, broker, app = setup
 
-        @app.task(task_name='nb_ctx_src')
-        def ctx_source(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        @app.task(name='nb_ctx_src')
+        def ctx_source(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         ctx_receiver = make_ctx_receiver_task(app, 'nb_ctx_recv')
 
@@ -1109,7 +1114,7 @@ class TestNodeBuilder:
         recv = ctx_receiver.node(
             node_id='ctx_recv',
             waits_for=[src],
-            workflow_ctx_from=[src],
+            workflow_context_from=[src],
         )()
 
         spec = make_workflow_spec(
@@ -1140,9 +1145,9 @@ class TestNodeBuilder:
         """.node(good_until=...) serialized into task_options JSONB."""
         session, broker, app = setup
 
-        @app.task(task_name='nb_good_until')
-        def timed_task(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        @app.task(name='nb_good_until')
+        def timed_task(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         deadline = datetime(2099, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
         node = timed_task.node(
@@ -1178,15 +1183,19 @@ class TestNodeBuilder:
         """.node() with from_node() stores args_from and auto-wires dependency."""
         session, broker, app = setup
 
-        @app.task(task_name='fn_producer')
-        def producer(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        @app.task(name='fn_producer')
+        def producer(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
-        @app.task(task_name='fn_consumer')
+        @app.task(name='fn_consumer')
         def consumer(
-            *, upstream: TaskResult[int, TaskError],
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=upstream.unwrap() + 1)
+            *, upstream: TaskOutcome[int, TaskError],
+        ) -> Result[int, TaskError]:
+            match upstream:
+                case Succeeded(value=value):
+                    return Ok(value + 1)
+                case Failed(error=error):
+                    return Err(error)
 
         prod = producer.node(node_id='fn_prod')(value=42)
         cons = consumer.node(node_id='fn_cons')(upstream=from_node(prod))
@@ -1223,16 +1232,20 @@ class TestNodeBuilder:
         """.node() with from_node() + static kwargs stores both correctly."""
         session, broker, app = setup
 
-        @app.task(task_name='fn_mix_producer')
-        def producer(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        @app.task(name='fn_mix_producer')
+        def producer(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
-        @app.task(task_name='fn_mix_consumer')
+        @app.task(name='fn_mix_consumer')
         def consumer(
-            *, upstream: TaskResult[int, TaskError],
+            *, upstream: TaskOutcome[int, TaskError],
             multiplier: int = 1,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=upstream.unwrap() * multiplier)
+        ) -> Result[int, TaskError]:
+            match upstream:
+                case Succeeded(value=value):
+                    return Ok(value * multiplier)
+                case Failed(error=error):
+                    return Err(error)
 
         prod = producer.node(node_id='mix_prod')(value=10)
         cons = consumer.node(node_id='mix_cons')(

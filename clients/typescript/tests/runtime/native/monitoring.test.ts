@@ -3,7 +3,7 @@
 // bounds is refused before any connect. The cases that need a sent task or a running worker are end-to-end cases.
 
 import assert from "node:assert/strict";
-import { describe, test } from "node:test";
+import { after, before, describe, test } from "node:test";
 
 import type { CoreAccess } from "../../../horsies/src/app/core-access.ts";
 import { TaskId, WorkflowId } from "../../../horsies/src/contract/ids.ts";
@@ -13,7 +13,8 @@ import { buildCoreHandle, type CoreHandle } from "../../../horsies/src/native/ha
 import { processCoreAddon } from "../../../horsies/src/native/process-core/addon.ts";
 import { nativeValue } from "../../../horsies/src/native/call/envelope.ts";
 import { noWorkflowCore } from "../../../horsies/src/workflow/core.ts";
-import { manifestJson, manifestJsonWithSchema, testDatabaseUrl } from "./manifest.ts";
+import { createFreshDatabase, type FreshDatabase } from "./fresh-database.ts";
+import { manifestJson, manifestJsonWithSchema } from "./manifest.ts";
 
 // The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
 void requireDevAddon();
@@ -60,9 +61,14 @@ function area(databaseUrl: string): MonitoringArea {
   return createMonitoringArea(access(buildCoreHandle(manifestJson(databaseUrl, false), "PRODUCER")));
 }
 
-/** The area of an installed test database. */
+/** The new empty database of this file: the rows of other test files are not in it. */
+let freshDatabase: FreshDatabase | undefined;
+
+/** The area of the installed database of this file. */
 async function installedArea(): Promise<MonitoringArea> {
-  const handle = buildCoreHandle(manifestJson(testDatabaseUrl(), false), "PRODUCER");
+  assert.ok(freshDatabase !== undefined, "the database of this file is created before the tests");
+
+  const handle = buildCoreHandle(manifestJson(freshDatabase.url, false), "PRODUCER");
   const installed = await handle.installSchema();
 
   assert.equal(installed.kind, "installed");
@@ -71,9 +77,18 @@ async function installedArea(): Promise<MonitoringArea> {
 }
 
 describe("the reads of an installed database", () => {
+  before(async () => {
+    freshDatabase = await createFreshDatabase();
+  });
+
+  after(async () => {
+    await freshDatabase?.drop();
+    freshDatabase = undefined;
+  });
+
   test("each monitoring read answers its model", async () => {
     const { monitoring } = await installedArea();
-    const stats = await monitoring.taskStats();
+    const stats = await monitoring.taskStatusCounts();
 
     assert.ok(stats.ok && stats.value.length === 7);
     assert.ok((await monitoring.taskFacets()).ok);
@@ -82,24 +97,24 @@ describe("the reads of an installed database", () => {
     const page = await monitoring.listTasks({ statuses: ["FAILED"], limit: 50 });
 
     assert.ok(page.ok && page.value.total === 0);
-    assert.deepEqual(await monitoring.workflowNames(), { ok: true, value: [] });
-    assert.deepEqual(await monitoring.workflowRuns(), { ok: true, value: [] });
-    assert.deepEqual(await monitoring.schedules(), { ok: true, value: [] });
+    assert.deepEqual(await monitoring.listWorkflowNames(), { ok: true, value: [] });
+    assert.deepEqual(await monitoring.listWorkflowRuns(), { ok: true, value: [] });
+    assert.deepEqual(await monitoring.listSchedules(), { ok: true, value: [] });
   });
 
   test("each health read answers its value", async () => {
     const { monitoring } = await installedArea();
 
-    assert.deepEqual(await monitoring.workers(), { ok: true, value: [] });
-    assert.deepEqual(await monitoring.worker("no-such-worker"), {
+    assert.deepEqual(await monitoring.listWorkerStates(), { ok: true, value: [] });
+    assert.deepEqual(await monitoring.getWorkerState("no-such-worker"), {
       ok: true,
       value: { kind: "notFound", workerId: "no-such-worker" },
     });
-    assert.deepEqual(await monitoring.workerHistory("no-such-worker"), { ok: true, value: [] });
-    assert.deepEqual(await monitoring.staleTasks({ thresholdMinutes: 5 }), { ok: true, value: { kind: "complete", rows: [] } });
-    assert.deepEqual(await monitoring.expiredTasks(), { ok: true, value: { kind: "complete", rows: [] } });
-    assert.ok((await monitoring.classCoverage()).ok);
-    assert.ok((await monitoring.classReport()).ok);
+    assert.deepEqual(await monitoring.getWorkerStateHistory("no-such-worker"), { ok: true, value: [] });
+    assert.deepEqual(await monitoring.getStaleTasks({ thresholdMinutes: 5 }), { ok: true, value: { kind: "complete", rows: [] } });
+    assert.deepEqual(await monitoring.getExpiredTasks(), { ok: true, value: { kind: "complete", rows: [] } });
+    assert.ok((await monitoring.getExecutionClassCoverage()).ok);
+    assert.ok((await monitoring.getExecutionClassReport()).ok);
   });
 
   test("taskDetail of an absent task names why: NOT_CLASSIFIED for a UUIDv4, WITHIN_RETAINED_HISTORY for a UUIDv7", async () => {
@@ -107,12 +122,12 @@ describe("the reads of an installed database", () => {
     const minted = nativeValue("mintTaskId", () => processCoreAddon().mintTaskId());
 
     assert.ok(minted.kind === "minted");
-    assert.deepEqual(await monitoring.taskDetail(UUID_V4), {
+    assert.deepEqual(await monitoring.getTaskDetail(UUID_V4), {
       ok: true,
       value: { kind: "notFound", taskId: UUID_V4, reason: "NOT_CLASSIFIED" },
     });
 
-    const read = await monitoring.taskDetail(parsed(TaskId.parse(minted.taskId)));
+    const read = await monitoring.getTaskDetail(parsed(TaskId.parse(minted.taskId)));
 
     assert.ok(read.ok && read.value.kind === "notFound" && read.value.reason === "WITHIN_RETAINED_HISTORY");
   });
@@ -120,13 +135,13 @@ describe("the reads of an installed database", () => {
   test("an unknown workflow run and node are notFound", async () => {
     const { monitoring } = await installedArea();
 
-    assert.deepEqual(await monitoring.workflowRun(WORKFLOW_V4), {
+    assert.deepEqual(await monitoring.getWorkflowRun(WORKFLOW_V4), {
       ok: true,
       value: { kind: "notFound", workflowId: WORKFLOW_V4 },
     });
-    assert.deepEqual(await monitoring.workflowNode(WORKFLOW_V4, 0), {
+    assert.deepEqual(await monitoring.getWorkflowNode(WORKFLOW_V4, 0), {
       ok: true,
-      value: { kind: "notFound", workflowId: WORKFLOW_V4, taskIndex: 0 },
+      value: { kind: "notFound", workflowId: WORKFLOW_V4, nodeIndex: 0 },
     });
   });
 
@@ -142,24 +157,24 @@ describe("the reads of an installed database", () => {
     const ping = await answered.pingDatabase();
 
     assert.ok(ping.ok && ping.value.latencyMs >= 0);
-    assert.deepEqual(await answered.pingWorkers({ timeoutMs: PING_WINDOW_MS }), { ok: true, value: [] });
+    assert.deepEqual(await answered.pingWorkers({ waitMs: PING_WINDOW_MS }), { ok: true, value: [] });
   });
 });
 
 describe("an unreachable database", () => {
-  test("each monitoring read is DB_OPERATION_FAILED with the retry rule of the cause", async () => {
+  test("each monitoring read is DATABASE_OPERATION_FAILED with the retry rule of the cause", async () => {
     const { monitoring } = area(REFUSED_DATABASE_URL);
 
     const reads = [
-      ["task stats query", await monitoring.taskStats()],
+      ["task status counts query", await monitoring.taskStatusCounts()],
       ["task list query", await monitoring.listTasks()],
-      ["task detail query", await monitoring.taskDetail(UUID_V4)],
-      ["workflow names query", await monitoring.workflowNames()],
-      ["schedule state query", await monitoring.schedules()],
+      ["task detail query", await monitoring.getTaskDetail(UUID_V4)],
+      ["workflow names query", await monitoring.listWorkflowNames()],
+      ["schedule state query", await monitoring.listSchedules()],
     ] as const;
 
     for (const [subject, read] of reads) {
-      assert.ok(!read.ok && read.error.code === "DB_OPERATION_FAILED", subject);
+      assert.ok(!read.ok && read.error.code === "DATABASE_OPERATION_FAILED", subject);
       assert.ok(read.error.retryable, subject);
       assert.ok(read.error.message.startsWith(`${subject} failed:`), read.error.message);
     }
@@ -167,39 +182,39 @@ describe("an unreachable database", () => {
 
   test("each health read, each ping and the cancel give their failure codes", async () => {
     const unreachable = area(REFUSED_DATABASE_URL);
-    const workers = await unreachable.monitoring.workers();
-    const coverage = await unreachable.monitoring.classCoverage();
+    const workers = await unreachable.monitoring.listWorkerStates();
+    const coverage = await unreachable.monitoring.getExecutionClassCoverage();
     const ping = await unreachable.pingDatabase();
-    const pongs = await unreachable.pingWorkers({ timeoutMs: PING_WINDOW_MS });
+    const pongs = await unreachable.pingWorkers({ waitMs: PING_WINDOW_MS });
     const cancel = await unreachable.monitoring.cancelTask(UUID_V4, { policy: "includeRunning" });
 
     assert.ok(!workers.ok && workers.error.code === "MONITORING_QUERY_FAILED");
     assert.ok(!coverage.ok && coverage.error.code === "MONITORING_QUERY_FAILED");
-    assert.ok(!ping.ok && ping.error.code === "DB_PING_FAILED");
+    assert.ok(!ping.ok && ping.error.code === "DATABASE_PING_FAILED");
     assert.ok(!pongs.ok && pongs.error.code === "WORKER_PING_FAILED");
-    assert.ok(!cancel.ok && cancel.error.code === "DB_OPERATION_FAILED" && cancel.error.retryable);
+    assert.ok(!cancel.ok && cancel.error.code === "DATABASE_OPERATION_FAILED" && cancel.error.retryable);
   });
 
-  test("each query bound is QUERY_REFUSED before the connect", async () => {
+  test("each query bound is invalidInput before the connect", async () => {
     const { monitoring } = area(REFUSED_DATABASE_URL);
     const until = Temporal.Now.instant();
 
     const refusals = [
       ["window", await monitoring.listTasks({ window: { since: until, until } })],
-      ["window", await monitoring.taskStats({ window: { since: until.subtract({ hours: 31 * 24 }), until } })],
+      ["window", await monitoring.taskStatusCounts({ window: { since: until.subtract({ hours: 31 * 24 }), until } })],
       ["page", await monitoring.listTasks({ offset: -1 })],
       ["page", await monitoring.listTasks({ limit: 0 })],
       ["page", await monitoring.listTasks({ limit: 201 })],
       ["page", await monitoring.listTasks({ offset: 400, limit: 101 })],
       ["limit", await monitoring.taskBreakdown({ groupBy: "worker", limit: 0 })],
       ["limit", await monitoring.taskBreakdown({ groupBy: "worker", limit: 501 })],
-      ["limit", await monitoring.workflowRuns({ limit: 0 })],
-      ["limit", await monitoring.workflowRuns({ limit: 201 })],
-      ["taskIndex", await monitoring.workflowNode(WORKFLOW_V4, 2 ** 31)],
+      ["limit", await monitoring.listWorkflowRuns({ limit: 0 })],
+      ["limit", await monitoring.listWorkflowRuns({ limit: 201 })],
+      ["nodeIndex", await monitoring.getWorkflowNode(WORKFLOW_V4, 2 ** 31)],
     ] as const;
 
     for (const [field, read] of refusals) {
-      assert.ok(!read.ok && read.error.code === "QUERY_REFUSED" && read.error.field === field, field);
+      assert.ok(!read.ok && read.error.kind === "invalidInput" && "field" in read.error && read.error.field === field, field);
     }
   });
 
@@ -207,10 +222,10 @@ describe("an unreachable database", () => {
     const unreachable = area(REFUSED_DATABASE_URL);
 
     const answers = [
-      await unreachable.pingWorkers({ timeoutMs: 0 }),
-      await unreachable.monitoring.staleTasks({ thresholdMinutes: -1 }),
-      await unreachable.monitoring.staleTasks({ thresholdMinutes: 525_601 }),
-      await unreachable.monitoring.workerHistory("w1", { kind: "newest", count: 0 }),
+      await unreachable.pingWorkers({ waitMs: 0 }),
+      await unreachable.monitoring.getStaleTasks({ thresholdMinutes: -1 }),
+      await unreachable.monitoring.getStaleTasks({ thresholdMinutes: 525_601 }),
+      await unreachable.monitoring.getWorkerStateHistory("w1", { kind: "newest", count: 0 }),
     ];
 
     for (const answer of answers) {
@@ -220,7 +235,7 @@ describe("an unreachable database", () => {
 
   test("a ping on a handle with no listener is LISTENER_DISABLED before the connect", async () => {
     const handle = buildCoreHandle(manifestJsonWithSchema(REFUSED_DATABASE_URL, false, "ASSUME_INITIALIZED"), "PRODUCER");
-    const answer = await createMonitoringArea(access(handle)).pingWorkers({ timeoutMs: PING_WINDOW_MS });
+    const answer = await createMonitoringArea(access(handle)).pingWorkers({ waitMs: PING_WINDOW_MS });
 
     assert.ok(!answer.ok && answer.error.code === "LISTENER_DISABLED");
   });

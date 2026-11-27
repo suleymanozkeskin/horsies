@@ -8,6 +8,7 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.cluster_cap import ClusterCap
 from horsies.core.models.queues import QueueMode
 
 from tests.e2e.helpers.env import e2e_database_url
@@ -20,8 +21,8 @@ CLUSTER_WIDE_CAP = 2
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    cluster_wide_cap=CLUSTER_WIDE_CAP,
-    broker=PostgresConfig(
+    cluster_wide_cap=ClusterCap(tasks=CLUSTER_WIDE_CAP),
+    database=PostgresConfig(
         database_url=DB_URL,
         pool_size=5,
         max_overflow=5,
@@ -30,7 +31,7 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 
@@ -45,24 +46,25 @@ app.discover_tasks(
 )
 
 # Local tasks bound to THIS app's broker
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Err, Ok, Result
 
 
-@app.task(task_name='e2e_cluster_cap_healthcheck')
-def healthcheck() -> TaskResult[str, TaskError]:
-    return TaskResult(ok='ready')
+@app.task(name='e2e_cluster_cap_healthcheck')
+def healthcheck() -> Result[str, TaskError]:
+    return Ok('ready')
 
 
-@app.task(task_name='e2e_cluster_cap_slow')
-def slow_task(*, duration_ms: int) -> TaskResult[str, TaskError]:
+@app.task(name='e2e_cluster_cap_slow')
+def slow_task(*, duration_ms: int) -> Result[str, TaskError]:
     """Task that sleeps for specified duration."""
     import time
 
     time.sleep(duration_ms / 1000)
-    return TaskResult(ok=f'slept_{duration_ms}')
+    return Ok(f'slept_{duration_ms}')
 
 
-@app.task(task_name='e2e_cluster_cap_fail')
-def fail_task() -> TaskResult[str, TaskError]:
+@app.task(name='e2e_cluster_cap_fail')
+def fail_task() -> Result[str, TaskError]:
     """Task that always fails, for cap-leak testing."""
-    return TaskResult(err=TaskError(error_code='DELIBERATE_FAIL', message='always fails'))
+    return Err(TaskError(code='DELIBERATE_FAIL', message='always fails'))

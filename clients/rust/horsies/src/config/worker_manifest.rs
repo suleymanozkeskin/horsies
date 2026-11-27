@@ -104,8 +104,8 @@ pub(crate) fn worker_manifest(
     })?;
     Ok(wire::WorkerManifest {
         manifest_version: wire::WorkerManifestVersion::CURRENT,
-        database: database_manifest(&config.broker),
-        send: send_manifest(&config.broker),
+        database: database_manifest(&config.database),
+        send: send_manifest(&config.database),
         profiles,
         profile,
         metrics_endpoint,
@@ -200,7 +200,7 @@ pub(crate) fn task_records(tasks: &TaskRegistry) -> BTreeMap<String, wire::TaskM
 /// The declared error codes of the registered task `name`. The
 /// registration refused a set that breaks a rule (`register_task`), so a
 /// refusal here is a defect: it panics with the task and the cause.
-fn declared_codes(name: &str, task: &RegisteredTask) -> DeclaredErrorCodes {
+pub(crate) fn declared_codes(name: &str, task: &RegisteredTask) -> DeclaredErrorCodes {
     DeclaredErrorCodes::parse(task.error_codes()).unwrap_or_else(|refused| {
         panic!("task '{name}' was registered with error codes that the registration refuses: {refused}")
     })
@@ -216,11 +216,17 @@ fn database_manifest(config: &PostgresConfig) -> wire::WorkerDatabaseManifest {
         pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
         pool_pre_ping: config.pool_pre_ping,
         worker_pool_pre_ping: config.worker_pool_pre_ping,
-        pool_timeout: WholeSeconds::from_secs(config.pool_timeout),
+        pool_timeout_seconds: WholeSeconds::from_secs(config.pool_timeout_seconds),
         pool_recycle: config.pool_recycle,
         echo: config.echo,
-        tcp_keepalives: config.tcp_keepalives,
-        tcp_user_timeout: config.tcp_user_timeout,
+        tcp_keepalives: config
+            .tcp_keepalives
+            .checked()
+            .expect("Horsies::new validated the keepalive values"),
+        tcp_user_timeout: config
+            .tcp_user_timeout
+            .checked()
+            .expect("Horsies::new validated the TCP user timeout"),
     }
 }
 
@@ -229,14 +235,14 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
     use std::sync::Arc;
 
-    use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMeta};
+    use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMetadata};
     use horsies_core::worker_manifest::parse_worker_manifest;
-    use horsies_core::{CancelGraceMs, RegisteredTask, TaskOptions, TaskResult};
+    use horsies_core::{RegisteredTask, TaskOptions, TaskResult, DEFAULT_CANCEL_GRACE_MS};
 
     use super::*;
     use crate::{
-        ChildPreload, CustomQueueConfig, DrainTimeout, IsolatedChildCount, IsolatedChildren,
-        IsolatedSetting, QueueMode, WorkerProfile,
+        ChildPreload, ClusterCapSetting, CustomQueueConfig, IsolatedChildren, QueueMode,
+        WorkerProfile,
     };
 
     struct EchoTask;
@@ -250,20 +256,20 @@ mod tests {
     fn task(execution: Option<Execution>) -> RegisteredTask {
         let plain = RegisteredTask::Blocking {
             task: Arc::new(EchoTask),
-            meta: TaskMeta::default(),
+            metadata: TaskMetadata::default(),
         };
         match execution {
             None => plain,
             Some(execution) => plain.with_task_options(TaskOptions {
                 task_name: "task".to_owned(),
-                queue_name: None,
+                queue: None,
                 good_until: None,
-                auto_retry_for: None,
+                retry_for: None,
                 retry_policy: None,
                 timeout_ms: Some(5_000),
                 execution,
                 cancel_grace_ms: match execution {
-                    Execution::SharedAsync => Some(CancelGraceMs::DEFAULT),
+                    Execution::SharedAsync => Some(DEFAULT_CANCEL_GRACE_MS),
                     Execution::Isolated | Execution::SharedThread => None,
                 },
             }),
@@ -284,16 +290,14 @@ mod tests {
 
     fn profile() -> WorkerProfile {
         WorkerProfile {
-            isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
-                IsolatedChildCount::try_from(4).unwrap(),
-            )),
+            isolated: IsolatedChildren::new(4).into(),
             preload: ChildPreload::NoPreload,
             ..WorkerProfile::default()
         }
     }
 
     fn config() -> AppConfig {
-        let mut config = AppConfig::for_database_url("postgresql://app@db.example/horsies");
+        let mut config = AppConfig::from_database_url("postgresql://app@db.example/horsies");
         config.worker_profiles.insert("web".to_owned(), profile());
         config
     }
@@ -363,7 +367,7 @@ mod tests {
         assert_eq!(read, manifest);
         let selected = read.selected_profile().unwrap();
         assert_eq!(selected.name, "web");
-        assert_eq!(selected.profile, profile());
+        assert_eq!(WorkerProfile::from(selected.profile), profile());
     }
 
     #[test]
@@ -382,7 +386,7 @@ mod tests {
                 max_concurrency: None,
             },
         ]);
-        config.cluster_wide_cap = Some(20);
+        config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: 20 };
         config.claim_lease_ms = Some(30_000);
         let manifest = build(&config).unwrap();
         let text = serde_json::to_string(&manifest).unwrap();
@@ -411,7 +415,8 @@ mod tests {
                 "charge",
                 RegisteredTask::Blocking {
                     task: Arc::new(EchoTask),
-                    meta: TaskMeta::default().with_error_codes(&["RATE_LIMITED", "CARD_DECLINED"]),
+                    metadata: TaskMetadata::default()
+                        .with_error_codes(&["RATE_LIMITED", "CARD_DECLINED"]),
                 },
             )
             .unwrap();
@@ -434,7 +439,7 @@ mod tests {
                 "charge",
                 RegisteredTask::Blocking {
                     task: Arc::new(EchoTask),
-                    meta: TaskMeta::default().with_error_codes(&["DUP", "DUP"]),
+                    metadata: TaskMetadata::default().with_error_codes(&["DUP", "DUP"]),
                 },
             )
             .unwrap();
@@ -487,7 +492,9 @@ mod tests {
                 None,
             ),
             (
-                Box::new(|config: &mut AppConfig| config.cluster_wide_cap = Some(u32::MAX)),
+                Box::new(|config: &mut AppConfig| {
+                    config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: u32::MAX }
+                }),
                 "cluster_wide_cap",
                 Some("4294967295"),
             ),
@@ -569,10 +576,10 @@ mod tests {
     #[test]
     fn no_retry_attempt_limit_is_its_own_variant() {
         let mut config = config();
-        config.resilience.db_retry_max_attempts = 0;
+        config.resilience.database_retry_max_attempts = 0;
         let manifest = build(&config).unwrap();
         assert_eq!(
-            manifest.resilience.db_retry_max_attempts,
+            manifest.resilience.database_retry_max_attempts,
             wire::RetryAttemptLimit::NoLimit
         );
     }
@@ -581,7 +588,7 @@ mod tests {
     fn a_drain_timeout_is_rounded_up_to_whole_milliseconds() {
         let mut config = config();
         let profile = WorkerProfile {
-            drain_timeout: DrainTimeout::try_from(std::time::Duration::from_micros(1_500)).unwrap(),
+            drain_timeout: std::time::Duration::from_micros(1_500),
             ..profile()
         };
         config.worker_profiles.insert("web".to_owned(), profile);

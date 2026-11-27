@@ -9,13 +9,13 @@ function assertNever(value: never): never {
 
 export function describeReadError(error: ReadError): string {
   switch (error.kind) {
-    case "waitTimedOut":
+    case "waitTimeout":
     case "taskNotFound":
     case "resultNotAvailable":
     case "storedResultUnreadable":
-    case "unknownUserCode":
+    case "unknownCustomCode":
     case "waitInsideTask":
-    case "database":
+    case "databaseError":
       return error.kind;
     default:
       return assertNever(error);

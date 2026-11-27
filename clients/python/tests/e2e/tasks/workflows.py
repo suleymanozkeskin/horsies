@@ -13,7 +13,9 @@ from typing import Annotated, Any, Literal, TypeAlias
 from pydantic import BaseModel, Field
 
 from horsies.core.codec.json_value import JsonValue
-from horsies.core.models.tasks import SubWorkflowError, TaskResult, TaskError
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
+from horsies.core.models.tasks import SubWorkflowFailure, TaskError
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.models.workflow import TaskNode, SuccessPolicy, SuccessCase
 
 from tests.e2e.tasks.instance import app
@@ -22,7 +24,7 @@ from tests.e2e.tasks.instance import app
 def _workflow(*, name: str, tasks: list[Any], **kwargs: Any) -> Any:
     return app.workflow(
         name=name,
-        tasks=tasks,
+        nodes=tasks,
         definition_key=f'tests.e2e.tasks.workflows.{name}.v1',
         **kwargs,
     )
@@ -33,34 +35,34 @@ def _workflow(*, name: str, tasks: list[Any], **kwargs: Any) -> Any:
 # =============================================================================
 
 
-@app.task(task_name='e2e_wf_step')
-def step_task(*, step: str) -> TaskResult[str, TaskError]:
+@app.task(name='e2e_wf_step')
+def step_task(*, step: str) -> Result[str, TaskError]:
     """Simple workflow step that returns the step name."""
     # Minimum 50ms execution to ensure distinguishable timestamps
     time.sleep(0.05)
-    return TaskResult(ok=f'completed_{step}')
+    return Ok(f'completed_{step}')
 
 
-@app.task(task_name='e2e_wf_slow_step')
-def slow_step_task(*, step: str, delay_ms: int = 500) -> TaskResult[str, TaskError]:
+@app.task(name='e2e_wf_slow_step')
+def slow_step_task(*, step: str, delay_ms: int = 500) -> Result[str, TaskError]:
     """Workflow step with configurable delay for timing tests."""
     time.sleep(delay_ms / 1000)
-    return TaskResult(ok=f'completed_{step}')
+    return Ok(f'completed_{step}')
 
 
-@app.task(task_name='e2e_wf_final_result')
-def final_result_task() -> TaskResult[dict[str, JsonValue], TaskError]:
+@app.task(name='e2e_wf_final_result')
+def final_result_task() -> Result[dict[str, JsonValue], TaskError]:
     """Task returning a dict result for output task tests."""
     time.sleep(0.05)
-    return TaskResult(ok={'final': 'result', 'count': 42})
+    return Ok({'final': 'result', 'count': 42})
 
 
-@app.task(task_name='e2e_wf_fail')
-def fail_task(*, error_code: str) -> TaskResult[int, TaskError]:
+@app.task(name='e2e_wf_fail')
+def fail_task(*, error_code: str) -> Result[int, TaskError]:
     """Always fails with the specified error code."""
     time.sleep(0.05)
-    return TaskResult(
-        err=TaskError(error_code=error_code, message=f'Failed: {error_code}')
+    return Err(
+        TaskError(code=error_code, message=f'Failed: {error_code}')
     )
 
 
@@ -68,9 +70,9 @@ def fail_task(*, error_code: str) -> TaskResult[int, TaskError]:
 # L4.1: Linear Chain (A → B → C)
 # =============================================================================
 
-node_linear_a = TaskNode(fn=step_task, kwargs={"step": 'A'})
-node_linear_b = TaskNode(fn=step_task, kwargs={"step": 'B'}, waits_for=[node_linear_a])
-node_linear_c = TaskNode(fn=step_task, kwargs={"step": 'C'}, waits_for=[node_linear_b])
+node_linear_a = TaskNode(function=step_task, kwargs={"step": 'A'})
+node_linear_b = TaskNode(function=step_task, kwargs={"step": 'B'}, waits_for=[node_linear_a])
+node_linear_c = TaskNode(function=step_task, kwargs={"step": 'C'}, waits_for=[node_linear_b])
 
 spec_linear = _workflow(
     name='e2e_linear',
@@ -82,17 +84,17 @@ spec_linear = _workflow(
 # L4.2: Fan-Out (root → B, C, D)
 # =============================================================================
 
-node_fanout_root = TaskNode(fn=step_task, kwargs={"step": 'root'})
+node_fanout_root = TaskNode(function=step_task, kwargs={"step": 'root'})
 node_fanout_b = TaskNode(
-    fn=slow_step_task, kwargs={"step": 'B', 'delay_ms': 500},
+    function=slow_step_task, kwargs={"step": 'B', 'delay_ms': 500},
     waits_for=[node_fanout_root],
 )
 node_fanout_c = TaskNode(
-    fn=slow_step_task, kwargs={"step": 'C', 'delay_ms': 500},
+    function=slow_step_task, kwargs={"step": 'C', 'delay_ms': 500},
     waits_for=[node_fanout_root],
 )
 node_fanout_d = TaskNode(
-    fn=slow_step_task, kwargs={"step": 'D', 'delay_ms': 500},
+    function=slow_step_task, kwargs={"step": 'D', 'delay_ms': 500},
     waits_for=[node_fanout_root],
 )
 
@@ -106,11 +108,11 @@ spec_fanout = _workflow(
 # L4.3: Fan-In (A, B, C → AGG)
 # =============================================================================
 
-node_fanin_a = TaskNode(fn=slow_step_task, kwargs={"step": 'A', 'delay_ms': 200})
-node_fanin_b = TaskNode(fn=slow_step_task, kwargs={"step": 'B', 'delay_ms': 400})
-node_fanin_c = TaskNode(fn=slow_step_task, kwargs={"step": 'C', 'delay_ms': 600})
+node_fanin_a = TaskNode(function=slow_step_task, kwargs={"step": 'A', 'delay_ms': 200})
+node_fanin_b = TaskNode(function=slow_step_task, kwargs={"step": 'B', 'delay_ms': 400})
+node_fanin_c = TaskNode(function=slow_step_task, kwargs={"step": 'C', 'delay_ms': 600})
 node_fanin_agg = TaskNode(
-    fn=step_task, kwargs={"step": 'AGG'}, waits_for=[node_fanin_a, node_fanin_b, node_fanin_c]
+    function=step_task, kwargs={"step": 'AGG'}, waits_for=[node_fanin_a, node_fanin_b, node_fanin_c]
 )
 
 spec_fanin = _workflow(
@@ -124,23 +126,23 @@ spec_fanin = _workflow(
 # =============================================================================
 
 
-@app.task(task_name='e2e_wf_join_barrier')
-def join_barrier_task() -> TaskResult[None, TaskError]:
+@app.task(name='e2e_wf_join_barrier')
+def join_barrier_task() -> Result[None, TaskError]:
     """Small barrier task used to detect duplicate/orphan join enqueues."""
     time.sleep(0.05)
-    return TaskResult(ok=None)
+    return Ok(None)
 
 
 node_wide_fanin_sources = [
     TaskNode(
-        fn=slow_step_task,
+        function=slow_step_task,
         kwargs={'step': f'wide_{idx}', 'delay_ms': 250},
         node_id=f'wide_source_{idx}',
     )
     for idx in range(16)
 ]
 node_wide_fanin_join = TaskNode(
-    fn=join_barrier_task,
+    function=join_barrier_task,
     waits_for=node_wide_fanin_sources,
     node_id='wide_join_barrier',
 )
@@ -156,17 +158,17 @@ spec_wide_fanin_join = _workflow(
 # L4.4: Diamond (A → B, C → D)
 # =============================================================================
 
-node_diamond_a = TaskNode(fn=step_task, kwargs={"step": 'A'})
+node_diamond_a = TaskNode(function=step_task, kwargs={"step": 'A'})
 node_diamond_b = TaskNode(
-    fn=slow_step_task, kwargs={"step": 'B', 'delay_ms': 200},
+    function=slow_step_task, kwargs={"step": 'B', 'delay_ms': 200},
     waits_for=[node_diamond_a],
 )
 node_diamond_c = TaskNode(
-    fn=slow_step_task, kwargs={"step": 'C', 'delay_ms': 400},
+    function=slow_step_task, kwargs={"step": 'C', 'delay_ms': 400},
     waits_for=[node_diamond_a],
 )
 node_diamond_d = TaskNode(
-    fn=step_task, kwargs={"step": 'D'}, waits_for=[node_diamond_b, node_diamond_c]
+    function=step_task, kwargs={"step": 'D'}, waits_for=[node_diamond_b, node_diamond_c]
 )
 
 spec_diamond = _workflow(
@@ -187,18 +189,18 @@ spec_diamond = _workflow(
 #     G
 # =============================================================================
 
-node_complex_a = TaskNode(fn=step_task, kwargs={"step": 'A'})
-node_complex_b = TaskNode(fn=step_task, kwargs={"step": 'B'}, waits_for=[node_complex_a])
-node_complex_c = TaskNode(fn=step_task, kwargs={"step": 'C'}, waits_for=[node_complex_a])
-node_complex_d = TaskNode(fn=step_task, kwargs={"step": 'D'}, waits_for=[node_complex_a])
+node_complex_a = TaskNode(function=step_task, kwargs={"step": 'A'})
+node_complex_b = TaskNode(function=step_task, kwargs={"step": 'B'}, waits_for=[node_complex_a])
+node_complex_c = TaskNode(function=step_task, kwargs={"step": 'C'}, waits_for=[node_complex_a])
+node_complex_d = TaskNode(function=step_task, kwargs={"step": 'D'}, waits_for=[node_complex_a])
 node_complex_e = TaskNode(
-    fn=step_task, kwargs={"step": 'E'}, waits_for=[node_complex_b, node_complex_c]
+    function=step_task, kwargs={"step": 'E'}, waits_for=[node_complex_b, node_complex_c]
 )
 node_complex_f = TaskNode(
-    fn=step_task, kwargs={"step": 'F'}, waits_for=[node_complex_c, node_complex_d]
+    function=step_task, kwargs={"step": 'F'}, waits_for=[node_complex_c, node_complex_d]
 )
 node_complex_g = TaskNode(
-    fn=step_task, kwargs={"step": 'G'}, waits_for=[node_complex_e, node_complex_f]
+    function=step_task, kwargs={"step": 'G'}, waits_for=[node_complex_e, node_complex_f]
 )
 
 spec_complex = _workflow(
@@ -219,11 +221,11 @@ spec_complex = _workflow(
 # L4.6: Output Task (explicit output vs default terminal results)
 # =============================================================================
 
-node_output_step1 = TaskNode(fn=step_task, kwargs={"step": 'step1'})
+node_output_step1 = TaskNode(function=step_task, kwargs={"step": 'step1'})
 node_output_step2 = TaskNode(
-    fn=step_task, kwargs={"step": 'step2'}, waits_for=[node_output_step1]
+    function=step_task, kwargs={"step": 'step2'}, waits_for=[node_output_step1]
 )
-node_output_final = TaskNode(fn=final_result_task, waits_for=[node_output_step2])
+node_output_final = TaskNode(function=final_result_task, waits_for=[node_output_step2])
 
 spec_output = _workflow(
     name='e2e_output',
@@ -236,7 +238,7 @@ spec_output = _workflow(
 # L4.8: Single-Node Workflow (boundary)
 # =============================================================================
 
-node_single = TaskNode(fn=step_task, kwargs={"step": 'ONLY'})
+node_single = TaskNode(function=step_task, kwargs={"step": 'ONLY'})
 
 spec_single_node = _workflow(
     name='e2e_single_node',
@@ -248,9 +250,9 @@ spec_single_node = _workflow(
 # L4.9: Linear Failure Cascade (A → B(fail) → C(skipped))
 # =============================================================================
 
-node_lfm_a = TaskNode(fn=step_task, kwargs={"step": 'A'})
-node_lfm_b = TaskNode(fn=fail_task, kwargs={"error_code": 'MID_FAIL'}, waits_for=[node_lfm_a])
-node_lfm_c = TaskNode(fn=step_task, kwargs={"step": 'C'}, waits_for=[node_lfm_b])
+node_lfm_a = TaskNode(function=step_task, kwargs={"step": 'A'})
+node_lfm_b = TaskNode(function=fail_task, kwargs={"error_code": 'MID_FAIL'}, waits_for=[node_lfm_a])
+node_lfm_c = TaskNode(function=step_task, kwargs={"step": 'C'}, waits_for=[node_lfm_b])
 
 spec_linear_fail_mid = _workflow(
     name='e2e_linear_fail_mid',
@@ -262,16 +264,16 @@ spec_linear_fail_mid = _workflow(
 # L4.10: Fan-Out with One Failing Branch (root → B(fail), C, D)
 # =============================================================================
 
-node_fof_root = TaskNode(fn=step_task, kwargs={"step": 'root'})
+node_fof_root = TaskNode(function=step_task, kwargs={"step": 'root'})
 node_fof_b = TaskNode(
-    fn=fail_task, kwargs={"error_code": 'BRANCH_FAIL'}, waits_for=[node_fof_root],
+    function=fail_task, kwargs={"error_code": 'BRANCH_FAIL'}, waits_for=[node_fof_root],
 )
 node_fof_c = TaskNode(
-    fn=slow_step_task, kwargs={"step": 'C', 'delay_ms': 300},
+    function=slow_step_task, kwargs={"step": 'C', 'delay_ms': 300},
     waits_for=[node_fof_root],
 )
 node_fof_d = TaskNode(
-    fn=slow_step_task, kwargs={"step": 'D', 'delay_ms': 300},
+    function=slow_step_task, kwargs={"step": 'D', 'delay_ms': 300},
     waits_for=[node_fof_root],
 )
 
@@ -285,11 +287,11 @@ spec_fanout_one_fail = _workflow(
 # L4.11: Fan-In with Failing Dep (A(fail), B, C → AGG(skipped))
 # =============================================================================
 
-node_fif_a = TaskNode(fn=fail_task, kwargs={"error_code": 'FI_FAIL'})
-node_fif_b = TaskNode(fn=slow_step_task, kwargs={"step": 'B', 'delay_ms': 200})
-node_fif_c = TaskNode(fn=slow_step_task, kwargs={"step": 'C', 'delay_ms': 200})
+node_fif_a = TaskNode(function=fail_task, kwargs={"error_code": 'FI_FAIL'})
+node_fif_b = TaskNode(function=slow_step_task, kwargs={"step": 'B', 'delay_ms': 200})
+node_fif_c = TaskNode(function=slow_step_task, kwargs={"step": 'C', 'delay_ms': 200})
 node_fif_agg = TaskNode(
-    fn=step_task, kwargs={"step": 'AGG'},
+    function=step_task, kwargs={"step": 'AGG'},
     waits_for=[node_fif_a, node_fif_b, node_fif_c],
 )
 
@@ -303,13 +305,13 @@ spec_fanin_one_fail = _workflow(
 # L4.12-13: Slow Linear (cancellation + timeout tests)
 # =============================================================================
 
-node_slow_a = TaskNode(fn=slow_step_task, kwargs={"step": 'A', 'delay_ms': 200})
+node_slow_a = TaskNode(function=slow_step_task, kwargs={"step": 'A', 'delay_ms': 200})
 node_slow_b = TaskNode(
-    fn=slow_step_task, kwargs={"step": 'B', 'delay_ms': 1000},
+    function=slow_step_task, kwargs={"step": 'B', 'delay_ms': 1000},
     waits_for=[node_slow_a],
 )
 node_slow_c = TaskNode(
-    fn=slow_step_task, kwargs={"step": 'C', 'delay_ms': 1000},
+    function=slow_step_task, kwargs={"step": 'C', 'delay_ms': 1000},
     waits_for=[node_slow_b],
 )
 
@@ -334,198 +336,220 @@ spec_slow_linear = _workflow(
 from horsies.core.models.workflow import WorkflowContext
 
 
-@app.task(task_name='e2e_wf_produce_int')
-def produce_int_task(*, value: int) -> TaskResult[int, TaskError]:
+@app.task(name='e2e_wf_produce_int')
+def produce_int_task(*, value: int) -> Result[int, TaskError]:
     """Produces an integer value."""
     time.sleep(0.05)
-    return TaskResult(ok=value)
+    return Ok(value)
 
 
-@app.task(task_name='e2e_wf_double')
-def double_task(*, input_result: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
+@app.task(name='e2e_wf_double')
+def double_task(*, input_result: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
     """Doubles the input value from args_from injection."""
     time.sleep(0.05)
-    if input_result.is_err():
-        return TaskResult(err=input_result.err_value)
-    return TaskResult(ok=input_result.unwrap() * 2)
+    match input_result:
+        case Succeeded(value):
+            return Ok(value * 2)
+        case Failed(error):
+            return Err(error)
 
 
-@app.task(task_name='e2e_wf_sum_two')
+@app.task(name='e2e_wf_sum_two')
 def sum_two_task(
-    *, first: TaskResult[int, TaskError],
-    second: TaskResult[int, TaskError],
-) -> TaskResult[int, TaskError]:
+    *, first: TaskOutcome[int, TaskError],
+    second: TaskOutcome[int, TaskError],
+) -> Result[int, TaskError]:
     """Sums two values from args_from injection."""
     time.sleep(0.05)
-    if first.is_err():
-        return TaskResult(err=first.err_value)
-    if second.is_err():
-        return TaskResult(err=second.err_value)
-    return TaskResult(ok=first.unwrap() + second.unwrap())
+    match first:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(first_value):
+            pass
+    match second:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(second_value):
+            return Ok(first_value + second_value)
 
 
-@app.task(task_name='e2e_wf_fail_with')
-def fail_with_task(*, error_code: str) -> TaskResult[int, TaskError]:
+@app.task(name='e2e_wf_fail_with')
+def fail_with_task(*, error_code: str) -> Result[int, TaskError]:
     """Returns an error with the specified code."""
     time.sleep(0.05)
-    return TaskResult(
-        err=TaskError(error_code=error_code, message=f'Failed with {error_code}')
+    return Err(
+        TaskError(code=error_code, message=f'Failed with {error_code}')
     )
 
 
-@app.task(task_name='e2e_wf_ctx_reader')
+@app.task(name='e2e_wf_ctx_reader')
 def ctx_reader_task(
-    *, workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[int, TaskError]:
+    *, workflow_context: WorkflowContext | None = None,
+) -> Result[int, TaskError]:
     """Reads integer value from workflow context."""
     time.sleep(0.05)
-    if workflow_ctx is None:
-        return TaskResult(
-            err=TaskError(error_code='NO_CTX', message='WorkflowContext not provided')
+    if workflow_context is None:
+        return Err(
+            TaskError(code='NO_CTX', message='WorkflowContext not provided')
         )
-    result = workflow_ctx.result_for(node_ctx_a.key())
-    if result.is_ok():
-        return TaskResult(ok=result.unwrap())
-    return TaskResult(err=result.err_value)
+    match workflow_context.result_for(node_ctx_a.key()):
+        case Succeeded(value):
+            return Ok(value)
+        case Failed(error):
+            return Err(error)
 
 
-@app.task(task_name='e2e_wf_ctx_reader_str')
+@app.task(name='e2e_wf_ctx_reader_str')
 def ctx_reader_str_task(
-    *, workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[str, TaskError]:
+    *, workflow_context: WorkflowContext | None = None,
+) -> Result[str, TaskError]:
     """Reads string value from workflow context."""
     time.sleep(0.05)
-    if workflow_ctx is None:
-        return TaskResult(
-            err=TaskError(error_code='NO_CTX', message='WorkflowContext not provided')
+    if workflow_context is None:
+        return Err(
+            TaskError(code='NO_CTX', message='WorkflowContext not provided')
         )
-    for node_id in workflow_ctx._results_by_id:
-        result = workflow_ctx._results_by_id[node_id]
-        if hasattr(result, 'is_ok') and result.is_ok():
-            return TaskResult(ok=str(result.unwrap()))
-        elif hasattr(result, 'is_err') and result.is_err():
-            return TaskResult(err=result.err_value)
-    return TaskResult(
-        err=TaskError(error_code='NO_RESULT', message='No results in context')
+    for node_id in workflow_context._results_by_id:
+        match workflow_context._results_by_id[node_id]:
+            case Succeeded(value):
+                return Ok(str(value))
+            case Failed(error):
+                return Err(error)
+    return Err(
+        TaskError(code='NO_RESULT', message='No results in context')
     )
 
 
-@app.task(task_name='e2e_wf_ctx_sum')
+@app.task(name='e2e_wf_ctx_sum')
 def ctx_sum_task(
-    *, workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[int, TaskError]:
+    *, workflow_context: WorkflowContext | None = None,
+) -> Result[int, TaskError]:
     """Sums all integer results from workflow context."""
     time.sleep(0.05)
-    if workflow_ctx is None:
-        return TaskResult(
-            err=TaskError(error_code='NO_CTX', message='WorkflowContext not provided')
+    if workflow_context is None:
+        return Err(
+            TaskError(code='NO_CTX', message='WorkflowContext not provided')
         )
-    first = workflow_ctx.result_for(node_ctx_multi_a.key())
-    second = workflow_ctx.result_for(node_ctx_multi_b.key())
-    if first.is_err():
-        return TaskResult(err=first.err_value)
-    if second.is_err():
-        return TaskResult(err=second.err_value)
-    return TaskResult(ok=first.unwrap() + second.unwrap())
+    first = workflow_context.result_for(node_ctx_multi_a.key())
+    second = workflow_context.result_for(node_ctx_multi_b.key())
+    match first:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(first_value):
+            pass
+    match second:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(second_value):
+            return Ok(first_value + second_value)
 
 
-@app.task(task_name='e2e_wf_check_upstream_skipped')
+@app.task(name='e2e_wf_check_upstream_skipped')
 def check_upstream_skipped_task(
-    *, input_result: TaskResult[int, TaskError],
-) -> TaskResult[str, TaskError]:
+    *, input_result: TaskOutcome[int, TaskError],
+) -> Result[str, TaskError]:
     """Checks if input is UPSTREAM_SKIPPED error."""
     time.sleep(0.05)
-    if input_result.is_err():
-        err = input_result.err
-        if err is not None and err.error_code == 'UPSTREAM_SKIPPED':
-            return TaskResult(ok='received_upstream_skipped')
-        return TaskResult(ok=f"received_error_{err.error_code if err else 'unknown'}")
-    return TaskResult(ok=f'received_value_{input_result.unwrap()}')
+    match input_result:
+        case Failed(error) if error.code == 'UPSTREAM_SKIPPED':
+            return Ok('received_upstream_skipped')
+        case Failed(error):
+            return Ok(f'received_error_{error.code}')
+        case Succeeded(value):
+            return Ok(f'received_value_{value}')
 
 
-@app.task(task_name='e2e_wf_passthrough')
-def passthrough_task(*, value: int) -> TaskResult[int, TaskError]:
+@app.task(name='e2e_wf_passthrough')
+def passthrough_task(*, value: int) -> Result[int, TaskError]:
     """Simple passthrough that returns the input value."""
     time.sleep(0.05)
-    return TaskResult(ok=value)
+    return Ok(value)
 
 
-@app.task(task_name='e2e_wf_mixed_reader')
+@app.task(name='e2e_wf_mixed_reader')
 def mixed_reader_task(
-    *, from_args: TaskResult[int, TaskError],
-    workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[dict[str, int], TaskError]:
-    """Reads from both args_from and workflow_ctx."""
+    *, from_args: TaskOutcome[int, TaskError],
+    workflow_context: WorkflowContext | None = None,
+) -> Result[dict[str, int], TaskError]:
+    """Reads from both args_from and workflow_context."""
     time.sleep(0.05)
     result: dict[str, int] = {}
 
     # Get value from args_from
-    if from_args.is_err():
-        return TaskResult(err=from_args.err_value)
-    result['from_args'] = from_args.unwrap()
+    match from_args:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(value):
+            result['from_args'] = value
 
-    # Get value from workflow_ctx
-    if workflow_ctx is None:
-        return TaskResult(
-            err=TaskError(error_code='NO_CTX', message='WorkflowContext not provided')
+    # Get value from workflow_context
+    if workflow_context is None:
+        return Err(
+            TaskError(code='NO_CTX', message='WorkflowContext not provided')
         )
 
-    for node_id in workflow_ctx._results_by_id:
-        ctx_result = workflow_ctx._results_by_id[node_id]
-        if hasattr(ctx_result, 'is_ok') and ctx_result.is_ok():
-            result['from_ctx'] = ctx_result.unwrap()
-            break
+    for node_id in workflow_context._results_by_id:
+        match workflow_context._results_by_id[node_id]:
+            case Succeeded(value):
+                result['from_ctx'] = value
+                break
+            case Failed():
+                pass
 
-    return TaskResult(ok=result)
+    return Ok(result)
 
 
-@app.task(task_name='e2e_wf_produce_dict')
-def produce_dict_task(*, value: str) -> TaskResult[dict[str, JsonValue], TaskError]:
+@app.task(name='e2e_wf_produce_dict')
+def produce_dict_task(*, value: str) -> Result[dict[str, JsonValue], TaskError]:
     """Produces a dict with nested structure."""
     time.sleep(0.05)
-    return TaskResult(ok={'key': value, 'count': 42, 'nested': {'inner': True}})
+    return Ok({'key': value, 'count': 42, 'nested': {'inner': True}})
 
 
-@app.task(task_name='e2e_wf_receive_dict')
+@app.task(name='e2e_wf_receive_dict')
 def receive_dict_task(
-    *, input_result: TaskResult[dict[str, JsonValue], TaskError],
-) -> TaskResult[dict[str, JsonValue], TaskError]:
+    *, input_result: TaskOutcome[dict[str, JsonValue], TaskError],
+) -> Result[dict[str, JsonValue], TaskError]:
     """Receives dict via args_from and returns it unchanged."""
     time.sleep(0.05)
-    if input_result.is_err():
-        return TaskResult(err=input_result.err_value)
-    return TaskResult(ok=input_result.unwrap())
+    match input_result:
+        case Succeeded(value):
+            return Ok(value)
+        case Failed(error):
+            return Err(error)
 
 
-@app.task(task_name='e2e_wf_dual_reader')
+@app.task(name='e2e_wf_dual_reader')
 def dual_reader_task(
-    *, from_args: TaskResult[int, TaskError],
-    workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[dict[str, int], TaskError]:
-    """Reads same node's result via both args_from and workflow_ctx."""
+    *, from_args: TaskOutcome[int, TaskError],
+    workflow_context: WorkflowContext | None = None,
+) -> Result[dict[str, int], TaskError]:
+    """Reads same node's result via both args_from and workflow_context."""
     time.sleep(0.05)
-    if from_args.is_err():
-        return TaskResult(err=from_args.err_value)
-    args_value = from_args.unwrap()
+    match from_args:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(args_value):
+            pass
 
-    if workflow_ctx is None:
-        return TaskResult(
-            err=TaskError(error_code='NO_CTX', message='WorkflowContext not provided'),
+    if workflow_context is None:
+        return Err(
+            TaskError(code='NO_CTX', message='WorkflowContext not provided'),
         )
-    ctx_result = workflow_ctx.result_for(node_dual_a.key())
-    if ctx_result.is_err():
-        return TaskResult(err=ctx_result.err_value)
-
-    return TaskResult(ok={'from_args': args_value, 'from_ctx': ctx_result.unwrap()})
+    match workflow_context.result_for(node_dual_a.key()):
+        case Failed(error):
+            return Err(error)
+        case Succeeded(ctx_value):
+            return Ok({'from_args': args_value, 'from_ctx': ctx_value})
 
 
 # =============================================================================
 # L5.1: args_from single dependency (A → B)
 # =============================================================================
 
-node_df_a = TaskNode(fn=produce_int_task, kwargs={"value": 5})
+node_df_a = TaskNode(function=produce_int_task, kwargs={"value": 5})
 node_df_b = TaskNode(
-    fn=double_task,
+    function=double_task,
     node_id='e2e_wf_double',
     waits_for=[node_df_a],
     args_from={'input_result': node_df_a},
@@ -541,10 +565,10 @@ spec_args_from_single = _workflow(
 # L5.2: args_from multiple dependencies (A, B → C)
 # =============================================================================
 
-node_df_multi_a = TaskNode(fn=produce_int_task, kwargs={"value": 10})
-node_df_multi_b = TaskNode(fn=produce_int_task, kwargs={"value": 20})
+node_df_multi_a = TaskNode(function=produce_int_task, kwargs={"value": 10})
+node_df_multi_b = TaskNode(function=produce_int_task, kwargs={"value": 20})
 node_df_multi_c = TaskNode(
-    fn=sum_two_task,
+    function=sum_two_task,
     node_id='e2e_wf_sum_two',
     waits_for=[node_df_multi_a, node_df_multi_b],
     args_from={'first': node_df_multi_a, 'second': node_df_multi_b},
@@ -557,15 +581,15 @@ spec_args_from_multi = _workflow(
 
 
 # =============================================================================
-# L5.3: workflow_ctx result_for (A → B)
+# L5.3: workflow_context result_for (A → B)
 # =============================================================================
 
-node_ctx_a = TaskNode(fn=produce_int_task, kwargs={"value": 42})
+node_ctx_a = TaskNode(function=produce_int_task, kwargs={"value": 42})
 node_ctx_b = TaskNode(
-    fn=ctx_reader_task,
+    function=ctx_reader_task,
     node_id='e2e_wf_ctx_reader',
     waits_for=[node_ctx_a],
-    workflow_ctx_from=[node_ctx_a],
+    workflow_context_from=[node_ctx_a],
 )
 
 spec_ctx_single = _workflow(
@@ -575,16 +599,16 @@ spec_ctx_single = _workflow(
 
 
 # =============================================================================
-# L5.4: workflow_ctx with multiple deps (A, B → C)
+# L5.4: workflow_context with multiple deps (A, B → C)
 # =============================================================================
 
-node_ctx_multi_a = TaskNode(fn=produce_int_task, kwargs={"value": 100})
-node_ctx_multi_b = TaskNode(fn=produce_int_task, kwargs={"value": 200})
+node_ctx_multi_a = TaskNode(function=produce_int_task, kwargs={"value": 100})
+node_ctx_multi_b = TaskNode(function=produce_int_task, kwargs={"value": 200})
 node_ctx_multi_c = TaskNode(
-    fn=ctx_sum_task,
+    function=ctx_sum_task,
     node_id='e2e_wf_ctx_sum',
     waits_for=[node_ctx_multi_a, node_ctx_multi_b],
-    workflow_ctx_from=[node_ctx_multi_a, node_ctx_multi_b],
+    workflow_context_from=[node_ctx_multi_a, node_ctx_multi_b],
 )
 
 spec_ctx_multi = _workflow(
@@ -594,16 +618,16 @@ spec_ctx_multi = _workflow(
 
 
 # =============================================================================
-# L5.5: FAILED propagation (A fails → B with allow_failed_deps)
+# L5.5: FAILED propagation (A fails → B with allow_failed_dependencies)
 # =============================================================================
 
-node_failed_a = TaskNode(fn=fail_with_task, kwargs={"error_code": 'DELIBERATE_FAIL'})
+node_failed_a = TaskNode(function=fail_with_task, kwargs={"error_code": 'DELIBERATE_FAIL'})
 node_failed_b = TaskNode(
-    fn=check_upstream_skipped_task,  # Use task that returns success even with error input
+    function=check_upstream_skipped_task,  # Use task that returns success even with error input
     node_id='e2e_wf_check_upstream_skipped',
     waits_for=[node_failed_a],
     args_from={'input_result': node_failed_a},
-    allow_failed_deps=True,
+    allow_failed_dependencies=True,
 )
 
 spec_failed_propagation = _workflow(
@@ -621,18 +645,18 @@ spec_failed_propagation = _workflow(
 # L5.6: SKIPPED propagation (A fails → B skipped → C sees UPSTREAM_SKIPPED)
 # =============================================================================
 
-node_skipped_a = TaskNode(fn=fail_with_task, kwargs={"error_code": 'CAUSE_SKIP'})
+node_skipped_a = TaskNode(function=fail_with_task, kwargs={"error_code": 'CAUSE_SKIP'})
 node_skipped_b = TaskNode(
-    fn=passthrough_task, kwargs={"value": 999},
+    function=passthrough_task, kwargs={"value": 999},
     waits_for=[node_skipped_a],
-    # allow_failed_deps=False (default) means B will be SKIPPED when A fails
+    # allow_failed_dependencies=False (default) means B will be SKIPPED when A fails
 )
 node_skipped_c = TaskNode(
-    fn=check_upstream_skipped_task,
+    function=check_upstream_skipped_task,
     node_id='e2e_wf_check_upstream_skipped',
     waits_for=[node_skipped_b],
     args_from={'input_result': node_skipped_b},
-    allow_failed_deps=True,
+    allow_failed_dependencies=True,
 )
 
 spec_skipped_propagation = _workflow(
@@ -650,13 +674,13 @@ spec_skipped_propagation = _workflow(
 # L5.7: Join + ctx deps terminal gating (A, B → C with join=any, ctx from B)
 # =============================================================================
 
-node_join_ctx_a = TaskNode(fn=slow_step_task, kwargs={"step": 'A', 'delay_ms': 100})
-node_join_ctx_b = TaskNode(fn=slow_step_task, kwargs={"step": 'B', 'delay_ms': 300})
+node_join_ctx_a = TaskNode(function=slow_step_task, kwargs={"step": 'A', 'delay_ms': 100})
+node_join_ctx_b = TaskNode(function=slow_step_task, kwargs={"step": 'B', 'delay_ms': 300})
 node_join_ctx_c = TaskNode(
-    fn=ctx_reader_str_task,  # Use string reader since slow_step_task returns strings
+    function=ctx_reader_str_task,  # Use string reader since slow_step_task returns strings
     node_id='e2e_wf_ctx_reader_str',
     waits_for=[node_join_ctx_a, node_join_ctx_b],
-    workflow_ctx_from=[node_join_ctx_b],  # C needs B's result
+    workflow_context_from=[node_join_ctx_b],  # C needs B's result
     join='any',
 )
 
@@ -671,22 +695,22 @@ spec_join_ctx_gating = _workflow(
 #       A → {B, C} → D (D uses args_from from B and ctx for C)
 # =============================================================================
 
-node_mixed_a = TaskNode(fn=produce_int_task, kwargs={"value": 7})
+node_mixed_a = TaskNode(function=produce_int_task, kwargs={"value": 7})
 node_mixed_b = TaskNode(
-    fn=double_task,
+    function=double_task,
     waits_for=[node_mixed_a],
     args_from={'input_result': node_mixed_a},
 )
 node_mixed_c = TaskNode(
-    fn=produce_int_task, kwargs={"value": 3},
+    function=produce_int_task, kwargs={"value": 3},
     waits_for=[node_mixed_a],
 )
 node_mixed_d = TaskNode(
-    fn=mixed_reader_task,
+    function=mixed_reader_task,
     node_id='e2e_wf_mixed_reader',
     waits_for=[node_mixed_b, node_mixed_c],
     args_from={'from_args': node_mixed_b},
-    workflow_ctx_from=[node_mixed_c],
+    workflow_context_from=[node_mixed_c],
 )
 
 spec_mixed_dataflow = _workflow(
@@ -699,14 +723,14 @@ spec_mixed_dataflow = _workflow(
 # L5.9: Transitive args_from chain (A → B → C)
 # =============================================================================
 
-node_chain_a = TaskNode(fn=produce_int_task, kwargs={"value": 3})
+node_chain_a = TaskNode(function=produce_int_task, kwargs={"value": 3})
 node_chain_b = TaskNode(
-    fn=double_task,
+    function=double_task,
     waits_for=[node_chain_a],
     args_from={'input_result': node_chain_a},
 )
 node_chain_c = TaskNode(
-    fn=double_task,
+    function=double_task,
     node_id='e2e_wf_double_chain',
     waits_for=[node_chain_b],
     args_from={'input_result': node_chain_b},
@@ -722,12 +746,12 @@ spec_args_from_chain = _workflow(
 # L5.10: Failed dep with args_from, no success_policy (workflow FAILED)
 # =============================================================================
 
-node_fail_np_a = TaskNode(fn=fail_with_task, kwargs={"error_code": 'DATAFLOW_FAIL'})
+node_fail_np_a = TaskNode(function=fail_with_task, kwargs={"error_code": 'DATAFLOW_FAIL'})
 node_fail_np_b = TaskNode(
-    fn=double_task,
+    function=double_task,
     waits_for=[node_fail_np_a],
     args_from={'input_result': node_fail_np_a},
-    # allow_failed_deps=False (default): B should be SKIPPED
+    # allow_failed_dependencies=False (default): B should be SKIPPED
 )
 
 spec_args_from_fail_workflow = _workflow(
@@ -740,9 +764,9 @@ spec_args_from_fail_workflow = _workflow(
 # L5.11: args_from with dict result (serialization round-trip)
 # =============================================================================
 
-node_dict_a = TaskNode(fn=produce_dict_task, kwargs={"value": 'test_value'})
+node_dict_a = TaskNode(function=produce_dict_task, kwargs={"value": 'test_value'})
 node_dict_b = TaskNode(
-    fn=receive_dict_task,
+    function=receive_dict_task,
     node_id='e2e_wf_receive_dict',
     waits_for=[node_dict_a],
     args_from={'input_result': node_dict_a},
@@ -755,16 +779,16 @@ spec_args_from_dict = _workflow(
 
 
 # =============================================================================
-# L5.12: Same node via both args_from and workflow_ctx (dual injection)
+# L5.12: Same node via both args_from and workflow_context (dual injection)
 # =============================================================================
 
-node_dual_a = TaskNode(fn=produce_int_task, kwargs={"value": 77})
+node_dual_a = TaskNode(function=produce_int_task, kwargs={"value": 77})
 node_dual_b = TaskNode(
-    fn=dual_reader_task,
+    function=dual_reader_task,
     node_id='e2e_wf_dual_reader',
     waits_for=[node_dual_a],
     args_from={'from_args': node_dual_a},
-    workflow_ctx_from=[node_dual_a],
+    workflow_context_from=[node_dual_a],
 )
 
 spec_dual_injection = _workflow(
@@ -778,35 +802,45 @@ spec_dual_injection = _workflow(
 # =============================================================================
 
 import os
+from enum import Enum
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
 from horsies.core.models.tasks import RetryPolicy
 
 
-@app.task(task_name='e2e_wf_mark')
+class WorkflowRetryCode(str, Enum):
+    """The code that ``e2e_wf_retry_then_ok`` retries on."""
+
+    RETRY_NEEDED = 'RETRY_NEEDED'
+
+
+@app.task(name='e2e_wf_mark')
 def mark_task(
     *, value: str,
-    workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[str, TaskError]:
+    workflow_context: WorkflowContext | None = None,
+) -> Result[str, TaskError]:
     """Returns the provided value."""
     time.sleep(0.05)
-    _ = workflow_ctx
-    return TaskResult(ok=value)
+    _ = workflow_context
+    return Ok(value)
 
 
-@app.task(task_name='e2e_wf_slow_mark')
-def slow_mark_task(*, value: str, delay_ms: int = 200) -> TaskResult[str, TaskError]:
+@app.task(name='e2e_wf_slow_mark')
+def slow_mark_task(*, value: str, delay_ms: int = 200) -> Result[str, TaskError]:
     """Returns value after sleeping for delay_ms."""
     time.sleep(delay_ms / 1000)
-    return TaskResult(ok=value)
+    return Ok(value)
 
 
 @app.task(
-    task_name='e2e_wf_retry_then_ok',
-    retry_policy=RetryPolicy.exponential(base_seconds=1, max_retries=3, auto_retry_for=['RETRY_NEEDED']),
+    name='e2e_wf_retry_then_ok',
+    error_codes=WorkflowRetryCode,
+    retry_policy=RetryPolicy.exponential(
+        base_seconds=1, max_retries=3, retry_for=[WorkflowRetryCode.RETRY_NEEDED],
+    ),
 )
 def retry_then_ok_task(
     *, counter_file: str, succeed_on_attempt: int = 2
-) -> TaskResult[str, TaskError]:
+) -> Result[str, TaskError]:
     """
     Fails until attempt number reaches succeed_on_attempt.
     Uses a file to track attempts across retries.
@@ -824,14 +858,14 @@ def retry_then_ok_task(
         f.write(str(attempt))
 
     if attempt < succeed_on_attempt:
-        return TaskResult(
-            err=TaskError(
-                error_code='RETRY_NEEDED',
+        return Err(
+            TaskError(
+                code='RETRY_NEEDED',
                 message=f'Attempt {attempt}, need {succeed_on_attempt}',
             )
         )
 
-    return TaskResult(ok=f'succeeded_on_attempt_{attempt}')
+    return Ok(f'succeeded_on_attempt_{attempt}')
 
 
 # =============================================================================
@@ -844,13 +878,13 @@ def retry_then_ok_task(
 # L6.2: Join=quorum with ctx gating (A, B, C → D with join=quorum, ctx from C)
 # =============================================================================
 
-node_quorum_a = TaskNode(fn=slow_mark_task, kwargs={"value": 'A', 'delay_ms': 100})
-node_quorum_b = TaskNode(fn=slow_mark_task, kwargs={"value": 'B', 'delay_ms': 150})
-node_quorum_c = TaskNode(fn=slow_mark_task, kwargs={"value": 'C', 'delay_ms': 300})
+node_quorum_a = TaskNode(function=slow_mark_task, kwargs={"value": 'A', 'delay_ms': 100})
+node_quorum_b = TaskNode(function=slow_mark_task, kwargs={"value": 'B', 'delay_ms': 150})
+node_quorum_c = TaskNode(function=slow_mark_task, kwargs={"value": 'C', 'delay_ms': 300})
 node_quorum_d = TaskNode(
-    fn=ctx_reader_str_task,  # Use string-aware ctx reader
+    function=ctx_reader_str_task,  # Use string-aware ctx reader
     waits_for=[node_quorum_a, node_quorum_b, node_quorum_c],
-    workflow_ctx_from=[node_quorum_c],  # D needs C's result for ctx
+    workflow_context_from=[node_quorum_c],  # D needs C's result for ctx
     join='quorum',
     min_success=2,
 )
@@ -866,15 +900,15 @@ spec_quorum_ctx_gating = _workflow(
 # =============================================================================
 
 # A longer pipeline for pause testing
-node_pause_a = TaskNode(fn=slow_mark_task, kwargs={"value": 'A', 'delay_ms': 100})
+node_pause_a = TaskNode(function=slow_mark_task, kwargs={"value": 'A', 'delay_ms': 100})
 node_pause_b = TaskNode(
-    fn=slow_mark_task, kwargs={"value": 'B', 'delay_ms': 200}, waits_for=[node_pause_a]
+    function=slow_mark_task, kwargs={"value": 'B', 'delay_ms': 200}, waits_for=[node_pause_a]
 )
 node_pause_c = TaskNode(
-    fn=slow_mark_task, kwargs={"value": 'C', 'delay_ms': 200}, waits_for=[node_pause_b]
+    function=slow_mark_task, kwargs={"value": 'C', 'delay_ms': 200}, waits_for=[node_pause_b]
 )
 node_pause_d = TaskNode(
-    fn=slow_mark_task, kwargs={"value": 'D', 'delay_ms': 100}, waits_for=[node_pause_c]
+    function=slow_mark_task, kwargs={"value": 'D', 'delay_ms': 100}, waits_for=[node_pause_c]
 )
 
 spec_pausable = _workflow(
@@ -887,8 +921,8 @@ spec_pausable = _workflow(
 # L6.6: Success policy satisfied (A required, B optional)
 # =============================================================================
 
-node_sp_a = TaskNode(fn=mark_task, kwargs={"value": 'required_A'})
-node_sp_b_fail = TaskNode(fn=fail_task, kwargs={"error_code": 'OPTIONAL_FAIL'})
+node_sp_a = TaskNode(function=mark_task, kwargs={"value": 'required_A'})
+node_sp_b_fail = TaskNode(function=fail_task, kwargs={"error_code": 'OPTIONAL_FAIL'})
 
 spec_success_policy_satisfied = _workflow(
     name='e2e_success_policy_satisfied',
@@ -904,8 +938,8 @@ spec_success_policy_satisfied = _workflow(
 # L6.7: Success policy not met (A and B required, B fails)
 # =============================================================================
 
-node_sp_req_a = TaskNode(fn=mark_task, kwargs={"value": 'required_A'})
-node_sp_req_b_fail = TaskNode(fn=fail_task, kwargs={"error_code": 'REQUIRED_FAIL'})
+node_sp_req_a = TaskNode(function=mark_task, kwargs={"value": 'required_A'})
+node_sp_req_b_fail = TaskNode(function=fail_task, kwargs={"error_code": 'REQUIRED_FAIL'})
 
 spec_success_policy_not_met = _workflow(
     name='e2e_success_policy_not_met',
@@ -920,8 +954,8 @@ spec_success_policy_not_met = _workflow(
 # L6.8: Multiple success cases (case1: A required, case2: B required)
 # =============================================================================
 
-node_sp_multi_a_fail = TaskNode(fn=fail_task, kwargs={"error_code": 'CASE1_FAIL'})
-node_sp_multi_b = TaskNode(fn=mark_task, kwargs={"value": 'case2_ok'})
+node_sp_multi_a_fail = TaskNode(function=fail_task, kwargs={"error_code": 'CASE1_FAIL'})
+node_sp_multi_b = TaskNode(function=mark_task, kwargs={"value": 'case2_ok'})
 
 spec_success_policy_multi = _workflow(
     name='e2e_success_policy_multi',
@@ -958,11 +992,11 @@ spec_success_policy_multi = _workflow(
 # L6.2b: Join=quorum impossible (A fails, B fails, C ok → D with min_success=3)
 # =============================================================================
 
-node_qi_a = TaskNode(fn=fail_task, kwargs={"error_code": 'QI_FAIL_A'})
-node_qi_b = TaskNode(fn=fail_task, kwargs={"error_code": 'QI_FAIL_B'})
-node_qi_c = TaskNode(fn=mark_task, kwargs={"value": 'C_ok'})
+node_qi_a = TaskNode(function=fail_task, kwargs={"error_code": 'QI_FAIL_A'})
+node_qi_b = TaskNode(function=fail_task, kwargs={"error_code": 'QI_FAIL_B'})
+node_qi_c = TaskNode(function=mark_task, kwargs={"value": 'C_ok'})
 node_qi_d = TaskNode(
-    fn=mark_task, kwargs={"value": 'D_should_skip'},
+    function=mark_task, kwargs={"value": 'D_should_skip'},
     waits_for=[node_qi_a, node_qi_b, node_qi_c],
     join='quorum',
     min_success=3,
@@ -978,10 +1012,10 @@ spec_quorum_impossible = _workflow(
 # L6.2c: Join=any with all deps failing (A fails, B fails → C with join=any)
 # =============================================================================
 
-node_jaf_a = TaskNode(fn=fail_task, kwargs={"error_code": 'JAF_FAIL_A'})
-node_jaf_b = TaskNode(fn=fail_task, kwargs={"error_code": 'JAF_FAIL_B'})
+node_jaf_a = TaskNode(function=fail_task, kwargs={"error_code": 'JAF_FAIL_A'})
+node_jaf_b = TaskNode(function=fail_task, kwargs={"error_code": 'JAF_FAIL_B'})
 node_jaf_c = TaskNode(
-    fn=mark_task, kwargs={"value": 'C_should_skip'},
+    function=mark_task, kwargs={"value": 'C_should_skip'},
     waits_for=[node_jaf_a, node_jaf_b],
     join='any',
 )
@@ -998,9 +1032,9 @@ spec_join_any_all_fail = _workflow(
 
 from horsies.core.models.workflow import OnError
 
-node_oep_a = TaskNode(fn=step_task, kwargs={"step": 'A'})
-node_oep_b = TaskNode(fn=fail_task, kwargs={"error_code": 'PAUSE_FAIL'}, waits_for=[node_oep_a])
-node_oep_c = TaskNode(fn=step_task, kwargs={"step": 'C'}, waits_for=[node_oep_b])
+node_oep_a = TaskNode(function=step_task, kwargs={"step": 'A'})
+node_oep_b = TaskNode(function=fail_task, kwargs={"error_code": 'PAUSE_FAIL'}, waits_for=[node_oep_a])
+node_oep_c = TaskNode(function=step_task, kwargs={"step": 'C'}, waits_for=[node_oep_b])
 
 spec_on_error_pause = _workflow(
     name='e2e_on_error_pause',
@@ -1037,42 +1071,47 @@ E2ESubPet: TypeAlias = Annotated[
 ]
 
 
-@app.task(task_name='e2e_sub_int_ok')
-def e2e_sub_int_ok_task(*, value: int = 11) -> TaskResult[int, TaskError]:
+@app.task(name='e2e_sub_int_ok')
+def e2e_sub_int_ok_task(*, value: int = 11) -> Result[int, TaskError]:
     time.sleep(0.05)
-    return TaskResult(ok=value)
+    return Ok(value)
 
 
-@app.task(task_name='e2e_sub_int_fail')
-def e2e_sub_int_fail_task(*, error_code: str) -> TaskResult[int, TaskError]:
+@app.task(name='e2e_sub_int_fail')
+def e2e_sub_int_fail_task(*, error_code: str) -> Result[int, TaskError]:
     time.sleep(0.05)
-    return TaskResult(
-        err=TaskError(error_code=error_code, message=f'Subworkflow failed: {error_code}'),
+    return Err(
+        TaskError(code=error_code, message=f'Subworkflow failed: {error_code}'),
     )
 
 
-@app.task(task_name='e2e_sub_report_input')
+@app.task(name='e2e_sub_report_input')
 def e2e_sub_report_input_task(
     *, input_is_err: bool,
     input_error_code: str | None,
     input_value: int | None,
-) -> TaskResult[dict[str, JsonValue], TaskError]:
+) -> Result[dict[str, JsonValue], TaskError]:
     time.sleep(0.05)
-    return TaskResult(ok={
+    return Ok({
         'input_is_err': input_is_err,
         'input_error_code': input_error_code,
         'input_value': input_value,
     })
 
 
-@app.task(task_name='e2e_sub_probe_failed_child')
+@app.task(name='e2e_sub_probe_failed_child')
 def e2e_sub_probe_failed_child_task(
-    *, child_result: TaskResult[int, TaskError],
-    workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[dict[str, JsonValue], TaskError]:
+    *, child_result: TaskOutcome[int, TaskError],
+    workflow_context: WorkflowContext | None = None,
+) -> Result[dict[str, JsonValue], TaskError]:
     time.sleep(0.05)
 
-    args_err = child_result.err if child_result.is_err() else None
+    args_err: TaskError | None
+    match child_result:
+        case Failed(error):
+            args_err = error
+        case Succeeded():
+            args_err = None
     ctx_err: TaskError | None = None
     summary_status: str | None = None
     summary_failed_tasks: int | None = None
@@ -1080,40 +1119,44 @@ def e2e_sub_probe_failed_child_task(
     ctx_lookup_ok = False
     summary_lookup_ok = False
 
-    if workflow_ctx is not None:
+    if workflow_context is not None:
         try:
-            ctx_result = workflow_ctx.result_for(node_e2e_sub_failure_probe_child.key())
+            ctx_result = workflow_context.result_for(node_e2e_sub_failure_probe_child.key())
             ctx_lookup_ok = True
-            ctx_err = ctx_result.err if ctx_result.is_err() else None
+            match ctx_result:
+                case Failed(error):
+                    ctx_err = error
+                case Succeeded():
+                    ctx_err = None
         except Exception as exc:
             ctx_err = TaskError(
-                error_code='CTX_LOOKUP_FAILED',
+                code='CTX_LOOKUP_FAILED',
                 message=f'{type(exc).__name__}: {exc}',
             )
 
         try:
-            summary = workflow_ctx.summary_for(node_e2e_sub_failure_probe_child)
+            summary = workflow_context.summary_for(node_e2e_sub_failure_probe_child)
             summary_lookup_ok = True
             summary_status = summary.status.value
-            summary_failed_tasks = summary.failed_tasks
+            summary_failed_tasks = summary.failed_nodes
             summary_error_summary = summary.error_summary
         except Exception as exc:
             summary_error_summary = f'{type(exc).__name__}: {exc}'
 
-    return TaskResult(ok={
+    return Ok({
         'args_lookup_ok': True,
-        'args_is_subworkflow_error': isinstance(args_err, SubWorkflowError),
+        'args_is_subworkflow_error': isinstance(args_err, SubWorkflowFailure),
         'args_sub_workflow_id': (
-            args_err.sub_workflow_id if isinstance(args_err, SubWorkflowError) else None
+            args_err.sub_workflow_id if isinstance(args_err, SubWorkflowFailure) else None
         ),
         'ctx_lookup_ok': ctx_lookup_ok,
-        'ctx_is_subworkflow_error': isinstance(ctx_err, SubWorkflowError),
+        'ctx_is_subworkflow_error': isinstance(ctx_err, SubWorkflowFailure),
         'ctx_sub_workflow_id': (
-            ctx_err.sub_workflow_id if isinstance(ctx_err, SubWorkflowError) else None
+            ctx_err.sub_workflow_id if isinstance(ctx_err, SubWorkflowFailure) else None
         ),
         'ids_match': (
-            isinstance(args_err, SubWorkflowError)
-            and isinstance(ctx_err, SubWorkflowError)
+            isinstance(args_err, SubWorkflowFailure)
+            and isinstance(ctx_err, SubWorkflowFailure)
             and args_err.sub_workflow_id == ctx_err.sub_workflow_id
         ),
         'summary_lookup_ok': summary_lookup_ok,
@@ -1123,10 +1166,10 @@ def e2e_sub_probe_failed_child_task(
     })
 
 
-@app.task(task_name='e2e_sub_probe_success_ctx')
+@app.task(name='e2e_sub_probe_success_ctx')
 def e2e_sub_probe_success_ctx_task(
-    *, workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[dict[str, JsonValue], TaskError]:
+    *, workflow_context: WorkflowContext | None = None,
+) -> Result[dict[str, JsonValue], TaskError]:
     time.sleep(0.05)
 
     result_ok = False
@@ -1137,32 +1180,32 @@ def e2e_sub_probe_success_ctx_task(
     summary_completed_tasks: int | None = None
     summary_lookup_ok = False
 
-    if workflow_ctx is None:
-        return TaskResult(
-            err=TaskError(error_code='NO_CTX', message='WorkflowContext not provided'),
+    if workflow_context is None:
+        return Err(
+            TaskError(code='NO_CTX', message='WorkflowContext not provided'),
         )
 
     try:
-        result = workflow_ctx.result_for(node_e2e_sub_success_ctx_child.key())
-        result_ok = result.is_ok()
-        if result.is_ok():
-            result_value = result.unwrap()
-        else:
-            err = result.err
-            result_error_code = str(err.error_code) if err is not None else None
+        match workflow_context.result_for(node_e2e_sub_success_ctx_child.key()):
+            case Succeeded(value):
+                result_ok = True
+                result_value = value
+            case Failed(error):
+                result_ok = False
+                result_error_code = str(error.code)
     except Exception as exc:
         result_error_code = f'{type(exc).__name__}: {exc}'
 
     try:
-        summary = workflow_ctx.summary_for(node_e2e_sub_success_ctx_child)
+        summary = workflow_context.summary_for(node_e2e_sub_success_ctx_child)
         summary_lookup_ok = True
         summary_status = summary.status.value
         summary_output = summary.output
-        summary_completed_tasks = summary.completed_tasks
+        summary_completed_tasks = summary.completed_nodes
     except Exception as exc:
         summary_status = f'{type(exc).__name__}: {exc}'
 
-    return TaskResult(ok={
+    return Ok({
         'result_ok': result_ok,
         'result_value': result_value,
         'result_error_code': result_error_code,
@@ -1173,15 +1216,15 @@ def e2e_sub_probe_success_ctx_task(
     })
 
 
-@app.task(task_name='e2e_sub_pet_report')
+@app.task(name='e2e_sub_pet_report')
 def e2e_sub_pet_report_task(
     *, saw_dog_at_build: bool,
     type_name_at_build: str,
     kind_at_build: str | None,
     bark_volume_at_build: int | None,
-) -> TaskResult[dict[str, JsonValue], TaskError]:
+) -> Result[dict[str, JsonValue], TaskError]:
     time.sleep(0.05)
-    return TaskResult(ok={
+    return Ok({
         'saw_dog_at_build': saw_dog_at_build,
         'type_name_at_build': type_name_at_build,
         'kind_at_build': kind_at_build,
@@ -1193,7 +1236,7 @@ class E2ESubOkWorkflow(WorkflowDefinition[int]):
     name = 'e2e_sub_ok_workflow'
     definition_key = 'tests.e2e.sub.ok.v1'
 
-    child = TaskNode(fn=e2e_sub_int_ok_task, kwargs={'value': 11})
+    child = TaskNode(function=e2e_sub_int_ok_task, kwargs={'value': 11})
 
     config = WorkflowDefinitionConfig(output=child, on_error=OnError.FAIL)
 
@@ -1203,7 +1246,7 @@ class E2ESubFailWorkflow(WorkflowDefinition[int]):
     definition_key = 'tests.e2e.sub.fail.v1'
 
     child = TaskNode(
-        fn=e2e_sub_int_fail_task,
+        function=e2e_sub_int_fail_task,
         kwargs={'error_code': 'E2E_SUB_CHILD_FAIL'},
     )
 
@@ -1214,7 +1257,7 @@ class E2ESubNestedOkMiddleWorkflow(WorkflowDefinition[int]):
     name = 'e2e_sub_nested_ok_middle_workflow'
     definition_key = 'tests.e2e.sub.nested.ok.middle.v1'
 
-    child = SubWorkflowNode(workflow_def=E2ESubOkWorkflow)
+    child = SubWorkflowNode(workflow_definition=E2ESubOkWorkflow)
 
     config = WorkflowDefinitionConfig(output=child, on_error=OnError.FAIL)
 
@@ -1223,7 +1266,7 @@ class E2ESubNestedFailMiddleWorkflow(WorkflowDefinition[int]):
     name = 'e2e_sub_nested_fail_middle_workflow'
     definition_key = 'tests.e2e.sub.nested.fail.middle.v1'
 
-    child = SubWorkflowNode(workflow_def=E2ESubFailWorkflow)
+    child = SubWorkflowNode(workflow_definition=E2ESubFailWorkflow)
 
     config = WorkflowDefinitionConfig(output=child, on_error=OnError.FAIL)
 
@@ -1236,17 +1279,21 @@ class E2ESubParamWorkflow(WorkflowDefinition[int]):
     def build_with(
         cls,
         horsies_app: Any,
-        value: TaskResult[int, TaskError],
+        value: TaskOutcome[int, TaskError],
     ) -> Any:
-        raw_value = value.unwrap() if value.is_ok() else -1
-        child = TaskNode(fn=e2e_sub_int_ok_task, kwargs={'value': raw_value})
+        match value:
+            case Succeeded(succeeded_value):
+                raw_value = succeeded_value
+            case Failed():
+                raw_value = -1
+        child = TaskNode(function=e2e_sub_int_ok_task, kwargs={'value': raw_value})
         return horsies_app.workflow(
             name=cls.name,
-            tasks=[child],
+            nodes=[child],
             output=child,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
-            workflow_def_cls=cls,
+            workflow_definition=cls,
         )
 
 
@@ -1258,24 +1305,33 @@ class E2ESubFailedInputWorkflow(WorkflowDefinition[dict[str, JsonValue]]):
     def build_with(
         cls,
         horsies_app: Any,
-        value: TaskResult[int, TaskError],
+        value: TaskOutcome[int, TaskError],
     ) -> Any:
-        err = value.err if value.is_err() else None
+        input_kwargs: dict[str, JsonValue]
+        match value:
+            case Failed(error):
+                input_kwargs = {
+                    'input_is_err': True,
+                    'input_error_code': str(error.code),
+                    'input_value': None,
+                }
+            case Succeeded(succeeded_value):
+                input_kwargs = {
+                    'input_is_err': False,
+                    'input_error_code': None,
+                    'input_value': succeeded_value,
+                }
         child = TaskNode(
-            fn=e2e_sub_report_input_task,
-            kwargs={
-                'input_is_err': value.is_err(),
-                'input_error_code': str(err.error_code) if err is not None else None,
-                'input_value': value.unwrap() if value.is_ok() else None,
-            },
+            function=e2e_sub_report_input_task,
+            kwargs=input_kwargs,
         )
         return horsies_app.workflow(
             name=cls.name,
-            tasks=[child],
+            nodes=[child],
             output=child,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
-            workflow_def_cls=cls,
+            workflow_definition=cls,
         )
 
 
@@ -1290,7 +1346,7 @@ class E2ESubTypedKwargWorkflow(WorkflowDefinition[dict[str, JsonValue]]):
         pet: E2ESubPet,
     ) -> Any:
         child = TaskNode(
-            fn=e2e_sub_pet_report_task,
+            function=e2e_sub_pet_report_task,
             kwargs={
                 'saw_dog_at_build': isinstance(pet, E2ESubDog),
                 'type_name_at_build': type(pet).__name__,
@@ -1300,11 +1356,11 @@ class E2ESubTypedKwargWorkflow(WorkflowDefinition[dict[str, JsonValue]]):
         )
         return horsies_app.workflow(
             name=cls.name,
-            tasks=[child],
+            nodes=[child],
             output=child,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
-            workflow_def_cls=cls,
+            workflow_definition=cls,
         )
 
 
@@ -1320,16 +1376,16 @@ class E2ESubSlowWorkflow(WorkflowDefinition[str]):
         delay_ms: int = 1_000,
     ) -> Any:
         child = TaskNode(
-            fn=slow_mark_task,
+            function=slow_mark_task,
             kwargs={'value': value, 'delay_ms': delay_ms},
         )
         return horsies_app.workflow(
             name=cls.name,
-            tasks=[child],
+            nodes=[child],
             output=child,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
-            workflow_def_cls=cls,
+            workflow_definition=cls,
         )
 
 
@@ -1338,7 +1394,7 @@ class E2ESubNestedSlowMiddleWorkflow(WorkflowDefinition[str]):
     definition_key = 'tests.e2e.sub.nested.slow.middle.v1'
 
     child = SubWorkflowNode(
-        workflow_def=E2ESubSlowWorkflow,
+        workflow_definition=E2ESubSlowWorkflow,
         kwargs={'value': 'nested_slow_leaf', 'delay_ms': 1_000},
     )
 
@@ -1357,7 +1413,7 @@ class E2ESubRetryWorkflow(WorkflowDefinition[str]):
         succeed_on_attempt: int,
     ) -> Any:
         child = TaskNode(
-            fn=retry_then_ok_task,
+            function=retry_then_ok_task,
             kwargs={
                 'counter_file': counter_file,
                 'succeed_on_attempt': succeed_on_attempt,
@@ -1365,11 +1421,11 @@ class E2ESubRetryWorkflow(WorkflowDefinition[str]):
         )
         return horsies_app.workflow(
             name=cls.name,
-            tasks=[child],
+            nodes=[child],
             output=child,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
-            workflow_def_cls=cls,
+            workflow_definition=cls,
         )
 
 
@@ -1384,7 +1440,7 @@ class E2ESubExpiredWorkflow(WorkflowDefinition[str]):
         expires_in_ms: int = -100,
     ) -> Any:
         child = TaskNode(
-            fn=mark_task,
+            function=mark_task,
             kwargs={'value': 'expired_child'},
             good_until=(
                 datetime.now(timezone.utc) + timedelta(milliseconds=expires_in_ms)
@@ -1392,16 +1448,16 @@ class E2ESubExpiredWorkflow(WorkflowDefinition[str]):
         )
         return horsies_app.workflow(
             name=cls.name,
-            tasks=[child],
+            nodes=[child],
             output=child,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
-            workflow_def_cls=cls,
+            workflow_definition=cls,
         )
 
 
 node_e2e_sub_success_child = SubWorkflowNode(
-    workflow_def=E2ESubOkWorkflow,
+    workflow_definition=E2ESubOkWorkflow,
     node_id='e2e_sub_success_child',
 )
 spec_subworkflow_success_full_surface = _workflow(
@@ -1412,7 +1468,7 @@ spec_subworkflow_success_full_surface = _workflow(
 
 
 node_e2e_sub_failure_child = SubWorkflowNode(
-    workflow_def=E2ESubFailWorkflow,
+    workflow_definition=E2ESubFailWorkflow,
     node_id='e2e_sub_failure_child',
 )
 spec_subworkflow_failure_fail_policy = _workflow(
@@ -1424,7 +1480,7 @@ spec_subworkflow_failure_fail_policy = _workflow(
 
 
 node_e2e_sub_pause_child = SubWorkflowNode(
-    workflow_def=E2ESubFailWorkflow,
+    workflow_definition=E2ESubFailWorkflow,
     node_id='e2e_sub_pause_child',
 )
 spec_subworkflow_failure_pause_policy = _workflow(
@@ -1436,14 +1492,14 @@ spec_subworkflow_failure_pause_policy = _workflow(
 
 
 node_e2e_sub_success_ctx_child = SubWorkflowNode(
-    workflow_def=E2ESubOkWorkflow,
+    workflow_definition=E2ESubOkWorkflow,
     node_id='e2e_sub_success_ctx_child',
 )
 node_e2e_sub_success_ctx_probe = TaskNode(
-    fn=e2e_sub_probe_success_ctx_task,
+    function=e2e_sub_probe_success_ctx_task,
     node_id='e2e_sub_success_ctx_probe',
     waits_for=[node_e2e_sub_success_ctx_child],
-    workflow_ctx_from=[node_e2e_sub_success_ctx_child],
+    workflow_context_from=[node_e2e_sub_success_ctx_child],
 )
 spec_subworkflow_success_ctx_probe = _workflow(
     name='e2e_subworkflow_success_ctx_probe',
@@ -1453,16 +1509,16 @@ spec_subworkflow_success_ctx_probe = _workflow(
 
 
 node_e2e_sub_failure_probe_child = SubWorkflowNode(
-    workflow_def=E2ESubFailWorkflow,
+    workflow_definition=E2ESubFailWorkflow,
     node_id='e2e_sub_failure_probe_child',
 )
 node_e2e_sub_failure_probe = TaskNode(
-    fn=e2e_sub_probe_failed_child_task,
+    function=e2e_sub_probe_failed_child_task,
     node_id='e2e_sub_failure_probe',
     waits_for=[node_e2e_sub_failure_probe_child],
     args_from={'child_result': node_e2e_sub_failure_probe_child},
-    workflow_ctx_from=[node_e2e_sub_failure_probe_child],
-    allow_failed_deps=True,
+    workflow_context_from=[node_e2e_sub_failure_probe_child],
+    allow_failed_dependencies=True,
 )
 spec_subworkflow_failure_args_ctx_probe = _workflow(
     name='e2e_subworkflow_failure_args_ctx_probe',
@@ -1476,12 +1532,12 @@ spec_subworkflow_failure_args_ctx_probe = _workflow(
 
 
 node_e2e_sub_outputless_ok = TaskNode(
-    fn=mark_task,
+    function=mark_task,
     node_id='e2e_sub_outputless_ok',
     kwargs={'value': 'required_ok'},
 )
 node_e2e_sub_outputless_fail_child = SubWorkflowNode(
-    workflow_def=E2ESubFailWorkflow,
+    workflow_definition=E2ESubFailWorkflow,
     node_id='e2e_sub_outputless_fail_child',
 )
 spec_subworkflow_outputless_success_policy = _workflow(
@@ -1495,11 +1551,11 @@ spec_subworkflow_outputless_success_policy = _workflow(
 
 
 node_e2e_sub_parallel_ok_child = SubWorkflowNode(
-    workflow_def=E2ESubOkWorkflow,
+    workflow_definition=E2ESubOkWorkflow,
     node_id='e2e_sub_parallel_ok_child',
 )
 node_e2e_sub_parallel_fail_child = SubWorkflowNode(
-    workflow_def=E2ESubFailWorkflow,
+    workflow_definition=E2ESubFailWorkflow,
     node_id='e2e_sub_parallel_fail_child',
 )
 spec_subworkflow_parallel_success_failure = _workflow(
@@ -1513,7 +1569,7 @@ spec_subworkflow_parallel_success_failure = _workflow(
 
 
 node_e2e_sub_nested_success_child = SubWorkflowNode(
-    workflow_def=E2ESubNestedOkMiddleWorkflow,
+    workflow_definition=E2ESubNestedOkMiddleWorkflow,
     node_id='e2e_sub_nested_success_child',
 )
 spec_subworkflow_nested_success = _workflow(
@@ -1524,7 +1580,7 @@ spec_subworkflow_nested_success = _workflow(
 
 
 node_e2e_sub_nested_failure_child = SubWorkflowNode(
-    workflow_def=E2ESubNestedFailMiddleWorkflow,
+    workflow_definition=E2ESubNestedFailMiddleWorkflow,
     node_id='e2e_sub_nested_failure_child',
 )
 spec_subworkflow_nested_failure = _workflow(
@@ -1535,12 +1591,12 @@ spec_subworkflow_nested_failure = _workflow(
 
 
 node_e2e_sub_param_source = TaskNode(
-    fn=produce_int_task,
+    function=produce_int_task,
     node_id='e2e_sub_param_source',
     kwargs={'value': 37},
 )
 node_e2e_sub_param_child = SubWorkflowNode(
-    workflow_def=E2ESubParamWorkflow,
+    workflow_definition=E2ESubParamWorkflow,
     node_id='e2e_sub_param_child',
     waits_for=[node_e2e_sub_param_source],
     args_from={'value': node_e2e_sub_param_source},
@@ -1553,19 +1609,19 @@ spec_subworkflow_build_with_args_from = _workflow(
 
 
 node_e2e_sub_failed_input_source = TaskNode(
-    fn=fail_task,
+    function=fail_task,
     node_id='e2e_sub_failed_input_source',
     kwargs={'error_code': 'E2E_UPSTREAM_FAIL'},
 )
 node_e2e_sub_failed_input_child = SubWorkflowNode(
-    workflow_def=E2ESubFailedInputWorkflow,
+    workflow_definition=E2ESubFailedInputWorkflow,
     node_id='e2e_sub_failed_input_child',
     waits_for=[node_e2e_sub_failed_input_source],
     args_from={'value': node_e2e_sub_failed_input_source},
-    allow_failed_deps=True,
+    allow_failed_dependencies=True,
 )
-spec_subworkflow_allow_failed_deps_to_build_with = _workflow(
-    name='e2e_subworkflow_allow_failed_deps_to_build_with',
+spec_subworkflow_allow_failed_dependencies_to_build_with = _workflow(
+    name='e2e_subworkflow_allow_failed_dependencies_to_build_with',
     tasks=[node_e2e_sub_failed_input_source, node_e2e_sub_failed_input_child],
     output=node_e2e_sub_failed_input_child,
     success_policy=SuccessPolicy(
@@ -1576,7 +1632,7 @@ spec_subworkflow_allow_failed_deps_to_build_with = _workflow(
 
 
 node_e2e_sub_typed_kwarg_child = SubWorkflowNode(
-    workflow_def=E2ESubTypedKwargWorkflow,
+    workflow_definition=E2ESubTypedKwargWorkflow,
     node_id='e2e_sub_typed_kwarg_child',
     kwargs={'pet': E2ESubDog(name='Ada', bark_volume=7)},
 )

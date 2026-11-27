@@ -42,8 +42,9 @@ After the ready frame:
   ``HANDLER_ERROR_LOG_EVERY`` failures. The thread goes on with the next
   event.
 - The main thread sends a ``handler_stats`` frame every
-  ``HANDLER_STATS_INTERVAL_S``: the totals of each handler since the child
-  started, the spans made with no workflow node, and the RSS of the child.
+  ``HANDLER_STATISTICS_INTERVAL_SECONDS``: the totals of each handler since
+  the child started, the spans made with no workflow node, and the RSS of the
+  child.
 
 At the stop frame each inbox closes, the handler threads and the reader
 thread get ``HANDLER_DRAIN_S`` together for the events and the spans left,
@@ -73,7 +74,7 @@ from typing import TYPE_CHECKING, Final, NoReturn, assert_never
 
 from horsies import _core as core
 from horsies._catalog import events
-from horsies._catalog.broker_errors import BrokerOperationFailed
+from horsies._catalog.broker_errors import DatabaseOperationFailed
 from horsies._catalog.events import AnyEvent
 from horsies.core.codec.json_io import loads_json
 from horsies.core.event_handlers import EventHandler, HandlerChildStartHook, HandlerKind
@@ -136,7 +137,7 @@ HANDLER_QUEUE_EVENTS: Final = 10_000
 """The most events that the inbox of one handler holds. An event that does
 not fit is dropped for that handler and counted in its ``dropped``."""
 
-HANDLER_STATS_INTERVAL_S: Final = 5.0
+HANDLER_STATISTICS_INTERVAL_SECONDS: Final = 5.0
 """The time between two ``handler_stats`` frames."""
 
 HANDLER_DRAIN_S: Final = 2.0
@@ -431,12 +432,12 @@ class RunningHandler:
 def node_read_of(
     outcome: core.TaskWorkflowNodeLinked
     | core.TaskWorkflowNodeNotLinked
-    | BrokerOperationFailed,
+    | DatabaseOperationFailed,
 ) -> NodeRead:
     """The node read of the outcome of ``CoreHandle.task_workflow_node``.
     Pure."""
     match outcome:
-        case BrokerOperationFailed(code=code, message=message):
+        case DatabaseOperationFailed(code=code, message=message):
             return NodeReadFailed(detail=f'{code.value}: {message}')
         case core.TaskWorkflowNodeLinked(
             workflow_id=workflow_id,
@@ -711,7 +712,7 @@ def runner_of(handler: EventHandler) -> Result[HandlerRunner, BootFailedFrame]:
     an errno of a resource limit, else ``TaskLoopCreateFailed``, which
     repeats.
     """
-    match handler.kind:
+    match handler.handler_kind:
         case HandlerKind.DEF:
             return Ok(OnThread())
         case HandlerKind.ASYNC_DEF:
@@ -893,6 +894,6 @@ def serve_handler_child(
     logger.debug(
         'The handler child %s is ready with %d handlers', os.getpid(), len(running)
     )
-    while not stopped.wait(HANDLER_STATS_INTERVAL_S):
+    while not stopped.wait(HANDLER_STATISTICS_INTERVAL_SECONDS):
         _send_child_frame(sock, stats_frame(running, ended_spans))
     exit_after_handler_stop(sock, running, ended_spans)

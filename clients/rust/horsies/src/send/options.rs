@@ -1,8 +1,19 @@
-//! The options of one send: its deadline, its idempotency key and the
-//! retention of its history record.
+//! The options of one send: its delay, its deadline, its idempotency key
+//! and the retention of its history record.
 
 use chrono::{DateTime, Utc};
+use horsies_core::manifest::WholeSeconds;
 use horsies_core::{EnqueueRetention, RetentionConfig, RetentionDays};
+
+/// When a send asks the task to start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SendStart {
+    /// When a worker claims it (the default).
+    #[default]
+    Now,
+    /// Not before the delay after the send.
+    AfterDelay(WholeSeconds),
+}
 
 /// How long the history record of a sent task is kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -19,26 +30,37 @@ pub enum SendRetention {
     Period(RetentionDays),
 }
 
-/// Options of one send (Python's `send` keyword arguments).
+/// Options of one send (Python's `with_options` keyword arguments).
 ///
 /// ```ignore
 /// let options = TaskSendOptions::new()
+///     .delay(WholeSeconds::from_secs(60))
 ///     .good_until(deadline)
 ///     .idempotency_key(format!("invoice-{invoice_id}"))
 ///     .retention(SendRetention::Forever);
-/// send_invoice::with_options(options).send(invoice).await?;
+/// send_invoice::with_options(options).send(&app, invoice).await?;
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskSendOptions {
+    start: SendStart,
     good_until: Option<DateTime<Utc>>,
     idempotency_key: Option<String>,
     retention: SendRetention,
 }
 
 impl TaskSendOptions {
-    /// No deadline, no key, the retention of the queue.
+    /// No delay, no deadline, no key, the retention of the queue.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The task starts no earlier than `delay` after the send. The stored
+    /// row is the row of a send with `enqueue_delay_seconds`.
+    pub fn delay(self, delay: WholeSeconds) -> Self {
+        Self {
+            start: SendStart::AfterDelay(delay),
+            ..self
+        }
     }
 
     /// The task expires when no worker started it by `deadline`.
@@ -67,6 +89,10 @@ impl TaskSendOptions {
     /// Keep the task's history record forever: `retention(SendRetention::Forever)`.
     pub fn retain_forever(self) -> Self {
         self.retention(SendRetention::Forever)
+    }
+
+    pub(crate) fn start(&self) -> SendStart {
+        self.start
     }
 
     pub(crate) fn deadline(&self) -> Option<DateTime<Utc>> {
@@ -140,14 +166,21 @@ mod tests {
     fn the_options_hold_what_the_builder_sets() {
         let deadline = Utc::now();
         let options = TaskSendOptions::new()
+            .delay(WholeSeconds::from_secs(60))
             .good_until(deadline)
             .idempotency_key("invoice-7")
             .retain_forever();
+        assert_eq!(
+            options.start(),
+            SendStart::AfterDelay(WholeSeconds::from_secs(60))
+        );
         assert_eq!(options.deadline(), Some(deadline));
         assert_eq!(options.key(), Some("invoice-7"));
         assert_eq!(options.chosen_retention(), SendRetention::Forever);
+        let defaults = TaskSendOptions::new();
+        assert_eq!(defaults.start(), SendStart::Now);
         assert_eq!(
-            TaskSendOptions::new().chosen_retention(),
+            defaults.chosen_retention(),
             SendRetention::FromQueueOrDefault
         );
     }

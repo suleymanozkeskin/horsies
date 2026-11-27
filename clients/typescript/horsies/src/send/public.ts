@@ -26,13 +26,10 @@ export type {
   TaskSendValidationFailed,
 } from "../_catalog/task_send_errors.ts";
 
-export type {
-  RetryableSendError,
-  SendFailure,
-  SentTypes,
-  TaskSendError,
-  TaskSendKeyConflict,
-  WithSentTypes,
-} from "./errors.ts";
+export type { RetryableSendError, SendFailure, SentTypes, TaskSendError, WithSentTypes } from "./errors.ts";
 
-export type { Retention, SendOptions } from "./options.ts";
+export type { SeatRelayFull } from "../seats/relay-full.ts";
+
+export { SeatRelayCode } from "../_catalog/task_send.ts";
+
+export type { SendRetention, TaskSendOptions } from "./options.ts";

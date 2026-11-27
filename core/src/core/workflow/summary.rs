@@ -19,17 +19,17 @@ pub struct SubWorkflowSummary {
     /// is an ok value. An integer outside the `i64` and `u64` range keeps every digit.
     pub output: Option<JsonText>,
 
-    /// Total number of tasks in the child workflow.
-    pub total_tasks: i32,
+    /// Total number of nodes in the child workflow.
+    pub total_nodes: i32,
 
-    /// Number of completed tasks.
-    pub completed_tasks: i32,
+    /// Number of completed nodes.
+    pub completed_nodes: i32,
 
-    /// Number of failed tasks.
-    pub failed_tasks: i32,
+    /// Number of failed nodes.
+    pub failed_nodes: i32,
 
-    /// Number of skipped tasks.
-    pub skipped_tasks: i32,
+    /// Number of skipped nodes.
+    pub skipped_nodes: i32,
 
     /// The message of the child workflow's stored error, when the child has one.
     pub error_summary: Option<String>,
@@ -102,10 +102,10 @@ impl SubWorkflowSummary {
         Ok(Self {
             status,
             output,
-            total_tasks: stored_count(&members, "total_tasks")?,
-            completed_tasks: stored_count(&members, "completed_tasks")?,
-            failed_tasks: stored_count(&members, "failed_tasks")?,
-            skipped_tasks: stored_count(&members, "skipped_tasks")?,
+            total_nodes: stored_count(&members, "total_nodes")?,
+            completed_nodes: stored_count(&members, "completed_nodes")?,
+            failed_nodes: stored_count(&members, "failed_nodes")?,
+            skipped_nodes: stored_count(&members, "skipped_nodes")?,
             error_summary,
         })
     }
@@ -183,10 +183,10 @@ mod tests {
         let summary = SubWorkflowSummary {
             status: WorkflowStatus::Failed,
             output: None,
-            total_tasks: 5,
-            completed_tasks: 3,
-            failed_tasks: 1,
-            skipped_tasks: 1,
+            total_nodes: 5,
+            completed_nodes: 3,
+            failed_nodes: 1,
+            skipped_nodes: 1,
             error_summary: None,
         };
 
@@ -196,10 +196,10 @@ mod tests {
             serde_json::json!({
                 "status": "FAILED",
                 "output": null,
-                "total_tasks": 5,
-                "completed_tasks": 3,
-                "failed_tasks": 1,
-                "skipped_tasks": 1,
+                "total_nodes": 5,
+                "completed_nodes": 3,
+                "failed_nodes": 1,
+                "skipped_nodes": 1,
                 "error_summary": null,
             })
         );
@@ -212,10 +212,10 @@ mod tests {
         let summary = SubWorkflowSummary {
             status: WorkflowStatus::Completed,
             output: Some(JsonText::parse(r#"{"result": 42}"#).unwrap()),
-            total_tasks: 3,
-            completed_tasks: 3,
-            failed_tasks: 0,
-            skipped_tasks: 0,
+            total_nodes: 3,
+            completed_nodes: 3,
+            failed_nodes: 0,
+            skipped_nodes: 0,
             error_summary: Some("task 'process' failed: timeout".to_owned()),
         };
 
@@ -233,7 +233,7 @@ mod tests {
             ("-9223372036854775809", Some(i128::from(i64::MIN) - 1)),
         ] {
             let text = format!(
-                r#"{{"status":"COMPLETED","output":{output},"total_tasks":1,"completed_tasks":1,"failed_tasks":0,"skipped_tasks":0,"error_summary":null}}"#
+                r#"{{"status":"COMPLETED","output":{output},"total_nodes":1,"completed_nodes":1,"failed_nodes":0,"skipped_nodes":0,"error_summary":null}}"#
             );
             let read = SubWorkflowSummary::from_stored_text(&text).unwrap();
             assert_eq!(read.output.as_ref().map(JsonText::get), Some(output));
@@ -252,21 +252,21 @@ mod tests {
     #[test]
     fn a_stored_summary_reads_with_python_s_rules() {
         let read = SubWorkflowSummary::from_stored_text(
-            r#"{"status": "FAILED", "total_tasks": 2, "completed_tasks": 1, "failed_tasks": 1, "skipped_tasks": 0, "other": 1e400}"#,
+            r#"{"status": "FAILED", "total_nodes": 2, "completed_nodes": 1, "failed_nodes": 1, "skipped_nodes": 0, "other": 1e400}"#,
         );
         assert!(
             read.is_err(),
             "a text with a non-finite number is not strict JSON"
         );
         let read = SubWorkflowSummary::from_stored_text(
-            r#"{"status": "FAILED", "total_tasks": 2, "completed_tasks": 1, "failed_tasks": 1, "skipped_tasks": -0, "output": null, "other": [1]}"#,
+            r#"{"status": "FAILED", "total_nodes": 2, "completed_nodes": 1, "failed_nodes": 1, "skipped_nodes": -0, "output": null, "other": [1]}"#,
         )
         .unwrap();
         assert_eq!(read.status, WorkflowStatus::Failed);
         assert_eq!(read.output, None);
         assert_eq!(read.error_summary, None);
         assert_eq!(
-            (read.total_tasks, read.failed_tasks, read.skipped_tasks),
+            (read.total_nodes, read.failed_nodes, read.skipped_nodes),
             (2, 1, 0)
         );
     }
@@ -275,10 +275,10 @@ mod tests {
     fn summary_text(changes: &[(&str, Option<&str>)]) -> String {
         let mut members: Vec<(&str, &str)> = vec![
             ("status", r#""COMPLETED""#),
-            ("total_tasks", "1"),
-            ("completed_tasks", "1"),
-            ("failed_tasks", "0"),
-            ("skipped_tasks", "0"),
+            ("total_nodes", "1"),
+            ("completed_nodes", "1"),
+            ("failed_nodes", "0"),
+            ("skipped_nodes", "0"),
         ];
         for (key, value) in changes {
             members.retain(|(name, _value)| name != key);
@@ -325,37 +325,37 @@ mod tests {
                 SummaryRefused::ErrorSummaryNotText { python_type: "int" },
             ),
             (
-                with("failed_tasks", "-1"),
+                with("failed_nodes", "-1"),
                 SummaryRefused::BadCount {
-                    field: "failed_tasks",
+                    field: "failed_nodes",
                     found: "-1".to_owned(),
                 },
             ),
             (
-                with("total_tasks", "true"),
+                with("total_nodes", "true"),
                 SummaryRefused::BadCount {
-                    field: "total_tasks",
+                    field: "total_nodes",
                     found: "true".to_owned(),
                 },
             ),
             (
-                with("total_tasks", "2147483648"),
+                with("total_nodes", "2147483648"),
                 SummaryRefused::BadCount {
-                    field: "total_tasks",
+                    field: "total_nodes",
                     found: "2147483648".to_owned(),
                 },
             ),
             (
-                with("completed_tasks", "1.0"),
+                with("completed_nodes", "1.0"),
                 SummaryRefused::BadCount {
-                    field: "completed_tasks",
+                    field: "completed_nodes",
                     found: "1.0".to_owned(),
                 },
             ),
             (
-                summary_text(&[("skipped_tasks", None)]),
+                summary_text(&[("skipped_nodes", None)]),
                 SummaryRefused::BadCount {
-                    field: "skipped_tasks",
+                    field: "skipped_nodes",
                     found: "None".to_owned(),
                 },
             ),

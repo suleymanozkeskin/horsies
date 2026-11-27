@@ -3,11 +3,11 @@
 //! `EVENT_TYPES`.
 
 use horsies_core::events::{
-    AttemptErrorCode, EventContract, EventField, EventNamedValue, EventType, FieldAccess,
-    NamedShape, NamedType, ValueForm, VariantType,
+    EventContract, EventField, EventType, FieldAccess, NamedShape, NamedType, ValueForm,
+    VariantType,
 };
 
-use super::code_union_type;
+use super::{code_union_type, is_shared};
 use crate::model::event_variant_type_name;
 use crate::ts_text::{
     camel_case_of_pascal, camel_case_of_snake, integer_literal, is_identifier, is_safe_integer,
@@ -33,26 +33,6 @@ const ANY_EVENT_DOC: &str = "/**
 const EVENT_TYPES_DOC: &str =
     "/** The names of the event types, in the order of the core's union. */";
 
-/// A variant whose kind is not its wire tag in camelCase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TagException {
-    /// The closed type of the variant.
-    pub type_name: &'static str,
-    /// The wire tag of the variant.
-    pub variant_tag: &'static str,
-    /// The kind of the variant's interface.
-    pub kind: &'static str,
-}
-
-/// The one tag exception: the built-in code of an `AttemptErrorCode` has the
-/// kind `library`, the name that the reads of a task error code give the
-/// same idea (`{ kind: "library", code }`).
-pub const LIBRARY_CODE_VARIANT: TagException = TagException {
-    type_name: <AttemptErrorCode as EventNamedValue>::NAMED.name,
-    variant_tag: "BuiltIn",
-    kind: "library",
-};
-
 /// How TypeScript holds a whole number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WholeNumberType {
@@ -70,42 +50,10 @@ pub fn whole_number_type(min: i64, max: i64) -> WholeNumberType {
     }
 }
 
-/// Panic unless `contract` has the variant of [`LIBRARY_CODE_VARIANT`]. A
-/// core rename of the variant then fails the render, before any output
-/// changes; a rename of the type fails the build of this renderer.
-pub fn assert_library_code_variant(contract: &EventContract) {
-    let exception = LIBRARY_CODE_VARIANT;
-    let Some(named) = contract
-        .value_types
-        .iter()
-        .find(|named| named.name == exception.type_name)
-    else {
-        panic!(
-            "events.ts: the contract has no closed type {}, which holds the variant of the kind {}",
-            exception.type_name, exception.kind,
-        );
-    };
-    let has_variant = match named.shape {
-        NamedShape::Variants { variants } => variants
-            .iter()
-            .any(|variant| variant.tag == exception.variant_tag),
-        NamedShape::Choice { .. } => false,
-    };
-    assert!(
-        has_variant,
-        "events.ts: the closed type {} has no variant {}, which has the kind {}",
-        exception.type_name, exception.variant_tag, exception.kind,
-    );
-}
-
-/// The kind of a variant: its wire tag in camelCase, or the kind of
-/// [`LIBRARY_CODE_VARIANT`]. Pure.
-pub fn variant_kind(named: &NamedType, variant: &VariantType) -> String {
-    let exception = LIBRARY_CODE_VARIANT;
-    match named.name == exception.type_name && variant.tag == exception.variant_tag {
-        true => exception.kind.to_owned(),
-        false => camel_case_of_pascal(variant.tag),
-    }
+/// The kind of a variant: its wire tag in camelCase (`BuiltIn` is
+/// `builtIn`). Pure.
+pub fn variant_kind(variant: &VariantType) -> String {
+    camel_case_of_pascal(variant.tag)
 }
 
 /// The member name of a field: its name in camelCase.
@@ -152,13 +100,19 @@ pub fn form_type(form: ValueForm) -> &'static str {
 }
 
 /// The sections of the types, in the model's order: the contract version,
-/// each closed type, each event type, `AnyEvent` and `EVENT_TYPES`. Pure.
+/// each closed type that is not shared (`super::SHARED_TYPES`: another
+/// module declares it, and `events.ts` imports it), each event type,
+/// `AnyEvent` and `EVENT_TYPES`. Pure.
 pub fn type_sections(contract: &EventContract) -> Vec<String> {
     let mut sections = vec![format!(
         "{VERSION_DOC}\nexport const EVENT_CONTRACT_VERSION = {};",
         integer_literal(i128::from(contract.version))
     )];
-    for named in contract.value_types {
+    for named in contract
+        .value_types
+        .iter()
+        .filter(|named| !is_shared(named.name))
+    {
         sections.extend(named_type_sections(named));
     }
     for event in contract.events {
@@ -167,6 +121,12 @@ pub fn type_sections(contract: &EventContract) -> Vec<String> {
     sections.push(any_event_section(contract.events));
     sections.push(event_types_section(contract.events));
     sections
+}
+
+/// The declaration of the closed type `named`, as `events.ts` writes it: its
+/// sections, each after a blank line. Pure.
+pub fn declaration_text(named: &NamedType) -> String {
+    named_type_sections(named).join("\n\n")
 }
 
 /// A choice as the union of its wire values; a variant type as one
@@ -186,7 +146,7 @@ fn named_type_sections(named: &NamedType) -> Vec<String> {
                 .map(|variant| {
                     record_interface(
                         event_variant_type_name(variant),
-                        &variant_kind(named, variant),
+                        &variant_kind(variant),
                         variant.fields,
                     )
                 })
@@ -300,15 +260,15 @@ mod tests {
         },
     };
 
-    /// A sample closed type with the name and the variant of the tag
-    /// exception.
+    /// A sample closed type with the name and the variants of the attempt
+    /// error code.
     const ERROR_CODE: NamedType = NamedType {
         name: "AttemptErrorCode",
         doc: "",
         shape: NamedShape::Variants {
             variants: &[
                 event_variant("BuiltIn", "AttemptErrorCodeBuiltIn", &[CODE]),
-                event_variant("UserOverBound", "AttemptErrorCodeUserOverBound", &[]),
+                event_variant("CustomOverBound", "AttemptErrorCodeCustomOverBound", &[]),
             ],
         },
     };
@@ -356,69 +316,41 @@ mod tests {
     }
 
     #[test]
-    fn the_built_in_variant_of_the_attempt_error_code_has_the_kind_library() {
+    fn the_built_in_variant_of_the_attempt_error_code_has_the_kind_built_in() {
         assert_eq!(
             named_type_sections(&ERROR_CODE),
             [
-                "export interface AttemptErrorCodeBuiltIn {\n  readonly kind: \"library\";\n  \
+                "export interface AttemptErrorCodeBuiltIn {\n  readonly kind: \"builtIn\";\n  \
                  readonly code: BuiltInTaskCode;\n}",
-                "export interface AttemptErrorCodeUserOverBound {\n  \
-                 readonly kind: \"userOverBound\";\n}",
+                "export interface AttemptErrorCodeCustomOverBound {\n  \
+                 readonly kind: \"customOverBound\";\n}",
                 "export type AttemptErrorCode =\n  | AttemptErrorCodeBuiltIn\n  \
-                 | AttemptErrorCodeUserOverBound;",
+                 | AttemptErrorCodeCustomOverBound;",
             ]
         );
     }
 
     #[test]
-    fn a_variant_named_built_in_in_another_type_keeps_its_tag_in_camel_case() {
+    fn the_kind_of_a_variant_is_its_tag_in_camel_case() {
         let variant = event_variant("BuiltIn", "StartBuiltIn", &[]);
-        assert_eq!(variant_kind(&START, &variant), "builtIn");
+        assert_eq!(variant_kind(&variant), "builtIn");
     }
 
     #[test]
-    fn the_real_contract_has_the_variant_of_the_tag_exception() {
-        assert_library_code_variant(&EVENT_CONTRACT);
+    fn the_real_contract_gives_each_attempt_error_code_its_tag_in_camel_case() {
         let text = type_sections(&EVENT_CONTRACT).join("\n\n");
         assert!(text.contains(
-            "export interface AttemptErrorCodeBuiltIn {\n  readonly kind: \"library\";\n  \
+            "export interface AttemptErrorCodeBuiltIn {\n  readonly kind: \"builtIn\";\n  \
              readonly code: BuiltInTaskCode;\n}"
         ));
         assert!(text.contains(
-            "export interface AttemptErrorCodeUser {\n  readonly kind: \"user\";\n  \
+            "export interface AttemptErrorCodeCustom {\n  readonly kind: \"custom\";\n  \
              readonly code: string;\n}"
         ));
         assert!(text.contains(
-            "export interface AttemptErrorCodeUserOverBound {\n  \
-             readonly kind: \"userOverBound\";\n}"
+            "export interface AttemptErrorCodeCustomOverBound {\n  \
+             readonly kind: \"customOverBound\";\n}"
         ));
-    }
-
-    #[test]
-    #[should_panic(expected = "has no variant BuiltIn, which has the kind library")]
-    fn a_contract_whose_error_code_has_no_built_in_variant_fails_the_render() {
-        const RENAMED: NamedType = NamedType {
-            name: "AttemptErrorCode",
-            doc: "",
-            shape: NamedShape::Variants {
-                variants: &[event_variant("Library", "AttemptErrorCodeLibrary", &[CODE])],
-            },
-        };
-        assert_library_code_variant(&EventContract {
-            version: 7,
-            events: &[SECOND],
-            value_types: &[RENAMED],
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "the contract has no closed type AttemptErrorCode")]
-    fn a_contract_without_the_error_code_type_fails_the_render() {
-        assert_library_code_variant(&EventContract {
-            version: 7,
-            events: &[SECOND],
-            value_types: &[START],
-        });
     }
 
     #[test]
@@ -538,9 +470,13 @@ mod tests {
             );
         }
         for named in EVENT_CONTRACT.value_types {
+            let declared = match is_shared(named.name) {
+                true => 0,
+                false => 1,
+            };
             assert_eq!(
                 count(&format!("export type {} =", named.name)),
-                1,
+                declared,
                 "{}",
                 named.name
             );
@@ -566,10 +502,7 @@ mod tests {
         for named in EVENT_CONTRACT.value_types {
             match named.shape {
                 NamedShape::Variants { variants } => {
-                    let kinds: BTreeSet<String> = variants
-                        .iter()
-                        .map(|variant| variant_kind(named, variant))
-                        .collect();
+                    let kinds: BTreeSet<String> = variants.iter().map(variant_kind).collect();
                     assert_eq!(kinds.len(), variants.len(), "{}", named.name);
                 }
                 NamedShape::Choice { .. } => {}

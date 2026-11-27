@@ -12,7 +12,7 @@ import json
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import time
+from datetime import time, timedelta
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -37,9 +37,9 @@ from horsies._core import (
     SchedulerStopped,
 )
 from horsies.core.app import Horsies
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
+from horsies.core.brokers.result_types import DatabaseErrorCode, DatabaseOperationFailed
 from horsies.core.codec.json_io import SerializationError
-from horsies.core.errors import ConfigurationError, ErrorCode, RegistryError
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode, RegistryError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
@@ -50,11 +50,11 @@ from horsies.core.models.schedule import (
     ScheduleConfig,
     TaskSchedule,
 )
-from horsies.core.models.tasks import RetryPolicy, TaskError, TaskResult
+from horsies.core.models.tasks import OperationalCode, RetryPolicy, TaskError
 from horsies.core.scheduler.manifest import to_scheduler_manifest
 from horsies.core.scheduler.service import Scheduler
 from horsies.core.scheduler.validation import PreparedSchedule, prepare_schedules
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err, Ok, Result
 
 _DATABASE_URL = 'postgresql://user:pass@localhost/db'
 _REPORT_TASK = 'reports.nightly'
@@ -70,7 +70,7 @@ def _app(
     app = Horsies(
         AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr(_DATABASE_URL),
                 retain_rerun_input_default=retain_rerun_input,
             ),
@@ -82,14 +82,14 @@ def _app(
     @app.task(
         _REPORT_TASK,
         timeout_ms=30_000,
-        retry_policy=RetryPolicy.fixed([1, 2], auto_retry_for=['TASK_EXCEPTION']),
+        retry_policy=RetryPolicy.fixed([1, 2], retry_for=[OperationalCode.TASK_EXCEPTION]),
     )
-    def nightly(*, day: str, limit: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=limit)
+    def nightly(*, day: str, limit: int) -> Result[int, TaskError]:
+        return Ok(limit)
 
     @app.task(_PLAIN_TASK)
-    def plain() -> TaskResult[int, TaskError]:
-        return TaskResult(ok=1)
+    def plain() -> Result[int, TaskError]:
+        return Ok(1)
 
     _ = (nightly, plain)
     return app
@@ -99,7 +99,7 @@ def _nightly(**overrides: object) -> TaskSchedule:
     values: dict[str, object] = {
         'name': 'nightly',
         'task_name': _REPORT_TASK,
-        'pattern': IntervalSchedule(seconds=60),
+        'pattern': IntervalSchedule(every=timedelta(seconds=60)),
         'kwargs': {'day': 'monday', 'limit': 5},
         'timezone': 'Europe/Berlin',
         'catch_up_missed': True,
@@ -160,15 +160,13 @@ class TestToSchedulerManifest:
         [schedule] = manifest.schedules
         assert schedule.name == 'nightly'
         assert _enabled(schedule) == ScheduleActivationEnabled(
-            pattern_json=(
-                '{"type":"interval","seconds":60,"minutes":null,"hours":null,"days":null}'
-            ),
+            pattern_json='{"kind":"interval","every":"PT1M"}',
             timezone='Europe/Berlin',
             catch_up_missed=True,
             max_catch_up_runs=7,
             send=ScheduleSendManifest(
                 task_name=_REPORT_TASK,
-                queue_name='default',
+                queue='default',
                 priority=100,
                 input_json='{"day":"monday","limit":5}',
                 task_options=ScheduleTaskOptionsEncoded(
@@ -184,7 +182,7 @@ class TestToSchedulerManifest:
 
         [schedule] = manifest.schedules
         enabled = _enabled(schedule)
-        assert enabled.pattern_json == '{"type":"daily","time":"09:30:00"}'
+        assert enabled.pattern_json == '{"kind":"daily","time":"09:30:00"}'
         assert enabled.send.input_json == '{}'
         assert enabled.send.retain_rerun_input is False
 
@@ -262,8 +260,8 @@ _OPTIONS_TASK = 'reports.options'
 
 def _register_options_task(app: Horsies) -> str | None:
     @app.task(_OPTIONS_TASK, timeout_ms=30_000)
-    def options_task(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def options_task(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     return options_task.task_options_json
 
@@ -276,14 +274,14 @@ class TestOptionsThatDoNotEncode:
         schedule = TaskSchedule(
             name='every_minute',
             task_name=_OPTIONS_TASK,
-            pattern=IntervalSchedule(seconds=60),
+            pattern=IntervalSchedule(every=timedelta(seconds=60)),
             kwargs={'value': 1},
         )
         schedule_config = ScheduleConfig(schedules=[schedule])
         app = Horsies(
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=PostgresConfig(database_url=SecretStr(_DATABASE_URL)),
+                database=PostgresConfig(database_url=SecretStr(_DATABASE_URL)),
                 schedule=schedule_config,
             ),
         )
@@ -304,7 +302,7 @@ class TestOptionsThatDoNotEncode:
         assert isinstance(prepared, Err)
         start_error = prepared.err_value[0]
         assert isinstance(start_error, RegistryError)
-        assert start_error.code == ErrorCode.TASK_NOT_REGISTERED
+        assert start_error.code == HorsiesErrorCode.TASK_NOT_REGISTERED
         assert _OPTIONS_TASK in start_error.message
         assert any('every_minute' in note for note in start_error.notes)
 
@@ -361,7 +359,7 @@ class TestInit:
         app = Horsies(
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
-                broker=PostgresConfig(database_url=SecretStr(_DATABASE_URL)),
+                database=PostgresConfig(database_url=SecretStr(_DATABASE_URL)),
             ),
         )
 
@@ -369,7 +367,7 @@ class TestInit:
             Scheduler(app)
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'schedule configuration' in error.message
         assert error.help_text is not None
 
@@ -418,7 +416,7 @@ class TestStart:
             await scheduler.start()
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert error.message == "schedule 'nightly' cannot start"
         assert error.notes == ["schedule 'nightly': unknown timezone 'Mars/Olympus'"]
 
@@ -567,11 +565,11 @@ class TestRunForeverAndStop:
         scheduler, broker = _scheduler(_nightly())
         broker.close_async = AsyncMock(
             return_value=Err(
-                BrokerOperationFailed(
-                    code=BrokerErrorCode.CLOSE_FAILED,
+                DatabaseOperationFailed(
+                    code=DatabaseErrorCode.CLOSE_FAILED,
                     message='close failed',
                     retryable=False,
-                    exception=ConnectionError('close failed'),
+                    cause=ConnectionError('close failed'),
                 ),
             ),
         )

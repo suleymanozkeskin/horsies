@@ -37,7 +37,7 @@ pub enum WorkerError {
     /// The last attempt of the worker start found the partition coverage
     /// gate held by another process, with no heartbeat leaf for the present
     /// instant, and the retry budget of the start
-    /// (`WorkerResilienceConfig::db_retry_max_attempts`) was spent. `waited`
+    /// (`WorkerResilienceConfig::database_retry_max_attempts`) was spent. `waited`
     /// is the time from the first attempt of the start to this error, and
     /// `attempts` counts the attempts. Retryable: the other process creates
     /// the leaves and releases the gate.
@@ -73,7 +73,7 @@ pub enum WorkerError {
     #[error("worker child start failed: the preload parent refused: {reason}")]
     PreloadRefused { reason: String },
 
-    /// An `on_child_process_start` hook failed in a child at the start
+    /// An `on_child_start` hook failed in a child at the start
     /// (Python `ChildHookFailedError`). Never retried: every new child runs
     /// the hook again.
     #[error("{}", crate::worker::worker::CHILD_HOOK_FAILURE_MESSAGE)]

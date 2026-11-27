@@ -16,25 +16,27 @@ operation. Every process of a deployment builds the same app in `main`.
 | `Horsies::new(config)` | `SchemaMode::MigrateAndValidate` | Installs the schema at the first operation, or checks it |
 | `Horsies::with_schema_mode(config, SchemaMode::ObserveOnly)` | `ObserveOnly` | Runs no schema DDL. For monitoring tools |
 | `Horsies::with_schema_mode(config, SchemaMode::AssumeInitialized)` | `AssumeInitialized` | Runs no schema DDL and uses no listener |
-| `Horsies::with_handle(config, handle)` | The mode of `handle` | Uses an `Arc<CoreHandle>` that another app shares |
+| `Horsies::with_core_connection(config, connection)` | The mode of `connection` | Uses an `Arc<CoreConnection>` that another app shares |
 
 - The constructors do no I/O. A config that does not validate is refused
-  with every refusal in one `HorsiesError`.
-- `HorsiesError` has `code` (`Option<ErrorCode>`, `HRS-xxx`), `message`,
+  with a `ValidationReport` of the phase `config` that holds every refusal.
+  `ValidationReport` converts into one `HorsiesError` (`?` in a function
+  that returns `HorsiesError`).
+- `HorsiesError` has `code` (`Option<HorsiesErrorCode>`, `HRS-xxx`), `message`,
   `notes` and `help_text`. The codes are on the shared docs page
   `tasks/errors` ("Config error codes").
 
 ## `AppConfig`
 
-`AppConfig::for_database_url(url)` builds the config with every default.
+`AppConfig::from_database_url(url)` builds the config with every default.
 Change fields with struct update syntax.
 
 | Field | Type | Shared docs page |
 |---|---|---|
 | `queue_mode` | `QueueMode` (`Default`, `Custom`) | `concepts/queue-modes` |
 | `custom_queues` | `Option<Vec<CustomQueueConfig>>` (`name`, `priority`, `max_concurrency`) | `concepts/queue-modes` |
-| `broker` | `PostgresConfig` | `configuration/broker-config` |
-| `cluster_wide_cap` | `Option<u32>` | `workers/concurrency` |
+| `database` | `PostgresConfig` | `configuration/broker-config` |
+| `cluster_wide_cap` | `ClusterCapSetting::ClusterCap { tasks }` or `ClusterCapSetting::NoClusterCap` (default) | `workers/concurrency` |
 | `prefetch_buffer` | `u32` | `workers/concurrency` |
 | `claim_lease_ms` | `Option<u32>` | `workers/concurrency` |
 | `max_claim_renew_age_ms` | `u32` | `workers/heartbeats-recovery` |
@@ -44,19 +46,19 @@ Change fields with struct update syntax.
 | `resilience` | `WorkerResilienceConfig` | `workers/worker-architecture` |
 | `worker_profiles` | `BTreeMap<String, WorkerProfile>` | `workers/concurrency` |
 | `schedule` | `Option<ScheduleConfig>` | `scheduling/scheduler-overview` |
-| `resend_on_transient_err` | `bool` | `operations/atomic-enqueue-and-topology` |
+| `resend_on_transient_error` | `bool` | `operations/atomic-enqueue-and-topology` |
 
 ```rust
-use horsies::{AppConfig, CustomQueueConfig, Horsies, HorsiesError, QueueMode};
+use horsies::{AppConfig, CustomQueueConfig, Horsies, QueueMode, ValidationReport};
 
-fn build_app(database_url: &str) -> Result<Horsies, HorsiesError> {
+fn build_app(database_url: &str) -> Result<Horsies, ValidationReport> {
     let config = AppConfig {
         queue_mode: QueueMode::Custom,
         custom_queues: Some(vec![
             CustomQueueConfig { name: "critical".to_owned(), priority: 1, max_concurrency: None },
             CustomQueueConfig { name: "standard".to_owned(), priority: 50, max_concurrency: Some(10) },
         ]),
-        ..AppConfig::for_database_url(database_url)
+        ..AppConfig::from_database_url(database_url)
     };
     Horsies::new(config)
 }
@@ -64,19 +66,21 @@ fn build_app(database_url: &str) -> Result<Horsies, HorsiesError> {
 
 ### `PostgresConfig`
 
-`PostgresConfig::from_url(url)` builds the broker config with every
-default. Three fields have Rust types where the Python client has numbers:
+`PostgresConfig::from_database_url(url)` builds the database config with every
+default. Four fields are enums, as the Python classes:
 
 | Field | Type |
 |---|---|
+| `session_database` | `SessionDatabase::SameAsDatabaseUrl` (default) or `SessionDatabase::Separate { url }` |
 | `pool_recycle` | `PoolRecycle::Never` or `PoolRecycle::AfterSeconds { seconds: WholeSeconds }` |
 | `tcp_keepalives` | `TcpKeepalivesConfig::Off` or `TcpKeepalivesConfig::On { idle_seconds, interval_seconds, probes }` |
 | `tcp_user_timeout` | `TcpUserTimeoutConfig::SystemDefault` or `TcpUserTimeoutConfig::After { milliseconds }` |
 
-The other fields have the names and meanings of the shared page
-`configuration/broker-config` (for example `database_url`,
-`session_database_url`, `pgbouncer_transaction_mode`, `pool_size`,
-`max_overflow`).
+The keepalive and user timeout values are plain `u32` numbers; `Horsies::new`
+refuses a value outside its bound with `HRS-215` and names the field (for
+example `tcp_keepalives.probes`). The other fields have the names and
+meanings of the shared page `configuration/broker-config` (for example
+`database_url`, `pgbouncer_transaction_mode`, `pool_size`, `max_overflow`).
 
 `pool_size` (default 5) and `max_overflow` (default 10) size the general
 broker pool: `pool_size` persistent connections, and up to `max_overflow`
@@ -97,16 +101,16 @@ more under load. The Python client has the same defaults.
 Raise both values for a producer that sends at a high rate:
 
 ```rust
-use horsies::{AppConfig, Horsies, HorsiesError, PostgresConfig};
+use horsies::{AppConfig, Horsies, PostgresConfig, ValidationReport};
 
-fn build_high_traffic_app(database_url: &str) -> Result<Horsies, HorsiesError> {
+fn build_high_traffic_app(database_url: &str) -> Result<Horsies, ValidationReport> {
     let config = AppConfig {
-        broker: PostgresConfig {
+        database: PostgresConfig {
             pool_size: 20,
             max_overflow: 40,
-            ..PostgresConfig::from_url(database_url)
+            ..PostgresConfig::from_database_url(database_url)
         },
-        ..AppConfig::for_database_url(database_url)
+        ..AppConfig::from_database_url(database_url)
     };
     Horsies::new(config)
 }
@@ -116,7 +120,7 @@ fn build_high_traffic_app(database_url: &str) -> Result<Horsies, HorsiesError> {
 
 | Config | Refusal of `Horsies::new` |
 |---|---|
-| `broker.pool_size` outside 1 to 10,000, or `broker.max_overflow` above 10,000 | `HorsiesError` "invalid broker config: broker.<field>: ..." with no code |
+| `database.pool_size` outside 1 to 10,000, or `database.max_overflow` above 10,000 | `HorsiesError` "invalid database config: database.<field>: ..." with no code |
 | A worker profile whose `preload` is `ChildPreload::Library` or `ChildPreload::App` | `HRS-218` with the path `worker_profiles.<name>.preload`. A Rust worker starts each child with `exec` of its own binary. Do not set `preload`: the default is `ChildPreload::NoPreload` |
 
 ### Queues
@@ -124,7 +128,7 @@ fn build_high_traffic_app(database_url: &str) -> Result<Horsies, HorsiesError> {
 | Method | Returns |
 |---|---|
 | `get_valid_queue_names()` | `Vec<String>`: `default` in `Default` mode, the configured queues in `Custom` mode |
-| `validate_queue(name)` | `Result<(), HorsiesError>`: refuses with `HRS-103` and the valid names |
+| `validate_queue(queue)` | `Result<(), HorsiesError>`: refuses with `HRS-103` and the valid names |
 | `effective_priority(name, task_priority)` | `u32`: `task_priority` when given, else the queue's priority, else 100 |
 
 - In `Default` mode a task that names a queue is refused, `default`
@@ -142,31 +146,27 @@ recycling, the pools, the claim limits and the drain timeout.
 use std::collections::BTreeMap;
 
 use horsies::{
-    AppConfig, IsolatedChildCount, IsolatedChildren, IsolatedRecycle,
-    IsolatedSetting, MemoryLimitSetting, MemoryMb, SharedAsyncChildCount, SharedAsyncChildren,
-    SharedAsyncSeats, SharedAsyncSetting, TaskCount, TaskLimitSetting, WorkerProfile,
+    AppConfig, IsolatedChildren, IsolatedRecycle, MemoryLimitSetting, SharedAsyncChildren,
+    TaskLimitSetting, WorkerProfile,
 };
 
-fn with_profiles(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Error>> {
+fn with_profiles(config: AppConfig) -> AppConfig {
     let isolated = IsolatedChildren {
         recycle: IsolatedRecycle {
-            after: TaskLimitSetting::TaskLimit { tasks: TaskCount::try_from(500)? },
-            above: MemoryLimitSetting::MemoryLimit { mb: MemoryMb::try_from(1024)? },
+            after: TaskLimitSetting::TaskLimit { tasks: 500 },
+            above: MemoryLimitSetting::MemoryLimit { mb: 1024 },
         },
-        ..IsolatedChildren::new(IsolatedChildCount::try_from(2)?)
+        ..IsolatedChildren::new(2)
     };
     let default_profile = WorkerProfile {
-        isolated: IsolatedSetting::IsolatedChildren(isolated),
-        shared_async: SharedAsyncSetting::SharedAsyncChildren(SharedAsyncChildren::new(
-            SharedAsyncChildCount::try_from(4)?,
-            SharedAsyncSeats::try_from(25)?,
-        )),
+        isolated: isolated.into(),
+        shared_async: SharedAsyncChildren::new(4, 25).into(),
         ..WorkerProfile::default()
     };
-    Ok(AppConfig {
+    AppConfig {
         worker_profiles: BTreeMap::from([("default".to_owned(), default_profile)]),
         ..config
-    })
+    }
 }
 ```
 
@@ -177,17 +177,23 @@ fn with_profiles(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Err
 | `shared_thread` | `SharedThreadSetting::SharedThreadChildren(SharedThreadChildren)` or `NoSharedThreadChildren {}` |
 | `pool` | `ParentPool` (`max_size: PoolSizeSetting`) |
 | `claim` | `ClaimLimits` (`per_queue_per_pass`, `claimed_per_worker`: `TaskLimitSetting`) |
-| `drain_timeout` | `DrainTimeout`: `DrainTimeout::try_from(Duration)`, above 0 and at most 24 hours, default 300 s |
+| `drain_timeout` | `Duration`, above 0 and at most 24 hours, default 300 s |
 | `preload` | `ChildPreload`, default `NoPreload`: the only value that a Rust app takes |
 | `parent_cpu` | `ParentCpu::Shared` (default) or `OwnCore` (Linux) |
 
 - `WorkerProfile::default()` has no children. A profile needs at least one
   child.
-- The counts are bounded types: build them with `try_from(u32)`, which
-  returns `OutOfBounds` for a value outside the bounds.
-  `IsolatedChildCount`, `SharedAsyncChildCount` and `SharedThreadChildCount`
-  are 1 to 1,024; `SharedAsyncSeats` 1 to 1,000; `SharedThreadSeats` 1 to
-  256.
+- Each count, size and task limit is a plain number. `Horsies::new`
+  checks each value against its bounds and refuses the config with every
+  refusal in its `ValidationReport`, each with `HRS-218`. Each refusal names the field path and
+  the bounds, for example
+  `worker_profiles['default'].isolated.count: 0 is outside the bounds 1 to 1024`.
+  The `count` of each child kind is 1 to 1,024; `SharedAsyncChildren.seats`
+  1 to 1,000; `SharedThreadChildren.seats` 1 to 256. The other bounds are on
+  the docs page `rust/workers/worker-setup`.
+- `IsolatedChildren::new(2).into()` is
+  `IsolatedSetting::IsolatedChildren(IsolatedChildren::new(2))`: `From`
+  builds each setting from its children.
 - `IsolatedChildren::new(count)`, `SharedAsyncChildren::new(count, seats)`
   and `SharedThreadChildren::new(count, seats)` take the default recycle
   and pools. `IsolatedRecycle` has `after` (default 100 tasks) and `above`
@@ -205,13 +211,15 @@ fn with_profiles(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Err
 |---|---|
 | `task_name::register(&mut app)` | Registers a task of `#[horsies::task]` (see `tasks.md`) |
 | `register(name, task)`, `register_with_queue(name, task, queue)` | Registers a task built with `async_task_fn!` or `blocking_task_fn!` |
-| `register_workflow_definition::<D>()`, `workflow_template::<D>()` | Registers a workflow definition (see `workflows.md`) |
+| `register_workflow_definition::<D>()`, `register_workflow_definition_with::<D>()` | Registers a workflow definition (see `workflows.md`) |
 | `provide(value)` | Gives a value of type `T` to task bodies, which read it with `TaskRuntime::state::<T>()` |
 | `discover(registrars)` | Runs each `fn(&mut Horsies) -> Result<(), HorsiesError>` on the app in order; stops at the first refusal |
 | `on_child_start(hook)` | Runs an async hook once in every task child |
 | `on_event::<E>(name, handler)`, `on_event_blocking::<E>(name, handler)` | Registers a handler of the events of type `E`; it runs in the worker's handler child (monitoring.md, Event Handlers) |
 | `on_handler_child_start(hook)` | Runs an async hook once in every handler child |
 | `task_runtime()` | The `TaskRuntime` that task bodies take |
+| `workflow_builder(name)` | A `WorkflowSpecBuilder` whose task nodes resolve against the tasks of this app (see `workflows.md`) |
+| `start_workflow::<D>()`, `start_workflow_with::<D>(params)` | Starts the definition `D` through its registration on this app; `VALIDATION_FAILED` when this app does not register `D` (see `workflows.md`) |
 
 ```rust
 use horsies::{Horsies, HorsiesError};
@@ -248,7 +256,7 @@ fn register_hooks(app: &mut Horsies) -> Result<(), HorsiesError> {
 | `are_sends_suppressed()` | `true` after `suppress_sends(true)`, or when `HORSIES_SUPPRESS_SENDS` (`SUPPRESS_SENDS_ENV`) is `1`. The variable is read at each call |
 | `role()`, `set_role(AppRole)` | `AppRole::Producer` (a new app), `Worker` or `Scheduler`. The CLI runner sets it |
 
-A suppressed send returns `TaskSendError::SendSuppressed` and writes
+A suppressed send returns `TaskSendError::Suppressed` and writes
 nothing.
 
 ## Schedules
@@ -257,6 +265,7 @@ nothing.
 
 ```rust
 use std::convert::Infallible;
+use std::time::Duration;
 
 use chrono::NaiveTime;
 use horsies::{
@@ -281,7 +290,7 @@ fn with_schedules(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Er
     let cache_cleanup = TaskSchedule::new(
         "cache-cleanup",
         "clean_cache",
-        SchedulePattern::Interval(IntervalSchedule { minutes: Some(15), ..IntervalSchedule::default() }),
+        SchedulePattern::Interval(IntervalSchedule { every: Duration::from_secs(15 * 60) }),
     );
     Ok(AppConfig {
         schedule: Some(ScheduleConfig::new(vec![nightly_report, cache_cleanup])),
@@ -295,8 +304,8 @@ fn with_schedules(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Er
 | Item | Fields and builders |
 |---|---|
 | `ScheduleConfig` | `enabled` (default `true`), `schedules`, `check_interval_seconds` (1 to 60). `ScheduleConfig::new(schedules)`, `.enabled(bool)`, `.check_interval_seconds(n)` |
-| `TaskSchedule::new(name, task_name, pattern)` | `.input(&value)` (`Result<TaskSchedule, JsonTextRefused>`), `.queue(name)`, `.enabled(bool)`, `.timezone(name)` (default `UTC`), `.catch_up_missed(bool)`, `.max_catch_up_runs(n)` (default 100) |
-| `SchedulePattern` | `Interval(IntervalSchedule { seconds, minutes, hours, days })`, `Hourly(HourlySchedule { minute, second })`, `Daily(DailySchedule { time })`, `Weekly(WeeklySchedule { days, time })`, `Monthly(MonthlySchedule { day, time })`, `Cron(CronSchedule)` |
+| `TaskSchedule::new(name, task_name, pattern)` | `.input(&value)` (`Result<TaskSchedule, JsonTextRefused>`), `.queue(queue)` (field `queue`; `None` uses the task's queue), `.enabled(bool)`, `.timezone(name)` (default `UTC`), `.catch_up_missed(bool)`, `.max_catch_up_runs(n)` (default 100) |
+| `SchedulePattern` | `Interval(IntervalSchedule { every })`, `Hourly(HourlySchedule { minute, second })`, `Daily(DailySchedule { time })`, `Weekly(WeeklySchedule { weekdays, time })`, `Monthly(MonthlySchedule { day_of_month, time })`, `Cron(CronSchedule)` |
 
 - `input` is the task input in the stored form: one member per task
   parameter, by name. A schedule without input stores `{}`.
@@ -309,6 +318,15 @@ fn with_schedules(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Er
   as its value, written by the same strict writer. In a config file, an
   integer of `input` must fit `i64` or `u64`; set an input with a wider
   integer in code with `.input(&value)`.
+- `IntervalSchedule.every` is a `std::time::Duration` in whole seconds,
+  1 second to 365 days (`INTERVAL_EVERY_SECONDS`). `validate()` refuses a
+  fraction of a second, zero, and a length above 365 days.
+- In a config file, a pattern names its kind in `kind`, and `every` is
+  ISO 8601 duration text with days, hours, minutes and seconds only:
+  `pattern = { kind = "interval", every = "PT15M" }` (`PT30S`, `PT1M30S`,
+  `P1DT2H`). The reader refuses years, months, weeks, a fraction, a sign
+  and a text without a part. A key that the config does not declare
+  (`type`, `queue_name`, `days`, `day`, `seconds`) is refused.
 - A time of day is a chrono `NaiveTime` in whole seconds, in the
   schedule's time zone. `Weekday` and `Month` are enums of the crate.
 - The scheduler checks each enabled schedule before it connects: its task
@@ -321,8 +339,8 @@ fn with_schedules(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Er
 
 | Method | Returns |
 |---|---|
-| `app.check()` | `Result<CheckPassed, CheckReport>`. No I/O |
-| `app.check_live().await` | `Result<CheckPassed, CheckReport>`. Connects and reads; installs no schema |
+| `app.check()` | `Result<CheckPassed, ValidationReport>`. No I/O |
+| `app.check_live().await` | `Result<CheckPassed, ValidationReport>`. Connects and reads; installs no schema |
 
 The check stops at the first phase that refuses:
 
@@ -335,18 +353,18 @@ The check stops at the first phase that refuses:
 
 `check_live` adds:
 
-4. Connectivity: `SELECT 1` on `database_url`, then on
-   `session_database_url` when it differs, then, in PgBouncer transaction
+4. Connectivity: `SELECT 1` on `database_url`, then on the URL of a
+   separate `session_database` when it differs, then, in PgBouncer transaction
    mode, a LISTEN probe on the session URL. A refusal is `HRS-203`.
 5. Worker connections: each worker profile against the connection limit of
    the server (`HRS-219`).
 
 `CheckPassed::task_count()` is the number of registered tasks.
 `CheckPassed::declared_error_codes()` is a `BTreeMap` from task name to
-the declared error codes (`UserErrorCode::CODES`) of each task that
+the declared error codes (`CustomErrorCode::CODES`) of each task that
 declares at least one. The success text lists them under
 `declared error codes:`, or prints `declared error codes: none`.
-`CheckReport::errors()` holds the refusals; `phase()` is `check`,
+`ValidationReport::refusals()` holds the refusals; `phase_name()` is `check`,
 `worker-startup` or `scheduler-startup`. Both implement `Display`.
 
 ## CLI
@@ -363,10 +381,10 @@ A Rust app has two command-line programs:
 ```rust
 use std::process::ExitCode;
 
-use horsies::{AppConfig, Horsies, HorsiesError};
+use horsies::{AppConfig, Horsies, ValidationReport};
 
-fn build_app() -> Result<Horsies, HorsiesError> {
-    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+fn build_app() -> Result<Horsies, ValidationReport> {
+    let config = AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies");
     Horsies::new(config)
 }
 
@@ -394,14 +412,14 @@ fn main() -> ExitCode {
 
 | Command | Does |
 |---|---|
-| `<binary> worker --profile <name> [--loglevel LEVEL] [--metrics-listen HOST:PORT]` | Starts a worker of one profile. A missing or unknown `--profile` exits 1 and lists the profile names. The check without the schedules runs first. `--metrics-listen` serves `GET /metrics`, `GET /livez` and `GET /readyz` (no default; `WorkerStart::with_metrics_endpoint(ListenAddress)` in a binary that owns its `main`) |
-| `<binary> scheduler [--loglevel LEVEL]` | Starts the scheduler of `AppConfig.schedule`. Exits 1 when there is no schedule section or `schedule.enabled` is `false` |
-| `<binary> check [--live] [--loglevel LEVEL]` | Checks the app. `--loglevel` default `WARNING` |
-| `<binary> metrics --listen HOST:PORT [--loglevel LEVEL]` | Serves the fleet metrics of the app's database at `GET /metrics` (Prometheus text format 0.0.4). `--listen` is required: `HOST:PORT` or `[IPV6]:PORT`. Reads at start, then at most once per 15 s; a scrape never reads. Exits 1 when the config does not build a handle or the address does not bind |
+| `<binary> worker --profile <name> [--log-level LEVEL] [--metrics-listen HOST:PORT]` | Starts a worker of one profile. A missing or unknown `--profile` exits 1 and lists the profile names. The check without the schedules runs first. `--metrics-listen` serves `GET /metrics`, `GET /livez` and `GET /readyz` (no default; `WorkerRunOptions::with_metrics_listen(ListenAddress)` in a binary that owns its `main`) |
+| `<binary> scheduler [--log-level LEVEL]` | Starts the scheduler of `AppConfig.schedule`. Exits 1 when there is no schedule section or `schedule.enabled` is `false` |
+| `<binary> check [--live] [--log-level LEVEL]` | Checks the app. `--log-level` default `WARNING` |
+| `<binary> metrics --metrics-listen HOST:PORT [--log-level LEVEL]` | Serves the fleet metrics of the app's database at `GET /metrics` (Prometheus text format 0.0.4). `--metrics-listen` is required: `HOST:PORT` or `[IPV6]:PORT`. Reads at start, then at most once per 15 s; a scrape never reads. Exits 1 when the config does not build a handle or the address does not bind |
 
 - `SIGTERM` or `SIGINT` stops the worker and the scheduler. The worker
   drains within the profile's `drain_timeout`.
-- `--loglevel` takes `DEBUG`, `INFO` (default), `WARNING`, `ERROR` or
+- `--log-level` takes `DEBUG`, `INFO` (default), `WARNING`, `ERROR` or
   `CRITICAL`. `RUST_LOG` with a valid filter replaces it. A subscriber
   that the binary installed before `run` is kept. `FORCE_COLOR` and
   `NO_COLOR` control color.
@@ -409,10 +427,10 @@ fn main() -> ExitCode {
   `-c`/`--concurrency`, `--max-claim-batch`, `--max-claim-per-worker`,
   `--coalesce-notifies`, `--check-interval`, `--dry-run`) exit 2 with
   what replaces each.
-- `horsies::cli::run_with_log_format(app, LogFormat::Json)` writes one JSON
+- `horsies::cli::run_with_log_format(app, LogFormat::JsonLogs)` writes one JSON
   object per record (`timestamp`, `level`, `target`, the event's fields at
   the top level, `span`, `spans`) in the runner and in each child.
-  `run(app)` is `run_with_log_format(app, LogFormat::Text)`.
+  `run(app)` is `run_with_log_format(app, LogFormat::TextLogs)`.
 - Each task body runs inside the `tracing` span `run` (target
   `horsies::attempt`, `horsies::ATTEMPT_SPAN_TARGET`) with the fields
   `horsies.task.id`, `horsies.task.name` and `horsies.task.attempt`; the
@@ -435,10 +453,10 @@ A worker child exits with a `ChildHostExit` code: 0 `Stopped`, 71
 ```rust
 use std::process::ExitCode;
 
-use horsies::{AppConfig, ChildHostExit, ChildMode, Horsies, HorsiesError, WorkerStart};
+use horsies::{AppConfig, ChildHostExit, ChildMode, Horsies, ValidationReport, WorkerRunOptions};
 
-fn build_app() -> Result<Horsies, HorsiesError> {
-    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+fn build_app() -> Result<Horsies, ValidationReport> {
+    let config = AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies");
     Horsies::new(config)
 }
 
@@ -454,7 +472,7 @@ fn main() -> ExitCode {
         ChildMode::Child(args) => app.serve_child(args),
         ChildMode::BadArguments(error) => {
             eprintln!("child mode cannot start: {error}");
-            ExitCode::from(u8::try_from(ChildHostExit::BadArguments.code()).unwrap_or(u8::MAX))
+            ExitCode::from(u8::try_from(ChildHostExit::BadArguments.exit_code()).unwrap_or(u8::MAX))
         }
         ChildMode::Worker => run_worker(app),
     }
@@ -468,7 +486,7 @@ fn run_worker(app: Horsies) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(app.run_worker(WorkerStart::profile("default"))) {
+    match runtime.block_on(app.run_worker(WorkerRunOptions::profile("default"))) {
         Ok(_stopped) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
@@ -481,7 +499,7 @@ fn run_worker(app: Horsies) -> ExitCode {
 | Command of `run` | Method |
 |---|---|
 | child mode | `horsies::child_mode() -> ChildMode`, then `Horsies::serve_child(self, ChildArgs) -> ExitCode`. Call it outside any tokio runtime |
-| `worker --profile <name>` | `Horsies::run_worker(self, WorkerStart) -> Result<WorkerStopped, WorkerRunError>` (async). `WorkerStart::profile(name).with_log_level(level)` |
+| `worker --profile <name>` | `Horsies::run_worker(self, WorkerRunOptions) -> Result<WorkerStopped, WorkerRunError>` (async). `WorkerRunOptions::profile(name).with_log_level(level)` |
 | `scheduler` | `Horsies::run_scheduler(&self) -> Result<SchedulerStopped, SchedulerRunError>` (async), or `Horsies::scheduler(&self)` for a `PreparedScheduler` with `run()` and `stop_handle()` |
 | `check` | `Horsies::check(&self)` |
 | `check --live` | `Horsies::check_live(&self)` (async) |
@@ -491,11 +509,11 @@ fn run_worker(app: Horsies) -> ExitCode {
 - `run_worker` and `run_scheduler` stop at `SIGTERM` or `SIGINT`.
 - `WorkerRunError`: `CheckRefused`, `ManifestBound`, `ChildCommandRefused`,
   `ProfileRefused`, `ConnectionSettingsRefused`,
-  `RuntimeUnavailable(RuntimeStartFailed)`, `BootFailed { cause }`,
+  `RuntimeStartFailed(RuntimeStartFailed)`, `BootFailed { cause }`,
   `Failed { cause }`.
 - `SchedulerRunError`: `NotConfigured`, `Disabled`, `CheckRefused`,
   `ManifestRefused`, `StartRefused`, `StartFailed { retryable }`,
-  `RuntimeUnavailable(RuntimeStartFailed)`.
+  `RuntimeStartFailed(RuntimeStartFailed)`.
 - `RuntimeStartFailed`: the operating system refused the threads of the
   core's process runtime; a later run tries again. A fork is not one: the
   run panics (`SKILL.md`, Result Types).
@@ -529,22 +547,21 @@ them with `HRS-218`. Leave `preload` at its default, `ChildPreload::NoPreload`.
 ```rust
 use horsies::{
     // App
-    Horsies, HorsiesError, ErrorCode, AppRole, SchemaMode, SUPPRESS_SENDS_ENV, CoreHandle,
+    Horsies, HorsiesError, HorsiesErrorCode, AppRole, SchemaMode, SUPPRESS_SENDS_ENV, CoreConnection,
     // Config
     AppConfig, PostgresConfig, QueueMode, CustomQueueConfig, PayloadPolicy, RecoveryConfig,
     RetentionConfig, WorkerResilienceConfig, PoolRecycle, TcpKeepalivesConfig,
-    TcpUserTimeoutConfig,
+    TcpUserTimeoutConfig, SessionDatabase, ClusterCapSetting,
     // Worker profiles
     WorkerProfile, ChildPreload, ParentCpu, IsolatedSetting, IsolatedChildren, IsolatedRecycle,
     SharedAsyncSetting, SharedAsyncChildren, SharedThreadSetting, SharedThreadChildren,
-    SharedRecycle, ClaimLimits, ParentPool, DrainTimeout, TaskLimitSetting, MemoryLimitSetting,
-    IsolatedChildCount, SharedAsyncChildCount, SharedAsyncSeats, SharedThreadChildCount,
-    SharedThreadSeats, TaskCount, MemoryMb, OutOfBounds,
+    SharedRecycle, ClaimLimits, ParentPool, TaskLimitSetting, MemoryLimitSetting,
+    ProfileValueRefused,
     // Schedules
     ScheduleConfig, TaskSchedule, SchedulePattern, IntervalSchedule, HourlySchedule,
     DailySchedule, WeeklySchedule, MonthlySchedule, CronSchedule, Weekday, Month,
     // Check and services
-    CheckPassed, CheckReport, WorkerStart, WorkerStopped, WorkerRunError, SchedulerStopped,
+    CheckPassed, ValidationReport, WorkerRunOptions, WorkerStopped, WorkerRunError, SchedulerStopped,
     SchedulerRunError, PreparedScheduler, ChildMode, ChildArgs, ChildHostExit,
     CHILD_START_HOOK_BOUND,
 };

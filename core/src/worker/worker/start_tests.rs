@@ -43,9 +43,9 @@ const WAIT: Duration = Duration::from_secs(30);
 
 fn resilience(initial_ms: u64, max_attempts: u64) -> WorkerResilienceConfig {
     WorkerResilienceConfig {
-        db_retry_initial_ms: initial_ms,
-        db_retry_max_ms: initial_ms,
-        db_retry_max_attempts: max_attempts,
+        database_retry_initial_ms: initial_ms,
+        database_retry_max_ms: initial_ms,
+        database_retry_max_attempts: max_attempts,
         ..WorkerResilienceConfig::default()
     }
 }
@@ -72,10 +72,10 @@ fn worker_of(
     worker_config: WorkerConfig,
     command: ChildCommand,
 ) -> Worker {
-    let mut app_config = AppConfig::for_database_url("postgresql://horsies@127.0.0.1:1/horsies");
+    let mut app_config = AppConfig::from_database_url("postgresql://horsies@127.0.0.1:1/horsies");
     app_config.resilience = resilience;
-    let database_url = DatabaseUrl::new(app_config.broker.database_url.clone());
-    let connection = ChildConnection::of_config(&app_config.broker)
+    let database_url = DatabaseUrl::new(app_config.database.database_url.clone());
+    let connection = ChildConnection::of_config(&app_config.database)
         .expect("the config of the test database validates");
     Worker::of_child_specs(
         broker,

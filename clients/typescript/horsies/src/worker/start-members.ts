@@ -19,9 +19,10 @@ import {
 } from "../_catalog/worker_manifest.ts";
 import type { WireJson } from "../_catalog/wire_json.ts";
 import type { AppContext } from "../app/context.ts";
-import type { HandlerRegistration, TracingKind } from "../app/telemetry.ts";
+import type { HandlerRegistration } from "../app/telemetry.ts";
 import { contractRecord } from "../contract/definition.ts";
 import { unreachable } from "../native/call/never.ts";
+import type { TracingSetting } from "../telemetry/tracing-config.ts";
 import type { ChildCommand } from "./child-command.ts";
 import { manifestText } from "./manifest-text.ts";
 
@@ -71,15 +72,29 @@ export function eventHandlers(handlers: readonly HandlerRegistration[]): EventHa
     : { kind: "HANDLERS", handlers: handlers.map((handler) => ({ name: handler.name, event_type: handler.eventType })) };
 }
 
-/** Whether the handler child makes the span of each attempt that the worker ended: with OpenTelemetry tracing. Pure. */
-export function workerEndedSpans(tracing: TracingKind): WorkerEndedSpans {
-  switch (tracing) {
-    case "otel":
-      return "MAKE_SPANS";
-    case "none":
+/**
+ * Whether the handler child makes the span of each attempt that the worker ended: with OpenTelemetry tracing and its
+ * `workerEndedSpans` switch on. Pure.
+ */
+export function workerEndedSpans(tracing: TracingSetting): WorkerEndedSpans {
+  switch (tracing.kind) {
+    case "otelTracing":
+      return endedSpansOfSwitch(tracing.workerEndedSpans);
+    case "noTracing":
       return "NO_SPANS";
     default:
       return unreachable(tracing);
+  }
+}
+
+function endedSpansOfSwitch(spans: "makeSpans" | "noSpans"): WorkerEndedSpans {
+  switch (spans) {
+    case "makeSpans":
+      return "MAKE_SPANS";
+    case "noSpans":
+      return "NO_SPANS";
+    default:
+      return unreachable(spans);
   }
 }
 

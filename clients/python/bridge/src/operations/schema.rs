@@ -10,7 +10,7 @@
 
 use horsies_core::manifest::SchemaMode;
 use horsies_core::web::{SchemaProbe, SchemaState, SchemaStatus};
-use horsies_core::{expected_schema_version, BrokerOperationError};
+use horsies_core::{expected_schema_version, DatabaseOperationError};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 
@@ -98,7 +98,7 @@ pub async fn install_operation(connection: BrokerConnection) -> InstallOutcome {
         Err(error) => {
             return InstallOutcome::Failed(BrokerFailure::of_operation_error(
                 INSTALL_SUBJECT,
-                BrokerOperationError::schema_init_failed(error),
+                DatabaseOperationError::schema_init_failed(error),
             ))
         }
     };
@@ -108,7 +108,7 @@ pub async fn install_operation(connection: BrokerConnection) -> InstallOutcome {
         }),
         Err(error) => InstallOutcome::Failed(BrokerFailure::of_operation_error(
             INSTALL_SUBJECT,
-            BrokerOperationError::schema_init_failed(error),
+            DatabaseOperationError::schema_init_failed(error),
         )),
     }
 }

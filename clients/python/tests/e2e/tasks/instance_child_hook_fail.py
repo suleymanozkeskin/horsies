@@ -1,4 +1,4 @@
-"""App instance whose on_child_process_start hook always fails.
+"""App instance whose on_child_start hook always fails.
 
 Used to assert the fail-closed contract: the worker must exit at boot
 with a legible message instead of restart-looping on the broken child.
@@ -13,7 +13,8 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result
 
 from tests.e2e.helpers.env import e2e_database_url
 from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
@@ -22,7 +23,7 @@ DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=DB_URL,
         pool_size=5,
         max_overflow=5,
@@ -31,19 +32,19 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 
 
-@app.on_child_process_start
+@app.on_child_start
 def _always_fails() -> None:
     raise RuntimeError('deliberate hook failure for the fail-closed e2e test')
 
 
-@app.task(task_name='e2e_hook_fail_healthcheck')
-def healthcheck() -> TaskResult[str, TaskError]:
-    return TaskResult(ok='ready')
+@app.task(name='e2e_hook_fail_healthcheck')
+def healthcheck() -> Result[str, TaskError]:
+    return Ok('ready')
 
 
 app.discover_tasks(['tests.e2e.tasks.instance_child_hook_fail'])

@@ -8,12 +8,14 @@ import type {
   LiveCheckOutcome,
   LogBacklog,
   NativePreparedWorker,
+  SeatIsolateMemory,
   WorkerAddon,
   WorkerBootCauseName,
   WorkerFailCauseName,
   WorkerPreparation,
   WorkerRunEnded,
 } from "../../horsies/src/native/worker/addon.ts";
+import type { ManifestProbeAddon, WorkerManifestProbe } from "../runtime/native/manifest-probe.ts";
 import type { Mutual, SameFunction } from "./mutual.ts";
 
 export const parseListenAddressMatches: SameFunction<
@@ -38,9 +40,18 @@ export const preparedWorkerMatches: Mutual<Generated.PreparedWorker, NativePrepa
 
 export const listenAddressMatches: Mutual<Generated.ListenAddressCheck, ListenAddressCheck> = true;
 export const preparationMatches: Mutual<Generated.WorkerPreparation, WorkerPreparation> = true;
+export const seatIsolateMemoryMatches: Mutual<Generated.SeatIsolateMemory, SeatIsolateMemory> = true;
 export const bootCauseMatches: Mutual<Generated.WorkerBootCauseName, WorkerBootCauseName> = true;
 export const failCauseMatches: Mutual<Generated.WorkerFailCauseName, WorkerFailCauseName> = true;
 export const runEndedMatches: Mutual<Generated.WorkerRunEnded, WorkerRunEnded> = true;
 export const stepMatches: Mutual<Generated.ConnectivityStep, ConnectivityStep> = true;
 export const liveCheckMatches: Mutual<Generated.LiveCheckOutcome, LiveCheckOutcome> = true;
 export const backlogMatches: Mutual<Generated.LogBacklog, LogBacklog> = true;
+
+// The test export of a build with the cargo feature `test-probes` (`build:dev`).
+export const probeParseWorkerManifestMatches: SameFunction<
+  typeof Generated.probeParseWorkerManifest,
+  ManifestProbeAddon["probeParseWorkerManifest"]
+> = true;
+
+export const workerManifestProbeMatches: Mutual<Generated.WorkerManifestProbe, WorkerManifestProbe> = true;

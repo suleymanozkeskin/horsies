@@ -7,14 +7,14 @@ from dataclasses import dataclass
 from horsies.core.models.tasks import MAX_TASK_TIMEOUT_MS
 from horsies.core.types.result import Err, Ok, Result
 
-WAIT_TIMEOUT_NOT_AN_INT: str = 'timeout_ms must be an int or None'
+WAIT_TIMEOUT_NOT_AN_INT: str = 'wait_ms must be an int or None'
 """The refusal for a bool or a value of another type."""
 
-WAIT_TIMEOUT_NEGATIVE: str = 'timeout_ms must not be negative; 0 checks once with no wait'
+WAIT_TIMEOUT_NEGATIVE: str = 'wait_ms must not be negative; 0 checks once with no wait'
 """The refusal for a negative value."""
 
 WAIT_TIMEOUT_ABOVE_LIMIT: str = (
-    f'timeout_ms is above the limit of {MAX_TASK_TIMEOUT_MS} ms (about 49.7 days)'
+    f'wait_ms is above the limit of {MAX_TASK_TIMEOUT_MS} ms (about 49.7 days)'
 )
 """The refusal for a value above the limit.
 
@@ -25,13 +25,13 @@ cannot be converted to a string.
 
 @dataclass(frozen=True, slots=True)
 class WaitTimeoutRefused:
-    """A `timeout_ms` that no wait can use. `message` names the rule."""
+    """A `wait_ms` that no wait can use. `message` names the rule."""
 
     message: str
 
 
 def wait_timeout_seconds(
-    timeout_ms: object,
+    wait_ms: object,
 ) -> Result[float | None, WaitTimeoutRefused]:
     """The wait budget in seconds, or None when the caller sets no limit.
 
@@ -41,16 +41,16 @@ def wait_timeout_seconds(
     a float above about 1.8e308 ms, and the Rust port waits take a
     `Duration`, which cannot be negative. Does no I/O.
     """
-    match timeout_ms:
+    match wait_ms:
         case None:
             return Ok(None)
         case bool():
             return Err(WaitTimeoutRefused(message=WAIT_TIMEOUT_NOT_AN_INT))
-        case int() if timeout_ms < 0:
+        case int() if wait_ms < 0:
             return Err(WaitTimeoutRefused(message=WAIT_TIMEOUT_NEGATIVE))
-        case int() if timeout_ms > MAX_TASK_TIMEOUT_MS:
+        case int() if wait_ms > MAX_TASK_TIMEOUT_MS:
             return Err(WaitTimeoutRefused(message=WAIT_TIMEOUT_ABOVE_LIMIT))
         case int():
-            return Ok(timeout_ms / 1000.0)
+            return Ok(wait_ms / 1000.0)
         case _:
             return Err(WaitTimeoutRefused(message=WAIT_TIMEOUT_NOT_AN_INT))

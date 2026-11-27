@@ -12,8 +12,11 @@ import type {
   SpawnRegistration,
   StartHookCall,
 } from "../../../horsies/src/native/child/addon.ts";
+import type { HandlerChildPlan } from "../../../horsies/src/native/handler-child/addon.ts";
 import type { AppConfigCheck, NativeTaskError, TaskErrorBuild, TaskErrorParts } from "../../../horsies/src/native/sends/addon.ts";
 import type { PanicRule } from "../../../horsies/src/thrown-errors.ts";
+import type { SchemaMode } from "../../../horsies/src/_catalog/manifest.ts";
+import type { LogFormat } from "../../../horsies/src/config/process-settings.ts";
 import { fakeSendRules } from "../app/support.ts";
 
 /** The task error that the fake builds: the stored text names the parts. */
@@ -46,6 +49,9 @@ export class FakeChildNative implements ChildNative {
   readonly errors: [bigint, TaskErrorParts][] = [];
   readonly builds: TaskErrorParts[] = [];
   readonly serves: ServeCall[] = [];
+  readonly handlerPlans: HandlerChildPlan[] = [];
+  /** The schema mode of each config check, in order. */
+  readonly schemaModes: SchemaMode[] = [];
   #end: (end: ChildServeEnd) => void = () => undefined;
 
   /** End the serve with `code`. */
@@ -57,6 +63,11 @@ export class FakeChildNative implements ChildNative {
     this.calls.push("childArguments");
 
     return this.arguments;
+  }
+
+  fillHandlerChild(plan: HandlerChildPlan): void {
+    this.calls.push("fillHandlerChild");
+    this.handlerPlans.push(plan);
   }
 
   async serveChild(
@@ -87,7 +98,7 @@ export class FakeChildNative implements ChildNative {
   buildTaskError(parts: TaskErrorParts): TaskErrorBuild {
     this.builds.push(parts);
 
-    return parts.code.kind === "user" && this.refusedCodes.has(parts.code.code)
+    return parts.code.kind === "custom" && this.refusedCodes.has(parts.code.code)
       ? { kind: "refused", cause: "the code breaks a rule" }
       : { kind: "built", error: new FakeTaskError(parts) };
   }
@@ -120,7 +131,13 @@ export class FakeChildNative implements ChildNative {
     this.calls.push(`setPanicRule ${rule}`);
   }
 
-  checkAppConfig(): AppConfigCheck {
+  applyLogFormat(format: LogFormat): void {
+    this.calls.push(`applyLogFormat ${format.kind}`);
+  }
+
+  checkAppConfig(_appConfigJson: string, schemaMode: SchemaMode): AppConfigCheck {
+    this.schemaModes.push(schemaMode);
+
     return {
       kind: "accepted",
       rules: fakeSendRules(),

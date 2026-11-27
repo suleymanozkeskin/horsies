@@ -6,23 +6,23 @@ import { clockSecondText, clockText } from '@/lib/clock-text';
 import { instantMs } from '@/lib/time-text';
 import { at, leafTask, normalAttempt, timedAttempt, NORMAL_TIMES } from '@/test/attempt-fixtures';
 import type { TaskDetail } from '@/types/tasks';
-import type { LeafTask, TaskAttempt } from '@/types/workflows';
+import type { TaskRow, TaskAttempt } from '@/types/workflows';
 
 const ms = (seconds: number): number => instantMs(at(seconds));
 const GROUPING_KEY = 'attempt-bars-grouping';
 const MESSAGE = 'Unhandled exception in task sync_supplier_feed: TimeoutError: brera-knitwear did not answer';
 
-function task(attempts: TaskAttempt[], leaf: Partial<LeafTask> = {}): TaskDetail {
+function task(attempts: TaskAttempt[], leaf: Partial<TaskRow> = {}): TaskDetail {
   return {
-    leaf: { ...leafTask('FAILED', attempts.length - 1, 3, { enqueuedAt: null, startedAt: null }), ...leaf },
+    task_row: { ...leafTask('FAILED', attempts.length - 1, 3, { enqueuedAt: null, startedAt: null }), ...leaf },
     task_name: 'sync_supplier_feed',
-    queue_name: 'analytics',
+    queue: 'analytics',
     priority: 90,
     is_workflow_task: false,
     error_category: 'OPERATIONAL',
     attempts,
     workflow_id: null,
-    workflow_task_index: null,
+    workflow_node_index: null,
   };
 }
 

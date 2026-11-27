@@ -20,12 +20,12 @@ While *"It's easier to ask for forgiveness than permission"* approach is helpful
 
 That approach leads developers to focus on happy path and completely ignore what could go wrong.
 
-In contrast, a task function in horsies **must** return a `TaskResult` type with either:
+In contrast, a task function in horsies **must** return a `Result` type with either:
 
 - a generic Ok value
 - a mandatory and structured TaskError with a uniform way to propagate errors
 
-Horsies' approach leads the developer to actually think on the error cases on both definition and call site. Same applies for coding agents. Horsies literally will not start if any of your task functions don't return a `TaskResult` type. Which will eventually lead to a better feedback loop for both agents and developers.
+Horsies' approach leads the developer to actually think on the error cases on both definition and call site. Same applies for coding agents. Horsies literally will not start if any of your task functions don't return a `Result` type. Which will eventually lead to a better feedback loop for both agents and developers.
 
 See [error handling](../tasks/error-handling) for more.
 
@@ -66,7 +66,7 @@ Every retry policy requires an explicit list of error codes to retry on. This gi
 
 They don't crash the worker and they don't disappear. You still get your `TaskError`.
 
-Any unhandled exception inside a task is caught, wrapped into a `TaskError` with `error_code=UNHANDLED_EXCEPTION`, and stored as a normal error result. The worker continues processing other tasks.
+Any unhandled exception inside a task is caught, wrapped into a `TaskError` with `code=UNHANDLED_EXCEPTION`, and stored as a normal error result. The worker continues processing other tasks.
 
 For finer control, the exception mapper lets you assign specific error codes to specific exception classes  without try/except boilerplate in your task functions. You can set it per-task or globally on the app. The mapper uses exact class matching only; map each class you need explicitly.
 
@@ -138,7 +138,7 @@ A task with `Execution.SHARED_ASYNC` or `Execution.SHARED_THREAD` shares its chi
 
 ## How much memory does a worker use?
 
-It depends on your app. On Linux, a preload parent imports code once and forks each child, so children share those pages. With 4 children, the whole worker at start measured 159 MiB on a small app and 342 MiB on an app with pandas, against 290 MiB and 445 MiB with `preload=ChildPreload.NONE`. With `preload=ChildPreload.APP`, the pandas app measured 212 MiB. See [Preload Parent](../workers/worker-architecture#preload-parent).
+It depends on your app. On Linux, a preload parent imports code once and forks each child, so children share those pages. With 4 children, the whole worker at start measured 159 MiB on a small app and 342 MiB on an app with pandas, against 290 MiB and 445 MiB with `preload=ChildPreload.NO_PRELOAD`. With `preload=ChildPreload.APP`, the pandas app measured 212 MiB. See [Preload Parent](../workers/worker-architecture#preload-parent).
 
 ## Throughput expectations and comparisons
 
@@ -147,7 +147,7 @@ Those systems should generally win fire-and-forget message benchmarks. Horsies i
 Measured per-statement latencies for this trade: [performance](../internals/performance).
 
 The closest comparison is Procrastinate, because it is also PostgreSQL-backed. 
-Horsies is heavier than a plain Postgres task queue because it adds strict serialization, typed TaskResult handling, workflow state, subworkflows, success policies, and monitoring state. Benchmark against Procrastinate if plain Postgres task throughput is the main buying criterion.
+Horsies is heavier than a plain Postgres task queue because it adds strict serialization, typed result handling, workflow state, subworkflows, success policies, and monitoring state. Benchmark against Procrastinate if plain Postgres task throughput is the main buying criterion.
 
 
 With the right deployment shape, it is still performant for typical SaaS background workloads where Horsies' additional features will prove its worth. 

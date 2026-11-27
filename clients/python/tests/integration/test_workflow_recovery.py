@@ -13,10 +13,12 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import dumps_json, loads_json
 from horsies.core.codec.typed import decode_task_result, encode_task_result
-from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode
+from horsies.core.models.outcome import Failed, Succeeded
+from horsies.core.models.tasks import TaskError, OperationalCode
 from horsies.core.models.workflow import (
     TaskNode,
 )
+from horsies.core.types.result import Err, Result
 
 from .conftest import (
     make_simple_task,
@@ -47,7 +49,7 @@ async def _run_phase2_recovery(
     return (await phase2_recovery_pass(broker, grace_ms=grace_ms)).applied
 
 
-def _strict_result_json(result: TaskResult[Any, TaskError]) -> str:
+def _strict_result_json(result: Result[Any, TaskError]) -> str:
     """Build the strict-serde wire envelope for ``horsies_workflow_tasks.result``.
 
     Tests in this file seed terminal task rows directly (simulating crash /
@@ -108,7 +110,7 @@ class TestWorkflowRecovery:
         session, broker, app = setup
         task_a = make_simple_task(app, 'recover_unregistered_err_a')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(
             broker=broker, name='recover_unregistered_err', tasks=[node_a]
         )
@@ -126,9 +128,9 @@ class TestWorkflowRecovery:
 
         # Store a real TASK_EXCEPTION (err-only) result, then simulate
         # crash via workflow_tasks=RUNNING.
-        real_err_result = TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.TASK_EXCEPTION,
+        real_err_result: Result[Any, TaskError] = Err(
+            TaskError(
+                code=OperationalCode.TASK_EXCEPTION,
                 message='real failure to preserve through recovery',
             ),
         )
@@ -172,12 +174,14 @@ class TestWorkflowRecovery:
         recovered_result = decode_task_result(
             loads_json(result_json).unwrap(), Any,
         )
-        assert recovered_result.is_err()
-        assert recovered_result.err is not None
-        # Critical: the real err survives, not the synthetic WORKER_CRASHED.
-        assert recovered_result.err.error_code == (
-            OperationalErrorCode.TASK_EXCEPTION
-        )
-        assert recovered_result.err.message == (
-            'real failure to preserve through recovery'
-        )
+        match recovered_result:
+            case Failed(error=recovered_error):
+                # Critical: the real err survives, not the synthetic WORKER_CRASHED.
+                assert recovered_error.code == (
+                    OperationalCode.TASK_EXCEPTION
+                )
+                assert recovered_error.message == (
+                    'real failure to preserve through recovery'
+                )
+            case Succeeded():
+                pytest.fail(f'expected the stored error, got {recovered_result!r}')

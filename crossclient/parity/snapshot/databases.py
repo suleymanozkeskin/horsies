@@ -20,7 +20,7 @@ from psycopg import sql
 from pydantic import SecretStr
 from sqlalchemy.engine import make_url
 
-from horsies._catalog.broker_errors import BrokerOperationFailed
+from horsies._catalog.broker_errors import DatabaseOperationFailed
 from horsies._catalog.manifest import dump_producer_manifest
 from horsies._core import CoreHandle, SchemaInstalled, SchemaInstallNotRun
 from horsies.core.history.identity.keys import IDEMPOTENCY_WINDOW_DEFAULT
@@ -130,7 +130,7 @@ def install_baseline_schema(
             raise AssertionError(
                 f'the install of {database.name} ran nothing, but its handle migrates',
             )
-        case BrokerOperationFailed(message=message):
+        case DatabaseOperationFailed(message=message):
             return Err(
                 DatabaseSetupFailed(
                     step=SetupStep.INSTALL, database=database.name, cause=message,

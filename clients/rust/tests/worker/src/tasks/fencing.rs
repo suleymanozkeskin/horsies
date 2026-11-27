@@ -2,13 +2,13 @@
 //! class, one that reads it twice and in work that it started, and one that
 //! a retry runs again. Each task is on the default queue.
 
-use horsies::{blocking_task, task, RetryPolicy, TaskError, TaskRuntime, UserErrorCode};
+use horsies::{blocking_task, task, CustomErrorCode, RetryPolicy, TaskError, TaskRuntime};
 use serde::{Deserialize, Serialize};
 
 use crate::markers;
 
 /// The codes of the fencing tasks' own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 pub enum FenceCode {
     /// The body read no fencing token.
     NoToken,
@@ -39,7 +39,7 @@ pub struct FenceRun {
 fn fence_of(rt: &TaskRuntime) -> Result<Fence, TaskError<FenceCode>> {
     let token = rt
         .fencing_token()
-        .map_err(|refused| TaskError::user(FenceCode::NoToken, refused.to_string()))?;
+        .map_err(|refused| TaskError::custom(FenceCode::NoToken, refused.to_string()))?;
     Ok(Fence {
         task_id: token.task_id().to_string(),
         value: token.value().get(),
@@ -93,10 +93,10 @@ pub async fn fence_reads_twice(rt: TaskRuntime) -> Result<Vec<Fence>, TaskError<
     let work_runtime = rt.clone();
     let work = rt
         .spawn("read_fence", async move { fence_of(&work_runtime) })
-        .map_err(|refused| TaskError::user(FenceCode::WorkFailed, refused.to_string()))?;
+        .map_err(|refused| TaskError::custom(FenceCode::WorkFailed, refused.to_string()))?;
     let from_work = work
         .await
-        .map_err(|joined| TaskError::user(FenceCode::WorkFailed, joined.to_string()))??;
+        .map_err(|joined| TaskError::custom(FenceCode::WorkFailed, joined.to_string()))??;
     Ok(vec![first, second, from_work])
 }
 
@@ -105,7 +105,7 @@ pub async fn fence_reads_twice(rt: TaskRuntime) -> Result<Vec<Fence>, TaskError<
 #[task(
     "e2e_fence_retry",
     retry_policy = one_retry(),
-    auto_retry_for = ["TRANSIENT"]
+    retry_for = ["TRANSIENT"]
 )]
 pub async fn fence_retry(
     rt: TaskRuntime,
@@ -113,9 +113,9 @@ pub async fn fence_retry(
 ) -> Result<FenceRun, TaskError<FenceCode>> {
     let fence = fence_of(&rt)?;
     let counted_run = markers::next_attempt(&marker)
-        .map_err(|cause| TaskError::user(FenceCode::MarkerFailed, cause.to_string()))?;
+        .map_err(|cause| TaskError::custom(FenceCode::MarkerFailed, cause.to_string()))?;
     match counted_run {
-        1 => Err(TaskError::user(
+        1 => Err(TaskError::custom(
             FenceCode::Transient,
             format!("run 1 read the fence value {}", fence.value),
         )),

@@ -580,7 +580,7 @@ fn named_reader_sections(named: &NamedType) -> Vec<String> {
                 .map(|variant| {
                     record_reader(
                         event_variant_type_name(variant),
-                        &variant_kind(named, variant),
+                        &variant_kind(variant),
                         variant.fields,
                     )
                 })
@@ -1253,7 +1253,7 @@ mod tests {
             "  const checkedErrorCode = readBuiltInTaskCode(itemAt(fields, 1));\n",
             "  const checkedTrace = readRunTrace(itemAt(fields, 2));\n",
             "  const checkedPlacedAt = readTime(itemAt(fields, 3));\n",
-            "  const checkedChildKind = readExecution(itemAt(fields, 4));\n",
+            "  const checkedChildExecution = readExecution(itemAt(fields, 4));\n",
             "  const checkedWorkerId = readText(itemAt(fields, 5), 255);\n",
             "  const checkedWorkflow = readWorkflowPlace(itemAt(fields, 6));\n",
         ] {

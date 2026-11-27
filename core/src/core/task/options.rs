@@ -4,18 +4,9 @@ use super::error::TaskErrorCode;
 use super::execution::{Execution, MAX_CANCEL_GRACE_MS, MIN_CANCEL_GRACE_MS};
 use crate::core::python_text::python_isoformat_utc;
 
-/// The cancel grace of a task, from [`MIN_CANCEL_GRACE_MS`] to
-/// [`MAX_CANCEL_GRACE_MS`] milliseconds (Python `cancel_grace_ms`):
-///
-/// - `SHARED_ASYNC`: the time from the cancel (at the deadline, or at an
-///   operator cancel) to the second cancel (Rust: the drop of its future).
-/// - `ISOLATED`: the time from an operator cancel to the kill of the child
-///   when the run has not ended.
-///
-/// Only [`CancelGraceMs::new`] builds one, and serde reads one through it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(try_from = "u32", into = "u32")]
-pub struct CancelGraceMs(u32);
+/// The cancel grace of a `SHARED_ASYNC` task that names none, in
+/// milliseconds (Python `DEFAULT_CANCEL_GRACE_MS`).
+pub const DEFAULT_CANCEL_GRACE_MS: u32 = 1_000;
 
 /// A cancel grace outside its bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -26,41 +17,17 @@ pub struct CancelGraceOutOfRange {
     pub value: u32,
 }
 
-impl CancelGraceMs {
-    /// The grace of a `SHARED_ASYNC` task that names none (Python
-    /// `DEFAULT_CANCEL_GRACE_MS`).
-    pub const DEFAULT: Self = Self(1_000);
-
-    /// The grace of `milliseconds`.
-    ///
-    /// Errors: [`CancelGraceOutOfRange`] outside [`MIN_CANCEL_GRACE_MS`] to
-    /// [`MAX_CANCEL_GRACE_MS`].
-    pub fn new(milliseconds: u32) -> Result<Self, CancelGraceOutOfRange> {
-        match (MIN_CANCEL_GRACE_MS..=MAX_CANCEL_GRACE_MS).contains(&i64::from(milliseconds)) {
-            true => Ok(Self(milliseconds)),
-            false => Err(CancelGraceOutOfRange {
-                value: milliseconds,
-            }),
-        }
-    }
-
-    /// The grace in milliseconds.
-    pub fn get(self) -> u32 {
-        self.0
-    }
-}
-
-impl TryFrom<u32> for CancelGraceMs {
-    type Error = CancelGraceOutOfRange;
-
-    fn try_from(milliseconds: u32) -> Result<Self, Self::Error> {
-        Self::new(milliseconds)
-    }
-}
-
-impl From<CancelGraceMs> for u32 {
-    fn from(grace: CancelGraceMs) -> Self {
-        grace.0
+/// The cancel grace `milliseconds` when it is from [`MIN_CANCEL_GRACE_MS`]
+/// to [`MAX_CANCEL_GRACE_MS`]. A client checks the grace of a task once,
+/// when it registers or declares the task. Pure.
+///
+/// Errors: [`CancelGraceOutOfRange`] outside the bounds.
+pub fn check_cancel_grace_ms(milliseconds: u32) -> Result<u32, CancelGraceOutOfRange> {
+    match (MIN_CANCEL_GRACE_MS..=MAX_CANCEL_GRACE_MS).contains(&i64::from(milliseconds)) {
+        true => Ok(milliseconds),
+        false => Err(CancelGraceOutOfRange {
+            value: milliseconds,
+        }),
     }
 }
 
@@ -73,23 +40,23 @@ fn isolated() -> Execution {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackoffStrategy {
-    /// Uses intervals list exactly as specified.
+    /// Uses the `intervals_seconds` list exactly as specified.
     Fixed,
-    /// Uses intervals[0] as base, exponentially increases: base * 2^(attempt-1).
+    /// Uses `intervals_seconds[0]` as base, exponentially increases: base * 2^(attempt-1).
     Exponential,
 }
 
 /// Retry policy configuration for tasks.
 ///
 /// Two strategies supported:
-/// 1. Fixed: uses intervals list exactly as specified
+/// 1. Fixed: uses the `intervals_seconds` list exactly as specified
 /// 2. Exponential: uses a single base interval, exponentially increases
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryPolicy {
     /// Maximum number of retry attempts (1-20). Initial send not counted.
     pub max_retries: u32,
     /// Delay intervals in seconds between retry attempts.
-    pub intervals: Vec<u32>,
+    pub intervals_seconds: Vec<u32>,
     /// Backoff strategy.
     pub backoff_strategy: BackoffStrategy,
     /// Whether to add +/-25% randomization to delays.
@@ -107,14 +74,14 @@ pub enum RetryPolicyError {
     #[error("max_retries must be between 1 and 20, got {0}")]
     MaxRetriesOutOfRange(u32),
 
-    #[error("intervals must not be empty")]
+    #[error("intervals_seconds must not be empty")]
     EmptyIntervals,
 
     #[error("interval values must be between 1 and 86400, got {0}")]
     IntervalOutOfRange(u32),
 
     #[error(
-        "fixed backoff requires intervals length ({intervals_len}) to match max_retries ({max_retries})"
+        "fixed backoff requires intervals_seconds length ({intervals_len}) to match max_retries ({max_retries})"
     )]
     FixedIntervalsMismatch {
         intervals_len: usize,
@@ -129,23 +96,24 @@ pub enum RetryPolicyError {
 }
 
 impl RetryPolicy {
-    /// Create a fixed backoff policy where intervals length defines max_retries.
-    pub fn fixed(intervals: Vec<u32>, jitter: bool) -> Result<Self, RetryPolicyError> {
-        if intervals.is_empty() {
+    /// Create a fixed backoff policy where the length of `intervals_seconds`
+    /// defines max_retries.
+    pub fn fixed(intervals_seconds: Vec<u32>, jitter: bool) -> Result<Self, RetryPolicyError> {
+        if intervals_seconds.is_empty() {
             return Err(RetryPolicyError::EmptyIntervals);
         }
-        for &interval in &intervals {
+        for &interval in &intervals_seconds {
             if interval == 0 || interval > 86400 {
                 return Err(RetryPolicyError::IntervalOutOfRange(interval));
             }
         }
-        let max_retries = intervals.len() as u32;
+        let max_retries = intervals_seconds.len() as u32;
         if max_retries > 20 {
             return Err(RetryPolicyError::MaxRetriesOutOfRange(max_retries));
         }
         Ok(Self {
             max_retries,
-            intervals,
+            intervals_seconds,
             backoff_strategy: BackoffStrategy::Fixed,
             jitter,
             max_delay_seconds: None,
@@ -168,7 +136,7 @@ impl RetryPolicy {
         }
         Ok(Self {
             max_retries,
-            intervals: vec![base_seconds],
+            intervals_seconds: vec![base_seconds],
             backoff_strategy: BackoffStrategy::Exponential,
             jitter,
             max_delay_seconds: None,
@@ -187,27 +155,27 @@ impl RetryPolicy {
         if self.max_retries == 0 || self.max_retries > 20 {
             return Err(RetryPolicyError::MaxRetriesOutOfRange(self.max_retries));
         }
-        if self.intervals.is_empty() {
+        if self.intervals_seconds.is_empty() {
             return Err(RetryPolicyError::EmptyIntervals);
         }
-        for &interval in &self.intervals {
+        for &interval in &self.intervals_seconds {
             if interval == 0 || interval > 86400 {
                 return Err(RetryPolicyError::IntervalOutOfRange(interval));
             }
         }
         match self.backoff_strategy {
             BackoffStrategy::Fixed => {
-                if self.intervals.len() != self.max_retries as usize {
+                if self.intervals_seconds.len() != self.max_retries as usize {
                     return Err(RetryPolicyError::FixedIntervalsMismatch {
-                        intervals_len: self.intervals.len(),
+                        intervals_len: self.intervals_seconds.len(),
                         max_retries: self.max_retries,
                     });
                 }
             }
             BackoffStrategy::Exponential => {
-                if self.intervals.len() != 1 {
+                if self.intervals_seconds.len() != 1 {
                     return Err(RetryPolicyError::ExponentialMultipleIntervals(
-                        self.intervals.len(),
+                        self.intervals_seconds.len(),
                     ));
                 }
             }
@@ -227,7 +195,7 @@ pub struct TaskOptions {
 
     /// Target queue name (None = default queue).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub queue_name: Option<String>,
+    pub queue: Option<String>,
 
     /// Task expiry deadline (task skipped if execution has not started by this time).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -235,7 +203,7 @@ pub struct TaskOptions {
 
     /// Error codes that trigger automatic retries.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub auto_retry_for: Option<Vec<TaskErrorCode>>,
+    pub retry_for: Option<Vec<TaskErrorCode>>,
 
     /// Retry timing and backoff configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -244,7 +212,7 @@ pub struct TaskOptions {
     /// Per-task execution time limit in milliseconds (minimum 1000), measured
     /// around user-code execution. On expiry the task fails with
     /// `OutcomeCode::TaskTimeout`; retry is opt-in by listing `"TASK_TIMEOUT"`
-    /// in `auto_retry_for`.
+    /// in `retry_for`.
     ///
     /// Cancellation semantics differ by task kind:
     /// - **Async tasks** are aborted at their next `.await` point (cleanly
@@ -266,13 +234,24 @@ pub struct TaskOptions {
     #[serde(default = "isolated")]
     pub execution: Execution,
 
-    /// The cancel grace of the task. A `SHARED_ASYNC` task carries one, and
-    /// it must; an `ISOLATED` task may carry one (none: an operator cancel
-    /// kills nothing); a `SHARED_THREAD` task carries none. Enqueue refuses
-    /// a grace on `SHARED_THREAD` and a `SHARED_ASYNC` task without one
-    /// (`stored_execution`).
+    /// The cancel grace of the task in milliseconds, from
+    /// [`MIN_CANCEL_GRACE_MS`] to [`MAX_CANCEL_GRACE_MS`] (Python
+    /// `cancel_grace_ms`):
+    ///
+    /// - `SHARED_ASYNC`: the time from the cancel (at the deadline, or at an
+    ///   operator cancel) to the second cancel (Rust: the drop of its
+    ///   future). The task carries one, and it must.
+    /// - `ISOLATED`: the time from an operator cancel to the kill of the
+    ///   child when the run has not ended. The task may carry one (none: an
+    ///   operator cancel kills nothing).
+    /// - `SHARED_THREAD`: the task carries none.
+    ///
+    /// The client checks the bounds once, when it registers the task
+    /// ([`check_cancel_grace_ms`]). Enqueue refuses a grace on
+    /// `SHARED_THREAD`, a `SHARED_ASYNC` task without one, and a grace
+    /// outside the bounds (`stored_execution`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cancel_grace_ms: Option<CancelGraceMs>,
+    pub cancel_grace_ms: Option<u32>,
 }
 
 impl TaskOptions {
@@ -281,14 +260,14 @@ impl TaskOptions {
     /// one layout the core reads at enqueue and at dispatch:
     ///
     /// ```json
-    /// {"retry_policy": {"max_retries": 3, "intervals": [60, 300, 900],
+    /// {"retry_policy": {"max_retries": 3, "intervals_seconds": [60, 300, 900],
     ///                   "backoff_strategy": "fixed", "jitter": true,
-    ///                   "auto_retry_for": ["STORAGE_ERROR"]},
+    ///                   "retry_for": ["STORAGE_ERROR"]},
     ///  "good_until": null, "timeout_ms": 2000, "execution": "ISOLATED",
     ///  "cancel_grace_ms": null}
     /// ```
     ///
-    /// - `retry_policy` holds the policy with `auto_retry_for` inside it, and
+    /// - `retry_policy` holds the policy with `retry_for` inside it, and
     ///   `max_delay_seconds` only when set; it is `null` with no policy. Codes
     ///   without a policy are not stored: with no policy a task has no retry.
     /// - `good_until` is `null`: a task has no deadline of its own. A send
@@ -323,14 +302,14 @@ impl TaskOptions {
         let stored = StoredTaskOptions {
             retry_policy: self.retry_policy.as_ref().map(|policy| StoredRetryPolicy {
                 max_retries: policy.max_retries,
-                intervals: &policy.intervals,
+                intervals_seconds: &policy.intervals_seconds,
                 backoff_strategy: policy.backoff_strategy,
                 jitter: policy.jitter,
                 max_delay_seconds: policy.max_delay_seconds,
                 // Python stores each code as its plain name; the tagged serde
                 // form of a built-in code is refused by the reader.
-                auto_retry_for: self
-                    .auto_retry_for
+                retry_for: self
+                    .retry_for
                     .as_deref()
                     .unwrap_or_default()
                     .iter()
@@ -340,7 +319,7 @@ impl TaskOptions {
             good_until,
             timeout_ms: self.timeout_ms,
             execution: self.execution.as_str(),
-            cancel_grace_ms: self.cancel_grace_ms.map(CancelGraceMs::get),
+            cancel_grace_ms: self.cancel_grace_ms,
         };
         // Every field is a plain number, string, bool or list of them, so the
         // encode cannot fail.
@@ -362,12 +341,12 @@ struct StoredTaskOptions<'a> {
 #[derive(Serialize)]
 struct StoredRetryPolicy<'a> {
     max_retries: u32,
-    intervals: &'a [u32],
+    intervals_seconds: &'a [u32],
     backoff_strategy: BackoffStrategy,
     jitter: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_delay_seconds: Option<u32>,
-    auto_retry_for: Vec<String>,
+    retry_for: Vec<String>,
 }
 
 #[cfg(test)]
@@ -386,7 +365,7 @@ mod tests {
     fn exponential_retry_policy() {
         let policy = RetryPolicy::exponential(30, 5, false).unwrap();
         assert_eq!(policy.max_retries, 5);
-        assert_eq!(policy.intervals, vec![30]);
+        assert_eq!(policy.intervals_seconds, vec![30]);
         assert_eq!(policy.backoff_strategy, BackoffStrategy::Exponential);
         assert!(policy.validate().is_ok());
     }
@@ -396,7 +375,7 @@ mod tests {
         // Directly construct an invalid policy and validate
         let policy = RetryPolicy {
             max_retries: 3,
-            intervals: vec![60, 300],
+            intervals_seconds: vec![60, 300],
             backoff_strategy: BackoffStrategy::Fixed,
             jitter: true,
             max_delay_seconds: None,
@@ -408,7 +387,7 @@ mod tests {
     fn exponential_multiple_intervals_rejected() {
         let policy = RetryPolicy {
             max_retries: 3,
-            intervals: vec![30, 60],
+            intervals_seconds: vec![30, 60],
             backoff_strategy: BackoffStrategy::Exponential,
             jitter: true,
             max_delay_seconds: None,
@@ -428,20 +407,20 @@ mod tests {
         let json = serde_json::to_string(&policy).unwrap();
         let back: RetryPolicy = serde_json::from_str(&json).unwrap();
         assert_eq!(back.max_retries, policy.max_retries);
-        assert_eq!(back.intervals, policy.intervals);
+        assert_eq!(back.intervals_seconds, policy.intervals_seconds);
         assert!(back.validate().is_ok());
     }
 
     #[test]
     fn stored_options_text_with_both_fields() {
-        use super::super::error::{TaskErrorCode, UserCode};
+        use super::super::error::{CustomCode, TaskErrorCode};
 
         let opts = TaskOptions {
             task_name: "my_task".to_owned(),
-            queue_name: Some("high".to_owned()),
+            queue: Some("high".to_owned()),
             good_until: None,
-            auto_retry_for: Some(vec![TaskErrorCode::User(
-                UserCode::parse("STORAGE_ERROR").unwrap(),
+            retry_for: Some(vec![TaskErrorCode::Custom(
+                CustomCode::parse("STORAGE_ERROR").unwrap(),
             )]),
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300, 900], true).unwrap()),
             timeout_ms: None,
@@ -452,17 +431,17 @@ mod tests {
         let json = opts.stored_options_text();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-        // Python's layout: auto_retry_for inside retry_policy, the five keys of
+        // Python's layout: retry_for inside retry_policy, the five keys of
         // serialize_task_options, and no identity fields.
         assert_eq!(
             parsed,
             serde_json::json!({
                 "retry_policy": {
                     "max_retries": 3,
-                    "intervals": [60, 300, 900],
+                    "intervals_seconds": [60, 300, 900],
                     "backoff_strategy": "fixed",
                     "jitter": true,
-                    "auto_retry_for": ["STORAGE_ERROR"],
+                    "retry_for": ["STORAGE_ERROR"],
                 },
                 "good_until": null,
                 "timeout_ms": null,
@@ -479,9 +458,9 @@ mod tests {
 
         let opts = TaskOptions {
             task_name: "my_task".to_owned(),
-            queue_name: None,
+            queue: None,
             good_until: None,
-            auto_retry_for: Some(vec![TaskErrorCode::BuiltIn(BuiltInTaskCode::Outcome(
+            retry_for: Some(vec![TaskErrorCode::BuiltIn(BuiltInTaskCode::Outcome(
                 OutcomeCode::TaskTimeout,
             ))]),
             retry_policy: Some(RetryPolicy::exponential(30, 2, false).unwrap()),
@@ -493,7 +472,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(
-            parsed["retry_policy"]["auto_retry_for"],
+            parsed["retry_policy"]["retry_for"],
             serde_json::json!(["TASK_TIMEOUT"])
         );
     }
@@ -503,17 +482,17 @@ mod tests {
     /// `ISOLATED` task with no grace stores none.
     #[test]
     fn the_stored_text_is_what_the_dispatch_reader_accepts() {
-        use super::super::error::{TaskErrorCode, UserCode};
+        use super::super::error::{CustomCode, TaskErrorCode};
         use crate::worker::retry::{
             read_stored_options, StoredCancelGrace, StoredOptions, StoredRetry, StoredTimeout,
         };
 
         let opts = TaskOptions {
             task_name: "my_task".to_owned(),
-            queue_name: None,
+            queue: None,
             good_until: None,
-            auto_retry_for: Some(vec![TaskErrorCode::User(
-                UserCode::parse("STORAGE_ERROR").unwrap(),
+            retry_for: Some(vec![TaskErrorCode::Custom(
+                CustomCode::parse("STORAGE_ERROR").unwrap(),
             )]),
             retry_policy: Some(
                 RetryPolicy::fixed(vec![60, 300], true)
@@ -538,14 +517,14 @@ mod tests {
 
     fn options_of(
         execution: Execution,
-        cancel_grace_ms: Option<CancelGraceMs>,
+        cancel_grace_ms: Option<u32>,
         timeout_ms: Option<u32>,
     ) -> TaskOptions {
         TaskOptions {
             task_name: "my_task".to_owned(),
-            queue_name: None,
+            queue: None,
             good_until: None,
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: None,
             timeout_ms,
             execution,
@@ -569,8 +548,7 @@ mod tests {
         use crate::core::task::execution::stored_execution;
         use crate::worker::retry::{read_stored_options, StoredCancelGrace, StoredOptions};
 
-        let grace = CancelGraceMs::new(500).expect("500 ms is a grace");
-        let options = options_of(Execution::SharedAsync, Some(grace), Some(3_000));
+        let options = options_of(Execution::SharedAsync, Some(500), Some(3_000));
         let stored = stored_object(&options);
         assert_eq!(stored["execution"], "SHARED_ASYNC");
         assert_eq!(stored["cancel_grace_ms"], 500);
@@ -605,7 +583,7 @@ mod tests {
     fn enqueue_refuses_a_grace_that_does_not_fit_the_class() {
         use crate::core::task::execution::stored_execution;
 
-        let grace = CancelGraceMs::DEFAULT;
+        let grace = DEFAULT_CANCEL_GRACE_MS;
         let on_thread = stored_object(&options_of(Execution::SharedThread, Some(grace), None));
         assert!(stored_execution(Some(&on_thread)).is_err());
         let without = stored_object(&options_of(Execution::SharedAsync, None, Some(1_000)));
@@ -619,8 +597,7 @@ mod tests {
         use crate::core::task::execution::stored_execution;
         use crate::worker::retry::{read_stored_options, StoredCancelGrace, StoredOptions};
 
-        let grace = CancelGraceMs::new(2_000).expect("2000 ms is a grace");
-        let options = options_of(Execution::Isolated, Some(grace), Some(30_000));
+        let options = options_of(Execution::Isolated, Some(2_000), Some(30_000));
         let stored = stored_object(&options);
         assert_eq!(stored["execution"], "ISOLATED");
         assert_eq!(stored["cancel_grace_ms"], 2_000);
@@ -638,26 +615,24 @@ mod tests {
 
     #[test]
     fn a_cancel_grace_is_from_100_to_10000_ms() {
-        assert_eq!(CancelGraceMs::new(100).map(CancelGraceMs::get), Ok(100));
+        assert_eq!(check_cancel_grace_ms(100), Ok(100));
+        assert_eq!(check_cancel_grace_ms(10_000), Ok(10_000));
         assert_eq!(
-            CancelGraceMs::new(10_000).map(CancelGraceMs::get),
-            Ok(10_000)
-        );
-        assert_eq!(
-            CancelGraceMs::new(99),
+            check_cancel_grace_ms(99),
             Err(CancelGraceOutOfRange { value: 99 })
         );
         assert_eq!(
-            CancelGraceMs::new(10_001),
+            check_cancel_grace_ms(10_001),
             Err(CancelGraceOutOfRange { value: 10_001 })
         );
-        assert_eq!(CancelGraceMs::DEFAULT.get(), 1_000);
+        assert_eq!(check_cancel_grace_ms(DEFAULT_CANCEL_GRACE_MS), Ok(1_000));
     }
 
-    /// serde reads the grace through its bounds, and options with no class
-    /// read as `ISOLATED`.
+    /// serde reads the grace as a plain number, and options with no class
+    /// read as `ISOLATED`. The bounds are the check of the registration
+    /// ([`check_cancel_grace_ms`]), not of serde.
     #[test]
-    fn serde_reads_the_class_and_the_grace_through_their_rules() {
+    fn serde_reads_the_class_and_the_grace_as_plain_values() {
         let isolated: TaskOptions =
             serde_json::from_str(r#"{"task_name": "t"}"#).expect("the class is optional");
         assert_eq!(isolated.execution, Execution::Isolated);
@@ -668,12 +643,13 @@ mod tests {
         )
         .expect("a grace inside its bounds");
         assert_eq!(shared.execution, Execution::SharedAsync);
-        assert_eq!(shared.cancel_grace_ms.map(CancelGraceMs::get), Some(250));
+        assert_eq!(shared.cancel_grace_ms, Some(250));
 
-        assert!(serde_json::from_str::<TaskOptions>(
+        let below: TaskOptions = serde_json::from_str(
             r#"{"task_name": "t", "execution": "SHARED_ASYNC", "cancel_grace_ms": 50}"#,
         )
-        .is_err());
+        .expect("serde does not check the bounds");
+        assert_eq!(below.cancel_grace_ms, Some(50));
     }
 
     /// Python stores the text for every task: an isolated task with no
@@ -682,9 +658,9 @@ mod tests {
     fn an_isolated_task_with_no_options_stores_the_text_with_nulls() {
         let opts = TaskOptions {
             task_name: "my_task".to_owned(),
-            queue_name: Some("high".to_owned()),
+            queue: Some("high".to_owned()),
             good_until: None,
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: None,
             timeout_ms: None,
             execution: Execution::Isolated,
@@ -702,9 +678,9 @@ mod tests {
         // bug horsies PR #102 fixed (serializer dropped non-retry fields).
         let opts = TaskOptions {
             task_name: "my_task".to_owned(),
-            queue_name: None,
+            queue: None,
             good_until: None,
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: None,
             timeout_ms: Some(2000),
             execution: Execution::Isolated,
@@ -756,9 +732,9 @@ mod tests {
         // Round-trips through task_options JSON.
         let opts = TaskOptions {
             task_name: "capped".to_owned(),
-            queue_name: None,
+            queue: None,
             good_until: None,
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: Some(policy),
             timeout_ms: None,
             execution: Execution::Isolated,

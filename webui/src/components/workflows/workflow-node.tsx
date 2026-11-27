@@ -22,7 +22,7 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   status: WorkflowStatus;
   isSubworkflow: boolean;
   /** Tolerant join — runs even if dependencies failed. Rendered dashed. */
-  allowFailedDeps: boolean;
+  allowFailedDependencies: boolean;
   /** Execution time only; null while queued. */
   execS: number | null;
   /** True when this node has a drillable subworkflow run. */
@@ -211,8 +211,8 @@ function WorkflowNodeCardImpl({ data, selected }: NodeProps<WorkflowFlowNode>) {
         width: NODE_W,
         height: NODE_H,
         borderColor: selected ? 'var(--ring)' : 'var(--border)',
-        borderWidth: selected ? 2 : data.allowFailedDeps ? 1 : 0,
-        borderStyle: data.allowFailedDeps ? 'dashed' : 'solid',
+        borderWidth: selected ? 2 : data.allowFailedDependencies ? 1 : 0,
+        borderStyle: data.allowFailedDependencies ? 'dashed' : 'solid',
         background: `color-mix(in oklab, ${color} 8%, var(--card))`,
         cursor: data.drillable ? 'pointer' : 'default',
         opacity: data.dimmed ? 0.35 : 1,

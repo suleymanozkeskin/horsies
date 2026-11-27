@@ -1,12 +1,14 @@
 //! `TaskFunction<A, T, E>`: the typed function of a registered task, and its
-//! sends (Python `TaskFunction.send`, `schedule`, `retry_send`,
-//! `retry_schedule`, `core/task_decorator.py`).
+//! sends (Python `TaskFunction.send`, `with_options(delay_seconds=...)`,
+//! `resend`, `core/task_decorator.py`). A delay is a send option
+//! ([`TaskSendOptions::delay`]), so one send method covers a send now and a
+//! send after a delay, and one resend method covers both.
 //!
 //! A send, in order: the suppression check, the retention of the send, the
 //! read-back of the input (encode, decode with `A`, encode again, compare),
 //! the payload size limit, a new task id and the sent instant, then one
 //! enqueue through the core with `SendKind::First`. With
-//! `AppConfig.resend_on_transient_err`, a retryable `ENQUEUE_FAILED` is
+//! `AppConfig.resend_on_transient_error`, a retryable `ENQUEUE_FAILED` is
 //! sent again up to 3 times with the same task id and payload as
 //! `SendKind::Repeat`, after 200 ms, 400 ms and 800 ms (at most 2,000 ms):
 //! a send whose commit reply was lost answers with its task id, and a task
@@ -32,8 +34,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use horsies_core::core::config::payload::{enforce_payload_policy, PayloadKind};
 use horsies_core::core::task::send_types::send_error_from_enqueue;
-use horsies_core::handle::CoreHandle;
-use horsies_core::manifest::WholeSeconds;
+use horsies_core::handle::CoreConnection;
 use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
     child_producer, mint_task_id, CheckedSend, ChildProducer, Execution, FailureCause,
@@ -43,12 +44,12 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use uuid::Uuid;
 
-use super::options::{send_retention, TaskSendOptions};
+use super::options::{send_retention, SendStart, TaskSendOptions};
 use crate::app::SendSuppression;
 use crate::process_state::refuse_in_a_fork;
 use crate::task::body::encode_send_input;
 use crate::telemetry::{CallEnd, TaskSendSpan, TaskSendSubject};
-use crate::{ErrorCode, Horsies, HorsiesError, TaskHandle, UserErrorCode};
+use crate::{CustomErrorCode, Horsies, HorsiesError, HorsiesErrorCode, TaskHandle};
 
 /// Resends of a retryable `ENQUEUE_FAILED` after the first send (Python
 /// `_SEND_RETRY_COUNT`).
@@ -61,9 +62,9 @@ const RESEND_LONGEST_WAIT: Duration = Duration::from_millis(2_000);
 /// What every function of one app sends with: the app's handle, the
 /// suppression of the process and the config values of a send.
 pub(crate) struct SendContext {
-    handle: Arc<CoreHandle>,
+    handle: Arc<CoreConnection>,
     suppression: SendSuppression,
-    resend_on_transient_err: bool,
+    resend_on_transient_error: bool,
     payload: PayloadPolicy,
     retention: RetentionConfig,
 }
@@ -74,7 +75,7 @@ impl SendContext {
         Self {
             handle: Arc::clone(app.handle()),
             suppression: app.send_suppression(),
-            resend_on_transient_err: app.config().resend_on_transient_err,
+            resend_on_transient_error: app.config().resend_on_transient_error,
             payload: app.config().payload.clone(),
             retention: app.config().retention.clone(),
         }
@@ -82,7 +83,7 @@ impl SendContext {
 
     /// The handle a send goes through: the child's producer handle in a
     /// worker child, else the app's.
-    fn send_handle(&self) -> Arc<CoreHandle> {
+    fn send_handle(&self) -> Arc<CoreConnection> {
         match child_producer() {
             ChildProducer::InChild(handle) => handle,
             ChildProducer::NotInAChild => Arc::clone(&self.handle),
@@ -90,29 +91,22 @@ impl SendContext {
     }
 }
 
-/// When a send asks the task to start.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum SendStart {
-    Now,
-    AfterDelay(WholeSeconds),
-}
-
 /// The typed function of a registered task: input `A`, output `T`, code
 /// type `E`. `#[horsies::task]` returns one from `register`; clones share
-/// one app.
+/// one app. Each send goes through the app of the registration.
 ///
 /// # Panics
 ///
-/// Every send, schedule and retry method, and their blocking forms, panic
-/// in a process that was forked without `exec` after the core's process
-/// runtime started in its parent. The fork is a state of the process: no
-/// send in it can run, so it is never a [`TaskSendError`].
+/// Every send and resend method, and their blocking forms, panic in a
+/// process that was forked without `exec` after the core's process runtime
+/// started in its parent. The fork is a state of the process: no send in it
+/// can run, so it is never a [`TaskSendError`].
 pub struct TaskFunction<A, T, E> {
     task_name: String,
-    queue_name: String,
+    queue: String,
     priority: u32,
     task_options: Option<TaskOptions>,
-    accepts_workflow_ctx: bool,
+    accepts_workflow_context: bool,
     context: Arc<SendContext>,
     types: PhantomData<fn(A) -> (T, E)>,
 }
@@ -121,10 +115,10 @@ impl<A, T, E> Clone for TaskFunction<A, T, E> {
     fn clone(&self) -> Self {
         Self {
             task_name: self.task_name.clone(),
-            queue_name: self.queue_name.clone(),
+            queue: self.queue.clone(),
             priority: self.priority,
             task_options: self.task_options.clone(),
-            accepts_workflow_ctx: self.accepts_workflow_ctx,
+            accepts_workflow_context: self.accepts_workflow_context,
             context: Arc::clone(&self.context),
             types: PhantomData,
         }
@@ -136,7 +130,7 @@ impl<A, T, E> std::fmt::Debug for TaskFunction<A, T, E> {
         formatter
             .debug_struct("TaskFunction")
             .field("task_name", &self.task_name)
-            .field("queue_name", &self.queue_name)
+            .field("queue", &self.queue)
             .field("priority", &self.priority)
             .finish_non_exhaustive()
     }
@@ -146,7 +140,7 @@ impl<A, T, E> TaskFunction<A, T, E>
 where
     A: Serialize + DeserializeOwned + 'static,
     T: Serialize + DeserializeOwned + 'static,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     /// The function of the task registered on `app` as `task_name`, with
     /// the queue, priority and options of its registration. The task
@@ -167,18 +161,18 @@ where
                 .with_help("build the typed function with the input type of the task"));
             }
         }
-        let (Some(queue_name), Some(priority)) = (task.queue_name(), task.priority()) else {
+        let (Some(queue), Some(priority)) = (task.queue(), task.priority()) else {
             return Err(HorsiesError::new(format!(
                 "task '{task_name}' has no resolved queue; register it with Horsies::register"
             ))
-            .with_code(ErrorCode::TaskInvalidQueue));
+            .with_code(HorsiesErrorCode::TaskInvalidQueue));
         };
         let function = Self {
             task_name: task_name.to_owned(),
-            queue_name: queue_name.to_owned(),
+            queue: queue.to_owned(),
             priority,
             task_options: task.task_options().cloned(),
-            accepts_workflow_ctx: task.accepts_workflow_ctx(),
+            accepts_workflow_context: task.accepts_workflow_context(),
             context: Arc::new(SendContext::of(app)),
             types: PhantomData,
         };
@@ -192,8 +186,8 @@ where
     }
 
     /// The queue the task is sent to.
-    pub fn queue_name(&self) -> &str {
-        &self.queue_name
+    pub fn queue(&self) -> &str {
+        &self.queue
     }
 
     /// The priority of the task's queue: 1 is claimed first, 100 last.
@@ -207,9 +201,9 @@ where
     }
 
     /// Whether the task's input takes the workflow context (the task
-    /// attribute's `workflow_ctx`).
-    pub fn accepts_workflow_ctx(&self) -> bool {
-        self.accepts_workflow_ctx
+    /// attribute's `workflow_context`).
+    pub fn accepts_workflow_context(&self) -> bool {
+        self.accepts_workflow_context
     }
 
     /// Send the task now.
@@ -219,118 +213,69 @@ where
         self.send_with_options(TaskSendOptions::new(), input).await
     }
 
-    /// Send the task now with `options`.
+    /// Send the task with `options`: now, or after the delay of
+    /// [`TaskSendOptions::delay`].
+    ///
+    /// Errors: as [`Self::send`].
     pub async fn send_with_options(
         &self,
         options: TaskSendOptions,
         input: A,
     ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        self.first_send(SendStart::Now, &options, &input).await
-    }
-
-    /// Send the task to start after `delay`.
-    pub async fn schedule(
-        &self,
-        delay: WholeSeconds,
-        input: A,
-    ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        self.schedule_with_options(TaskSendOptions::new(), delay, input)
-            .await
-    }
-
-    /// Send the task to start after `delay`, with `options`.
-    pub async fn schedule_with_options(
-        &self,
-        options: TaskSendOptions,
-        delay: WholeSeconds,
-        input: A,
-    ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        self.first_send(SendStart::AfterDelay(delay), &options, &input)
+        let (task_id, payload) = self.prepare(&options, &input)?;
+        self.enqueue_with_resends(task_id, payload, SendKind::First)
             .await
     }
 
     /// The sends of this task with `options`.
-    pub fn with_options(&self, options: TaskSendOptions) -> TaskFunctionSendOptions<'_, A, T, E> {
-        TaskFunctionSendOptions {
+    pub fn with_options(&self, options: TaskSendOptions) -> TaskFunctionWithOptions<'_, A, T, E> {
+        TaskFunctionWithOptions {
             function: self,
             options,
         }
     }
 
-    /// Send again the task of a failed `send`: the same task id and
-    /// payload, each call `SendKind::Repeat`, so a task that an earlier call
-    /// wrote answers with its id, also after it finished.
+    /// Send again the task of a failed send: the same task id and payload,
+    /// the delay of the send included, each call `SendKind::Repeat`, so a
+    /// task that an earlier call wrote answers with its id, also after it
+    /// finished.
     ///
-    /// Errors: `VALIDATION_FAILED` for an error the retry does not accept
+    /// Errors: `VALIDATION_FAILED` for an error the resend does not accept
     /// (only `ASYNC_CONTEXT`, `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT`
-    /// carry a payload to send again), for the error of another task, and
-    /// for the error of a `schedule`; else the errors of a send.
-    pub async fn retry_send(
-        &self,
-        error: &TaskSendError,
-    ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        let (task_id, payload) = self.retry_target(error, RetryOf::Send)?;
+    /// carry a payload to send again) and for the error of another task;
+    /// else the errors of a send.
+    pub async fn resend(&self, error: &TaskSendError) -> Result<TaskHandle<T, E>, TaskSendError> {
+        let (task_id, payload) = self.checked_resend_target(error)?;
         self.enqueue_with_resends(task_id, payload, SendKind::Repeat)
             .await
     }
 
-    /// Send again the task of a failed `schedule`, as [`Self::retry_send`].
-    ///
-    /// Errors: as `retry_send`, with the error of a `send` refused.
-    pub async fn retry_schedule(
-        &self,
-        error: &TaskSendError,
-    ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        let (task_id, payload) = self.retry_target(error, RetryOf::Schedule)?;
-        self.enqueue_with_resends(task_id, payload, SendKind::Repeat)
-            .await
-    }
-
-    async fn first_send(
-        &self,
-        start: SendStart,
-        options: &TaskSendOptions,
-        input: &A,
-    ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        let (task_id, payload) = self.prepare(start, options, input)?;
-        self.enqueue_with_resends(task_id, payload, SendKind::First)
-            .await
-    }
-
-    /// The task id and payload of a first send, or the refusal before any
-    /// statement (Python `_send_with_options`, `_prepare_send`). No I/O.
+    /// The task id and payload of a first send with `options`, or the
+    /// refusal before any statement (Python `_send_with_options`,
+    /// `_prepare_send`). No I/O.
     pub(crate) fn prepare(
         &self,
-        start: SendStart,
         options: &TaskSendOptions,
         input: &A,
     ) -> Result<(Uuid, TaskSendPayload), TaskSendError> {
         let context = &self.context;
         if context.suppression.is_active() {
-            let verb = match start {
-                SendStart::Now => "send",
-                SendStart::AfterDelay(_) => "schedule",
-            };
-            return Err(TaskSendError::SendSuppressed {
+            return Err(TaskSendError::Suppressed {
                 message: format!(
-                    "Task {verb} suppressed for {} (import/check phase or \
+                    "Task send suppressed for {} (import/check phase or \
                      HORSIES_SUPPRESS_SENDS=1)",
                     self.task_name
                 ),
             });
         }
-        let retention = send_retention(
-            &context.retention,
-            &self.queue_name,
-            options.chosen_retention(),
-        )
-        .map_err(|refused| self.validation_failed(&format!("Invalid retention: {refused}")))?;
+        let retention = send_retention(&context.retention, &self.queue, options.chosen_retention())
+            .map_err(|refused| self.validation_failed(&format!("Invalid retention: {refused}")))?;
         let input_json = self.encoded_input(input)?;
         self.check_payload_size(&input_json)?;
         let priority = i32::try_from(self.priority).map_err(|_| {
             self.validation_failed(&format!(
                 "the priority of queue '{}' does not fit a Postgres integer",
-                self.queue_name
+                self.queue
             ))
         })?;
         let task_id = mint_task_id().map_err(|refused| {
@@ -343,12 +288,12 @@ where
         );
         let payload = TaskSendPayload {
             task_name: self.task_name.clone(),
-            queue_name: self.queue_name.clone(),
+            queue_name: self.queue.clone(),
             priority,
             input_json,
             sent_at: Utc::now(),
             good_until: options.deadline(),
-            enqueue_delay_seconds: match start {
+            enqueue_delay_seconds: match options.start() {
                 SendStart::Now => None,
                 SendStart::AfterDelay(delay) => Some(i64::from(delay.get())),
             },
@@ -408,37 +353,27 @@ where
         }
     }
 
-    /// The task id and payload of an error that `retry_send` or
-    /// `retry_schedule` accepts (Python `_validate_retry`).
-    pub(crate) fn retry_target(
+    /// The task id and payload of an error that `resend` accepts
+    /// (Python `_validate_resend`): the payload of a send now or of a send
+    /// after a delay, each sent again as it was.
+    pub(crate) fn checked_resend_target(
         &self,
         error: &TaskSendError,
-        retry: RetryOf,
     ) -> Result<(Uuid, TaskSendPayload), TaskSendError> {
         let Some(target) = error.resend_target() else {
             return Err(self.validation_failed(&format!(
-                "cannot retry a send that failed with {}: only ASYNC_CONTEXT, \
-                 ENQUEUE_FAILED and IDEMPOTENCY_KEY_CONFLICT carry a payload to send again",
+                "cannot resend a send that failed with {}: only ASYNC_CONTEXT and \
+                 ENQUEUE_FAILED are sent again",
                 error.code()
             )));
         };
         if target.payload.task_name != self.task_name {
             return Err(self.validation_failed(&format!(
-                "cross-task retry: error is for '{}' but this task is '{}'",
+                "cross-task resend: error is for '{}' but this task is '{}'",
                 target.payload.task_name, self.task_name
             )));
         }
-        match (retry, target.payload.enqueue_delay_seconds) {
-            (RetryOf::Send, Some(_)) => Err(self.validation_failed(
-                "cannot retry scheduled task via retry_send; use retry_schedule instead",
-            )),
-            (RetryOf::Schedule, None) => {
-                Err(self.validation_failed("cannot retry schedule: missing enqueue_delay_seconds"))
-            }
-            (RetryOf::Send, None) | (RetryOf::Schedule, Some(_)) => {
-                Ok((target.task_id, target.payload.clone()))
-            }
-        }
+        Ok((target.task_id, target.payload.clone()))
     }
 
     /// Enqueue `payload` as `task_id`, and resend a retryable
@@ -458,7 +393,7 @@ where
         first: SendKind,
     ) -> Result<TaskHandle<T, E>, TaskSendError> {
         refuse_in_a_fork(format_args!("send of task '{}'", self.task_name));
-        let resends = match self.context.resend_on_transient_err {
+        let resends = match self.context.resend_on_transient_error {
             true => RESEND_COUNT,
             false => 0,
         };
@@ -469,7 +404,7 @@ where
             queue_name: &payload.queue_name,
         });
         let trace = span.trace();
-        let handle_ref: &CoreHandle = &handle;
+        let handle_ref: &CoreConnection = &handle;
         let payload_ref = &payload;
         let trace_ref = &trace;
         let sent = send_with_resends(resends, first, move |kind| {
@@ -489,13 +424,6 @@ where
             cause: FailureCause::PreconditionFailed,
         }
     }
-}
-
-/// Which retry method checks an error.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum RetryOf {
-    Send,
-    Schedule,
 }
 
 /// Run `send` with `first`; after a retryable `ENQUEUE_FAILED`, run it
@@ -543,7 +471,7 @@ fn resend_wait(resend: u32) -> Duration {
 /// error, maps to the send catalog by the core's one rule. A carrier that
 /// breaks a bound of the core is not stored and never refuses the send.
 async fn enqueue_once(
-    handle: &CoreHandle,
+    handle: &CoreConnection,
     task_id: Uuid,
     payload: &TaskSendPayload,
     trace: &SendTrace,
@@ -599,9 +527,9 @@ pub(crate) fn send_options_text(
 fn isolated_options(task_name: &str) -> TaskOptions {
     TaskOptions {
         task_name: task_name.to_owned(),
-        queue_name: None,
+        queue: None,
         good_until: None,
-        auto_retry_for: None,
+        retry_for: None,
         retry_policy: None,
         timeout_ms: None,
         execution: Execution::Isolated,
@@ -610,32 +538,21 @@ fn isolated_options(task_name: &str) -> TaskOptions {
 }
 
 /// The sends of one task with per-send options.
-pub struct TaskFunctionSendOptions<'a, A, T, E> {
+pub struct TaskFunctionWithOptions<'a, A, T, E> {
     function: &'a TaskFunction<A, T, E>,
     options: TaskSendOptions,
 }
 
-impl<A, T, E> TaskFunctionSendOptions<'_, A, T, E>
+impl<A, T, E> TaskFunctionWithOptions<'_, A, T, E>
 where
     A: Serialize + DeserializeOwned + 'static,
     T: Serialize + DeserializeOwned + 'static,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
-    /// Send the task now with these options.
+    /// Send the task with these options: now, or after their delay.
     pub async fn send(&self, input: A) -> Result<TaskHandle<T, E>, TaskSendError> {
         self.function
             .send_with_options(self.options.clone(), input)
-            .await
-    }
-
-    /// Send the task to start after `delay` with these options.
-    pub async fn schedule(
-        &self,
-        delay: WholeSeconds,
-        input: A,
-    ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        self.function
-            .schedule_with_options(self.options.clone(), delay, input)
             .await
     }
 }
@@ -650,7 +567,7 @@ mod tests {
     use serde::Deserialize;
 
     use super::*;
-    use crate::{AppConfig, SendRetention, TaskError};
+    use crate::{AppConfig, SendRetention, TaskError, WholeSeconds};
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     struct Invoice {
@@ -684,11 +601,22 @@ mod tests {
     }
 
     fn config() -> AppConfig {
-        AppConfig::for_database_url("postgresql://localhost/horsies")
+        AppConfig::from_database_url("postgresql://localhost/horsies")
+    }
+
+    /// A config whose address has no database: a send that a defect lets
+    /// past its checks fails to connect, and writes to no local database.
+    fn config_without_database() -> AppConfig {
+        AppConfig::from_database_url("postgresql://127.0.0.1:1/nothing")
     }
 
     fn function(app: &Horsies) -> TaskFunction<Invoice, u32, Infallible> {
-        TaskFunction::__registered(app, "send_invoice").unwrap()
+        function_named(app, "send_invoice")
+    }
+
+    /// The typed function of the task `task_name`, which decodes `Invoice`.
+    fn function_named(app: &Horsies, task_name: &str) -> TaskFunction<Invoice, u32, Infallible> {
+        TaskFunction::__registered(app, task_name).unwrap()
     }
 
     fn invoice() -> Invoice {
@@ -710,20 +638,39 @@ mod tests {
         let app = app_with(config());
         let function = function(&app);
         assert_eq!(function.task_name(), "send_invoice");
-        assert_eq!(function.queue_name(), "default");
+        assert_eq!(function.queue(), "default");
         assert_eq!(function.priority(), 100);
     }
 
-    /// A workflow node of a registered function has the queue and the
-    /// stored options text of its registration (Python `TaskNode(fn=task)`);
-    /// a task registered without options gives its node none.
+    /// The queue and the stored options text of the one task node of a
+    /// spec that a builder of `app` built.
+    fn built_node_body(app: &Horsies) -> (String, Option<String>) {
+        let mut builder = app.workflow_builder("invoices");
+        let _node = builder
+            .task(function(app).node().set_input(invoice()).unwrap())
+            .unwrap();
+        let spec = builder.build().unwrap();
+        match &spec.nodes[0].body {
+            crate::workflow::SpecBody::Task {
+                queue,
+                task_options,
+                ..
+            } => (queue.clone(), task_options.clone()),
+            crate::workflow::SpecBody::SubWorkflow { .. } => panic!("a task node was built"),
+        }
+    }
+
+    /// A workflow builder of an app gives a task node the queue and the
+    /// stored options text of the task's registration on that app (Python
+    /// `TaskNode(fn=task)`); a task registered without options gives its
+    /// node none.
     #[test]
-    fn a_node_of_a_registered_function_has_the_queue_and_options_of_its_registration() {
+    fn a_builder_gives_a_node_the_queue_and_options_of_the_registration_on_its_app() {
         let options = TaskOptions {
             task_name: "send_invoice".to_owned(),
-            queue_name: None,
+            queue: None,
             good_until: None,
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: None,
             timeout_ms: Some(5_000),
             execution: Execution::Isolated,
@@ -735,12 +682,57 @@ mod tests {
             crate::async_task_fn!(send_invoice, Invoice).with_task_options(options.clone()),
         )
         .unwrap();
-        let node = function(&app).node();
-        assert_eq!(node.queue, "default");
-        assert_eq!(node.task_options, Some(options.stored_options_text()));
+        let _function = function(&app);
+        assert_eq!(
+            built_node_body(&app),
+            ("default".to_owned(), Some(options.stored_options_text()))
+        );
 
         let plain = app_with(config());
-        assert_eq!(function(&plain).node().task_options, None);
+        let _function = function(&plain);
+        assert_eq!(built_node_body(&plain), ("default".to_owned(), None));
+    }
+
+    /// A builder of an app that does not register the task refuses its node
+    /// with `HRS-302` and adds nothing, also when another app of the process
+    /// registers the task.
+    #[test]
+    fn a_node_of_a_task_that_the_builder_app_does_not_register_is_hrs_302() {
+        let registered = app_with(config());
+        let node_of = || function(&registered).node().set_input(invoice()).unwrap();
+        let mut accepted = registered.workflow_builder("invoices");
+        assert!(accepted.task(node_of()).is_ok());
+
+        let without = Horsies::new(config()).unwrap();
+        let mut builder = without.workflow_builder("invoices");
+        let refused = builder.task(node_of()).unwrap_err();
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::WorkflowUnregisteredTask)
+        );
+        assert!(refused.message.contains("task 'send_invoice'"), "{refused}");
+        assert_eq!(
+            builder.build().unwrap_err().code,
+            Some(HorsiesErrorCode::WorkflowNoNodes)
+        );
+    }
+
+    /// The app registers a task of the node's name with another input type:
+    /// `HRS-302`, with both types named.
+    #[test]
+    fn a_node_with_other_types_than_the_registration_is_hrs_302() {
+        let app = app_with(config());
+        let _function = function(&app);
+        let mut builder = app.workflow_builder("invoices");
+        let refused = builder
+            .task(crate::__private::task_node::<u32, String>("send_invoice"))
+            .unwrap_err();
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::WorkflowUnregisteredTask)
+        );
+        assert!(refused.message.contains("Invoice"), "{refused}");
+        assert!(refused.message.contains("String"), "{refused}");
     }
 
     #[test]
@@ -748,7 +740,7 @@ mod tests {
         let app = app_with(config());
         let refused =
             TaskFunction::<Invoice, u32, Infallible>::__registered(&app, "missing").unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::TaskNotRegistered));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::TaskNotRegistered));
     }
 
     #[test]
@@ -765,16 +757,11 @@ mod tests {
         let app = app_with(config());
         let deadline = Utc::now() + chrono::Duration::hours(1);
         let options = TaskSendOptions::new()
+            .delay(WholeSeconds::from_secs(30))
             .good_until(deadline)
             .idempotency_key("invoice-7")
             .retain_forever();
-        let (task_id, payload) = function(&app)
-            .prepare(
-                SendStart::AfterDelay(WholeSeconds::from_secs(30)),
-                &options,
-                &invoice(),
-            )
-            .unwrap();
+        let (task_id, payload) = function(&app).prepare(&options, &invoice()).unwrap();
         assert_eq!(task_id.get_version_num(), 7);
         assert_eq!(payload.task_name, "send_invoice");
         assert_eq!(payload.queue_name, "default");
@@ -799,7 +786,7 @@ mod tests {
     fn a_send_now_has_no_delay_and_the_default_retention() {
         let app = app_with(config());
         let (_task_id, payload) = function(&app)
-            .prepare(SendStart::Now, &TaskSendOptions::new(), &invoice())
+            .prepare(&TaskSendOptions::new(), &invoice())
             .unwrap();
         assert_eq!(payload.enqueue_delay_seconds, None);
         assert_eq!(payload.retention, EnqueueRetention::Default);
@@ -811,10 +798,10 @@ mod tests {
         let app = app_with(config());
         app.suppress_sends(true);
         let refused = function(&app)
-            .prepare(SendStart::Now, &TaskSendOptions::new(), &invoice())
+            .prepare(&TaskSendOptions::new(), &invoice())
             .unwrap_err();
         match refused {
-            TaskSendError::SendSuppressed { message } => {
+            TaskSendError::Suppressed { message } => {
                 assert!(message.contains("Task send suppressed for send_invoice"));
             }
             other => panic!("expected SEND_SUPPRESSED, got {other}"),
@@ -831,7 +818,7 @@ mod tests {
             dropped: 2,
         };
         let refused = function
-            .prepare(SendStart::Now, &TaskSendOptions::new(), &input)
+            .prepare(&TaskSendOptions::new(), &input)
             .unwrap_err();
         let message = validation_message(refused);
         assert!(message.contains("LossyInput"), "{message}");
@@ -846,7 +833,7 @@ mod tests {
             amount: f64::NAN,
         };
         let refused = function(&app)
-            .prepare(SendStart::Now, &TaskSendOptions::new(), &input)
+            .prepare(&TaskSendOptions::new(), &input)
             .unwrap_err();
         assert!(validation_message(refused).contains("non-finite"));
     }
@@ -856,7 +843,7 @@ mod tests {
         let mut config = config();
         config.payload.reject_bytes = Some(8);
         let app = app_with(config);
-        match function(&app).prepare(SendStart::Now, &TaskSendOptions::new(), &invoice()) {
+        match function(&app).prepare(&TaskSendOptions::new(), &invoice()) {
             Err(TaskSendError::PayloadTooLarge {
                 size_bytes,
                 limit_bytes,
@@ -874,16 +861,14 @@ mod tests {
         let app = app_with(config());
         let ninety = horsies_core::RetentionDays::parse_period(chrono::Duration::days(90)).unwrap();
         let options = TaskSendOptions::new().retention(SendRetention::Period(ninety));
-        let refused = function(&app)
-            .prepare(SendStart::Now, &options, &invoice())
-            .unwrap_err();
+        let refused = function(&app).prepare(&options, &invoice()).unwrap_err();
         assert!(validation_message(refused).contains("retention of 90 days"));
     }
 
     fn enqueue_failed(task_name: &str, delay: Option<i64>) -> TaskSendError {
         let app = app_with(config());
         let (task_id, mut payload) = function(&app)
-            .prepare(SendStart::Now, &TaskSendOptions::new(), &invoice())
+            .prepare(&TaskSendOptions::new(), &invoice())
             .unwrap();
         payload.task_name = task_name.to_owned();
         payload.enqueue_delay_seconds = delay;
@@ -896,39 +881,68 @@ mod tests {
         }
     }
 
+    /// The resend of a send with a delay sends its payload again with the
+    /// delay; the resend of a send now sends it with none.
     #[test]
-    fn a_retry_takes_the_task_id_and_payload_of_the_failed_send() {
+    fn a_resend_takes_the_task_id_and_payload_of_the_failed_send() {
         let app = app_with(config());
         let error = enqueue_failed("send_invoice", None);
-        let (task_id, payload) = function(&app).retry_target(&error, RetryOf::Send).unwrap();
+        let (task_id, payload) = function(&app).checked_resend_target(&error).unwrap();
         assert_eq!(Some(task_id), error.task_id());
         assert_eq!(payload.input_json, r#"{"id":7,"amount":12.5}"#);
-        let scheduled = enqueue_failed("send_invoice", Some(30));
-        assert!(function(&app)
-            .retry_target(&scheduled, RetryOf::Schedule)
-            .is_ok());
+        assert_eq!(payload.enqueue_delay_seconds, None);
+        let delayed = enqueue_failed("send_invoice", Some(30));
+        let (delayed_id, delayed_payload) = function(&app).checked_resend_target(&delayed).unwrap();
+        assert_eq!(Some(delayed_id), delayed.task_id());
+        assert_eq!(delayed_payload.enqueue_delay_seconds, Some(30));
     }
 
-    /// Python `_validate_retry` accepts `TaskSendAsyncContext`: the
+    /// Python `_validate_resend` accepts `TaskSendAsyncContext`: the
     /// prepared task id and payload of a blocking send on a runtime thread.
     #[test]
-    fn a_retry_takes_the_task_id_and_payload_of_an_async_context() {
+    fn a_resend_takes_the_task_id_and_payload_of_an_async_context() {
         let app = app_with(config());
         let (task_id, payload) = function(&app)
-            .prepare(SendStart::Now, &TaskSendOptions::new(), &invoice())
+            .prepare(&TaskSendOptions::new(), &invoice())
             .unwrap();
         let error = TaskSendError::AsyncContext {
             task_id,
             payload: Box::new(payload),
             message: "blocking send on a runtime thread".to_owned(),
         };
-        let (retried_id, retried) = function(&app).retry_target(&error, RetryOf::Send).unwrap();
-        assert_eq!(retried_id, task_id);
-        assert_eq!(retried.input_json, r#"{"id":7,"amount":12.5}"#);
+        let (resent_id, resent) = function(&app).checked_resend_target(&error).unwrap();
+        assert_eq!(resent_id, task_id);
+        assert_eq!(resent.input_json, r#"{"id":7,"amount":12.5}"#);
+    }
+
+    fn key_conflict() -> TaskSendError {
+        let app = app_with(config());
+        let (task_id, payload) = function(&app)
+            .prepare(&TaskSendOptions::new(), &invoice())
+            .unwrap();
+        TaskSendError::IdempotencyKeyConflict {
+            task_id,
+            payload: Box::new(payload),
+            message: "the key is held".to_owned(),
+            owner_task_id: Uuid::from_u128(2),
+        }
+    }
+
+    /// Reverting the `IdempotencyKeyConflict` arm of
+    /// `TaskSendError::resend_target` to `Some(..)` fails this test.
+    #[test]
+    fn a_resend_refuses_a_key_conflict_before_any_write() {
+        let app = app_with(config());
+        let message = validation_message(
+            function(&app)
+                .checked_resend_target(&key_conflict())
+                .unwrap_err(),
+        );
+        assert!(message.contains("IDEMPOTENCY_KEY_CONFLICT"), "{message}");
     }
 
     #[test]
-    fn a_retry_refuses_errors_that_carry_no_payload_another_task_and_the_other_method() {
+    fn a_resend_refuses_errors_that_carry_no_payload_and_errors_of_another_task() {
         let app = app_with(config());
         let function = function(&app);
         let refusals = [
@@ -937,27 +951,13 @@ mod tests {
                     message: "bad".to_owned(),
                     cause: FailureCause::PreconditionFailed,
                 },
-                RetryOf::Send,
                 "VALIDATION_FAILED",
             ),
-            (
-                enqueue_failed("other_task", None),
-                RetryOf::Send,
-                "cross-task retry",
-            ),
-            (
-                enqueue_failed("send_invoice", Some(30)),
-                RetryOf::Send,
-                "use retry_schedule",
-            ),
-            (
-                enqueue_failed("send_invoice", None),
-                RetryOf::Schedule,
-                "missing enqueue_delay_seconds",
-            ),
+            (enqueue_failed("other_task", None), "cross-task resend"),
+            (enqueue_failed("other_task", Some(30)), "cross-task resend"),
         ];
-        for (error, retry, expected) in refusals {
-            let message = validation_message(function.retry_target(&error, retry).unwrap_err());
+        for (error, expected) in refusals {
+            let message = validation_message(function.checked_resend_target(&error).unwrap_err());
             assert!(message.contains(expected), "{message}");
         }
     }
@@ -976,12 +976,12 @@ mod tests {
         let _function = function(&app);
         let runtime = app.task_runtime();
         let found = runtime
-            .task_handle::<Invoice, u32, Infallible>("send_invoice")
+            .task_function::<Invoice, u32, Infallible>("send_invoice")
             .unwrap();
-        assert_eq!(found.queue_name(), "default");
+        assert_eq!(found.queue(), "default");
         assert_eq!(
             runtime
-                .task_handle::<Invoice, String, Infallible>("send_invoice")
+                .task_function::<Invoice, String, Infallible>("send_invoice")
                 .unwrap_err(),
             crate::TaskFunctionNotFound::OtherTypes {
                 task_name: "send_invoice".to_owned(),
@@ -990,15 +990,9 @@ mod tests {
             }
         );
         assert!(matches!(
-            runtime.task_handle::<Invoice, u32, Infallible>("lossy"),
+            runtime.task_function::<Invoice, u32, Infallible>("lossy"),
             Err(crate::TaskFunctionNotFound::NotRegistered { .. })
         ));
-    }
-
-    #[test]
-    fn the_unregistered_send_helper_is_validation_failed() {
-        let message = validation_message(crate::__private::send_before_register("report"));
-        assert!(message.contains("report::register(&mut app)"));
     }
 
     #[test]
@@ -1064,6 +1058,7 @@ mod tests {
     async fn a_failure_that_is_not_retryable_is_not_resent() {
         for refusal in [
             failed_enqueue(false),
+            key_conflict(),
             TaskSendError::ValidationFailed {
                 message: "bad input".to_owned(),
                 cause: FailureCause::PreconditionFailed,
@@ -1112,30 +1107,104 @@ mod tests {
         );
     }
 
-    /// The task of the process-wide send test. No other test registers it:
-    /// the first registration in the process serves the module's helpers.
-    #[horsies::task("process_wide_send")]
-    async fn process_wide_send(id: u32) -> Result<u32, TaskError<Infallible>> {
+    /// The task of the tests of the generated sends.
+    #[horsies::task("generated_send")]
+    async fn generated_send(id: u32) -> Result<u32, TaskError<Infallible>> {
         Ok(id)
     }
 
+    /// An app that registers `generated_send` with `config`.
+    fn app_with_generated_send(config: AppConfig) -> Horsies {
+        let mut app = Horsies::new(config).unwrap();
+        let _function = generated_send::register(&mut app).unwrap();
+        app
+    }
+
+    /// Two apps of one process, each with its own registration of the task:
+    /// each generated send reads the app that it names. The first app
+    /// suppresses its sends; the second refuses every input by its payload
+    /// limit. Each refusal comes before any I/O.
     #[tokio::test]
-    async fn the_process_wide_send_helpers_use_the_registered_function() {
-        let mut app = Horsies::new(config()).unwrap();
-        let function = process_wide_send::register(&mut app).unwrap();
-        assert_eq!(function.task_name(), "process_wide_send");
-        app.suppress_sends(true);
-        let refused = process_wide_send::send(7).await.unwrap_err();
+    async fn each_generated_send_goes_through_the_app_that_it_names() {
+        let first = app_with_generated_send(config_without_database());
+        first.suppress_sends(true);
+        let mut limited = config_without_database();
+        limited.payload.reject_bytes = Some(1);
+        let second = app_with_generated_send(limited);
+        let refused = generated_send::send(&first, 7).await.unwrap_err();
         assert!(
-            matches!(refused, TaskSendError::SendSuppressed { .. }),
+            matches!(refused, TaskSendError::Suppressed { .. }),
             "{refused}"
         );
-        let refused = process_wide_send::schedule(WholeSeconds::from_secs(30), 7)
+        let refused = generated_send::send(&second, 7).await.unwrap_err();
+        assert!(
+            matches!(refused, TaskSendError::PayloadTooLarge { .. }),
+            "{refused}"
+        );
+        let delayed = TaskSendOptions::new().delay(WholeSeconds::from_secs(30));
+        let refused = generated_send::with_options(delayed.clone())
+            .send(&second, 7)
             .await
             .unwrap_err();
         assert!(
-            matches!(refused, TaskSendError::SendSuppressed { .. }),
+            matches!(refused, TaskSendError::PayloadTooLarge { .. }),
             "{refused}"
         );
+        let refused = generated_send::with_options(delayed)
+            .send(&first, 7)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused, TaskSendError::Suppressed { .. }),
+            "{refused}"
+        );
+    }
+
+    /// A generated send through an app that does not register the task is
+    /// `VALIDATION_FAILED` with the cause `PreconditionFailed`, before any
+    /// I/O, also when another app of the process registers it.
+    #[tokio::test]
+    async fn a_generated_send_through_an_app_without_the_task_is_validation_failed() {
+        let _registered = app_with_generated_send(config_without_database());
+        let without = Horsies::new(config_without_database()).unwrap();
+        let refused = generated_send::send(&without, 7).await.unwrap_err();
+        match &refused {
+            TaskSendError::ValidationFailed { message, cause } => {
+                assert_eq!(*cause, FailureCause::PreconditionFailed);
+                assert!(message.contains("task 'generated_send'"), "{message}");
+            }
+            other => panic!("expected VALIDATION_FAILED, got {other}"),
+        }
+        let refused = generated_send::with_options(TaskSendOptions::new())
+            .send(&without, 7)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                TaskSendError::ValidationFailed {
+                    cause: FailureCause::PreconditionFailed,
+                    ..
+                }
+            ),
+            "{refused}"
+        );
+    }
+
+    /// The app holds a task of this name with another input type: the
+    /// generated send names both types and writes nothing.
+    #[tokio::test]
+    async fn a_generated_send_of_a_task_registered_with_other_types_is_validation_failed() {
+        let mut app = Horsies::new(config_without_database()).unwrap();
+        app.register(
+            "generated_send",
+            crate::async_task_fn!(send_invoice, Invoice),
+        )
+        .unwrap();
+        let _function = function_named(&app, "generated_send");
+        let refused = generated_send::send(&app, 7).await.unwrap_err();
+        let message = validation_message(refused);
+        assert!(message.contains("Invoice"), "{message}");
+        assert!(message.contains("generated_send::Input"), "{message}");
     }
 }

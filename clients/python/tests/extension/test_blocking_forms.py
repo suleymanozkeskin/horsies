@@ -104,12 +104,15 @@ def test_each_blocking_monitoring_form_gives_the_outcome_of_its_awaitable_form(
     outcomes = dict(_pairs(blocking))
     assert outcomes['worker_state'] == ['WorkerStateAbsent']
     assert outcomes['worker_state_history'] == ['WorkerStatesRecord', 0]
-    assert outcomes['worker_state_history_refused'] == ['BrokerInvalidInput', 'INVALID_INPUT', False]
+    assert outcomes['worker_state_history_refused'] == ['DatabaseInvalidInput', 'INVALID_INPUT', False]
     assert outcomes['ping'] == ['WorkerPongsRecord', 0]
-    assert outcomes['ping_refused'] == ['BrokerInvalidInput', 'INVALID_INPUT', False]
+    assert outcomes['ping_refused'] == ['DatabaseInvalidInput', 'INVALID_INPUT', False]
+    assert outcomes['stale_tasks_refused'] == ['DatabaseInvalidInput', 'INVALID_INPUT', False]
     assert _class_of(outcomes['worker_states']) == 'WorkerStatesRecord'
-    assert _class_of(outcomes['class_coverage']) == 'ClassCoverageRecord'
-    assert _class_of(outcomes['class_report']) == 'ClassReportRecord'
+    assert _class_of(outcomes['execution_class_coverage']) == 'ExecutionClassCoverageRecord'
+    assert _class_of(outcomes['execution_class_report']) == 'ExecutionClassReportRecord'
+    assert _class_of(outcomes['stale_tasks']) == 'StaleTaskListComplete'
+    assert _class_of(outcomes['expired_tasks']) == 'ExpiredTaskListComplete'
 
 
 def test_each_blocking_form_on_an_unreachable_database_gives_the_awaitable_failure(
@@ -123,16 +126,20 @@ def test_each_blocking_form_on_an_unreachable_database_gives_the_awaitable_failu
     assert _class_of(outcomes['start']) == 'WorkflowStartEnqueueFailed'
     for read in ('status', 'wait', 'node_result', 'node_results', 'nodes', 'pause', 'resume', 'cancel'):
         assert _class_and_code(outcomes[read]) == (
-            'HandleDbOperationFailed', 'DB_OPERATION_FAILED',
+            'WorkflowHandleDatabaseOperationFailed', 'DATABASE_OPERATION_FAILED',
         ), read
-    for read in ('worker_states', 'worker_state', 'worker_state_history', 'class_coverage', 'class_report'):
+    for read in (
+        'worker_states', 'worker_state', 'worker_state_history',
+        'execution_class_coverage', 'execution_class_report', 'stale_tasks', 'expired_tasks',
+    ):
         assert _class_and_code(outcomes[read]) == (
-            'BrokerOperationFailed', 'MONITORING_QUERY_FAILED',
+            'DatabaseOperationFailed', 'MONITORING_QUERY_FAILED',
         ), read
     # Refused before any core call: the same answer as on a real database.
-    assert outcomes['worker_state_history_refused'] == ['BrokerInvalidInput', 'INVALID_INPUT', False]
-    assert outcomes['ping_refused'] == ['BrokerInvalidInput', 'INVALID_INPUT', False]
-    assert _class_of(outcomes['ping']) == 'BrokerOperationFailed'
+    assert outcomes['worker_state_history_refused'] == ['DatabaseInvalidInput', 'INVALID_INPUT', False]
+    assert outcomes['ping_refused'] == ['DatabaseInvalidInput', 'INVALID_INPUT', False]
+    assert outcomes['stale_tasks_refused'] == ['DatabaseInvalidInput', 'INVALID_INPUT', False]
+    assert _class_of(outcomes['ping']) == 'DatabaseOperationFailed'
 
 
 def _pairs(run: JsonValue) -> list[tuple[str, JsonValue]]:

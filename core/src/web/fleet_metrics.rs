@@ -167,7 +167,7 @@ mod tests {
         WorkflowCounts, FLEET_QUERY_TIMEOUT,
     };
     use crate::telemetry::labels::FleetQuery;
-    use crate::{ClassCoverage, ClientFamily};
+    use crate::{ClientFamily, ExecutionClassCoverage};
 
     /// How long a test read takes.
     const READ_TIME: Duration = Duration::from_secs(1);
@@ -253,7 +253,7 @@ mod tests {
                     handler_child: 0,
                 },
             }),
-            class_coverage: answered(ClassCoverage {
+            class_coverage: answered(ExecutionClassCoverage {
                 checked_at: checked_at(),
                 live_workers: 2,
                 streams: Vec::new(),

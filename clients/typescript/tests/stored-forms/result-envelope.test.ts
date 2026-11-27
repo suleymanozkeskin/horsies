@@ -1,6 +1,7 @@
 // result_envelope.json: the text of each `ok` value and of the `data` of each user error that this client writes,
-// and the read of every envelope through the codec's envelope reader and through an `h.resultOf` parameter (the
-// envelope that a workflow node gets from its upstream node). The core writes the envelope around the client's text;
+// and the read of every envelope through the codec's envelope reader and through an `h.taskOutcome` parameter (the
+// envelope that a workflow node gets from its upstream node), `TaskHandle.get` and `resultFor` of a workflow handle.
+// The core writes the envelope around the client's text;
 // these tests stand in for it. The named cases are separate tests beside the loops.
 
 import assert from "node:assert/strict";
@@ -12,11 +13,13 @@ import { decodeEnvelope, decodeParameters } from "../../horsies/src/codec/reader
 import type { DecodeRefused, EnvelopeRule } from "../../horsies/src/codec/refusal.ts";
 import { isPlainObject } from "../../horsies/src/codec/values.ts";
 import { encodeValue } from "../../horsies/src/codec/writer.ts";
+import { defineTask } from "../../horsies/src/contract/define-task.ts";
 import { h, parametersKind } from "../../horsies/src/wire/builders.ts";
 import type { RequiredWire } from "../../horsies/src/wire/infer.ts";
 import type { TaskOutcome } from "../../horsies/src/wire/task-error.ts";
 import { kindOf } from "../../horsies/src/wire/wire-type.ts";
 import { sameValue, show } from "../support/values.ts";
+import { taskHandleOutcome, workflowResultForOutcome } from "./read-paths.ts";
 import {
   declaredWires,
   type ErrorNotation,
@@ -35,7 +38,7 @@ function okEnvelopeText(okText: string): string {
 }
 
 /** The core writes the error object of a user error around the client's `data` text (`error_envelope`). */
-function userErrorEnvelopeText(code: string, message: string | null, dataText: string): string {
+function customErrorEnvelopeText(code: string, message: string | null, dataText: string): string {
   const messageText = message === null ? "null" : JSON.stringify(message);
   const error = `{"exception":null,"error_code":${JSON.stringify(code)},"data":${dataText},"message":${messageText}}`;
 
@@ -51,9 +54,10 @@ function readerOutcome(wire: RequiredWire, text: string): TaskOutcome<unknown> {
   return outcome.value;
 }
 
-/** The outcome that an `h.resultOf` parameter gives for the envelope text of its upstream node. */
-function resultOfOutcome(wire: RequiredWire, text: string): unknown {
-  const parameters = parametersKind({ upstream: h.resultOf(wire) });
+/** The outcome that an `h.taskOutcome` parameter gives for the envelope text of its upstream node of output `wire`. */
+function taskOutcomeOf(wire: RequiredWire, text: string): unknown {
+  const upstream = defineTask({ name: "upstream", input: {}, output: wire });
+  const parameters = parametersKind({ upstream: h.taskOutcome(upstream) });
   const decoded = decodeParameters(parameters, jsonTextCheckedByCore(`{"upstream":${text}}`), "worker");
 
   assert(decoded.ok && isPlainObject(decoded.value), show(decoded));
@@ -72,7 +76,7 @@ function refusalOf(wire: RequiredWire, text: string): DecodeRefused {
 function ruleOf(text: string): EnvelopeRule {
   const refusal = refusalOf(h.json(), text);
 
-  assert(refusal.kind === "EnvelopeRefused", show(refusal));
+  assert(refusal.kind === "envelopeRefused", show(refusal));
 
   return refusal.rule;
 }
@@ -88,7 +92,7 @@ function assertOkVector<V>(name: string, wire: RequiredWire, value: V): void {
   const outcome = readerOutcome(wire, vector.text);
 
   assert(outcome.kind === "succeeded" && sameValue(outcome.value, value), show(outcome));
-  assert(sameValue(resultOfOutcome(wire, vector.text), { kind: "succeeded", value }));
+  assert(sameValue(taskOutcomeOf(wire, vector.text), { kind: "succeeded", value }));
 }
 
 describe("result_envelope.json ok values", () => {
@@ -121,10 +125,22 @@ describe("result_envelope.json ok values", () => {
         assert(outcome.kind === "succeeded" && sameValue(outcome.value, value), show(outcome));
       });
 
-      test(`${vector.name} [${declared.label}]: an h.resultOf parameter gives the ok value`, () => {
-        const outcome = resultOfOutcome(declared.wire, vector.text);
+      test(`${vector.name} [${declared.label}]: an h.taskOutcome parameter gives the ok value`, () => {
+        const outcome = taskOutcomeOf(declared.wire, vector.text);
 
         assert(sameValue(outcome, { kind: "succeeded", value }), show(outcome));
+      });
+
+      test(`${vector.name} [${declared.label}]: TaskHandle.get gives the ok value`, async () => {
+        const outcome = await taskHandleOutcome(declared.wire, vector.text, "COMPLETED");
+
+        assert(outcome.kind === "succeeded" && sameValue(outcome.value, value), show(outcome));
+      });
+
+      test(`${vector.name} [${declared.label}]: resultFor of a workflow handle gives the ok value`, async () => {
+        const outcome = await workflowResultForOutcome(declared.wire, vector.text);
+
+        assert(outcome.kind === "succeeded" && sameValue(outcome.value, value), show(outcome));
       });
     }
   }
@@ -138,14 +154,14 @@ function assertUserErrorData(name: string, code: string, error: ErrorNotation, s
   assert.equal(data.state, "stored");
 
   if (storedData === undefined) {
-    assert.equal(userErrorEnvelopeText(code, error.message, data.text), vector.text);
+    assert.equal(customErrorEnvelopeText(code, error.message, data.text), vector.text);
 
     return;
   }
 
   // The data holds what the core refuses: the core stores the replacement (`stored_data`) around this text.
   assert.equal(data.text, JSON.stringify(error.data));
-  assert.equal(userErrorEnvelopeText(code, error.message, JSON.stringify(storedData)), vector.text);
+  assert.equal(customErrorEnvelopeText(code, error.message, JSON.stringify(storedData)), vector.text);
 }
 
 describe("result_envelope.json errors", () => {
@@ -172,8 +188,16 @@ describe("result_envelope.json errors", () => {
       assert.deepEqual(outcome.error, expected);
     });
 
-    test(`${vector.name}: an h.resultOf parameter gives the error`, () => {
-      assert.deepEqual(resultOfOutcome(h.json(), vector.text), { kind: "failed", error: expected });
+    test(`${vector.name}: an h.taskOutcome parameter gives the error`, () => {
+      assert.deepEqual(taskOutcomeOf(h.json(), vector.text), { kind: "failed", error: expected });
+    });
+
+    test(`${vector.name}: TaskHandle.get gives the error`, async () => {
+      assert.deepEqual(await taskHandleOutcome(h.json(), vector.text, "FAILED"), { kind: "failed", error: expected });
+    });
+
+    test(`${vector.name}: resultFor of a workflow handle gives the error`, async () => {
+      assert.deepEqual(await workflowResultForOutcome(h.json(), vector.text), { kind: "failed", error: expected });
     });
   }
 });
@@ -254,7 +278,8 @@ describe("result_envelope.json refused texts", () => {
           test(`${row.name} [${label}]: the ok value is refused`, () => {
             const refusal = refusalOf(wire, row.text);
 
-            assert.deepEqual([refusal.kind, refusal.path], ["EngineKey", "$.ok.<input>"]);
+            assert(refusal.kind === "decodeRefused", show(refusal));
+            assert.deepEqual([refusal.refusal, refusal.path], ["EngineKey", "$.ok.<input>"]);
           });
         }
 

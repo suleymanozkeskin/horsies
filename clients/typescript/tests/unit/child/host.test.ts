@@ -1,4 +1,4 @@
-// Child mode: bad arguments, the panic rule, the plan, the start hooks (the child's own, the providers before the
+// Child mode: bad arguments, the panic rule, the log format, the schema mode of the task sends, the plan, the start hooks (the child's own, the providers before the
 // `onChildStart` hooks, a throw), the culprit method of a shared async child, the turns, and the exit rule.
 
 import assert from "node:assert/strict";
@@ -13,6 +13,7 @@ import { CHILD_KIND_HOOK_NAME } from "../../../horsies/src/child/serve.ts";
 import type { CallbackSettlement } from "../../../horsies/src/native/call/callback.ts";
 import { contextOf, implementedApp } from "../worker/support.ts";
 import { FakeChildNative, settled } from "./child-native.ts";
+import { unusedSeatHost } from "../seats/support.ts";
 
 const CHILD_ARGUMENTS = ["--horsies-child", "3", "4242"] as const;
 
@@ -76,6 +77,7 @@ function fakeDeps(native: FakeChildNative): ChildModeDeps & Recorded {
     culprit,
     settlement,
     hostname: "host-1",
+    seats: unusedSeatHost(),
     writeLine: (line) => lines.push(line),
     wait: async (milliseconds) => {
       flushes.push(`wait ${String(milliseconds)}`);
@@ -130,11 +132,12 @@ describe("child mode", () => {
     const running = runChildMode(app, CHILD_ARGUMENTS, fakeDeps(native));
 
     await settled();
-    assert.deepEqual(native.calls.slice(0, 3), ["childArguments", "setPanicRule ABORT_PROCESS", "serveChild"]);
+    assert.deepEqual(native.calls.slice(0, 4), ["childArguments", "setPanicRule ABORT_PROCESS", "applyLogFormat textLogs", "serveChild"]);
+    assert.deepEqual(native.schemaModes, ["MIGRATE_AND_VALIDATE"]);
     assert.deepEqual(native.serves[0]?.plan, {
       tasks: [
-        { name: "ping", form: "ASYNC" },
-        { name: "charge", form: "ASYNC" },
+        { name: "ping", form: "ASYNC", context: "NO_CONTEXT" },
+        { name: "charge", form: "ASYNC", context: "NO_CONTEXT" },
       ],
       startHooks: [CHILD_KIND_HOOK_NAME, "provide #1 openPool", "onChildStart #1 warmCache"],
       producerManifestJson: '{"manifest":"of the app"}',
@@ -143,6 +146,17 @@ describe("child mode", () => {
       exitFlushBoundMs: CHILD_EXIT_FLUSH_BOUND_MS,
       processArguments: [...CHILD_ARGUMENTS],
     });
+    native.endServe(0);
+    assert.equal(await endedCode(running), 0);
+  });
+
+  test("the task sends take the app's schema mode, and the stderr lines take the app's log format", async () => {
+    const native = new FakeChildNative();
+    const running = runChildMode(implementedApp({ schemaMode: "OBSERVE_ONLY", logFormat: { kind: "jsonLogs" } }), CHILD_ARGUMENTS, fakeDeps(native));
+
+    await settled();
+    assert.deepEqual(native.calls.slice(0, 4), ["childArguments", "setPanicRule ABORT_PROCESS", "applyLogFormat jsonLogs", "serveChild"]);
+    assert.deepEqual(native.schemaModes, ["OBSERVE_ONLY"]);
     native.endServe(0);
     assert.equal(await endedCode(running), 0);
   });
@@ -217,7 +231,7 @@ describe("child mode", () => {
 
 describe("the body facts of a child", () => {
   test("OpenTelemetry tracing records the facts of each run; no tracing records none", () => {
-    assert.equal(bodyFactsMode("otel"), "SPANS");
-    assert.equal(bodyFactsMode("none"), "NO_SCOPE");
+    assert.equal(bodyFactsMode({ kind: "otelTracing", parentage: "linkedToSend", workerEndedSpans: "noSpans" }), "SPANS");
+    assert.equal(bodyFactsMode({ kind: "noTracing" }), "NO_SCOPE");
   });
 });

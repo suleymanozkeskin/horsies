@@ -1,9 +1,9 @@
-// The send path: `app.send` and `app.retrySend`.
+// The send path: `app.send` and `app.resend`.
 //
 // A send: the contract is listed; sends are not suppressed; the options and the input pass their checks (the input
 // with a read-back); the core prepares the facts (task id, options text, retention, payload bound, the priority of the
 // queue in the accepted config); one enqueue with
-// `FIRST`, wrapped by the send observer; with `resendOnTransientErr`, a retryable `ENQUEUE_FAILED` is sent again with
+// `FIRST`, wrapped by the send observer; with `resendOnTransientError`, a retryable `ENQUEUE_FAILED` is sent again with
 // `REPEAT`, at most `RESEND_COUNT` times. Every refusal before the enqueue writes nothing.
 
 import type { CoreAccess } from "../app/core-access.ts";
@@ -19,7 +19,8 @@ import type { EnqueueRequest, OptionalText, RetentionRecord, SendKind, SendPrior
 import type { TraceArgument } from "../native/values/records.ts";
 import { readFormOfCompiled, type TaskHandle, taskHandleOf } from "../read/handle.ts";
 import { err, ok, type Result } from "../wire/result.ts";
-import { DEFAULT_QUEUE_PRIORITY, RESEND_COUNT, RESEND_FIRST_WAIT_MS, RESEND_LONGEST_WAIT_MS } from "./bounds.ts";
+import { DEFAULT_QUEUE_PRIORITY } from "../_catalog/send_bounds.ts";
+import { RESEND_COUNT, RESEND_FIRST_WAIT_MS, RESEND_LONGEST_WAIT_MS } from "./bounds.ts";
 import { enqueue, prepareSend } from "./core-calls.ts";
 import {
   preconditionFailed,
@@ -31,7 +32,7 @@ import {
   type TaskSendError,
   validationFailed,
 } from "./errors.ts";
-import { checkSendOptions, epochMicrosTowardPast, type SendOptions } from "./options.ts";
+import { checkSendOptions, epochMicrosTowardPast, type TaskSendOptions } from "./options.ts";
 
 /** The queue that each send of a task carries. The priority of the queue comes from the core's accepted config. */
 export type QueueRoute = { readonly queueName: string };
@@ -53,7 +54,7 @@ export interface ContractLookup {
 /** What a send reads from its app. */
 export interface SendContext {
   readonly contracts: ContractLookup;
-  readonly resendOnTransientErr: boolean;
+  readonly resendOnTransientError: boolean;
   readonly core: CoreAccess;
   readonly observer: SendObserver;
   readonly suppression: SuppressionState;
@@ -70,7 +71,7 @@ export async function sendTask<O, E extends string>(
   context: SendContext,
   contract: object,
   input: object,
-  options: SendOptions,
+  options: TaskSendOptions,
 ): Promise<SendOutcome<O, E>> {
   const taskName = contractRecord(contract).name;
   const listed = context.contracts.byContract(contract);
@@ -90,16 +91,19 @@ export async function sendTask<O, E extends string>(
   return request.ok ? sentHandle<O, E>(context, listed.task, request.value, "FIRST") : request;
 }
 
-/** Send again the payload of a retryable error, under the same task id, with `REPEAT`. */
-export async function retrySend<O, E extends string>(
+/**
+ * Send again the payload of an `ENQUEUE_FAILED` error, under the same task id, with `REPEAT`. An
+ * `IDEMPOTENCY_KEY_CONFLICT` is not retryable: the type refuses it, and untyped code gets `VALIDATION_FAILED`.
+ */
+export async function resend<O, E extends string>(
   context: SendContext,
   error: RetryableSendError<O, E>,
 ): Promise<SendOutcome<O, E>> {
   // A JavaScript caller can pass another error than the type allows.
   const code: string = error.code;
 
-  if (code !== "ENQUEUE_FAILED") {
-    const message = `retrySend takes ENQUEUE_FAILED only; ${code} is not retryable`;
+  if (!isResendCode(code)) {
+    const message = `resend takes ENQUEUE_FAILED only; ${code} is not retryable`;
 
     return err(validationFailed(message, ruleRefused(message)));
   }
@@ -117,6 +121,16 @@ export async function retrySend<O, E extends string>(
   }
 
   return sentHandle<O, E>(context, listed.task, requestOfPayload(error.taskId, error.payload), "REPEAT");
+}
+
+/** Whether `resend` takes an error of the code `code`, a text that a JavaScript caller can give. Pure. */
+function isResendCode(code: string): boolean {
+  switch (code) {
+    case "ENQUEUE_FAILED":
+      return true;
+    default:
+      return false;
+  }
 }
 
 function notListed(taskName: string): SendFailure {
@@ -148,7 +162,7 @@ async function preparedRequest(
   context: SendContext,
   task: ListedTask,
   input: object,
-  options: SendOptions,
+  options: TaskSendOptions,
 ): Promise<Result<EnqueueRequest, SendFailure>> {
   const { compiled, route } = task;
   const taskName = compiled.record.name;
@@ -180,8 +194,18 @@ async function preparedRequest(
     inputBytes: Buffer.byteLength(text.value, "utf8"),
   });
 
-  if (prepared.kind === "refused") {
-    return err(sendErrorOfRaw(prepared.error));
+  switch (prepared.kind) {
+    case "refused":
+      return err(sendErrorOfRaw(prepared.error));
+    case "seatRelayFull":
+      return err(prepared.error);
+    case "prepared":
+      break;
+    default: {
+      const unexpected: never = prepared;
+
+      throw new TypeError(`send: a prepare outside its type: ${String(unexpected)}`);
+    }
   }
 
   const request: EnqueueRequest = {
@@ -266,7 +290,7 @@ async function sentHandle<O, E extends string>(
 }
 
 /**
- * One enqueue; with `resendOnTransientErr`, a retryable `ENQUEUE_FAILED` is sent again with `REPEAT` after
+ * One enqueue; with `resendOnTransientError`, a retryable `ENQUEUE_FAILED` is sent again with `REPEAT` after
  * `RESEND_FIRST_WAIT_MS`, doubled each time, at most `RESEND_LONGEST_WAIT_MS`, at most `RESEND_COUNT` times.
  */
 export async function enqueueWithResends(
@@ -277,8 +301,8 @@ export async function enqueueWithResends(
 ): Promise<Result<TaskId, SendFailure>> {
   let sent = await enqueueOnce(context, request, firstKind, trace);
 
-  for (let resend = 0; resend < RESEND_COUNT && context.resendOnTransientErr && isTransient(sent); resend += 1) {
-    await context.pause(Math.min(RESEND_FIRST_WAIT_MS * 2 ** resend, RESEND_LONGEST_WAIT_MS));
+  for (let resends = 0; resends < RESEND_COUNT && context.resendOnTransientError && isTransient(sent); resends += 1) {
+    await context.pause(Math.min(RESEND_FIRST_WAIT_MS * 2 ** resends, RESEND_LONGEST_WAIT_MS));
     sent = await enqueueOnce(context, request, "REPEAT", trace);
   }
 
@@ -298,6 +322,8 @@ async function enqueueOnce(
       return ok(taskIdFromCore(outcome.taskId, "enqueue"));
     case "failed":
       return err(sendErrorOfRaw(outcome.error));
+    case "seatRelayFull":
+      return err(outcome.error);
     default: {
       const unexpected: never = outcome;
 

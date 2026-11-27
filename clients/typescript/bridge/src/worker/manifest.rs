@@ -75,7 +75,7 @@ pub fn config_sections(
         max: refused.max,
     })?;
     Ok(ConfigSections {
-        database: database_manifest(producer, &config.broker),
+        database: database_manifest(producer, &config.database),
         send: producer.send,
         profiles,
         claim,
@@ -91,7 +91,7 @@ pub fn config_sections(
 /// process from the config. Pure.
 fn database_manifest(
     producer: &ProducerManifest,
-    broker: &PostgresConfig,
+    database_config: &PostgresConfig,
 ) -> wire::WorkerDatabaseManifest {
     let database = &producer.database;
     wire::WorkerDatabaseManifest {
@@ -99,8 +99,8 @@ fn database_manifest(
         session_database: database.session_database.clone(),
         pgbouncer_transaction_mode: database.pgbouncer_transaction_mode,
         pool_pre_ping: database.pool_pre_ping,
-        worker_pool_pre_ping: broker.worker_pool_pre_ping,
-        pool_timeout: database.pool_timeout,
+        worker_pool_pre_ping: database_config.worker_pool_pre_ping,
+        pool_timeout_seconds: database.pool_timeout_seconds,
         pool_recycle: database.pool_recycle,
         echo: database.echo,
         tcp_keepalives: database.tcp_keepalives,
@@ -139,7 +139,7 @@ fn recovery_member(field: RecoveryField) -> &'static str {
         RecoveryField::RunningStaleThresholdMs => "runningStaleThresholdMs",
         RecoveryField::FinalizingStaleThresholdMs => "finalizingStaleThresholdMs",
         RecoveryField::CrashedWorkerRecoveryGraceMs => "crashedWorkerRecoveryGraceMs",
-        RecoveryField::Phase2QuarantineAfterAttempts => "phase2QuarantineAfterAttempts",
+        RecoveryField::FinalizationQuarantineAfterAttempts => "finalizationQuarantineAfterAttempts",
         RecoveryField::WorkflowRecoveryFailureLimit => "workflowRecoveryFailureLimit",
         RecoveryField::CheckIntervalMs => "checkIntervalMs",
         RecoveryField::OrphanTaskAuditIntervalMs => "orphanTaskAuditIntervalMs",
@@ -162,19 +162,19 @@ fn retention_member(field: &RetentionField) -> String {
             "queueRetention[{}].days",
             serde_json::Value::String(queue.clone())
         ),
-        RetentionField::PartitionMaintenanceIntervalS => {
+        RetentionField::PartitionMaintenanceIntervalSeconds => {
             "partitionMaintenanceIntervalSeconds".to_owned()
         }
-        RetentionField::RetentionSweepIntervalS => "retentionSweepIntervalSeconds".to_owned(),
+        RetentionField::RetentionSweepIntervalSeconds => "retentionSweepIntervalSeconds".to_owned(),
         RetentionField::RetentionDeleteBatchSize => "retentionDeleteBatchSize".to_owned(),
     }
 }
 
 fn resilience_member(field: ResilienceField) -> &'static str {
     match field {
-        ResilienceField::DbRetryInitialMs => "dbRetryInitialMs",
-        ResilienceField::DbRetryMaxMs => "dbRetryMaxMs",
-        ResilienceField::DbRetryMaxAttempts => "dbRetryMaxAttempts.attempts",
+        ResilienceField::DatabaseRetryInitialMs => "databaseRetryInitialMs",
+        ResilienceField::DatabaseRetryMaxMs => "databaseRetryMaxMs",
+        ResilienceField::DatabaseRetryMaxAttempts => "databaseRetryMaxAttempts.attempts",
         ResilienceField::NotifyPollIntervalMs => "notifyPollIntervalMs",
     }
 }
@@ -193,11 +193,11 @@ mod tests {
 
     use super::*;
     use crate::call::thrown::Envelope;
-    use crate::sends::checks::{check_app_config, AppConfigCheck};
+    use crate::sends::checks::{check_app_config, AppConfigCheck, AppSchemaMode};
 
     /// The JSON text of an app config with `rest` after its broker section.
     fn config_text(rest: &str) -> String {
-        format!(r#"{{"broker": {{"database_url": "postgres://127.0.0.1:55432/horsies"}}{rest}}}"#)
+        format!(r#"{{"database": {{"database_url": "postgres://127.0.0.1:55432/horsies"}}{rest}}}"#)
     }
 
     /// The config and the producer manifest of `text`, as `prepareWorker`
@@ -205,7 +205,7 @@ mod tests {
     fn read(text: &str) -> (AppConfig, ProducerManifest) {
         let config: AppConfig = serde_json::from_str(text).expect("the config text reads");
         let Envelope::Value(AppConfigCheck::Accepted { manifest_json, .. }) =
-            check_app_config(text.to_owned())
+            check_app_config(text.to_owned(), AppSchemaMode::MigrateAndValidate)
         else {
             panic!("the config is accepted");
         };
@@ -303,6 +303,111 @@ mod tests {
     /// The change of one case of the bound test below.
     type ConfigChange = Box<dyn Fn(&mut AppConfig)>;
 
+    /// The bound cases of the fields that the first list of the bound test
+    /// leaves out: together they refuse every kind of `ConfigField`.
+    fn more_bound_cases() -> Vec<(ConfigChange, &'static str)> {
+        let recovery = |path, change: fn(&mut horsies_core::RecoveryConfig)| {
+            let change: ConfigChange =
+                Box::new(move |config: &mut AppConfig| change(&mut config.recovery));
+            (change, path)
+        };
+        let retention = |path, change: fn(&mut horsies_core::RetentionConfig)| {
+            let change: ConfigChange =
+                Box::new(move |config: &mut AppConfig| change(&mut config.retention));
+            (change, path)
+        };
+        let resilience = |path, change: fn(&mut horsies_core::WorkerResilienceConfig)| {
+            let change: ConfigChange =
+                Box::new(move |config: &mut AppConfig| change(&mut config.resilience));
+            (change, path)
+        };
+        vec![
+            (
+                Box::new(|config: &mut AppConfig| config.max_claim_renew_age_ms = 0),
+                "maxClaimRenewAgeMs",
+            ),
+            (
+                Box::new(|config: &mut AppConfig| {
+                    config.queue_mode = QueueMode::Custom;
+                    config.custom_queues = Some(vec![horsies_core::CustomQueueConfig {
+                        name: "critical".to_owned(),
+                        priority: 1,
+                        max_concurrency: Some(u32::MAX),
+                    }]);
+                }),
+                "customQueues[0].maxConcurrency.tasks",
+            ),
+            recovery("recovery.claimedStaleThresholdMs", |c| {
+                c.claimed_stale_threshold_ms = u64::MAX;
+            }),
+            recovery("recovery.runningStaleThresholdMs", |c| {
+                c.running_stale_threshold_ms = u64::MAX;
+            }),
+            recovery("recovery.finalizingStaleThresholdMs", |c| {
+                c.finalizing_stale_threshold_ms = u64::MAX;
+            }),
+            recovery("recovery.crashedWorkerRecoveryGraceMs", |c| {
+                c.crashed_worker_recovery_grace_ms = u64::MAX;
+            }),
+            recovery("recovery.finalizationQuarantineAfterAttempts", |c| {
+                c.finalization_quarantine_after_attempts = u32::MAX;
+            }),
+            recovery("recovery.workflowRecoveryFailureLimit", |c| {
+                c.workflow_recovery_failure_limit = u32::MAX;
+            }),
+            recovery("recovery.orphanTaskAuditIntervalMs", |c| {
+                c.orphan_task_audit_interval_ms = u64::MAX;
+            }),
+            recovery("recovery.runnerHeartbeatIntervalMs", |c| {
+                c.runner_heartbeat_interval_ms = u64::MAX;
+            }),
+            recovery("recovery.claimerHeartbeatIntervalMs", |c| {
+                c.claimer_heartbeat_interval_ms = u64::MAX;
+            }),
+            recovery("recovery.workerStateSnapshotIntervalMs", |c| {
+                c.worker_state_snapshot_interval_ms = u64::MAX;
+            }),
+            retention("retention.workerStateRetention.hours", |c| {
+                c.worker_state_retention_hours = Some(u32::MAX);
+            }),
+            retention("retention.terminalRecordRetention.hours", |c| {
+                c.terminal_record_retention_hours = Some(u32::MAX);
+            }),
+            retention("retention.historyLeafHorizonDays", |c| {
+                c.history_leaf_horizon_days = u32::MAX;
+            }),
+            retention("retention.heartbeatLeafHorizonHours", |c| {
+                c.heartbeat_leaf_horizon_hours = u32::MAX;
+            }),
+            retention(r#"retention.queueRetention["bulk"].days"#, |c| {
+                c.queue_retention
+                    .insert("bulk".to_owned(), Some(chrono::Duration::hours(36)));
+            }),
+            retention("retention.partitionMaintenanceIntervalSeconds", |c| {
+                c.partition_maintenance_interval_seconds = u64::MAX;
+            }),
+            retention("retention.retentionSweepIntervalSeconds", |c| {
+                c.retention_sweep_interval_seconds = u64::MAX;
+            }),
+            retention("retention.retentionDeleteBatchSize", |c| {
+                c.retention_delete_batch_size = u32::MAX;
+            }),
+            resilience("resilience.databaseRetryInitialMs", |c| {
+                c.database_retry_initial_ms = u64::MAX;
+            }),
+            resilience("resilience.databaseRetryMaxMs", |c| {
+                c.database_retry_max_ms = u64::MAX;
+            }),
+            resilience("resilience.databaseRetryMaxAttempts.attempts", |c| {
+                c.database_retry_max_attempts = u64::MAX;
+            }),
+            (
+                Box::new(|config: &mut AppConfig| config.payload.reject_bytes = Some(0)),
+                "payload.rejectBytes.bytes",
+            ),
+        ]
+    }
+
     /// Each value outside its manifest bound is refused with its path as the
     /// TypeScript config writes it and the bound of its field, never the
     /// value. The config is changed after its check, as a value that the
@@ -319,7 +424,10 @@ mod tests {
                 "claim.leaseMs",
             ),
             (
-                Box::new(|config: &mut AppConfig| config.cluster_wide_cap = Some(u32::MAX)),
+                Box::new(|config: &mut AppConfig| {
+                    config.cluster_wide_cap =
+                        horsies_core::core::ClusterCapSetting::ClusterCap { tasks: u32::MAX }
+                }),
                 "clusterWideCap.tasks",
             ),
             (
@@ -356,6 +464,10 @@ mod tests {
                 "payload.warnBytes.bytes",
             ),
         ];
+        let cases = cases
+            .into_iter()
+            .chain(more_bound_cases())
+            .collect::<Vec<_>>();
         for (change, path) in cases {
             let (mut config, producer) = read(&config_text(""));
             change(&mut config);
@@ -365,13 +477,146 @@ mod tests {
         }
     }
 
+    /// The profile JSON of a recycle of `after` and `above`, in the config
+    /// text's forms.
+    fn recycle_text(after_key: &str, after: &str, above: &str) -> String {
+        format!(r#"{{"{after_key}": {after}, "above": {above}}}"#)
+    }
+
+    /// The four recycle forms: each task limit with each memory limit.
+    fn recycle_forms() -> [(&'static str, &'static str); 4] {
+        [
+            (
+                r#"{"kind": "no_task_limit"}"#,
+                r#"{"kind": "no_memory_limit"}"#,
+            ),
+            (
+                r#"{"kind": "no_task_limit"}"#,
+                r#"{"kind": "memory_limit", "mb": 512}"#,
+            ),
+            (
+                r#"{"kind": "task_limit", "tasks": 7}"#,
+                r#"{"kind": "no_memory_limit"}"#,
+            ),
+            (
+                r#"{"kind": "task_limit", "tasks": 7}"#,
+                r#"{"kind": "memory_limit", "mb": 512}"#,
+            ),
+        ]
+    }
+
+    /// The task and memory limit that `form` of `recycle_forms` gives, as
+    /// whether each one is set.
+    fn is_limited(after: &wire::TaskLimit, above: &wire::MemoryLimit) -> (bool, bool) {
+        (
+            matches!(after, wire::TaskLimit::Tasks { .. }),
+            matches!(above, wire::MemoryLimit::Megabytes { .. }),
+        )
+    }
+
+    #[test]
+    fn each_recycle_form_of_an_isolated_child_is_kept() {
+        for (after, above) in recycle_forms() {
+            let recycle = recycle_text("after", after, above);
+            let built = profile(
+                &format!(
+                    r#", "worker_profiles": {{"io": {{"isolated": {{"kind": "isolated_children", "count": 1, "recycle": {recycle}}}}}}}"#
+                ),
+                "io",
+            );
+            let wire::Isolated::Children { recycle, .. } = built.isolated else {
+                panic!("the profile has isolated children");
+            };
+            assert_eq!(
+                is_limited(&recycle.after, &recycle.above),
+                (
+                    after.contains("\"task_limit\""),
+                    above.contains("\"memory_limit\"")
+                ),
+                "{after} {above}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_recycle_form_of_a_shared_async_child_is_kept() {
+        for (after, above) in recycle_forms() {
+            let recycle = recycle_text("after_per_seat", after, above);
+            let built = profile(
+                &format!(
+                    r#", "worker_profiles": {{"io": {{"isolated": {{"kind": "no_isolated_children"}}, "shared_async": {{"kind": "shared_async_children", "count": 1, "seats": 2, "recycle": {recycle}}}}}}}"#
+                ),
+                "io",
+            );
+            let wire::SharedAsync::Children { recycle, .. } = built.shared_async else {
+                panic!("the profile has shared async children");
+            };
+            assert_eq!(
+                is_limited(&recycle.after_per_seat, &recycle.above),
+                (
+                    after.contains("\"task_limit\""),
+                    above.contains("\"memory_limit\"")
+                ),
+                "{after} {above}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_recycle_form_of_a_shared_thread_child_is_kept() {
+        for (after, above) in recycle_forms() {
+            let recycle = recycle_text("after_per_seat", after, above);
+            let built = profile(
+                &format!(
+                    r#", "worker_profiles": {{"cpu": {{"isolated": {{"kind": "no_isolated_children"}}, "shared_thread": {{"kind": "shared_thread_children", "count": 1, "seats": 2, "recycle": {recycle}}}}}}}"#
+                ),
+                "cpu",
+            );
+            let wire::SharedThread::Children { recycle, .. } = built.shared_thread else {
+                panic!("the profile has shared thread children");
+            };
+            assert_eq!(
+                is_limited(&recycle.after_per_seat, &recycle.above),
+                (
+                    after.contains("\"task_limit\""),
+                    above.contains("\"memory_limit\"")
+                ),
+                "{after} {above}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_profile_kind_is_with_children_where_it_is_given_and_without_where_it_is_not() {
+        let built = sections(
+            r#", "worker_profiles": {
+                "only_isolated": {"isolated": {"kind": "isolated_children", "count": 1}},
+                "only_async": {"isolated": {"kind": "no_isolated_children"}, "shared_async": {"kind": "shared_async_children", "count": 1, "seats": 2}},
+                "only_thread": {"isolated": {"kind": "no_isolated_children"}, "shared_thread": {"kind": "shared_thread_children", "count": 1, "seats": 2}}
+            }"#,
+        )
+        .expect("the sections are inside their bounds")
+        .profiles;
+        let kinds = |name: &str| {
+            let profile = built.get(name).expect("the profile is in the manifest");
+            (
+                matches!(profile.isolated, wire::Isolated::Children { .. }),
+                matches!(profile.shared_async, wire::SharedAsync::Children { .. }),
+                matches!(profile.shared_thread, wire::SharedThread::Children { .. }),
+            )
+        };
+        assert_eq!(kinds("only_isolated"), (true, false, false));
+        assert_eq!(kinds("only_async"), (false, true, false));
+        assert_eq!(kinds("only_thread"), (false, false, true));
+    }
+
     #[test]
     fn no_retry_attempt_limit_is_its_own_variant() {
         let (mut config, producer) = read(&config_text(""));
-        config.resilience.db_retry_max_attempts = 0;
+        config.resilience.database_retry_max_attempts = 0;
         let built = config_sections(&config, &producer).expect("inside every bound");
         assert_eq!(
-            built.resilience.db_retry_max_attempts,
+            built.resilience.database_retry_max_attempts,
             wire::RetryAttemptLimit::NoLimit
         );
     }
@@ -391,8 +636,8 @@ mod tests {
                 "customQueues[2].maxConcurrency.tasks",
             ),
             (
-                ConfigField::Recovery(RecoveryField::Phase2QuarantineAfterAttempts),
-                "recovery.phase2QuarantineAfterAttempts",
+                ConfigField::Recovery(RecoveryField::FinalizationQuarantineAfterAttempts),
+                "recovery.finalizationQuarantineAfterAttempts",
             ),
             (
                 ConfigField::Retention(RetentionField::QueueRetention {
@@ -401,12 +646,12 @@ mod tests {
                 r#"retention.queueRetention["bulk \"low\""].days"#,
             ),
             (
-                ConfigField::Retention(RetentionField::PartitionMaintenanceIntervalS),
+                ConfigField::Retention(RetentionField::PartitionMaintenanceIntervalSeconds),
                 "retention.partitionMaintenanceIntervalSeconds",
             ),
             (
-                ConfigField::Resilience(ResilienceField::DbRetryMaxAttempts),
-                "resilience.dbRetryMaxAttempts.attempts",
+                ConfigField::Resilience(ResilienceField::DatabaseRetryMaxAttempts),
+                "resilience.databaseRetryMaxAttempts.attempts",
             ),
             (
                 ConfigField::Payload(PayloadField::RejectBytes),

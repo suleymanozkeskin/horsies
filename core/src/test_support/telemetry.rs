@@ -4,7 +4,7 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use crate::events::Event;
+use crate::events::AnyEvent;
 use crate::telemetry::catalog::MetricId;
 use crate::telemetry::declared::{DeclaredNames, ErrorCodeValues};
 use crate::telemetry::registry::{
@@ -85,7 +85,7 @@ impl WatchedTelemetry {
     }
 
     /// The events that the points emitted since the last read, in order.
-    pub(crate) fn events(&mut self) -> Vec<Event> {
+    pub(crate) fn events(&mut self) -> Vec<AnyEvent> {
         self.queue.take_waiting(MOST_TEST_EVENTS)
     }
 

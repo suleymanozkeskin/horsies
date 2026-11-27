@@ -15,10 +15,13 @@ import type {
 
 /**
  * A core handle of the producer manifest `manifestJson`, with the pool profile of this process.
- * Starts nothing. Throws `ManifestRefused` for a manifest that the core refuses.
+ * Starts nothing. Throws `ManifestRefused` for a manifest that the core refuses, and the error of a failed
+ * addon load (`RuntimeStartFailed`, `AddonOutsideMainThread`), not a defect of the call.
  */
 export function buildCoreHandle(manifestJson: string, profile: HandleProfile): CoreHandle {
-  return new CoreHandle(nativeValue("buildCoreHandle", () => handleAddon().buildCoreHandle(manifestJson, profile)));
+  const addon = handleAddon();
+
+  return new CoreHandle(nativeValue("buildCoreHandle", () => addon.buildCoreHandle(manifestJson, profile)));
 }
 
 /** The core handle of one producer manifest. */

@@ -1,5 +1,5 @@
 //! The operator cancel of a RUNNING task on a live worker
-//! (`horsies::monitoring::cancel_task` with `include_running`), per
+//! (`horsies::monitoring::cancel_task` with `CancelPolicy::IncludeRunning`), per
 //! execution class and body kind:
 //!
 //! - the task code sees the cancel within 2 s on a local database: an async
@@ -17,7 +17,7 @@
 
 use std::time::{Duration, Instant};
 
-use horsies::{TaskHandle, TaskInfoParts, TaskStatus, UserErrorCode};
+use horsies::{CustomErrorCode, TaskHandle, TaskInfoParts, TaskStatus};
 use horsies_test_worker::harness::{succeeded, Suite};
 use horsies_test_worker::instance::{Instance, Profile};
 use horsies_test_worker::markers;
@@ -86,9 +86,13 @@ async fn started_pid(suite: &Suite, token: &str) -> String {
 /// before the cancel.
 async fn cancel_running(suite: &Suite, task_id: Uuid) -> u128 {
     let cancel_at = markers::unix_millis();
-    let _cancelled = horsies::monitoring::cancel_task(&suite.app, task_id, true)
-        .await
-        .unwrap_or_else(|error| panic!("cancel the running task {task_id}: {error}"));
+    let _cancelled = horsies::monitoring::cancel_task(
+        &suite.app,
+        task_id,
+        horsies::monitoring::CancelPolicy::IncludeRunning,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("cancel the running task {task_id}: {error}"));
     cancel_at
 }
 
@@ -115,7 +119,7 @@ async fn assert_seen_in_time(suite: &Suite, token: &str, cancel_at: u128) {
 async fn assert_cancelled_with_one_attempt<T, E>(handle: &TaskHandle<T, E>)
 where
     T: DeserializeOwned + Clone + std::fmt::Debug,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     let info = handle.info(ALL_PARTS).await.expect("read the info");
     assert_eq!(info.status, TaskStatus::Cancelled);
@@ -131,7 +135,7 @@ where
 /// The pid of the isolated child that runs the next task.
 async fn isolated_pid(suite: &Suite) -> String {
     let handle = suite
-        .function(basic::pid::handle)
+        .function(basic::pid::function)
         .send(basic::pid::Input { sleep_ms: 0 })
         .await
         .expect("send e2e_pid");
@@ -147,7 +151,7 @@ async fn an_isolated_async_body_sees_the_cancel() {
     let _worker = suite.worker(Profile::Isolated1).await;
     let token = new_token();
     let handle = suite
-        .function(cancel::cancel_isolated_async::handle)
+        .function(cancel::cancel_isolated_async::function)
         .send(cancel::cancel_isolated_async::Input {
             token: token.clone(),
         })
@@ -170,7 +174,7 @@ async fn an_isolated_blocking_body_sees_the_cancel() {
     let _worker = suite.worker(Profile::Isolated1).await;
     let token = new_token();
     let handle = suite
-        .function(cancel::cancel_isolated_blocking::handle)
+        .function(cancel::cancel_isolated_blocking::function)
         .send(cancel::cancel_isolated_blocking::Input {
             token: token.clone(),
         })
@@ -193,7 +197,7 @@ async fn a_shared_async_body_sees_the_cancel() {
     let _worker = suite.worker(Profile::SharedOnly1x4).await;
     let token = new_token();
     let handle = suite
-        .function(cancel::cancel_shared_async::handle)
+        .function(cancel::cancel_shared_async::function)
         .send(cancel::cancel_shared_async::Input {
             token: token.clone(),
         })
@@ -216,7 +220,7 @@ async fn a_shared_thread_body_sees_the_cancel() {
     let _worker = suite.worker(Profile::ThreadOnly1x4).await;
     let token = new_token();
     let handle = suite
-        .function(cancel::cancel_shared_thread::handle)
+        .function(cancel::cancel_shared_thread::function)
         .send(cancel::cancel_shared_thread::Input {
             token: token.clone(),
         })
@@ -240,7 +244,7 @@ async fn an_isolated_task_that_ignores_the_cancel_is_killed_after_its_grace() {
     let _worker = suite.worker(Profile::Isolated1).await;
     let token = new_token();
     let handle = suite
-        .function(cancel::cancel_ignored_with_grace::handle)
+        .function(cancel::cancel_ignored_with_grace::function)
         .send(cancel::cancel_ignored_with_grace::Input {
             token: token.clone(),
         })
@@ -265,7 +269,7 @@ async fn an_isolated_task_with_no_grace_is_not_killed() {
     let _worker = suite.worker(Profile::Isolated1).await;
     let token = new_token();
     let handle = suite
-        .function(cancel::cancel_ignored_no_grace::handle)
+        .function(cancel::cancel_ignored_no_grace::function)
         .send(cancel::cancel_ignored_no_grace::Input {
             token: token.clone(),
         })

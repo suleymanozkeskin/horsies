@@ -1,6 +1,9 @@
 // The `h.*` builders of the wire types.
 
 import type { JsonValue } from "../codec/json-value.ts";
+import type { AnyTaskContract } from "../contract/define-task.ts";
+import { upstreamCodesOf, upstreamOutputOf } from "../contract/upstream-output.ts";
+import type { AnyWorkflowContract } from "../workflow/define.ts";
 import type { Decimal } from "./decimal.ts";
 import type {
   AnyWire,
@@ -32,11 +35,15 @@ import {
   PLAIN_DATE_KIND,
   PLAIN_DATE_TIME_KIND,
   PLAIN_TIME_KIND,
+  NO_TUPLE_REST,
   STRING_KIND,
   taggedUnionKind,
+  tupleKind,
+  type TupleRest,
   UUID_KIND,
 } from "./kinds.ts";
-import { isResultOfKind, type ResultOfWire, resultOfWire } from "./result-of.ts";
+import { lazyKind } from "./lazy.ts";
+import { isTaskOutcomeKind, taskOutcomeKind, type TaskOutcomeWire } from "./task-outcome.ts";
 import { kindOf, presenceOf, type Wire, wireOf } from "./wire-type.ts";
 
 /** A list with at least one item. */
@@ -105,15 +112,33 @@ export interface WireBuilders {
     members: T,
   ): Wire<ValueOf<T[number]>, SentOf<T[number]>>;
   /**
-   * A task input parameter that a workflow node fills with the outcome of an upstream task: `{ kind: "succeeded",
-   * value }` or `{ kind: "failed", error }`. Valid only as a whole parameter (optional or nullable too); a sender
-   * never gives it.
+   * A task input parameter that a workflow node fills with the outcome of an upstream node: `{ kind: "succeeded",
+   * value }` or `{ kind: "failed", error }`, typed by `contract`. For a task contract the value has its output type and
+   * the error its codes (the input decode refuses a stored custom code that `errorCodes` does not declare; a task with no
+   * `errorCodes` allows any); for a workflow contract (a sub-workflow node) the value has its output type and the code
+   * is any code. Valid only as a whole parameter (optional or nullable too); a sender never gives it.
    */
-  resultOf<W extends RequiredWire>(inner: W): ResultOfWire<W>;
+  taskOutcome<C extends AnyTaskContract | AnyWorkflowContract>(contract: C): TaskOutcomeWire<C>;
   /** A JSON array of one item type. */
   array<W extends RequiredWire>(item: W): Wire<ValueOf<W>[], SentOf<W>[]>;
   /** A JSON array with one value per item type. */
   tuple<const T extends readonly RequiredWire[]>(items: T): Wire<TupleValue<T>, TupleSent<T>>;
+  /**
+   * A JSON array with one value per item type, then any number of `rest` values (zero or more). Python stores
+   * `tuple[T, ...]` so when `items` is empty.
+   */
+  tuple<const T extends readonly RequiredWire[], R extends RequiredWire>(
+    items: T,
+    rest: R,
+  ): Wire<[...TupleValue<T>, ...ValueOf<R>[]], [...TupleSent<T>, ...SentOf<R>[]]>;
+  /**
+   * The wire type that `getter` gives, for a recursive type: the getter returns a wire type that is built later and
+   * holds this one, as in `children: h.array(h.lazy(() => Tree))`. Give the recursive constant its type
+   * (`const Tree: Wire<TreeNode> = h.object(...)`). The getter runs once, at the first use of the type. A cycle must
+   * pass an array or an object: `Horsies.create` refuses a nullable or a union of itself (`RecursiveWithoutLevel`). A
+   * value deeper than the core's bound (200 levels of arrays and objects) is refused (`TooDeep`).
+   */
+  lazy<W extends RequiredWire>(getter: () => W): Wire<ValueOf<W>, SentOf<W>>;
   /** A JSON object with any string keys, stored in the value's own key order (integer-like keys first). */
   record<W extends RequiredWire>(
     value: W,
@@ -124,8 +149,8 @@ export interface WireBuilders {
 function valueKindOf(wire: AnyWire, place: string): Kind {
   const kind = kindOf(wire);
 
-  if (isResultOfKind(kind)) {
-    throw new TypeError(`h.${place}: h.resultOf is valid only as a whole task input parameter`);
+  if (isTaskOutcomeKind(kind)) {
+    throw new TypeError(`h.${place}: h.taskOutcome is valid only as a whole task input parameter`);
   }
 
   return kind;
@@ -210,6 +235,20 @@ function isWireList(first: string | NonEmpty<RequiredWire>): first is NonEmpty<R
   return Array.isArray(first);
 }
 
+function tuple<const T extends readonly RequiredWire[]>(items: T): Wire<TupleValue<T>, TupleSent<T>>;
+function tuple<const T extends readonly RequiredWire[], R extends RequiredWire>(
+  items: T,
+  rest: R,
+): Wire<[...TupleValue<T>, ...ValueOf<R>[]], [...TupleSent<T>, ...SentOf<R>[]]>;
+function tuple(items: readonly RequiredWire[], rest?: RequiredWire): Wire<unknown, unknown> {
+  const kinds = items.map((item) => requiredKindOf(item, "tuple"));
+
+  const tail: TupleRest =
+    rest === undefined ? NO_TUPLE_REST : Object.freeze({ state: "items", item: requiredKindOf(rest, "tuple") });
+
+  return wireOf(tupleKind(kinds, tail));
+}
+
 /** A literal kind of the members. An empty list is a defect that the static types refuse. */
 function literalWire<const L extends NonEmpty<LiteralMember>>(members: L): Wire<L[number]> {
   if (members.length === 0) {
@@ -219,7 +258,7 @@ function literalWire<const L extends NonEmpty<LiteralMember>>(members: L): Wire<
   return wireOf(Object.freeze({ node: "literal", members: Object.freeze([...members]) }));
 }
 
-/** The kind of a task input: one member per parameter, in declaration order. A parameter may be `h.resultOf`. */
+/** The kind of a task input: one member per parameter, in declaration order. A parameter may be `h.taskOutcome`. */
 export function parametersKind(parameters: ParameterWires): ObjectKind {
   return objectKind(membersOf(parameters, kindOf));
 }
@@ -242,13 +281,15 @@ export const h: WireBuilders = Object.freeze({
   literal: <const L extends NonEmpty<LiteralMember>>(...members: L): Wire<L[number]> => literalWire(members),
   enum: <const L extends NonEmpty<string>>(members: L): Wire<L[number]> => literalWire(members),
   union,
-  resultOf: <W extends RequiredWire>(inner: W): ResultOfWire<W> => resultOfWire(inner),
+  taskOutcome: <C extends AnyTaskContract | AnyWorkflowContract>(contract: C): TaskOutcomeWire<C> =>
+    wireOf(taskOutcomeKind(upstreamOutputOf(contract), upstreamCodesOf(contract))),
   object: <const M extends WireMembers>(members: M): Wire<ObjectValue<M>, ObjectSent<M>> =>
     wireOf(objectKind(membersOf(members, (wire) => valueKindOf(wire, "object")))),
   array: <W extends RequiredWire>(item: W): Wire<ValueOf<W>[], SentOf<W>[]> =>
     wireOf(Object.freeze({ node: "array", item: requiredKindOf(item, "array") })),
-  tuple: <const T extends readonly RequiredWire[]>(items: T): Wire<TupleValue<T>, TupleSent<T>> =>
-    wireOf(Object.freeze({ node: "tuple", items: Object.freeze(items.map((item) => requiredKindOf(item, "tuple"))) })),
+  tuple,
+  lazy: <W extends RequiredWire>(getter: () => W): Wire<ValueOf<W>, SentOf<W>> =>
+    wireOf(lazyKind(() => requiredKindOf(getter(), "lazy"))),
   record: <W extends RequiredWire>(
     value: W,
   ): Wire<Readonly<Record<string, ValueOf<W>>>, Readonly<Record<string, SentOf<W>>>> =>

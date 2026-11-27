@@ -15,15 +15,15 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use horsies::{
-    start_workflow, task, AppConfig, Horsies, HorsiesError, TaskError, TaskOutcome, UserErrorCode,
-    WaitLimit, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
+    task, AppConfig, CustomErrorCode, Horsies, HorsiesError, TaskError, TaskOutcome, WaitLimit,
+    WorkflowDefinition, WorkflowDefinitionConfig, WorkflowSpecBuilder,
 };
 use horsies_examples::{
     app_refused, database_url, isolated_profile, main_of, DemoResult, DEFAULT_PROFILE,
 };
 
 /// The codes of the pipeline's own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum PipelineCode {
     /// A dependency did not succeed.
     UpstreamFailed,
@@ -74,8 +74,8 @@ async fn summarize(
     }
 }
 
-fn upstream_failed<E: UserErrorCode>(error: &TaskError<E>) -> TaskError<PipelineCode> {
-    TaskError::user(PipelineCode::UpstreamFailed, error.to_string())
+fn upstream_failed<E: CustomErrorCode>(error: &TaskError<E>) -> TaskError<PipelineCode> {
+    TaskError::custom(PipelineCode::UpstreamFailed, error.to_string())
 }
 
 /// The definition: its nodes, and the node whose result is the workflow's.
@@ -83,7 +83,7 @@ struct OrderSummary;
 
 impl WorkflowDefinition for OrderSummary {
     type Output = String;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "order_summary"
@@ -93,23 +93,24 @@ impl WorkflowDefinition for OrderSummary {
         "examples.order_summary.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let load =
-            builder.task(load_prices::node()?.set(load_prices::params::order_id(), ORDER_ID)?);
-        let total = builder.task(sum_prices::node()?.arg_from(sum_prices::params::prices(), load));
+            builder.task(load_prices::node().set(load_prices::fields::order_id(), ORDER_ID)?)?;
+        let total =
+            builder.task(sum_prices::node().arg_from(sum_prices::fields::prices(), load))?;
         let count =
-            builder.task(count_items::node()?.arg_from(count_items::params::prices(), load));
+            builder.task(count_items::node().arg_from(count_items::fields::prices(), load))?;
         let summary = builder.task(
-            summarize::node()?
-                .arg_from(summarize::params::total(), total)
-                .arg_from(summarize::params::count(), count),
-        );
-        Ok(WorkflowDefConfig::new().output(summary))
+            summarize::node()
+                .arg_from(summarize::fields::total(), total)
+                .arg_from(summarize::fields::count(), count),
+        )?;
+        Ok(WorkflowDefinitionConfig::new().output(summary))
     }
 }
 
 fn build_app() -> Result<Horsies, HorsiesError> {
-    let mut config = AppConfig::for_database_url(database_url());
+    let mut config = AppConfig::from_database_url(database_url());
     config.worker_profiles = BTreeMap::from([(DEFAULT_PROFILE.to_owned(), isolated_profile())]);
     let mut app = Horsies::new(config)?;
     let _load_prices = load_prices::register(&mut app)?;
@@ -121,10 +122,10 @@ fn build_app() -> Result<Horsies, HorsiesError> {
     Ok(app)
 }
 
-async fn demo(_app: Horsies) -> DemoResult {
-    let handle = start_workflow::<OrderSummary>().await?;
+async fn demo(app: Horsies) -> DemoResult {
+    let handle = app.start_workflow::<OrderSummary>().await?;
     println!("started workflow {}", handle.workflow_id());
-    let limit = WaitLimit::parse(Some(Duration::from_secs(60)))?;
+    let limit = WaitLimit::Within(Duration::from_secs(60));
     match handle.get(limit).await? {
         TaskOutcome::Succeeded(summary) => println!("summary: {summary}"),
         TaskOutcome::Failed(error) => println!("the workflow failed: {error}"),

@@ -6,8 +6,8 @@
 // rule of the config is the core's (`checkAppConfig` of the bridge). Each refusal has the catalog code of the config
 // section of its field.
 
-import type { ErrorCode } from "../_catalog/error_codes.ts";
-import { refusal, type Refusal } from "../app/refusal.ts";
+import type { HorsiesErrorCode } from "../_catalog/error_codes.ts";
+import { refusal, type HorsiesError } from "../app/refusal.ts";
 import { unreachable } from "../wire/unreachable.ts";
 
 /** A JSON value of the core's config text. */
@@ -22,10 +22,10 @@ export type JsonEntry = readonly [string, ConfigJson];
 /** A value that the parse built, or every refusal that it found, in field order. */
 export type Checked<T> =
   | { readonly kind: "accepted"; readonly value: T }
-  | { readonly kind: "refused"; readonly refusals: readonly Refusal[] };
+  | { readonly kind: "refused"; readonly refusals: readonly HorsiesError[] };
 
 /** The range of a whole number, and the catalog code of a refusal of a value outside it. */
-export type IntegerBound = { readonly min: number; readonly max: number; readonly code: ErrorCode };
+export type IntegerBound = { readonly min: number; readonly max: number; readonly code: HorsiesErrorCode };
 
 /** The largest value of a Rust `u32`. */
 export const U32_MAX: number = 2 ** 32 - 1;
@@ -37,12 +37,12 @@ export const U32_MAX: number = 2 ** 32 - 1;
 export const U64_SAFE_MAX: number = Number.MAX_SAFE_INTEGER;
 
 /** A Rust `u32` field with no other bound in its type, in the config section of `code`. Pure. */
-export function u32Field(code: ErrorCode): IntegerBound {
+export function u32Field(code: HorsiesErrorCode): IntegerBound {
   return Object.freeze({ min: 0, max: U32_MAX, code });
 }
 
 /** A Rust `u64` field with no other bound in its type, in the config section of `code`. Pure. */
-export function u64Field(code: ErrorCode): IntegerBound {
+export function u64Field(code: HorsiesErrorCode): IntegerBound {
   return Object.freeze({ min: 0, max: U64_SAFE_MAX, code });
 }
 
@@ -52,7 +52,7 @@ export function accepted<T>(value: T): Checked<T> {
 }
 
 /** One refusal. Pure. */
-export function refused<T>(one: Refusal): Checked<T> {
+export function refused<T>(one: HorsiesError): Checked<T> {
   return { kind: "refused", refusals: [one] };
 }
 
@@ -73,7 +73,7 @@ export function checkedInteger(value: number, bound: IntegerBound, path: string)
  * `text` when it is well-formed (no lone surrogate), else a refusal at `path` with `code`, the code of the config
  * section of the field. The message holds no part of the text: the text can be a secret.
  */
-export function checkedText(text: string, code: ErrorCode, path: string): Checked<string> {
+export function checkedText(text: string, code: HorsiesErrorCode, path: string): Checked<string> {
   if (text.isWellFormed()) {
     return accepted(text);
   }

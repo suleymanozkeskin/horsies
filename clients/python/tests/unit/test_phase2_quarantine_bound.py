@@ -22,16 +22,16 @@ class TestQuarantineBoundConfig:
     @pytest.mark.parametrize('value', [2, 1_001])
     def test_out_of_range_bounds_are_refused(self, value: int) -> None:
         with pytest.raises(
-            ValidationError, match='phase2_quarantine_after_attempts'
+            ValidationError, match='finalization_quarantine_after_attempts'
         ):
             RecoveryConfig(
                 **cast(
                     'dict[str, Any]',
-                    {'phase2_quarantine_after_attempts': value},
+                    {'finalization_quarantine_after_attempts': value},
                 )
             )
 
     def test_the_default_holds_the_derived_value(self) -> None:
-        assert RecoveryConfig().phase2_quarantine_after_attempts == 25
+        assert RecoveryConfig().finalization_quarantine_after_attempts == 25
 
 

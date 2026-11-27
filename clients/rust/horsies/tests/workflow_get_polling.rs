@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use horsies::{
     task, AppConfig, Horsies, SchemaMode, TaskError, TaskOutcome, WaitLimit, WorkflowHandle,
-    WorkflowReadError, WorkflowSpecBuilder, WorkflowStatus,
+    WorkflowReadError, WorkflowStatus,
 };
 use horsies_core::core::lifecycle::{OwnedClaim, WorkflowSuccessOutcome};
 use horsies_core::{
@@ -110,11 +110,13 @@ async fn covered_database() -> (TestDatabase, PostgresBroker) {
 /// Starts a workflow of one node, the task `answer`, which is its output,
 /// on an app of `url`. No worker runs the task: the workflow stays RUNNING.
 async fn start_one_node_workflow(url: &str, name: &str) -> Uuid {
-    let mut writer = Horsies::new(AppConfig::for_database_url(url)).expect("the writing app");
+    let mut writer = Horsies::new(AppConfig::from_database_url(url)).expect("the writing app");
     let answer_function = answer::register(&mut writer).expect("register the task");
-    let mut builder = WorkflowSpecBuilder::new(name);
+    let mut builder = writer.workflow_builder(name);
     builder.definition_key(format!("tests.workflow_get_polling.{name}.v1"));
-    let output = builder.task(answer_function.node());
+    let output = builder
+        .task(answer_function.node())
+        .expect("the writing app registers answer");
     builder.output(output);
     let spec = builder.build().expect("the spec builds");
     let started: WorkflowHandle<u32> = writer.start(&spec).await.expect("the workflow starts");
@@ -131,11 +133,13 @@ async fn start_one_node_workflow(url: &str, name: &str) -> Uuid {
 /// Checks that the workflow is RUNNING: that read opens the connection of
 /// the app's core pool.
 async fn listener_refused_handle(url: &str, workflow_id: Uuid) -> WorkflowHandle<u32> {
-    let mut config = AppConfig::for_database_url(url);
-    config.broker.session_database_url = Some(format!(
-        "postgresql://postgres:none@127.0.0.1:1/listener_refused_{}",
-        Uuid::new_v4().simple()
-    ));
+    let mut config = AppConfig::from_database_url(url);
+    config.database.session_database = horsies::SessionDatabase::Separate {
+        url: format!(
+            "postgresql://postgres:none@127.0.0.1:1/listener_refused_{}",
+            Uuid::new_v4().simple()
+        ),
+    };
     let reader =
         Horsies::with_schema_mode(config, SchemaMode::ObserveOnly).expect("the reading app");
     let handle = reader.workflow_handle::<u32>(workflow_id);
@@ -234,7 +238,7 @@ async fn get_polls_to_the_end_when_the_listener_connect_is_refused() {
     let (database, worker) = covered_database().await;
     let workflow_id = start_one_node_workflow(database.url(), "listen_refused_poll").await;
     let handle = listener_refused_handle(database.url(), workflow_id).await;
-    let limit = WaitLimit::parse(Some(POLLED_WAIT_LIMIT)).expect("a wait limit in bounds");
+    let limit = WaitLimit::Within(POLLED_WAIT_LIMIT);
 
     let wait = handle.get(limit);
     tokio::pin!(wait);
@@ -257,14 +261,14 @@ async fn get_polls_to_the_end_when_the_listener_connect_is_refused() {
 
 /// A wait on a RUNNING workflow whose listener connect is refused polls the
 /// workflow row, and the workflow does not end. At the wait limit `get()`
-/// answers `WaitTimedOut`: it waited for the whole limit, and it did not
+/// answers `WaitTimeout`: it waited for the whole limit, and it did not
 /// hang.
 #[tokio::test]
 async fn get_answers_wait_timed_out_when_the_limit_passes_while_polling() {
     let (database, worker) = covered_database().await;
     let workflow_id = start_one_node_workflow(database.url(), "listen_refused_timeout").await;
     let handle = listener_refused_handle(database.url(), workflow_id).await;
-    let limit = WaitLimit::parse(Some(SHORT_WAIT_LIMIT)).expect("a wait limit in bounds");
+    let limit = WaitLimit::Within(SHORT_WAIT_LIMIT);
 
     let started = Instant::now();
     let answered = tokio::time::timeout(WAIT_ANSWER_BOUND, handle.get(limit))
@@ -273,10 +277,10 @@ async fn get_answers_wait_timed_out_when_the_limit_passes_while_polling() {
     let waited = started.elapsed();
 
     match answered {
-        Err(WorkflowReadError::WaitTimedOut {
+        Err(WorkflowReadError::WaitTimeout {
             workflow_id: timed_out,
         }) => assert_eq!(timed_out, workflow_id),
-        other => panic!("expected WaitTimedOut, got {other:?}"),
+        other => panic!("expected WaitTimeout, got {other:?}"),
     }
     assert!(
         waited >= SHORT_WAIT_LIMIT,

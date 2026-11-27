@@ -14,15 +14,21 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, Awaitable, Callable, cast
+from typing import Awaitable, Callable
 
 import pytest
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import TaskResult
 
 from horsies.core.types.result import is_ok
-from tests.e2e.helpers.assertions import assert_ok, assert_err, start_ok_in_thread, unwrap_send
+from tests.e2e.helpers.assertions import (
+    assert_failed,
+    assert_succeeded,
+    read_succeeded,
+    start_ok_in_thread,
+    succeeded_value,
+    unwrap_send,
+)
 from tests.e2e.helpers.db import uuid_of_column, wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.helpers.workflow import (
@@ -39,16 +45,6 @@ from tests.workflow_recovery_support import workflow_recovery_pass
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
 
 
-def _unwrap_task_value(value: Any) -> Any:
-    """Unwrap TaskResult value from workflow output."""
-    if isinstance(value, TaskResult):
-        task_result = cast(TaskResult[Any, Any], value)
-        if task_result.is_ok():
-            return task_result.unwrap()
-        return task_result
-    return value
-
-
 def _make_ready_check() -> Callable[[], bool]:
     """Create a ready check that sends healthcheck task."""
     from horsies.core.task_decorator import TaskHandle
@@ -59,8 +55,7 @@ def _make_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(healthcheck.send())
-        result = handle.get(timeout_ms=2000)
-        return result.is_ok()
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
@@ -95,7 +90,7 @@ async def test_quorum_ctx_gating(broker: PostgresBroker) -> None:
         ready_check=_make_ready_check(),
     ):
         # spec_quorum_ctx_gating: A(100ms), B(150ms), C(300ms) -> D
-        # D has join=quorum, min_success=2, workflow_ctx_from=[C]
+        # D has join=quorum, min_success=2, workflow_context_from=[C]
         # A and B complete first (satisfying quorum), but D must wait for C
         handle = await start_ok_in_thread(wf_tasks.spec_quorum_ctx_gating)
 
@@ -462,8 +457,8 @@ async def test_success_policy_not_met_error_content(broker: PostgresBroker) -> N
         )
         assert status == 'FAILED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_err(result, expected_code='REQUIRED_FAIL')
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
+        assert_failed(result, expected_code='REQUIRED_FAIL')
 
 
 # =============================================================================
@@ -526,9 +521,8 @@ async def test_recovery_preserves_results(broker: PostgresBroker) -> None:
         assert status == 'COMPLETED'
 
         # Get the original result to ensure it completed properly
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
-        _ = result.unwrap()  # Verify result is accessible
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
+        _ = succeeded_value(result)  # Verify result is accessible
 
         # Now simulate a "stuck" workflow by artificially setting status back to RUNNING
         # but keeping all tasks terminal
@@ -621,7 +615,7 @@ async def test_workflow_task_retries(broker: PostgresBroker, tmp_path: Path) -> 
 
     # Create dynamic spec with counter file
     node_retry = TaskNode(
-        fn=retry_then_ok_task,
+        function=retry_then_ok_task,
         kwargs={'counter_file': str(counter_file), 'succeed_on_attempt': 2},
     )
 
@@ -629,7 +623,7 @@ async def test_workflow_task_retries(broker: PostgresBroker, tmp_path: Path) -> 
 
     spec_retry = app.workflow(
         name='e2e_retry_test',
-        tasks=[node_retry],
+        nodes=[node_retry],
         definition_key='tests.e2e.retry_test.v1',
     )
 
@@ -649,8 +643,8 @@ async def test_workflow_task_retries(broker: PostgresBroker, tmp_path: Path) -> 
         ), f'Workflow should complete after retries, got {status}'
 
         # Verify the task completed with success
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
+        assert_succeeded(result)
 
         # Verify attempts were made
         assert counter_file.exists(), 'Counter file should exist'
@@ -675,13 +669,13 @@ async def test_workflow_task_retries_exhausted(
 
     # succeed_on_attempt=10 but max_retries=3 → 4 attempts total, never succeeds
     node_retry = TaskNode(
-        fn=retry_then_ok_task,
+        function=retry_then_ok_task,
         kwargs={'counter_file': str(counter_file), 'succeed_on_attempt': 10},
     )
 
     spec_retry_fail = app.workflow(
         name='e2e_retry_exhausted',
-        tasks=[node_retry],
+        nodes=[node_retry],
         definition_key='tests.e2e.retry_exhausted.v1',
     )
 
@@ -742,8 +736,8 @@ async def test_on_error_pause_stops_workflow(broker: PostgresBroker) -> None:
         assert db_tasks[2]['status'] == 'PENDING', f"C should still be PENDING (paused before enqueue), got {db_tasks[2]['status']}"
 
         # handle.get() should return WORKFLOW_PAUSED error
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_err(result, expected_code='WORKFLOW_PAUSED')
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
+        assert_failed(result, expected_code='WORKFLOW_PAUSED')
 
 
 @pytest.mark.e2e
@@ -804,8 +798,7 @@ def _make_recovery_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(instance_recovery.healthcheck.send())
-        result = handle.get(timeout_ms=2000)
-        return result.is_ok()
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
@@ -820,14 +813,14 @@ async def test_workflow_recovers_after_worker_crash(
     DAG: A(50ms) -> B(50ms) -> C(60s) -> E(50ms, recovery queue) -> F(50ms, recovery queue)
                             -> D(60s) -/
 
-    E has allow_failed_deps=True so it runs after C,D are marked FAILED.
+    E has allow_failed_dependencies=True so it runs after C,D are marked FAILED.
     E and F are on "recovery" queue (max_concurrency=1) — sequential execution.
 
     Kill worker after A,B complete and C,D are RUNNING.
     Restart worker. Recovery chain:
         reaper marks C,D FAILED (WORKER_CRASHED)
         -> recover_stuck_workflows resolves wt mismatch
-        -> E runs (allow_failed_deps=True) on recovery queue
+        -> E runs (allow_failed_dependencies=True) on recovery queue
         -> F runs after E on recovery queue
         -> workflow finalizes as FAILED (C,D failed despite E,F succeeding)
     """
@@ -932,7 +925,7 @@ async def test_workflow_recovers_after_worker_crash(
         f"D should be FAILED, got {db_tasks[3]['status']}"
     )
 
-    # E: COMPLETED — ran after recovery (allow_failed_deps=True, recovery queue)
+    # E: COMPLETED — ran after recovery (allow_failed_dependencies=True, recovery queue)
     assert db_tasks[4]['status'] == 'COMPLETED', (
         f"E should be COMPLETED, got {db_tasks[4]['status']}"
     )

@@ -101,7 +101,7 @@ pub(crate) async fn cover_partitions(url: &str) {
 /// leaves it to the forced drop at the end of the test.
 pub(crate) fn core_handle(url: &str) -> CoreHandle {
     CoreHandle::open_with_environment(
-        &PostgresConfig::from_url(url),
+        &PostgresConfig::from_database_url(url),
         PoolProfile::Producer,
         ConnectionEnvironment::capture().expect("read the connection environment of the test"),
     )

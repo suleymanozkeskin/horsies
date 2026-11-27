@@ -6,22 +6,11 @@
 // The error: `exception`, `error_code`, `data`, `message`; a sub-workflow error adds `sub_workflow_id` and
 // `sub_workflow_summary`.
 
-import type {
-  ExceptionRecord,
-  LibraryTaskCode,
-  SubWorkflowFailure,
-  TaskError,
-  TaskErrorCode,
-} from "../wire/task-error.ts";
+import { BUILTIN_CODE_KEY, ERROR_DATA_DEPTH_LIMIT, TASK_RESULT_ENVELOPE_KEY } from "../_catalog/codec_bounds.ts";
+import { BUILT_IN_TASK_CODES, RESERVED_NON_TASK_CODES } from "../_catalog/task_code.ts";
+import type { BuiltInTaskCode, ExceptionRecord, SubWorkflowFailure, TaskError } from "../wire/task-error.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import {
-  BUILTIN_CODE_KEY,
-  ERROR_DATA_DEPTH_LIMIT,
-  LIBRARY_TASK_CODES,
-  RESERVED_NON_TASK_CODES,
-  TASK_RESULT_ENVELOPE_KEY,
-} from "./bounds.ts";
 import type { JsonText } from "./json-text.ts";
 import { decodeJsonNode, type JsonValue } from "./json-value.ts";
 import { isTreeObject, readTree, type TreeObject, type TreeValue } from "./number-text.ts";
@@ -32,6 +21,7 @@ import {
   envelopeRefused,
   type EnvelopeRule,
   memberPath,
+  refusalName,
   ROOT_PATH,
 } from "./refusal.ts";
 import { readSubWorkflow } from "./sub-workflow.ts";
@@ -47,8 +37,13 @@ const SUB_WORKFLOW_ID_KEY = "sub_workflow_id";
 const SUB_WORKFLOW_SUMMARY_KEY = "sub_workflow_summary";
 const EXCEPTION_KEYS = ["type", "module", "message", "repr", "traceback"] as const;
 
-const LIBRARY_CODES: ReadonlySet<string> = new Set(LIBRARY_TASK_CODES);
+const BUILT_IN_CODES: ReadonlySet<string> = new Set(BUILT_IN_TASK_CODES);
 const RESERVED_CODES: ReadonlySet<string> = new Set(RESERVED_NON_TASK_CODES);
+
+/** The tag and the code of a stored error: a custom code text, or a built-in code. */
+type StoredCode =
+  | { readonly kind: "custom"; readonly code: string }
+  | { readonly kind: "builtIn"; readonly code: BuiltInTaskCode };
 
 /** The slots of a stored result envelope: the `ok` value as its tree, or the stored error. */
 export type EnvelopeSlots =
@@ -164,7 +159,7 @@ export function readErrorNode(node: TreeValue, path: string): Result<TaskError, 
 /** The fields of a stored error after its code. */
 function readErrorFields(
   node: TreeObject,
-  code: TaskErrorCode,
+  code: StoredCode,
   errorClass: StoredErrorClass,
   path: string,
 ): Result<TaskError, DecodeRefused> {
@@ -194,7 +189,7 @@ function readErrorFields(
 
   return ok(
     Object.freeze({
-      code,
+      ...code,
       message: message.value,
       data: data.value,
       exception: exception.value,
@@ -219,16 +214,16 @@ function subWorkflowOf(
   }
 }
 
-function isLibraryCode(text: string): text is LibraryTaskCode {
-  return LIBRARY_CODES.has(text);
+function isBuiltInCode(text: string): text is BuiltInTaskCode {
+  return BUILT_IN_CODES.has(text);
 }
 
-/** A user code text, or `{"__builtin_task_code__": "<library code>"}`, with exactly that one key. */
-function readCode(node: TreeValue, path: string): Result<TaskErrorCode, EnvelopeRefused> {
+/** A custom code text, or `{"__builtin_task_code__": "<built-in code>"}`, with exactly that one key. */
+function readCode(node: TreeValue, path: string): Result<StoredCode, EnvelopeRefused> {
   if (isString(node)) {
-    return LIBRARY_CODES.has(node) || RESERVED_CODES.has(node)
-      ? refuse("ErrorFieldInvalid", path, "a user code that names a library or reserved code")
-      : ok(Object.freeze({ kind: "user", code: node }));
+    return BUILT_IN_CODES.has(node) || RESERVED_CODES.has(node)
+      ? refuse("ErrorFieldInvalid", path, "a custom code that names a built-in or reserved code")
+      : ok({ kind: "custom", code: node });
   }
 
   if (!isTreeObject(node)) {
@@ -241,9 +236,9 @@ function readCode(node: TreeValue, path: string): Result<TaskErrorCode, Envelope
     return refuse("ErrorFieldInvalid", path, "the tagged code has another form");
   }
 
-  return isLibraryCode(tagged)
-    ? ok(Object.freeze({ kind: "library", code: tagged }))
-    : refuse("ErrorUnknownBuiltInCode", path, "the tag names no library code");
+  return isBuiltInCode(tagged)
+    ? ok({ kind: "builtIn", code: tagged })
+    : refuse("ErrorUnknownBuiltInCode", path, "the tag names no built-in code");
 }
 
 /** The exception record: `null`, or an object of exactly the five text keys. */
@@ -273,5 +268,5 @@ function readData(node: TreeValue, path: string): Result<JsonValue, DecodeRefuse
 
   return data.ok
     ? data
-    : refuse("ErrorDataRefused", path, `the data breaks a rule of a user value: ${data.error.kind}`);
+    : refuse("ErrorDataRefused", path, `the data breaks a rule of a user value: ${refusalName(data.error)}`);
 }

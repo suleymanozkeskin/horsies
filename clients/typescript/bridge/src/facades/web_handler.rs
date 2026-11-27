@@ -39,7 +39,7 @@ use horsies_core::telemetry::declared::{
     warn_folded_names, DeclaredNames, Folded, FoldedNames, QueueName, ScheduleName,
 };
 use horsies_core::web::{
-    route_access as core_route_access, AccessGrant, AccessNeed, Bytes, EventFrames,
+    route_access as core_route_access, AccessGrant, AccessNeed, Actions, Bytes, EventFrames,
     EventStreamItem, Method, MonitoringHandler as CoreHandler, MonitoringHandlerConfig,
     MonitoringUiConfig, RequestParts, ResponseForm, ResponseParts, RouteAccess, TraceLink,
     TraceLinkRefusal, TraceLinkTemplate, Verdict, DEGRADED_FRAME, MAX_REQUEST_BODY_BYTES,
@@ -81,11 +81,11 @@ pub enum ActionsSwitch {
 }
 
 impl ActionsSwitch {
-    /// The core's actions switch. Pure.
-    const fn enabled(self) -> bool {
+    /// The core's actions switch of the same name. Pure.
+    const fn core_actions(self) -> Actions {
         match self {
-            Self::Enabled => true,
-            Self::Disabled => false,
+            Self::Enabled => Actions::Enabled,
+            Self::Disabled => Actions::Disabled,
         }
     }
 }
@@ -468,7 +468,7 @@ fn handler_of(
             connection,
             children,
             config: MonitoringHandlerConfig {
-                actions_enabled: settings.actions.enabled(),
+                actions: settings.actions.core_actions(),
                 ui: MonitoringUiConfig {
                     custom_css_url: settings.custom_css_url,
                     trace_link,
@@ -502,13 +502,13 @@ fn heartbeat_of(heartbeat_ms: f64) -> Result<Duration, BoundaryRefusal> {
     }
 }
 
-/// The trace link of a template text: `NoTraceLink` when absent. Pure.
+/// The trace link of a template text: `Text` when absent. Pure.
 ///
 /// Failure exits: the refusal of a template that the core refuses (the
 /// package checks it first).
 fn trace_link_of(template: Option<&str>) -> Result<TraceLink, BoundaryRefusal> {
     match template {
-        None => Ok(TraceLink::NoTraceLink),
+        None => Ok(TraceLink::Text),
         Some(text) => TraceLinkTemplate::parse(text)
             .map(TraceLink::Template)
             .map_err(|refused| BoundaryRefusal::new("traceLinkTemplate", &refused.to_string())),
@@ -610,7 +610,7 @@ impl MonitoringHandler {
         sync_call("MonitoringHandler.routeAccess", || {
             match method_of(&method) {
                 Ok(method) => Envelope::Value(RouteAccessRecord::of(core_route_access(
-                    self.actions.enabled(),
+                    self.actions.core_actions(),
                     &method,
                     &path,
                 ))),
@@ -858,7 +858,7 @@ pub fn check_trace_link_template(text: String) -> Envelope<TraceLinkCheck> {
 
 /// Write `message` as one ERROR record of the `horsies.web` logger, if its
 /// threshold lets it through. Starts the log bridge, not the core runtime.
-/// A log bridge that cannot start throws `CORE_START_FAILED`.
+/// A log bridge that cannot start throws `RUNTIME_START_FAILED`.
 #[napi(ts_return_type = "NativeEnvelope<undefined>")]
 #[allow(
     clippy::needless_pass_by_value,
@@ -872,7 +872,7 @@ pub fn log_monitoring_failure(message: String) -> Envelope<()> {
             });
             Envelope::Value(())
         }
-        Err(failure) => Envelope::Thrown(NativeThrown::CoreStartFailed {
+        Err(failure) => Envelope::Thrown(NativeThrown::RuntimeStartFailed {
             cause: failure.cause,
         }),
     })
@@ -889,7 +889,7 @@ pub(crate) const TEST_MANIFEST: &str = r#"{
         "pool_pre_ping": true,
         "pool_size": 5,
         "max_overflow": 0,
-        "pool_timeout": 30,
+        "pool_timeout_seconds": 30,
         "pool_recycle": {"kind": "AFTER_SECONDS", "seconds": 1800},
         "echo": false,
         "tcp_keepalives": {
@@ -951,21 +951,30 @@ mod tests {
 
     #[test]
     fn route_access_names_need_and_form() {
-        let events = RouteAccessRecord::of(core_route_access(true, &Method::GET, "/api/events"));
+        let events = RouteAccessRecord::of(core_route_access(
+            Actions::Enabled,
+            &Method::GET,
+            "/api/events",
+        ));
         assert_eq!(events.need, RouteNeed::View);
         assert_eq!(events.form, ResponseFormName::EventStream);
-        let meta = RouteAccessRecord::of(core_route_access(true, &Method::GET, "/api/meta"));
+        let meta = RouteAccessRecord::of(core_route_access(
+            Actions::Enabled,
+            &Method::GET,
+            "/api/meta",
+        ));
         assert_eq!(meta.need, RouteNeed::ViewReportAct);
         assert_eq!(meta.form, ResponseFormName::OneResponse);
-        let page = RouteAccessRecord::of(core_route_access(true, &Method::GET, "/"));
+        let page = RouteAccessRecord::of(core_route_access(Actions::Enabled, &Method::GET, "/"));
         assert_eq!(page.need, RouteNeed::Public);
     }
 
     #[test]
     fn an_action_needs_view_and_act_only_while_actions_are_enabled() {
         let path = "/api/workflows/01890a5d-ac96-774b-bcce-b302099a8057/pause";
-        let enabled = core_route_access(ActionsSwitch::Enabled.enabled(), &Method::POST, path);
-        let disabled = core_route_access(ActionsSwitch::Disabled.enabled(), &Method::POST, path);
+        let enabled = core_route_access(ActionsSwitch::Enabled.core_actions(), &Method::POST, path);
+        let disabled =
+            core_route_access(ActionsSwitch::Disabled.core_actions(), &Method::POST, path);
         assert_eq!(RouteAccessRecord::of(enabled).need, RouteNeed::ViewAndAct);
         assert_eq!(RouteAccessRecord::of(disabled).need, RouteNeed::View);
     }
@@ -1015,7 +1024,7 @@ mod tests {
 
     #[test]
     fn a_trace_link_template_is_checked_by_the_core() {
-        assert_eq!(trace_link_of(None), Ok(TraceLink::NoTraceLink));
+        assert_eq!(trace_link_of(None), Ok(TraceLink::Text));
         let template = "https://grafana.example.com/explore?traceId={trace_id}";
         assert!(matches!(
             trace_link_of(Some(template)),

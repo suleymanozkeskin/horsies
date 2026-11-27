@@ -1,5 +1,5 @@
 {
-  "contract_version": 7,
+  "contract_version": 9,
   "vectors": [
     {
       "name": "task_claimed",
@@ -23,7 +23,7 @@
     },
     {
       "name": "attempt_ended_user_code",
-      "wire": ["AttemptEnded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "SHARED_ASYNC", 2, ["ReportedByChild", ["Failed", ["User", "RATE_LIMITED"]], ["Reported", 1700000000100000000]], 2000000000]
+      "wire": ["AttemptEnded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "SHARED_ASYNC", 2, ["ReportedByChild", ["Failed", ["Custom", "RATE_LIMITED"]], ["Reported", 1700000000100000000]], 2000000000]
     },
     {
       "name": "attempt_ended_built_in_code",

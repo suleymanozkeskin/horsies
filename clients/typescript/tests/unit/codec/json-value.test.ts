@@ -3,10 +3,10 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/_catalog/codec_bounds.ts";
 import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
 import { decodeValue } from "../../../horsies/src/codec/reader.ts";
-import type { DecodeRefused, EncodeRefused } from "../../../horsies/src/codec/refusal.ts";
+import type { EncodeRefused, ValueRefused } from "../../../horsies/src/codec/refusal.ts";
 import { isPlainObject } from "../../../horsies/src/codec/values.ts";
 import { encodeValue } from "../../../horsies/src/codec/writer.ts";
 import { h } from "../../../horsies/src/wire/builders.ts";
@@ -17,7 +17,7 @@ const JSON_KIND = kindOf(h.json());
 function written<V>(value: V): string {
   const result = encodeValue(JSON_KIND, value);
 
-  assert(result.ok, result.ok ? "" : `refused ${result.error.kind} at ${result.error.path}`);
+  assert(result.ok, result.ok ? "" : `refused ${JSON.stringify(result.error)}`);
 
   return result.value;
 }
@@ -33,15 +33,16 @@ function writeRefused<V>(value: V): EncodeRefused {
 function read(text: string): unknown {
   const result = decodeValue(JSON_KIND, jsonTextCheckedByCore(text), "worker");
 
-  assert(result.ok, result.ok ? "" : `refused ${result.error.kind} at ${result.error.path}`);
+  assert(result.ok, result.ok ? "" : `refused ${JSON.stringify(result.error)}`);
 
   return result.value;
 }
 
-function readRefused(text: string): DecodeRefused {
+function readRefused(text: string): ValueRefused {
   const result = decodeValue(JSON_KIND, jsonTextCheckedByCore(text), "worker");
 
   assert(!result.ok, "decoded a refused text");
+  assert(result.error.kind === "decodeRefused", `a value refusal: ${JSON.stringify(result.error)}`);
 
   return result.error;
 }
@@ -81,26 +82,26 @@ describe("h.json() writer", () => {
   test("EngineKey: a key that only the engine writes, at any depth", () => {
     const error = writeRefused({ a: [{ __h_task_result__: true }] });
 
-    assert.deepEqual([error.kind, error.path], ["EngineKey", "$.<input>[0].<input>"]);
+    assert.deepEqual([error.refusal, error.path], ["EngineKey", "$.<input>[0].<input>"]);
   });
 
   test("NotJsonNative: a Date, a Map, a class instance, a function, a symbol, a symbol key", () => {
     for (const value of [new Date(0), new Map(), new Point(), () => 1, Symbol("s"), { [Symbol("k")]: 1 }]) {
-      assert.equal(writeRefused(value).kind, "NotJsonNative");
+      assert.equal(writeRefused(value).refusal, "NotJsonNative");
     }
   });
 
   test("ExplicitUndefined, NonFiniteFloat, LoneSurrogate, IntegerTooLong", () => {
-    assert.equal(writeRefused({ a: undefined }).kind, "ExplicitUndefined");
-    assert.equal(writeRefused([1, undefined]).kind, "ExplicitUndefined");
-    assert.equal(writeRefused({ a: Number.NaN }).kind, "NonFiniteFloat");
-    assert.equal(writeRefused({ "\ud800": 1 }).kind, "LoneSurrogate");
-    assert.equal(writeRefused(10n ** 4300n).kind, "IntegerTooLong");
+    assert.equal(writeRefused({ a: undefined }).refusal, "ExplicitUndefined");
+    assert.equal(writeRefused([1, undefined]).refusal, "ExplicitUndefined");
+    assert.equal(writeRefused({ a: Number.NaN }).refusal, "NonFiniteFloat");
+    assert.equal(writeRefused({ "\ud800": 1 }).refusal, "LoneSurrogate");
+    assert.equal(writeRefused(10n ** 4300n).refusal, "IntegerTooLong");
   });
 
   test(`TooDeep: more than ${MAX_VALUE_JSON_DEPTH} levels; ${MAX_VALUE_JSON_DEPTH} are written`, () => {
     assert.equal(written(nested(MAX_VALUE_JSON_DEPTH)).length, 401);
-    assert.equal(writeRefused(nested(MAX_VALUE_JSON_DEPTH + 1)).kind, "TooDeep");
+    assert.equal(writeRefused(nested(MAX_VALUE_JSON_DEPTH + 1)).refusal, "TooDeep");
   });
 });
 
@@ -119,9 +120,9 @@ describe("h.json() reader", () => {
   });
 
   test("EngineKey and TooDeep", () => {
-    assert.equal(readRefused('{"a":{"__horsies_x":1}}').kind, "EngineKey");
+    assert.equal(readRefused('{"a":{"__horsies_x":1}}').refusal, "EngineKey");
     const levels = MAX_VALUE_JSON_DEPTH + 1;
 
-    assert.equal(readRefused(`${"[".repeat(levels)}${"]".repeat(levels)}`).kind, "TooDeep");
+    assert.equal(readRefused(`${"[".repeat(levels)}${"]".repeat(levels)}`).refusal, "TooDeep");
   });
 });

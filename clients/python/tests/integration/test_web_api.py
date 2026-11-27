@@ -34,13 +34,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core import cli
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.types.result import is_err
+from horsies.core.models.schema_mode import SchemaMode
+from horsies.core.types.result import Ok, Result, is_err
 from horsies.core.types.status import TaskStatus
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode as WorkflowTaskNode
 from horsies.core.models.workflow import WorkflowDefinition, WorkflowSpec
 from horsies.core.workflows.registry import register_workflow_definition
-from horsies.web import INTENT_HEADER, INTENT_VALUE, AllowAll, create_monitoring_app
+from horsies.web import INTENT_HEADER, INTENT_VALUE, Actions, AllowAll, create_monitoring_app
 from horsies.core.utils.url import to_psycopg_url
 from horsies.web import schema as schema_module
 from tests.integration.conftest import DB_URL
@@ -87,7 +88,7 @@ async def clean_tables(
 @pytest_asyncio.fixture
 async def monitoring(app: Horsies) -> AsyncGenerator[FastAPI, None]:
     """The monitoring app for this horsies app."""
-    built = create_monitoring_app(app, auth_policy=AllowAll())
+    built = create_monitoring_app(app, authorization_policy=AllowAll())
     yield built
     await built.state.events.close()
 
@@ -216,7 +217,7 @@ def make_node(*, workflow_id: str, status: str, task_id: str | None) -> NodeRow:
         task_name='step',
         status=status,
         dependencies=(),
-        allow_failed_deps=False,
+        allow_failed_dependencies=False,
         kind=TaskNode(task_id=task_id),
         result=None,
         created_at=datetime.now(UTC) - timedelta(seconds=120),
@@ -258,7 +259,7 @@ class TestTaskReads:
     ) -> None:
         await persist(session, make_task(status=TaskStatus.FAILED))
 
-        response = await api.get('/api/tasks/stats')
+        response = await api.get('/api/tasks/status-counts')
 
         assert response.status_code == 200
         body = response.json()
@@ -278,11 +279,11 @@ class TestTaskReads:
     ) -> None:
         """A second poll of the same scope inside the TTL is the cached answer."""
         await persist(session, make_task(status=TaskStatus.FAILED))
-        first = (await api.get('/api/tasks/stats')).json()
+        first = (await api.get('/api/tasks/status-counts')).json()
 
         await persist(session, make_task(status=TaskStatus.FAILED))
-        second = (await api.get('/api/tasks/stats')).json()
-        other_scope = (await api.get('/api/tasks/stats?retried_only=false&queue=default')).json()
+        second = (await api.get('/api/tasks/status-counts')).json()
+        other_scope = (await api.get('/api/tasks/status-counts?retried_only=false&queue=default')).json()
 
         failed = {row['status']: row['count'] for row in first}['FAILED']
         assert failed == 1
@@ -336,8 +337,8 @@ class TestTaskReads:
 
         body = (await api.get(f'/api/tasks/{task.id}')).json()
 
-        assert body['leaf']['task_id'] == task.id
-        assert body['leaf']['good_until'] is None
+        assert body['task_row']['task_id'] == task.id
+        assert body['task_row']['good_until'] is None
         assert body['error_category'] == 'OPERATIONAL'
         assert body['attempts'] == []
 
@@ -371,7 +372,7 @@ class TestTaskReads:
         scope = 'error_category=OPERATIONAL'
 
         listing = (await api.get(f'/api/tasks?{scope}')).json()
-        stats = (await api.get(f'/api/tasks/stats?{scope}')).json()
+        stats = (await api.get(f'/api/tasks/status-counts?{scope}')).json()
         breakdown = (
             await api.get(f'/api/tasks/breakdown?group_by=task_name&{scope}')
         ).json()
@@ -383,7 +384,7 @@ class TestTaskReads:
         # The code list follows the selection; the strip's own totals do not,
         # so the categories it does not have selected stay offerable.
         assert [f['value'] for f in facets['error_codes']] == ['TASK_EXCEPTION']
-        assert facets['error_category_totals'] == {'OPERATIONAL': 1, 'DOMAIN': 1}
+        assert facets['error_category_totals'] == {'OPERATIONAL': 1, 'CUSTOM': 1}
 
     async def test_repeated_error_category_params_are_or_combined(
         self, api: AsyncClient, session: AsyncSession
@@ -396,7 +397,7 @@ class TestTaskReads:
         )
 
         body = (
-            await api.get('/api/tasks?error_category=OUTCOME&error_category=DOMAIN')
+            await api.get('/api/tasks?error_category=OUTCOME&error_category=CUSTOM')
         ).json()
 
         assert {row['error_code'] for row in body['rows']} == {
@@ -406,7 +407,7 @@ class TestTaskReads:
 
     @pytest.mark.parametrize(
         'path',
-        ['/api/tasks', '/api/tasks/stats', '/api/tasks/breakdown', '/api/tasks/facets'],
+        ['/api/tasks', '/api/tasks/status-counts', '/api/tasks/breakdown', '/api/tasks/facets'],
     )
     async def test_unknown_error_category_is_a_bad_request(
         self, api: AsyncClient, path: str
@@ -432,7 +433,7 @@ class TestWorkflowReads:
 
         assert names == ['alpha_flow']
         assert len(runs) == 1
-        assert runs[0]['name'] == 'alpha_flow'
+        assert runs[0]['workflow_name'] == 'alpha_flow'
 
     async def test_run_detail_carries_nodes_and_edges(
         self, api: AsyncClient, session: AsyncSession
@@ -446,7 +447,7 @@ class TestWorkflowReads:
 
         body = (await api.get(f'/api/workflows/{run.id}')).json()
 
-        assert body['run']['id'] == run.id
+        assert body['run']['workflow_id'] == run.id
         assert body['failed_indices'] == [0]
         assert body['edges'] == []
 
@@ -483,7 +484,7 @@ class TestWorkflowReads:
         response = await api.get(f'/api/workflows/{run.id}/tasks/0')
 
         assert response.status_code == 200
-        assert response.json()['leaf'] is None
+        assert response.json()['task_row'] is None
 
 
 @pytest.mark.usefixtures('clean_tables')
@@ -543,16 +544,19 @@ class TestWorkerReads:
             await session.commit()
 
         (worker,) = [entry for entry in body if entry['worker_id'] == worker_id]
-        assert worker['slot_health'] == 'slots_down'
-        assert worker['down_slots'] == [
-            {
-                'slot': 1,
-                'cause': 'the OS ran short of a resource (EMFILE)',
-                'detail': 'OSError: [Errno 24] Too many open files',
-                'down_since': '2026-11-10T12:00:00Z',
-                'failed_boots': 2,
-            },
-        ]
+        assert worker['slot_health'] == {
+            'kind': 'slots_down',
+            'slots': [
+                {
+                    'slot': 1,
+                    'cause': 'the OS ran short of a resource (EMFILE)',
+                    'detail': 'OSError: [Errno 24] Too many open files',
+                    'down_since': '2026-11-10T12:00:00Z',
+                    'failed_boots': 2,
+                },
+            ],
+        }
+        assert 'down_slots' not in worker
 
     async def test_class_report_answers_with_streams_and_budgets(
         self,
@@ -587,10 +591,11 @@ class TestWorkerReads:
         assert response.status_code == 200
         body = response.json()
         (stream,) = body['streams']
-        assert stream['queue_name'] == 'default'
+        assert stream['queue'] == 'default'
         assert stream['execution'] == 'ISOLATED'
         assert stream['coverage'] == {'kind': 'unserved'}
-        assert stream['wait']['kind'] == 'waiting'
+        assert stream['wait']['kind'] == 'due'
+        assert body['live_window_seconds'] == 120.0
         assert 'not_recorded' not in body
         assert body['workers'] == [
             {
@@ -602,7 +607,6 @@ class TestWorkerReads:
                         'capacity': 8,
                         'serves': ['SHARED_ASYNC'],
                         'in_flight': 0,
-                        'free': 8,
                     },
                 ],
             },
@@ -620,8 +624,8 @@ class TestWorkerReads:
         """An unreachable database would be data here, not an error."""
         body = (await api.get('/api/workers/ping?timeout_seconds=0.1')).json()
 
-        assert body['db_reachable'] is True
-        assert body['db_latency_ms'] is not None
+        assert body['database']['kind'] == 'ping'
+        assert body['database']['latency_ms'] >= 0.0
         assert body['workers'] == []
 
     async def test_unknown_worker_history_is_empty_not_missing(
@@ -707,7 +711,7 @@ class TestTaskActionMapping:
         refused = await api.post(f'/api/tasks/{task.id}/cancel', headers=ACT)
         allowed = await api.post(
             f'/api/tasks/{task.id}/cancel',
-            json={'include_running': True},
+            json={'policy': 'INCLUDE_RUNNING'},
             headers=ACT,
         )
 
@@ -726,7 +730,7 @@ class TestTaskActionMapping:
 
         cancel = await api.post(
             f'/api/tasks/{task.id}/cancel',
-            json={'include_running': True},
+            json={'policy': 'INCLUDE_RUNNING'},
             headers=ACT,
         )
         detail = await api.get(f'/api/tasks/{task.id}')
@@ -734,7 +738,7 @@ class TestTaskActionMapping:
         assert cancel.status_code == 200
         assert detail.status_code == 200
         body = detail.json()
-        assert body['leaf']['status'] == 'CANCELLED'
+        assert body['task_row']['status'] == 'CANCELLED'
         [attempt] = body['attempts']
         assert attempt['attempt'] == 1
         assert attempt['outcome'] == 'CANCELLED'
@@ -892,9 +896,9 @@ def _register_child_with_a_corrupt_root(app: Horsies) -> str:
     key."""
     suffix = uuid.uuid4().hex[:8]
 
-    @app.task(task_name=f'web_corrupt_root_{suffix}')
-    def corrupt_root(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    @app.task(name=f'web_corrupt_root_{suffix}')
+    def corrupt_root(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     corrupt_root.task_options_json = '{not-json'  # type: ignore[attr-defined]
 
@@ -906,7 +910,7 @@ def _register_child_with_a_corrupt_root(app: Horsies) -> str:
         def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
             _ = (args, params)
             node = WorkflowTaskNode(
-                fn=corrupt_root,
+                function=corrupt_root,
                 kwargs={'value': 1},
                 good_until=datetime.now(timezone.utc) + timedelta(hours=1),
             )
@@ -930,7 +934,7 @@ async def _seed_paused_parent_of_a_ready_child(
         task_name='corrupt_child',
         status='READY',
         dependencies=(),
-        allow_failed_deps=False,
+        allow_failed_dependencies=False,
         kind=SubworkflowNode(sub_workflow_id=None),
         result=None,
         created_at=datetime.now(UTC) - timedelta(seconds=120),
@@ -1043,7 +1047,7 @@ class TestEventStreamAuthorization:
         from horsies.web import TrustedHeader
 
         monitoring_app = create_monitoring_app(
-            app, auth_policy=TrustedHeader('X-Forwarded-User', allow_actions=False)
+            app, authorization_policy=TrustedHeader('X-Forwarded-User', actions=Actions.DISABLED)
         )
         async with AsyncClient(
             transport=ASGITransport(app=monitoring_app), base_url='http://test'
@@ -1058,14 +1062,14 @@ class TestMountedUnderAHost:
     """The API answers under a mount path, which is how adopters deploy it."""
 
     async def test_routes_answer_under_the_mount(self, app: Horsies) -> None:
-        monitoring_app = create_monitoring_app(app, auth_policy=AllowAll())
+        monitoring_app = create_monitoring_app(app, authorization_policy=AllowAll())
         host = FastAPI()
         host.mount('/monitoring', monitoring_app)
 
         async with AsyncClient(
             transport=ASGITransport(app=host), base_url='http://test'
         ) as client:
-            stats = await client.get('/monitoring/api/tasks/stats')
+            stats = await client.get('/monitoring/api/tasks/status-counts')
             meta = await client.get('/monitoring/api/meta')
 
         assert stats.status_code == 200
@@ -1081,16 +1085,16 @@ def web_args(**overrides: Any) -> Any:
     import argparse
 
     values: dict[str, Any] = {
-        'app_path': None,
+        'module': None,
         'database_url': None,
         'session_database_url': None,
         'pgbouncer_transaction_mode': False,
         'host': '127.0.0.1',
         'port': 8600,
-        'auth': 'none',
+        'authorization': 'none',
         'trusted_header': 'X-Forwarded-User',
         'enable_actions': False,
-        'loglevel': 'INFO',
+        'log_level': 'INFO',
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -1152,7 +1156,7 @@ class TestTheToolNeverRunsDdl:
         call simply never reached the migration seam.
         """
         enabled = cli.resolve_web_app(web_args(database_url=fresh_database))
-        enabled.run_schema_migrations = True
+        enabled.schema_mode = SchemaMode.MIGRATE_AND_VALIDATE
 
         initialized = await enabled.get_broker().ensure_schema_initialized()
 
@@ -1164,7 +1168,7 @@ class TestTheToolNeverRunsDdl:
 
     async def test_meta_reports_the_absent_schema(self, fresh_database: str) -> None:
         cli_app = cli.resolve_web_app(web_args(database_url=fresh_database))
-        built = create_monitoring_app(cli_app, auth_policy=AllowAll())
+        built = create_monitoring_app(cli_app, authorization_policy=AllowAll())
 
         async with AsyncClient(
             transport=ASGITransport(app=built), base_url='http://test'
@@ -1173,7 +1177,7 @@ class TestTheToolNeverRunsDdl:
 
         assert body['schema_version'] is None
         assert body['schema_compatible'] is False
-        assert body['actions_enabled'] is False
+        assert body['actions'] == 'DISABLED'
         # Reachable but empty is ABSENT, not UNKNOWN: the operator is told to
         # start a worker, which is the correct instruction here.
         assert body['actions_disabled_reason'] == 'SCHEMA_INCOMPATIBLE'
@@ -1184,7 +1188,7 @@ class TestTheToolNeverRunsDdl:
         self, fresh_database: str
     ) -> None:
         cli_app = cli.resolve_web_app(web_args(database_url=fresh_database))
-        built = create_monitoring_app(cli_app, auth_policy=AllowAll())
+        built = create_monitoring_app(cli_app, authorization_policy=AllowAll())
 
         async with AsyncClient(
             transport=ASGITransport(app=built), base_url='http://test'
@@ -1238,7 +1242,7 @@ class TestZeroXSchema:
 
     async def _meta(self, database_url: str) -> dict[str, Any]:
         cli_app = cli.resolve_web_app(web_args(database_url=database_url))
-        built = create_monitoring_app(cli_app, auth_policy=AllowAll())
+        built = create_monitoring_app(cli_app, authorization_policy=AllowAll())
         try:
             async with AsyncClient(
                 transport=ASGITransport(app=built), base_url='http://test'
@@ -1257,7 +1261,7 @@ class TestZeroXSchema:
         assert body['schema_state'] == 'ZERO_X'
         assert body['schema_version'] is None
         assert body['schema_compatible'] is False
-        assert body['actions_enabled'] is False
+        assert body['actions'] == 'DISABLED'
         assert body['actions_disabled_reason'] == 'SCHEMA_INCOMPATIBLE'
 
     async def test_meta_reports_a_rust_0x_schema(self, fresh_database: str) -> None:
@@ -1274,7 +1278,7 @@ class TestZeroXSchema:
     ) -> None:
         await run_statements(fresh_database, *_ZERO_X_PYTHON_SCHEMA)
         cli_app = cli.resolve_web_app(web_args(database_url=fresh_database))
-        built = create_monitoring_app(cli_app, auth_policy=AllowAll())
+        built = create_monitoring_app(cli_app, authorization_policy=AllowAll())
 
         async with AsyncClient(
             transport=ASGITransport(app=built), base_url='http://test'
@@ -1305,7 +1309,7 @@ class TestSchemaMatch:
         assert body['schema_version'] == schema_module.EXPECTED_SCHEMA_VERSION
         assert body['expected_schema_version'] == schema_module.EXPECTED_SCHEMA_VERSION
         assert body['schema_compatible'] is True
-        assert body['actions_enabled'] is True
+        assert body['actions'] == 'ENABLED'
         assert body['actions_disabled_reason'] is None
 
     async def test_actions_are_permitted(
@@ -1362,7 +1366,7 @@ class TestSchemaMismatch:
         assert body['expected_schema_version'] == schema_module.EXPECTED_SCHEMA_VERSION
         assert body['schema_state'] == 'MISMATCH'
         assert body['schema_compatible'] is False
-        assert body['actions_enabled'] is False
+        assert body['actions'] == 'DISABLED'
         assert body['actions_disabled_reason'] == 'SCHEMA_INCOMPATIBLE'
 
     @pytest.mark.parametrize(
@@ -1390,7 +1394,7 @@ class TestSchemaMismatch:
         """Force-disabled server-side means regardless of authorization."""
         task = make_task(status=TaskStatus.PENDING)
         await persist(session, task)
-        built = create_monitoring_app(app, auth_policy=AllowAll(), actions_enabled=True)
+        built = create_monitoring_app(app, authorization_policy=AllowAll(), actions=Actions.ENABLED)
 
         async with AsyncClient(
             transport=ASGITransport(app=built), base_url='http://test'

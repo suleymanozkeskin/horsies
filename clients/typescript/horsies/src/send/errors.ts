@@ -1,5 +1,5 @@
 // The errors of a send: the task send catalog of the core, generated (`src/_catalog/task_send_errors.ts`), told apart
-// by `code`. The two errors that `retrySend` takes carry the contract's types and hold the prepared payload in a
+// by `kind`. The two errors that `resend` takes carry the contract's types and hold the prepared payload in a
 // member that is not enumerable, so `JSON.stringify` of an error never holds the input.
 
 import type { CoreCause, NoCause } from "../_catalog/error_detail.ts";
@@ -15,6 +15,7 @@ import {
   type TaskSendValidationFailed,
 } from "../_catalog/task_send_errors.ts";
 import type { RawCatalogError } from "../native/values/records.ts";
+import type { SeatRelayFull } from "../seats/relay-full.ts";
 import { nativeCatalogValue } from "./catalog-value.ts";
 
 /** Type-only key of the types of a sent task. It does not exist at run time. */
@@ -23,34 +24,33 @@ export declare const sentTypes: unique symbol;
 /** The output and code types of the task of a send error. */
 export type SentTypes<O, E extends string> = { readonly output: O; readonly code: E };
 
-/** A send error that carries the types of its task, for the handle that `retrySend` gives. */
+/** A send error that carries the types of its task, for the handle that `resend` gives. */
 export type WithSentTypes<V, O, E extends string> = V & { readonly [sentTypes]?: SentTypes<O, E> };
 
-/** The one send error that `retrySend` takes: the row may or may not exist (`ENQUEUE_FAILED`). */
+/**
+ * The send error that `resend` takes: the row may or may not exist (`ENQUEUE_FAILED`). It leaves out
+ * `IDEMPOTENCY_KEY_CONFLICT` (`retryable: false`): a repeat of the same send does not complete it.
+ */
 export type RetryableSendError<O, E extends string> = WithSentTypes<TaskSendEnqueueFailed, O, E>;
 
-/**
- * `IDEMPOTENCY_KEY_CONFLICT`: another task holds the key. It is not retryable (`retryable` is `false`): a resend under
- * this task id meets the same reservation.
- */
-export type TaskSendKeyConflict = TaskSendIdempotencyKeyConflict & { readonly retryable: false };
-
-/** A send error of the task send catalog, with the fixed `retryable` of a key conflict. */
+/** A send error of the task send catalog, or the seat relay at its bound. */
 export type SendFailure =
   | TaskSendSuppressed
   | TaskSendValidationFailed
   | TaskSendEnqueueFailed
   | TaskSendPayloadMismatch
   | TaskSendPayloadTooLarge
-  | TaskSendKeyConflict;
+  | TaskSendIdempotencyKeyConflict
+  | SeatRelayFull;
 
-/** The error of a send, told apart by `code`. */
+/** The error of a send, told apart by `kind`. */
 export type TaskSendError<O, E extends string> =
   | TaskSendSuppressed
   | TaskSendValidationFailed
   | TaskSendPayloadMismatch
   | TaskSendPayloadTooLarge
-  | TaskSendKeyConflict
+  | TaskSendIdempotencyKeyConflict
+  | SeatRelayFull
   | RetryableSendError<O, E>;
 
 /** The public send error of a raw record of the task send catalog. An unknown class throws (a build defect). */
@@ -58,31 +58,21 @@ export function sendErrorOfRaw(raw: RawCatalogError): SendFailure {
   // SAFETY: the bridge builds the slots of a task send class from the core's slot list of that class
   // (`ErrorClassValues`), the list from which the codegen renders `NativeTaskSendCoreError`; the generated converter
   // throws for a class name that it does not know.
-  const error = taskSendCoreErrorFromNative(nativeCatalogValue(raw) as unknown as NativeTaskSendCoreError);
-
-  return error.code === "IDEMPOTENCY_KEY_CONFLICT" ? notRetryable(error) : error;
-}
-
-/** The key conflict with `retryable: false`; its other members keep their enumerability (the payload stays hidden). */
-function notRetryable(error: TaskSendIdempotencyKeyConflict): TaskSendKeyConflict {
-  const members = { ...Object.getOwnPropertyDescriptors(error), retryable: { value: false, enumerable: true } };
-
-  // SAFETY: the object holds every member of the conflict, with the same descriptors, and `retryable: false`.
-  return Object.freeze(Object.create(Object.prototype, members) as TaskSendKeyConflict);
+  return taskSendCoreErrorFromNative(nativeCatalogValue(raw) as unknown as NativeTaskSendCoreError);
 }
 
 /** `SEND_SUPPRESSED`: the process does not send now. Nothing is written. Pure. */
 export function suppressedError(message: string): TaskSendSuppressed {
   const error = taskSendCoreErrorFromNative({ class: "TaskSendSuppressed", slots: { message } });
 
-  return error.code === "SEND_SUPPRESSED" ? error : wrongCode(error);
+  return error.kind === "suppressed" ? error : wrongClass(error);
 }
 
 /** `VALIDATION_FAILED`: the send breaks a rule; nothing is written. Pure. */
-export function validationFailed(message: string, exception: CoreCause | NoCause): TaskSendValidationFailed {
-  const error = taskSendCoreErrorFromNative({ class: "TaskSendValidationFailed", slots: { message, exception } });
+export function validationFailed(message: string, cause: CoreCause | NoCause): TaskSendValidationFailed {
+  const error = taskSendCoreErrorFromNative({ class: "TaskSendValidationFailed", slots: { message, cause } });
 
-  return error.code === "VALIDATION_FAILED" ? error : wrongCode(error);
+  return error.kind === "validationFailed" ? error : wrongClass(error);
 }
 
 /** The cause of a value that a rule of the client refuses (Python's `ValueError`). Pure. */
@@ -101,6 +91,6 @@ export function preconditionFailed(message: string): CoreCause {
   });
 }
 
-function wrongCode(error: TaskSendCoreError): never {
-  throw new TypeError(`taskSendCoreErrorFromNative: the converter gave the code ${error.code} for another class`);
+function wrongClass(error: TaskSendCoreError): never {
+  throw new TypeError(`taskSendCoreErrorFromNative: the converter gave the kind ${error.kind} for another class`);
 }

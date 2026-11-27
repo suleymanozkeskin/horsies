@@ -81,10 +81,8 @@ MANIFEST_VERSION_MAX: Final = 1
 type SchemaMode = Literal['MIGRATE_AND_VALIDATE', 'OBSERVE_ONLY', 'ASSUME_INITIALIZED']
 """Schema behaviour of a handle.
 
-The Python broker flags map to it: `assume_initialized=True` is
-`ASSUME_INITIALIZED`, whatever `run_schema_migrations` says; otherwise
-`run_schema_migrations=True` is `MIGRATE_AND_VALIDATE` and `False` is
-`OBSERVE_ONLY`.
+Python's `SchemaMode` has the same three members, with the manifest text
+as their values.
 
 `MIGRATE_AND_VALIDATE`: The first operation applies the migrations and checks the schema version.
 
@@ -158,8 +156,8 @@ class TcpKeepalivesConfigOn:
 
 
 type TcpKeepalivesConfig = TcpKeepalivesConfigOff | TcpKeepalivesConfigOn
-"""TCP keepalives of every core connection. Python's
-`tcp_keepalives=False` is `Off`; `True` is `On` with the three values.
+"""TCP keepalives of every core connection, checked form (Python
+`TcpKeepalivesOff`, `TcpKeepalivesOn`).
 """
 
 
@@ -182,8 +180,8 @@ class TcpUserTimeoutConfigAfter:
 
 
 type TcpUserTimeoutConfig = TcpUserTimeoutConfigSystemDefault | TcpUserTimeoutConfigAfter
-"""The TCP user timeout of every core connection. Python's
-`tcp_user_timeout_ms=0` is `SystemDefault`; another value is `After`.
+"""The TCP user timeout of every core connection, checked form (Python
+`TcpUserTimeoutSystemDefault`, `TcpUserTimeoutAfter`).
 """
 
 
@@ -213,7 +211,7 @@ class DatabaseManifest:
     `max_overflow=-1` (no limit) has no form here.
     """
 
-    pool_timeout: int
+    pool_timeout_seconds: int
     """The longest a checkout waits for a free connection. 0 means a checkout
     does not wait: it fails at once when no connection is free, as
     SQLAlchemy's `pool_timeout=0`.
@@ -225,14 +223,10 @@ class DatabaseManifest:
     """Log every statement through the log bridge."""
 
     tcp_keepalives: TcpKeepalivesConfig
-    """TCP keepalives of every core connection (Python `tcp_keepalives` and
-    its three values).
-    """
+    """TCP keepalives of every core connection (Python `tcp_keepalives`)."""
 
     tcp_user_timeout: TcpUserTimeoutConfig
-    """TCP user timeout of every core connection (Python
-    `tcp_user_timeout_ms`; its 0 is `SYSTEM_DEFAULT`).
-    """
+    """TCP user timeout of every core connection (Python `tcp_user_timeout`)."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

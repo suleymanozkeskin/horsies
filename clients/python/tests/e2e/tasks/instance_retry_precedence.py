@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import os
+from enum import Enum
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import RetryPolicy, TaskError, TaskResult
+from horsies.core.models.tasks import RetryPolicy, TaskError
+from horsies.core.types.result import Ok, Result
 
 from tests.e2e.helpers.env import e2e_database_url
 from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
@@ -21,7 +23,7 @@ config = AppConfig(
     exception_mapper={
         ValueError: 'GLOBAL_VALUE_ERROR',
     },
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=DB_URL,
         pool_size=5,
         max_overflow=5,
@@ -30,39 +32,49 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 
 
-@app.task(task_name='e2e_retry_precedence_healthcheck')
-def healthcheck() -> TaskResult[str, TaskError]:
-    return TaskResult(ok='ready')
+class PrecedenceCode(str, Enum):
+    """The codes that the mappers of this app give."""
+
+    GLOBAL_VALUE_ERROR = 'GLOBAL_VALUE_ERROR'
+    TASK_VALUE_ERROR = 'TASK_VALUE_ERROR'
+
+
+@app.task(name='e2e_retry_precedence_healthcheck')
+def healthcheck() -> Result[str, TaskError]:
+    return Ok('ready')
 
 
 @app.task(
-    task_name='e2e_retry_precedence_task_mapper_wins_no_retry',
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=['GLOBAL_VALUE_ERROR']),
+    name='e2e_retry_precedence_task_mapper_wins_no_retry',
+    error_codes=PrecedenceCode,
+    retry_policy=RetryPolicy.fixed([1], retry_for=[PrecedenceCode.GLOBAL_VALUE_ERROR]),
     exception_mapper={ValueError: 'TASK_VALUE_ERROR'},
 )
-def task_mapper_wins_no_retry_task() -> TaskResult[str, TaskError]:
+def task_mapper_wins_no_retry_task() -> Result[str, TaskError]:
     raise ValueError('task mapper should win over global mapper')
 
 
 @app.task(
-    task_name='e2e_retry_precedence_task_mapper_wins_retry',
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=['TASK_VALUE_ERROR']),
+    name='e2e_retry_precedence_task_mapper_wins_retry',
+    error_codes=PrecedenceCode,
+    retry_policy=RetryPolicy.fixed([1], retry_for=[PrecedenceCode.TASK_VALUE_ERROR]),
     exception_mapper={ValueError: 'TASK_VALUE_ERROR'},
 )
-def task_mapper_wins_retry_task() -> TaskResult[str, TaskError]:
+def task_mapper_wins_retry_task() -> Result[str, TaskError]:
     raise ValueError('task mapper should win and retry should trigger')
 
 
 @app.task(
-    task_name='e2e_retry_precedence_global_mapper_retry',
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=['GLOBAL_VALUE_ERROR']),
+    name='e2e_retry_precedence_global_mapper_retry',
+    error_codes=PrecedenceCode,
+    retry_policy=RetryPolicy.fixed([1], retry_for=[PrecedenceCode.GLOBAL_VALUE_ERROR]),
 )
-def global_mapper_retry_task() -> TaskResult[str, TaskError]:
+def global_mapper_retry_task() -> Result[str, TaskError]:
     raise ValueError('global mapper should trigger retry')
 
 
@@ -71,10 +83,11 @@ ValueErrorClone = type('ValueError', (Exception,), {})
 
 
 @app.task(
-    task_name='e2e_retry_precedence_exception_name_collision',
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=['GLOBAL_VALUE_ERROR']),
+    name='e2e_retry_precedence_exception_name_collision',
+    error_codes=PrecedenceCode,
+    retry_policy=RetryPolicy.fixed([1], retry_for=[PrecedenceCode.GLOBAL_VALUE_ERROR]),
 )
-def exception_name_collision_task() -> TaskResult[str, TaskError]:
+def exception_name_collision_task() -> Result[str, TaskError]:
     raise ValueErrorClone('same name as ValueError, different class object')
 
 

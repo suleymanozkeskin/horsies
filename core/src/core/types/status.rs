@@ -131,12 +131,12 @@ impl std::str::FromStr for TaskStatus {
 pub enum TaskAttemptOutcome {
     /// Task completed successfully.
     Completed,
-    /// Task returned a domain or library error (with a `TaskResult`).
+    /// The task ended with an error: its own error, or a library error.
     Failed,
-    /// Worker process crashed without producing a `TaskResult`.
+    /// Worker process crashed without producing a result.
     WorkerFailure,
     /// An operator cancelled the task while the attempt ran
-    /// (`cancel_task` with `include_running`). The cancel statement
+    /// (`cancel_task` with the policy `INCLUDE_RUNNING`). The cancel statement
     /// records the attempt; it never retries.
     Cancelled,
 }

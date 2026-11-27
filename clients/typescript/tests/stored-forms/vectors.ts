@@ -7,14 +7,15 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { LIBRARY_TASK_CODES, WORKFLOW_STATUSES } from "../../horsies/src/codec/bounds.ts";
+import { BUILT_IN_TASK_CODES } from "../../horsies/src/_catalog/task_code.ts";
+import { WORKFLOW_STATUSES } from "../../horsies/src/wire/task-error.ts";
 import { isArray, isPlainObject, isString } from "../../horsies/src/codec/values.ts";
 import { h } from "../../horsies/src/wire/builders.ts";
 import { Decimal } from "../../horsies/src/wire/decimal.ts";
 import type { RequiredWire } from "../../horsies/src/wire/infer.ts";
 import type {
   ExceptionRecord,
-  LibraryTaskCode,
+  BuiltInTaskCode,
   TaskError,
   WorkflowStatus,
 } from "../../horsies/src/wire/task-error.ts";
@@ -527,19 +528,19 @@ export function parameterCases(parameters: readonly Parameter[]): readonly Param
   return cases;
 }
 
-const LIBRARY_CODES: ReadonlySet<string> = new Set(LIBRARY_TASK_CODES);
+const BUILT_IN_CODES: ReadonlySet<string> = new Set(BUILT_IN_TASK_CODES);
 const STATUSES: ReadonlySet<string> = new Set(WORKFLOW_STATUSES);
 
-function isLibraryCode(text: string): text is LibraryTaskCode {
-  return LIBRARY_CODES.has(text);
+function isBuiltInCode(text: string): text is BuiltInTaskCode {
+  return BUILT_IN_CODES.has(text);
 }
 
 function isWorkflowStatus(text: string): text is WorkflowStatus {
   return STATUSES.has(text);
 }
 
-function libraryCode(text: string): LibraryTaskCode {
-  assert(isLibraryCode(text), text);
+function builtInCode(text: string): BuiltInTaskCode {
+  assert(isBuiltInCode(text), text);
 
   return text;
 }
@@ -578,10 +579,9 @@ export function taskErrorOf(error: ErrorNotation, storedData?: Notation): TaskEr
   const subWorkflow = error.sub_workflow;
 
   return {
-    code:
-      "built_in" in code
-        ? { kind: "library", code: libraryCode(code.built_in) }
-        : { kind: "user", code: code.user },
+    ...("built_in" in code
+      ? { kind: "builtIn", code: builtInCode(code.built_in) }
+      : { kind: "custom", code: code.user }),
     message: error.message,
     data: storedData ?? error.data,
     exception: error.exception === null ? null : exceptionOf(error.exception),
@@ -594,10 +594,10 @@ export function taskErrorOf(error: ErrorNotation, storedData?: Notation): TaskEr
               status: workflowStatus(subWorkflow.summary["status"]),
               output: subWorkflow.summary["output"] ?? null,
               errorSummary: textOrNull(subWorkflow.summary["error_summary"]),
-              totalTasks: countOf(subWorkflow.summary["total_tasks"]),
-              completedTasks: countOf(subWorkflow.summary["completed_tasks"]),
-              failedTasks: countOf(subWorkflow.summary["failed_tasks"]),
-              skippedTasks: countOf(subWorkflow.summary["skipped_tasks"]),
+              totalNodes: countOf(subWorkflow.summary["total_nodes"]),
+              completedNodes: countOf(subWorkflow.summary["completed_nodes"]),
+              failedNodes: countOf(subWorkflow.summary["failed_nodes"]),
+              skippedNodes: countOf(subWorkflow.summary["skipped_nodes"]),
             },
           },
   };

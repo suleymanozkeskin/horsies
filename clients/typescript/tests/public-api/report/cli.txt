@@ -1,0 +1,29 @@
+command check
+  usage: <entry> check [--live] [--log-level LEVEL]
+  --live (boolean)
+  --log-level (string)
+
+command metrics
+  usage: <entry> metrics --metrics-listen HOST:PORT [--log-level LEVEL]
+  --log-level (string)
+  --metrics-listen (string)
+
+command scheduler
+  usage: <entry> scheduler [--log-level LEVEL]
+  --log-level (string)
+
+command web
+  usage: <entry> web [--host HOST] [--port PORT] [--authorization none|trusted-header] [--trusted-header NAME] [--enable-actions] [--trace-link TEMPLATE] [--log-level LEVEL]
+  --authorization (string)
+  --enable-actions (boolean)
+  --host (string)
+  --log-level (string)
+  --port (string)
+  --trace-link (string)
+  --trusted-header (string)
+
+command worker
+  usage: <entry> worker --profile NAME [--log-level LEVEL] [--metrics-listen HOST:PORT]
+  --log-level (string)
+  --metrics-listen (string)
+  --profile (string)

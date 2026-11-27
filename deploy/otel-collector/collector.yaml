@@ -7,7 +7,7 @@
 # Scrape jobs:
 # - horsies-worker: the endpoint of each worker process,
 #   `horsies worker <app> --profile <name> --metrics-listen HOST:PORT`.
-# - horsies-fleet: the fleet collector, `horsies metrics <app> --listen HOST:PORT`.
+# - horsies-fleet: the fleet collector, `horsies metrics <app> --metrics-listen HOST:PORT`.
 #   Run one fleet collector per database. Two of them give two copies of each
 #   fleet series, with different `service.instance.id` values.
 #

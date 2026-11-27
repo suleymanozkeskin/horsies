@@ -110,11 +110,11 @@ export function countingRelay(read: TaskInfoRead): { readonly access: CoreAccess
       requests += 1;
 
       const reply: SendsSeatReply =
-        operation.kind === "taskInfo"
+        "kind" in operation && operation.kind === "taskInfo"
           ? { kind: "taskInfo", read }
           : { kind: "taskInfo", read: { kind: "absent", reason: "NOT_CLASSIFIED" } };
 
-      return reply;
+      return { kind: "reply", reply };
     },
   };
 
@@ -144,26 +144,26 @@ export function okEnvelope(valueText: string): string {
   return `{"__h_task_result__":true,"ok":${valueText},"err":null}`;
 }
 
-/** The stored envelope of an error with a user code (the form of `err_user_code_without_message`). */
-export function userErrorEnvelope(code: string): string {
+/** The stored envelope of an error with a custom code (the form of `err_user_code_without_message`). */
+export function customErrorEnvelope(code: string): string {
   return `{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":"${code}","data":null,"message":null}}`;
 }
 
-/** The stored envelope of an error with a library code (the form of `err_built_in_code`). */
-export function libraryErrorEnvelope(code: string): string {
+/** The stored envelope of an error with a built-in code (the form of `err_built_in_code`). */
+export function builtInErrorEnvelope(code: string): string {
   return `{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"${code}"},"data":null,"message":"the broker refused the write"}}`;
 }
 
-/** `BrokerOperationFailed` with `code`: the slot list of `NativeBrokerOperationFailed`. */
+/** `DatabaseOperationFailed` with `code`: the slot list of `NativeDatabaseOperationFailed`. */
 export function operationFailedRaw(code: string, retryable: boolean): RawCatalogError {
   return {
-    class: "BrokerOperationFailed",
+    class: "DatabaseOperationFailed",
     slots: [
-      { name: "code", value: { kind: "codeMember", catalog: "BrokerOperationFailedCode", value: code } },
+      { name: "code", value: { kind: "codeMember", catalog: "DatabaseOperationFailedCode", value: code } },
       { name: "message", value: { kind: "text", text: "connection failed: refused" } },
       { name: "retryable", value: { kind: "flag", value: retryable } },
       {
-        name: "exception",
+        name: "cause",
         value: {
           kind: "exception",
           exception: {
@@ -176,14 +176,14 @@ export function operationFailedRaw(code: string, retryable: boolean): RawCatalog
   };
 }
 
-/** `BrokerInvalidJsonPayload`: the slot list of `NativeBrokerInvalidJsonPayload`. */
+/** `DatabaseInvalidJsonPayload`: the slot list of `NativeDatabaseInvalidJsonPayload`. */
 export function invalidJsonPayloadRaw(): RawCatalogError {
   return {
-    class: "BrokerInvalidJsonPayload",
+    class: "DatabaseInvalidJsonPayload",
     slots: [
       { name: "message", value: { kind: "text", text: "result JSON is refused: duplicate key" } },
       {
-        name: "exception",
+        name: "cause",
         value: { kind: "exception", exception: { kind: "clientClass", class: "serializationError", text: "duplicate key" } },
       },
     ],

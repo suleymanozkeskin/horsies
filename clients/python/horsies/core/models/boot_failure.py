@@ -84,7 +84,7 @@ class ResourceShortage:
     This cause can clear.
     """
 
-    errno_name: ShortageErrno
+    errno: ShortageErrno
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,8 +172,8 @@ def describe_boot_cause(cause: ModelBootCause) -> str:
             return 'the app or a task module could not be imported'
         case ChildPoolSetupFailed():
             return 'the child could not set up its database connection pool'
-        case ResourceShortage(errno_name=errno_name):
-            return f'the OS ran short of a resource ({errno_name.value})'
+        case ResourceShortage(errno=shortage_errno):
+            return f'the OS ran short of a resource ({shortage_errno.value})'
         case TaskLoopCreateFailed():
             return 'the child could not create the event loop for async tasks'
         case ThreadStartRefused():

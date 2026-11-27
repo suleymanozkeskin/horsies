@@ -1,13 +1,20 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/_catalog/codec_bounds.ts";
+import { defineTask } from "../../../horsies/src/contract/define-task.ts";
 import { h, parametersKind } from "../../../horsies/src/wire/builders.ts";
 import { checkKind, checkParameters } from "../../../horsies/src/wire/check.ts";
-import { conversionKind, objectKind } from "../../../horsies/src/wire/kinds.ts";
+import { checkedKind, conversionKind, INT_KIND, type Kind, objectKind } from "../../../horsies/src/wire/kinds.ts";
+import { MAX_KIND_WALK_DEPTH } from "../../../horsies/src/wire/lazy.ts";
 import { ok } from "../../../horsies/src/wire/result.ts";
 import type { RequiredWire } from "../../../horsies/src/wire/infer.ts";
-import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
+import { kindOf, type Wire } from "../../../horsies/src/wire/wire-type.ts";
+
+/** An `h.taskOutcome` parameter of an upstream task of output `output`. */
+function outcomeOf(output: RequiredWire): Wire<unknown, never, "required", "taskOutcome"> {
+  return h.taskOutcome(defineTask({ name: "upstream", input: {}, output }));
+}
 
 function nestedArrays(levels: number): RequiredWire {
   let wire: RequiredWire = h.int();
@@ -38,6 +45,78 @@ describe("checkKind", () => {
     assert.deepEqual(refusals, [
       { rule: "DefaultNotStored", path: "$.inner.ratio", detail: "the default is refused: NonFiniteFloat" },
     ]);
+  });
+
+  test("DefaultNotStored: the first value of a default function, which the check calls once", () => {
+    let calls = 0;
+    const kind = kindOf(h.object({ ratio: h.float().default(() => ((calls += 1), Number.NaN)) }));
+
+    assert.deepEqual(checkKind(kind), [
+      { rule: "DefaultNotStored", path: "$.ratio", detail: "the default function gives a refused value: NonFiniteFloat" },
+    ]);
+    assert.equal(calls, 1);
+    assert.deepEqual(checkKind(kindOf(h.object({ id: h.uuid().default(() => crypto.randomUUID()) }))), []);
+  });
+
+  test("a recursive kind (h.lazy through an array or an object) has no refusal; its kind is walked once", () => {
+    type TreeNode = { name: string; children: TreeNode[]; next?: TreeNode | null };
+
+    const tree: Wire<TreeNode> = h.object({
+      name: h.string(),
+      children: h.array(h.lazy(() => tree)),
+      next: h.lazy(() => tree).nullable().optional(),
+    });
+
+    assert.deepEqual(checkKind(kindOf(tree)), []);
+  });
+
+  test("RecursiveWithoutLevel: a lazy kind that reaches itself through a nullable or a union", () => {
+    const nullable: RequiredWire = h.lazy(() => nullable.nullable());
+    const union: RequiredWire = h.union([h.string(), h.lazy(() => union)]);
+
+    assert.deepEqual(
+      checkKind(kindOf(h.object({ a: nullable }))).map((refusal) => [refusal.rule, refusal.path]),
+      [["RecursiveWithoutLevel", "$.a"]],
+    );
+    assert.deepEqual(
+      checkKind(kindOf(union)).map((refusal) => refusal.rule),
+      ["RecursiveWithoutLevel"],
+    );
+  });
+
+  test("RecursiveWithoutLevel: a chain of new lazy kinds with no level fails closed at MAX_KIND_WALK_DEPTH", () => {
+    const chain = (): RequiredWire => h.lazy(() => chain().nullable());
+    const refusals = checkKind(kindOf(chain()));
+
+    assert.deepEqual(refusals, [
+      {
+        rule: "RecursiveWithoutLevel",
+        path: "$",
+        detail: `the lazy kind reaches more than ${MAX_KIND_WALK_DEPTH} kinds through no array or object`,
+      },
+    ]);
+  });
+
+  test("KindNodesTooDeep: a kind nested deeper than MAX_KIND_WALK_DEPTH kinds", () => {
+    let kind: Kind = INT_KIND;
+
+    for (let depth = 0; depth <= MAX_KIND_WALK_DEPTH; depth += 1) {
+      kind = checkedKind(kind, () => ok(true));
+    }
+
+    assert.deepEqual(
+      checkKind(kind).map((refusal) => [refusal.rule, refusal.path]),
+      [["KindNodesTooDeep", "$"]],
+    );
+  });
+
+  test("a tuple with a rest item: the rest item kind is checked at [*]", () => {
+    const refusals = checkKind(kindOf(h.tuple([h.int()], h.literal(1.5))));
+
+    assert.deepEqual(
+      refusals.map((refusal) => [refusal.rule, refusal.path]),
+      [["LiteralNotSafeInteger", "$[*]"]],
+    );
   });
 
   test("EngineKeyMember: a member name that only the engine writes", () => {
@@ -125,14 +204,14 @@ describe("checkKind", () => {
   });
 
   test("a task input may have an upstream outcome as a whole parameter, optional or nullable", () => {
-    const upstream = h.resultOf(h.object({ id: h.int() }));
+    const upstream = outcomeOf(h.object({ id: h.int() }));
     const parameters = parametersKind({ a: upstream, b: upstream.optional(), c: upstream.nullable(), d: h.int() });
 
     assert.deepEqual(checkParameters(parameters), []);
   });
 
   test("checkParameters looks inside a nullable upstream outcome and refuses one below a conversion", () => {
-    const upstream = kindOf(h.resultOf(h.union([h.int(), h.float()])).nullable());
+    const upstream = kindOf(outcomeOf(h.union([h.int(), h.float()])).nullable());
     const parameters = objectKind([{ name: "order", kind: upstream, presence: { mode: "required" } }]);
 
     assert.deepEqual(
@@ -143,18 +222,18 @@ describe("checkKind", () => {
     const converted = objectKind([
       {
         name: "order",
-        kind: conversionKind(kindOf(h.resultOf(h.int())), ok, ok),
+        kind: conversionKind(kindOf(outcomeOf(h.int())), ok, ok),
         presence: { mode: "required" },
       },
     ]);
 
-    assert.equal(checkParameters(converted)[0]?.rule, "ResultOfPlacement");
+    assert.equal(checkParameters(converted)[0]?.rule, "TaskOutcomePlacement");
   });
 
-  test("ResultOfPlacement: an upstream outcome as a value, or below a parameter", () => {
-    const upstream = kindOf(h.resultOf(h.int()));
+  test("TaskOutcomePlacement: an upstream outcome as a value, or below a parameter", () => {
+    const upstream = kindOf(outcomeOf(h.int()));
 
-    assert.equal(checkKind(upstream)[0]?.rule, "ResultOfPlacement");
+    assert.equal(checkKind(upstream)[0]?.rule, "TaskOutcomePlacement");
 
     const nested = objectKind([
       { name: "list", kind: { node: "array", item: upstream }, presence: { mode: "required" } },
@@ -162,14 +241,14 @@ describe("checkKind", () => {
 
     assert.deepEqual(
       checkParameters(nested).map((refusal) => [refusal.rule, refusal.path]),
-      [["ResultOfPlacement", "$.list[*]"]],
+      [["TaskOutcomePlacement", "$.list[*]"]],
     );
   });
 
   test("checkParameters checks the upstream output kind and the parameter names", () => {
     const parameters = parametersKind({
       __h_x: h.int(),
-      order: h.resultOf(h.union([h.int(), h.float()])),
+      order: outcomeOf(h.union([h.int(), h.float()])),
     });
 
     assert.deepEqual(

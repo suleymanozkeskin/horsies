@@ -1,5 +1,5 @@
 // expect: TS2345 at 15
-// `retrySend` takes only `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT`.
+// `resend` takes only `ENQUEUE_FAILED`.
 
 import { defineTask, type Horsies } from "../../../horsies/src/index.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
@@ -12,6 +12,6 @@ export async function send(): Promise<void> {
   const sent = await app.send(report, {});
 
   if (!sent.ok && sent.error.code === "VALIDATION_FAILED") {
-    void (await app.retrySend(sent.error));
+    void (await app.resend(sent.error));
   }
 }

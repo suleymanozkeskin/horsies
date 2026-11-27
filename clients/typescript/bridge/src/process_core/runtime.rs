@@ -101,7 +101,7 @@ impl CallRefusal {
                 cause: report.cause,
                 state_after: StateAfter::NoChange,
             },
-            Self::StartFailed(failure) => NativeThrown::CoreStartFailed {
+            Self::StartFailed(failure) => NativeThrown::RuntimeStartFailed {
                 cause: failure.cause(),
             },
         }

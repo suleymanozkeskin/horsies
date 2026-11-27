@@ -22,7 +22,7 @@ config = AppConfig(
         CustomQueueConfig(name='normal', priority=50, max_concurrency=10),
         CustomQueueConfig(name='low', priority=100, max_concurrency=20),
     ],
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=DB_URL,
         pool_size=5,
         max_overflow=5,
@@ -31,7 +31,7 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 

@@ -1,7 +1,8 @@
 // The contract list of an app (`Horsies.create({ tasks })`): each listed contract, its queue route and its compiled
 // form. The checks here are TypeScript code, so they run on every thread.
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
+import { DEFAULT_QUEUE_NAME } from "../_catalog/send_bounds.ts";
 import {
   compileContract,
   type CompiledContract,
@@ -12,13 +13,10 @@ import { contractRecord, type ContractRecord } from "../contract/definition.ts";
 import type { QueueSetup } from "../config/queues.ts";
 import type { ContractLookup, ListedLookup, ListedTask, QueueRoute } from "../send/send.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import { refusal, type Refusal, type RefusalCode } from "./refusal.ts";
+import { refusal, type HorsiesError, type RefusalCode } from "./refusal.ts";
 
-/**
- * The one queue of the default queue mode. The Python and Rust clients hold the same value
- * (`clients/rust/horsies/src/registry.rs`, `DEFAULT_QUEUE`); issue #2425 moves it to the core.
- */
-export const DEFAULT_QUEUE_ROUTE: QueueRoute = Object.freeze({ queueName: "default" });
+/** The one queue of the default queue mode: the core's `DEFAULT_QUEUE_NAME`. */
+export const DEFAULT_QUEUE_ROUTE: QueueRoute = Object.freeze({ queueName: DEFAULT_QUEUE_NAME });
 
 const NOT_LISTED: ListedLookup = Object.freeze({ kind: "notListed" });
 
@@ -31,7 +29,7 @@ export type ListedEntry = {
 };
 
 /** A refusal of the contract at `index` of the list. */
-export type ListRefusal = { readonly index: number; readonly refusal: Refusal };
+export type ListRefusal = { readonly index: number; readonly refusal: HorsiesError };
 
 /** The outcome of the list checks: every entry that passed, and every refusal in list order. */
 export type ListChecked = { readonly entries: readonly ListedEntry[]; readonly refusals: readonly ListRefusal[] };
@@ -61,7 +59,7 @@ export function checkContractList(contracts: readonly object[], queues: QueueSet
 
       refusals.push({
         index,
-        refusal: refusal(ErrorCode.TASK_DUPLICATE_NAME, path, detail, ["list each task once, under one name"]),
+        refusal: refusal(HorsiesErrorCode.TASK_DUPLICATE_NAME, path, detail, ["list each task once, under one name"]),
       });
 
       return;
@@ -83,7 +81,7 @@ export function checkContractList(contracts: readonly object[], queues: QueueSet
 
 type EntryChecked =
   | { readonly kind: "listed"; readonly task: ListedTask }
-  | { readonly kind: "refused"; readonly refusals: readonly Refusal[] };
+  | { readonly kind: "refused"; readonly refusals: readonly HorsiesError[] };
 
 function checkEntry(contract: object, record: ContractRecord, queues: QueueSetup, path: string): EntryChecked {
   const route = queueRoute(record, queues, path);
@@ -102,7 +100,7 @@ function checkEntry(contract: object, record: ContractRecord, queues: QueueSetup
 }
 
 /** A contract refusal at the listed contract `path`, with the catalog code of its rule and its help. Pure. */
-function contractRefusal(refused: ContractRefused, path: string): Refusal {
+function contractRefusal(refused: ContractRefused, path: string): HorsiesError {
   return refusal(contractRuleCode(refused.rule), path, `${refused.path}: ${refused.detail} [${refused.rule}]`, refused.help);
 }
 
@@ -113,14 +111,14 @@ function contractRefusal(refused: ContractRefused, path: string): Refusal {
 function contractRuleCode(rule: ContractRule): RefusalCode {
   switch (rule) {
     case "TaskName":
-      return ErrorCode.TASK_INVALID_OPTIONS;
+      return HorsiesErrorCode.TASK_INVALID_OPTIONS;
     case "ParameterName":
     case "SchemaVendor":
     case "Zod3Schema":
     case "ZodVersionNotSupported":
     case "ZodSchema":
     case "WireKind":
-      return ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION;
+      return HorsiesErrorCode.TASK_STRICT_SIGNATURE_VIOLATION;
     default:
       return unreachable(rule, "contractRuleCode");
   }
@@ -130,7 +128,7 @@ function listedTask(compiled: CompiledContract, route: QueueRoute): ListedTask {
   return Object.freeze({ compiled, route });
 }
 
-type RouteChecked = { readonly ok: true; readonly value: QueueRoute } | { readonly ok: false; readonly error: Refusal };
+type RouteChecked = { readonly ok: true; readonly value: QueueRoute } | { readonly ok: false; readonly error: HorsiesError };
 
 /** The queue route of a contract under the queue mode. Pure. */
 function queueRoute(record: ContractRecord, queues: QueueSetup, path: string): RouteChecked {
@@ -141,7 +139,7 @@ function queueRoute(record: ContractRecord, queues: QueueSetup, path: string): R
         : {
             ok: false,
             error: refusal(
-              ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+              HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE,
               path,
               `the task names the queue "${record.queue.name}", and the default queue mode takes no queue`,
               ["remove queue, or set queueMode: \"custom\" with customQueues"],
@@ -151,7 +149,7 @@ function queueRoute(record: ContractRecord, queues: QueueSetup, path: string): R
       if (record.queue.kind === "noQueue") {
         return {
           ok: false,
-          error: refusal(ErrorCode.CONFIG_INVALID_QUEUE_MODE, path, "the custom queue mode needs a queue on each task", [
+          error: refusal(HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE, path, "the custom queue mode needs a queue on each task", [
             "set queue to one of the customQueues",
           ]),
         };
@@ -162,7 +160,7 @@ function queueRoute(record: ContractRecord, queues: QueueSetup, path: string): R
       return queue === undefined
         ? {
             ok: false,
-            error: refusal(ErrorCode.TASK_INVALID_QUEUE, path, `the queue "${record.queue.name}" is not a custom queue`, [
+            error: refusal(HorsiesErrorCode.TASK_INVALID_QUEUE, path, `the queue "${record.queue.name}" is not a custom queue`, [
               "add the queue to customQueues, or name one of them",
             ]),
           }
@@ -193,6 +191,6 @@ function found(task: ListedTask | undefined): ListedLookup {
 }
 
 /** The refusals in list order; for one contract, in their own order (a stable sort). Pure. */
-export function inListOrder(refusals: readonly ListRefusal[]): readonly Refusal[] {
+export function inListOrder(refusals: readonly ListRefusal[]): readonly HorsiesError[] {
   return refusals.toSorted((first, second) => first.index - second.index).map((listed) => listed.refusal);
 }

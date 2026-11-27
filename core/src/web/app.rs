@@ -17,11 +17,12 @@ use crate::telemetry::endpoint::metrics_response;
 use crate::workflow_engine::child_spec::ChildSpecSource;
 
 use super::auth::{
-    MonitoringAuthPolicy, MonitoringRequest, INTENT_HEADER, INTENT_VALUE, NOT_AUTHORIZED,
+    MonitoringAuthorizationPolicy, MonitoringRequest, INTENT_HEADER, INTENT_VALUE, NOT_AUTHORIZED,
 };
 use super::common::{ApiError, CodeBody, DetailBody, InvalidInputRefused, INVALID_INPUT};
 use super::events::EventBroadcaster;
 use super::fleet_metrics::WebFleetMetrics;
+use super::handler::Actions;
 use super::routes;
 use super::schema::{
     SchemaIncompatible, SchemaProbe, SchemaState, SCHEMA_INCOMPATIBLE, SCHEMA_UNKNOWN,
@@ -37,7 +38,9 @@ use super::task_stats_cache::{ReadCache, TaskStatsCache};
 pub(crate) struct MetaResponse {
     pub horsies_version: String,
     pub base_path: String,
-    pub actions_enabled: bool,
+    /// The deployment's own switch with schema compatibility: `Enabled`
+    /// only when both allow the actions.
+    pub actions: Actions,
     pub can_act: bool,
     pub schema_version: Option<i64>,
     pub expected_schema_version: i64,
@@ -54,13 +57,13 @@ pub(crate) struct MetaResponse {
 #[derive(Clone)]
 pub(crate) struct WebState {
     pub broker: Arc<PostgresBroker>,
-    pub auth_policy: Arc<dyn MonitoringAuthPolicy>,
+    pub authorization_policy: Arc<dyn MonitoringAuthorizationPolicy>,
     pub schema_probe: Arc<SchemaProbe>,
     pub task_stats_cache: Arc<TaskStatsCache>,
     pub task_facets_cache: Arc<ReadCache<crate::monitoring::Facets>>,
     pub task_breakdown_cache: Arc<ReadCache<crate::monitoring::Breakdown>>,
     pub events: Arc<EventBroadcaster>,
-    pub actions_enabled: bool,
+    pub actions: Actions,
     pub ui_config: MonitoringUiConfig,
     pub assets: Arc<dyn AssetStore>,
     /// Where the resume route gets the children that a resume owes.
@@ -142,7 +145,7 @@ async fn log_invalid_input(request: Request, next: Next) -> Response {
 
 async fn view_guard(State(state): State<WebState>, request: Request, next: Next) -> Response {
     if !state
-        .auth_policy
+        .authorization_policy
         .can_view(MonitoringRequest::from_request(&request))
         .await
     {
@@ -159,11 +162,15 @@ async fn view_guard(State(state): State<WebState>, request: Request, next: Next)
 
 async fn action_guard(State(state): State<WebState>, request: Request, next: Next) -> Response {
     let facts = MonitoringRequest::from_request(&request);
-    if !state.auth_policy.can_view(facts).await {
+    if !state.authorization_policy.can_view(facts).await {
         return forbidden(NOT_AUTHORIZED);
     }
     let facts = MonitoringRequest::from_request(&request);
-    if !state.actions_enabled || !state.auth_policy.can_act(facts).await {
+    let acts = match state.actions {
+        Actions::Enabled => state.authorization_policy.can_act(facts).await,
+        Actions::Disabled => false,
+    };
+    if !acts {
         return forbidden(NOT_AUTHORIZED);
     }
     if request
@@ -224,7 +231,7 @@ fn base_path(request: &Request<Body>, api_route: bool) -> String {
 
 async fn read_meta(State(state): State<WebState>, request: Request) -> Response {
     let can_act = state
-        .auth_policy
+        .authorization_policy
         .can_act(MonitoringRequest::from_request(&request))
         .await;
     let base_path = base_path(&request, true);
@@ -239,7 +246,10 @@ async fn read_meta(State(state): State<WebState>, request: Request) -> Response 
     Json(MetaResponse {
         horsies_version: state.client_version.clone(),
         base_path,
-        actions_enabled: state.actions_enabled && schema.compatible(),
+        actions: match (state.actions, schema.compatible()) {
+            (Actions::Enabled, true) => Actions::Enabled,
+            (Actions::Enabled, false) | (Actions::Disabled, _) => Actions::Disabled,
+        },
         can_act,
         schema_version: schema.version,
         expected_schema_version: schema.expected_version,

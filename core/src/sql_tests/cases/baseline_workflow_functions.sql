@@ -280,10 +280,10 @@ BEGIN
                       'start, child that ends at once: child FAILED');
     PERFORM wft_check((wft_node(v_wf, 0)).status = 'FAILED'
                       AND ((wft_node(v_wf, 0)).result::json -> 'err' -> 'error_code' ->> '__builtin_task_code__')
-                          = 'SUBWORKFLOW_FAILED'
+                          = 'SUB_WORKFLOW_FAILED'
                       AND ((wft_node(v_wf, 0)).result::json -> 'err' ->> 'sub_workflow_id') = v_child::text
-                      AND ((wft_node(v_wf, 0)).sub_workflow_summary::json ->> 'failed_tasks') = '1',
-                      'start, child that ends at once: parent node FAILED with SUBWORKFLOW_FAILED and summary');
+                      AND ((wft_node(v_wf, 0)).sub_workflow_summary::json ->> 'failed_nodes') = '1',
+                      'start, child that ends at once: parent node FAILED with SUB_WORKFLOW_FAILED and summary');
     PERFORM wft_check((wft_node(v_wf, 1)).status = 'ENQUEUED' AND wft_task_of(v_wf, 1) IS NOT NULL,
                       'start, child that ends at once: parent dependent promoted in the same statement');
 END $$;
@@ -527,7 +527,7 @@ BEGIN
                       'start, root order: root 1 stays READY and its child is not written');
     PERFORM wft_check(((wft_workflow(v_wf)).error::json ->> 'message') = format('Subworkflow %s failed', v_failing)
                       AND ((wft_workflow(v_wf)).error::json -> 'error_code' ->> '__builtin_task_code__')
-                          = 'SUBWORKFLOW_FAILED'
+                          = 'SUB_WORKFLOW_FAILED'
                       AND ((wft_workflow(v_wf)).error::json ->> 'sub_workflow_id') = v_failing::text,
                       'paused parent of a failed child: the workflow error is "Subworkflow <id> failed", as Python');
     PERFORM wft_check(((wft_node(v_wf, 0)).result::json -> 'err' ->> 'message')
@@ -1382,7 +1382,7 @@ DECLARE
     v_form record;
     v_row horsies_workflows;
 BEGIN
-    -- Node 0 COMPLETED, node 1 FAILED with the user code SECOND. Each accepted form reads as no policy or as its
+    -- Node 0 COMPLETED, node 1 FAILED with the custom code SECOND. Each accepted form reads as no policy or as its
     -- cases; the completion writes the expected status and error code.
     PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1}]');
     UPDATE horsies_workflow_tasks SET status = 'COMPLETED', result = wft_ok('1'), completed_at = now()
@@ -1549,10 +1549,10 @@ BEGIN
     PERFORM * FROM horsies_workflow_child_finish(v_child);
     PERFORM wft_check((wft_node(v_wf, 0)).status = 'FAILED'
                       AND ((wft_node(v_wf, 0)).result::json -> 'err' -> 'error_code' ->> '__builtin_task_code__')
-                          = 'SUBWORKFLOW_FAILED'
+                          = 'SUB_WORKFLOW_FAILED'
                       AND ((wft_node(v_wf, 0)).result::json -> 'err' -> 'sub_workflow_summary' ->> 'error_summary')
                           = 'boom',
-                      'child finish: a FAILED child gives SUBWORKFLOW_FAILED with the summary');
+                      'child finish: a FAILED child gives SUB_WORKFLOW_FAILED with the summary');
     PERFORM wft_check((wft_workflow(v_wf)).status = 'FAILED', 'child finish: the parent completes FAILED');
 END $$;
 
@@ -2105,7 +2105,7 @@ BEGIN
                       'child start TREE: a child whose root failed ends at once');
     PERFORM wft_check((wft_node(v_parent, 0)).status = 'FAILED' AND (wft_node(v_parent, 0)).sub_workflow_id = v_child
                       AND ((wft_node(v_parent, 0)).result::json -> 'err' -> 'error_code' ->> '__builtin_task_code__')
-                          = 'SUBWORKFLOW_FAILED',
+                          = 'SUB_WORKFLOW_FAILED',
                       'child start TREE: the child that ended advances the node in the same statement');
     PERFORM wft_check(v_row.disposition = 'STARTED' AND v_row.workflow_status = 'FAILED'
                       AND v_row.advance_child_workflow_id = v_parent AND (wft_node(v_top, 0)).status = 'RUNNING',

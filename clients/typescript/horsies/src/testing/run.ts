@@ -5,9 +5,10 @@
 // 2. the body runs through the body adapter of the child (the input decode, the body, the read-back of the value,
 //    the error mapping);
 // 3. the stored outcome reads as a task read gives it: the value, or the task error.
-// A user code that the core's rules would refuse is not checked here: that check needs the addon.
+// A custom code that the core's rules would refuse is not checked here: that check needs the addon.
 
-import { LIBRARY_TASK_CODES, MAX_JSON_DEPTH } from "../codec/bounds.ts";
+import { MAX_JSON_DEPTH } from "../_catalog/codec_bounds.ts";
+import { BUILT_IN_TASK_CODES } from "../_catalog/task_code.ts";
 import { encodeParametersWithReadBack } from "../codec/read-back.ts";
 import { decodeValue } from "../codec/reader.ts";
 import { decodeJsonNode } from "../codec/json-value.ts";
@@ -19,8 +20,9 @@ import type { LoopHolder, LoopMarks } from "../child/run-table.ts";
 import type { ThreadTaskRuntime } from "../child/runtime.ts";
 import { type CompiledContract, compileContract } from "../contract/compile.ts";
 import type { ImplementationParts } from "../contract/implementation.ts";
+import type { ErrorCodePart } from "../native/sends/addon.ts";
 import { ClientDefect } from "../thrown-errors.ts";
-import type { LibraryTaskCode, TaskError, TaskOutcome } from "../wire/task-error.ts";
+import type { BuiltInTaskCode, TaskError, TaskOutcome } from "../wire/task-error.ts";
 import { unreachable } from "../wire/unreachable.ts";
 
 /** The loop marks of a test run: no loop watch runs. */
@@ -50,7 +52,8 @@ export async function runImplementation(
     const message = `task input does not encode as ${taskName}.input: ${refusalText(written.error)}`;
 
     return failed({
-      code: { kind: "library", code: "WORKER_SERIALIZATION_ERROR" },
+      kind: "builtIn",
+      code: "WORKER_SERIALIZATION_ERROR",
       message,
       data: { expected_type: `${taskName}.input`, validation_error: message },
       exception: null,
@@ -59,10 +62,9 @@ export async function runImplementation(
   }
 
   const outcome = await runBody({
-    inputJson: written.value,
+    start: { kind: "given", inputJson: written.value, runtime },
     implementation,
     compiled: compiled.value,
-    runtime,
     mark: { taskId: runtime.taskId, taskName, attempt: runtime.fencingToken.value },
     marks: NO_LOOP_MARKS,
     observation: NO_BODY_OBSERVER.enter({ kind: "notRecorded" }),
@@ -106,7 +108,7 @@ function storedError(outcome: Extract<StoredBodyOutcome, { kind: "error" }>): Ta
   const parts = outcome.parts;
 
   return {
-    code: parts.code.kind === "user" ? { kind: "user", code: parts.code.code } : { kind: "library", code: libraryCode(parts.code.code) },
+    ...codeOfPart(parts.code),
     message: parts.message.kind === "text" ? parts.message.text : null,
     data: data.value,
     exception:
@@ -123,12 +125,26 @@ function storedError(outcome: Extract<StoredBodyOutcome, { kind: "error" }>): Ta
   };
 }
 
-/** A library code of the adapter. Another text is a defect. */
-function libraryCode(code: string): LibraryTaskCode {
-  const found = LIBRARY_TASK_CODES.find((known) => known === code);
+/** The tag and the code of the code part of the adapter. */
+function codeOfPart(
+  part: ErrorCodePart,
+): { readonly kind: "custom"; readonly code: string } | { readonly kind: "builtIn"; readonly code: BuiltInTaskCode } {
+  switch (part.kind) {
+    case "custom":
+      return { kind: "custom", code: part.code };
+    case "builtIn":
+      return { kind: "builtIn", code: builtInCode(part.code) };
+    default:
+      return unreachable(part, "codeOfPart");
+  }
+}
+
+/** A built-in code of the adapter. Another text is a defect. */
+function builtInCode(code: string): BuiltInTaskCode {
+  const found = BUILT_IN_TASK_CODES.find((known) => known === code);
 
   if (found === undefined) {
-    throw new ClientDefect({ subject: "implementation.run", rule: `the adapter gave the library code ${code}, which the catalog does not hold` });
+    throw new ClientDefect({ subject: "implementation.run", rule: `the adapter gave the built-in code ${code}, which the catalog does not hold` });
   }
 
   return found;

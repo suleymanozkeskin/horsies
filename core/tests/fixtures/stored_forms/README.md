@@ -77,7 +77,7 @@ every writer stores as the characters, not as `\u` escapes:
 | Error data | `result_deserialization_error_non_ascii_task_name` (the message), `workflow_output_skipped_non_ascii_task_name` (the data) |
 | Workflow spec data | `non_ascii_text` |
 
-The task options hold no user text: an error code of `auto_retry_for` is
+The task options hold no user text: an error code of `retry_for` is
 UPPER_SNAKE_CASE ASCII in both clients.
 
 ## Value notation
@@ -163,7 +163,7 @@ Decoders:
 `{"__h_task_result__":true,"ok":null,"err":<error>}`. An error object has the
 keys `exception`, `error_code`, `data`, `message`, in this order, nulls kept;
 a sub-workflow error adds `sub_workflow_id` and `sub_workflow_summary`. A
-built-in code is `{"__builtin_task_code__": "<NAME>"}`, a user code its text.
+built-in code is `{"__builtin_task_code__": "<NAME>"}`, a custom code its text.
 A vector holds an `ok` typed value (the notation above) or an `err` task error
 (`{"error_code": {"built_in" | "user": ...}, "message", "data", "exception",
 "sub_workflow"?}`).
@@ -218,7 +218,7 @@ Decoders:
 
 The Rust client builds an error from a code, a message and `data`. The
 exception record and the sub-workflow failure are written by the library, and
-`TaskError::user` and `TaskError::library` take a message: the Rust tests only
+`TaskError::custom` and `TaskError::built_in` take a message: the Rust tests only
 read those vectors.
 
 ## Error data (`error_data.json`)
@@ -249,14 +249,16 @@ made, and the core writer is the only writer.
 | `WORKFLOW_START_INCOMPLETE` (error object) | `workflow_id`, `recovery` | removed in 0.8.0 | `core/src/workflow_engine/recovery.rs:1748` |
 | `WORKFLOW_EXPIRED` (error object) | `policy`, `older_than_seconds` | `clients/python/horsies/core/workflows/lifecycle.py:845-857` | `core/src/workflow_engine/lifecycle.rs:300` |
 | `UNHANDLED_EXCEPTION`, with the exception record | `exception_type` | `clients/python/horsies/core/task_decorator.py:2031-2036` | `core/src/worker/executor/child_host/panic.rs:175` (a Rust panic) |
+| `WORKER_SERIALIZATION_ERROR`, stored options that the worker cannot use (3 vectors: `field` `task_options`, `timeout_ms` and `cancel_grace_ms`) | `task_name`, `field`; then `min_ms`, `max_ms` for `timeout_ms` and `cancel_grace_ms` | `clients/python/horsies/core/worker/child_runner.py:289-326` (`_stored_timeout_refusal_response`) | `core/src/worker/executor/child_host/run.rs` (`refusal_end`) |
 
 The SQL writer is `horsies_task_error_envelope`
 (`core/baseline/0005_workflow_functions.sql:99`); a DB test
 calls it with the code, the message and the data text of each engine vector.
 The core's tests call `timeout_write`, `killed_child_write`,
-`stale_attempt_command`, `upstream_skipped_error`, `missing_result_error` and
-`node_error`; the other core writers build their data with `json!` in the key
-order of the table, and the generic test pins the encoding of each vector.
+`stale_attempt_command`, `upstream_skipped_error`, `missing_result_error`,
+`node_error` and `refusal_end`; the other core writers build their data
+with `json!` in the key order of the table, and the generic test pins the
+encoding of each vector.
 The Rust client writes none of these errors; its test reads each envelope
 through `outcome_of_record`.
 
@@ -264,9 +266,9 @@ through `outcome_of_record`.
 
 `{"retry_policy": <policy or null>, "good_until": <instant or null>,
 "timeout_ms": <ms or null>, "execution": <class>, "cancel_grace_ms": <ms or
-null>}`, in this order; the policy holds `max_retries`, `intervals`,
+null>}`, in this order; the policy holds `max_retries`, `intervals_seconds`,
 `backoff_strategy`, `jitter`, `max_delay_seconds` (only when set) and
-`auto_retry_for`, codes by name. Every task stores the text, nulls included.
+`retry_for`, codes by name. Every task stores the text, nulls included.
 A vector's `kind` is `task` (the options of a task), `send` (a send with a
 deadline: the task's text with the deadline in `good_until`, in
 `isoformat()`) or `node` (a workflow

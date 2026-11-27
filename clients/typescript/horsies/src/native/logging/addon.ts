@@ -47,16 +47,42 @@ export interface LoggerLevelArg {
 }
 
 /**
+ * A span that the package did not make or did not complete: of a send, of a workflow start, of an attempt in a Node
+ * child or in a seat isolate, of an attempt that the worker ended. Ids are canonical UUID texts.
+ */
+export type NotMadeSpan =
+  | { readonly kind: "send"; readonly taskId: string }
+  | { readonly kind: "workflowStart"; readonly workflowId: string }
+  | { readonly kind: "attempt"; readonly taskId: string }
+  | { readonly kind: "seatAttempt"; readonly taskId: string }
+  | { readonly kind: "workerEnded"; readonly taskId: string };
+
+/**
  * The sink function that the addon calls with each batch: `true` when the sink took the batch,
  * `false` when it threw. It never throws.
  */
 export type NativeLogSink = (records: LogRecordOut[]) => boolean;
 
+/** The format of the stderr lines of the core log records: the `kind` of the app's `logFormat`. */
+export type LogFormatKind = "textLogs" | "jsonLogs";
+
 /** The functions of the `logging` area. None of them starts the core. */
 export interface LoggingAddon {
   setLogLevels(levels: LogLevelsArg): NativeEnvelope<undefined>;
+  /** Set the format of the stderr lines of later core log records. */
+  setLogFormat(format: LogFormatKind): NativeEnvelope<undefined>;
+  /**
+   * Write `message` as a WARNING record of `logger`, at the threshold of that logger. Starts the log bridge; a forwarder
+   * that cannot start throws `RUNTIME_START_FAILED`.
+   */
+  logClientWarning(logger: LoggerName, message: string): NativeEnvelope<undefined>;
   setLogSink(sink: NativeLogSink): NativeEnvelope<undefined>;
   resetLogSink(): NativeEnvelope<undefined>;
+  /**
+   * Write the WARNING record of `span`, not made for `cause`, on `horsies.telemetry`, once per process and kind of span.
+   * Starts the log bridge; a forwarder that cannot start throws `RUNTIME_START_FAILED`.
+   */
+  logSpanNotMade(span: NotMadeSpan, cause: string): NativeEnvelope<undefined>;
 }
 
 /** The `logging` functions of the addon. Throws as `requireAddon` does. */

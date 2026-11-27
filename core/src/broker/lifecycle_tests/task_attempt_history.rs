@@ -29,7 +29,7 @@ const STALE_SCAN_LIMIT: i64 = 1_000;
 /// Python `test_worker_failure_writes_worker_failure_attempt`, at the writer:
 /// a worker-level failure writes one WORKER_FAILURE attempt that does not
 /// retry. The decision that turns a lost child into this write (code
-/// `BROKER_ERROR`, never retried) belongs to the executor's outcome writer.
+/// `DATABASE_ERROR`, never retried) belongs to the executor's outcome writer.
 #[tokio::test]
 async fn worker_failure_writes_worker_failure_attempt() {
     let pool = pool().await;
@@ -42,7 +42,7 @@ async fn worker_failure_writes_worker_failure_attempt() {
             fence: owned_claim(),
             retry: RetryRequest::NoRetry,
             result_json: r#"{"err": "worker failure"}"#.to_owned(),
-            error_code: Some("BROKER_ERROR".to_owned()),
+            error_code: Some("DATABASE_ERROR".to_owned()),
             failed_reason: Some("Segfault in child".to_owned()),
             attempt: AttemptFailure {
                 kind: AttemptFailureKind::WorkerFailure,
@@ -77,7 +77,7 @@ async fn worker_failure_writes_worker_failure_attempt() {
             1,
             "WORKER_FAILURE",
             false,
-            Some("BROKER_ERROR"),
+            Some("DATABASE_ERROR"),
             Some("Segfault in child"),
             Some("Segfault in child"),
             Some(WORKER),
@@ -89,7 +89,7 @@ async fn worker_failure_writes_worker_failure_attempt() {
             .expect("history row")
             .error_code
             .as_deref(),
-        Some("BROKER_ERROR")
+        Some("DATABASE_ERROR")
     );
     cleanup_tasks(&pool, &[task_id]).await;
 }

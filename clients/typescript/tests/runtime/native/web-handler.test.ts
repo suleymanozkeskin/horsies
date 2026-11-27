@@ -11,7 +11,7 @@ import { Horsies } from "../../../horsies/src/index.ts";
 import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { allowAll, viewOnly } from "../../../horsies/src/web/auth.ts";
-import type { MonitoringAuthPolicy } from "../../../horsies/src/web/auth.ts";
+import type { MonitoringAuthorizationPolicy } from "../../../horsies/src/web/auth.ts";
 import { nativeMonitoringBridge } from "../../../horsies/src/web/bridge.ts";
 import { clientVersion } from "../../../horsies/src/web/client-version.ts";
 import {
@@ -83,7 +83,7 @@ async function framesUntil(response: Response, wanted: string): Promise<string[]
 
 /** An app of the test database with no task, or the failed test with every refusal. */
 function appOfTestDatabase(): Horsies {
-  const created = Horsies.create({ broker: { databaseUrl: { kind: "value", value: testDatabaseUrl() } }, tasks: [] });
+  const created = Horsies.create({ database: { databaseUrl: { kind: "value", value: testDatabaseUrl() } }, tasks: [] });
 
   if (!created.ok) {
     assert.fail(`Horsies.create refused: ${created.error.refusals.map((refusal) => refusal.message).join("; ")}`);
@@ -106,7 +106,7 @@ describe("the monitoring handler with a built addon and a database", () => {
     assert.equal((await installer.installSchema()).kind, "installed");
     await installer.close();
     handler = monitoringHandlerOf(testApp(probedHandle(manifestJson(testDatabaseUrl(), false))), {
-      auth: allowAll(),
+      authorizationPolicy: allowAll(),
     });
   });
 
@@ -134,7 +134,7 @@ describe("the monitoring handler with a built addon and a database", () => {
   // The core refuses to build a handler over a handle with no child spec source; `Horsies.create` registers the app's
   // source on the app's one handle, so the handler of an app builds and answers.
   test("the handler of an app of Horsies.create answers with the app's handle and the package version", async () => {
-    const app = createMonitoringHandler(appOfTestDatabase(), { auth: allowAll() });
+    const app = createMonitoringHandler(appOfTestDatabase(), { authorizationPolicy: allowAll() });
 
     try {
       const response = await app(request("/api/meta"));
@@ -150,8 +150,8 @@ describe("the monitoring handler with a built addon and a database", () => {
   });
 
   test("a refused view of a read route is 403", async () => {
-    const refusing: MonitoringAuthPolicy = { canView: () => false, canAct: () => false };
-    const refused = monitoringHandlerOf(testApp(probedHandle(manifestJson(testDatabaseUrl(), false))), { auth: refusing });
+    const refusing: MonitoringAuthorizationPolicy = { canView: () => false, canAct: () => false };
+    const refused = monitoringHandlerOf(testApp(probedHandle(manifestJson(testDatabaseUrl(), false))), { authorizationPolicy: refusing });
 
     assert.equal((await refused(request("/api/tasks"))).status, 403);
   });
@@ -177,7 +177,7 @@ describe("the monitoring handler with a built addon and a database", () => {
 
   test("a mount under a prefix answers the page links under the prefix", async () => {
     const mounted = monitoringHandlerOf(testApp(probedHandle(manifestJson(testDatabaseUrl(), false))), {
-      auth: viewOnly(),
+      authorizationPolicy: viewOnly(),
       basePath: "/ops/monitoring",
     });
 
@@ -191,7 +191,7 @@ describe("the monitoring handler with a built addon and a database", () => {
 
 describe("the event stream with a built addon and a database", () => {
   test("a quiet stream sends the heartbeat frame after the short test heartbeat", async () => {
-    const handler = shortHeartbeatHandler(manifestJson(testDatabaseUrl(), false), { auth: allowAll() });
+    const handler = shortHeartbeatHandler(manifestJson(testDatabaseUrl(), false), { authorizationPolicy: allowAll() });
     const response = await handler(request("/api/events"));
 
     assert.equal(response.headers.get("content-type"), "text/event-stream; charset=utf-8");
@@ -201,7 +201,7 @@ describe("the event stream with a built addon and a database", () => {
   });
 
   test("close() ends an open stream after the degraded frame", async () => {
-    const handler = shortHeartbeatHandler(manifestJson(testDatabaseUrl(), false), { auth: allowAll() });
+    const handler = shortHeartbeatHandler(manifestJson(testDatabaseUrl(), false), { authorizationPolicy: allowAll() });
     const response = await handler(request("/api/events"));
 
     await framesUntil(response, ": heartbeat\n\n");
@@ -213,7 +213,7 @@ describe("the event stream with a built addon and a database", () => {
   });
 
   test("the client's abort ends the stream", async () => {
-    const handler = shortHeartbeatHandler(manifestJson(testDatabaseUrl(), false), { auth: allowAll() });
+    const handler = shortHeartbeatHandler(manifestJson(testDatabaseUrl(), false), { authorizationPolicy: allowAll() });
     const leaving = new AbortController();
     const response = await handler(request("/api/events", { signal: leaving.signal }));
     const reader = response.body?.getReader();
@@ -233,7 +233,7 @@ describe("the event stream with a built addon and a database", () => {
   test("a broker with no listener answers the degraded frame, then the end", async () => {
     const handler = shortHeartbeatHandler(
       manifestJsonWithSchema(testDatabaseUrl(), false, "ASSUME_INITIALIZED"),
-      { auth: allowAll() },
+      { authorizationPolicy: allowAll() },
     );
 
     const response = await handler(request("/api/events"));
@@ -247,14 +247,14 @@ describe("the refusals of the build and of the broker", () => {
   test("a handle with no child spec source is refused with ClientDefect", () => {
     const handle = buildCoreHandle(manifestJson(testDatabaseUrl(), false), "PRODUCER");
 
-    assert.throws(() => monitoringHandlerOf(testApp(handle), { auth: allowAll() }), { name: "ClientDefect" });
+    assert.throws(() => monitoringHandlerOf(testApp(handle), { authorizationPolicy: allowAll() }), { name: "ClientDefect" });
   });
 
   // The core builds the broker with no connect (each pool connects at its first checkout), so a database that does
   // not answer is the core's read failure, not a handler with no broker.
   test("a broker that cannot connect answers 503 with the cause", async () => {
     const handler = monitoringHandlerOf(testApp(probedHandle(manifestJson(REFUSED_DATABASE_URL, false))), {
-      auth: allowAll(),
+      authorizationPolicy: allowAll(),
     });
 
     const response = await handler(request("/api/tasks"));

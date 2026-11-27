@@ -20,9 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import RetryPolicy, TaskError, TaskResult
+from horsies.core.models.tasks import OperationalCode, RetryPolicy, TaskError
 from horsies.core.models.workflow import TaskNode
-from horsies.core.types.result import is_err
+from horsies.core.types.result import Ok, Result, is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
 from tests.broker_resources_support import current_resources
 
@@ -33,15 +33,15 @@ def _fanout_spec(app: Horsies, n_roots: int, *, with_dependent: bool = False) ->
     """N independent roots (the run_all_scrapers shape), optionally plus
     one node depending on root 0."""
 
-    @app.task(task_name=f'batched_root_{uuid.uuid4().hex[:8]}')
-    def root_task(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    @app.task(name=f'batched_root_{uuid.uuid4().hex[:8]}')
+    def root_task(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     nodes: list[Any] = [
-        TaskNode(fn=root_task, kwargs={'value': i}) for i in range(n_roots)
+        TaskNode(function=root_task, kwargs={'value': i}) for i in range(n_roots)
     ]
     if with_dependent:
-        nodes.append(TaskNode(fn=root_task, kwargs={'value': -1}, waits_for=[nodes[0]]))
+        nodes.append(TaskNode(function=root_task, kwargs={'value': -1}, waits_for=[nodes[0]]))
     return app.workflow(
         f'batched_start_{uuid.uuid4().hex[:8]}', nodes,
         definition_key=f'batched-start-{uuid.uuid4().hex[:8]}',
@@ -209,17 +209,17 @@ class TestBatchedStartShape:
         from datetime import datetime, timedelta, timezone
 
         @app.task(
-            task_name=f'batched_retry_{uuid.uuid4().hex[:8]}',
+            name=f'batched_retry_{uuid.uuid4().hex[:8]}',
             retry_policy=RetryPolicy.fixed(
                 [1000, 1000, 1000, 1000, 1000],
-                auto_retry_for=['TASK_EXCEPTION'],
+                retry_for=[OperationalCode.TASK_EXCEPTION],
             ),
         )
-        def retry_task(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        def retry_task(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         deadline = datetime.now(timezone.utc) + timedelta(hours=1)
-        node = TaskNode(fn=retry_task, kwargs={'value': 1}, good_until=deadline)
+        node = TaskNode(function=retry_task, kwargs={'value': 1}, good_until=deadline)
         spec = app.workflow(
             f'batched_retry_wf_{uuid.uuid4().hex[:8]}', [node],
             definition_key=f'batched-retry-{uuid.uuid4().hex[:8]}',
@@ -265,16 +265,16 @@ class TestBatchedStartShape:
         and nothing is written."""
         from horsies._core import PanicException
 
-        @app.task(task_name=f'batched_corrupt_{uuid.uuid4().hex[:8]}')
-        def corrupt_task(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        @app.task(name=f'batched_corrupt_{uuid.uuid4().hex[:8]}')
+        def corrupt_task(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         # Force unparseable decorator-attached options.
         corrupt_task.task_options_json = '{not-json'  # type: ignore[attr-defined]
 
         spec = app.workflow(
             f'batched_corrupt_wf_{uuid.uuid4().hex[:8]}',
-            [TaskNode(fn=corrupt_task, kwargs={'value': 1})],
+            [TaskNode(function=corrupt_task, kwargs={'value': 1})],
             definition_key=f'batched-corrupt-{uuid.uuid4().hex[:8]}',
         )
         with pytest.raises(
@@ -312,13 +312,13 @@ class TestStartPauseGate:
         )
         from horsies.core.workflows import child_build as child_build_mod
 
-        @app.task(task_name=f'pause_gate_root_{uuid.uuid4().hex[:8]}')
-        def fast_task(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        @app.task(name=f'pause_gate_root_{uuid.uuid4().hex[:8]}')
+        def fast_task(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
-        @app.task(task_name=f'pause_gate_child_{uuid.uuid4().hex[:8]}')
-        def child_task() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=0)
+        @app.task(name=f'pause_gate_child_{uuid.uuid4().hex[:8]}')
+        def child_task() -> Result[int, TaskError]:
+            return Ok(0)
 
         class GateChild(WorkflowDefinition[int]):
             name = f'pause_gate_child_wf_{uuid.uuid4().hex[:8]}'
@@ -326,11 +326,11 @@ class TestStartPauseGate:
 
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-                node = TaskNode(fn=child_task)
-                return app.workflow(name=cls.name, tasks=[node], output=node)
+                node = TaskNode(function=child_task)
+                return app.workflow(name=cls.name, nodes=[node], output=node)
 
-        fast = TaskNode(fn=fast_task, kwargs={'value': 1})
-        sub = SubWorkflowNode(workflow_def=GateChild)
+        fast = TaskNode(function=fast_task, kwargs={'value': 1})
+        sub = SubWorkflowNode(workflow_definition=GateChild)
         spec = app.workflow(
             f'pause_gate_{uuid.uuid4().hex[:6]}', [fast, sub],
             on_error=OnError.PAUSE,
@@ -386,9 +386,9 @@ class TestStartPauseGate:
         ).scalar()
         assert n_tasks == 0
 
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from horsies.core.workflows.lifecycle import resume_workflow_async
 
-        resume_r = await resume_workflow(broker, wf_id)
+        resume_r = await resume_workflow_async(broker, wf_id)
         assert not is_err(resume_r), resume_r
         fast_status = (
             await session.execute(
@@ -420,9 +420,9 @@ class TestStartPauseGate:
             WorkflowDefinition,
         )
 
-        @app.task(task_name=f'pause_prop_root_{uuid.uuid4().hex[:8]}')
-        def fast_task(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        @app.task(name=f'pause_prop_root_{uuid.uuid4().hex[:8]}')
+        def fast_task(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         class BrokenGrandchild(WorkflowDefinition[int]):
             name = f'pause_prop_grandchild_wf_{uuid.uuid4().hex[:8]}'
@@ -439,11 +439,11 @@ class TestStartPauseGate:
 
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-                node = SubWorkflowNode(workflow_def=BrokenGrandchild)
-                return app.workflow(name=cls.name, tasks=[node], output=node)
+                node = SubWorkflowNode(workflow_definition=BrokenGrandchild)
+                return app.workflow(name=cls.name, nodes=[node], output=node)
 
-        fast = TaskNode(fn=fast_task, kwargs={'value': 1})
-        sub = SubWorkflowNode(workflow_def=BadChild)
+        fast = TaskNode(function=fast_task, kwargs={'value': 1})
+        sub = SubWorkflowNode(workflow_definition=BadChild)
         spec = app.workflow(
             f'pause_prop_{uuid.uuid4().hex[:6]}',
             [fast, sub],
@@ -490,9 +490,9 @@ class TestStartPauseGate:
         ).scalar()
         assert n_tasks == 0
 
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from horsies.core.workflows.lifecycle import resume_workflow_async
 
-        resume_r = await resume_workflow(broker, wf_id)
+        resume_r = await resume_workflow_async(broker, wf_id)
         assert not is_err(resume_r), resume_r
         fast_status = (
             await session.execute(

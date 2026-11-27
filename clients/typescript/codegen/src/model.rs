@@ -67,6 +67,8 @@ pub enum ClassSlot {
     CodeSubset { subset: &'static str },
     /// The state of the class never clears: `retryable` is always false.
     NeverRetryable,
+    /// The state of the class may clear: `retryable` is always true.
+    AlwaysRetryable,
     /// A field of the value.
     Field {
         name: &'static str,
@@ -83,6 +85,7 @@ pub fn class_slot(slot: &ErrorSlot) -> ClassSlot {
         ErrorSlot::CodeMember { member } => ClassSlot::CodeMember { member },
         ErrorSlot::CodeSubset { subset } => ClassSlot::CodeSubset { subset },
         ErrorSlot::NeverRetryable => ClassSlot::NeverRetryable,
+        ErrorSlot::AlwaysRetryable => ClassSlot::AlwaysRetryable,
         ErrorSlot::Field {
             name,
             python_type,
@@ -156,6 +159,9 @@ pub enum ItemType {
     Named(&'static str),
     /// A time of day in whole seconds, as the text `HH:MM:SS`.
     TimeOfDay,
+    /// A length of time in whole seconds inside the bound, as ISO 8601
+    /// duration text with days, hours, minutes and seconds only.
+    Duration(IntBound),
 }
 
 /// The type of a manifest field.
@@ -175,6 +181,9 @@ pub enum ValueType {
     Optional(ItemType),
     /// A time of day in whole seconds, as the text `HH:MM:SS`.
     TimeOfDay,
+    /// A length of time in whole seconds inside the bound, as ISO 8601
+    /// duration text with days, hours, minutes and seconds only.
+    Duration(IntBound),
 }
 
 /// The item type of the model's `item`. Pure.
@@ -185,6 +194,7 @@ pub fn item_type(item: PythonItem) -> ItemType {
         PythonItem::Int(bound) => ItemType::Int(bound),
         PythonItem::Named(name) => ItemType::Named(name),
         PythonItem::TimeOfDay => ItemType::TimeOfDay,
+        PythonItem::Duration(bound) => ItemType::Duration(bound),
     }
 }
 
@@ -199,6 +209,7 @@ pub fn field_value_type(field: &ManifestField) -> ValueType {
         PythonValue::Map(item) => ValueType::Map(item_type(item)),
         PythonValue::Optional(item) => ValueType::Optional(item_type(item)),
         PythonValue::TimeOfDay => ValueType::TimeOfDay,
+        PythonValue::Duration(bound) => ValueType::Duration(bound),
     }
 }
 
@@ -301,9 +312,10 @@ mod tests {
                     member: "ENQUEUE_FAILED",
                 },
                 ErrorSlot::CodeSubset {
-                    subset: "BrokerOperationFailedCode",
+                    subset: "DatabaseOperationFailedCode",
                 },
                 ErrorSlot::NeverRetryable,
+                ErrorSlot::AlwaysRetryable,
                 ErrorSlot::Field {
                     name: "message",
                     python_type: SlotType::Str,
@@ -324,9 +336,10 @@ mod tests {
                     member: "ENQUEUE_FAILED"
                 },
                 ClassSlot::CodeSubset {
-                    subset: "BrokerOperationFailedCode"
+                    subset: "DatabaseOperationFailedCode"
                 },
                 ClassSlot::NeverRetryable,
+                ClassSlot::AlwaysRetryable,
                 ClassSlot::Field {
                     name: "message",
                     slot_type: SlotType::Str,
@@ -344,7 +357,7 @@ mod tests {
 
     #[test]
     fn unions_subsets_records_and_new_types_have_their_modules() {
-        let broker = <horsies_core::BrokerOperationError as ErrorEnum>::ERROR_CATALOG;
+        let broker = <horsies_core::DatabaseOperationError as ErrorEnum>::ERROR_CATALOG;
         for union in ERROR_UNIONS {
             assert_eq!(error_union_module(union), error_catalog_module(&broker));
         }
@@ -385,6 +398,7 @@ mod tests {
                 ValueType::Optional(ItemType::Str),
             ),
             (PythonValue::TimeOfDay, ValueType::TimeOfDay),
+            (PythonValue::Duration(BOUND), ValueType::Duration(BOUND)),
         ];
         for (value, expected) in cases {
             assert_eq!(field_value_type(&field(value)), expected);
@@ -399,6 +413,7 @@ mod tests {
             (PythonItem::Int(BOUND), ItemType::Int(BOUND)),
             (PythonItem::Named("Weekday"), ItemType::Named("Weekday")),
             (PythonItem::TimeOfDay, ItemType::TimeOfDay),
+            (PythonItem::Duration(BOUND), ItemType::Duration(BOUND)),
         ];
         for (item, expected) in cases {
             assert_eq!(item_type(item), expected);

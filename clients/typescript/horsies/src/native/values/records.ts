@@ -49,7 +49,7 @@ export type RawRecordValue =
   | { readonly kind: "absent" }
   | { readonly kind: "retainForever" };
 
-/** The exception of an `exception` slot. */
+/** The exception of a `cause` slot. */
 export type ExceptionRecord =
   | { readonly kind: "coreFailure"; readonly cause: CauseRecord }
   | { readonly kind: "generated"; readonly class: string; readonly text: string }

@@ -30,9 +30,9 @@ use super::link::{read_frame, FrameWriter};
 use super::panic::install_panic_hook;
 use super::seats::ServeEnd;
 use crate::core::config::bounded::BoundedU32;
-use crate::core::error::ErrorCode;
+use crate::core::error::HorsiesErrorCode;
 use crate::core::task::Execution;
-use crate::events::{Event, EventDecodeError, EventTypeName, SlotRecovered, TaskClaimed};
+use crate::events::{AnyEvent, EventDecodeError, EventTypeName, SlotRecovered, TaskClaimed};
 use crate::process_exit::ProcessExit;
 use crate::worker::executor::protocol::{
     decode_child_frame, BoundedText, ChildConnection, ChildFrame, ChildKind, ChildLogLevel,
@@ -57,7 +57,7 @@ fn time() -> DateTime<Utc> {
 fn slot_recovered(slot: u32) -> SlotRecovered {
     SlotRecovered {
         at: time(),
-        child_kind: Execution::Isolated,
+        child_execution: Execution::Isolated,
         slot: BoundedU32::try_from(slot).unwrap(),
     }
 }
@@ -103,7 +103,7 @@ fn small_runtime() -> tokio::runtime::Runtime {
 }
 
 /// The events frame of `events`, in order.
-fn events_frame(events: &[Event]) -> EventsFrame {
+fn events_frame(events: &[AnyEvent]) -> EventsFrame {
     let wire: Vec<WireEvent> = events
         .iter()
         .map(|event| WireEvent::of(event).unwrap())
@@ -165,21 +165,21 @@ fn each_handler_refusal_has_the_code_of_the_python_refusal() {
             EventHandlerRefused::InvalidName {
                 cause: "empty".to_owned(),
             },
-            ErrorCode::EventHandlerInvalidName,
+            HorsiesErrorCode::EventHandlerInvalidName,
             "HRS-225",
         ),
         (
             EventHandlerRefused::RepeatedName {
                 name: "audit".to_owned(),
             },
-            ErrorCode::EventHandlerDuplicateName,
+            HorsiesErrorCode::EventHandlerDuplicateName,
             "HRS-224",
         ),
         (
             EventHandlerRefused::TooMany {
                 name: "one.more".to_owned(),
             },
-            ErrorCode::EventHandlerLimit,
+            HorsiesErrorCode::EventHandlerLimit,
             "HRS-226",
         ),
     ];
@@ -249,10 +249,10 @@ fn each_handler_takes_only_the_events_of_its_type() {
     .unwrap();
     let running = set.start(roomy()).unwrap();
     for event in [
-        Event::from(task_claimed(1)),
-        Event::from(slot_recovered(3)),
-        Event::from(task_claimed(2)),
-        Event::from(slot_recovered(4)),
+        AnyEvent::from(task_claimed(1)),
+        AnyEvent::from(slot_recovered(3)),
+        AnyEvent::from(task_claimed(2)),
+        AnyEvent::from(slot_recovered(4)),
     ] {
         running.offer(&event);
     }
@@ -311,7 +311,7 @@ fn a_handler_that_panics_or_fails_is_counted_and_takes_its_next_event() {
     .unwrap();
     let running = set.start(roomy()).unwrap();
     for slot in 0..=2 {
-        running.offer(&Event::from(slot_recovered(slot)));
+        running.offer(&AnyEvent::from(slot_recovered(slot)));
     }
     assert_eq!(next(&async_slots), 2);
     assert_eq!(next(&blocking_slots), 2);
@@ -321,7 +321,7 @@ fn a_handler_that_panics_or_fails_is_counted_and_takes_its_next_event() {
         [counts("async.flaky", 2, 0), counts("blocking.flaky", 2, 0)]
     );
     // Both threads live: each takes one more event after its failures.
-    running.offer(&Event::from(slot_recovered(5)));
+    running.offer(&AnyEvent::from(slot_recovered(5)));
     assert_eq!(next(&async_slots), 5);
     assert_eq!(next(&blocking_slots), 5);
     assert_eq!(
@@ -358,11 +358,11 @@ fn a_blocking_handler_drops_its_events_and_the_others_take_theirs() {
     .unwrap();
     let capacity = NonZeroUsize::new(2).unwrap();
     let running = set.start(capacity).unwrap();
-    running.offer(&Event::from(slot_recovered(0)));
+    running.offer(&AnyEvent::from(slot_recovered(0)));
     assert_eq!(next(&stuck_slots), 0);
     assert_eq!(next(&free_slots), 0);
     for slot in 1..=5 {
-        running.offer(&Event::from(slot_recovered(slot)));
+        running.offer(&AnyEvent::from(slot_recovered(slot)));
         // The free handler takes each event before the next offer.
         assert_eq!(next(&free_slots), slot);
     }
@@ -396,7 +396,7 @@ fn the_stop_names_a_handler_that_does_not_drain_in_time() {
     })
     .unwrap();
     let running = set.start(roomy()).unwrap();
-    running.offer(&Event::from(slot_recovered(0)));
+    running.offer(&AnyEvent::from(slot_recovered(0)));
     assert_eq!(next(&taken), 0);
     let drain = Duration::from_millis(100);
     let started = std::time::Instant::now();
@@ -450,9 +450,9 @@ async fn the_service_hands_out_the_events_and_reports_the_totals_of_each_handler
         serve_handlers(running, &EndedSpans::none(), writer, &mut frames, times).await
     });
     let batch = events_frame(&[
-        Event::from(slot_recovered(1)),
-        Event::from(task_claimed(1)),
-        Event::from(slot_recovered(2)),
+        AnyEvent::from(slot_recovered(1)),
+        AnyEvent::from(task_claimed(1)),
+        AnyEvent::from(slot_recovered(2)),
     ]);
     parent.send(ParentFrame::Events(batch)).await.unwrap();
     let seen = tokio::task::block_in_place(|| [next(&slots), next(&slots)]);
@@ -564,7 +564,7 @@ fn the_start_hooks_of_the_handler_child_run_in_order_and_a_failure_exits_173() {
         ProcessExit::Standard,
     );
     assert_eq!(exit, ChildHostExit::ChildHookFailed);
-    assert_eq!(exit.code(), 173);
+    assert_eq!(exit.exit_code(), 173);
     assert_eq!(*calls.lock().unwrap(), vec!["first"]);
     runtime.shutdown_background();
 }
@@ -628,7 +628,7 @@ fn the_first_failure_and_then_one_per_bound_are_logged() {
 /// unknown event type each reach no handler, with their cause.
 #[test]
 fn an_event_decodes_on_its_own_and_a_bad_event_names_its_cause() {
-    let event = Event::from(slot_recovered(7));
+    let event = AnyEvent::from(slot_recovered(7));
     let wire = WireEvent::of(&event).unwrap();
     assert_eq!(decode_wire_event(wire.as_str()).unwrap(), event);
     assert!(matches!(

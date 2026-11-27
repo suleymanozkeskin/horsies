@@ -42,6 +42,10 @@ export type InstallEntry = {
   readonly installer: Installer;
   readonly runtime: "node" | "bun";
   readonly place: NpmInstall["kind"];
+  /** `run`: the install check serves the monitoring page and its script; `skip`: it does not. */
+  readonly web_page: "run" | "skip";
+  /** Every platform package of the list, comma separated: the selection check offers them all to the installer. */
+  readonly all_packages: string;
   readonly image?: string;
 };
 
@@ -81,15 +85,26 @@ export function buildEntryOf(row: ReleasePlatform, versions: RuntimeVersions): B
   return { ...entry, build: row.build.kind, check: row.install.kind, ...buildImage, ...checkImages };
 }
 
+/** Whether the install check of a row serves the monitoring page: the Linux x86_64 glibc row, as the wheel check does. Pure. */
+export function webPageOf(row: ReleasePlatform): InstallEntry["web_page"] {
+  return row.platform === "linux-x64-gnu" ? "run" : "skip";
+}
+
 /** The two install entries of a row: npm on Node, and Bun. Pure. */
-export function installEntriesOf(row: ReleasePlatform, versions: RuntimeVersions): readonly InstallEntry[] {
+export function installEntriesOf(
+  row: ReleasePlatform,
+  versions: RuntimeVersions,
+  allPackages: string = platformPackageOf(row),
+): readonly InstallEntry[] {
   const common = {
+    all_packages: allPackages,
     name: row.name,
     runner: row.runner,
     platform: row.platform,
     package: platformPackageOf(row),
     release: row.release,
     place: row.install.kind,
+    web_page: webPageOf(row),
   };
 
   switch (row.install.kind) {
@@ -159,8 +174,9 @@ function main(args: readonly string[]): number {
     return 2;
   }
 
+  const allPackages = rows.value.map((row) => platformPackageOf(row)).join(",");
   const build = rows.value.map((row) => buildEntryOf(row, versions));
-  const install = rows.value.flatMap((row) => installEntriesOf(row, versions));
+  const install = rows.value.flatMap((row) => installEntriesOf(row, versions, allPackages));
 
   console.log(`version=${manifest.value.version}`);
   console.log(`build_matrix=${JSON.stringify({ include: build })}`);

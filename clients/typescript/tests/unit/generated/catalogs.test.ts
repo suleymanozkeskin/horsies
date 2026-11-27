@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
-import { ErrorCode } from "../../../horsies/src/_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../../../horsies/src/_catalog/error_codes.ts";
 import {
   TASK_TERMINAL_STATES,
   TaskStatus,
-  WORKFLOW_TASK_TERMINAL_STATES,
+  WORKFLOW_NODE_TERMINAL_STATES,
   WORKFLOW_TERMINAL_STATES,
   WorkflowStatus,
-  WorkflowTaskStatus,
+  WorkflowNodeStatus,
 } from "../../../horsies/src/_catalog/status.ts";
 import { RetrievalCode } from "../../../horsies/src/_catalog/task_codes.ts";
 import { TaskSendErrorCode } from "../../../horsies/src/_catalog/task_send.ts";
@@ -15,7 +15,7 @@ import { TaskSendErrorCode } from "../../../horsies/src/_catalog/task_send.ts";
 describe("code catalogs", () => {
   test("a member name maps to its wire value", () => {
     expect(TaskStatus.PENDING).toBe("PENDING");
-    expect(ErrorCode.WORKFLOW_NO_NAME).toBe("HRS-001");
+    expect(HorsiesErrorCode.WORKFLOW_NO_NAME).toBe("HRS-001");
   });
 
   test("a member that only a blocking form gives stays in its catalog", () => {
@@ -44,11 +44,11 @@ describe("code catalogs", () => {
   });
 
   test("the workflow task terminal set holds the three final statuses", () => {
-    expect([...WORKFLOW_TASK_TERMINAL_STATES]).toEqual([
-      WorkflowTaskStatus.COMPLETED,
-      WorkflowTaskStatus.FAILED,
-      WorkflowTaskStatus.SKIPPED,
+    expect([...WORKFLOW_NODE_TERMINAL_STATES]).toEqual([
+      WorkflowNodeStatus.COMPLETED,
+      WorkflowNodeStatus.FAILED,
+      WorkflowNodeStatus.SKIPPED,
     ]);
-    expect(WORKFLOW_TASK_TERMINAL_STATES.has(WorkflowTaskStatus.ENQUEUED)).toBe(false);
+    expect(WORKFLOW_NODE_TERMINAL_STATES.has(WorkflowNodeStatus.ENQUEUED)).toBe(false);
   });
 });

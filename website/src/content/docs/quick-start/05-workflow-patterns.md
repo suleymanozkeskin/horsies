@@ -39,7 +39,7 @@ def start_order_workflow(
     output_node: TaskNode[Any] | None = None
 
     node_validate: TaskNode[Any] = TaskNode(
-        fn=validate_order,
+        function=validate_order,
         kwargs={'order': order},
         node_id="validate_order",
     )
@@ -50,7 +50,7 @@ def start_order_workflow(
 
     if include_inventory_check:
         node_inventory: TaskNode[Any] = TaskNode(
-            fn=check_inventory,
+            function=check_inventory,
             waits_for=[prev_node] if prev_node else [],
             args_from={"order_result": prev_node} if prev_node else {},
             node_id="check_inventory",
@@ -61,7 +61,7 @@ def start_order_workflow(
 
     if include_address_validation:
         node_address: TaskNode[Any] = TaskNode(
-            fn=check_address,
+            function=check_address,
             # An args_from source must also be in waits_for (HRS-008).
             waits_for=[prev_node] if prev_node is node_validate else [prev_node, node_validate],
             args_from={"order_result": node_validate},
@@ -72,7 +72,7 @@ def start_order_workflow(
 
     workflow = app.workflow(
         name=f"order_{order.order_id}",
-        tasks=nodes,
+        nodes=nodes,
         output=output_node,
         on_error=OnError.FAIL,
         definition_key="myapp.order_workflow.v1",
@@ -87,11 +87,11 @@ def start_order_workflow(
     reveal_type(handle)  # WorkflowHandle
 
     # Wait for workflow completion
-    handle.get(timeout_ms=30000)
+    handle.get(wait_ms=30000)
 
-    # result_for() is non-blocking - returns RESULT_NOT_READY if task hasn't completed
+    # result_for() is non-blocking - returns Err(ReadResultNotReady(...)) if task hasn't completed
     result = handle.result_for(output_node)
-    reveal_type(result)  # TaskResult[Any, TaskError]
+    reveal_type(result)  # ReadResult[Any, TaskError]
 ```
 
 ## Fan-Out Pattern (Parallel Execution)
@@ -100,7 +100,7 @@ Run many independent tasks in parallel. Queue `max_concurrency` controls paralle
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import Err, Ok, TaskResult, TaskError
+from horsies import Err, Ok, Result, TaskError
 from horsies import TaskNode, AnyNode
 
 # List of warehouse sync tasks
@@ -112,17 +112,17 @@ ALL_WAREHOUSE_TASKS = [
     sync_warehouse_cologne,
 ]
 
-@app.task('sync_all_warehouses', queue_name='low')
-def sync_all_warehouses_task() -> TaskResult[dict[str, int], TaskError]:
+@app.task('sync_all_warehouses', queue='low')
+def sync_all_warehouses_task() -> Result[dict[str, int], TaskError]:
     # Create nodes with node_id from task name
     nodes: list[AnyNode] = [
-        TaskNode(fn=task, node_id=task.task_name)
+        TaskNode(function=task, node_id=task.task_name)
         for task in ALL_WAREHOUSE_TASKS[:-1]
     ]
 
     # Keep typed reference to last node for result_for()
     last_node: TaskNode[WarehouseSyncResult] = TaskNode(
-        fn=ALL_WAREHOUSE_TASKS[-1],
+        function=ALL_WAREHOUSE_TASKS[-1],
         node_id=ALL_WAREHOUSE_TASKS[-1].task_name,
     )
     reveal_type(last_node)  # TaskNode[WarehouseSyncResult]
@@ -132,7 +132,7 @@ def sync_all_warehouses_task() -> TaskResult[dict[str, int], TaskError]:
     # Queue max_concurrency limits simultaneous execution
     workflow = app.workflow(
         name='sync_all_warehouses',
-        tasks=nodes,
+        nodes=nodes,
         output=last_node,
         definition_key='myapp.sync_all_warehouses.v1',
     )
@@ -146,12 +146,12 @@ def sync_all_warehouses_task() -> TaskResult[dict[str, int], TaskError]:
     reveal_type(handle)  # WorkflowHandle
 
     # Wait for workflow completion before accessing result_for()
-    handle.get(timeout_ms=60000)
+    handle.get(wait_ms=60000)
 
     result = handle.result_for(last_node)
-    reveal_type(result)  # TaskResult[WarehouseSyncResult, TaskError]
+    reveal_type(result)  # ReadResult[WarehouseSyncResult, TaskError]
 
-    return TaskResult(ok={'warehouses_synced': len(ALL_WAREHOUSE_TASKS)})
+    return Ok({'warehouses_synced': len(ALL_WAREHOUSE_TASKS)})
 ```
 
 ## Linear Chain Pattern
@@ -173,38 +173,38 @@ from .tasks import (
 
 def fulfillment_workflow(order: Order) -> None:
     node_validate: TaskNode[ValidatedOrder] = TaskNode(
-        fn=validate_order,
+        function=validate_order,
         kwargs={'order': order},
         node_id="validate_order",
     )
     reveal_type(node_validate)  # TaskNode[ValidatedOrder]
 
     node_inventory = TaskNode(
-        fn=check_inventory,
+        function=check_inventory,
         waits_for=[node_validate],
         args_from={"order_result": node_validate},
         node_id="check_inventory",
     )
     node_reserve = TaskNode(
-        fn=reserve_inventory,
+        function=reserve_inventory,
         waits_for=[node_inventory],
         args_from={"inventory_result": node_inventory},
         node_id="reserve_inventory",
     )
     node_shipment = TaskNode(
-        fn=create_shipment,
+        function=create_shipment,
         waits_for=[node_reserve],
         args_from={"reservation_result": node_reserve},
         node_id="create_shipment",
     )
     node_notify = TaskNode(
-        fn=send_notification,
+        function=send_notification,
         waits_for=[node_shipment],
         args_from={"shipment_result": node_shipment},
         node_id="send_notification",
     )
     node_tracking: TaskNode[TrackingResult] = TaskNode(
-        fn=update_tracking,
+        function=update_tracking,
         waits_for=[node_notify],
         args_from={"notification_result": node_notify},
         node_id="update_tracking",
@@ -213,7 +213,7 @@ def fulfillment_workflow(order: Order) -> None:
 
     workflow = app.workflow(
         name=f"fulfillment_{order.order_id}",
-        tasks=[
+        nodes=[
             node_validate,
             node_inventory,
             node_reserve,
@@ -240,20 +240,20 @@ from horsies import Err, Ok
 
 def trigger_shipment_tracking(shipment_id: str) -> bool:
     node_fetch: TaskNode[CarrierStatus] = TaskNode(
-        fn=fetch_carrier_status,
+        function=fetch_carrier_status,
         kwargs={'shipment_id': shipment_id},
         node_id="fetch_carrier_status",
     )
     reveal_type(node_fetch)  # TaskNode[CarrierStatus]
 
     node_update = TaskNode(
-        fn=update_shipment_status,
+        function=update_shipment_status,
         waits_for=[node_fetch],
         args_from={"carrier_result": node_fetch},
         node_id="update_shipment_status",
     )
     node_notify: TaskNode[NotificationResult] = TaskNode(
-        fn=notify_customer,
+        function=notify_customer,
         waits_for=[node_update],
         args_from={"status_result": node_update},
         node_id="notify_customer",
@@ -262,7 +262,7 @@ def trigger_shipment_tracking(shipment_id: str) -> bool:
 
     workflow = app.workflow(
         name=f"tracking_{shipment_id}",
-        tasks=[node_fetch, node_update, node_notify],
+        nodes=[node_fetch, node_update, node_notify],
         output=node_notify,
         definition_key="myapp.shipment_tracking.v1",
     )
@@ -285,27 +285,27 @@ A task that orchestrates a workflow internally. Useful for composing complex ope
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import Err, Ok
+from horsies import Err, Ok, Result, TaskError
 
-@app.task('process_returns', queue_name='standard')
-def process_returns_task() -> TaskResult[dict[str, str], TaskError]:
+@app.task('process_returns', queue='standard')
+def process_returns_task() -> Result[dict[str, str], TaskError]:
     # Define parallel nodes - process returns from multiple channels
     node_web: TaskNode[ReturnStats] = TaskNode(
-        fn=process_web_returns,
+        function=process_web_returns,
         node_id="process_web_returns",
     )
     node_store: TaskNode[ReturnStats] = TaskNode(
-        fn=process_store_returns,
+        function=process_store_returns,
         node_id="process_store_returns",
     )
     node_phone: TaskNode[ReturnStats] = TaskNode(
-        fn=process_phone_returns,
+        function=process_phone_returns,
         node_id="process_phone_returns",
     )
 
     # Aggregate results
     node_aggregate: TaskNode[AggregatedStats] = TaskNode(
-        fn=aggregate_return_stats,
+        function=aggregate_return_stats,
         waits_for=[node_web, node_store, node_phone],
         args_from={
             "web_result": node_web,
@@ -318,7 +318,7 @@ def process_returns_task() -> TaskResult[dict[str, str], TaskError]:
 
     workflow = app.workflow(
         name='returns_processing',
-        tasks=[node_web, node_store, node_phone, node_aggregate],
+        nodes=[node_web, node_store, node_phone, node_aggregate],
         output=node_aggregate,
         on_error=OnError.FAIL,
         definition_key='myapp.returns_processing.v1',
@@ -333,12 +333,12 @@ def process_returns_task() -> TaskResult[dict[str, str], TaskError]:
     reveal_type(handle)  # WorkflowHandle
 
     # Wait for workflow completion before accessing result_for()
-    handle.get(timeout_ms=60000)
+    handle.get(wait_ms=60000)
 
     result = handle.result_for(node_aggregate)
-    reveal_type(result)  # TaskResult[AggregatedStats, TaskError]
+    reveal_type(result)  # ReadResult[AggregatedStats, TaskError]
 
-    return TaskResult(ok={'message': 'Returns processed'})
+    return Ok({'message': 'Returns processed'})
 ```
 
 ## Pattern Summary

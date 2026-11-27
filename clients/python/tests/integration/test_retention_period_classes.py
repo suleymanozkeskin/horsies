@@ -29,9 +29,9 @@ from horsies.core.history.periods import period_class_key
 from horsies.core.models.app import AppConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.core.models.retention import RetentionConfig
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode
-from horsies.core.types.result import is_err, is_ok
+from horsies.core.types.result import Ok, Result, is_err, is_ok
 from horsies.core.workflows.lifecycle import start_workflow_async
 from tests.broker_resources_support import current_resources
 
@@ -49,7 +49,7 @@ def _mapped_app(broker: PostgresBroker) -> tuple[Horsies, Any, Any]:
     app = Horsies(
         AppConfig(
             queue_mode=QueueMode.CUSTOM,
-            broker=broker.config,
+            database=broker.config,
             custom_queues=[
                 CustomQueueConfig(name='emails'),
                 CustomQueueConfig(name='alerts'),
@@ -63,13 +63,13 @@ def _mapped_app(broker: PostgresBroker) -> tuple[Horsies, Any, Any]:
     broker.app = app
     suffix = uuid.uuid4().hex[:8]
 
-    @app.task(task_name=f'period_email_{suffix}', queue_name='emails')
-    def email_task(*, x: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=x)  # pragma: no cover - never executed here
+    @app.task(name=f'period_email_{suffix}', queue='emails')
+    def email_task(*, x: int) -> Result[int, TaskError]:
+        return Ok(x)  # pragma: no cover - never executed here
 
-    @app.task(task_name=f'period_alert_{suffix}', queue_name='alerts')
-    def alert_task(*, x: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=x)  # pragma: no cover - never executed here
+    @app.task(name=f'period_alert_{suffix}', queue='alerts')
+    def alert_task(*, x: int) -> Result[int, TaskError]:
+        return Ok(x)  # pragma: no cover - never executed here
 
     return app, email_task, alert_task
 
@@ -107,7 +107,7 @@ class TestEveryPathStampsThePeriodClass:
         engine = current_resources(broker).engine
         _app, email_task, _alert_task = _mapped_app(broker)
 
-        delayed = await email_task.schedule_async(60, x=3)
+        delayed = await email_task.with_options(delay_seconds=60).send_async(x=3)
 
         assert is_ok(delayed), delayed
         assert await _row_class(engine, delayed.ok_value.task_id) == _PERIOD_KEY
@@ -117,7 +117,7 @@ class TestEveryPathStampsThePeriodClass:
     ) -> None:
         engine = current_resources(broker).engine
         app, email_task, _alert_task = _mapped_app(broker)
-        node = TaskNode(fn=email_task, kwargs={'x': 4}, node_id='email')
+        node = TaskNode(function=email_task, kwargs={'x': 4}, node_id='email')
         spec = app.workflow(
             f'period_workflow_{uuid.uuid4().hex[:8]}',
             [node],

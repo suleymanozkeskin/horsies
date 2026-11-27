@@ -1,10 +1,11 @@
 //! `TaskRuntime`: what a task body reads while it runs.
 //!
 //! A body that takes `TaskRuntime` as its first parameter gets the app's
-//! state, the cancel signal and the cancel state of its run, the fencing
-//! token of its run, and a way to start work that belongs to its run. The
-//! app builds the runtime when the task registers, so every worker child,
-//! which runs `main` again, has its own.
+//! state, the typed functions and the workflow builders of the app, the
+//! cancel signal and the cancel state of its run, the fencing token of its
+//! run, and a way to start work that belongs to its run. The app builds the
+//! runtime when the task registers, so every worker child, which runs
+//! `main` again, has its own.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -21,8 +22,8 @@ use crate::app::{AppState, StateNotProvided};
 use crate::send::TaskFunctions;
 use crate::workflow::WorkflowStarter;
 use crate::{
-    TaskFunction, TaskFunctionNotFound, UserErrorCode, WorkflowHandle, WorkflowSpec,
-    WorkflowStartError,
+    CustomErrorCode, TaskFunction, TaskFunctionNotFound, WorkflowHandle, WorkflowSpec,
+    WorkflowSpecBuilder, WorkflowStartError,
 };
 
 /// What a task body reads while it runs.
@@ -32,10 +33,10 @@ use crate::{
 /// async fn sync_feed(rt: horsies::TaskRuntime, feed: Feed) -> Result<u32, TaskError<FeedCode>> {
 ///     let client = rt
 ///         .state::<HttpClient>()
-///         .map_err(|missing| TaskError::user(FeedCode::NotConfigured, missing.to_string()))?;
+///         .map_err(|missing| TaskError::custom(FeedCode::NotConfigured, missing.to_string()))?;
 ///     tokio::select! {
 ///         count = client.sync(&feed) => Ok(count),
-///         () = rt.cancelled() => Err(TaskError::user(FeedCode::Interrupted, "cancelled")),
+///         () = rt.cancelled() => Err(TaskError::custom(FeedCode::Interrupted, "cancelled")),
 ///     }
 /// }
 /// ```
@@ -57,6 +58,13 @@ impl TaskRuntime {
             functions,
             workflows,
         }
+    }
+
+    /// A workflow builder of the workflow `name` on the app of this runtime,
+    /// as `Horsies::workflow_builder` gives it: each task node resolves
+    /// against the tasks of that app when it is added.
+    pub fn workflow_builder(&self, name: impl Into<String>) -> WorkflowSpecBuilder {
+        WorkflowSpecBuilder::new(name, Arc::clone(&self.functions))
     }
 
     /// Start `spec`, a workflow that the task built, with a new id and the
@@ -96,19 +104,19 @@ impl TaskRuntime {
     }
 
     /// The typed function of task `task_name` in this app, as its
-    /// `register` returned it. The generated `name::handle(&runtime)` calls
+    /// `register` returned it. The generated `name::function(&runtime)` calls
     /// it.
     ///
     /// Errors: [`TaskFunctionNotFound`] for a name that no task attribute
     /// registered on this app, or one registered with other types.
-    pub fn task_handle<A, T, E>(
+    pub fn task_function<A, T, E>(
         &self,
         task_name: &str,
     ) -> Result<TaskFunction<A, T, E>, TaskFunctionNotFound>
     where
         A: Serialize + DeserializeOwned + 'static,
         T: Serialize + DeserializeOwned + 'static,
-        E: UserErrorCode,
+        E: CustomErrorCode,
     {
         self.functions.get::<A, T, E>(task_name)
     }
@@ -130,7 +138,7 @@ impl TaskRuntime {
     /// ([`Self::cancel_state`]):
     ///
     /// - An operator cancel, in every execution mode: `cancel_task` with
-    ///   `include_running` on a `RUNNING` task. The task is `CANCELLED`
+    ///   `CancelPolicy::IncludeRunning` on a `RUNNING` task. The task is `CANCELLED`
     ///   already, with its attempt recorded as `CANCELLED`; what the body
     ///   returns is dropped. In a `SHARED_ASYNC` run the body and the work it
     ///   started with [`Self::spawn`] have the task's `cancel_grace_ms` to
@@ -179,7 +187,7 @@ impl TaskRuntime {
     ///     for row in file.rows() {
     ///         match rt.cancel_state() {
     ///             RunCancelState::Requested { .. } => {
-    ///                 return Err(TaskError::user(ImportCode::Stopped, "cancelled"))
+    ///                 return Err(TaskError::custom(ImportCode::Stopped, "cancelled"))
     ///             }
     ///             RunCancelState::NotRequested | RunCancelState::NotInARun => {}
     ///         }
@@ -215,7 +223,7 @@ impl TaskRuntime {
     /// async fn charge(rt: TaskRuntime, order: Order) -> Result<(), TaskError<ChargeCode>> {
     ///     let token = rt
     ///         .fencing_token()
-    ///         .map_err(|refused| TaskError::user(ChargeCode::NoRun, refused.to_string()))?;
+    ///         .map_err(|refused| TaskError::custom(ChargeCode::NoRun, refused.to_string()))?;
     ///     // UPDATE payments SET state = 'charged', fence = $2
     ///     //  WHERE task_id = $1 AND fence <= $2
     ///     store.charge(token.task_id(), i64::from(token.value().get()), &order).await
@@ -264,7 +272,7 @@ mod tests {
     struct Settings(u32);
 
     fn app() -> Horsies {
-        Horsies::new(AppConfig::for_database_url(
+        Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap()
@@ -318,8 +326,11 @@ mod tests {
     #[tokio::test]
     async fn a_start_from_the_runtime_checks_the_spec_first() {
         let runtime = app().task_runtime();
-        let mut builder = crate::WorkflowSpecBuilder::new("keyless");
-        let tick = builder.task(crate::workflow::tests_support::unit_task_node("tick"));
+        let mut builder = crate::workflow::tests_support::test_builder("keyless");
+        let tick = crate::workflow::tests_support::add(
+            &mut builder,
+            crate::workflow::tests_support::unit_task_node("tick"),
+        );
         builder.output(tick);
         let spec = builder.build().unwrap();
         let refused = runtime.start::<u32>(&spec).await.unwrap_err();

@@ -245,7 +245,7 @@ CREATE FUNCTION wft_workflow(p_workflow uuid) RETURNS horsies_workflows LANGUAGE
     SELECT * FROM horsies_workflows WHERE id = p_workflow
 $$;
 
--- A value result envelope, and an error envelope with a user code.
+-- A value result envelope, and an error envelope with a custom code.
 CREATE FUNCTION wft_ok(p_value text) RETURNS text LANGUAGE sql AS $$
     SELECT '{"__h_task_result__":true,"ok":' || p_value || ',"err":null}'
 $$;

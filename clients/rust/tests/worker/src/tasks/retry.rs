@@ -1,11 +1,11 @@
 //! Retry tasks (Python `clients/python/tests/e2e/tasks/retry.py`).
 
-use horsies::{task, RetryPolicy, TaskError, UserErrorCode};
+use horsies::{task, CustomErrorCode, RetryPolicy, TaskError};
 
 use crate::markers;
 
 /// The codes of the retry tasks' own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 pub enum RetryCode {
     /// Retried by every policy of this module.
     Transient,
@@ -23,10 +23,10 @@ fn fixed(intervals: Vec<u32>) -> RetryPolicy {
 #[task(
     "e2e_retry_exhausted",
     retry_policy = fixed(vec![1, 1, 1]),
-    auto_retry_for = ["TRANSIENT"]
+    retry_for = ["TRANSIENT"]
 )]
 pub async fn retry_exhausted() -> Result<String, TaskError<RetryCode>> {
-    Err(TaskError::user(RetryCode::Transient, "always fails"))
+    Err(TaskError::custom(RetryCode::Transient, "always fails"))
 }
 
 /// Python `e2e_retry_success`: `TRANSIENT` on the first two attempts of
@@ -35,13 +35,13 @@ pub async fn retry_exhausted() -> Result<String, TaskError<RetryCode>> {
 #[task(
     "e2e_retry_success",
     retry_policy = fixed(vec![1, 1, 1]),
-    auto_retry_for = ["TRANSIENT"]
+    retry_for = ["TRANSIENT"]
 )]
 pub async fn retry_success(token: String) -> Result<String, TaskError<RetryCode>> {
     let attempt = markers::next_attempt(&token)
-        .map_err(|cause| TaskError::user(RetryCode::MarkerFailed, cause.to_string()))?;
+        .map_err(|cause| TaskError::custom(RetryCode::MarkerFailed, cause.to_string()))?;
     match attempt < 3 {
-        true => Err(TaskError::user(
+        true => Err(TaskError::custom(
             RetryCode::Transient,
             format!("attempt {attempt}"),
         )),
@@ -54,20 +54,20 @@ pub async fn retry_success(token: String) -> Result<String, TaskError<RetryCode>
 #[task(
     "e2e_exponential",
     retry_policy = RetryPolicy::exponential(1, 3, false).expect("a valid exponential policy"),
-    auto_retry_for = ["TRANSIENT"]
+    retry_for = ["TRANSIENT"]
 )]
 pub async fn exponential() -> Result<String, TaskError<RetryCode>> {
-    Err(TaskError::user(RetryCode::Transient, "fail"))
+    Err(TaskError::custom(RetryCode::Transient, "fail"))
 }
 
 /// Python `e2e_retry_error_code`: always `RETRYABLE_ERROR`; one retry.
 #[task(
     "e2e_retry_error_code",
     retry_policy = fixed(vec![1]),
-    auto_retry_for = ["RETRYABLE_ERROR"]
+    retry_for = ["RETRYABLE_ERROR"]
 )]
 pub async fn retry_error_code() -> Result<String, TaskError<RetryCode>> {
-    Err(TaskError::user(
+    Err(TaskError::custom(
         RetryCode::RetryableError,
         "Retryable error",
     ))
@@ -78,12 +78,12 @@ pub async fn retry_error_code() -> Result<String, TaskError<RetryCode>> {
 #[task(
     "e2e_retry_other_code",
     retry_policy = fixed(vec![1, 1]),
-    auto_retry_for = ["TRANSIENT"]
+    retry_for = ["TRANSIENT"]
 )]
 pub async fn retry_other_code() -> Result<String, TaskError<RetryCode>> {
-    Err(TaskError::user(
+    Err(TaskError::custom(
         RetryCode::RetryableError,
-        "not in auto_retry_for",
+        "not in retry_for",
     ))
 }
 
@@ -93,8 +93,8 @@ pub async fn retry_other_code() -> Result<String, TaskError<RetryCode>> {
 #[task(
     "e2e_retry_long_interval",
     retry_policy = fixed(vec![60, 60, 60]),
-    auto_retry_for = ["TRANSIENT"]
+    retry_for = ["TRANSIENT"]
 )]
 pub async fn retry_long_interval() -> Result<String, TaskError<RetryCode>> {
-    Err(TaskError::user(RetryCode::Transient, "always fails"))
+    Err(TaskError::custom(RetryCode::Transient, "always fails"))
 }

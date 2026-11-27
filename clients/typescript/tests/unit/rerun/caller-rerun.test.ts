@@ -13,6 +13,7 @@ import type { RerunOutcome } from "../../../horsies/src/rerun/types.ts";
 import type { Result } from "../../../horsies/src/wire/result.ts";
 import {
   CARRIER,
+  CODES,
   COMMAND,
   ENQUEUED_ANSWERS,
   NEW_TASK_ID,
@@ -26,19 +27,31 @@ import {
 import type { BridgeAnswers, TransactionAnswer } from "./support.ts";
 
 /** A host with an active span. */
-const HOST: RerunHost = { coreHandle: unusedCoreHandle, activeCarrier: () => CARRIER };
+const HOST: RerunHost = { coreHandle: unusedCoreHandle, activeCarrier: () => CARRIER, registeredCodes: () => CODES };
 
-/** The answer of `app.rerunIn` and the names of the statements that ran, with these answers. */
+/** The answer of `app.rerunTaskIn` and the names of the statements that ran, with these answers. */
 async function rerunIn(
   answers: BridgeAnswers,
   transactionAnswers: readonly TransactionAnswer[],
 ): Promise<{ readonly answer: Result<RerunOutcome, CallerRerunError>; readonly ran: string[] }> {
   const { bridge } = fakeBridge(answers);
   const { transaction, statements } = fakeTransaction(transactionAnswers);
-  const answer = await rerunAreaOn(HOST, bridge).rerunIn(transaction, COMMAND, POLICY);
+  const answer = await rerunAreaOn(HOST, bridge).rerunTaskIn(transaction, COMMAND, POLICY);
 
   return { answer, ran: statements.map((statement) => statement.name) };
 }
+
+/** The `kind` of each refusal code of the rerun steps. */
+const STEP_REFUSAL_KINDS: Readonly<Record<CallerStepRefusal["code"], CallerRerunError["kind"]>> = {
+  CLASS_NOT_REGISTERED: "classNotRegistered",
+  RETRY_CODE_NOT_DECLARED: "retryCodeNotDeclared",
+  TASK_NOT_REGISTERED: "taskNotRegistered",
+  IDEMPOTENCY_KEY_REFUSED: "idempotencyKeyRefused",
+  ID_MINT_REFUSED: "idMintRefused",
+  CLIENT_FAMILY_MISMATCH: "clientFamilyMismatch",
+  UNKNOWN_STORED_FAMILY: "unknownStoredFamily",
+  CONTRACT_VIOLATION: "contractViolation",
+};
 
 const ENQUEUED: RerunOutcome = {
   kind: "enqueued",
@@ -47,11 +60,11 @@ const ENQUEUED: RerunOutcome = {
   rerunRootTaskId: SOURCE_TASK_ID,
 };
 
-describe("app.rerunIn", () => {
+describe("app.rerunTaskIn", () => {
   test("runs the read, then the write, on the caller's transaction and commits nothing", async () => {
     const { bridge, calls } = fakeBridge(ENQUEUED_ANSWERS);
     const { transaction, statements } = fakeTransaction([rowOf("t", null), rowOf("INSERTED", NEW_TASK_ID)]);
-    const answer = await rerunAreaOn(HOST, bridge).rerunIn(transaction, COMMAND, POLICY);
+    const answer = await rerunAreaOn(HOST, bridge).rerunTaskIn(transaction, COMMAND, POLICY);
 
     assert.deepEqual(answer, { ok: true, value: ENQUEUED });
     assert.deepEqual(statements, [
@@ -76,6 +89,7 @@ describe("app.rerunIn", () => {
         call: "prepareWrite",
         trace: CARRIER,
         readRow: { cells: [{ kind: "text", text: "t" }, { kind: "null" }] },
+        codes: CODES,
       },
       { call: "decodeRow", row: { cells: [{ kind: "text", text: "INSERTED" }, { kind: "text", text: NEW_TASK_ID }] } },
     ]);
@@ -86,9 +100,9 @@ describe("app.rerunIn", () => {
     const { transaction } = fakeTransaction([rowOf("t"), rowOf("INSERTED", NEW_TASK_ID)]);
 
     const answer = await rerunAreaOn(
-      { coreHandle: unusedCoreHandle, activeCarrier: () => NO_ACTIVE_CARRIER },
+      { coreHandle: unusedCoreHandle, activeCarrier: () => NO_ACTIVE_CARRIER, registeredCodes: () => CODES },
       bridge,
-    ).rerunIn(transaction, COMMAND, POLICY);
+    ).rerunTaskIn(transaction, COMMAND, POLICY);
 
     assert.ok(answer.ok);
     assert.deepEqual(calls[1]?.call === "prepareWrite" && calls[1].trace, { kind: "noCarrier" });
@@ -117,7 +131,7 @@ describe("app.rerunIn", () => {
     const { bridge, calls } = fakeBridge(ENQUEUED_ANSWERS);
     const { transaction, statements } = fakeTransaction([]);
     const lateDeadline = { kind: "until", at: Temporal.Instant.from("+010000-01-01T00:00:00Z") } as const;
-    const answer = await rerunAreaOn(HOST, bridge).rerunIn(transaction, { ...COMMAND, deadline: lateDeadline }, POLICY);
+    const answer = await rerunAreaOn(HOST, bridge).rerunTaskIn(transaction, { ...COMMAND, goodUntil: lateDeadline }, POLICY);
 
     assert.equal(!answer.ok && answer.error.code, "INVALID_COMMAND");
     assert.deepEqual(calls, []);
@@ -125,11 +139,11 @@ describe("app.rerunIn", () => {
   });
 });
 
-describe("app.rerunIn errors", () => {
+describe("app.rerunTaskIn errors", () => {
   test("each refusal of the steps writes nothing and keeps its fields", async () => {
     const refusals: CallerStepRefusal[] = [
       { code: "CLASS_NOT_REGISTERED", message: "unknown retention class", classKey: "standard_8d" },
-      { code: "CALLER_KEY_REFUSED", message: "rerun idempotency key failed" },
+      { code: "IDEMPOTENCY_KEY_REFUSED", message: "rerun idempotency key failed" },
       { code: "ID_MINT_REFUSED", message: "rerun identity mint failed" },
       { code: "CLIENT_FAMILY_MISMATCH", message: "rerun refused", stored: { kind: "notRecorded" } },
       { code: "UNKNOWN_STORED_FAMILY", message: "rerun refused: corrupt", stored: "GO" },
@@ -139,9 +153,31 @@ describe("app.rerunIn errors", () => {
     for (const refusal of refusals) {
       const { answer, ran } = await rerunIn({ ...ENQUEUED_ANSWERS, preparation: { kind: "refused", error: refusal } }, [rowOf("t")]);
 
-      assert.deepEqual(answer, { ok: false, error: { ...refusal, retryable: false } }, refusal.code);
+      assert.deepEqual(answer, { ok: false, error: { kind: STEP_REFUSAL_KINDS[refusal.code], ...refusal, retryable: false } }, refusal.code);
       assert.deepEqual(ran, ["rerun_source_read"], refusal.code);
     }
+  });
+
+  test("RETRY_CODE_NOT_DECLARED names the task and the code, and writes nothing", async () => {
+    const refusal: CallerStepRefusal = {
+      code: "RETRY_CODE_NOT_DECLARED",
+      message: "rerun refused: undeclared",
+      taskName: "charge",
+      retryCode: "CARD_DECLINED",
+    };
+
+    const { answer, ran } = await rerunIn({ ...ENQUEUED_ANSWERS, preparation: { kind: "refused", error: refusal } }, [rowOf("t")]);
+
+    assert.deepEqual(answer, { ok: false, error: { kind: "retryCodeNotDeclared", ...refusal, retryable: false } });
+    assert.deepEqual(ran, ["rerun_source_read"]);
+  });
+
+  test("TASK_NOT_REGISTERED names the task, and writes nothing", async () => {
+    const refusal: CallerStepRefusal = { code: "TASK_NOT_REGISTERED", message: "rerun refused: unlisted", taskName: "charge" };
+    const { answer, ran } = await rerunIn({ ...ENQUEUED_ANSWERS, preparation: { kind: "refused", error: refusal } }, [rowOf("t")]);
+
+    assert.deepEqual(answer, { ok: false, error: { kind: "taskNotRegistered", ...refusal, retryable: false } });
+    assert.deepEqual(ran, ["rerun_source_read"]);
   });
 
   test("DRIVER_FAILED carries the driver's error and the statement", async () => {
@@ -155,6 +191,7 @@ describe("app.rerunIn errors", () => {
     assert.deepEqual(answer, {
       ok: false,
       error: {
+        kind: "driverFailed",
         code: "DRIVER_FAILED",
         message: "statement rerun_enqueue failed in the caller's driver: could not serialize access",
         statement: "rerun_enqueue",
@@ -179,6 +216,7 @@ describe("app.rerunIn errors", () => {
     assert.deepEqual(answer, {
       ok: false,
       error: {
+        kind: "noOpenTransaction",
         code: "NO_OPEN_TRANSACTION",
         retryable: false,
         message: "statement rerun_source_read did not run: the caller's connection has no open transaction; run BEGIN first",
@@ -216,6 +254,7 @@ describe("app.rerunIn errors", () => {
     assert.deepEqual(answer, {
       ok: false,
       error: {
+        kind: "resultNotText",
         code: "RESULT_NOT_TEXT",
         retryable: false,
         message:
@@ -236,7 +275,7 @@ describe("app.rerunIn errors", () => {
 
     assert.deepEqual(answer, {
       ok: false,
-      error: { code: "CONTRACT_VIOLATION", retryable: false, message: "statement rerun_source_read gave 0 rows; it gives one row" },
+      error: { kind: "contractViolation", code: "CONTRACT_VIOLATION", retryable: false, message: "statement rerun_source_read gave 0 rows; it gives one row" },
     });
   });
 
@@ -248,7 +287,7 @@ describe("app.rerunIn errors", () => {
 
     assert.deepEqual(answer, {
       ok: false,
-      error: { code: "CONTRACT_VIOLATION", retryable: false, message: "statement `rerun_enqueue` declares 2 result columns; the row has 1 cells" },
+      error: { kind: "contractViolation", code: "CONTRACT_VIOLATION", retryable: false, message: "statement `rerun_enqueue` declares 2 result columns; the row has 1 cells" },
     });
   });
 });

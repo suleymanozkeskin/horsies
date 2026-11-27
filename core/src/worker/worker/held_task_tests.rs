@@ -97,7 +97,7 @@ fn test_dir(name: &str) -> PathBuf {
 /// [`BEAT_INTERVAL_MS`] and the smallest stale threshold that stale running
 /// recovery takes: the worker fails closed after 3 s with no landed beat.
 fn config_with_fast_beats(url: &str) -> AppConfig {
-    let mut config = AppConfig::for_database_url(url);
+    let mut config = AppConfig::from_database_url(url);
     config.recovery.runner_heartbeat_interval_ms = BEAT_INTERVAL_MS;
     config.recovery.running_stale_threshold_ms = fail_closed_threshold_floor_ms(BEAT_INTERVAL_MS);
     config
@@ -106,10 +106,10 @@ fn config_with_fast_beats(url: &str) -> AppConfig {
 /// A worker of `config` with one isolated child that holds its first run
 /// and writes its pid to `pid_file`, and a drain of `drain_secs`.
 async fn worker_holding_one_task(config: AppConfig, pid_file: &Path, drain_secs: u64) -> Worker {
-    let broker = PostgresBroker::connect_worker_with(&config.broker, crate::ClientFamily::Rust)
+    let broker = PostgresBroker::connect_worker_with(&config.database, crate::ClientFamily::Rust)
         .await
         .expect("connect the broker of a worker");
-    let database_url = DatabaseUrl::new(config.broker.database_url.clone());
+    let database_url = DatabaseUrl::new(config.database.database_url.clone());
     Worker::of_child_specs(
         Arc::new(broker),
         crate::test_support::child_specs::no_child_specs(),
@@ -374,7 +374,7 @@ async fn the_stop_waits_for_an_outcome_write_that_is_tried_again() {
     let dir = test_dir("held-task-write-retry");
     let pid_file = dir.join("child.pid");
     let worker = worker_holding_one_task(
-        AppConfig::for_database_url(database.url()),
+        AppConfig::from_database_url(database.url()),
         &pid_file,
         SHORT_DRAIN_SECS,
     )

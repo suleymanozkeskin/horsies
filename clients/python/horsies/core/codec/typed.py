@@ -39,7 +39,8 @@ from horsies.core.codec.validation_errors import (
     validation_summary,
 )
 from horsies.core.logging import get_logger
-from horsies.core.models.tasks import SubWorkflowError, TaskError, TaskResult
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
+from horsies.core.models.tasks import SubWorkflowFailure, TaskError
 from horsies.core.types.result import Err, Ok, Result
 
 logger = get_logger('codec')
@@ -73,7 +74,7 @@ __all__ = [
 ]
 
 
-# Wire envelope key for the typed `TaskResult` payload (§5 / §8). The
+# Wire envelope key for the stored task result payload (§5 / §8). The
 # only reserved-namespace key the codec layer emits directly; user-
 # originated dumps that try to inject this key are rejected by
 # `_scan_reserved_keys`.
@@ -105,7 +106,7 @@ TypeAnnotation = object
 """Any value `pydantic.TypeAdapter` accepts.
 
 Not narrowed to `type` because `list[X]`, `Annotated[...]`, `Union[...]`,
-`TaskResult[X, Y]`, etc. are not plain `type` instances at runtime. See
+`Result[X, Y]`, etc. are not plain `type` instances at runtime. See
 design-doc §0.
 """
 
@@ -141,10 +142,12 @@ start byte`, so a bad decode in a computed field stays a defect."""
 _NOT_SERIALIZABLE_VALUE_TEXTS: Final = frozenset({
     'Circular reference detected (id repeated)',
     'Circular reference detected (depth exceeded)',
+    'Maximum serialization depth exceeded',
 })
 """The texts of the plain `ValueError` from `dump_python` for a value that holds
 itself, and for a value that is nested too deep. The second text says circular,
-but the value can be finite. `_dump` compares all of each text: any other
+but the value can be finite. Pydantic 2.14 writes the third text for the depth
+limit. `_dump` compares all of each text: any other
 `ValueError` propagates."""
 
 
@@ -259,10 +262,10 @@ def _validated_and_dumped(
             _dump(adapter, validated, 'python', location), location,
         )
     if _is_task_error_type(expected_type):
-        # TaskError's own `error_code` field legitimately emits
+        # TaskError's own `code` field legitimately emits
         # `{"__builtin_task_code__": "..."}` for built-in codes.
         # Path-aware allowance: scan only the user-controlled fields
-        # (`data`, `exception`, `message`) and skip `error_code`.
+        # (`data`, `exception`, `message`) and skip `code`.
         _scan_task_error_user_fields(dumped_json)
     else:
         _scan_reserved_keys(dumped_json)
@@ -529,35 +532,37 @@ def validate_omitted_default(
 
 
 def conform_to_target(
-    result: TaskResult[Any, TaskError],
+    outcome: TaskOutcome[Any, TaskError],
     target_ok_type: TypeAnnotation,
-) -> Result[TaskResult[Any, TaskError], ValueValidationError | StrictJsonError]:
-    """Validate a dependency result against the type that the receiver declares.
+) -> Result[TaskOutcome[Any, TaskError], ValueValidationError | StrictJsonError]:
+    """Validate a dependency outcome against the type that the receiver declares.
 
-    An `args_from` result is decoded with the source's type, so a constraint or
-    a validator on the receiver's `TaskResult[T, TaskError]` has not run. This
+    An `args_from` outcome is decoded with the source's type, so a constraint or
+    a validator on the receiver's `TaskOutcome[T, TaskError]` has not run. This
     runs them on the decoded value, and the receiver gets the value they
     return. It validates the value, not the wire form: a subclass stays a
     subclass, and a source that the wiring check accepts does not fail on a
     key that the target forbids.
 
-    An error result passes unchanged, because it has no ok value.
+    A failed outcome passes unchanged, because it has no value.
 
     Args:
-        result: The decoded result of the dependency.
+        outcome: The decoded outcome of the dependency.
         target_ok_type: The `T` of the receiver's parameter.
 
     Returns:
-        Ok with the result to give to the receiver, or Err with the refusal.
+        Ok with the outcome to give to the receiver, or Err with the refusal.
         The text of a refusal holds no input value.
     """
-    if result.is_err():
-        return Ok(result)
-    adapter = _get_adapter(target_ok_type)
-    try:
-        return Ok(TaskResult(ok=_validate_strict(adapter, result.ok_value)))
-    except (StrictJsonError, ValueValidationError) as refusal:
-        return Err(refusal)
+    match outcome:
+        case Failed():
+            return Ok(outcome)
+        case Succeeded(value=value):
+            adapter = _get_adapter(target_ok_type)
+            try:
+                return Ok(Succeeded(_validate_strict(adapter, value)))
+            except (StrictJsonError, ValueValidationError) as refusal:
+                return Err(refusal)
 
 
 def decode_value(
@@ -769,19 +774,19 @@ def _dump(
 
 
 def encode_task_result(
-    result: TaskResult[Any, TaskError],
+    result: Result[Any, TaskError],
     ok_type: TypeAnnotation,
     origin: Literal['task', 'library'] = 'library',
 ) -> dict[str, Json]:
-    """Encode a `TaskResult[OkT, TaskError]` into the wire envelope.
+    """Encode a `Result[OkT, TaskError]` into the wire envelope.
 
     Envelope shape:
         ``{"__h_task_result__": True, "ok": <encoded ok> | None,
            "err": <encoded TaskError dict> | None}``
 
-    Exactly one slot carries data (matching `TaskResult`'s constructor
-    invariant). The ok slot may legitimately be `None` when
-    `ok_type` permits it (e.g. `TaskResult[None, TaskError]`); decode
+    Exactly one slot carries data (``Ok`` or ``Err``). The ok slot may
+    legitimately be `None` when `ok_type` permits it (e.g.
+    `Result[None, TaskError]`); decode
     discriminates on the err slot — `err is None` → ok path,
     `err is not None` → err path.
 
@@ -789,14 +794,14 @@ def encode_task_result(
     the JsonValue fence, wire scan, and reserved-key scan. The err slot
     routes through `encode_value(value, TaskError)` and picks up the
     path-aware TaskError scan (built-in code discriminator allowed under
-    `error_code`; smuggle attempts in `data` rejected).
+    `code`; smuggle attempts in `data` rejected).
 
     ``TaskError.exception`` is declared as ``BaseException |
-    FlattenedException | None``: the in-memory form lets producers
+    ExceptionRecord | None``: the in-memory form lets producers
     (task_decorator's catch blocks, library error builders) attach a
     live exception for local diagnostics. Pydantic can't serialize a
     raw ``BaseException``, so the err branch flattens it to the
-    structured ``FlattenedException`` shape via ``model_copy`` before
+    structured ``ExceptionRecord`` shape via ``model_copy`` before
     invoking ``encode_value``. This is the single source of truth for
     the live-exception → flattened invariant; every wire emit
     (worker finalize, engine args_from envelope, broker reaper /
@@ -817,23 +822,23 @@ def encode_task_result(
         ValueValidationError: when the carried value doesn't satisfy
             its declared shape.
     """
-    if result.is_err():
-        encoded_err = encode_task_error(reportable_error(result.err_value, origin))
-        return {
-            _TASK_RESULT_ENVELOPE_KEY: True,
-            'ok': None,
-            'err': encoded_err,
-        }
-    encoded_ok = encode_value(result.ok_value, ok_type)
-    return {
-        _TASK_RESULT_ENVELOPE_KEY: True,
-        'ok': encoded_ok,
-        'err': None,
-    }
+    match result:
+        case Err(err_value=error):
+            return {
+                _TASK_RESULT_ENVELOPE_KEY: True,
+                'ok': None,
+                'err': encode_task_error(reportable_error(error, origin)),
+            }
+        case Ok(ok_value=value):
+            return {
+                _TASK_RESULT_ENVELOPE_KEY: True,
+                'ok': encode_value(value, ok_type),
+                'err': None,
+            }
 
 
 def encode_returned_result(
-    result: TaskResult[Any, TaskError],
+    result: Result[Any, TaskError],
     ok_type: TypeAnnotation,
 ) -> dict[str, Json]:
     """Encode the return of a task body, and prove the ok value reads back.
@@ -846,13 +851,15 @@ def encode_returned_result(
         ValueValidationError: as `encode_value`, or when a reader cannot get the
             value back.
     """
-    if result.is_err():
-        return encode_task_result(result, ok_type, origin='task')
-    return {
-        _TASK_RESULT_ENVELOPE_KEY: True,
-        'ok': encode_or_raise_on_refusal(result.ok_value, ok_type),
-        'err': None,
-    }
+    match result:
+        case Err():
+            return encode_task_result(result, ok_type, origin='task')
+        case Ok(ok_value=value):
+            return {
+                _TASK_RESULT_ENVELOPE_KEY: True,
+                'ok': encode_or_raise_on_refusal(value, ok_type),
+                'err': None,
+            }
 
 
 def reportable_error(
@@ -861,12 +868,12 @@ def reportable_error(
 ) -> TaskError:
     """Return an error that crosses the wire, with its code and message kept.
 
-    An error is the report of a failure, and `auto_retry_for` and outcome routing
+    An error is the report of a failure, and `retry_for` and outcome routing
     read its code. So this function is total: a bad `data` or a bad subclass field
     never costs the code.
 
-    Order: the error as it is; with `data` replaced; for a `SubWorkflowError`,
-    with its summary repaired, so that `case SubWorkflowError()` still matches;
+    Order: the error as it is; with `data` replaced; for a `SubWorkflowFailure`,
+    with its summary repaired, so that `case SubWorkflowFailure()` still matches;
     and last a plain `TaskError`.
 
     A refusal logs at ERROR with subject and cause. A value from a library path
@@ -880,7 +887,7 @@ def reportable_error(
         An error that encodes and reads back.
 
     Raises:
-        ValueValidationError: `error_code` is missing, or it is not a str or a
+        ValueValidationError: `code` is missing, or it is not a str or a
             built-in code. The code is the one field that cannot be repaired, so
             the caller's serialization path stands.
     """
@@ -900,7 +907,7 @@ def reportable_error(
     without_data = escaped.model_copy(update={'data': {'data_refused': cause}})
     if _report_refusal(without_data) is None:
         return without_data
-    if isinstance(without_data, SubWorkflowError):
+    if isinstance(without_data, SubWorkflowFailure):
         repaired = _repaired_subworkflow_error(without_data)
         if repaired is not None:
             return repaired
@@ -917,7 +924,7 @@ def _checked_plain_error(err: TaskError, cause: str) -> TaskError:
     Raises:
         ValueValidationError: the code cannot be kept.
     """
-    code: object = getattr(err, 'error_code', None)
+    code: object = getattr(err, 'code', None)
     message: object = getattr(err, 'message', None)
     exception: object = getattr(err, 'exception', None)
     text = message if isinstance(message, str) else None
@@ -929,7 +936,7 @@ def _checked_plain_error(err: TaskError, cause: str) -> TaskError:
     for payload in payloads:
         try:
             plain = TaskError.model_validate({
-                'error_code': code,
+                'code': code,
                 'data': {'data_refused': cause},
                 **payload,
             })
@@ -938,23 +945,23 @@ def _checked_plain_error(err: TaskError, cause: str) -> TaskError:
         if _report_refusal(plain) is None:
             return plain
     raise ValueValidationError(
-        f'a TaskError holds an error_code of type {type(code).__name__}, '
+        f'a TaskError holds a code of type {type(code).__name__}, '
         f'which cannot cross the wire',
     )
 
 
 def _code_text(err: TaskError) -> str:
-    return escape_lone_surrogates(str(getattr(err, 'error_code', None)))
+    return escape_lone_surrogates(str(getattr(err, 'code', None)))
 
 
 def _with_escaped_text(err: TaskError) -> TaskError:
     """Flatten the exception and escape the free text of an error."""
     from horsies.core.codec.error_payload import flatten_exception
 
-    code = err.error_code
+    code = err.code
     update: dict[str, Any] = {}
     if type(code) is str:
-        update['error_code'] = escape_lone_surrogates(code)
+        update['code'] = escape_lone_surrogates(code)
     if isinstance(err.message, str):
         update['message'] = escape_lone_surrogates(err.message)
     exception = err.exception
@@ -1001,8 +1008,8 @@ def _report_refusal(err: TaskError) -> str | None:
     return None
 
 
-def _repaired_subworkflow_error(err: SubWorkflowError) -> TaskError | None:
-    """Keep the class of a `SubWorkflowError`, and drop only what cannot cross.
+def _repaired_subworkflow_error(err: SubWorkflowFailure) -> TaskError | None:
+    """Keep the class of a `SubWorkflowFailure`, and drop only what cannot cross.
 
     It runs under a guard: a dataclass does not check its fields, so task code can
     put anything in the summary.
@@ -1023,18 +1030,78 @@ def _repaired_subworkflow_error(err: SubWorkflowError) -> TaskError | None:
     return repaired if _report_refusal(repaired) is None else None
 
 
+_STORED_CODE_KEY: Final = 'error_code'
+"""The key of the code in a stored task error. It is the field name of the
+core's ``TaskError`` (``core/src/core/task/error.rs``), and the workflow SQL
+reads it. The Python field is ``code``, so ``encode_task_error`` and
+``decode_task_error`` rename the key."""
+
+_MODEL_CODE_FIELD: Final = 'code'
+"""The field of the code on the Python ``TaskError``."""
+
+
+def _stored_error_form(model_form: Json) -> Json:
+    """The stored form of an encoded ``TaskError``: the key ``code`` becomes
+    ``error_code`` at the same place, so the key order stays. Pure.
+
+    Raises:
+        AssertionError: ``model_form`` is not a JSON object. The dump of a
+            model is always an object, so this is a defect.
+    """
+    match model_form:
+        case dict():
+            members = cast('dict[str, Json]', model_form)
+            return {
+                (_STORED_CODE_KEY if key == _MODEL_CODE_FIELD else key): value
+                for key, value in members.items()
+            }
+        case _:
+            raise AssertionError(
+                f'a TaskError encodes as a JSON object, got '
+                f'{type(model_form).__name__}',
+            )
+
+
+def _model_error_form(err_slot: Json) -> Json:
+    """The model form of a stored task error: the key ``error_code`` becomes
+    ``code`` at the same place. A value that is not a JSON object is given
+    back as it is, and the decode refuses it. Pure.
+
+    Raises:
+        ValueValidationError: the object holds the key ``code``. A stored task
+            error has no such key, so the read does not take it as the code.
+    """
+    match err_slot:
+        case dict():
+            members = cast('dict[str, Json]', err_slot)
+            if _MODEL_CODE_FIELD in members:
+                raise ValueValidationError(
+                    f'unexpected key {_MODEL_CODE_FIELD!r} in a stored task '
+                    f'error; the stored key of the code is {_STORED_CODE_KEY!r}',
+                )
+            return {
+                (_MODEL_CODE_FIELD if key == _STORED_CODE_KEY else key): value
+                for key, value in members.items()
+            }
+        case _:
+            return err_slot
+
+
 def encode_task_error(err: TaskError) -> Json:
     """Encode a TaskError (or subclass) preserving its concrete type.
 
     Symmetric counterpart to ``decode_task_error``. Routes the encode
     through ``TypeAdapter(type(err))`` so subclass-only fields (notably
-    ``SubWorkflowError.sub_workflow_id`` / ``sub_workflow_summary``)
+    ``SubWorkflowFailure.sub_workflow_id`` / ``sub_workflow_summary``)
     survive the wire round-trip. ``encode_value(err, TaskError)`` would
     silently strip them.
 
+    The stored key of the code is ``error_code`` (``_STORED_CODE_KEY``), at
+    the place of the field ``code``.
+
     Args:
         err: A ``TaskError`` instance — may be the base class or any
-            library-known subclass such as ``SubWorkflowError``.
+            library-known subclass such as ``SubWorkflowFailure``.
 
     Returns:
         The encoded JSON payload carrying every field present on the
@@ -1045,7 +1112,7 @@ def encode_task_error(err: TaskError) -> Json:
             smuggling inside ``err.data`` or schema violations
             (same surfaces as ``encode_value``).
     """
-    return encode_value(err, type(err))
+    return _stored_error_form(encode_value(err, type(err)))
 
 
 def decode_task_error(err_slot: Json) -> TaskError:
@@ -1057,45 +1124,50 @@ def decode_task_error(err_slot: Json) -> TaskError:
     rules can never drift between callers.
 
     The strict codec uses ``TypeAdapter(TaskError)`` which drops fields
-    declared only on subclasses (notably ``SubWorkflowError``'s
-    ``sub_workflow_id`` / ``sub_workflow_summary``). The engine emits
-    subworkflow failures via ``SubWorkflowError.model_dump(...)`` at
-    ``engine.py::on_subworkflow_complete``; without polymorphic decode
-    those subclass fields would be silently lost when downstream
-    consumers read the parent node's TaskResult.
+    declared only on subclasses (notably ``SubWorkflowFailure``'s
+    ``sub_workflow_id`` / ``sub_workflow_summary``). The core engine
+    writes the stored ``SubWorkflowFailure.model_dump(...)`` of a sub-workflow failure into the parent
+    node; without polymorphic decode those subclass fields would be
+    silently lost when downstream consumers read the parent node's
+    outcome.
 
-    Discriminator: inspect the payload's keys. SubWorkflowError-specific
+    The stored key ``error_code`` becomes the field ``code``. A stored
+    object with the key ``code`` is refused: the read takes the code only
+    from ``error_code``.
+
+    Discriminator: inspect the payload's keys. SubWorkflowFailure-specific
     fields (``sub_workflow_id``) identify the subclass; everything else
     decodes as plain ``TaskError``. The reserved-key scan
     (``_scan_task_error_user_fields``) still applies in both branches
     via ``decode_value``.
 
     Args:
-        err_slot: The raw err-slot value from a TaskResult envelope.
+        err_slot: The raw err-slot value from a stored task result envelope.
 
     Returns:
-        A ``TaskError`` (or ``SubWorkflowError``) instance.
+        A ``TaskError`` (or ``SubWorkflowFailure``) instance.
 
     Raises:
         StrictJsonError: on reserved-key smuggling inside the err
             payload.
         ValueValidationError: when the payload doesn't satisfy the
-            chosen concrete class.
+            chosen concrete class, or it holds the key ``code``.
     """
+    model_form = _model_error_form(err_slot)
     if (
-        isinstance(err_slot, dict)
-        and 'sub_workflow_id' in cast('dict[str, Json]', err_slot)
+        isinstance(model_form, dict)
+        and 'sub_workflow_id' in cast('dict[str, Json]', model_form)
     ):
-        decoded = decode_value(err_slot, SubWorkflowError)
-        if not isinstance(decoded, SubWorkflowError):
+        decoded = decode_value(model_form, SubWorkflowFailure)
+        if not isinstance(decoded, SubWorkflowFailure):
             # Defensive: TypeAdapter should always return the concrete
             # class. If it ever doesn't, refuse to silently downgrade.
             raise StrictJsonError(
-                f'SubWorkflowError decode returned '
+                f'SubWorkflowFailure decode returned '
                 f'{type(decoded).__name__!r}',
             )
         return decoded
-    decoded_base = decode_value(err_slot, TaskError)
+    decoded_base = decode_value(model_form, TaskError)
     if not isinstance(decoded_base, TaskError):
         raise StrictJsonError(
             f'TaskError decode returned {type(decoded_base).__name__!r}',
@@ -1156,8 +1228,8 @@ def validate_task_result_envelope(raw: Json) -> dict[str, Json]:
 def decode_task_result(
     raw: Json,
     ok_type: TypeAnnotation,
-) -> TaskResult[Any, TaskError]:
-    """Decode a wire envelope back to `TaskResult[OkT, TaskError]`.
+) -> TaskOutcome[Any, TaskError]:
+    """Decode a wire envelope back to `TaskOutcome[OkT, TaskError]`.
 
     Validates the envelope shape strictly (must be a dict carrying
     `__h_task_result__: True`, with exactly the keys
@@ -1177,7 +1249,7 @@ def decode_task_result(
         ok_type: Declared `OkT` for the ok-slot decoding.
 
     Returns:
-        The reconstructed `TaskResult`.
+        The reconstructed outcome: `Succeeded(value)` or `Failed(error)`.
 
     Raises:
         StrictJsonError: on envelope shape failure or reserved-key
@@ -1189,13 +1261,13 @@ def decode_task_result(
     ok_slot = envelope.get('ok')
     err_slot = envelope.get('err')
     if err_slot is not None:
-        # Polymorphic decode preserves SubWorkflowError subclass fields
-        # (``sub_workflow_id`` / ``sub_workflow_summary``). The engine
-        # emits these at ``on_subworkflow_complete``; without subclass
+        # Polymorphic decode preserves SubWorkflowFailure subclass fields
+        # (``sub_workflow_id`` / ``sub_workflow_summary``). The core
+        # engine stores these in the parent node; without subclass
         # routing TypeAdapter(TaskError) would drop them.
-        return TaskResult(err=decode_task_error(err_slot))
+        return Failed(decode_task_error(err_slot))
     decoded_ok = decode_value(ok_slot, ok_type)
-    return TaskResult(ok=decoded_ok)
+    return Succeeded(decoded_ok)
 
 
 def _is_task_error_type(expected_type: TypeAnnotation) -> bool:
@@ -1204,12 +1276,16 @@ def _is_task_error_type(expected_type: TypeAnnotation) -> bool:
 
 def _scan_task_error_user_fields(dumped_json: Json) -> None:
     """Scan a TaskError dump with the path-specific allowance for
-    `error_code`'s built-in-code discriminator.
+    `code`'s built-in-code discriminator.
 
-    TaskError's `error_code` serializer emits exactly
+    The value is the model form, with the key `code`: the dump of the
+    model at encode, and the stored object after `_model_error_form` at
+    decode.
+
+    TaskError's `code` serializer emits exactly
     `{"__builtin_task_code__": "<str>"}` for built-in codes and a
-    plain string for user codes. Anything else under
-    `error_code` — additional keys, other reserved keys alongside the
+    plain string for custom codes. Anything else under
+    `code` — additional keys, other reserved keys alongside the
     discriminator — is rejected as smuggled. `data`, `exception`, and
     `message` are user-controlled and get the full strict scan.
     """
@@ -1217,27 +1293,27 @@ def _scan_task_error_user_fields(dumped_json: Json) -> None:
         return
     d = cast('dict[str, Json]', dumped_json)
     for key, sub_value in d.items():
-        if key == 'error_code':
-            _scan_task_error_error_code(sub_value)
+        if key == _MODEL_CODE_FIELD:
+            _scan_task_error_code(sub_value)
             continue
         _scan_reserved_keys(sub_value)
 
 
-def _scan_task_error_error_code(value: Json) -> None:
-    """Path-aware scan for TaskError.error_code.
+def _scan_task_error_code(value: Json) -> None:
+    """Path-aware scan for TaskError.code.
 
     The TaskError serializer emits one of exactly two shapes:
-    - `"some_user_code"` (plain string for user codes)
+    - `"some_custom_code"` (plain string for custom codes)
     - `{"__builtin_task_code__": "BUILTIN_NAME"}` (single-key dict for
       built-in codes)
 
-    Any other dict shape under `error_code` is malformed and must be
+    Any other dict shape under `code` is malformed and must be
     rejected. The earlier version of this scan relied on TypeAdapter
     to surface a shape error for the
     `{"__builtin_task_code__": "X", "other": "y"}` case, but Pydantic
-    silently drops unknown keys during error_code validation — so an
+    silently drops unknown keys during code validation — so an
     extra non-reserved key would pass through unobserved. Reject any
-    deviation from the documented two shapes here. A null `error_code` is not
+    deviation from the documented two shapes here. A null `code` is not
     a dict, so the TypeAdapter refuses it with its own cause.
 
     When the deviation includes a reserved key (e.g.
@@ -1270,7 +1346,7 @@ def _scan_task_error_error_code(value: Json) -> None:
                 f'reserved key {key!r} in user-originated data',
             )
     raise StrictJsonError(
-        f'invalid TaskError.error_code shape: expected a plain string '
+        f'invalid TaskError.code shape: expected a plain string '
         f'or {{"__builtin_task_code__": "<str>"}}; got dict '
         f'with keys {sorted(d.keys())}',
     )

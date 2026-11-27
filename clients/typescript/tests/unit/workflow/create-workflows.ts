@@ -11,19 +11,19 @@ export const ping = defineTask({ name: "ping", input: {}, output: h.int() });
 
 /** A workflow with no params and one node. */
 export const plain = defineWorkflow(
-  { name: "plain", definitionKey: "tests.plain.v1", output: h.int(), params: {} },
+  { name: "plain", definitionKey: "tests.plain.v1", outputType: h.int(), parameters: {} },
   (w) => ({
-    output: w.task(ping, {}, { id: "ping" }),
+    output: w.task(ping, {}, { nodeId: "ping" }),
   }),
 );
 
 /** A workflow with no params whose build has a duplicate node id. */
 export const duplicateIds = defineWorkflow(
-  { name: "duplicate", definitionKey: "tests.duplicate.v1", output: h.int(), params: {} },
+  { name: "duplicate", definitionKey: "tests.duplicate.v1", outputType: h.int(), parameters: {} },
   (w) => {
-    w.task(ping, {}, { id: "same" });
+    w.task(ping, {}, { nodeId: "same" });
 
-    return { output: w.task(ping, {}, { id: "same" }) };
+    return { output: w.task(ping, {}, { nodeId: "same" }) };
   },
 );
 

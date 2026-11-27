@@ -40,6 +40,7 @@ broker_config = PostgresConfig(
 
 0.8.0:
 
+<!-- check: skip elided -- the 0.8.0 names; a later release renames them -->
 ```python
 from pydantic import SecretStr
 
@@ -52,7 +53,7 @@ broker_config = PostgresConfig(
 )
 ```
 
-A URL that names a driver fails when `PostgresConfig` is built. It raises `ConfigurationError` with `HRS-203` (`BROKER_INVALID_URL`). The error names the scheme, not the rest of the URL. Its help names the fix: `replace 'postgresql+psycopg://' with 'postgresql://'`. A URL with another scheme, or with no scheme, also gets `HRS-203`.
+A URL that names a driver fails when `PostgresConfig` is built. It raises `ConfigurationError` with `HRS-203` (`DATABASE_INVALID_URL`). The error names the scheme, not the rest of the URL. Its help names the fix: `replace 'postgresql+psycopg://' with 'postgresql://'`. A URL with another scheme, or with no scheme, also gets `HRS-203`.
 
 Change the URL where the deployment keeps it: in the code, in an environment variable or in a secret store. `horsies web --database-url` and `--session-database-url` take the same schemes.
 
@@ -136,6 +137,7 @@ result = app.get_result(UUID(stored_task_id))
 | The `workflow_id` of `pause_workflow`, `resume_workflow`, `pause_workflow_sync` and `resume_workflow_sync` | Give a `uuid.UUID` |
 | The `workflow_id` of the handle error classes | Still a `str`: the canonical text of the UUID (lower case, with hyphens). In 0.7 it was the text that the handle was made from |
 
+<!-- check: skip elided -- the 0.8.0 names; a later release renames them -->
 ```python
 from horsies import Err, Ok, WorkflowHandle
 
@@ -153,6 +155,7 @@ In 0.7, the `exception` field of a database failure held the exception of the dr
 
 Code that tests the class of `exception` against a SQLAlchemy or psycopg class must test the core classes. The SQLSTATE of a server error is `CoreServerError.sqlstate`:
 
+<!-- check: skip elided -- the 0.8.0 names; a later release renames them -->
 ```python
 from horsies import BrokerOperationFailed, CoreServerError
 

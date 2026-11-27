@@ -11,8 +11,14 @@ import os
 import threading
 import time
 
-from horsies.core.models.tasks import Execution, RetryPolicy, TaskError, TaskResult
-from horsies.core.types.result import Err, Ok
+from horsies.core.models.tasks import (
+    Execution,
+    OperationalCode,
+    OutcomeCode,
+    RetryPolicy,
+    TaskError,
+)
+from horsies.core.types.result import Err, Ok, Result
 
 from tests.e2e.tasks.basic import simple_task
 from tests.e2e.tasks.instance import app
@@ -31,27 +37,27 @@ async def remember_the_loop() -> None:
 
 
 @app.task(
-    task_name='e2e_shared_sleep',
+    name='e2e_shared_sleep',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=30_000,
 )
-async def shared_sleep(*, seconds: float) -> TaskResult[str, TaskError]:
+async def shared_sleep(*, seconds: float) -> Result[str, TaskError]:
     """Sleep on the loop. Return ``pid:start:end`` in seconds since the epoch."""
     started = time.time()
     await asyncio.sleep(seconds)
-    return TaskResult(ok=f'{os.getpid()}:{started}:{time.time()}')
+    return Ok(f'{os.getpid()}:{started}:{time.time()}')
 
 
 @app.task(
-    task_name='e2e_shared_task_send_pool',
+    name='e2e_shared_task_send_pool',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=30_000,
 )
-async def shared_task_send_pool() -> TaskResult[str, TaskError]:
+async def shared_task_send_pool() -> Result[str, TaskError]:
     """The pool of the app broker that task code in this child opens when it
     sends: ``pool_size:max_overflow``."""
     config = app.get_broker().config
-    return TaskResult(ok=f'{config.pool_size}:{config.max_overflow}')
+    return Ok(f'{config.pool_size}:{config.max_overflow}')
 
 
 HELD_EXECUTOR_CALLS = 8
@@ -60,11 +66,11 @@ once: more than any executor size that the e2e profiles set."""
 
 
 @app.task(
-    task_name='e2e_shared_executor_threads',
+    name='e2e_shared_executor_threads',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=30_000,
 )
-async def shared_executor_threads() -> TaskResult[int, TaskError]:
+async def shared_executor_threads() -> Result[int, TaskError]:
     """The threads that run ``HELD_EXECUTOR_CALLS`` calls of the default
     executor, each held until all are sent: the size of that executor."""
     names: set[str] = set()
@@ -83,19 +89,19 @@ async def shared_executor_threads() -> TaskResult[int, TaskError]:
     await asyncio.sleep(0.2)
     release.set()
     _ = await asyncio.gather(*pending)
-    return TaskResult(ok=len(names))
+    return Ok(len(names))
 
 
 @app.task(
-    task_name='e2e_shared_hang',
+    name='e2e_shared_hang',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=HANG_TIMEOUT_MS,
     cancel_grace_ms=1_000,
 )
-async def shared_hang() -> TaskResult[str, TaskError]:
+async def shared_hang() -> Result[str, TaskError]:
     """Wait far past the timeout; the cancel at the deadline ends it."""
     await asyncio.sleep(3600)
-    return TaskResult(ok='never')
+    return Ok('never')
 
 
 STOP_TIMEOUT_MS = 2_000
@@ -113,13 +119,13 @@ def _first_attempt(marker: str) -> bool:
 
 
 @app.task(
-    task_name='e2e_shared_stuck_once',
+    name='e2e_shared_stuck_once',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=STOP_TIMEOUT_MS,
     cancel_grace_ms=100,
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=['TASK_TIMEOUT']),
+    retry_policy=RetryPolicy.fixed([1], retry_for=[OutcomeCode.TASK_TIMEOUT]),
 )
-async def shared_stuck_once(*, marker: str) -> TaskResult[str, TaskError]:
+async def shared_stuck_once(*, marker: str) -> Result[str, TaskError]:
     """The first attempt ignores every cancel; the retry returns its pid."""
     if _first_attempt(marker):
         while True:
@@ -127,21 +133,21 @@ async def shared_stuck_once(*, marker: str) -> TaskResult[str, TaskError]:
                 await asyncio.sleep(60)
             except asyncio.CancelledError:
                 continue
-    return TaskResult(ok=str(os.getpid()))
+    return Ok(str(os.getpid()))
 
 
 @app.task(
-    task_name='e2e_shared_blocks_once',
+    name='e2e_shared_blocks_once',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=30_000,
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=['TASK_BLOCKED_LOOP']),
+    retry_policy=RetryPolicy.fixed([1], retry_for=[OperationalCode.TASK_BLOCKED_LOOP]),
 )
-async def shared_blocks_once(*, marker: str) -> TaskResult[str, TaskError]:
+async def shared_blocks_once(*, marker: str) -> Result[str, TaskError]:
     """The first attempt blocks the event loop past the block limit; the
     retry returns its pid."""
     if _first_attempt(marker):
         time.sleep(30)
-    return TaskResult(ok=str(os.getpid()))
+    return Ok(str(os.getpid()))
 
 
 LAZY_CLIENT_TIMEOUT_MS = 1_000
@@ -159,41 +165,41 @@ async def _keepalive() -> None:
 
 
 @app.task(
-    task_name='e2e_shared_lazy_client',
+    name='e2e_shared_lazy_client',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=LAZY_CLIENT_TIMEOUT_MS,
     cancel_grace_ms=LAZY_CLIENT_GRACE_MS,
 )
-async def shared_lazy_client() -> TaskResult[str, TaskError]:
+async def shared_lazy_client() -> Result[str, TaskError]:
     """Open a client on first use, not in the start hook: its background
     task carries the mark of this task. Return the pid."""
     if not _LAZY_CLIENT:
         _LAZY_CLIENT.append(asyncio.get_running_loop().create_task(_keepalive()))
-    return TaskResult(ok=str(os.getpid()))
+    return Ok(str(os.getpid()))
 
 
 @app.task(
-    task_name='e2e_shared_hook_loop',
+    name='e2e_shared_hook_loop',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=10_000,
 )
-async def shared_hook_loop() -> TaskResult[str, TaskError]:
+async def shared_hook_loop() -> Result[str, TaskError]:
     """Report whether the start hook ran on the loop of this task."""
     same = len(_HOOK_LOOPS) == 1 and _HOOK_LOOPS[0] is asyncio.get_running_loop()
-    return TaskResult(ok=f'{os.getpid()}:{same}')
+    return Ok(f'{os.getpid()}:{same}')
 
 
 @app.task(
-    task_name='e2e_shared_sends',
+    name='e2e_shared_sends',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=10_000,
 )
-async def shared_sends(*, x: int) -> TaskResult[str, TaskError]:
+async def shared_sends(*, x: int) -> Result[str, TaskError]:
     """Send a task with ``send_async`` from a shared task. Return its id."""
     match await simple_task.send_async(x=x):
         case Ok(handle):
-            return TaskResult(ok=str(handle.task_id))
+            return Ok(str(handle.task_id))
         case Err(send_err):
-            return TaskResult(
-                err=TaskError(error_code='SEND_FAILED', message=send_err.message),
+            return Err(
+                TaskError(code='SEND_FAILED', message=send_err.message),
             )

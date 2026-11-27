@@ -89,10 +89,6 @@ impl CauseRecord {
 
     /// The cause record of the core error `error` of the operation
     /// `subject`. Pure.
-    #[allow(
-        dead_code,
-        reason = "the operations of later areas report a core error as the cause of a record"
-    )]
     pub fn of(subject: &str, error: &impl CoreFailureSource) -> Self {
         Self::new(
             subject,

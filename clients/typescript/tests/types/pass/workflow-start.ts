@@ -1,5 +1,5 @@
 // Compile-pass cases of the sketch's start and handle code (section 5.3): the start error switch with a full match,
-// retryStart of ENQUEUE_FAILED, get with open user codes, resultFor typed by the node's contract, pause, resume,
+// resendStart of ENQUEUE_FAILED, get with open custom codes, resultFor typed by the node's contract, pause, resume,
 // cancel, and a handle by id.
 
 import {
@@ -29,22 +29,22 @@ const validate = defineTask({ name: "validate", input: { orderId: h.uuid() }, ou
 
 const charge = defineTask({
   name: "charge",
-  input: { amount: h.resultOf(h.int()) },
+  input: { amount: h.taskOutcome(validate) },
   output: Receipt,
-  errors: ["PAYMENT_DECLINED"],
+  errorCodes: ["PAYMENT_DECLINED"],
 });
 
 const fulfil = defineWorkflow(
   {
     name: "fulfil",
     definitionKey: "shop.fulfil.v1",
-    output: Receipt,
-    params: { orderId: h.uuid() },
+    outputType: Receipt,
+    parameters: { orderId: h.uuid() },
     checkCases: [{ orderId: "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b" }],
   },
   (w, { orderId }) => {
-    const validated = w.task(validate, { orderId }, { id: "validate" });
-    const charged = w.task(charge, { amount: validated }, { id: "charge" });
+    const validated = w.task(validate, { orderId }, { nodeId: "validate" });
+    const charged = w.task(charge, { amount: validated }, { nodeId: "charge" });
 
     return { output: charged, successPolicy: { cases: [{ required: [charged] }], optional: [validated] } };
   },
@@ -58,10 +58,11 @@ export async function startAndRead(workflowId: WorkflowId): Promise<void> {
       case "WORKFLOW_COMMAND_CONFLICT":
       case "WORKFLOW_ID_CONFLICT":
       case "VALIDATION_FAILED":
+      case "SEAT_RELAY_FULL":
         break;
       case "ENQUEUE_FAILED":
         if (started.error.retryable) {
-          void (await app.retryStart(started.error));
+          void (await app.resendStart(started.error));
         }
 
         break;
@@ -73,7 +74,7 @@ export async function startAndRead(workflowId: WorkflowId): Promise<void> {
   }
 
   const wf = started.value;
-  const result = await wf.get({ timeoutMs: 60_000 });
+  const result = await wf.get({ waitMs: 60_000 });
 
   if (result.ok) {
     expectType<Equal<typeof result.value, TaskOutcome<{ receiptId: string }, string>>>();
@@ -115,7 +116,7 @@ export function readContext(context: WorkflowContext): void {
   }
 
   if (summary.ok) {
-    expectType<Equal<typeof summary.value.totalTasks, number>>();
+    expectType<Equal<typeof summary.value.totalNodes, number>>();
   }
 
   expectType<Equal<ReturnType<typeof context.hasResult>, boolean>>();

@@ -1,5 +1,5 @@
 //! One core statement in a transaction that the caller owns (Python
-//! `rerun_task(connection, ...)`: the core builds each statement, and the
+//! `rerun_task_in_async(connection, ...)`: the core builds each statement, and the
 //! caller's connection runs it, so all of it commits or rolls back with the
 //! caller's own writes).
 //!

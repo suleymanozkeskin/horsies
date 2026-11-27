@@ -2,220 +2,400 @@
 
 import type { CoreCause, NoCause } from "./error_detail.ts";
 
-export type BrokerOperationFailedCode =
+export type DatabaseOperationFailedCode =
   | "SCHEMA_INIT_FAILED"
   | "TASK_INFO_QUERY_FAILED"
   | "MONITORING_QUERY_FAILED"
-  | "DB_PING_FAILED"
+  | "DATABASE_PING_FAILED"
   | "WORKER_PING_FAILED"
   | "CLEANUP_FAILED"
   | "CLOSE_FAILED"
   | "LISTENER_START_FAILED"
   | "LISTENER_SUBSCRIBE_FAILED";
 
-export interface BrokerOperationFailed {
-  readonly code: BrokerOperationFailedCode;
-  readonly message: string;
-  readonly retryable: boolean;
-  readonly exception: CoreCause;
+export interface DatabaseOperationFailedCodeKind {
+  readonly SCHEMA_INIT_FAILED: "schemaInitFailed";
+  readonly TASK_INFO_QUERY_FAILED: "taskInfoQueryFailed";
+  readonly MONITORING_QUERY_FAILED: "monitoringQueryFailed";
+  readonly DATABASE_PING_FAILED: "databasePingFailed";
+  readonly WORKER_PING_FAILED: "workerPingFailed";
+  readonly CLEANUP_FAILED: "cleanupFailed";
+  readonly CLOSE_FAILED: "closeFailed";
+  readonly LISTENER_START_FAILED: "listenerStartFailed";
+  readonly LISTENER_SUBSCRIBE_FAILED: "listenerSubscribeFailed";
 }
 
-export interface BrokerEnqueueFailed {
+export type DatabaseOperationFailed<Code extends DatabaseOperationFailedCode = DatabaseOperationFailedCode> = {
+  readonly [Member in Code]: {
+    readonly kind: DatabaseOperationFailedCodeKind[Member];
+    readonly code: Member;
+    readonly message: string;
+    readonly retryable: boolean;
+    readonly cause: CoreCause;
+  };
+}[Code];
+
+export interface DatabaseEnqueueFailed {
+  readonly kind: "enqueueFailed";
   readonly code: "ENQUEUE_FAILED";
   readonly message: string;
   readonly retryable: boolean;
-  readonly exception: CoreCause | NoCause;
+  readonly cause: CoreCause | NoCause;
 }
 
-export interface BrokerPayloadMismatch {
+export interface DatabasePayloadMismatch {
+  readonly kind: "payloadMismatch";
   readonly code: "PAYLOAD_MISMATCH";
   readonly retryable: false;
   readonly message: string;
 }
 
-export interface BrokerIdempotencyKeyConflict {
+export interface DatabaseIdempotencyKeyConflict {
+  readonly kind: "idempotencyKeyConflict";
   readonly code: "IDEMPOTENCY_KEY_CONFLICT";
   readonly retryable: false;
   readonly message: string;
   readonly ownerTaskId: string;
 }
 
-export interface BrokerInvalidJsonPayload {
+export interface DatabaseInvalidJsonPayload {
+  readonly kind: "invalidJsonPayload";
   readonly code: "INVALID_JSON_PAYLOAD";
   readonly retryable: false;
   readonly message: string;
-  readonly exception: CoreCause | NoCause;
+  readonly cause: CoreCause | NoCause;
 }
 
-export interface BrokerInvalidTaskOptions {
+export interface DatabaseInvalidTaskOptions {
+  readonly kind: "invalidTaskOptions";
   readonly code: "INVALID_TASK_OPTIONS";
   readonly retryable: false;
   readonly message: string;
-  readonly exception: CoreCause | NoCause;
+  readonly cause: CoreCause | NoCause;
 }
 
-export interface BrokerInvalidInput {
+export interface DatabaseInvalidInput {
+  readonly kind: "invalidInput";
   readonly code: "INVALID_INPUT";
   readonly retryable: false;
   readonly message: string;
-  readonly exception: CoreCause | NoCause;
+  readonly cause: CoreCause | NoCause;
 }
 
-export interface BrokerListenerDisabled {
+export interface DatabaseListenerDisabled {
+  readonly kind: "listenerDisabled";
   readonly code: "LISTENER_DISABLED";
   readonly retryable: false;
   readonly message: string;
 }
 
-export interface BrokerWaitInsideTask {
+export interface DatabaseWaitInsideTask {
+  readonly kind: "waitInsideTask";
   readonly code: "WAIT_INSIDE_TASK";
   readonly retryable: false;
   readonly message: string;
 }
 
-export type BrokerCoreError =
-  | BrokerOperationFailed
-  | BrokerEnqueueFailed
-  | BrokerPayloadMismatch
-  | BrokerIdempotencyKeyConflict
-  | BrokerInvalidJsonPayload
-  | BrokerInvalidTaskOptions
-  | BrokerInvalidInput
-  | BrokerListenerDisabled
-  | BrokerWaitInsideTask;
+export type DatabaseCoreError =
+  | DatabaseOperationFailed
+  | DatabaseEnqueueFailed
+  | DatabasePayloadMismatch
+  | DatabaseIdempotencyKeyConflict
+  | DatabaseInvalidJsonPayload
+  | DatabaseInvalidTaskOptions
+  | DatabaseInvalidInput
+  | DatabaseListenerDisabled
+  | DatabaseWaitInsideTask;
 
-export type BrokerCoreEnqueueError =
-  | BrokerEnqueueFailed
-  | BrokerPayloadMismatch
-  | BrokerIdempotencyKeyConflict
-  | BrokerInvalidTaskOptions
-  | BrokerInvalidInput;
+export type DatabaseCoreEnqueueError =
+  | DatabaseEnqueueFailed
+  | DatabasePayloadMismatch
+  | DatabaseIdempotencyKeyConflict
+  | DatabaseInvalidTaskOptions
+  | DatabaseInvalidInput;
 
-export interface NativeBrokerOperationFailed {
-  readonly class: "BrokerOperationFailed";
+export interface NativeDatabaseOperationFailed {
+  readonly class: "DatabaseOperationFailed";
   readonly slots: {
-    readonly code: BrokerOperationFailedCode;
+    readonly code: DatabaseOperationFailedCode;
     readonly message: string;
     readonly retryable: boolean;
-    readonly exception: CoreCause;
+    readonly cause: CoreCause;
   };
 }
 
-export interface NativeBrokerEnqueueFailed {
-  readonly class: "BrokerEnqueueFailed";
+export interface NativeDatabaseEnqueueFailed {
+  readonly class: "DatabaseEnqueueFailed";
   readonly slots: {
     readonly message: string;
     readonly retryable: boolean;
-    readonly exception: CoreCause | NoCause;
+    readonly cause: CoreCause | NoCause;
   };
 }
 
-export interface NativeBrokerPayloadMismatch {
-  readonly class: "BrokerPayloadMismatch";
+export interface NativeDatabasePayloadMismatch {
+  readonly class: "DatabasePayloadMismatch";
   readonly slots: {
     readonly message: string;
   };
 }
 
-export interface NativeBrokerIdempotencyKeyConflict {
-  readonly class: "BrokerIdempotencyKeyConflict";
+export interface NativeDatabaseIdempotencyKeyConflict {
+  readonly class: "DatabaseIdempotencyKeyConflict";
   readonly slots: {
     readonly message: string;
     readonly owner_task_id: string;
   };
 }
 
-export interface NativeBrokerInvalidJsonPayload {
-  readonly class: "BrokerInvalidJsonPayload";
+export interface NativeDatabaseInvalidJsonPayload {
+  readonly class: "DatabaseInvalidJsonPayload";
   readonly slots: {
     readonly message: string;
-    readonly exception: CoreCause | NoCause;
+    readonly cause: CoreCause | NoCause;
   };
 }
 
-export interface NativeBrokerInvalidTaskOptions {
-  readonly class: "BrokerInvalidTaskOptions";
+export interface NativeDatabaseInvalidTaskOptions {
+  readonly class: "DatabaseInvalidTaskOptions";
   readonly slots: {
     readonly message: string;
-    readonly exception: CoreCause | NoCause;
+    readonly cause: CoreCause | NoCause;
   };
 }
 
-export interface NativeBrokerInvalidInput {
-  readonly class: "BrokerInvalidInput";
+export interface NativeDatabaseInvalidInput {
+  readonly class: "DatabaseInvalidInput";
   readonly slots: {
     readonly message: string;
-    readonly exception: CoreCause | NoCause;
+    readonly cause: CoreCause | NoCause;
   };
 }
 
-export interface NativeBrokerListenerDisabled {
-  readonly class: "BrokerListenerDisabled";
+export interface NativeDatabaseListenerDisabled {
+  readonly class: "DatabaseListenerDisabled";
   readonly slots: {
     readonly message: string;
   };
 }
 
-export interface NativeBrokerWaitInsideTask {
-  readonly class: "BrokerWaitInsideTask";
+export interface NativeDatabaseWaitInsideTask {
+  readonly class: "DatabaseWaitInsideTask";
   readonly slots: {
     readonly message: string;
   };
 }
 
 /** The value that the bridge gives: the class name and the instance slots by core name. */
-export type NativeBrokerCoreError =
-  | NativeBrokerOperationFailed
-  | NativeBrokerEnqueueFailed
-  | NativeBrokerPayloadMismatch
-  | NativeBrokerIdempotencyKeyConflict
-  | NativeBrokerInvalidJsonPayload
-  | NativeBrokerInvalidTaskOptions
-  | NativeBrokerInvalidInput
-  | NativeBrokerListenerDisabled
-  | NativeBrokerWaitInsideTask;
+export type NativeDatabaseCoreError =
+  | NativeDatabaseOperationFailed
+  | NativeDatabaseEnqueueFailed
+  | NativeDatabasePayloadMismatch
+  | NativeDatabaseIdempotencyKeyConflict
+  | NativeDatabaseInvalidJsonPayload
+  | NativeDatabaseInvalidTaskOptions
+  | NativeDatabaseInvalidInput
+  | NativeDatabaseListenerDisabled
+  | NativeDatabaseWaitInsideTask;
 
 function unknownClass(converter: string, raw: { readonly class: string }): never {
   throw new Error(`${converter}: unknown class name ${raw.class}`);
 }
 
-/** The frozen value of `raw`. A class name that this build does not know throws. */
-export function brokerCoreErrorFromNative(raw: NativeBrokerCoreError): BrokerCoreError {
-  switch (raw.class) {
-    case "BrokerOperationFailed": {
-      const value: BrokerOperationFailed = {
+function unknownCode(converter: string, code: string): never {
+  throw new Error(`${converter}: unknown code ${code}`);
+}
+
+/** The frozen value of `raw`, its `kind` named after its code. A code that this build does not know throws. */
+function databaseOperationFailedFromNative(raw: NativeDatabaseOperationFailed): DatabaseOperationFailed {
+  switch (raw.slots.code) {
+    case "SCHEMA_INIT_FAILED": {
+      const value: DatabaseOperationFailed<"SCHEMA_INIT_FAILED"> = {
+        kind: "schemaInitFailed",
         code: raw.slots.code,
         message: raw.slots.message,
         retryable: raw.slots.retryable,
-        exception: Object.freeze({ ...raw.slots.exception }),
+        cause: Object.freeze({ ...raw.slots.cause }),
       };
 
       return Object.freeze(
         Object.defineProperties(value, {
           message: { enumerable: false },
-          exception: { enumerable: false },
+          cause: { enumerable: false },
         }),
       );
     }
 
-    case "BrokerEnqueueFailed": {
-      const value: BrokerEnqueueFailed = {
+    case "TASK_INFO_QUERY_FAILED": {
+      const value: DatabaseOperationFailed<"TASK_INFO_QUERY_FAILED"> = {
+        kind: "taskInfoQueryFailed",
+        code: raw.slots.code,
+        message: raw.slots.message,
+        retryable: raw.slots.retryable,
+        cause: Object.freeze({ ...raw.slots.cause }),
+      };
+
+      return Object.freeze(
+        Object.defineProperties(value, {
+          message: { enumerable: false },
+          cause: { enumerable: false },
+        }),
+      );
+    }
+
+    case "MONITORING_QUERY_FAILED": {
+      const value: DatabaseOperationFailed<"MONITORING_QUERY_FAILED"> = {
+        kind: "monitoringQueryFailed",
+        code: raw.slots.code,
+        message: raw.slots.message,
+        retryable: raw.slots.retryable,
+        cause: Object.freeze({ ...raw.slots.cause }),
+      };
+
+      return Object.freeze(
+        Object.defineProperties(value, {
+          message: { enumerable: false },
+          cause: { enumerable: false },
+        }),
+      );
+    }
+
+    case "DATABASE_PING_FAILED": {
+      const value: DatabaseOperationFailed<"DATABASE_PING_FAILED"> = {
+        kind: "databasePingFailed",
+        code: raw.slots.code,
+        message: raw.slots.message,
+        retryable: raw.slots.retryable,
+        cause: Object.freeze({ ...raw.slots.cause }),
+      };
+
+      return Object.freeze(
+        Object.defineProperties(value, {
+          message: { enumerable: false },
+          cause: { enumerable: false },
+        }),
+      );
+    }
+
+    case "WORKER_PING_FAILED": {
+      const value: DatabaseOperationFailed<"WORKER_PING_FAILED"> = {
+        kind: "workerPingFailed",
+        code: raw.slots.code,
+        message: raw.slots.message,
+        retryable: raw.slots.retryable,
+        cause: Object.freeze({ ...raw.slots.cause }),
+      };
+
+      return Object.freeze(
+        Object.defineProperties(value, {
+          message: { enumerable: false },
+          cause: { enumerable: false },
+        }),
+      );
+    }
+
+    case "CLEANUP_FAILED": {
+      const value: DatabaseOperationFailed<"CLEANUP_FAILED"> = {
+        kind: "cleanupFailed",
+        code: raw.slots.code,
+        message: raw.slots.message,
+        retryable: raw.slots.retryable,
+        cause: Object.freeze({ ...raw.slots.cause }),
+      };
+
+      return Object.freeze(
+        Object.defineProperties(value, {
+          message: { enumerable: false },
+          cause: { enumerable: false },
+        }),
+      );
+    }
+
+    case "CLOSE_FAILED": {
+      const value: DatabaseOperationFailed<"CLOSE_FAILED"> = {
+        kind: "closeFailed",
+        code: raw.slots.code,
+        message: raw.slots.message,
+        retryable: raw.slots.retryable,
+        cause: Object.freeze({ ...raw.slots.cause }),
+      };
+
+      return Object.freeze(
+        Object.defineProperties(value, {
+          message: { enumerable: false },
+          cause: { enumerable: false },
+        }),
+      );
+    }
+
+    case "LISTENER_START_FAILED": {
+      const value: DatabaseOperationFailed<"LISTENER_START_FAILED"> = {
+        kind: "listenerStartFailed",
+        code: raw.slots.code,
+        message: raw.slots.message,
+        retryable: raw.slots.retryable,
+        cause: Object.freeze({ ...raw.slots.cause }),
+      };
+
+      return Object.freeze(
+        Object.defineProperties(value, {
+          message: { enumerable: false },
+          cause: { enumerable: false },
+        }),
+      );
+    }
+
+    case "LISTENER_SUBSCRIBE_FAILED": {
+      const value: DatabaseOperationFailed<"LISTENER_SUBSCRIBE_FAILED"> = {
+        kind: "listenerSubscribeFailed",
+        code: raw.slots.code,
+        message: raw.slots.message,
+        retryable: raw.slots.retryable,
+        cause: Object.freeze({ ...raw.slots.cause }),
+      };
+
+      return Object.freeze(
+        Object.defineProperties(value, {
+          message: { enumerable: false },
+          cause: { enumerable: false },
+        }),
+      );
+    }
+
+    default: {
+      const unreachable: never = raw.slots.code;
+
+      return unknownCode("databaseOperationFailedFromNative", unreachable);
+    }
+  }
+}
+
+/** The frozen value of `raw`. A class name that this build does not know throws. */
+export function databaseCoreErrorFromNative(raw: NativeDatabaseCoreError): DatabaseCoreError {
+  switch (raw.class) {
+    case "DatabaseOperationFailed":
+      return databaseOperationFailedFromNative(raw);
+
+    case "DatabaseEnqueueFailed": {
+      const value: DatabaseEnqueueFailed = {
+        kind: "enqueueFailed",
         code: "ENQUEUE_FAILED",
         message: raw.slots.message,
         retryable: raw.slots.retryable,
-        exception: Object.freeze({ ...raw.slots.exception }),
+        cause: Object.freeze({ ...raw.slots.cause }),
       };
 
       return Object.freeze(
         Object.defineProperties(value, {
           message: { enumerable: false },
-          exception: { enumerable: false },
+          cause: { enumerable: false },
         }),
       );
     }
 
-    case "BrokerPayloadMismatch": {
-      const value: BrokerPayloadMismatch = {
+    case "DatabasePayloadMismatch": {
+      const value: DatabasePayloadMismatch = {
+        kind: "payloadMismatch",
         code: "PAYLOAD_MISMATCH",
         retryable: false,
         message: raw.slots.message,
@@ -228,8 +408,9 @@ export function brokerCoreErrorFromNative(raw: NativeBrokerCoreError): BrokerCor
       );
     }
 
-    case "BrokerIdempotencyKeyConflict": {
-      const value: BrokerIdempotencyKeyConflict = {
+    case "DatabaseIdempotencyKeyConflict": {
+      const value: DatabaseIdempotencyKeyConflict = {
+        kind: "idempotencyKeyConflict",
         code: "IDEMPOTENCY_KEY_CONFLICT",
         retryable: false,
         message: raw.slots.message,
@@ -243,56 +424,60 @@ export function brokerCoreErrorFromNative(raw: NativeBrokerCoreError): BrokerCor
       );
     }
 
-    case "BrokerInvalidJsonPayload": {
-      const value: BrokerInvalidJsonPayload = {
+    case "DatabaseInvalidJsonPayload": {
+      const value: DatabaseInvalidJsonPayload = {
+        kind: "invalidJsonPayload",
         code: "INVALID_JSON_PAYLOAD",
         retryable: false,
         message: raw.slots.message,
-        exception: Object.freeze({ ...raw.slots.exception }),
+        cause: Object.freeze({ ...raw.slots.cause }),
       };
 
       return Object.freeze(
         Object.defineProperties(value, {
           message: { enumerable: false },
-          exception: { enumerable: false },
+          cause: { enumerable: false },
         }),
       );
     }
 
-    case "BrokerInvalidTaskOptions": {
-      const value: BrokerInvalidTaskOptions = {
+    case "DatabaseInvalidTaskOptions": {
+      const value: DatabaseInvalidTaskOptions = {
+        kind: "invalidTaskOptions",
         code: "INVALID_TASK_OPTIONS",
         retryable: false,
         message: raw.slots.message,
-        exception: Object.freeze({ ...raw.slots.exception }),
+        cause: Object.freeze({ ...raw.slots.cause }),
       };
 
       return Object.freeze(
         Object.defineProperties(value, {
           message: { enumerable: false },
-          exception: { enumerable: false },
+          cause: { enumerable: false },
         }),
       );
     }
 
-    case "BrokerInvalidInput": {
-      const value: BrokerInvalidInput = {
+    case "DatabaseInvalidInput": {
+      const value: DatabaseInvalidInput = {
+        kind: "invalidInput",
         code: "INVALID_INPUT",
         retryable: false,
         message: raw.slots.message,
-        exception: Object.freeze({ ...raw.slots.exception }),
+        cause: Object.freeze({ ...raw.slots.cause }),
       };
 
       return Object.freeze(
         Object.defineProperties(value, {
           message: { enumerable: false },
-          exception: { enumerable: false },
+          cause: { enumerable: false },
         }),
       );
     }
 
-    case "BrokerListenerDisabled": {
-      const value: BrokerListenerDisabled = {
+    case "DatabaseListenerDisabled": {
+      const value: DatabaseListenerDisabled = {
+        kind: "listenerDisabled",
         code: "LISTENER_DISABLED",
         retryable: false,
         message: raw.slots.message,
@@ -305,8 +490,9 @@ export function brokerCoreErrorFromNative(raw: NativeBrokerCoreError): BrokerCor
       );
     }
 
-    case "BrokerWaitInsideTask": {
-      const value: BrokerWaitInsideTask = {
+    case "DatabaseWaitInsideTask": {
+      const value: DatabaseWaitInsideTask = {
+        kind: "waitInsideTask",
         code: "WAIT_INSIDE_TASK",
         retryable: false,
         message: raw.slots.message,
@@ -322,7 +508,7 @@ export function brokerCoreErrorFromNative(raw: NativeBrokerCoreError): BrokerCor
     default: {
       const unreachable: never = raw;
 
-      return unknownClass("brokerCoreErrorFromNative", unreachable);
+      return unknownClass("databaseCoreErrorFromNative", unreachable);
     }
   }
 }

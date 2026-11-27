@@ -22,13 +22,13 @@ mod manifest_schema;
 /// /// Categorized broker operation failure codes.
 /// #[derive(horsies_core_derive::CodeCatalog)]
 /// #[code_catalog(module = "broker", base = "str_enum")]
-/// pub enum BrokerErrorCode {
+/// pub enum DatabaseErrorCode {
 ///     /// Schema initialization failed.
 ///     SchemaInitFailed,
 /// }
 /// ```
 ///
-/// Emits `impl horsies_core::catalog::CodeEnum for BrokerErrorCode`.
+/// Emits `impl horsies_core::catalog::CodeEnum for DatabaseErrorCode`.
 ///
 /// The Python name of a member is the variant name in SCREAMING_SNAKE_CASE.
 /// Its wire value is the same text, unless the variant sets
@@ -53,11 +53,11 @@ pub fn derive_code_catalog(item: TokenStream) -> TokenStream {
 ///
 /// ```ignore
 /// #[derive(horsies_core_derive::ErrorCatalog)]
-/// #[error_catalog(module = "broker_errors", code = "BrokerErrorCode",
-///     union = "BrokerCoreError", union_doc = "Every core failure.")]
-/// pub enum BrokerOperationError {
+/// #[error_catalog(module = "broker_errors", code = "DatabaseErrorCode",
+///     union = "DatabaseCoreError", union_doc = "Every core failure.")]
+/// pub enum DatabaseOperationError {
 ///     /// The task id holds a different command. Nothing was written.
-///     #[error_class(class = "BrokerPayloadMismatch", code = "PayloadMismatch", never_retryable)]
+///     #[error_class(class = "DatabasePayloadMismatch", code = "PayloadMismatch", never_retryable)]
 ///     PayloadMismatch {
 ///         #[error_slot(python = "Str", hidden)]
 ///         message: String,
@@ -87,9 +87,9 @@ pub fn derive_error_catalog(item: TokenStream) -> TokenStream {
 ///     union = "TaskActionCoreError", union_doc = "Every core failure.")]
 /// pub enum TaskActionError {
 ///     /// The cancel statement failed.
-///     #[error_class(class = "TaskActionDbOperationFailed", code = "DbOperationFailed",
+///     #[error_class(class = "TaskActionDatabaseOperationFailed", code = "DatabaseOperationFailed",
 ///         exception = "BaseException")]
-///     DbOperationFailed {
+///     DatabaseOperationFailed {
 ///         #[error_slot(python = "Str", hidden)]
 ///         message: String,
 ///         #[error_slot(cause)]

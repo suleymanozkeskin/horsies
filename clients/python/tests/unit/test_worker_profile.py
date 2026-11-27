@@ -12,7 +12,7 @@ from pydantic import BaseModel, SecretStr, ValidationError
 import horsies
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     HorsiesError,
     MultipleValidationErrors,
 )
@@ -78,7 +78,7 @@ def _app_config(
     **overrides: Any,
 ) -> AppConfig:
     return AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://user:pass@localhost/db'),
         ),
         worker_profiles=profiles,
@@ -89,7 +89,7 @@ def _app_config(
 def _errors_of(raised: HorsiesError) -> list[HorsiesError]:
     match raised:
         case MultipleValidationErrors(report=report):
-            return list(report.errors)
+            return list(report.refusals)
         case _:
             return [raised]
 
@@ -529,12 +529,12 @@ class TestChildPoolDefaults:
         assert IsolatedChildren(count=1).pool == IsolatedPool(
             min_size=0,
             max_size=PoolSize(connections=1),
-            check=False,
+            pre_ping=False,
         )
         assert IsolatedChildren(count=1).resolved_pool() == ResolvedPool(
             min_size=0,
             max_size=1,
-            check=False,
+            pre_ping=False,
         )
 
     def test_a_shared_async_child_derives_its_sizes_from_its_seats(self) -> None:
@@ -542,7 +542,7 @@ class TestChildPoolDefaults:
         assert children.pool == SharedPool(
             min_size=0,
             max_size=PoolSizeFromSeats(),
-            check=False,
+            pre_ping=False,
         )
         assert children.executor == ExecutorThreadsFromSeats()
 
@@ -551,7 +551,7 @@ class TestChildPoolDefaults:
         assert children.pool == SharedPool(
             min_size=0,
             max_size=PoolSizeFromSeats(),
-            check=False,
+            pre_ping=False,
         )
 
 
@@ -615,12 +615,12 @@ class TestChildPoolResolution:
         children = SharedAsyncChildren(
             count=1,
             seats=seats,
-            pool=SharedPool(min_size=1, check=False),
+            pool=SharedPool(min_size=1, pre_ping=False),
         )
         assert children.resolved_pool() == ResolvedPool(
             min_size=1,
             max_size=shared_async_pool_connections(seats),
-            check=False,
+            pre_ping=False,
         )
 
     @pytest.mark.parametrize(
@@ -632,7 +632,7 @@ class TestChildPoolResolution:
         assert children.resolved_pool() == ResolvedPool(
             min_size=0,
             max_size=shared_thread_pool_connections(seats),
-            check=False,
+            pre_ping=False,
         )
 
     def test_a_set_pool_size_is_kept_whatever_the_seats(self) -> None:
@@ -665,11 +665,11 @@ class TestChildPoolResolution:
         assert children.resolved_executor_threads() == 3
 
     def test_an_isolated_pool_resolves_to_its_set_values(self) -> None:
-        pool = IsolatedPool(min_size=2, max_size=PoolSize(connections=5), check=False)
+        pool = IsolatedPool(min_size=2, max_size=PoolSize(connections=5), pre_ping=False)
         assert IsolatedChildren(count=1, pool=pool).resolved_pool() == ResolvedPool(
             min_size=2,
             max_size=5,
-            check=False,
+            pre_ping=False,
         )
 
 
@@ -824,7 +824,7 @@ class TestAppConfigPoolChecks:
             _app_config({'p': profile})
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_WORKER_PROFILE
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE
         assert error.message == (
             "worker_profiles['p'].isolated.pool.min_size: 3 is above the pool "
             'max_size (1)'
@@ -863,7 +863,7 @@ class TestAppConfigPoolChecks:
             _app_config({'p': profile})
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_WORKER_PROFILE
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE
         assert error.message == (
             f"worker_profiles['p'].shared_async.pool.min_size: {derived + 1} is "
             f'above the pool max_size ({derived})'
@@ -947,7 +947,7 @@ class TestAppConfigParentPoolChecks:
             _app_config({'p': profile})
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_WORKER_PROFILE
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE
         assert error.message == (
             "worker_profiles['p'].pool.max_size: 2 connections is below the "
             'minimum of the pool of the worker process (3)'
@@ -991,7 +991,7 @@ class TestAppConfigProfileChecks:
     def test_a_profile_with_no_children_names_the_profile(self) -> None:
         with pytest.raises(ConfigurationError) as raised:
             _app_config({'empty': WorkerProfile()})
-        assert raised.value.code == ErrorCode.CONFIG_INVALID_WORKER_PROFILE
+        assert raised.value.code == HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE
         assert raised.value.message == (
             "worker_profiles['empty']: the profile starts no children"
         )
@@ -1003,7 +1003,7 @@ class TestAppConfigProfileChecks:
     def test_an_invalid_name_is_refused(self, name: str) -> None:
         with pytest.raises(ConfigurationError) as raised:
             _app_config({name: _isolated(1)})
-        assert raised.value.code == ErrorCode.CONFIG_INVALID_WORKER_PROFILE
+        assert raised.value.code == HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE
         assert raised.value.message == (
             f'worker_profiles[{name!r}]: the profile name is not valid'
         )
@@ -1022,7 +1022,7 @@ class TestAppConfigProfileChecks:
     ) -> None:
         with pytest.raises(ConfigurationError) as raised:
             _app_config({'small': _isolated(2, **{field: TaskLimit(tasks=3)})})
-        assert raised.value.code == ErrorCode.CONFIG_INVALID_WORKER_PROFILE
+        assert raised.value.code == HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE
         assert raised.value.message == (
             f"worker_profiles['small'].claim.{field}: 3 tasks is above the "
             'capacity of the worker (2)'
@@ -1131,7 +1131,7 @@ class TestAppConfigProfileChecks:
                 {'p': _isolated(1, claimed_per_worker=TaskLimit(tasks=1))},
                 prefetch_buffer=-1,
             )
-        assert raised.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert raised.value.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
 
     def test_log_config_lists_each_profile(self) -> None:
         config = _app_config({'default': _isolated(2)})
@@ -1157,7 +1157,7 @@ class TestDescribeWorkerProfile:
         )
         assert describe_worker_profile(profile) == (
             'isolated=8 (recycle after no limit, above 1024 MB; pool 0 to 1 '
-            'connections, check off; task_send_pool 2 connections), '
+            'connections, pre_ping off; task_send_pool 2 connections), '
             'shared_async=none, shared_thread=none, '
             'pool=5 connections (derived from 8 seats), '
             'claim per queue per pass: 4 tasks, claimed per worker: no limit, '
@@ -1179,7 +1179,7 @@ class TestDescribeWorkerProfile:
             'shared_async=3x25 seats (recycle after 40 tasks per seat, '
             'above 2048 MB; '
             f'pool 0 to {shared_async_pool_connections(25)} connections, '
-            'derived from seats, check off; '
+            'derived from seats, pre_ping off; '
             f'executor {shared_async_executor_threads(25)} threads, derived '
             'from seats; task_send_pool 2 connections), '
         ) in describe_worker_profile(profile)
@@ -1199,7 +1199,7 @@ class TestDescribeWorkerProfile:
             'shared_thread=2x8 seats (recycle after no limit per seat, '
             'above 1024 MB; '
             f'pool 0 to {shared_thread_pool_connections(8)} connections, '
-            'derived from seats, check off; task_send_pool 2 connections), '
+            'derived from seats, pre_ping off; task_send_pool 2 connections), '
         ) in describe_worker_profile(profile)
 
     def test_set_sizes_are_named_without_their_origin(self) -> None:
@@ -1211,7 +1211,7 @@ class TestDescribeWorkerProfile:
                 pool=IsolatedPool(
                     min_size=1,
                     max_size=PoolSize(connections=4),
-                    check=False,
+                    pre_ping=False,
                 ),
                 task_send_pool=PoolSize(connections=3),
             ),
@@ -1221,7 +1221,7 @@ class TestDescribeWorkerProfile:
                 pool=SharedPool(
                     min_size=2,
                     max_size=PoolSize(connections=9),
-                    check=True,
+                    pre_ping=True,
                 ),
                 executor=ExecutorThreads(threads=7),
                 task_send_pool=PoolSize(connections=5),
@@ -1229,7 +1229,7 @@ class TestDescribeWorkerProfile:
             shared_thread=SharedThreadChildren(
                 count=1,
                 seats=6,
-                pool=SharedPool(max_size=PoolSize(connections=3), check=False),
+                pool=SharedPool(max_size=PoolSize(connections=3), pre_ping=False),
                 task_send_pool=PoolSize(connections=1),
             ),
             pool=ParentPool(max_size=PoolSize(connections=11)),
@@ -1237,16 +1237,16 @@ class TestDescribeWorkerProfile:
         described = describe_worker_profile(profile)
         assert (
             'isolated=1 (recycle after 100 tasks, above no limit; pool 1 to 4 '
-            'connections, check off; task_send_pool 3 connections), '
+            'connections, pre_ping off; task_send_pool 3 connections), '
         ) in described
         assert (
             'shared_async=1x50 seats (recycle after 100 tasks per seat, above '
-            'no limit; pool 2 to 9 connections, check on; executor 7 threads; '
+            'no limit; pool 2 to 9 connections, pre_ping on; executor 7 threads; '
             'task_send_pool 5 connections), '
         ) in described
         assert (
             'shared_thread=1x6 seats (recycle after 100 tasks per seat, above '
-            'no limit; pool 0 to 3 connections, check off; task_send_pool 1 '
+            'no limit; pool 0 to 3 connections, pre_ping off; task_send_pool 1 '
             'connections), '
         ) in described
         assert ', pool=11 connections, claim per queue per pass: ' in described

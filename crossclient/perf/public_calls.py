@@ -28,9 +28,9 @@ from horsies import (
     Horsies,
     Ok,
     PostgresConfig,
+    Result,
     TaskError,
     TaskNode,
-    TaskResult,
 )
 from crossclient.perf.telemetry_levels import AppTelemetry
 
@@ -68,7 +68,7 @@ def public_call_app(dsn: str, app_telemetry: AppTelemetry) -> Horsies:
     ``app_telemetry``. No I/O."""
     match app_telemetry:
         case AppTelemetry.NONE:
-            return Horsies(AppConfig(broker=public_call_broker(dsn)))
+            return Horsies(AppConfig(database=public_call_broker(dsn)))
         case (
             AppTelemetry.TRACING
             | AppTelemetry.TRACING_AND_HANDLER
@@ -93,8 +93,8 @@ class SendCall:
         app = public_call_app(dsn, app_telemetry)
 
         @app.task(SEND_TASK_NAME)
-        def perf_public_send(*, text: str) -> TaskResult[str, TaskError]:
-            return TaskResult(ok=text)
+        def perf_public_send(*, text: str) -> Result[str, TaskError]:
+            return Ok(text)
 
         self._broker = app.get_broker()
         self._task = perf_public_send
@@ -130,17 +130,17 @@ class WorkflowStartCall:
         app = public_call_app(dsn, app_telemetry)
 
         @app.task(WORKFLOW_TASK_NAME)
-        def perf_public_workflow_node(*, text: str) -> TaskResult[str, TaskError]:
-            return TaskResult(ok=text)
+        def perf_public_workflow_node(*, text: str) -> Result[str, TaskError]:
+            return Ok(text)
 
         node = TaskNode(
-            fn=perf_public_workflow_node,
+            function=perf_public_workflow_node,
             kwargs={'text': 'x' * INPUT_TEXT_BYTES},
         )
         self._broker = app.get_broker()
         self._spec = app.workflow(
             name=WORKFLOW_NAME,
-            tasks=[node],
+            nodes=[node],
             output=node,
             definition_key=WORKFLOW_DEFINITION_KEY,
         )

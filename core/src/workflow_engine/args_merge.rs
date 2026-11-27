@@ -6,7 +6,7 @@ use serde_json::value::RawValue;
 use uuid::Uuid;
 
 use crate::core::task::result::TaskResult;
-use crate::core::{OperationalErrorCode, OutcomeCode, TaskError, TaskErrorKind};
+use crate::core::{OperationalCode, OutcomeCode, TaskError, TaskErrorKind};
 
 use crate::workflow_engine::error::WorkflowError;
 
@@ -308,8 +308,8 @@ impl ArgsFromConflict {
                     "task_index": task_index,
                 }),
             )),
-            ..TaskError::builtin(
-                OperationalErrorCode::WorkflowEnqueueFailed,
+            ..TaskError::built_in(
+                OperationalCode::WorkflowEnqueueFailed,
                 format!(
                     "args_from key '{}' conflicts with static kwarg ({node})",
                     self.key
@@ -443,7 +443,7 @@ pub enum ArgsFromEntryRefused {
 /// The `inner` result envelope of the kwarg `name`, as its text, when `value` is an `args_from` entry;
 /// `None` when it is not one. An entry is an object with `ARGS_FROM_ENVELOPE_KEY: true`; it must have a
 /// text `source_task_name`, a text or null `source_definition_key`, an `inner` value and no other key.
-/// The receiving `TaskResult` field decodes the envelope with its own type (Python
+/// The receiving `TaskOutcome` parameter decodes the envelope with its own type (Python
 /// `core/worker/child_runner.py:1362-1436`).
 ///
 /// `value` is JSON, so its members read unless it is not an object.
@@ -586,7 +586,7 @@ pub(crate) fn missing_result_error(
     let node = node_id.unwrap_or("-");
     TaskError {
         exception: None,
-        error_code: OperationalErrorCode::ResultDeserializationError.into(),
+        error_code: OperationalCode::ResultDeserializationError.into(),
         data: Some(crate::core::codec::JsonText::of_engine_value(&serde_json::json!({ "dependency_index": dep_idx }))),
         message: Some(format!(
             "Dependency node {node} (index {dep_idx}, task {task_name}) is {status} with no stored result"
@@ -596,8 +596,8 @@ pub(crate) fn missing_result_error(
 }
 
 fn dep_parse_error(dep_idx: i32, error: &serde_json::Error) -> TaskError {
-    TaskError::builtin(
-        OperationalErrorCode::ResultDeserializationError,
+    TaskError::built_in(
+        OperationalCode::ResultDeserializationError,
         format!(
             "failed to parse upstream task result at index {}: {}",
             dep_idx, error

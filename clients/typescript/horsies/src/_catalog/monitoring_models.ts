@@ -6,31 +6,31 @@ import type { DecodeResult, WireJson } from "./wire_json.ts";
 export type MonitoringModelName =
   | "Breakdown"
   | "BreakdownCounts"
-  | "BudgetLoadInfo"
-  | "ClassReportInfo"
-  | "DownSlotInfo"
+  | "BudgetLoad"
+  | "DownSlot"
   | "ErrorFacet"
+  | "ExecutionClassReport"
   | "FacetValue"
   | "Facets"
   | "GroupRow"
-  | "LeafTaskInfo"
   | "LivenessReport"
-  | "PendingStreamInfo"
+  | "PendingStream"
   | "ScheduleStateInfo"
   | "StatusCount"
-  | "TaskAttemptInfo"
+  | "TaskAttemptDetail"
   | "TaskDetail"
   | "TaskListPage"
+  | "TaskRowInfo"
   | "TaskSummary"
-  | "WorkerClassLoadInfo"
+  | "WorkerExecutionClassLoad"
   | "WorkerHistoryPoint"
-  | "WorkerPingInfo"
+  | "WorkerPong"
   | "WorkerStateInfo"
   | "WorkflowEdge"
-  | "WorkflowNodeInfo"
+  | "WorkflowNodeDetail"
+  | "WorkflowNodeSummary"
   | "WorkflowRunDetail"
-  | "WorkflowRunSummary"
-  | "WorkflowTaskDetail";
+  | "WorkflowRunSummary";
 
 /** The JSON kind of a field, as `kindMismatch` names it. */
 export type MonitoringWireKind =
@@ -137,10 +137,9 @@ export interface BreakdownCounts {
   readonly total: number;
 }
 
-export interface BudgetLoadInfo {
+export interface BudgetLoad {
   readonly budget: Execution;
   readonly capacity: number;
-  readonly free: number;
   readonly inFlight: number;
   readonly serves: ReadonlyArray<Execution>;
 }
@@ -150,14 +149,7 @@ export type Execution =
   | "SHARED_ASYNC"
   | "SHARED_THREAD";
 
-export interface ClassReportInfo {
-  readonly checkedAt: Temporal.Instant;
-  readonly liveWindowS: number;
-  readonly streams: ReadonlyArray<PendingStreamInfo>;
-  readonly workers: ReadonlyArray<WorkerClassLoadInfo>;
-}
-
-export interface DownSlotInfo {
+export interface DownSlot {
   readonly cause: string;
   readonly detail: string;
   readonly downSince: Temporal.Instant;
@@ -169,6 +161,13 @@ export interface ErrorFacet {
   readonly category: string;
   readonly count: number;
   readonly value: string;
+}
+
+export interface ExecutionClassReport {
+  readonly checkedAt: Temporal.Instant;
+  readonly liveWindowSeconds: number;
+  readonly streams: ReadonlyArray<PendingStream>;
+  readonly workers: ReadonlyArray<WorkerExecutionClassLoad>;
 }
 
 export interface FacetValue {
@@ -198,83 +197,76 @@ export interface GroupRow {
 }
 
 export type BreakdownGroup =
-  | BreakdownUnclaimedGroup
-  | BreakdownValueGroup;
+  | BreakdownGroupUnclaimed
+  | BreakdownGroupValue;
 
-export interface BreakdownUnclaimedGroup {
+export interface BreakdownGroupUnclaimed {
   readonly kind: "unclaimed";
 }
 
-export interface BreakdownValueGroup {
+export interface BreakdownGroupValue {
   readonly kind: "value";
   readonly value: string;
 }
 
-export interface LeafTaskInfo {
-  readonly completedAt: Temporal.Instant | null;
-  readonly enqueuedAt: Temporal.Instant | null;
-  readonly errorCode: string | null;
-  readonly execS: number | null;
-  readonly execution: Execution | null;
-  readonly failedAt: Temporal.Instant | null;
-  readonly failedReason: string | null;
-  readonly goodUntil: Temporal.Instant | null;
-  readonly maxRetries: number;
-  readonly queueS: number | null;
-  readonly retryCount: number;
-  readonly startedAt: Temporal.Instant | null;
-  readonly status: string;
-  readonly taskId: string;
-  readonly traceId: string | null;
-  readonly workerHostname: string | null;
-}
-
 export interface LivenessReport {
-  readonly dbLatencyMs: number | null;
-  readonly dbReachable: boolean;
-  readonly workers: ReadonlyArray<WorkerPingInfo>;
+  readonly database: DatabaseLiveness;
+  readonly workers: ReadonlyArray<WorkerPong>;
 }
 
-export interface PendingStreamInfo {
-  readonly coverage: StreamCoverageInfo;
+export type DatabaseLiveness =
+  | DatabasePing
+  | DatabaseUnreachable;
+
+export interface DatabasePing {
+  readonly kind: "ping";
+  readonly latencyMs: number;
+}
+
+export interface DatabaseUnreachable {
+  readonly kind: "unreachable";
+}
+
+export interface PendingStream {
+  readonly coverage: StreamCoverageState;
   readonly execution: Execution;
-  readonly queueName: string;
-  readonly wait: StreamWaitInfo;
+  readonly queue: string;
+  readonly wait: StreamWait;
 }
 
-export type StreamCoverageInfo =
-  | StreamNoCapacityInfo
-  | StreamServedInfo
-  | StreamUnservedInfo;
+export type StreamCoverageState =
+  | StreamCoverageStateNoCapacity
+  | StreamCoverageStateServed
+  | StreamCoverageStateUnserved;
 
-export interface StreamNoCapacityInfo {
+export interface StreamCoverageStateNoCapacity {
   readonly kind: "noCapacity";
   readonly workers: number;
 }
 
-export interface StreamServedInfo {
+export interface StreamCoverageStateServed {
   readonly kind: "served";
   readonly capacity: number;
   readonly workers: number;
 }
 
-export interface StreamUnservedInfo {
+export interface StreamCoverageStateUnserved {
   readonly kind: "unserved";
 }
 
-export type StreamWaitInfo =
-  | StreamNoneDueInfo
-  | StreamWaitingInfo;
+export type StreamWait =
+  | StreamWaitDue
+  | StreamWaitNoneDue;
 
-export interface StreamNoneDueInfo {
-  readonly kind: "noneDue";
-  readonly nextDueAt: Temporal.Instant;
+export interface StreamWaitDue {
+  readonly kind: "due";
+  readonly oldestDueAt: Temporal.Instant;
+  readonly waitSeconds: number;
 }
 
-export interface StreamWaitingInfo {
-  readonly kind: "waiting";
-  readonly oldestDueAt: Temporal.Instant;
-  readonly waitS: number;
+export interface StreamWaitNoneDue {
+  readonly kind: "noneDue";
+  readonly nextDueAt: Temporal.Instant;
 }
 
 export interface ScheduleStateInfo {
@@ -291,7 +283,7 @@ export interface StatusCount {
   readonly status: string;
 }
 
-export interface TaskAttemptInfo {
+export interface TaskAttemptDetail {
   readonly attempt: number;
   readonly errorCode: string | null;
   readonly errorMessage: string | null;
@@ -305,10 +297,10 @@ export interface TaskAttemptInfo {
 }
 
 export type AttemptPhasesInfo =
-  | PhasesCapturedInfo
-  | PhasesNotCapturedInfo;
+  | AttemptPhasesCapturedInfo
+  | AttemptPhasesNotCapturedInfo;
 
-export interface PhasesCapturedInfo {
+export interface AttemptPhasesCapturedInfo {
   readonly kind: "captured";
   readonly claimedAt: Temporal.Instant;
   readonly claims: AttemptClaimsInfo;
@@ -318,78 +310,78 @@ export interface PhasesCapturedInfo {
 }
 
 export type AttemptClaimsInfo =
-  | ClaimsCountedInfo
-  | ClaimsNotCountedInfo;
+  | AttemptClaimsCountedInfo
+  | AttemptClaimsNotCountedInfo;
 
-export interface ClaimsCountedInfo {
+export interface AttemptClaimsCountedInfo {
   readonly kind: "counted";
   readonly count: number;
   readonly firstClaimedAt: Temporal.Instant;
 }
 
-export interface ClaimsNotCountedInfo {
+export interface AttemptClaimsNotCountedInfo {
   readonly kind: "notCounted";
 }
 
 export type AttemptFinalizingInfo =
-  | FinalizingMarkedInfo
-  | FinalizingNotMarkedInfo;
+  | AttemptFinalizingMarkedInfo
+  | AttemptFinalizingNotMarkedInfo;
 
-export interface FinalizingMarkedInfo {
+export interface AttemptFinalizingMarkedInfo {
   readonly kind: "marked";
   readonly finalizingAt: Temporal.Instant;
 }
 
-export interface FinalizingNotMarkedInfo {
+export interface AttemptFinalizingNotMarkedInfo {
   readonly kind: "notMarked";
 }
 
 export type AttemptRecordedByInfo =
-  | RecordedByCancelInfo
-  | RecordedByRecoveryInfo
-  | RecordedByWorkerInfo;
+  | AttemptRecordedByCancelInfo
+  | AttemptRecordedByRecoveryInfo
+  | AttemptRecordedByWorkerInfo;
 
-export interface RecordedByCancelInfo {
+export interface AttemptRecordedByCancelInfo {
   readonly kind: "cancel";
 }
 
-export interface RecordedByRecoveryInfo {
+export interface AttemptRecordedByRecoveryInfo {
   readonly kind: "recovery";
   readonly lastSeenAt: Temporal.Instant;
 }
 
-export interface RecordedByWorkerInfo {
+export interface AttemptRecordedByWorkerInfo {
   readonly kind: "worker";
   readonly placement: AttemptPlacementInfo;
 }
 
 export type AttemptPlacementInfo =
-  | PlacementNotObservedInfo
-  | PlacementPlacedInfo;
+  | AttemptPlacementNotObservedInfo
+  | AttemptPlacementPlacedInfo;
 
-export interface PlacementNotObservedInfo {
+export interface AttemptPlacementNotObservedInfo {
   readonly kind: "notObserved";
 }
 
-export interface PlacementPlacedInfo {
+export interface AttemptPlacementPlacedInfo {
   readonly kind: "placed";
   readonly placedAt: Temporal.Instant;
 }
 
-export interface PhasesNotCapturedInfo {
+export interface AttemptPhasesNotCapturedInfo {
   readonly kind: "notCaptured";
 }
 
 export interface TaskDetail {
-  readonly attempts: ReadonlyArray<TaskAttemptInfo>;
+  readonly attempts: ReadonlyArray<TaskAttemptDetail>;
   readonly errorCategory: string | null;
   readonly isWorkflowTask: boolean;
-  readonly leaf: LeafTaskInfo;
   readonly priority: number;
-  readonly queueName: string;
+  readonly queue: string;
   readonly taskName: string;
+  readonly taskRow: TaskRowInfo;
   readonly workflowId: string | null;
-  readonly workflowTaskIndex: number | null;
+  readonly workflowNodeIndex: number | null;
 }
 
 export interface TaskListPage {
@@ -397,29 +389,48 @@ export interface TaskListPage {
   readonly total: number;
 }
 
+export interface TaskRowInfo {
+  readonly completedAt: Temporal.Instant | null;
+  readonly enqueuedAt: Temporal.Instant | null;
+  readonly errorCode: string | null;
+  readonly execution: Execution | null;
+  readonly executionSeconds: number | null;
+  readonly failedAt: Temporal.Instant | null;
+  readonly failedReason: string | null;
+  readonly goodUntil: Temporal.Instant | null;
+  readonly maxRetries: number;
+  readonly queueSeconds: number | null;
+  readonly retryCount: number;
+  readonly startedAt: Temporal.Instant | null;
+  readonly status: string;
+  readonly taskId: string;
+  readonly traceId: string | null;
+  readonly workerHostname: string | null;
+}
+
 export interface TaskSummary {
   readonly completedAt: Temporal.Instant | null;
   readonly enqueuedAt: Temporal.Instant | null;
   readonly errorCategory: string | null;
   readonly errorCode: string | null;
-  readonly execS: number | null;
+  readonly executionSeconds: number | null;
   readonly failedAt: Temporal.Instant | null;
-  readonly id: string;
   readonly isWorkflowTask: boolean;
   readonly maxRetries: number;
   readonly priority: number;
-  readonly queueName: string;
-  readonly queueS: number | null;
+  readonly queue: string;
+  readonly queueSeconds: number | null;
   readonly retryCount: number;
   readonly startedAt: Temporal.Instant | null;
   readonly status: string;
+  readonly taskId: string;
   readonly taskName: string;
   readonly workerHostname: string | null;
   readonly workerId: string | null;
 }
 
-export interface WorkerClassLoadInfo {
-  readonly budgets: ReadonlyArray<BudgetLoadInfo>;
+export interface WorkerExecutionClassLoad {
+  readonly budgets: ReadonlyArray<BudgetLoad>;
   readonly snapshotAt: Temporal.Instant;
   readonly workerId: string;
 }
@@ -433,7 +444,7 @@ export interface WorkerHistoryPoint {
   readonly tasksRunning: number;
 }
 
-export interface WorkerPingInfo {
+export interface WorkerPong {
   readonly hostname: string;
   readonly pid: number;
   readonly roundTripMs: number;
@@ -441,62 +452,81 @@ export interface WorkerPingInfo {
 }
 
 export interface WorkerStateInfo {
+  readonly childCount: number;
   readonly clusterWideCap: number | null;
   readonly cpuPercent: number | null;
-  readonly downSlots: ReadonlyArray<DownSlotInfo>;
   readonly hostname: string;
   readonly memoryPercent: number | null;
   readonly memoryUsageMb: number | null;
   readonly pid: number;
-  readonly processes: number;
-  readonly profile: SnapshotProfileInfo;
+  readonly profile: SnapshotProfile;
   readonly queueMaxConcurrency: ReadonlyMap<string, number>;
   readonly queues: ReadonlyArray<string>;
-  readonly slotHealth: SlotHealthKind;
-  readonly snapshotAgeS: number | null;
+  readonly slotHealth: SlotHealth;
+  readonly snapshotAgeSeconds: number | null;
   readonly snapshotAt: Temporal.Instant;
   readonly stale: boolean;
   readonly tasksClaimed: number;
   readonly tasksRunning: number;
-  readonly uptimeS: number | null;
+  readonly uptimeSeconds: number | null;
   readonly workerId: string;
   readonly workerStartedAt: Temporal.Instant;
 }
 
-export type SnapshotProfileInfo =
-  | ProfileNamedInfo
-  | ProfileNotRecordedInfo;
+export type SnapshotProfile =
+  | SnapshotProfileNamed
+  | SnapshotProfileNotRecorded;
 
-export interface ProfileNamedInfo {
+export interface SnapshotProfileNamed {
   readonly kind: "named";
   readonly name: string;
 }
 
-export interface ProfileNotRecordedInfo {
+export interface SnapshotProfileNotRecorded {
   readonly kind: "notRecorded";
 }
 
-export type SlotHealthKind =
-  | "all_serving"
-  | "slots_down";
+export type SlotHealth =
+  | SlotHealthAllServing
+  | SlotHealthSlotsDown;
+
+export interface SlotHealthAllServing {
+  readonly kind: "allServing";
+}
+
+export interface SlotHealthSlotsDown {
+  readonly kind: "slotsDown";
+  readonly slots: ReadonlyArray<DownSlot>;
+}
 
 export interface WorkflowEdge {
   readonly fromIndex: number;
   readonly toIndex: number;
 }
 
-export interface WorkflowNodeInfo {
-  readonly allowFailedDeps: boolean;
+export interface WorkflowNodeDetail {
+  readonly attempts: ReadonlyArray<TaskAttemptDetail>;
+  readonly isSubWorkflow: boolean;
+  readonly nodeError: string | null;
+  readonly nodeId: string | null;
+  readonly nodeIndex: number;
+  readonly nodeStatus: string;
+  readonly taskName: string;
+  readonly taskRow: TaskRowInfo | null;
+}
+
+export interface WorkflowNodeSummary {
+  readonly allowFailedDependencies: boolean;
   readonly childFailed: number | null;
   readonly childTotal: number | null;
   readonly completedAt: Temporal.Instant | null;
-  readonly execS: number | null;
-  readonly isSubworkflow: boolean;
+  readonly executionSeconds: number | null;
+  readonly isSubWorkflow: boolean;
   readonly nodeId: string | null;
+  readonly nodeIndex: number;
   readonly nodeStatus: string;
   readonly startedAt: Temporal.Instant | null;
   readonly subWorkflowId: string | null;
-  readonly taskIndex: number;
   readonly taskName: string;
   readonly timing: NodeTimingInfo;
 }
@@ -514,14 +544,14 @@ export interface NodeTimingExactInfo {
 }
 
 export type NodeEndpointInfo =
-  | EndpointNotTerminalInfo
-  | EndpointTerminalInfo;
+  | NodeEndpointNotTerminalInfo
+  | NodeEndpointTerminalInfo;
 
-export interface EndpointNotTerminalInfo {
+export interface NodeEndpointNotTerminalInfo {
   readonly kind: "notTerminal";
 }
 
-export interface EndpointTerminalInfo {
+export interface NodeEndpointTerminalInfo {
   readonly kind: "terminal";
   readonly at: Temporal.Instant;
   readonly status: TerminalNodeStatus;
@@ -540,82 +570,82 @@ export interface TimingSegmentInfo {
 }
 
 export type SegmentEndInfo =
-  | SegmentEndedInfo
-  | SegmentOpenInfo;
+  | SegmentEndClosedInfo
+  | SegmentEndOpenInfo;
 
-export interface SegmentEndedInfo {
-  readonly kind: "ended";
+export interface SegmentEndClosedInfo {
+  readonly kind: "closed";
   readonly at: Temporal.Instant;
 }
 
-export interface SegmentOpenInfo {
+export interface SegmentEndOpenInfo {
   readonly kind: "open";
 }
 
 export type SegmentPhaseInfo =
-  | PhaseAdvancingInfo
-  | PhaseClaimedInfo
-  | PhaseEnqueuedInfo
-  | PhaseFinalizingInfo
-  | PhasePendingInfo
-  | PhaseReadyInfo
-  | PhaseRetryWaitInfo
-  | PhaseRunningInfo
-  | PhaseUnknownInfo;
+  | SegmentPhaseAdvancingInfo
+  | SegmentPhaseClaimedInfo
+  | SegmentPhaseEnqueuedInfo
+  | SegmentPhaseFinalizingInfo
+  | SegmentPhasePendingInfo
+  | SegmentPhaseReadyInfo
+  | SegmentPhaseRetryWaitInfo
+  | SegmentPhaseRunningInfo
+  | SegmentPhaseUnknownInfo;
 
-export interface PhaseAdvancingInfo {
+export interface SegmentPhaseAdvancingInfo {
   readonly kind: "advancing";
 }
 
-export interface PhaseClaimedInfo {
+export interface SegmentPhaseClaimedInfo {
   readonly kind: "claimed";
   readonly claim: SegmentClaimInfo;
 }
 
 export type SegmentClaimInfo =
-  | ClaimEarlierInfo
-  | ClaimNotRecordedInfo
-  | ClaimRecordedInfo;
+  | SegmentClaimEarlierInfo
+  | SegmentClaimNotRecordedInfo
+  | SegmentClaimRecordedInfo;
 
-export interface ClaimEarlierInfo {
+export interface SegmentClaimEarlierInfo {
   readonly kind: "earlier";
   readonly count: number;
 }
 
-export interface ClaimNotRecordedInfo {
+export interface SegmentClaimNotRecordedInfo {
   readonly kind: "notRecorded";
 }
 
-export interface ClaimRecordedInfo {
+export interface SegmentClaimRecordedInfo {
   readonly kind: "recorded";
   readonly placement: AttemptPlacementInfo;
 }
 
-export interface PhaseEnqueuedInfo {
+export interface SegmentPhaseEnqueuedInfo {
   readonly kind: "enqueued";
 }
 
-export interface PhaseFinalizingInfo {
+export interface SegmentPhaseFinalizingInfo {
   readonly kind: "finalizing";
 }
 
-export interface PhasePendingInfo {
+export interface SegmentPhasePendingInfo {
   readonly kind: "pending";
 }
 
-export interface PhaseReadyInfo {
+export interface SegmentPhaseReadyInfo {
   readonly kind: "ready";
 }
 
-export interface PhaseRetryWaitInfo {
+export interface SegmentPhaseRetryWaitInfo {
   readonly kind: "retryWait";
 }
 
-export interface PhaseRunningInfo {
+export interface SegmentPhaseRunningInfo {
   readonly kind: "running";
 }
 
-export interface PhaseUnknownInfo {
+export interface SegmentPhaseUnknownInfo {
   readonly kind: "unknown";
   readonly reason: UnknownReason;
 }
@@ -627,22 +657,22 @@ export type UnknownReason =
   | "WORKER_LOST";
 
 export type SegmentSourceInfo =
-  | SourceAttemptInfo
-  | SourceNodeInfo
-  | SourceTaskInfo;
+  | SegmentSourceAttemptInfo
+  | SegmentSourceNodeInfo
+  | SegmentSourceTaskInfo;
 
-export interface SourceAttemptInfo {
+export interface SegmentSourceAttemptInfo {
   readonly kind: "attempt";
   readonly attempt: number;
   readonly generation: number;
   readonly taskId: string;
 }
 
-export interface SourceNodeInfo {
+export interface SegmentSourceNodeInfo {
   readonly kind: "node";
 }
 
-export interface SourceTaskInfo {
+export interface SegmentSourceTaskInfo {
   readonly kind: "task";
   readonly generation: number;
   readonly taskId: string;
@@ -654,11 +684,11 @@ export interface NodeTimingInconsistentInfo {
 }
 
 export type TimingConflictInfo =
-  | ConflictClockOrderInfo
-  | ConflictMissingRecordInfo
-  | ConflictUnexpectedEventInfo;
+  | TimingConflictClockOrderInfo
+  | TimingConflictMissingRecordInfo
+  | TimingConflictUnexpectedEventInfo;
 
-export interface ConflictClockOrderInfo {
+export interface TimingConflictClockOrderInfo {
   readonly kind: "clockOrder";
   readonly earlier: TimingBoundary;
   readonly earlierAt: Temporal.Instant;
@@ -688,7 +718,7 @@ export type TimingBoundary =
   | "TASK_CREATED"
   | "TASK_MOVED";
 
-export interface ConflictMissingRecordInfo {
+export interface TimingConflictMissingRecordInfo {
   readonly kind: "missingRecord";
   readonly record: MissingRecord;
 }
@@ -702,7 +732,7 @@ export type MissingRecord =
   | "OPEN_ATTEMPT"
   | "TASK_TIMES";
 
-export interface ConflictUnexpectedEventInfo {
+export interface TimingConflictUnexpectedEventInfo {
   readonly kind: "unexpectedEvent";
   readonly event: WorkflowEventKind;
   readonly eventId: number;
@@ -735,7 +765,7 @@ export interface WorkflowRunDetail {
   readonly edges: ReadonlyArray<WorkflowEdge>;
   readonly failedCount: number;
   readonly failedIndices: ReadonlyArray<number>;
-  readonly nodes: ReadonlyArray<WorkflowNodeInfo>;
+  readonly nodes: ReadonlyArray<WorkflowNodeSummary>;
   readonly run: WorkflowRunSummary;
   readonly timing: RunTimingInfo;
   readonly traceId: string | null;
@@ -776,7 +806,7 @@ export type RunConflictInfo =
 
 export interface RunConflictNodeInfo {
   readonly kind: "node";
-  readonly taskIndex: number;
+  readonly nodeIndex: number;
 }
 
 export interface RunConflictPauseInfo {
@@ -795,20 +825,20 @@ export interface PauseIntervalInfo {
 }
 
 export type PauseEndInfo =
-  | PauseOpenInfo
-  | PauseResumedInfo
-  | PauseRunEndedInfo;
+  | PauseEndOpenInfo
+  | PauseEndResumedInfo
+  | PauseEndRunEndedInfo;
 
-export interface PauseOpenInfo {
+export interface PauseEndOpenInfo {
   readonly kind: "open";
 }
 
-export interface PauseResumedInfo {
+export interface PauseEndResumedInfo {
   readonly kind: "resumed";
   readonly at: Temporal.Instant;
 }
 
-export interface PauseRunEndedInfo {
+export interface PauseEndRunEndedInfo {
   readonly kind: "runEnded";
   readonly at: Temporal.Instant;
 }
@@ -824,21 +854,10 @@ export interface WorkflowRunSummary {
   readonly completedAt: Temporal.Instant | null;
   readonly createdAt: Temporal.Instant | null;
   readonly definitionKey: string | null;
-  readonly id: string;
-  readonly name: string;
   readonly status: string;
-  readonly wallS: number | null;
-}
-
-export interface WorkflowTaskDetail {
-  readonly attempts: ReadonlyArray<TaskAttemptInfo>;
-  readonly isSubworkflow: boolean;
-  readonly leaf: LeafTaskInfo | null;
-  readonly nodeError: string | null;
-  readonly nodeId: string | null;
-  readonly nodeStatus: string;
-  readonly taskIndex: number;
-  readonly taskName: string;
+  readonly wallSeconds: number | null;
+  readonly workflowId: string;
+  readonly workflowName: string;
 }
 
 /** Where a value is in the input: the model that the decode started from, and the path. */
@@ -1249,16 +1268,16 @@ function readBreakdownCounts(
   );
 }
 
-export function decodeBudgetLoadInfo(
+export function decodeBudgetLoad(
   value: WireJson,
-): DecodeResult<BudgetLoadInfo, MonitoringDecodeError> {
-  return readBudgetLoadInfo(value, { model: "BudgetLoadInfo", path: "$" });
+): DecodeResult<BudgetLoad, MonitoringDecodeError> {
+  return readBudgetLoad(value, { model: "BudgetLoad", path: "$" });
 }
 
-function readBudgetLoadInfo(
+function readBudgetLoad(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<BudgetLoadInfo, MonitoringDecodeError> {
+): DecodeResult<BudgetLoad, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -1268,7 +1287,6 @@ function readBudgetLoadInfo(
   const results = {
     budget: fields.value.read("budget", readExecution),
     capacity: fields.value.read("capacity", decodeInteger),
-    free: fields.value.read("free", decodeInteger),
     inFlight: fields.value.read("in_flight", decodeInteger),
     serves: fields.value.read("serves", listOf(readExecution)),
   };
@@ -1287,7 +1305,6 @@ function readBudgetLoadInfo(
     Object.freeze({
       budget: results.budget.value,
       capacity: results.capacity.value,
-      free: results.free.value,
       inFlight: results.inFlight.value,
       serves: results.serves.value,
     }),
@@ -1308,59 +1325,16 @@ function readExecution(
   }
 }
 
-export function decodeClassReportInfo(
+export function decodeDownSlot(
   value: WireJson,
-): DecodeResult<ClassReportInfo, MonitoringDecodeError> {
-  return readClassReportInfo(value, { model: "ClassReportInfo", path: "$" });
+): DecodeResult<DownSlot, MonitoringDecodeError> {
+  return readDownSlot(value, { model: "DownSlot", path: "$" });
 }
 
-function readClassReportInfo(
+function readDownSlot(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<ClassReportInfo, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    checkedAt: fields.value.read("checked_at", decodeDateTime),
-    liveWindowS: fields.value.read("live_window_s", decodeInteger),
-    streams: fields.value.read("streams", listOf(readPendingStreamInfo)),
-    workers: fields.value.read("workers", listOf(readWorkerClassLoadInfo)),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      checkedAt: results.checkedAt.value,
-      liveWindowS: results.liveWindowS.value,
-      streams: results.streams.value,
-      workers: results.workers.value,
-    }),
-  );
-}
-
-export function decodeDownSlotInfo(
-  value: WireJson,
-): DecodeResult<DownSlotInfo, MonitoringDecodeError> {
-  return readDownSlotInfo(value, { model: "DownSlotInfo", path: "$" });
-}
-
-function readDownSlotInfo(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<DownSlotInfo, MonitoringDecodeError> {
+): DecodeResult<DownSlot, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -1433,6 +1407,49 @@ function readErrorFacet(
       category: results.category.value,
       count: results.count.value,
       value: results.value.value,
+    }),
+  );
+}
+
+export function decodeExecutionClassReport(
+  value: WireJson,
+): DecodeResult<ExecutionClassReport, MonitoringDecodeError> {
+  return readExecutionClassReport(value, { model: "ExecutionClassReport", path: "$" });
+}
+
+function readExecutionClassReport(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<ExecutionClassReport, MonitoringDecodeError> {
+  const fields = readObject(value, place);
+
+  if (!fields.ok) {
+    return fields;
+  }
+
+  const results = {
+    checkedAt: fields.value.read("checked_at", decodeDateTime),
+    liveWindowSeconds: fields.value.read("live_window_seconds", decodeNumber),
+    streams: fields.value.read("streams", listOf(readPendingStream)),
+    workers: fields.value.read("workers", listOf(readWorkerExecutionClassLoad)),
+  };
+
+  if (!allDecoded(results)) {
+    return firstFailure(results);
+  }
+
+  const unread = fields.value.unread();
+
+  if (!unread.ok) {
+    return unread;
+  }
+
+  return ok(
+    Object.freeze({
+      checkedAt: results.checkedAt.value,
+      liveWindowSeconds: results.liveWindowSeconds.value,
+      streams: results.streams.value,
+      workers: results.workers.value,
     }),
   );
 }
@@ -1594,17 +1611,17 @@ function readBreakdownGroup(
 
   switch (tag.value) {
     case "unclaimed":
-      return readBreakdownUnclaimedGroup(fields.value);
+      return readBreakdownGroupUnclaimed(fields.value);
     case "value":
-      return readBreakdownValueGroup(fields.value);
+      return readBreakdownGroupValue(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readBreakdownUnclaimedGroup(
+function readBreakdownGroupUnclaimed(
   fields: FieldReader,
-): DecodeResult<BreakdownUnclaimedGroup, MonitoringDecodeError> {
+): DecodeResult<BreakdownGroupUnclaimed, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -1618,9 +1635,9 @@ function readBreakdownUnclaimedGroup(
   );
 }
 
-function readBreakdownValueGroup(
+function readBreakdownGroupValue(
   fields: FieldReader,
-): DecodeResult<BreakdownValueGroup, MonitoringDecodeError> {
+): DecodeResult<BreakdownGroupValue, MonitoringDecodeError> {
   const results = {
     value: fields.read("value", decodeString),
   };
@@ -1643,73 +1660,6 @@ function readBreakdownValueGroup(
   );
 }
 
-export function decodeLeafTaskInfo(
-  value: WireJson,
-): DecodeResult<LeafTaskInfo, MonitoringDecodeError> {
-  return readLeafTaskInfo(value, { model: "LeafTaskInfo", path: "$" });
-}
-
-function readLeafTaskInfo(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<LeafTaskInfo, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    completedAt: fields.value.read("completed_at", nullableOf(decodeDateTime)),
-    enqueuedAt: fields.value.read("enqueued_at", nullableOf(decodeDateTime)),
-    errorCode: fields.value.read("error_code", nullableOf(decodeString)),
-    execS: fields.value.read("exec_s", nullableOf(decodeNumber)),
-    execution: fields.value.read("execution", nullableOf(readExecution)),
-    failedAt: fields.value.read("failed_at", nullableOf(decodeDateTime)),
-    failedReason: fields.value.read("failed_reason", nullableOf(decodeString)),
-    goodUntil: fields.value.read("good_until", nullableOf(decodeDateTime)),
-    maxRetries: fields.value.read("max_retries", decodeInteger),
-    queueS: fields.value.read("queue_s", nullableOf(decodeNumber)),
-    retryCount: fields.value.read("retry_count", decodeInteger),
-    startedAt: fields.value.read("started_at", nullableOf(decodeDateTime)),
-    status: fields.value.read("status", decodeString),
-    taskId: fields.value.read("task_id", decodeUuid),
-    traceId: fields.value.read("trace_id", nullableOf(decodeString)),
-    workerHostname: fields.value.read("worker_hostname", nullableOf(decodeString)),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      completedAt: results.completedAt.value,
-      enqueuedAt: results.enqueuedAt.value,
-      errorCode: results.errorCode.value,
-      execS: results.execS.value,
-      execution: results.execution.value,
-      failedAt: results.failedAt.value,
-      failedReason: results.failedReason.value,
-      goodUntil: results.goodUntil.value,
-      maxRetries: results.maxRetries.value,
-      queueS: results.queueS.value,
-      retryCount: results.retryCount.value,
-      startedAt: results.startedAt.value,
-      status: results.status.value,
-      taskId: results.taskId.value,
-      traceId: results.traceId.value,
-      workerHostname: results.workerHostname.value,
-    }),
-  );
-}
-
 export function decodeLivenessReport(
   value: WireJson,
 ): DecodeResult<LivenessReport, MonitoringDecodeError> {
@@ -1727,9 +1677,8 @@ function readLivenessReport(
   }
 
   const results = {
-    dbLatencyMs: fields.value.read("db_latency_ms", nullableOf(decodeNumber)),
-    dbReachable: fields.value.read("db_reachable", decodeBoolean),
-    workers: fields.value.read("workers", listOf(readWorkerPingInfo)),
+    database: fields.value.read("database", readDatabaseLiveness),
+    workers: fields.value.read("workers", listOf(readWorkerPong)),
   };
 
   if (!allDecoded(results)) {
@@ -1744,23 +1693,89 @@ function readLivenessReport(
 
   return ok(
     Object.freeze({
-      dbLatencyMs: results.dbLatencyMs.value,
-      dbReachable: results.dbReachable.value,
+      database: results.database.value,
       workers: results.workers.value,
     }),
   );
 }
 
-export function decodePendingStreamInfo(
-  value: WireJson,
-): DecodeResult<PendingStreamInfo, MonitoringDecodeError> {
-  return readPendingStreamInfo(value, { model: "PendingStreamInfo", path: "$" });
-}
-
-function readPendingStreamInfo(
+function readDatabaseLiveness(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<PendingStreamInfo, MonitoringDecodeError> {
+): DecodeResult<DatabaseLiveness, MonitoringDecodeError> {
+  const fields = readObject(value, place);
+
+  if (!fields.ok) {
+    return fields;
+  }
+
+  const tag = fields.value.read("kind", decodeString);
+
+  if (!tag.ok) {
+    return tag;
+  }
+
+  switch (tag.value) {
+    case "ping":
+      return readDatabasePing(fields.value);
+    case "unreachable":
+      return readDatabaseUnreachable(fields.value);
+    default:
+      return tagUnknown(fields.value, "kind", tag.value);
+  }
+}
+
+function readDatabasePing(
+  fields: FieldReader,
+): DecodeResult<DatabasePing, MonitoringDecodeError> {
+  const results = {
+    latencyMs: fields.read("latency_ms", decodeNumber),
+  };
+
+  if (!allDecoded(results)) {
+    return firstFailure(results);
+  }
+
+  const unread = fields.unread();
+
+  if (!unread.ok) {
+    return unread;
+  }
+
+  return ok(
+    Object.freeze({
+      kind: "ping",
+      latencyMs: results.latencyMs.value,
+    }),
+  );
+}
+
+function readDatabaseUnreachable(
+  fields: FieldReader,
+): DecodeResult<DatabaseUnreachable, MonitoringDecodeError> {
+  const unread = fields.unread();
+
+  if (!unread.ok) {
+    return unread;
+  }
+
+  return ok(
+    Object.freeze({
+      kind: "unreachable",
+    }),
+  );
+}
+
+export function decodePendingStream(
+  value: WireJson,
+): DecodeResult<PendingStream, MonitoringDecodeError> {
+  return readPendingStream(value, { model: "PendingStream", path: "$" });
+}
+
+function readPendingStream(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<PendingStream, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -1768,10 +1783,10 @@ function readPendingStreamInfo(
   }
 
   const results = {
-    coverage: fields.value.read("coverage", readStreamCoverageInfo),
+    coverage: fields.value.read("coverage", readStreamCoverageState),
     execution: fields.value.read("execution", readExecution),
-    queueName: fields.value.read("queue_name", decodeString),
-    wait: fields.value.read("wait", readStreamWaitInfo),
+    queue: fields.value.read("queue", decodeString),
+    wait: fields.value.read("wait", readStreamWait),
   };
 
   if (!allDecoded(results)) {
@@ -1788,16 +1803,16 @@ function readPendingStreamInfo(
     Object.freeze({
       coverage: results.coverage.value,
       execution: results.execution.value,
-      queueName: results.queueName.value,
+      queue: results.queue.value,
       wait: results.wait.value,
     }),
   );
 }
 
-function readStreamCoverageInfo(
+function readStreamCoverageState(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<StreamCoverageInfo, MonitoringDecodeError> {
+): DecodeResult<StreamCoverageState, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -1812,19 +1827,19 @@ function readStreamCoverageInfo(
 
   switch (tag.value) {
     case "no_capacity":
-      return readStreamNoCapacityInfo(fields.value);
+      return readStreamCoverageStateNoCapacity(fields.value);
     case "served":
-      return readStreamServedInfo(fields.value);
+      return readStreamCoverageStateServed(fields.value);
     case "unserved":
-      return readStreamUnservedInfo(fields.value);
+      return readStreamCoverageStateUnserved(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readStreamNoCapacityInfo(
+function readStreamCoverageStateNoCapacity(
   fields: FieldReader,
-): DecodeResult<StreamNoCapacityInfo, MonitoringDecodeError> {
+): DecodeResult<StreamCoverageStateNoCapacity, MonitoringDecodeError> {
   const results = {
     workers: fields.read("workers", decodeInteger),
   };
@@ -1847,9 +1862,9 @@ function readStreamNoCapacityInfo(
   );
 }
 
-function readStreamServedInfo(
+function readStreamCoverageStateServed(
   fields: FieldReader,
-): DecodeResult<StreamServedInfo, MonitoringDecodeError> {
+): DecodeResult<StreamCoverageStateServed, MonitoringDecodeError> {
   const results = {
     capacity: fields.read("capacity", decodeInteger),
     workers: fields.read("workers", decodeInteger),
@@ -1874,9 +1889,9 @@ function readStreamServedInfo(
   );
 }
 
-function readStreamUnservedInfo(
+function readStreamCoverageStateUnserved(
   fields: FieldReader,
-): DecodeResult<StreamUnservedInfo, MonitoringDecodeError> {
+): DecodeResult<StreamCoverageStateUnserved, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -1890,10 +1905,10 @@ function readStreamUnservedInfo(
   );
 }
 
-function readStreamWaitInfo(
+function readStreamWait(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<StreamWaitInfo, MonitoringDecodeError> {
+): DecodeResult<StreamWait, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -1907,18 +1922,45 @@ function readStreamWaitInfo(
   }
 
   switch (tag.value) {
+    case "due":
+      return readStreamWaitDue(fields.value);
     case "none_due":
-      return readStreamNoneDueInfo(fields.value);
-    case "waiting":
-      return readStreamWaitingInfo(fields.value);
+      return readStreamWaitNoneDue(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readStreamNoneDueInfo(
+function readStreamWaitDue(
   fields: FieldReader,
-): DecodeResult<StreamNoneDueInfo, MonitoringDecodeError> {
+): DecodeResult<StreamWaitDue, MonitoringDecodeError> {
+  const results = {
+    oldestDueAt: fields.read("oldest_due_at", decodeDateTime),
+    waitSeconds: fields.read("wait_seconds", decodeNumber),
+  };
+
+  if (!allDecoded(results)) {
+    return firstFailure(results);
+  }
+
+  const unread = fields.unread();
+
+  if (!unread.ok) {
+    return unread;
+  }
+
+  return ok(
+    Object.freeze({
+      kind: "due",
+      oldestDueAt: results.oldestDueAt.value,
+      waitSeconds: results.waitSeconds.value,
+    }),
+  );
+}
+
+function readStreamWaitNoneDue(
+  fields: FieldReader,
+): DecodeResult<StreamWaitNoneDue, MonitoringDecodeError> {
   const results = {
     nextDueAt: fields.read("next_due_at", decodeDateTime),
   };
@@ -1937,33 +1979,6 @@ function readStreamNoneDueInfo(
     Object.freeze({
       kind: "noneDue",
       nextDueAt: results.nextDueAt.value,
-    }),
-  );
-}
-
-function readStreamWaitingInfo(
-  fields: FieldReader,
-): DecodeResult<StreamWaitingInfo, MonitoringDecodeError> {
-  const results = {
-    oldestDueAt: fields.read("oldest_due_at", decodeDateTime),
-    waitS: fields.read("wait_s", decodeNumber),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      kind: "waiting",
-      oldestDueAt: results.oldestDueAt.value,
-      waitS: results.waitS.value,
     }),
   );
 }
@@ -2054,16 +2069,16 @@ function readStatusCount(
   );
 }
 
-export function decodeTaskAttemptInfo(
+export function decodeTaskAttemptDetail(
   value: WireJson,
-): DecodeResult<TaskAttemptInfo, MonitoringDecodeError> {
-  return readTaskAttemptInfo(value, { model: "TaskAttemptInfo", path: "$" });
+): DecodeResult<TaskAttemptDetail, MonitoringDecodeError> {
+  return readTaskAttemptDetail(value, { model: "TaskAttemptDetail", path: "$" });
 }
 
-function readTaskAttemptInfo(
+function readTaskAttemptDetail(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<TaskAttemptInfo, MonitoringDecodeError> {
+): DecodeResult<TaskAttemptDetail, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -2127,17 +2142,17 @@ function readAttemptPhasesInfo(
 
   switch (tag.value) {
     case "captured":
-      return readPhasesCapturedInfo(fields.value);
+      return readAttemptPhasesCapturedInfo(fields.value);
     case "not_captured":
-      return readPhasesNotCapturedInfo(fields.value);
+      return readAttemptPhasesNotCapturedInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readPhasesCapturedInfo(
+function readAttemptPhasesCapturedInfo(
   fields: FieldReader,
-): DecodeResult<PhasesCapturedInfo, MonitoringDecodeError> {
+): DecodeResult<AttemptPhasesCapturedInfo, MonitoringDecodeError> {
   const results = {
     claimedAt: fields.read("claimed_at", decodeDateTime),
     claims: fields.read("claims", readAttemptClaimsInfo),
@@ -2186,17 +2201,17 @@ function readAttemptClaimsInfo(
 
   switch (tag.value) {
     case "counted":
-      return readClaimsCountedInfo(fields.value);
+      return readAttemptClaimsCountedInfo(fields.value);
     case "not_counted":
-      return readClaimsNotCountedInfo(fields.value);
+      return readAttemptClaimsNotCountedInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readClaimsCountedInfo(
+function readAttemptClaimsCountedInfo(
   fields: FieldReader,
-): DecodeResult<ClaimsCountedInfo, MonitoringDecodeError> {
+): DecodeResult<AttemptClaimsCountedInfo, MonitoringDecodeError> {
   const results = {
     count: fields.read("count", decodeInteger),
     firstClaimedAt: fields.read("first_claimed_at", decodeDateTime),
@@ -2221,9 +2236,9 @@ function readClaimsCountedInfo(
   );
 }
 
-function readClaimsNotCountedInfo(
+function readAttemptClaimsNotCountedInfo(
   fields: FieldReader,
-): DecodeResult<ClaimsNotCountedInfo, MonitoringDecodeError> {
+): DecodeResult<AttemptClaimsNotCountedInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -2255,17 +2270,17 @@ function readAttemptFinalizingInfo(
 
   switch (tag.value) {
     case "marked":
-      return readFinalizingMarkedInfo(fields.value);
+      return readAttemptFinalizingMarkedInfo(fields.value);
     case "not_marked":
-      return readFinalizingNotMarkedInfo(fields.value);
+      return readAttemptFinalizingNotMarkedInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readFinalizingMarkedInfo(
+function readAttemptFinalizingMarkedInfo(
   fields: FieldReader,
-): DecodeResult<FinalizingMarkedInfo, MonitoringDecodeError> {
+): DecodeResult<AttemptFinalizingMarkedInfo, MonitoringDecodeError> {
   const results = {
     finalizingAt: fields.read("finalizing_at", decodeDateTime),
   };
@@ -2288,9 +2303,9 @@ function readFinalizingMarkedInfo(
   );
 }
 
-function readFinalizingNotMarkedInfo(
+function readAttemptFinalizingNotMarkedInfo(
   fields: FieldReader,
-): DecodeResult<FinalizingNotMarkedInfo, MonitoringDecodeError> {
+): DecodeResult<AttemptFinalizingNotMarkedInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -2322,19 +2337,19 @@ function readAttemptRecordedByInfo(
 
   switch (tag.value) {
     case "cancel":
-      return readRecordedByCancelInfo(fields.value);
+      return readAttemptRecordedByCancelInfo(fields.value);
     case "recovery":
-      return readRecordedByRecoveryInfo(fields.value);
+      return readAttemptRecordedByRecoveryInfo(fields.value);
     case "worker":
-      return readRecordedByWorkerInfo(fields.value);
+      return readAttemptRecordedByWorkerInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readRecordedByCancelInfo(
+function readAttemptRecordedByCancelInfo(
   fields: FieldReader,
-): DecodeResult<RecordedByCancelInfo, MonitoringDecodeError> {
+): DecodeResult<AttemptRecordedByCancelInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -2348,9 +2363,9 @@ function readRecordedByCancelInfo(
   );
 }
 
-function readRecordedByRecoveryInfo(
+function readAttemptRecordedByRecoveryInfo(
   fields: FieldReader,
-): DecodeResult<RecordedByRecoveryInfo, MonitoringDecodeError> {
+): DecodeResult<AttemptRecordedByRecoveryInfo, MonitoringDecodeError> {
   const results = {
     lastSeenAt: fields.read("last_seen_at", decodeDateTime),
   };
@@ -2373,9 +2388,9 @@ function readRecordedByRecoveryInfo(
   );
 }
 
-function readRecordedByWorkerInfo(
+function readAttemptRecordedByWorkerInfo(
   fields: FieldReader,
-): DecodeResult<RecordedByWorkerInfo, MonitoringDecodeError> {
+): DecodeResult<AttemptRecordedByWorkerInfo, MonitoringDecodeError> {
   const results = {
     placement: fields.read("placement", readAttemptPlacementInfo),
   };
@@ -2416,17 +2431,17 @@ function readAttemptPlacementInfo(
 
   switch (tag.value) {
     case "not_observed":
-      return readPlacementNotObservedInfo(fields.value);
+      return readAttemptPlacementNotObservedInfo(fields.value);
     case "placed":
-      return readPlacementPlacedInfo(fields.value);
+      return readAttemptPlacementPlacedInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readPlacementNotObservedInfo(
+function readAttemptPlacementNotObservedInfo(
   fields: FieldReader,
-): DecodeResult<PlacementNotObservedInfo, MonitoringDecodeError> {
+): DecodeResult<AttemptPlacementNotObservedInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -2440,9 +2455,9 @@ function readPlacementNotObservedInfo(
   );
 }
 
-function readPlacementPlacedInfo(
+function readAttemptPlacementPlacedInfo(
   fields: FieldReader,
-): DecodeResult<PlacementPlacedInfo, MonitoringDecodeError> {
+): DecodeResult<AttemptPlacementPlacedInfo, MonitoringDecodeError> {
   const results = {
     placedAt: fields.read("placed_at", decodeDateTime),
   };
@@ -2465,9 +2480,9 @@ function readPlacementPlacedInfo(
   );
 }
 
-function readPhasesNotCapturedInfo(
+function readAttemptPhasesNotCapturedInfo(
   fields: FieldReader,
-): DecodeResult<PhasesNotCapturedInfo, MonitoringDecodeError> {
+): DecodeResult<AttemptPhasesNotCapturedInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -2498,15 +2513,15 @@ function readTaskDetail(
   }
 
   const results = {
-    attempts: fields.value.read("attempts", listOf(readTaskAttemptInfo)),
+    attempts: fields.value.read("attempts", listOf(readTaskAttemptDetail)),
     errorCategory: fields.value.read("error_category", nullableOf(decodeString)),
     isWorkflowTask: fields.value.read("is_workflow_task", decodeBoolean),
-    leaf: fields.value.read("leaf", readLeafTaskInfo),
     priority: fields.value.read("priority", decodeInteger),
-    queueName: fields.value.read("queue_name", decodeString),
+    queue: fields.value.read("queue", decodeString),
     taskName: fields.value.read("task_name", decodeString),
+    taskRow: fields.value.read("task_row", readTaskRowInfo),
     workflowId: fields.value.read("workflow_id", nullableOf(decodeString)),
-    workflowTaskIndex: fields.value.read("workflow_task_index", nullableOf(decodeInteger)),
+    workflowNodeIndex: fields.value.read("workflow_node_index", nullableOf(decodeInteger)),
   };
 
   if (!allDecoded(results)) {
@@ -2524,12 +2539,12 @@ function readTaskDetail(
       attempts: results.attempts.value,
       errorCategory: results.errorCategory.value,
       isWorkflowTask: results.isWorkflowTask.value,
-      leaf: results.leaf.value,
       priority: results.priority.value,
-      queueName: results.queueName.value,
+      queue: results.queue.value,
       taskName: results.taskName.value,
+      taskRow: results.taskRow.value,
       workflowId: results.workflowId.value,
-      workflowTaskIndex: results.workflowTaskIndex.value,
+      workflowNodeIndex: results.workflowNodeIndex.value,
     }),
   );
 }
@@ -2573,6 +2588,73 @@ function readTaskListPage(
   );
 }
 
+export function decodeTaskRowInfo(
+  value: WireJson,
+): DecodeResult<TaskRowInfo, MonitoringDecodeError> {
+  return readTaskRowInfo(value, { model: "TaskRowInfo", path: "$" });
+}
+
+function readTaskRowInfo(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<TaskRowInfo, MonitoringDecodeError> {
+  const fields = readObject(value, place);
+
+  if (!fields.ok) {
+    return fields;
+  }
+
+  const results = {
+    completedAt: fields.value.read("completed_at", nullableOf(decodeDateTime)),
+    enqueuedAt: fields.value.read("enqueued_at", nullableOf(decodeDateTime)),
+    errorCode: fields.value.read("error_code", nullableOf(decodeString)),
+    execution: fields.value.read("execution", nullableOf(readExecution)),
+    executionSeconds: fields.value.read("execution_seconds", nullableOf(decodeNumber)),
+    failedAt: fields.value.read("failed_at", nullableOf(decodeDateTime)),
+    failedReason: fields.value.read("failed_reason", nullableOf(decodeString)),
+    goodUntil: fields.value.read("good_until", nullableOf(decodeDateTime)),
+    maxRetries: fields.value.read("max_retries", decodeInteger),
+    queueSeconds: fields.value.read("queue_seconds", nullableOf(decodeNumber)),
+    retryCount: fields.value.read("retry_count", decodeInteger),
+    startedAt: fields.value.read("started_at", nullableOf(decodeDateTime)),
+    status: fields.value.read("status", decodeString),
+    taskId: fields.value.read("task_id", decodeUuid),
+    traceId: fields.value.read("trace_id", nullableOf(decodeString)),
+    workerHostname: fields.value.read("worker_hostname", nullableOf(decodeString)),
+  };
+
+  if (!allDecoded(results)) {
+    return firstFailure(results);
+  }
+
+  const unread = fields.value.unread();
+
+  if (!unread.ok) {
+    return unread;
+  }
+
+  return ok(
+    Object.freeze({
+      completedAt: results.completedAt.value,
+      enqueuedAt: results.enqueuedAt.value,
+      errorCode: results.errorCode.value,
+      execution: results.execution.value,
+      executionSeconds: results.executionSeconds.value,
+      failedAt: results.failedAt.value,
+      failedReason: results.failedReason.value,
+      goodUntil: results.goodUntil.value,
+      maxRetries: results.maxRetries.value,
+      queueSeconds: results.queueSeconds.value,
+      retryCount: results.retryCount.value,
+      startedAt: results.startedAt.value,
+      status: results.status.value,
+      taskId: results.taskId.value,
+      traceId: results.traceId.value,
+      workerHostname: results.workerHostname.value,
+    }),
+  );
+}
+
 export function decodeTaskSummary(
   value: WireJson,
 ): DecodeResult<TaskSummary, MonitoringDecodeError> {
@@ -2594,17 +2676,17 @@ function readTaskSummary(
     enqueuedAt: fields.value.read("enqueued_at", nullableOf(decodeDateTime)),
     errorCategory: fields.value.read("error_category", nullableOf(decodeString)),
     errorCode: fields.value.read("error_code", nullableOf(decodeString)),
-    execS: fields.value.read("exec_s", nullableOf(decodeNumber)),
+    executionSeconds: fields.value.read("execution_seconds", nullableOf(decodeNumber)),
     failedAt: fields.value.read("failed_at", nullableOf(decodeDateTime)),
-    id: fields.value.read("id", decodeUuid),
     isWorkflowTask: fields.value.read("is_workflow_task", decodeBoolean),
     maxRetries: fields.value.read("max_retries", decodeInteger),
     priority: fields.value.read("priority", decodeInteger),
-    queueName: fields.value.read("queue_name", decodeString),
-    queueS: fields.value.read("queue_s", nullableOf(decodeNumber)),
+    queue: fields.value.read("queue", decodeString),
+    queueSeconds: fields.value.read("queue_seconds", nullableOf(decodeNumber)),
     retryCount: fields.value.read("retry_count", decodeInteger),
     startedAt: fields.value.read("started_at", nullableOf(decodeDateTime)),
     status: fields.value.read("status", decodeString),
+    taskId: fields.value.read("task_id", decodeUuid),
     taskName: fields.value.read("task_name", decodeString),
     workerHostname: fields.value.read("worker_hostname", nullableOf(decodeString)),
     workerId: fields.value.read("worker_id", nullableOf(decodeString)),
@@ -2626,17 +2708,17 @@ function readTaskSummary(
       enqueuedAt: results.enqueuedAt.value,
       errorCategory: results.errorCategory.value,
       errorCode: results.errorCode.value,
-      execS: results.execS.value,
+      executionSeconds: results.executionSeconds.value,
       failedAt: results.failedAt.value,
-      id: results.id.value,
       isWorkflowTask: results.isWorkflowTask.value,
       maxRetries: results.maxRetries.value,
       priority: results.priority.value,
-      queueName: results.queueName.value,
-      queueS: results.queueS.value,
+      queue: results.queue.value,
+      queueSeconds: results.queueSeconds.value,
       retryCount: results.retryCount.value,
       startedAt: results.startedAt.value,
       status: results.status.value,
+      taskId: results.taskId.value,
       taskName: results.taskName.value,
       workerHostname: results.workerHostname.value,
       workerId: results.workerId.value,
@@ -2644,16 +2726,16 @@ function readTaskSummary(
   );
 }
 
-export function decodeWorkerClassLoadInfo(
+export function decodeWorkerExecutionClassLoad(
   value: WireJson,
-): DecodeResult<WorkerClassLoadInfo, MonitoringDecodeError> {
-  return readWorkerClassLoadInfo(value, { model: "WorkerClassLoadInfo", path: "$" });
+): DecodeResult<WorkerExecutionClassLoad, MonitoringDecodeError> {
+  return readWorkerExecutionClassLoad(value, { model: "WorkerExecutionClassLoad", path: "$" });
 }
 
-function readWorkerClassLoadInfo(
+function readWorkerExecutionClassLoad(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkerClassLoadInfo, MonitoringDecodeError> {
+): DecodeResult<WorkerExecutionClassLoad, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -2661,7 +2743,7 @@ function readWorkerClassLoadInfo(
   }
 
   const results = {
-    budgets: fields.value.read("budgets", listOf(readBudgetLoadInfo)),
+    budgets: fields.value.read("budgets", listOf(readBudgetLoad)),
     snapshotAt: fields.value.read("snapshot_at", decodeDateTime),
     workerId: fields.value.read("worker_id", decodeString),
   };
@@ -2732,16 +2814,16 @@ function readWorkerHistoryPoint(
   );
 }
 
-export function decodeWorkerPingInfo(
+export function decodeWorkerPong(
   value: WireJson,
-): DecodeResult<WorkerPingInfo, MonitoringDecodeError> {
-  return readWorkerPingInfo(value, { model: "WorkerPingInfo", path: "$" });
+): DecodeResult<WorkerPong, MonitoringDecodeError> {
+  return readWorkerPong(value, { model: "WorkerPong", path: "$" });
 }
 
-function readWorkerPingInfo(
+function readWorkerPong(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkerPingInfo, MonitoringDecodeError> {
+): DecodeResult<WorkerPong, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -2792,24 +2874,23 @@ function readWorkerStateInfo(
   }
 
   const results = {
+    childCount: fields.value.read("child_count", decodeInteger),
     clusterWideCap: fields.value.read("cluster_wide_cap", nullableOf(decodeInteger)),
     cpuPercent: fields.value.read("cpu_percent", nullableOf(decodeNumber)),
-    downSlots: fields.value.read("down_slots", listOf(readDownSlotInfo)),
     hostname: fields.value.read("hostname", decodeString),
     memoryPercent: fields.value.read("memory_percent", nullableOf(decodeNumber)),
     memoryUsageMb: fields.value.read("memory_usage_mb", nullableOf(decodeNumber)),
     pid: fields.value.read("pid", decodeInteger),
-    processes: fields.value.read("processes", decodeInteger),
-    profile: fields.value.read("profile", readSnapshotProfileInfo),
+    profile: fields.value.read("profile", readSnapshotProfile),
     queueMaxConcurrency: fields.value.read("queue_max_concurrency", mapOf(decodeInteger)),
     queues: fields.value.read("queues", listOf(decodeString)),
-    slotHealth: fields.value.read("slot_health", readSlotHealthKind),
-    snapshotAgeS: fields.value.read("snapshot_age_s", nullableOf(decodeNumber)),
+    slotHealth: fields.value.read("slot_health", readSlotHealth),
+    snapshotAgeSeconds: fields.value.read("snapshot_age_seconds", nullableOf(decodeNumber)),
     snapshotAt: fields.value.read("snapshot_at", decodeDateTime),
     stale: fields.value.read("stale", decodeBoolean),
     tasksClaimed: fields.value.read("tasks_claimed", decodeInteger),
     tasksRunning: fields.value.read("tasks_running", decodeInteger),
-    uptimeS: fields.value.read("uptime_s", nullableOf(decodeNumber)),
+    uptimeSeconds: fields.value.read("uptime_seconds", nullableOf(decodeNumber)),
     workerId: fields.value.read("worker_id", decodeString),
     workerStartedAt: fields.value.read("worker_started_at", decodeDateTime),
   };
@@ -2826,34 +2907,33 @@ function readWorkerStateInfo(
 
   return ok(
     Object.freeze({
+      childCount: results.childCount.value,
       clusterWideCap: results.clusterWideCap.value,
       cpuPercent: results.cpuPercent.value,
-      downSlots: results.downSlots.value,
       hostname: results.hostname.value,
       memoryPercent: results.memoryPercent.value,
       memoryUsageMb: results.memoryUsageMb.value,
       pid: results.pid.value,
-      processes: results.processes.value,
       profile: results.profile.value,
       queueMaxConcurrency: results.queueMaxConcurrency.value,
       queues: results.queues.value,
       slotHealth: results.slotHealth.value,
-      snapshotAgeS: results.snapshotAgeS.value,
+      snapshotAgeSeconds: results.snapshotAgeSeconds.value,
       snapshotAt: results.snapshotAt.value,
       stale: results.stale.value,
       tasksClaimed: results.tasksClaimed.value,
       tasksRunning: results.tasksRunning.value,
-      uptimeS: results.uptimeS.value,
+      uptimeSeconds: results.uptimeSeconds.value,
       workerId: results.workerId.value,
       workerStartedAt: results.workerStartedAt.value,
     }),
   );
 }
 
-function readSnapshotProfileInfo(
+function readSnapshotProfile(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<SnapshotProfileInfo, MonitoringDecodeError> {
+): DecodeResult<SnapshotProfile, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -2868,17 +2948,17 @@ function readSnapshotProfileInfo(
 
   switch (tag.value) {
     case "named":
-      return readProfileNamedInfo(fields.value);
+      return readSnapshotProfileNamed(fields.value);
     case "not_recorded":
-      return readProfileNotRecordedInfo(fields.value);
+      return readSnapshotProfileNotRecorded(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readProfileNamedInfo(
+function readSnapshotProfileNamed(
   fields: FieldReader,
-): DecodeResult<ProfileNamedInfo, MonitoringDecodeError> {
+): DecodeResult<SnapshotProfileNamed, MonitoringDecodeError> {
   const results = {
     name: fields.read("name", decodeString),
   };
@@ -2901,9 +2981,9 @@ function readProfileNamedInfo(
   );
 }
 
-function readProfileNotRecordedInfo(
+function readSnapshotProfileNotRecorded(
   fields: FieldReader,
-): DecodeResult<ProfileNotRecordedInfo, MonitoringDecodeError> {
+): DecodeResult<SnapshotProfileNotRecorded, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -2917,17 +2997,71 @@ function readProfileNotRecordedInfo(
   );
 }
 
-function readSlotHealthKind(
+function readSlotHealth(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<SlotHealthKind, MonitoringDecodeError> {
-  switch (value) {
-    case "all_serving":
-    case "slots_down":
-      return ok(value);
-    default:
-      return enumValueUnknown(value, place);
+): DecodeResult<SlotHealth, MonitoringDecodeError> {
+  const fields = readObject(value, place);
+
+  if (!fields.ok) {
+    return fields;
   }
+
+  const tag = fields.value.read("kind", decodeString);
+
+  if (!tag.ok) {
+    return tag;
+  }
+
+  switch (tag.value) {
+    case "all_serving":
+      return readSlotHealthAllServing(fields.value);
+    case "slots_down":
+      return readSlotHealthSlotsDown(fields.value);
+    default:
+      return tagUnknown(fields.value, "kind", tag.value);
+  }
+}
+
+function readSlotHealthAllServing(
+  fields: FieldReader,
+): DecodeResult<SlotHealthAllServing, MonitoringDecodeError> {
+  const unread = fields.unread();
+
+  if (!unread.ok) {
+    return unread;
+  }
+
+  return ok(
+    Object.freeze({
+      kind: "allServing",
+    }),
+  );
+}
+
+function readSlotHealthSlotsDown(
+  fields: FieldReader,
+): DecodeResult<SlotHealthSlotsDown, MonitoringDecodeError> {
+  const results = {
+    slots: fields.read("slots", listOf(readDownSlot)),
+  };
+
+  if (!allDecoded(results)) {
+    return firstFailure(results);
+  }
+
+  const unread = fields.unread();
+
+  if (!unread.ok) {
+    return unread;
+  }
+
+  return ok(
+    Object.freeze({
+      kind: "slotsDown",
+      slots: results.slots.value,
+    }),
+  );
 }
 
 export function decodeWorkflowEdge(
@@ -2969,16 +3103,16 @@ function readWorkflowEdge(
   );
 }
 
-export function decodeWorkflowNodeInfo(
+export function decodeWorkflowNodeDetail(
   value: WireJson,
-): DecodeResult<WorkflowNodeInfo, MonitoringDecodeError> {
-  return readWorkflowNodeInfo(value, { model: "WorkflowNodeInfo", path: "$" });
+): DecodeResult<WorkflowNodeDetail, MonitoringDecodeError> {
+  return readWorkflowNodeDetail(value, { model: "WorkflowNodeDetail", path: "$" });
 }
 
-function readWorkflowNodeInfo(
+function readWorkflowNodeDetail(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<WorkflowNodeInfo, MonitoringDecodeError> {
+): DecodeResult<WorkflowNodeDetail, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -2986,17 +3120,68 @@ function readWorkflowNodeInfo(
   }
 
   const results = {
-    allowFailedDeps: fields.value.read("allow_failed_deps", decodeBoolean),
+    attempts: fields.value.read("attempts", listOf(readTaskAttemptDetail)),
+    isSubWorkflow: fields.value.read("is_sub_workflow", decodeBoolean),
+    nodeError: fields.value.read("node_error", nullableOf(decodeString)),
+    nodeId: fields.value.read("node_id", nullableOf(decodeString)),
+    nodeIndex: fields.value.read("node_index", decodeInteger),
+    nodeStatus: fields.value.read("node_status", decodeString),
+    taskName: fields.value.read("task_name", decodeString),
+    taskRow: fields.value.read("task_row", nullableOf(readTaskRowInfo)),
+  };
+
+  if (!allDecoded(results)) {
+    return firstFailure(results);
+  }
+
+  const unread = fields.value.unread();
+
+  if (!unread.ok) {
+    return unread;
+  }
+
+  return ok(
+    Object.freeze({
+      attempts: results.attempts.value,
+      isSubWorkflow: results.isSubWorkflow.value,
+      nodeError: results.nodeError.value,
+      nodeId: results.nodeId.value,
+      nodeIndex: results.nodeIndex.value,
+      nodeStatus: results.nodeStatus.value,
+      taskName: results.taskName.value,
+      taskRow: results.taskRow.value,
+    }),
+  );
+}
+
+export function decodeWorkflowNodeSummary(
+  value: WireJson,
+): DecodeResult<WorkflowNodeSummary, MonitoringDecodeError> {
+  return readWorkflowNodeSummary(value, { model: "WorkflowNodeSummary", path: "$" });
+}
+
+function readWorkflowNodeSummary(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<WorkflowNodeSummary, MonitoringDecodeError> {
+  const fields = readObject(value, place);
+
+  if (!fields.ok) {
+    return fields;
+  }
+
+  const results = {
+    allowFailedDependencies: fields.value.read("allow_failed_dependencies", decodeBoolean),
     childFailed: fields.value.read("child_failed", nullableOf(decodeInteger)),
     childTotal: fields.value.read("child_total", nullableOf(decodeInteger)),
     completedAt: fields.value.read("completed_at", nullableOf(decodeDateTime)),
-    execS: fields.value.read("exec_s", nullableOf(decodeNumber)),
-    isSubworkflow: fields.value.read("is_subworkflow", decodeBoolean),
+    executionSeconds: fields.value.read("execution_seconds", nullableOf(decodeNumber)),
+    isSubWorkflow: fields.value.read("is_sub_workflow", decodeBoolean),
     nodeId: fields.value.read("node_id", nullableOf(decodeString)),
+    nodeIndex: fields.value.read("node_index", decodeInteger),
     nodeStatus: fields.value.read("node_status", decodeString),
     startedAt: fields.value.read("started_at", nullableOf(decodeDateTime)),
     subWorkflowId: fields.value.read("sub_workflow_id", nullableOf(decodeString)),
-    taskIndex: fields.value.read("task_index", decodeInteger),
     taskName: fields.value.read("task_name", decodeString),
     timing: fields.value.read("timing", readNodeTimingInfo),
   };
@@ -3013,17 +3198,17 @@ function readWorkflowNodeInfo(
 
   return ok(
     Object.freeze({
-      allowFailedDeps: results.allowFailedDeps.value,
+      allowFailedDependencies: results.allowFailedDependencies.value,
       childFailed: results.childFailed.value,
       childTotal: results.childTotal.value,
       completedAt: results.completedAt.value,
-      execS: results.execS.value,
-      isSubworkflow: results.isSubworkflow.value,
+      executionSeconds: results.executionSeconds.value,
+      isSubWorkflow: results.isSubWorkflow.value,
       nodeId: results.nodeId.value,
+      nodeIndex: results.nodeIndex.value,
       nodeStatus: results.nodeStatus.value,
       startedAt: results.startedAt.value,
       subWorkflowId: results.subWorkflowId.value,
-      taskIndex: results.taskIndex.value,
       taskName: results.taskName.value,
       timing: results.timing.value,
     }),
@@ -3105,17 +3290,17 @@ function readNodeEndpointInfo(
 
   switch (tag.value) {
     case "not_terminal":
-      return readEndpointNotTerminalInfo(fields.value);
+      return readNodeEndpointNotTerminalInfo(fields.value);
     case "terminal":
-      return readEndpointTerminalInfo(fields.value);
+      return readNodeEndpointTerminalInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readEndpointNotTerminalInfo(
+function readNodeEndpointNotTerminalInfo(
   fields: FieldReader,
-): DecodeResult<EndpointNotTerminalInfo, MonitoringDecodeError> {
+): DecodeResult<NodeEndpointNotTerminalInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -3129,9 +3314,9 @@ function readEndpointNotTerminalInfo(
   );
 }
 
-function readEndpointTerminalInfo(
+function readNodeEndpointTerminalInfo(
   fields: FieldReader,
-): DecodeResult<EndpointTerminalInfo, MonitoringDecodeError> {
+): DecodeResult<NodeEndpointTerminalInfo, MonitoringDecodeError> {
   const results = {
     at: fields.read("at", decodeDateTime),
     status: fields.read("status", readTerminalNodeStatus),
@@ -3224,18 +3409,18 @@ function readSegmentEndInfo(
   }
 
   switch (tag.value) {
-    case "ended":
-      return readSegmentEndedInfo(fields.value);
+    case "closed":
+      return readSegmentEndClosedInfo(fields.value);
     case "open":
-      return readSegmentOpenInfo(fields.value);
+      return readSegmentEndOpenInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readSegmentEndedInfo(
+function readSegmentEndClosedInfo(
   fields: FieldReader,
-): DecodeResult<SegmentEndedInfo, MonitoringDecodeError> {
+): DecodeResult<SegmentEndClosedInfo, MonitoringDecodeError> {
   const results = {
     at: fields.read("at", decodeDateTime),
   };
@@ -3252,15 +3437,15 @@ function readSegmentEndedInfo(
 
   return ok(
     Object.freeze({
-      kind: "ended",
+      kind: "closed",
       at: results.at.value,
     }),
   );
 }
 
-function readSegmentOpenInfo(
+function readSegmentEndOpenInfo(
   fields: FieldReader,
-): DecodeResult<SegmentOpenInfo, MonitoringDecodeError> {
+): DecodeResult<SegmentEndOpenInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -3292,31 +3477,31 @@ function readSegmentPhaseInfo(
 
   switch (tag.value) {
     case "advancing":
-      return readPhaseAdvancingInfo(fields.value);
+      return readSegmentPhaseAdvancingInfo(fields.value);
     case "claimed":
-      return readPhaseClaimedInfo(fields.value);
+      return readSegmentPhaseClaimedInfo(fields.value);
     case "enqueued":
-      return readPhaseEnqueuedInfo(fields.value);
+      return readSegmentPhaseEnqueuedInfo(fields.value);
     case "finalizing":
-      return readPhaseFinalizingInfo(fields.value);
+      return readSegmentPhaseFinalizingInfo(fields.value);
     case "pending":
-      return readPhasePendingInfo(fields.value);
+      return readSegmentPhasePendingInfo(fields.value);
     case "ready":
-      return readPhaseReadyInfo(fields.value);
+      return readSegmentPhaseReadyInfo(fields.value);
     case "retry_wait":
-      return readPhaseRetryWaitInfo(fields.value);
+      return readSegmentPhaseRetryWaitInfo(fields.value);
     case "running":
-      return readPhaseRunningInfo(fields.value);
+      return readSegmentPhaseRunningInfo(fields.value);
     case "unknown":
-      return readPhaseUnknownInfo(fields.value);
+      return readSegmentPhaseUnknownInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readPhaseAdvancingInfo(
+function readSegmentPhaseAdvancingInfo(
   fields: FieldReader,
-): DecodeResult<PhaseAdvancingInfo, MonitoringDecodeError> {
+): DecodeResult<SegmentPhaseAdvancingInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -3330,9 +3515,9 @@ function readPhaseAdvancingInfo(
   );
 }
 
-function readPhaseClaimedInfo(
+function readSegmentPhaseClaimedInfo(
   fields: FieldReader,
-): DecodeResult<PhaseClaimedInfo, MonitoringDecodeError> {
+): DecodeResult<SegmentPhaseClaimedInfo, MonitoringDecodeError> {
   const results = {
     claim: fields.read("claim", readSegmentClaimInfo),
   };
@@ -3373,19 +3558,19 @@ function readSegmentClaimInfo(
 
   switch (tag.value) {
     case "earlier":
-      return readClaimEarlierInfo(fields.value);
+      return readSegmentClaimEarlierInfo(fields.value);
     case "not_recorded":
-      return readClaimNotRecordedInfo(fields.value);
+      return readSegmentClaimNotRecordedInfo(fields.value);
     case "recorded":
-      return readClaimRecordedInfo(fields.value);
+      return readSegmentClaimRecordedInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readClaimEarlierInfo(
+function readSegmentClaimEarlierInfo(
   fields: FieldReader,
-): DecodeResult<ClaimEarlierInfo, MonitoringDecodeError> {
+): DecodeResult<SegmentClaimEarlierInfo, MonitoringDecodeError> {
   const results = {
     count: fields.read("count", decodeInteger),
   };
@@ -3408,9 +3593,9 @@ function readClaimEarlierInfo(
   );
 }
 
-function readClaimNotRecordedInfo(
+function readSegmentClaimNotRecordedInfo(
   fields: FieldReader,
-): DecodeResult<ClaimNotRecordedInfo, MonitoringDecodeError> {
+): DecodeResult<SegmentClaimNotRecordedInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -3424,9 +3609,9 @@ function readClaimNotRecordedInfo(
   );
 }
 
-function readClaimRecordedInfo(
+function readSegmentClaimRecordedInfo(
   fields: FieldReader,
-): DecodeResult<ClaimRecordedInfo, MonitoringDecodeError> {
+): DecodeResult<SegmentClaimRecordedInfo, MonitoringDecodeError> {
   const results = {
     placement: fields.read("placement", readAttemptPlacementInfo),
   };
@@ -3449,9 +3634,9 @@ function readClaimRecordedInfo(
   );
 }
 
-function readPhaseEnqueuedInfo(
+function readSegmentPhaseEnqueuedInfo(
   fields: FieldReader,
-): DecodeResult<PhaseEnqueuedInfo, MonitoringDecodeError> {
+): DecodeResult<SegmentPhaseEnqueuedInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -3465,9 +3650,9 @@ function readPhaseEnqueuedInfo(
   );
 }
 
-function readPhaseFinalizingInfo(
+function readSegmentPhaseFinalizingInfo(
   fields: FieldReader,
-): DecodeResult<PhaseFinalizingInfo, MonitoringDecodeError> {
+): DecodeResult<SegmentPhaseFinalizingInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -3481,9 +3666,9 @@ function readPhaseFinalizingInfo(
   );
 }
 
-function readPhasePendingInfo(
+function readSegmentPhasePendingInfo(
   fields: FieldReader,
-): DecodeResult<PhasePendingInfo, MonitoringDecodeError> {
+): DecodeResult<SegmentPhasePendingInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -3497,9 +3682,9 @@ function readPhasePendingInfo(
   );
 }
 
-function readPhaseReadyInfo(
+function readSegmentPhaseReadyInfo(
   fields: FieldReader,
-): DecodeResult<PhaseReadyInfo, MonitoringDecodeError> {
+): DecodeResult<SegmentPhaseReadyInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -3513,9 +3698,9 @@ function readPhaseReadyInfo(
   );
 }
 
-function readPhaseRetryWaitInfo(
+function readSegmentPhaseRetryWaitInfo(
   fields: FieldReader,
-): DecodeResult<PhaseRetryWaitInfo, MonitoringDecodeError> {
+): DecodeResult<SegmentPhaseRetryWaitInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -3529,9 +3714,9 @@ function readPhaseRetryWaitInfo(
   );
 }
 
-function readPhaseRunningInfo(
+function readSegmentPhaseRunningInfo(
   fields: FieldReader,
-): DecodeResult<PhaseRunningInfo, MonitoringDecodeError> {
+): DecodeResult<SegmentPhaseRunningInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -3545,9 +3730,9 @@ function readPhaseRunningInfo(
   );
 }
 
-function readPhaseUnknownInfo(
+function readSegmentPhaseUnknownInfo(
   fields: FieldReader,
-): DecodeResult<PhaseUnknownInfo, MonitoringDecodeError> {
+): DecodeResult<SegmentPhaseUnknownInfo, MonitoringDecodeError> {
   const results = {
     reason: fields.read("reason", readUnknownReason),
   };
@@ -3603,19 +3788,19 @@ function readSegmentSourceInfo(
 
   switch (tag.value) {
     case "attempt":
-      return readSourceAttemptInfo(fields.value);
+      return readSegmentSourceAttemptInfo(fields.value);
     case "node":
-      return readSourceNodeInfo(fields.value);
+      return readSegmentSourceNodeInfo(fields.value);
     case "task":
-      return readSourceTaskInfo(fields.value);
+      return readSegmentSourceTaskInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readSourceAttemptInfo(
+function readSegmentSourceAttemptInfo(
   fields: FieldReader,
-): DecodeResult<SourceAttemptInfo, MonitoringDecodeError> {
+): DecodeResult<SegmentSourceAttemptInfo, MonitoringDecodeError> {
   const results = {
     attempt: fields.read("attempt", decodeInteger),
     generation: fields.read("generation", decodeInteger),
@@ -3642,9 +3827,9 @@ function readSourceAttemptInfo(
   );
 }
 
-function readSourceNodeInfo(
+function readSegmentSourceNodeInfo(
   fields: FieldReader,
-): DecodeResult<SourceNodeInfo, MonitoringDecodeError> {
+): DecodeResult<SegmentSourceNodeInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -3658,9 +3843,9 @@ function readSourceNodeInfo(
   );
 }
 
-function readSourceTaskInfo(
+function readSegmentSourceTaskInfo(
   fields: FieldReader,
-): DecodeResult<SourceTaskInfo, MonitoringDecodeError> {
+): DecodeResult<SegmentSourceTaskInfo, MonitoringDecodeError> {
   const results = {
     generation: fields.read("generation", decodeInteger),
     taskId: fields.read("task_id", decodeUuid),
@@ -3728,19 +3913,19 @@ function readTimingConflictInfo(
 
   switch (tag.value) {
     case "clock_order":
-      return readConflictClockOrderInfo(fields.value);
+      return readTimingConflictClockOrderInfo(fields.value);
     case "missing_record":
-      return readConflictMissingRecordInfo(fields.value);
+      return readTimingConflictMissingRecordInfo(fields.value);
     case "unexpected_event":
-      return readConflictUnexpectedEventInfo(fields.value);
+      return readTimingConflictUnexpectedEventInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readConflictClockOrderInfo(
+function readTimingConflictClockOrderInfo(
   fields: FieldReader,
-): DecodeResult<ConflictClockOrderInfo, MonitoringDecodeError> {
+): DecodeResult<TimingConflictClockOrderInfo, MonitoringDecodeError> {
   const results = {
     earlier: fields.read("earlier", readTimingBoundary),
     earlierAt: fields.read("earlier_at", decodeDateTime),
@@ -3800,9 +3985,9 @@ function readTimingBoundary(
   }
 }
 
-function readConflictMissingRecordInfo(
+function readTimingConflictMissingRecordInfo(
   fields: FieldReader,
-): DecodeResult<ConflictMissingRecordInfo, MonitoringDecodeError> {
+): DecodeResult<TimingConflictMissingRecordInfo, MonitoringDecodeError> {
   const results = {
     record: fields.read("record", readMissingRecord),
   };
@@ -3843,9 +4028,9 @@ function readMissingRecord(
   }
 }
 
-function readConflictUnexpectedEventInfo(
+function readTimingConflictUnexpectedEventInfo(
   fields: FieldReader,
-): DecodeResult<ConflictUnexpectedEventInfo, MonitoringDecodeError> {
+): DecodeResult<TimingConflictUnexpectedEventInfo, MonitoringDecodeError> {
   const results = {
     event: fields.read("event", readWorkflowEventKind),
     eventId: fields.read("event_id", decodeInteger),
@@ -3973,7 +4158,7 @@ function readWorkflowRunDetail(
     edges: fields.value.read("edges", listOf(readWorkflowEdge)),
     failedCount: fields.value.read("failed_count", decodeInteger),
     failedIndices: fields.value.read("failed_indices", listOf(decodeInteger)),
-    nodes: fields.value.read("nodes", listOf(readWorkflowNodeInfo)),
+    nodes: fields.value.read("nodes", listOf(readWorkflowNodeSummary)),
     run: fields.value.read("run", readWorkflowRunSummary),
     timing: fields.value.read("timing", readRunTimingInfo),
     traceId: fields.value.read("trace_id", nullableOf(decodeString)),
@@ -4164,7 +4349,7 @@ function readRunConflictNodeInfo(
   fields: FieldReader,
 ): DecodeResult<RunConflictNodeInfo, MonitoringDecodeError> {
   const results = {
-    taskIndex: fields.read("task_index", decodeInteger),
+    nodeIndex: fields.read("node_index", decodeInteger),
   };
 
   if (!allDecoded(results)) {
@@ -4180,7 +4365,7 @@ function readRunConflictNodeInfo(
   return ok(
     Object.freeze({
       kind: "node",
-      taskIndex: results.taskIndex.value,
+      nodeIndex: results.nodeIndex.value,
     }),
   );
 }
@@ -4286,19 +4471,19 @@ function readPauseEndInfo(
 
   switch (tag.value) {
     case "open":
-      return readPauseOpenInfo(fields.value);
+      return readPauseEndOpenInfo(fields.value);
     case "resumed":
-      return readPauseResumedInfo(fields.value);
+      return readPauseEndResumedInfo(fields.value);
     case "run_ended":
-      return readPauseRunEndedInfo(fields.value);
+      return readPauseEndRunEndedInfo(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
 }
 
-function readPauseOpenInfo(
+function readPauseEndOpenInfo(
   fields: FieldReader,
-): DecodeResult<PauseOpenInfo, MonitoringDecodeError> {
+): DecodeResult<PauseEndOpenInfo, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -4312,9 +4497,9 @@ function readPauseOpenInfo(
   );
 }
 
-function readPauseResumedInfo(
+function readPauseEndResumedInfo(
   fields: FieldReader,
-): DecodeResult<PauseResumedInfo, MonitoringDecodeError> {
+): DecodeResult<PauseEndResumedInfo, MonitoringDecodeError> {
   const results = {
     at: fields.read("at", decodeDateTime),
   };
@@ -4337,9 +4522,9 @@ function readPauseResumedInfo(
   );
 }
 
-function readPauseRunEndedInfo(
+function readPauseEndRunEndedInfo(
   fields: FieldReader,
-): DecodeResult<PauseRunEndedInfo, MonitoringDecodeError> {
+): DecodeResult<PauseEndRunEndedInfo, MonitoringDecodeError> {
   const results = {
     at: fields.read("at", decodeDateTime),
   };
@@ -4411,10 +4596,10 @@ function readWorkflowRunSummary(
     completedAt: fields.value.read("completed_at", nullableOf(decodeDateTime)),
     createdAt: fields.value.read("created_at", nullableOf(decodeDateTime)),
     definitionKey: fields.value.read("definition_key", nullableOf(decodeString)),
-    id: fields.value.read("id", decodeString),
-    name: fields.value.read("name", decodeString),
     status: fields.value.read("status", decodeString),
-    wallS: fields.value.read("wall_s", nullableOf(decodeNumber)),
+    wallSeconds: fields.value.read("wall_seconds", nullableOf(decodeNumber)),
+    workflowId: fields.value.read("workflow_id", decodeString),
+    workflowName: fields.value.read("workflow_name", decodeString),
   };
 
   if (!allDecoded(results)) {
@@ -4432,61 +4617,10 @@ function readWorkflowRunSummary(
       completedAt: results.completedAt.value,
       createdAt: results.createdAt.value,
       definitionKey: results.definitionKey.value,
-      id: results.id.value,
-      name: results.name.value,
       status: results.status.value,
-      wallS: results.wallS.value,
-    }),
-  );
-}
-
-export function decodeWorkflowTaskDetail(
-  value: WireJson,
-): DecodeResult<WorkflowTaskDetail, MonitoringDecodeError> {
-  return readWorkflowTaskDetail(value, { model: "WorkflowTaskDetail", path: "$" });
-}
-
-function readWorkflowTaskDetail(
-  value: WireJson,
-  place: DecodePlace,
-): DecodeResult<WorkflowTaskDetail, MonitoringDecodeError> {
-  const fields = readObject(value, place);
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
-    attempts: fields.value.read("attempts", listOf(readTaskAttemptInfo)),
-    isSubworkflow: fields.value.read("is_subworkflow", decodeBoolean),
-    leaf: fields.value.read("leaf", nullableOf(readLeafTaskInfo)),
-    nodeError: fields.value.read("node_error", nullableOf(decodeString)),
-    nodeId: fields.value.read("node_id", nullableOf(decodeString)),
-    nodeStatus: fields.value.read("node_status", decodeString),
-    taskIndex: fields.value.read("task_index", decodeInteger),
-    taskName: fields.value.read("task_name", decodeString),
-  };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
-      attempts: results.attempts.value,
-      isSubworkflow: results.isSubworkflow.value,
-      leaf: results.leaf.value,
-      nodeError: results.nodeError.value,
-      nodeId: results.nodeId.value,
-      nodeStatus: results.nodeStatus.value,
-      taskIndex: results.taskIndex.value,
-      taskName: results.taskName.value,
+      wallSeconds: results.wallSeconds.value,
+      workflowId: results.workflowId.value,
+      workflowName: results.workflowName.value,
     }),
   );
 }

@@ -3,10 +3,10 @@
 Covers the strict producer/worker binding:
 
 - Unknown kwarg names rejected (encode + decode).
-- User-supplied engine-injected names (workflow_ctx / workflow_meta)
+- User-supplied engine-injected names (workflow_context / workflow_meta)
   rejected at encode.
-- User-supplied TaskResult-typed kwargs rejected at encode; engine
-  envelopes for TaskResult-typed params pass through at decode.
+- User-supplied TaskOutcome-typed kwargs rejected at encode; engine
+  envelopes for TaskOutcome-typed params pass through at decode.
 - Engine transport-key prefixes (`__horsies_*` / `__h_*`) preserved
   verbatim by decode.
 - No-hints / unresolvable-hints fallback: lambdas and Mock fall
@@ -23,26 +23,28 @@ from pydantic import BaseModel
 from horsies.core.codec.json_value import JsonValue, StrictJsonError
 from horsies.core.codec.kwargs import decode_kwargs, encode_kwargs_read_back
 from horsies.core.codec.typed import Json
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.outcome import Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result
 
 
-def _task_a(value: int) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
+def _task_a(value: int) -> Result[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
     ...
 
 
-def _task_with_ctx(value: int, workflow_ctx: object) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
+def _task_with_ctx(value: int, workflow_context: object) -> Result[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
     ...
 
 
 def _task_with_upstream(
-    upstream_result: TaskResult[int, TaskError],
-) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
+    upstream_result: TaskOutcome[int, TaskError],
+) -> Result[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
     ...
 
 
 def _task_with_optional_upstream(
-    upstream_result: TaskResult[int, TaskError] | None,
-) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
+    upstream_result: TaskOutcome[int, TaskError] | None,
+) -> Result[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
     """An ``args_from`` target under ``join='any'`` / ``'quorum'``.
 
     The source may never complete, so the documented annotation admits None.
@@ -52,7 +54,7 @@ def _task_with_optional_upstream(
 
 def _task_with_plain_union(
     payload: int | None,
-) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
+) -> Result[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
     ...
 
 
@@ -73,13 +75,13 @@ class _SmuggleEnvelope(BaseModel):
 
 def _ingest_round_trip(
     payload: _RoundTripEnvelope,
-) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
+) -> Result[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
     ...
 
 
 def _ingest_smuggle(
     payload: _SmuggleEnvelope,
-) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
+) -> Result[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
     ...
 
 
@@ -95,9 +97,9 @@ class TestEncodeStrictBinding:
     def test_workflow_ctx_user_supplied_rejected(self) -> None:
         with pytest.raises(
             StrictJsonError,
-            match="kwarg 'workflow_ctx' is engine-injected",
+            match="kwarg 'workflow_context' is engine-injected",
         ):
-            encode_kwargs_read_back(_task_with_ctx, {'value': 1, 'workflow_ctx': 'x'})
+            encode_kwargs_read_back(_task_with_ctx, {'value': 1, 'workflow_context': 'x'})
 
     def test_workflow_meta_user_supplied_rejected(self) -> None:
         with pytest.raises(
@@ -106,14 +108,14 @@ class TestEncodeStrictBinding:
         ):
             encode_kwargs_read_back(_task_a, {'value': 1, 'workflow_meta': 'x'})
 
-    def test_taskresult_typed_kwarg_user_supplied_rejected(self) -> None:
-        # TaskResult-typed kwargs come from the engine's args_from path,
+    def test_outcome_typed_kwarg_user_supplied_rejected(self) -> None:
+        # TaskOutcome-typed kwargs come from the engine's args_from path,
         # not from user code. Producer-side encode rejects to avoid
         # confusion with engine-injected envelopes.
-        bogus: TaskResult[int, TaskError] = TaskResult(ok=42)
+        bogus: TaskOutcome[int, TaskError] = Succeeded(42)
         with pytest.raises(
             StrictJsonError,
-            match="kwarg 'upstream_result' is TaskResult-typed",
+            match="kwarg 'upstream_result' is TaskOutcome-typed",
         ):
             encode_kwargs_read_back(_task_with_upstream, {'upstream_result': bogus})
 
@@ -144,7 +146,7 @@ class TestDecodeStrictBinding:
         )
         assert decoded['__h_workflow_ctx__'] == {'wf': 'id'}
 
-    def test_taskresult_typed_kwarg_envelope_passes_through(self) -> None:
+    def test_outcome_typed_kwarg_envelope_passes_through(self) -> None:
         envelope: dict[str, Json] = {
             '__h_taskresult_envelope__': True,
             'data': '{"ok":42}',
@@ -155,8 +157,8 @@ class TestDecodeStrictBinding:
         )
         assert decoded['upstream_result'] == envelope
 
-    def test_optional_taskresult_kwarg_envelope_passes_through(self) -> None:
-        # `TaskResult[T, TaskError] | None` is the documented annotation for an
+    def test_optional_outcome_kwarg_envelope_passes_through(self) -> None:
+        # `TaskOutcome[T, TaskError] | None` is the documented annotation for an
         # args_from target under join='any' / 'quorum'. Its origin is the union,
         # so an origin-only test sends the envelope to decode_value, which
         # rejects the reserved envelope key and fails the node.
@@ -170,7 +172,7 @@ class TestDecodeStrictBinding:
         )
         assert decoded['upstream_result'] == envelope
 
-    def test_optional_taskresult_kwarg_accepts_an_absent_source(self) -> None:
+    def test_optional_outcome_kwarg_accepts_an_absent_source(self) -> None:
         # The other half of the join='any' contract: no envelope at all.
         decoded = decode_kwargs(
             _task_with_optional_upstream,
@@ -178,12 +180,12 @@ class TestDecodeStrictBinding:
         )
         assert decoded['upstream_result'] is None
 
-    def test_union_without_taskresult_still_decodes_as_a_value(self) -> None:
+    def test_union_without_outcome_still_decodes_as_a_value(self) -> None:
         decoded = decode_kwargs(_task_with_plain_union, {'payload': 42})
         assert decoded['payload'] == 42
 
-    def test_union_without_taskresult_still_rejects_the_reserved_key(self) -> None:
-        # Only the union-of-TaskResult shape gains passthrough; every other
+    def test_union_without_outcome_still_rejects_the_reserved_key(self) -> None:
+        # Only the union-of-TaskOutcome shape gains passthrough; every other
         # union keeps decode_value's smuggling guard.
         smuggled: dict[str, Json] = {'__h_taskresult_envelope__': True}
         with pytest.raises(
@@ -327,7 +329,7 @@ class TestLegacyHorsiesPrefixSmuggleClosed:
     test confirms encode_kwargs_read_back propagates that rejection."""
 
     def test_legacy_envelope_in_dict_kwarg_rejected(self) -> None:
-        def task(payload: dict[str, object]) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
+        def task(payload: dict[str, object]) -> Result[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
             ...
 
         with pytest.raises(StrictJsonError, match='reserved key'):
@@ -348,7 +350,7 @@ from horsies.core.codec.kwargs import (  # noqa: E402
     resolve_hints_and_sig,
     resolve_producer_kwarg_binding,
 )
-from horsies.core.errors import ErrorCode, WorkflowValidationError  # noqa: E402
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError  # noqa: E402
 from horsies.core.models.workflow import (  # noqa: E402
     SubWorkflowNode,
     TaskNode,
@@ -363,7 +365,7 @@ def _mock_workflow_def_task() -> Any:
 
     fn = MagicMock(spec=lambda: None)
     fn.task_name = 'mock_task'
-    fn._original_fn = lambda: TaskResult(ok=0)
+    fn._original_function = lambda: Ok(0)
     return fn
 
 
@@ -454,19 +456,19 @@ class _OpenBagWorkflow(WorkflowDefinition[int]):
         raise NotImplementedError
 
 
-def _int_source() -> TaskResult[int, TaskError]:
-    return TaskResult(ok=1)
+def _int_source() -> Result[int, TaskError]:
+    return Ok(1)
 
 
-class _TaskResultParamWorkflow(WorkflowDefinition[int]):
-    """build_with(cls, app, *, dep_result: TaskResult[...]) — args_from-only."""
+class _OutcomeParamWorkflow(WorkflowDefinition[int]):
+    """build_with(cls, app, *, dep_result: TaskOutcome[...]) — args_from-only."""
 
-    name = 'taskresult_param_workflow'
-    definition_key = 'tests.unit.taskresult_param.v1'
+    name = 'outcome_param_workflow'
+    definition_key = 'tests.unit.outcome_param.v1'
 
     @classmethod
     def build_with(  # pyright: ignore[reportUnusedParameter]
-        cls, app: Horsies, *, dep_result: TaskResult[int, TaskError],
+        cls, app: Horsies, *, dep_result: TaskOutcome[int, TaskError],
     ) -> WorkflowSpec[int]:
         raise NotImplementedError
 
@@ -488,9 +490,9 @@ def _node_wire(
 ) -> dict[str, Any]:
     """The wire form that a spec keeps for one `SubWorkflowNode`."""
     node: SubWorkflowNode[int] = SubWorkflowNode(
-        workflow_def=workflow_def, kwargs=kwargs,
+        workflow_definition=workflow_def, kwargs=kwargs,
     )
-    wire = WorkflowSpec(name='wire', tasks=[node]).tasks[0].wire_kwargs
+    wire = WorkflowSpec(name='wire', nodes=[node]).nodes[0].wire_kwargs
     assert wire is not None
     return dict(wire)
 
@@ -517,10 +519,10 @@ class TestSubworkflowNodeKwargs:
         with pytest.raises(WorkflowValidationError, match='other'):
             _node_wire(_TypedNamedParamWorkflow, {'value': 1, 'other': 1})
 
-    def test_taskresult_typed_kwarg_rejected(self) -> None:
-        """TaskResult-typed params are args_from-only."""
-        with pytest.raises(WorkflowValidationError, match='TaskResult'):
-            _node_wire(_TaskResultParamWorkflow, {'dep_result': TaskResult(ok=1)})
+    def test_outcome_typed_kwarg_rejected(self) -> None:
+        """TaskOutcome-typed params are args_from-only."""
+        with pytest.raises(WorkflowValidationError, match='TaskOutcome'):
+            _node_wire(_OutcomeParamWorkflow, {'dep_result': Succeeded(1)})
 
     def test_unannotated_param_rejected(self) -> None:
         with pytest.raises(WorkflowValidationError, match='no type annotation'):
@@ -542,7 +544,7 @@ class TestSubworkflowNodeKwargs:
         with pytest.raises(WorkflowValidationError) as caught:
             _node_wire(workflow_def, {'a': 1})
 
-        assert caught.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert caught.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
         assert 'takes nothing from a node' in str(caught.value)
 
     @pytest.mark.parametrize(
@@ -553,17 +555,17 @@ class TestSubworkflowNodeKwargs:
     def test_a_catch_all_takes_no_args_from(
         self, workflow_def: type[WorkflowDefinition[int]],
     ) -> None:
-        source: TaskNode[int] = TaskNode(fn=_int_source)
+        source: TaskNode[int] = TaskNode(function=_int_source)
         node: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=workflow_def,
+            workflow_definition=workflow_def,
             waits_for=[source],
             args_from={'a': source},
         )
 
         with pytest.raises(WorkflowValidationError) as caught:
-            WorkflowSpec(name='wire', tasks=[source, node])
+            WorkflowSpec(name='wire', nodes=[source, node])
 
-        assert caught.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert caught.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_a_declared_catch_all_with_nothing_bound_is_valid(self) -> None:
         assert _node_wire(_OpaqueParamsWorkflow, {}) == {}
@@ -575,21 +577,21 @@ class TestSubworkflowNodeKwargs:
         with pytest.raises(WorkflowValidationError) as caught:
             _node_wire(_NamedAppWorkflow, {'horsies_app': 1, 'x': 1})
 
-        assert caught.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert caught.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_the_app_slot_takes_no_args_from_whatever_its_name(self) -> None:
-        source: TaskNode[int] = TaskNode(fn=_int_source)
+        source: TaskNode[int] = TaskNode(function=_int_source)
         node: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=_NamedAppWorkflow,
+            workflow_definition=_NamedAppWorkflow,
             waits_for=[source],
             args_from={'horsies_app': source},
             kwargs={'x': 1},
         )
 
         with pytest.raises(WorkflowValidationError) as caught:
-            WorkflowSpec(name='wire', tasks=[source, node])
+            WorkflowSpec(name='wire', nodes=[source, node])
 
-        assert caught.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert caught.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_a_key_that_names_the_catch_all_is_refused(self) -> None:
         with pytest.raises(WorkflowValidationError):
@@ -623,11 +625,11 @@ class TestDecodeSubworkflowKwargs:
                 _TypedNamedParamWorkflow, {'other': 1},
             )
 
-    def test_taskresult_typed_kwarg_rejected_on_wire(self) -> None:
+    def test_outcome_typed_kwarg_rejected_on_wire(self) -> None:
         """Static kwargs must never carry args_from values on the wire."""
-        with pytest.raises(StrictJsonError, match='TaskResult-typed'):
+        with pytest.raises(StrictJsonError, match='TaskOutcome-typed'):
             decode_subworkflow_kwargs(
-                _TaskResultParamWorkflow, {'dep_result': {'ok': 1}},
+                _OutcomeParamWorkflow, {'dep_result': {'ok': 1}},
             )
 
     def test_a_stored_key_that_names_the_app_slot_is_refused(self) -> None:

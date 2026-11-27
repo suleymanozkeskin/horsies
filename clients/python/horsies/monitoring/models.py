@@ -6,9 +6,15 @@ conventions hold across every model:
 * Datetimes are timezone-aware UTC.
 * Optional text is normalized before it reaches a model: horsies stores ``''``
   for cleared text, and empty strings arrive here as ``None``.
-* A measured duration (``queue_s``, ``exec_s``, ``wall_s``,
-  ``snapshot_age_s``, ``uptime_s``, ``wait_s``) is a float of seconds,
-  exact to the microsecond.
+* A measured duration (``queue_seconds``, ``execution_seconds``,
+  ``wall_seconds``, ``snapshot_age_seconds``, ``uptime_seconds``,
+  ``wait_seconds``) is a float of
+  seconds, exact to the microsecond.
+
+The worker and execution class routes answer with the health types of
+``horsies.core.models.health`` and ``horsies.core.models.class_coverage``
+(``WorkerPong``, ``DownSlot``, ``SlotHealth``, ``SnapshotProfile``,
+``ExecutionClassReport`` and its parts): one type per record.
 
 These models are unstable pre-1.0.
 """
@@ -24,6 +30,31 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from horsies._catalog.history import TaskAbsenceReason
+from horsies.core.models.class_coverage import (
+    BudgetLoad as BudgetLoad,
+    ExecutionClassReport as ExecutionClassReport,
+    StreamWaitNoneDue as StreamWaitNoneDue,
+    StreamWaitDue as StreamWaitDue,
+    PendingStream as PendingStream,
+    StreamCoverageState as StreamCoverageState,
+    StreamCoverageStateServed as StreamCoverageStateServed,
+    StreamCoverageStateUnserved as StreamCoverageStateUnserved,
+    StreamWait as StreamWait,
+    StreamCoverageStateNoCapacity as StreamCoverageStateNoCapacity,
+    WorkerExecutionClassLoad as WorkerExecutionClassLoad,
+)
+from horsies.core.models.health import (
+    SlotHealthAllServing as SlotHealthAllServing,
+    DatabasePing as DatabasePing,
+    DatabaseUnreachable as DatabaseUnreachable,
+    DownSlot as DownSlot,
+    SnapshotProfileNamed as SnapshotProfileNamed,
+    SnapshotProfileNotRecorded as SnapshotProfileNotRecorded,
+    SlotHealth as SlotHealth,
+    SlotHealthSlotsDown as SlotHealthSlotsDown,
+    SnapshotProfile as SnapshotProfile,
+    WorkerPong as WorkerPong,
+)
 from horsies.core.models.tasks import Execution
 
 
@@ -33,15 +64,15 @@ class ErrorCategory(str, enum.Enum):
     An operator reads these differently: ``OPERATIONAL`` means infrastructure
     is failing, ``CONTRACT`` means a task's code or serialization is wrong,
     ``OUTCOME`` is a terminal lifecycle state (cancelled/expired/timeout),
-    ``RETRIEVAL`` is a result-fetch state, and ``DOMAIN`` is a business error
-    the task itself chose to return.
+    ``RETRIEVAL`` is a result-fetch state, and ``CUSTOM`` is a code that the
+    task itself chose to return (a code outside the built-in codes).
     """
 
     OPERATIONAL = 'OPERATIONAL'
     CONTRACT = 'CONTRACT'
     RETRIEVAL = 'RETRIEVAL'
     OUTCOME = 'OUTCOME'
-    DOMAIN = 'DOMAIN'
+    CUSTOM = 'CUSTOM'
 
 
 # --------------------------------------------------------------------------- #
@@ -127,7 +158,7 @@ class WorkflowEventKind(str, enum.Enum):
     TASK_MOVED = 'TASK_MOVED'
 
 
-class ClaimsCountedInfo(BaseModel):
+class AttemptClaimsCountedInfo(BaseModel):
     """``count`` claims (1 or more) were taken for the attempt; the first at ``first_claimed_at``."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -137,7 +168,7 @@ class ClaimsCountedInfo(BaseModel):
     first_claimed_at: datetime
 
 
-class ClaimsNotCountedInfo(BaseModel):
+class AttemptClaimsNotCountedInfo(BaseModel):
     """The attempt began before the lifecycle record: its claims were not counted."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -146,13 +177,13 @@ class ClaimsNotCountedInfo(BaseModel):
 
 
 AttemptClaimsInfo = Annotated[
-    ClaimsCountedInfo | ClaimsNotCountedInfo,
+    AttemptClaimsCountedInfo | AttemptClaimsNotCountedInfo,
     Field(discriminator='kind'),
 ]
 """The claims of one attempt."""
 
 
-class PlacementPlacedInfo(BaseModel):
+class AttemptPlacementPlacedInfo(BaseModel):
     """A child of the worker took the task at ``placed_at``: the claim time plus the measured slot wait."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -161,7 +192,7 @@ class PlacementPlacedInfo(BaseModel):
     placed_at: datetime
 
 
-class PlacementNotObservedInfo(BaseModel):
+class AttemptPlacementNotObservedInfo(BaseModel):
     """The writer of the attempt row observed no placement."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -170,13 +201,13 @@ class PlacementNotObservedInfo(BaseModel):
 
 
 AttemptPlacementInfo = Annotated[
-    PlacementPlacedInfo | PlacementNotObservedInfo,
+    AttemptPlacementPlacedInfo | AttemptPlacementNotObservedInfo,
     Field(discriminator='kind'),
 ]
 """When a child of the worker took the task of the attempt."""
 
 
-class FinalizingMarkedInfo(BaseModel):
+class AttemptFinalizingMarkedInfo(BaseModel):
     """The child marked the end of the task body at ``finalizing_at``."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -185,7 +216,7 @@ class FinalizingMarkedInfo(BaseModel):
     finalizing_at: datetime
 
 
-class FinalizingNotMarkedInfo(BaseModel):
+class AttemptFinalizingNotMarkedInfo(BaseModel):
     """No finalizing marker was written."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -194,13 +225,13 @@ class FinalizingNotMarkedInfo(BaseModel):
 
 
 AttemptFinalizingInfo = Annotated[
-    FinalizingMarkedInfo | FinalizingNotMarkedInfo,
+    AttemptFinalizingMarkedInfo | AttemptFinalizingNotMarkedInfo,
     Field(discriminator='kind'),
 ]
 """The finalizing marker of the claim that ran the attempt."""
 
 
-class RecordedByWorkerInfo(BaseModel):
+class AttemptRecordedByWorkerInfo(BaseModel):
     """The worker wrote the end of the attempt, with the placement it observed."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -209,7 +240,7 @@ class RecordedByWorkerInfo(BaseModel):
     placement: AttemptPlacementInfo
 
 
-class RecordedByRecoveryInfo(BaseModel):
+class AttemptRecordedByRecoveryInfo(BaseModel):
     """Stale RUNNING recovery wrote the attempt row. ``last_seen_at`` is the last sign of life."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -218,7 +249,7 @@ class RecordedByRecoveryInfo(BaseModel):
     last_seen_at: datetime
 
 
-class RecordedByCancelInfo(BaseModel):
+class AttemptRecordedByCancelInfo(BaseModel):
     """The cancel statement wrote the attempt row: an operator cancelled the task while the attempt ran.
 
     The attempt ended at the cancel (``finished_at``). The cancel observes no placement.
@@ -230,13 +261,13 @@ class RecordedByCancelInfo(BaseModel):
 
 
 AttemptRecordedByInfo = Annotated[
-    RecordedByWorkerInfo | RecordedByRecoveryInfo | RecordedByCancelInfo,
+    AttemptRecordedByWorkerInfo | AttemptRecordedByRecoveryInfo | AttemptRecordedByCancelInfo,
     Field(discriminator='kind'),
 ]
 """Who wrote the attempt row."""
 
 
-class PhasesCapturedInfo(BaseModel):
+class AttemptPhasesCapturedInfo(BaseModel):
     """The phase times of the attempt.
 
     ``enqueued_at`` is the due time of the attempt; ``claimed_at`` is the claim
@@ -253,7 +284,7 @@ class PhasesCapturedInfo(BaseModel):
     recorded_by: AttemptRecordedByInfo
 
 
-class PhasesNotCapturedInfo(BaseModel):
+class AttemptPhasesNotCapturedInfo(BaseModel):
     """The attempt row was written before the lifecycle record, or history holds a version-1 archive."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -262,13 +293,13 @@ class PhasesNotCapturedInfo(BaseModel):
 
 
 AttemptPhasesInfo = Annotated[
-    PhasesCapturedInfo | PhasesNotCapturedInfo,
+    AttemptPhasesCapturedInfo | AttemptPhasesNotCapturedInfo,
     Field(discriminator='kind'),
 ]
 """The phase record of one attempt row."""
 
 
-class ClaimEarlierInfo(BaseModel):
+class SegmentClaimEarlierInfo(BaseModel):
     """``count`` claims before the claim that holds the attempt: lost leases and released claims."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -277,7 +308,7 @@ class ClaimEarlierInfo(BaseModel):
     count: int
 
 
-class ClaimRecordedInfo(BaseModel):
+class SegmentClaimRecordedInfo(BaseModel):
     """The claim that ran the attempt, from its attempt row, with the placement that the row holds."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -286,7 +317,7 @@ class ClaimRecordedInfo(BaseModel):
     placement: AttemptPlacementInfo
 
 
-class ClaimNotRecordedInfo(BaseModel):
+class SegmentClaimNotRecordedInfo(BaseModel):
     """The claim of an attempt that has no attempt row.
 
     The attempt still runs, or a cancel, an expiry or a pause abandon ended it.
@@ -298,13 +329,13 @@ class ClaimNotRecordedInfo(BaseModel):
 
 
 SegmentClaimInfo = Annotated[
-    ClaimEarlierInfo | ClaimRecordedInfo | ClaimNotRecordedInfo,
+    SegmentClaimEarlierInfo | SegmentClaimRecordedInfo | SegmentClaimNotRecordedInfo,
     Field(discriminator='kind'),
 ]
 """Which claim a ``claimed`` segment shows."""
 
 
-class PhasePendingInfo(BaseModel):
+class SegmentPhasePendingInfo(BaseModel):
     """The node waits for its dependencies."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -312,7 +343,7 @@ class PhasePendingInfo(BaseModel):
     kind: Literal['pending'] = 'pending'
 
 
-class PhaseReadyInfo(BaseModel):
+class SegmentPhaseReadyInfo(BaseModel):
     """The dependencies of the node are met and nothing is dispatched."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -320,7 +351,7 @@ class PhaseReadyInfo(BaseModel):
     kind: Literal['ready'] = 'ready'
 
 
-class PhaseEnqueuedInfo(BaseModel):
+class SegmentPhaseEnqueuedInfo(BaseModel):
     """The attempt is due and waits for a claim; a sub-workflow node waits for its child start."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -328,7 +359,7 @@ class PhaseEnqueuedInfo(BaseModel):
     kind: Literal['enqueued'] = 'enqueued'
 
 
-class PhaseRetryWaitInfo(BaseModel):
+class SegmentPhaseRetryWaitInfo(BaseModel):
     """The retry delay of the attempt has not passed."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -336,7 +367,7 @@ class PhaseRetryWaitInfo(BaseModel):
     kind: Literal['retry_wait'] = 'retry_wait'
 
 
-class PhaseClaimedInfo(BaseModel):
+class SegmentPhaseClaimedInfo(BaseModel):
     """A worker holds a claim and the task code did not start."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -345,7 +376,7 @@ class PhaseClaimedInfo(BaseModel):
     claim: SegmentClaimInfo
 
 
-class PhaseRunningInfo(BaseModel):
+class SegmentPhaseRunningInfo(BaseModel):
     """The task code runs; for a sub-workflow node, the child run runs."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -353,7 +384,7 @@ class PhaseRunningInfo(BaseModel):
     kind: Literal['running'] = 'running'
 
 
-class PhaseFinalizingInfo(BaseModel):
+class SegmentPhaseFinalizingInfo(BaseModel):
     """The task body ended and the attempt is not recorded yet."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -361,7 +392,7 @@ class PhaseFinalizingInfo(BaseModel):
     kind: Literal['finalizing'] = 'finalizing'
 
 
-class PhaseAdvancingInfo(BaseModel):
+class SegmentPhaseAdvancingInfo(BaseModel):
     """The task is in history (or the child run ended) and the workflow has not applied the node yet."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -369,7 +400,7 @@ class PhaseAdvancingInfo(BaseModel):
     kind: Literal['advancing'] = 'advancing'
 
 
-class PhaseUnknownInfo(BaseModel):
+class SegmentPhaseUnknownInfo(BaseModel):
     """A known interval whose phase the record cannot show."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -379,30 +410,30 @@ class PhaseUnknownInfo(BaseModel):
 
 
 SegmentPhaseInfo = Annotated[
-    PhasePendingInfo
-    | PhaseReadyInfo
-    | PhaseEnqueuedInfo
-    | PhaseRetryWaitInfo
-    | PhaseClaimedInfo
-    | PhaseRunningInfo
-    | PhaseFinalizingInfo
-    | PhaseAdvancingInfo
-    | PhaseUnknownInfo,
+    SegmentPhasePendingInfo
+    | SegmentPhaseReadyInfo
+    | SegmentPhaseEnqueuedInfo
+    | SegmentPhaseRetryWaitInfo
+    | SegmentPhaseClaimedInfo
+    | SegmentPhaseRunningInfo
+    | SegmentPhaseFinalizingInfo
+    | SegmentPhaseAdvancingInfo
+    | SegmentPhaseUnknownInfo,
     Field(discriminator='kind'),
 ]
 """The phase of one segment."""
 
 
-class SegmentEndedInfo(BaseModel):
-    """The segment ended at ``at``."""
+class SegmentEndClosedInfo(BaseModel):
+    """The segment closed at ``at``."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
 
-    kind: Literal['ended'] = 'ended'
+    kind: Literal['closed'] = 'closed'
     at: datetime
 
 
-class SegmentOpenInfo(BaseModel):
+class SegmentEndOpenInfo(BaseModel):
     """The segment had not ended at the read (``as_of`` of the run timing)."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -411,13 +442,13 @@ class SegmentOpenInfo(BaseModel):
 
 
 SegmentEndInfo = Annotated[
-    SegmentEndedInfo | SegmentOpenInfo,
+    SegmentEndClosedInfo | SegmentEndOpenInfo,
     Field(discriminator='kind'),
 ]
 """The end of one segment."""
 
 
-class SourceNodeInfo(BaseModel):
+class SegmentSourceNodeInfo(BaseModel):
     """The node itself: before, between and after its tasks, and the child run of a sub-workflow node."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -425,7 +456,7 @@ class SourceNodeInfo(BaseModel):
     kind: Literal['node'] = 'node'
 
 
-class SourceTaskInfo(BaseModel):
+class SegmentSourceTaskInfo(BaseModel):
     """The ``generation``-th task of the node (1-based), when the record holds no attempt of it."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -435,7 +466,7 @@ class SourceTaskInfo(BaseModel):
     task_id: UUID
 
 
-class SourceAttemptInfo(BaseModel):
+class SegmentSourceAttemptInfo(BaseModel):
     """Attempt ``attempt`` of the ``generation``-th task of the node (1-based)."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -447,7 +478,7 @@ class SourceAttemptInfo(BaseModel):
 
 
 SegmentSourceInfo = Annotated[
-    SourceNodeInfo | SourceTaskInfo | SourceAttemptInfo,
+    SegmentSourceNodeInfo | SegmentSourceTaskInfo | SegmentSourceAttemptInfo,
     Field(discriminator='kind'),
 ]
 """What one segment describes."""
@@ -464,7 +495,7 @@ class TimingSegmentInfo(BaseModel):
     source: SegmentSourceInfo
 
 
-class EndpointTerminalInfo(BaseModel):
+class NodeEndpointTerminalInfo(BaseModel):
     """The node reached ``status`` at ``at``. It can come before the end of a task that ran on."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -474,7 +505,7 @@ class EndpointTerminalInfo(BaseModel):
     at: datetime
 
 
-class EndpointNotTerminalInfo(BaseModel):
+class NodeEndpointNotTerminalInfo(BaseModel):
     """The node is not terminal."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -483,13 +514,13 @@ class EndpointNotTerminalInfo(BaseModel):
 
 
 NodeEndpointInfo = Annotated[
-    EndpointTerminalInfo | EndpointNotTerminalInfo,
+    NodeEndpointTerminalInfo | NodeEndpointNotTerminalInfo,
     Field(discriminator='kind'),
 ]
 """The terminal state of a node: a marker, not a segment."""
 
 
-class ConflictClockOrderInfo(BaseModel):
+class TimingConflictClockOrderInfo(BaseModel):
     """Two boundaries in the wrong order.
 
     ``earlier`` comes first in the record, and its time ``earlier_at`` is after
@@ -505,7 +536,7 @@ class ConflictClockOrderInfo(BaseModel):
     later_at: datetime
 
 
-class ConflictMissingRecordInfo(BaseModel):
+class TimingConflictMissingRecordInfo(BaseModel):
     """The state of the node needs a record that is not there."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -514,7 +545,7 @@ class ConflictMissingRecordInfo(BaseModel):
     record: MissingRecord
 
 
-class ConflictUnexpectedEventInfo(BaseModel):
+class TimingConflictUnexpectedEventInfo(BaseModel):
     """An event that the state of the node or the run at that point does not allow."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -525,7 +556,7 @@ class ConflictUnexpectedEventInfo(BaseModel):
 
 
 TimingConflictInfo = Annotated[
-    ConflictClockOrderInfo | ConflictMissingRecordInfo | ConflictUnexpectedEventInfo,
+    TimingConflictClockOrderInfo | TimingConflictMissingRecordInfo | TimingConflictUnexpectedEventInfo,
     Field(discriminator='kind'),
 ]
 """A contradiction in the record of a node or a run."""
@@ -580,7 +611,7 @@ NodeTimingInfo = Annotated[
 """The phase timing of one node, tagged by its coverage label."""
 
 
-class PauseResumedInfo(BaseModel):
+class PauseEndResumedInfo(BaseModel):
     """A ``WORKFLOW_RESUMED`` event at ``at`` ended the pause."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -589,7 +620,7 @@ class PauseResumedInfo(BaseModel):
     at: datetime
 
 
-class PauseRunEndedInfo(BaseModel):
+class PauseEndRunEndedInfo(BaseModel):
     """A cancel or a paused expiry ended the run at ``at`` while it was paused."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -598,7 +629,7 @@ class PauseRunEndedInfo(BaseModel):
     at: datetime
 
 
-class PauseOpenInfo(BaseModel):
+class PauseEndOpenInfo(BaseModel):
     """The run is still paused."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -607,7 +638,7 @@ class PauseOpenInfo(BaseModel):
 
 
 PauseEndInfo = Annotated[
-    PauseResumedInfo | PauseRunEndedInfo | PauseOpenInfo,
+    PauseEndResumedInfo | PauseEndRunEndedInfo | PauseEndOpenInfo,
     Field(discriminator='kind'),
 ]
 """The end of one pause."""
@@ -623,12 +654,12 @@ class PauseIntervalInfo(BaseModel):
 
 
 class RunConflictNodeInfo(BaseModel):
-    """The node at ``task_index`` is ``inconsistent``; its timing names the conflict."""
+    """The node at ``node_index`` is ``inconsistent``; its timing names the conflict."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
 
     kind: Literal['node'] = 'node'
-    task_index: int
+    node_index: int
 
 
 class RunConflictPauseInfo(BaseModel):
@@ -727,7 +758,7 @@ RunTimingInfo = Annotated[
 # --------------------------------------------------------------------------- #
 # Tasks
 # --------------------------------------------------------------------------- #
-class TaskAttemptInfo(BaseModel):
+class TaskAttemptDetail(BaseModel):
     """One immutable execution attempt of a task (from horsies_task_attempts).
 
     ``phases`` is the phase record of the attempt row.
@@ -745,13 +776,13 @@ class TaskAttemptInfo(BaseModel):
     phases: AttemptPhasesInfo
 
 
-class LeafTaskInfo(BaseModel):
+class TaskRowInfo(BaseModel):
     """The task row backing a list entry or a workflow node.
 
-    ``queue_s`` is dispatch-to-start wait; ``exec_s`` is start-to-finish run
-    time. Both are split so queue wait is never conflated with run time, and
-    both are ``None`` when the span cannot be determined. Both are seconds,
-    exact to the microsecond.
+    ``queue_seconds`` is dispatch-to-start wait; ``execution_seconds`` is
+    start-to-finish run time. Both are split so queue wait is never conflated
+    with run time, and both are ``None`` when the span cannot be determined.
+    Both are seconds, exact to the microsecond.
 
     ``execution`` is the stored ``Execution`` of a live task, and ``None``
     for a task read from history, which does not keep the class.
@@ -771,8 +802,8 @@ class LeafTaskInfo(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     failed_at: datetime | None
-    queue_s: float | None
-    exec_s: float | None
+    queue_seconds: float | None
+    execution_seconds: float | None
     worker_hostname: str | None
     good_until: datetime | None
     execution: Execution | None
@@ -815,7 +846,7 @@ class Facets(BaseModel):
     error_category_totals: dict[str, int]
 
 
-class BreakdownValueGroup(BaseModel):
+class BreakdownGroupValue(BaseModel):
     """The tasks whose group column holds ``value``: a worker id, a task name or a queue name."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
@@ -824,10 +855,10 @@ class BreakdownValueGroup(BaseModel):
     value: str
 
 
-class BreakdownUnclaimedGroup(BaseModel):
+class BreakdownGroupUnclaimed(BaseModel):
     """The tasks that no worker claimed. Only the ``worker`` grouping has this group.
 
-    A worker whose id is the text ``'unknown'`` is a ``BreakdownValueGroup``
+    A worker whose id is the text ``'unknown'`` is a ``BreakdownGroupValue``
     of its own, never this group.
     """
 
@@ -837,7 +868,7 @@ class BreakdownUnclaimedGroup(BaseModel):
 
 
 BreakdownGroup = Annotated[
-    BreakdownValueGroup | BreakdownUnclaimedGroup,
+    BreakdownGroupValue | BreakdownGroupUnclaimed,
     Field(discriminator='kind'),
 ]
 """What one breakdown group holds: one stored value, or the unclaimed tasks."""
@@ -884,13 +915,14 @@ class TaskSummary(BaseModel):
     """One task row, shaped for the list view.
 
     ``error_category`` names the error family; ``None`` when there is no
-    error. ``worker_id`` is the claiming worker. ``queue_s`` and ``exec_s``
-    are the spans of ``LeafTaskInfo``: seconds, exact to the microsecond.
+    error. ``worker_id`` is the claiming worker. ``queue_seconds`` and
+    ``execution_seconds`` are the spans of ``TaskRowInfo``: seconds, exact to
+    the microsecond.
     """
 
-    id: UUID
+    task_id: UUID
     task_name: str
-    queue_name: str
+    queue: str
     status: str
     priority: int
     retry_count: int
@@ -904,8 +936,8 @@ class TaskSummary(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     failed_at: datetime | None
-    queue_s: float | None
-    exec_s: float | None
+    queue_seconds: float | None
+    execution_seconds: float | None
 
 
 class TaskListPage(BaseModel):
@@ -922,20 +954,20 @@ class TaskListPage(BaseModel):
 class TaskDetail(BaseModel):
     """A single task with its full attempt history, ordered by attempt.
 
-    ``workflow_id`` and ``workflow_task_index`` locate the node a
+    ``workflow_id`` and ``workflow_node_index`` locate the node a
     workflow-bound task belongs to, so a UI can link to the run rather than
     offering task actions it must refuse. Both are null for standalone tasks.
     """
 
-    leaf: LeafTaskInfo
+    task_row: TaskRowInfo
     task_name: str
-    queue_name: str
+    queue: str
     priority: int
     is_workflow_task: bool
     error_category: str | None
-    attempts: list[TaskAttemptInfo]
+    attempts: list[TaskAttemptDetail]
     workflow_id: str | None
-    workflow_task_index: int | None
+    workflow_node_index: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -946,46 +978,50 @@ class TaskDetailNotFound:
     reason: TaskAbsenceReason
 
 
+type TaskDetailRead = TaskDetail | TaskDetailNotFound
+"""The answer of the task detail read: the task, or why no table holds it."""
+
+
 # --------------------------------------------------------------------------- #
 # Workflows
 # --------------------------------------------------------------------------- #
 class WorkflowRunSummary(BaseModel):
     """One workflow run, root or subworkflow.
 
-    ``wall_s`` counts up while ``completed_at`` is null, including for PAUSED
-    runs. It is seconds, exact to the microsecond.
+    ``wall_seconds`` counts up while ``completed_at`` is null, including for
+    PAUSED runs. It is seconds, exact to the microsecond.
     """
 
-    id: str
-    name: str
+    workflow_id: str
+    workflow_name: str
     definition_key: str | None
     status: str
     created_at: datetime | None
     completed_at: datetime | None
-    wall_s: float | None
+    wall_seconds: float | None
 
 
-class WorkflowNodeInfo(BaseModel):
-    """A single node in a run's DAG. ``task_index`` is the stable key.
+class WorkflowNodeSummary(BaseModel):
+    """A single node in a run's DAG. ``node_index`` is the stable key.
 
-    ``exec_s`` is execution time only, in seconds, exact to the microsecond:
-    null until the node starts running, so a node sitting in the queue does
-    not accrue a misleading duration.
+    ``execution_seconds`` is execution time only, in seconds, exact to the
+    microsecond: null until the node starts running, so a node sitting in the
+    queue does not accrue a misleading duration.
     ``child_total`` / ``child_failed`` roll up a subworkflow node's direct
     children and are both null for leaf nodes and for child runs with no task
     rows yet. ``timing`` is the phase timing of the node.
     """
 
-    task_index: int
+    node_index: int
     node_id: str | None
     task_name: str
     node_status: str
-    is_subworkflow: bool
+    is_sub_workflow: bool
     sub_workflow_id: str | None
-    allow_failed_deps: bool
+    allow_failed_dependencies: bool
     started_at: datetime | None
     completed_at: datetime | None
-    exec_s: float | None
+    execution_seconds: float | None
     child_total: int | None
     child_failed: int | None
     timing: NodeTimingInfo
@@ -1001,7 +1037,7 @@ class WorkflowEdge(BaseModel):
 class WorkflowRunDetail(BaseModel):
     """A run's metadata plus its full node/edge graph.
 
-    ``failed_indices`` lists the ``task_index`` of every FAILED node in
+    ``failed_indices`` lists the ``node_index`` of every FAILED node in
     ascending order, so the UI can navigate failures without scanning the
     graph; ``failed_count`` is its length. ``trace_id`` is the trace id of
     the span that started the run, as 32 lowercase hex digits; ``None`` for
@@ -1009,7 +1045,7 @@ class WorkflowRunDetail(BaseModel):
     """
 
     run: WorkflowRunSummary
-    nodes: list[WorkflowNodeInfo]
+    nodes: list[WorkflowNodeSummary]
     edges: list[WorkflowEdge]
     failed_count: int
     failed_indices: list[int]
@@ -1017,91 +1053,51 @@ class WorkflowRunDetail(BaseModel):
     timing: RunTimingInfo
 
 
-class WorkflowTaskDetail(BaseModel):
+class WorkflowNodeDetail(BaseModel):
     """Per-node detail: node-level error, backing task, and attempt history.
 
     Subworkflow nodes carry no backing task; their detail lives in the child
-    run. ``leaf`` is also null when the backing task row no longer exists.
+    run. ``task_row`` is also null when the backing task row no longer exists.
     """
 
-    task_index: int
+    node_index: int
     node_id: str | None
     task_name: str
     node_status: str
-    is_subworkflow: bool
+    is_sub_workflow: bool
     node_error: str | None
-    leaf: LeafTaskInfo | None
-    attempts: list[TaskAttemptInfo]
+    task_row: TaskRowInfo | None
+    attempts: list[TaskAttemptDetail]
 
 
 # --------------------------------------------------------------------------- #
 # Workers and schedules
 # --------------------------------------------------------------------------- #
-class DownSlotInfo(BaseModel):
-    """One slot that was down when the worker wrote its snapshot.
-
-    ``cause`` describes the cause of the last failed child start, and
-    ``detail`` is its error text.
-    """
-
-    slot: int
-    cause: str
-    detail: str
-    down_since: datetime
-    failed_boots: int
-
-
-class ProfileNamedInfo(BaseModel):
-    """The worker ran the profile ``name`` of ``AppConfig.worker_profiles``."""
-
-    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
-
-    kind: Literal['named'] = 'named'
-    name: str
-
-
-class ProfileNotRecordedInfo(BaseModel):
-    """The snapshot holds no profile name: a worker of a build before schema
-    migration 1004 wrote it."""
-
-    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
-
-    kind: Literal['not_recorded'] = 'not_recorded'
-
-
-SnapshotProfileInfo = Annotated[
-    ProfileNamedInfo | ProfileNotRecordedInfo,
-    Field(discriminator='kind'),
-]
-"""The worker profile that a snapshot names."""
-
-
 class WorkerStateInfo(BaseModel):
     """Latest state snapshot for one worker (from horsies_worker_states).
 
-    ``snapshot_age_s`` is how long ago the snapshot was written, and
-    ``uptime_s`` how long the worker has run; both are seconds, exact to the
+    ``snapshot_age_seconds`` is how long ago the snapshot was written, and
+    ``uptime_seconds`` how long the worker has run; both are seconds, exact to the
     microsecond. ``stale`` is True once that age exceeds the snapshot
     threshold, signalling a worker that stopped reporting. Liveness is proven
     separately by an active ping.
 
-    ``slot_health`` is ``all_serving`` or ``slots_down`` (``down_slots`` lists
-    them, in slot order). ``down_slots`` is empty unless ``slot_health`` is
-    ``slots_down``.
+    ``slot_health`` is ``SlotHealthAllServing`` or ``SlotHealthSlotsDown`` with the down
+    slots, in slot order.
 
     ``profile`` names the worker profile that the worker ran:
-    ``ProfileNamedInfo`` or ``ProfileNotRecordedInfo``.
+    ``SnapshotProfileNamed`` or ``SnapshotProfileNotRecorded``.
     """
 
     worker_id: str
     hostname: str
     pid: int
     snapshot_at: datetime
-    snapshot_age_s: float | None
+    snapshot_age_seconds: float | None
     stale: bool
     worker_started_at: datetime
-    uptime_s: float | None
-    processes: int
+    uptime_seconds: float | None
+    child_count: int
     queues: list[str]
     queue_max_concurrency: dict[str, int]
     tasks_running: int
@@ -1110,121 +1106,22 @@ class WorkerStateInfo(BaseModel):
     memory_usage_mb: float | None
     memory_percent: float | None
     cpu_percent: float | None
-    slot_health: Literal['all_serving', 'slots_down']
-    down_slots: list[DownSlotInfo]
-    profile: SnapshotProfileInfo
+    slot_health: SlotHealth
+    profile: SnapshotProfile
 
 
-class BudgetLoadInfo(BaseModel):
-    """One claim budget of a live worker.
-
-    ``capacity`` (children or seats in service) and ``serves`` come from the
-    worker's latest snapshot. ``in_flight`` counts, at the read, its RUNNING
-    rows and CLAIMED rows with a live lease of the classes in ``serves``.
-    ``free`` is ``capacity`` minus ``in_flight``, at least 0.
-    """
-
-    budget: Execution
-    capacity: int
-    serves: list[Execution]
-    in_flight: int
-    free: int
-
-
-class WorkerClassLoadInfo(BaseModel):
-    """The claim budgets of one live worker, in execution class order."""
-
-    worker_id: str
-    snapshot_at: datetime
-    budgets: list[BudgetLoadInfo]
-
-
-class StreamServedInfo(BaseModel):
-    """Live workers serve the stream with capacity in service.
-
-    ``workers`` counts them; ``capacity`` sums the capacity in service of
-    the budget that serves the class on each.
-    """
-
-    kind: Literal['served']
-    workers: int
-    capacity: int
-
-
-class StreamNoCapacityInfo(BaseModel):
-    """Live workers serve the stream, and none has capacity in service for it."""
-
-    kind: Literal['no_capacity']
-    workers: int
-
-
-class StreamUnservedInfo(BaseModel):
-    """No live worker serves the stream."""
-
-    kind: Literal['unserved']
-
-
-class StreamWaitingInfo(BaseModel):
-    """At least one row is due. ``wait_s`` is the wait of the oldest due row,
-    in seconds, exact to the microsecond."""
-
-    kind: Literal['waiting']
-    oldest_due_at: datetime
-    wait_s: float
-
-
-class StreamNoneDueInfo(BaseModel):
-    """Every row is due later; ``next_due_at`` is the earliest due time."""
-
-    kind: Literal['none_due']
-    next_due_at: datetime
-
-
-class PendingStreamInfo(BaseModel):
-    """The PENDING rows of one queue and one execution class."""
-
-    queue_name: str
-    execution: Execution
-    coverage: Annotated[
-        StreamServedInfo | StreamNoCapacityInfo | StreamUnservedInfo,
-        Field(discriminator='kind'),
-    ]
-    wait: Annotated[
-        StreamWaitingInfo | StreamNoneDueInfo,
-        Field(discriminator='kind'),
-    ]
-
-
-class ClassReportInfo(BaseModel):
-    """Pending streams and the budget load of each live worker.
-
-    ``checked_at`` is database time. A worker is live while its latest
-    snapshot is at most ``live_window_s`` old. ``streams`` is ordered by
-    queue name, then by execution class. ``workers`` holds the live workers,
-    by worker id.
-    """
-
-    checked_at: datetime
-    live_window_s: int
-    streams: list[PendingStreamInfo]
-    workers: list[WorkerClassLoadInfo]
-
-
-class WorkerPingInfo(BaseModel):
-    """One worker's reply to an active liveness ping."""
-
-    worker_id: str
-    hostname: str
-    pid: int
-    round_trip_ms: float
+DatabaseLiveness = Annotated[
+    DatabasePing | DatabaseUnreachable,
+    Field(discriminator='kind'),
+]
+"""The database part of a liveness report: the ping latency, or unreachable."""
 
 
 class LivenessReport(BaseModel):
     """Database reachability plus the workers that answered an active ping."""
 
-    db_latency_ms: float | None
-    db_reachable: bool
-    workers: list[WorkerPingInfo]
+    database: DatabaseLiveness
+    workers: list[WorkerPong]
 
 
 class WorkerHistoryPoint(BaseModel):

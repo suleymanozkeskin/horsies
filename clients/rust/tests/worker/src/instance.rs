@@ -11,11 +11,10 @@ use std::time::Duration;
 
 use horsies::{
     AppConfig, ChildPreload, ClaimLimits, CronEnumTerm, CronNumericTerm, CronSchedule,
-    CustomQueueConfig, DaySelector, DrainTimeout, IntervalSchedule, IsolatedChildCount,
-    IsolatedChildren, IsolatedRecycle, IsolatedSetting, QueueMode, RecoveryConfig, ScheduleConfig,
-    SchedulePattern, SharedAsyncChildCount, SharedAsyncChildren, SharedAsyncSeats,
-    SharedAsyncSetting, SharedThreadChildCount, SharedThreadChildren, SharedThreadSeats,
-    SharedThreadSetting, TaskCount, TaskLimitSetting, TaskSchedule, WorkerProfile,
+    CustomQueueConfig, DaySelector, IntervalSchedule, IsolatedChildren, IsolatedRecycle,
+    IsolatedSetting, QueueMode, RecoveryConfig, ScheduleConfig, SchedulePattern,
+    SharedAsyncChildren, SharedAsyncSetting, SharedThreadChildren, SharedThreadSetting,
+    TaskLimitSetting, TaskSchedule, WorkerProfile,
 };
 
 /// The database URL of the worker binary.
@@ -152,12 +151,14 @@ impl Instance {
 
     /// The configuration of the instance on `connection`.
     pub fn config(self, connection: &Connection) -> AppConfig {
-        let mut config = AppConfig::for_database_url(connection.database_url.clone());
-        config.broker.pool_size = POOL_SIZE;
-        config.broker.max_overflow = POOL_OVERFLOW;
+        let mut config = AppConfig::from_database_url(connection.database_url.clone());
+        config.database.pool_size = POOL_SIZE;
+        config.database.max_overflow = POOL_OVERFLOW;
         if let Some(session) = &connection.session_database_url {
-            config.broker.session_database_url = Some(session.clone());
-            config.broker.pgbouncer_transaction_mode = true;
+            config.database.session_database = horsies::SessionDatabase::Separate {
+                url: session.clone(),
+            };
+            config.database.pgbouncer_transaction_mode = true;
         }
         config.worker_profiles = Profile::ALL
             .into_iter()
@@ -169,7 +170,11 @@ impl Instance {
                 config.queue_mode = QueueMode::Custom;
                 config.custom_queues = Some(custom_queues(&CUSTOM_QUEUES));
             }
-            Self::ClusterCap => config.cluster_wide_cap = Some(CLUSTER_WIDE_CAP),
+            Self::ClusterCap => {
+                config.cluster_wide_cap = horsies::ClusterCapSetting::ClusterCap {
+                    tasks: CLUSTER_WIDE_CAP,
+                }
+            }
             Self::Recovery => config.recovery = fast_recovery(),
             Self::SoftCap => {
                 config.prefetch_buffer = SOFT_CAP_PREFETCH;
@@ -223,8 +228,7 @@ pub fn fast_recovery() -> RecoveryConfig {
 fn schedules() -> ScheduleConfig {
     let interval = |seconds: u32| {
         SchedulePattern::Interval(IntervalSchedule {
-            seconds: Some(seconds),
-            ..IntervalSchedule::default()
+            every: Duration::from_secs(u64::from(seconds)),
         })
     };
     ScheduleConfig::new(vec![
@@ -396,8 +400,7 @@ impl Profile {
             shared_async: SharedAsyncSetting::NoSharedAsyncChildren {},
             shared_thread: SharedThreadSetting::NoSharedThreadChildren {},
             preload: ChildPreload::NoPreload,
-            drain_timeout: DrainTimeout::try_from(TEST_DRAIN_TIMEOUT)
-                .expect("the test drain timeout is above 0 and below 24 hours"),
+            drain_timeout: TEST_DRAIN_TIMEOUT,
             ..WorkerProfile::default()
         };
         match self {
@@ -407,23 +410,20 @@ impl Profile {
             Self::Isolated8 => with_isolated(base, 8),
             Self::ClaimBatch1 => WorkerProfile {
                 claim: ClaimLimits {
-                    per_queue_per_pass: TaskLimitSetting::TaskLimit {
-                        tasks: TaskCount::from_constant(1),
-                    },
+                    per_queue_per_pass: TaskLimitSetting::TaskLimit { tasks: 1 },
                     ..ClaimLimits::default()
                 },
                 ..with_isolated(base, 1)
             },
             Self::RecycleAfter2 => WorkerProfile {
-                isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren {
+                isolated: IsolatedChildren {
                     recycle: IsolatedRecycle {
-                        after: TaskLimitSetting::TaskLimit {
-                            tasks: TaskCount::from_constant(2),
-                        },
+                        after: TaskLimitSetting::TaskLimit { tasks: 2 },
                         ..IsolatedRecycle::default()
                     },
-                    ..IsolatedChildren::new(IsolatedChildCount::from_constant(2))
-                }),
+                    ..IsolatedChildren::new(2)
+                }
+                .into(),
                 ..base
             },
             Self::SharedOnly1x4 => with_shared_async(base),
@@ -436,9 +436,7 @@ impl Profile {
 
 fn with_isolated(profile: WorkerProfile, count: u32) -> WorkerProfile {
     WorkerProfile {
-        isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
-            IsolatedChildCount::from_constant(count),
-        )),
+        isolated: IsolatedChildren::new(count).into(),
         ..profile
     }
 }
@@ -446,10 +444,7 @@ fn with_isolated(profile: WorkerProfile, count: u32) -> WorkerProfile {
 /// One shared async child with 4 seats.
 fn with_shared_async(profile: WorkerProfile) -> WorkerProfile {
     WorkerProfile {
-        shared_async: SharedAsyncSetting::SharedAsyncChildren(SharedAsyncChildren::new(
-            SharedAsyncChildCount::from_constant(1),
-            SharedAsyncSeats::from_constant(4),
-        )),
+        shared_async: SharedAsyncChildren::new(1, 4).into(),
         ..profile
     }
 }
@@ -457,10 +452,7 @@ fn with_shared_async(profile: WorkerProfile) -> WorkerProfile {
 /// One shared thread child with 4 seats.
 fn with_shared_thread(profile: WorkerProfile) -> WorkerProfile {
     WorkerProfile {
-        shared_thread: SharedThreadSetting::SharedThreadChildren(SharedThreadChildren::new(
-            SharedThreadChildCount::from_constant(1),
-            SharedThreadSeats::from_constant(4),
-        )),
+        shared_thread: SharedThreadChildren::new(1, 4).into(),
         ..profile
     }
 }

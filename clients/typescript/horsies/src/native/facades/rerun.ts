@@ -7,17 +7,17 @@ import type { NativeEnvelope } from "../call/envelope.ts";
 import type { NativeCoreHandle } from "../handle/addon.ts";
 import type { CauseRecord, TraceArgument } from "../values/records.ts";
 
-/** The deadline of the new task: an instant in epoch microseconds, or no deadline. */
+/** The good-until instant of the new task: an instant in epoch microseconds, or no deadline. */
 export type DeadlineArg = { readonly kind: "until"; readonly epochMicros: bigint } | { readonly kind: "noDeadline" };
 
-/** The caller key of the new task. */
-export type CallerKeyArg = { readonly kind: "keyed"; readonly key: string } | { readonly kind: "unkeyed" };
+/** The idempotency key of the new task. */
+export type IdempotencyKeyArg = { readonly kind: "keyed"; readonly key: string } | { readonly kind: "unkeyed" };
 
 /** One rerun request. `sourceTaskId` is lower-case hyphenated UUID text. */
 export interface RerunCommandArg {
   readonly sourceTaskId: string;
-  readonly deadline: DeadlineArg;
-  readonly callerKey: CallerKeyArg;
+  readonly goodUntil: DeadlineArg;
+  readonly idempotencyKey: IdempotencyKeyArg;
 }
 
 /** The retention of the new task: a whole number of days, or forever. */
@@ -31,6 +31,17 @@ export interface RerunPolicyArg {
   readonly retention: RetentionArg;
   readonly rerunInput: RerunInputArg;
   readonly reservationWindowMicros: bigint;
+}
+
+/** One task that the calling app lists, with the custom codes that its contract declares (none for a contract with no list). */
+export interface RegisteredTaskArg {
+  readonly taskName: string;
+  readonly codes: string[];
+}
+
+/** The tasks that the calling app lists, each once: a rerun checks the stored retry list of its source against them. */
+export interface RegisteredTaskCodesArg {
+  readonly tasks: RegisteredTaskArg[];
 }
 
 /** The text form of one SQL value: its PostgreSQL text input or output, or SQL NULL. */
@@ -78,7 +89,7 @@ export type RerunOutcomeRecord =
   | { readonly kind: "notEligible"; readonly taskId: string; readonly reason: NotEligibleName }
   | { readonly kind: "inputUnavailable"; readonly taskId: string; readonly disposition: string }
   | { readonly kind: "inputCorrupt"; readonly taskId: string; readonly detail: string }
-  | { readonly kind: "keyConflict"; readonly taskId: string; readonly reservedByTaskId: string }
+  | { readonly kind: "keyConflict"; readonly taskId: string; readonly ownerTaskId: string }
   | { readonly kind: "keyReplay"; readonly existingTaskId: string };
 
 /** A client family, by its stored value. */
@@ -101,11 +112,18 @@ export type AppRerunFailure =
     }
   | { readonly code: typeof RerunErrorCode.CLASS_NOT_REGISTERED; readonly message: string; readonly classKey: string }
   | { readonly code: typeof RerunErrorCode.INVALID_POLICY; readonly message: string }
-  | { readonly code: typeof RerunErrorCode.CALLER_KEY_REFUSED; readonly message: string }
+  | { readonly code: typeof RerunErrorCode.IDEMPOTENCY_KEY_REFUSED; readonly message: string }
   | { readonly code: typeof RerunErrorCode.ID_MINT_REFUSED; readonly message: string }
   | { readonly code: typeof RerunErrorCode.CLIENT_FAMILY_MISMATCH; readonly message: string; readonly stored: StoredFamilyRecord }
   | { readonly code: typeof RerunErrorCode.UNKNOWN_STORED_FAMILY; readonly message: string; readonly stored: string }
   | { readonly code: typeof RerunErrorCode.FAMILY_CHECK_FAILED; readonly message: string; readonly cause: CauseRecord }
+  | {
+      readonly code: typeof RerunErrorCode.RETRY_CODE_NOT_DECLARED;
+      readonly message: string;
+      readonly taskName: string;
+      readonly retryCode: string;
+    }
+  | { readonly code: typeof RerunErrorCode.TASK_NOT_REGISTERED; readonly message: string; readonly taskName: string }
   | { readonly code: typeof RerunErrorCode.CONTRACT_VIOLATION; readonly message: string };
 
 /** How one rerun in the app's transaction ended. */
@@ -116,10 +134,17 @@ export type AppRerunAnswer =
 /** A refusal of the rerun steps in the caller's transaction. Nothing is written. */
 export type CallerStepRefusal =
   | { readonly code: typeof RerunErrorCode.CLASS_NOT_REGISTERED; readonly message: string; readonly classKey: string }
-  | { readonly code: typeof RerunErrorCode.CALLER_KEY_REFUSED; readonly message: string }
+  | { readonly code: typeof RerunErrorCode.IDEMPOTENCY_KEY_REFUSED; readonly message: string }
   | { readonly code: typeof RerunErrorCode.ID_MINT_REFUSED; readonly message: string }
   | { readonly code: typeof RerunErrorCode.CLIENT_FAMILY_MISMATCH; readonly message: string; readonly stored: StoredFamilyRecord }
   | { readonly code: typeof RerunErrorCode.UNKNOWN_STORED_FAMILY; readonly message: string; readonly stored: string }
+  | {
+      readonly code: typeof RerunErrorCode.RETRY_CODE_NOT_DECLARED;
+      readonly message: string;
+      readonly taskName: string;
+      readonly retryCode: string;
+    }
+  | { readonly code: typeof RerunErrorCode.TASK_NOT_REGISTERED; readonly message: string; readonly taskName: string }
   | { readonly code: typeof RerunErrorCode.CONTRACT_VIOLATION; readonly message: string };
 
 /** The outcome of the write's row. */
@@ -146,6 +171,7 @@ export interface RerunAddon {
     command: RerunCommandArg,
     policy: RerunPolicyArg,
     trace: TraceArgument,
+    codes: RegisteredTaskCodesArg,
   ): Promise<NativeEnvelope<AppRerunAnswer>>;
   rerunReadStatement(command: RerunCommandArg, policy: RerunPolicyArg): NativeEnvelope<CallerStatementRecord>;
   prepareRerunWrite(
@@ -153,6 +179,7 @@ export interface RerunAddon {
     policy: RerunPolicyArg,
     trace: TraceArgument,
     readRow: CallerRowArg,
+    codes: RegisteredTaskCodesArg,
   ): NativeEnvelope<RerunPreparationRecord>;
 }
 

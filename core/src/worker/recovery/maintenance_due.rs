@@ -6,7 +6,7 @@
 //! write whose hour or day has no leaf is refused (SQLSTATE 23514). So a
 //! pass must run before the last leaf of the previous pass ends.
 //!
-//! The interval between passes (`partition_maintenance_interval_s`, 60 s to
+//! The interval between passes (`partition_maintenance_interval_seconds`, 60 s to
 //! 3600 s) is shorter than the smallest horizon. A deadline on the
 //! monotonic clock alone does not hold that bound across a suspend of the
 //! host: the monotonic clock of Linux and macOS stops while the host

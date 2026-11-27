@@ -3,10 +3,10 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Annotated, ClassVar, Final, Self, cast
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from horsies.core.defaults import WORKER_STATE_LIVE_WINDOW_S
+from horsies.core.defaults import WORKER_STATE_LIVE_WINDOW_SECONDS
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     ValidationReport,
     raise_collected,
 )
@@ -16,7 +16,7 @@ DEFAULT_WORKFLOW_RECOVERY_FAILURE_LIMIT: Final = 25
 """Reaper passes with a persistent recovery raise before a workflow fails."""
 
 
-WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS: Final = WORKER_STATE_LIVE_WINDOW_S * 1_000 // 2
+WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS: Final = WORKER_STATE_LIVE_WINDOW_SECONDS * 1_000 // 2
 """Largest `worker_state_snapshot_interval_ms`: half the live window.
 
 A worker reads as live only while its latest snapshot is inside the live
@@ -27,7 +27,7 @@ write."""
 FAIL_CLOSED_WINDOW_DIVISOR: Final = 2
 """The fail-closed window is `running_stale_threshold_ms` divided by this.
 
-With `auto_fail_stale_running` on, a worker stops when no runner heartbeat
+With `fail_stale_running` on, a worker stops when no runner heartbeat
 lands for this window. The rest of the threshold is the time left to kill
 its children before the reaper acts."""
 
@@ -67,7 +67,7 @@ def _snapshot_interval_above_cap(interval_ms: int) -> str:
 
 
 def fail_closed_threshold_floor_ms(runner_heartbeat_interval_ms: int) -> int:
-    """Smallest `running_stale_threshold_ms` with `auto_fail_stale_running` on.
+    """Smallest `running_stale_threshold_ms` with `fail_stale_running` on.
 
     Its fail-closed window holds one beat interval plus
     `RUNNER_BEAT_LANDING_ALLOWANCE_MS`.
@@ -81,12 +81,12 @@ MOVED_TO_RETENTION: frozenset[str] = frozenset({
     'retention_classes',
     'terminal_record_retention_hours',
     'worker_state_retention_hours',
-    'retention_sweep_interval_s',
+    'retention_sweep_interval_seconds',
     'retention_delete_batch_size',
     'history_leaf_horizon_days',
     'heartbeat_leaf_horizon_hours',
-    'partition_maintenance_interval_s',
-    'paused_workflow_auto_cancel_after',
+    'partition_maintenance_interval_seconds',
+    'paused_workflow_cancel_after',
 })
 """Fields that now live on `AppConfig.retention`. Named here so the
 refusal can point at the exact successor rather than a page."""
@@ -121,19 +121,19 @@ class RecoveryConfig(BaseModel):
     All time values are in milliseconds for consistency with timeout_ms.
 
     Fields:
-    - auto_requeue_stale_claimed: If True, automatically requeue tasks stuck in CLAIMED
+    - requeue_stale_claimed: If True, automatically requeue tasks stuck in CLAIMED
     - claimed_stale_threshold_ms: Milliseconds without heartbeat before CLAIMED task is stale
-    - auto_terminate_orphaned_workflow_tasks: If True (default), cancel orphaned workflow
+    - terminate_orphaned_workflow_tasks: If True (default), cancel orphaned workflow
       tasks (CLAIMED, workflow_task linkage missing or terminal) when their start misses in
       the child and in the reaper. If False, they are left CLAIMED for inspection — never
       requeued (futile, they cannot reach RUNNING) and never deleted by retention (their
       workflow is retained while the backing task is non-terminal). Orphans are never
       requeued regardless of this flag.
-    - auto_fail_stale_running: If True, automatically mark stale RUNNING tasks as FAILED
+    - fail_stale_running: If True, automatically mark stale RUNNING tasks as FAILED
     - running_stale_threshold_ms: Milliseconds without heartbeat before RUNNING task is stale
     - finalizing_stale_threshold_ms: Milliseconds a task may remain finalizing before recovery
     - crashed_worker_recovery_grace_ms: Grace before recovering a terminal task whose workflow progression was not applied
-    - phase2_quarantine_after_attempts: Recovery passes an unresolvable phase-2 pending row may retain before it is quarantined
+    - finalization_quarantine_after_attempts: Recovery passes an unresolvable pending finalization row may retain before it is quarantined
     - workflow_recovery_failure_limit: Reaper passes with a persistent recovery raise before a workflow fails closed
     - check_interval_ms: How often the reaper checks for stale tasks
     - orphan_task_audit_interval_ms: How often the orphan cursor scans one page
@@ -147,7 +147,7 @@ class RecoveryConfig(BaseModel):
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
-    auto_requeue_stale_claimed: bool = Field(
+    requeue_stale_claimed: bool = Field(
         default=True,
         description='Automatically requeue tasks stuck in CLAIMED (safe - user code never ran)',
     )
@@ -156,7 +156,7 @@ class RecoveryConfig(BaseModel):
         description='Milliseconds without claimer heartbeat before CLAIMED task is considered stale (1s-1hr)',
     )
 
-    auto_terminate_orphaned_workflow_tasks: bool = Field(
+    terminate_orphaned_workflow_tasks: bool = Field(
         default=True,
         description=(
             'Cancel orphaned workflow tasks (CLAIMED, workflow_task linkage missing '
@@ -167,7 +167,7 @@ class RecoveryConfig(BaseModel):
         ),
     )
 
-    auto_fail_stale_running: bool = Field(
+    fail_stale_running: bool = Field(
         default=True,
         description=(
             'Automatically mark stale RUNNING tasks as FAILED (not safe to requeue); '
@@ -179,7 +179,7 @@ class RecoveryConfig(BaseModel):
         default=300_000,  # 5 minutes
         description=(
             'Milliseconds without runner heartbeat before RUNNING task is considered '
-            'stale (1s-2hr); with auto_fail_stale_running on, at least '
+            'stale (1s-2hr); with fail_stale_running on, at least '
             '2 x (runner_heartbeat_interval_ms + '
             f'{RUNNER_BEAT_LANDING_ALLOWANCE_MS}ms)'
         ),
@@ -209,7 +209,7 @@ class RecoveryConfig(BaseModel):
         ),
     )
 
-    phase2_quarantine_after_attempts: Annotated[
+    finalization_quarantine_after_attempts: Annotated[
         int, Field(ge=3, le=1_000),
     ] = Field(
         default=25,
@@ -282,7 +282,7 @@ class RecoveryConfig(BaseModel):
             'How often each worker persists a worker-state snapshot (monitoring '
             'timeseries) in milliseconds '
             f'(1000-{WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS}); at most half the '
-            f'{WORKER_STATE_LIVE_WINDOW_S} s live window, so a running worker '
+            f'{WORKER_STATE_LIVE_WINDOW_SECONDS} s live window, so a running worker '
             'stays live when a snapshot write is late by up to half the window; '
             'each snapshot is one row in '
             'horsies_worker_states, so shorter intervals grow the table faster'
@@ -317,7 +317,7 @@ class RecoveryConfig(BaseModel):
                         # the field, which is the only object positioned
                         # to notice. The remedy living in retention does
                         # not make the refusal a retention refusal.
-                        code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                        code=HorsiesErrorCode.CONFIG_INVALID_RECOVERY,
                         notes=[
                             'it governs how long records live, not how '
                             'stalled work is detected',
@@ -364,7 +364,7 @@ class RecoveryConfig(BaseModel):
     def _running_threshold_errors(self) -> tuple[ConfigurationError, ...]:
         """The refusal of `running_stale_threshold_ms`, or none.
 
-        With `auto_fail_stale_running` on, the floor is
+        With `fail_stale_running` on, the floor is
         `fail_closed_threshold_floor_ms`: below it the worker stops while
         every runner heartbeat lands. With it off, the floor is two beat
         intervals.
@@ -377,21 +377,21 @@ class RecoveryConfig(BaseModel):
         interval_note = (
             f'runner_heartbeat_interval_ms={interval_ms}ms ({interval_ms / 1000:.1f}s)'
         )
-        match self.auto_fail_stale_running:
+        match self.fail_stale_running:
             case True:
                 floor_ms = fail_closed_threshold_floor_ms(interval_ms)
                 message = (
-                    'running_stale_threshold_ms too low for auto_fail_stale_running'
+                    'running_stale_threshold_ms too low for fail_stale_running'
                 )
                 rule_notes = [
-                    'with auto_fail_stale_running on, the worker stops when no '
+                    'with fail_stale_running on, the worker stops when no '
                     'runner heartbeat lands for half of running_stale_threshold_ms',
                     'that half must hold one runner_heartbeat_interval_ms plus '
                     f'{RUNNER_BEAT_LANDING_ALLOWANCE_MS}ms for a beat to land: '
                     'running_stale_threshold_ms >= 2 x (runner_heartbeat_interval_ms '
                     f'+ {RUNNER_BEAT_LANDING_ALLOWANCE_MS}ms)',
                 ]
-                remedy = ', or set auto_fail_stale_running=False'
+                remedy = ', or set fail_stale_running=False'
             case False:
                 floor_ms = interval_ms * 2
                 message = 'running_stale_threshold_ms too low'
@@ -402,7 +402,7 @@ class RecoveryConfig(BaseModel):
         return (
             ConfigurationError(
                 message=message,
-                code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                code=HorsiesErrorCode.CONFIG_INVALID_RECOVERY,
                 notes=[threshold_note, interval_note, *rule_notes],
                 help_text=(
                     f'set running_stale_threshold_ms >= {floor_ms}ms '
@@ -430,7 +430,7 @@ class RecoveryConfig(BaseModel):
             report.add(
                 ConfigurationError(
                     message='finalizing_stale_threshold_ms too low',
-                    code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                    code=HorsiesErrorCode.CONFIG_INVALID_RECOVERY,
                     notes=[
                         f'finalizing_stale_threshold_ms={self.finalizing_stale_threshold_ms}ms ({self.finalizing_stale_threshold_ms/1000:.1f}s)',
                         f'runner_heartbeat_interval_ms={self.runner_heartbeat_interval_ms}ms ({self.runner_heartbeat_interval_ms/1000:.1f}s)',
@@ -445,7 +445,7 @@ class RecoveryConfig(BaseModel):
             report.add(
                 ConfigurationError(
                     message='claimed_stale_threshold_ms too low',
-                    code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                    code=HorsiesErrorCode.CONFIG_INVALID_RECOVERY,
                     notes=[
                         f'claimed_stale_threshold_ms={self.claimed_stale_threshold_ms}ms ({self.claimed_stale_threshold_ms/1000:.1f}s)',
                         f'claimer_heartbeat_interval_ms={self.claimer_heartbeat_interval_ms}ms ({self.claimer_heartbeat_interval_ms/1000:.1f}s)',
@@ -470,10 +470,10 @@ class RecoveryConfig(BaseModel):
         if interval_ms > WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS:
             raise ConfigurationError(
                 message=_snapshot_interval_above_cap(interval_ms),
-                code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                code=HorsiesErrorCode.CONFIG_INVALID_RECOVERY,
                 notes=[
                     'the cap is half the live window '
-                    f'(WORKER_STATE_LIVE_WINDOW_S={WORKER_STATE_LIVE_WINDOW_S}s)',
+                    f'(WORKER_STATE_LIVE_WINDOW_SECONDS={WORKER_STATE_LIVE_WINDOW_SECONDS}s)',
                     'a worker reads as live only while its latest snapshot is '
                     'inside the live window; the other half of the window is '
                     'room for a late snapshot write',

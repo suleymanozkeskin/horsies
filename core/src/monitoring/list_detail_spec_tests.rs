@@ -19,9 +19,9 @@ use crate::core::history::reads::aggregates::plan_rows_from_explain_text;
 use crate::core::lifecycle::{BatchSize, TerminalizationCommand, TerminalizationOutcome};
 use crate::core::task::Execution;
 use crate::monitoring::{
-    get_task_detail, get_workflow_node, list_tasks, task_stats, MonitoringQueryError,
+    get_task_detail, get_workflow_node, list_tasks, task_status_counts, MonitoringQueryError,
     MonitoringQueryErrorCode, SortDirection, TaskAbsenceReason, TaskDetail, TaskDetailNotFound,
-    TaskDetailRead, TaskListPage, TaskListQuery, TaskSortField, TaskStatsQuery,
+    TaskDetailRead, TaskListPage, TaskListQuery, TaskSortField, TaskStatusCountsQuery,
 };
 use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 
@@ -112,7 +112,7 @@ async fn only_spans(broker: &PostgresBroker) -> (Option<Duration>, Option<Durati
     )
     .await;
     let row = page.rows.first().expect("the list has a row");
-    (row.queue_s, row.exec_s)
+    (row.queue_seconds, row.execution_seconds)
 }
 
 /// A completed task that started 40 s ago and ended 30 s ago.
@@ -181,7 +181,7 @@ async fn every_sort_key_reads_both_sides_in_both_directions() {
 }
 
 /// Python `TestListTasks::test_live_rows_sort_as_null_on_derived_spans`: a
-/// running row shows a growing `exec_s` but has no span to sort on, so it
+/// running row shows a growing `execution_seconds` but has no span to sort on, so it
 /// sorts after a finished row.
 #[tokio::test]
 async fn a_running_row_sorts_as_null_on_the_execution_span() {
@@ -518,7 +518,7 @@ async fn a_standalone_task_has_no_workflow_link() {
     let detail = detail_of(&database.broker(), task.id).await;
 
     assert_eq!(detail.workflow_id, None);
-    assert_eq!(detail.workflow_task_index, None);
+    assert_eq!(detail.workflow_node_index, None);
     database.drop().await;
 }
 
@@ -543,7 +543,7 @@ async fn a_node_of_another_task_does_not_link_this_task() {
     let detail = detail_of(&database.broker(), unrelated.id).await;
 
     assert_eq!(detail.workflow_id, None);
-    assert_eq!(detail.workflow_task_index, None);
+    assert_eq!(detail.workflow_node_index, None);
     database.drop().await;
 }
 
@@ -562,11 +562,11 @@ async fn a_live_leaf_shows_its_class_and_a_history_leaf_shows_none() {
     let live_detail = detail_of(&broker, live.id).await;
     let finished_detail = detail_of(&broker, finished.id).await;
 
-    assert_eq!(live_detail.leaf.execution, Some(Execution::Isolated));
-    assert_eq!(finished_detail.leaf.execution, None);
-    let encoded = serde_json::to_value(&live_detail.leaf).expect("the leaf encodes");
+    assert_eq!(live_detail.task_row.execution, Some(Execution::Isolated));
+    assert_eq!(finished_detail.task_row.execution, None);
+    let encoded = serde_json::to_value(&live_detail.task_row).expect("the leaf encodes");
     assert_eq!(encoded["execution"], "ISOLATED");
-    let encoded = serde_json::to_value(&finished_detail.leaf).expect("the leaf encodes");
+    let encoded = serde_json::to_value(&finished_detail.task_row).expect("the leaf encodes");
     assert_eq!(encoded["execution"], serde_json::Value::Null);
     database.drop().await;
 }
@@ -601,9 +601,9 @@ async fn a_leaf_carries_the_trace_id_of_its_send_live_and_in_history() {
     .expect("store the history trace id");
     let broker = database.broker();
 
-    let traced_leaf = detail_of(&broker, traced.id).await.leaf;
-    let untraced_leaf = detail_of(&broker, untraced.id).await.leaf;
-    let finished_leaf = detail_of(&broker, finished.id).await.leaf;
+    let traced_leaf = detail_of(&broker, traced.id).await.task_row;
+    let untraced_leaf = detail_of(&broker, untraced.id).await.task_row;
+    let finished_leaf = detail_of(&broker, finished.id).await.task_row;
 
     assert_eq!(traced_leaf.trace_id, Some("a1".repeat(16)));
     assert_eq!(untraced_leaf.trace_id, None);
@@ -626,7 +626,7 @@ async fn the_detail_reports_the_deadline_and_the_workflow_membership() {
     let detail = detail_of(&database.broker(), task.id).await;
 
     assert!(detail.is_workflow_task);
-    let stored = detail.leaf.good_until.expect("the deadline is read");
+    let stored = detail.task_row.good_until.expect("the deadline is read");
     assert!(
         (stored - deadline).num_milliseconds().abs() < 1_000,
         "{stored} against {deadline}"
@@ -656,7 +656,7 @@ async fn empty_and_blank_attempt_texts_read_as_absent() {
 
     let detail = detail_of(&database.broker(), task.id).await;
 
-    assert_eq!(detail.leaf.failed_reason, None);
+    assert_eq!(detail.task_row.failed_reason, None);
     let attempt = detail.attempts.first().expect("the attempt is read");
     assert_eq!(attempt.error_code, None);
     assert_eq!(attempt.error_message, None);
@@ -672,14 +672,14 @@ async fn a_claimed_task_counts_its_queue_time_up() {
     task.enqueued_seconds_ago = 25;
     seed_live(&database.pool, &task).await;
 
-    let (queue_s, exec_s) = only_spans(&database.broker()).await;
+    let (queue_seconds, execution_seconds) = only_spans(&database.broker()).await;
 
-    let queue_s = queue_s.expect("a claimed task has a queue span");
+    let queue_seconds = queue_seconds.expect("a claimed task has a queue span");
     assert!(
-        (Duration::seconds(25)..=LIVE_SPAN_CEILING).contains(&queue_s),
-        "{queue_s}"
+        (Duration::seconds(25)..=LIVE_SPAN_CEILING).contains(&queue_seconds),
+        "{queue_seconds}"
     );
-    assert_eq!(exec_s, None);
+    assert_eq!(execution_seconds, None);
     database.drop().await;
 }
 
@@ -754,11 +754,11 @@ async fn the_detail_leaf_and_the_list_row_report_the_same_spans() {
     set_history_times(&database.pool, task.id, 300, None, 0).await;
     let broker = database.broker();
 
-    let (queue_s, exec_s) = only_spans(&broker).await;
+    let (queue_seconds, execution_seconds) = only_spans(&broker).await;
     let detail = detail_of(&broker, task.id).await;
 
-    assert_eq!(detail.leaf.queue_s, queue_s);
-    assert_eq!(detail.leaf.exec_s, exec_s);
+    assert_eq!(detail.task_row.queue_seconds, queue_seconds);
+    assert_eq!(detail.task_row.execution_seconds, execution_seconds);
     database.drop().await;
 }
 
@@ -769,17 +769,23 @@ async fn a_detail_read_on_an_unreachable_database_is_an_error_not_absence() {
         .await
         .expect_err("an unreachable database fails the read");
 
-    assert_eq!(error.code(), MonitoringQueryErrorCode::DbOperationFailed);
+    assert_eq!(
+        error.code(),
+        MonitoringQueryErrorCode::DatabaseOperationFailed
+    );
     assert!(error.retryable(), "{error:?}");
 }
 
 /// Python `TestDatabaseFailure::test_aggregate_failure_is_reported`.
 #[tokio::test]
 async fn a_stats_read_on_an_unreachable_database_is_a_retryable_error() {
-    let error = task_stats(&unreachable_broker(), &TaskStatsQuery::new(window()))
+    let error = task_status_counts(&unreachable_broker(), &TaskStatusCountsQuery::new(window()))
         .await
         .expect_err("an unreachable database fails the read");
 
-    assert_eq!(error.code(), MonitoringQueryErrorCode::DbOperationFailed);
+    assert_eq!(
+        error.code(),
+        MonitoringQueryErrorCode::DatabaseOperationFailed
+    );
     assert!(error.retryable(), "{error:?}");
 }

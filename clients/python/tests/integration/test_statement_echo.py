@@ -23,6 +23,7 @@ from horsies._core import refresh_log_levels
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.logging import STATEMENT_LOGGER_NAME
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.types.result import is_ok
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
@@ -96,7 +97,7 @@ async def test_a_broker_with_echo_logs_its_core_statements_at_info_on_horsies_sq
     # `broker` installed the schema; the echo broker uses it as it is.
     echo_broker = PostgresBroker(
         PostgresConfig(database_url=SecretStr(db_url), echo=True),
-        assume_initialized=True,
+        schema_mode=SchemaMode.ASSUME_INITIALIZED,
     )
     try:
         expired = await echo_broker.expire_pending_tasks()

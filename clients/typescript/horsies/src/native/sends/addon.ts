@@ -9,6 +9,7 @@
 // - `enqueue`, `getResult` and `taskInfo` are operations on a core handle: they start the core of the process at the
 //   first call and run on its runtime.
 
+import type { SchemaMode } from "../../_catalog/manifest.ts";
 import { requireAddon } from "../call/addon.ts";
 import type { NativeEnvelope } from "../call/envelope.ts";
 import type { InstallCoverageArg, NativeCoreHandle } from "../handle/addon.ts";
@@ -60,14 +61,14 @@ export type MillisecondsFact =
 /** The longest wait between two retries of an exponential policy. */
 export type MaxDelayFact = { readonly kind: "noCap" } | { readonly kind: "seconds"; readonly seconds: number };
 
-/** The retry policy of a task. Each code of `autoRetryFor` is a user code or a library code, as its text. */
+/** The retry policy of a task. Each code of `retryFor` is a custom code or a built-in code, as its text. */
 export type RetryFacts =
   | { readonly kind: "noRetry" }
   | {
       readonly kind: "fixed";
       readonly intervalsSeconds: number[];
       readonly jitter: boolean;
-      readonly autoRetryFor: string[];
+      readonly retryFor: string[];
     }
   | {
       readonly kind: "exponential";
@@ -75,7 +76,7 @@ export type RetryFacts =
       readonly maxRetries: number;
       readonly jitter: boolean;
       readonly maxDelay: MaxDelayFact;
-      readonly autoRetryFor: string[];
+      readonly retryFor: string[];
     };
 
 /** The error codes of a task: any code (`open`), or the declared list. */
@@ -84,7 +85,7 @@ export type DeclaredCodesFact = { readonly kind: "open" } | { readonly kind: "de
 /** The facts of a task that its stored options text holds, and the rules of the core check. */
 export interface TaskOptionsFacts {
   readonly taskName: string;
-  readonly queueName: string;
+  readonly queue: string;
   readonly execution: ExecutionName;
   readonly timeout: MillisecondsFact;
   readonly cancelGrace: MillisecondsFact;
@@ -260,13 +261,13 @@ export interface TaskInfoRecord {
   readonly taskId: string;
   readonly taskName: string;
   readonly status: TaskStatusName;
-  readonly queueName: string;
+  readonly queue: string;
   readonly priority: number;
   readonly retryCount: number;
   readonly maxRetries: number;
   readonly nextRetryAt: RecordedInstant;
   readonly sentAt: RecordedInstant;
-  readonly enqueuedAtMicros: bigint;
+  readonly dueAtMicros: bigint;
   readonly claimedAt: RecordedInstant;
   readonly startedAt: RecordedInstant;
   readonly completedAt: RecordedInstant;
@@ -289,10 +290,10 @@ export type TaskInfoRead =
 /** Whether this process runs task bodies: a task child does; a producer, a worker parent or a scheduler does not. */
 export type ProcessRoleName = "RUNS_TASK_BODIES" | "RUNS_NO_TASK_BODIES";
 
-/** The code of an error that a body gives: a code that the task chose, or a library code. */
+/** The code of an error that a body gives: a custom code that the task chose, or a built-in code. */
 export type ErrorCodePart =
-  | { readonly kind: "user"; readonly code: string }
-  | { readonly kind: "library"; readonly code: string };
+  | { readonly kind: "custom"; readonly code: string }
+  | { readonly kind: "builtIn"; readonly code: string };
 
 /**
  * The exception record of a body error: none, or the record of a thrown value. `className` is the stored `type` of
@@ -336,14 +337,14 @@ export interface NativeTaskError {
   storedText(): NativeEnvelope<string>;
 }
 
-/** The outcome of a task error build: the error, or why the core refuses the parts (a reserved user code). */
+/** The outcome of a task error build: the error, or why the core refuses the parts (a reserved custom code). */
 export type TaskErrorBuild =
   | { readonly kind: "built"; readonly error: NativeTaskError }
   | { readonly kind: "refused"; readonly cause: string };
 
 /** The functions of the `sends` area. */
 export interface SendsAddon {
-  checkAppConfig(appConfigJson: string): NativeEnvelope<AppConfigCheck>;
+  checkAppConfig(appConfigJson: string, schemaMode: SchemaMode): NativeEnvelope<AppConfigCheck>;
   parseDeclaredErrorCodes(codes: string[]): NativeEnvelope<DeclaredCodesCheck>;
   checkTaskOptions(facts: TaskOptionsFacts): NativeEnvelope<TaskOptionsCheck>;
   enqueue(

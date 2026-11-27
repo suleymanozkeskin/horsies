@@ -1,7 +1,8 @@
 //! Render integer constants of horsies-core as modules of `_catalog`
 //! (`monitoring_bounds.py`, `broker_bounds.py`, `broker_pool_defaults.py`,
-//! `exit_codes.py`, `child_bounds.py`). Each
-//! constant is a `Final` integer whose value is the core's constant, so a
+//! `exit_codes.py`, `child_bounds.py`, `task_bounds.py`, `queue_defaults.py`,
+//! `schedule_defaults.py`). Each
+//! constant is a `Final` integer, text or flag whose value is the core's constant, so a
 //! Python bound cannot differ from the bound that the core enforces: `check`
 //! fails when a core value changes and the module is not written again.
 
@@ -17,8 +18,10 @@ use horsies_core::monitoring::{
     MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
 };
 use horsies_core::{
-    CANCELLED_WRITE_END, LIVENESS_LOCK_LOST_EXIT_CODE, RUNNER_HEARTBEAT_LOST_EXIT_CODE,
-    TASK_LIST_BOUND,
+    CANCELLED_WRITE_END, DEFAULT_MAX_CATCH_UP_RUNS, DEFAULT_QUEUE_NAME, DEFAULT_QUEUE_PRIORITY,
+    DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, DEFAULT_SCHEDULE_ENABLED, DEFAULT_SCHEDULE_TIMEZONE,
+    IDEMPOTENCY_KEY_MAX_BYTES, LIVENESS_LOCK_LOST_EXIT_CODE, MAX_TASK_TIMEOUT_MS,
+    MIN_TASK_TIMEOUT_MS, RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND,
 };
 
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
@@ -31,7 +34,30 @@ pub struct CoreConstant {
     /// The docstring under the constant.
     pub doc: &'static str,
     /// The core's value.
-    pub value: i64,
+    pub value: CoreValue,
+}
+
+/// The value of one core constant. Each variant has its Python literal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CoreValue {
+    /// A whole number, as a Python `int`.
+    Integer(i64),
+    /// A text, as a Python `str`.
+    Text(&'static str),
+    /// A yes or no, as a Python `bool`.
+    Flag(bool),
+}
+
+impl CoreValue {
+    /// The Python source of the value.
+    pub fn python_literal(self) -> String {
+        match self {
+            Self::Integer(number) => number.to_string(),
+            Self::Text(text) => string_literal(text),
+            Self::Flag(true) => "True".to_owned(),
+            Self::Flag(false) => "False".to_owned(),
+        }
+    }
 }
 
 /// One generated module of core constants, inside `_catalog`.
@@ -49,38 +75,38 @@ const MONITORING_CONSTANTS: [CoreConstant; 7] = [
     CoreConstant {
         name: "MONITORING_WINDOW_DEFAULT_SECONDS",
         doc: "The span of the window of a read that gives no bound.",
-        value: MONITORING_WINDOW_DEFAULT.num_seconds(),
+        value: CoreValue::Integer(MONITORING_WINDOW_DEFAULT.num_seconds()),
     },
     CoreConstant {
         name: "MONITORING_WINDOW_MAX_SECONDS",
         doc: "The longest window; a longer one is refused.",
-        value: MONITORING_WINDOW_MAX.num_seconds(),
+        value: CoreValue::Integer(MONITORING_WINDOW_MAX.num_seconds()),
     },
     CoreConstant {
         name: "MAX_TASK_PAGE_REACH",
         doc: "The most `offset + limit` of one task list page.",
-        value: MAX_TASK_PAGE_REACH,
+        value: CoreValue::Integer(MAX_TASK_PAGE_REACH),
     },
     CoreConstant {
         name: "MAX_TASK_PAGE_LIMIT",
         doc: "The most rows of one task list page.",
-        value: MAX_TASK_PAGE_LIMIT,
+        value: CoreValue::Integer(MAX_TASK_PAGE_LIMIT),
     },
     CoreConstant {
         name: "MAX_BREAKDOWN_LIMIT",
         doc: "The most groups of one task breakdown.",
-        value: MAX_BREAKDOWN_LIMIT,
+        value: CoreValue::Integer(MAX_BREAKDOWN_LIMIT),
     },
     CoreConstant {
         name: "MAX_WORKFLOW_RUNS_LIMIT",
         doc: "The most runs of one workflow runs list.",
-        value: MAX_WORKFLOW_RUNS_LIMIT,
+        value: CoreValue::Integer(MAX_WORKFLOW_RUNS_LIMIT),
     },
     CoreConstant {
         name: "LIST_ROW_BOUND",
         doc: "The most rows of the workflow names list and of the schedules list; a\n\
               longer list is cut at the bound.",
-        value: LIST_ROW_BOUND as i64,
+        value: CoreValue::Integer(LIST_ROW_BOUND as i64),
     },
 ];
 
@@ -96,7 +122,7 @@ const BROKER_CONSTANTS: [CoreConstant; 1] = [CoreConstant {
     name: "TASK_LIST_ROW_BOUND",
     doc: "The most rows of the stale task list and of the expired task list; a\n\
           longer list is cut at the bound.",
-    value: TASK_LIST_BOUND as i64,
+    value: CoreValue::Integer(TASK_LIST_BOUND as i64),
 }];
 
 /// The bound of the stale and expired task lists of the broker.
@@ -112,14 +138,14 @@ const BROKER_POOL_DEFAULT_CONSTANTS: [CoreConstant; 2] = [
         name: "BROKER_POOL_SIZE_DEFAULT",
         doc: "The persistent connections of the general broker pool of a config that\n\
               names no `pool_size`: the default of `PostgresConfig.pool_size`.",
-        value: BROKER_POOL_SIZE_DEFAULT as i64,
+        value: CoreValue::Integer(BROKER_POOL_SIZE_DEFAULT as i64),
     },
     CoreConstant {
         name: "BROKER_MAX_OVERFLOW_DEFAULT",
         doc: "The connections past the pool size that the general broker pool of a\n\
               config that names no `max_overflow` opens under load: the default of\n\
               `PostgresConfig.max_overflow`.",
-        value: BROKER_MAX_OVERFLOW_DEFAULT as i64,
+        value: CoreValue::Integer(BROKER_MAX_OVERFLOW_DEFAULT as i64),
     },
 ];
 
@@ -136,62 +162,62 @@ const EXIT_CODE_CONSTANTS: [CoreConstant; 11] = [
         name: "PARENT_GONE_EXIT_CODE",
         doc: "A child: the parent is gone (the socket reached EOF, or the parent-death\n\
               check found another parent).",
-        value: PARENT_GONE_EXIT_CODE as i64,
+        value: CoreValue::Integer(PARENT_GONE_EXIT_CODE as i64),
     },
     CoreConstant {
         name: "BAD_PARENT_FRAME_EXIT_CODE",
         doc: "A child: the parent sent a frame over the bounds, or a malformed frame.",
-        value: BAD_PARENT_FRAME_EXIT_CODE as i64,
+        value: CoreValue::Integer(BAD_PARENT_FRAME_EXIT_CODE as i64),
     },
     CoreConstant {
         name: "BAD_ARGUMENTS_EXIT_CODE",
         doc: "A child: the child program got arguments it cannot use.",
-        value: BAD_ARGUMENTS_EXIT_CODE as i64,
+        value: CoreValue::Integer(BAD_ARGUMENTS_EXIT_CODE as i64),
     },
     CoreConstant {
         name: "STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE",
         doc: "A child: after a stop frame, threads of the task loop's executor still\n\
               ran; the child left without waiting for them.",
-        value: STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE as i64,
+        value: CoreValue::Integer(STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE as i64),
     },
     CoreConstant {
         name: "BOOT_FAILED_EXIT_CODE",
         doc: "A child: the boot failed, after a `boot_failed` frame that names the cause.",
-        value: BOOT_FAILED_EXIT_CODE as i64,
+        value: CoreValue::Integer(BOOT_FAILED_EXIT_CODE as i64),
     },
     CoreConstant {
         name: "REPARENT_FAILED_EXIT_CODE",
         doc: "A child: a forked child did not reach the worker as its parent in time.",
-        value: REPARENT_FAILED_EXIT_CODE as i64,
+        value: CoreValue::Integer(REPARENT_FAILED_EXIT_CODE as i64),
     },
     CoreConstant {
         name: "RUNNER_HEARTBEAT_LOST_EXIT_CODE",
         doc: "The worker process: it failed closed because its runner heartbeats\n\
               stopped.",
-        value: RUNNER_HEARTBEAT_LOST_EXIT_CODE as i64,
+        value: CoreValue::Integer(RUNNER_HEARTBEAT_LOST_EXIT_CODE as i64),
     },
     CoreConstant {
         name: "PROTOCOL_MISMATCH_EXIT_CODE",
         doc: "A child: the init frame named another protocol version than the child\n\
               speaks.",
-        value: PROTOCOL_MISMATCH_EXIT_CODE as i64,
+        value: CoreValue::Integer(PROTOCOL_MISMATCH_EXIT_CODE as i64),
     },
     CoreConstant {
         name: "LIVENESS_LOCK_LOST_EXIT_CODE",
         doc: "The worker process: it failed closed because its liveness lock was not\n\
               held for the regain bound while it held a task.",
-        value: LIVENESS_LOCK_LOST_EXIT_CODE as i64,
+        value: CoreValue::Integer(LIVENESS_LOCK_LOST_EXIT_CODE as i64),
     },
     CoreConstant {
         name: "CORE_STOPPED_EXIT_CODE",
         doc: "A child: its core stopped, or the process was forked after its core\n\
               started; the child ended itself.",
-        value: CORE_STOPPED_EXIT_CODE as i64,
+        value: CoreValue::Integer(CORE_STOPPED_EXIT_CODE as i64),
     },
     CoreConstant {
         name: "CHILD_HOOK_FAILED_EXIT_CODE",
         doc: "A child: a start hook of the child failed or hung.",
-        value: CHILD_HOOK_FAILED_EXIT_CODE as i64,
+        value: CoreValue::Integer(CHILD_HOOK_FAILED_EXIT_CODE as i64),
     },
 ];
 
@@ -208,7 +234,7 @@ const CHILD_CONSTANTS: [CoreConstant; 1] = [CoreConstant {
     name: "CANCELLED_WRITE_END_SECONDS",
     doc: "The longest end of a write of a child after its bound: the cancel request\n\
           of the statement and the wait for its reply.",
-    value: CANCELLED_WRITE_END.as_secs() as i64,
+    value: CoreValue::Integer(CANCELLED_WRITE_END.as_secs() as i64),
 }];
 
 /// The bounds of the writes of a worker child. The spans are whole seconds.
@@ -219,13 +245,102 @@ pub const CHILD_BOUNDS: ConstantModule = ConstantModule {
     constants: &CHILD_CONSTANTS,
 };
 
+const TASK_BOUND_CONSTANTS: [CoreConstant; 3] = [
+    CoreConstant {
+        name: "MIN_TASK_TIMEOUT_MS",
+        doc: "The smallest `TaskOptions.timeout_ms`.",
+        value: CoreValue::Integer(MIN_TASK_TIMEOUT_MS as i64),
+    },
+    CoreConstant {
+        name: "MAX_TASK_TIMEOUT_MS",
+        doc: "The largest `TaskOptions.timeout_ms`, and the largest wait of a result get.
+
+\
+              About 49.7 days. It is the limit of the Rust port's `u32` field, so both
+\
+              clients refuse the same values.",
+        value: CoreValue::Integer(MAX_TASK_TIMEOUT_MS as i64),
+    },
+    CoreConstant {
+        name: "IDEMPOTENCY_KEY_MAX_BYTES",
+        doc: "The most UTF-8 bytes of an idempotency key; a key has at least one byte.",
+        value: CoreValue::Integer(IDEMPOTENCY_KEY_MAX_BYTES as i64),
+    },
+];
+
+/// The bounds of a task timeout and of an idempotency key.
+pub const TASK_BOUNDS: ConstantModule = ConstantModule {
+    file: "task_bounds.py",
+    doc: "The bounds of a task timeout and of an idempotency key of horsies-core,
+\
+          generated from its Rust constants.",
+    constants: &TASK_BOUND_CONSTANTS,
+};
+
+const QUEUE_DEFAULT_CONSTANTS: [CoreConstant; 2] = [
+    CoreConstant {
+        name: "DEFAULT_QUEUE_NAME",
+        doc: "The name of the one queue of `QueueMode.DEFAULT`.",
+        value: CoreValue::Text(DEFAULT_QUEUE_NAME),
+    },
+    CoreConstant {
+        name: "DEFAULT_QUEUE_PRIORITY",
+        doc: "The priority of the queue of `QueueMode.DEFAULT`, and of a task that
+\
+              resolves no queue priority: 100, the last priority.",
+        value: CoreValue::Integer(DEFAULT_QUEUE_PRIORITY as i64),
+    },
+];
+
+/// The default route of a task.
+pub const QUEUE_DEFAULTS: ConstantModule = ConstantModule {
+    file: "queue_defaults.py",
+    doc: "The default queue route of horsies-core, generated from its Rust constants.",
+    constants: &QUEUE_DEFAULT_CONSTANTS,
+};
+
+const SCHEDULE_DEFAULT_CONSTANTS: [CoreConstant; 4] = [
+    CoreConstant {
+        name: "DEFAULT_SCHEDULE_ENABLED",
+        doc: "The default of `TaskSchedule.enabled`.",
+        value: CoreValue::Flag(DEFAULT_SCHEDULE_ENABLED),
+    },
+    CoreConstant {
+        name: "DEFAULT_SCHEDULE_TIMEZONE",
+        doc: "The default of `TaskSchedule.timezone`.",
+        value: CoreValue::Text(DEFAULT_SCHEDULE_TIMEZONE),
+    },
+    CoreConstant {
+        name: "DEFAULT_MAX_CATCH_UP_RUNS",
+        doc: "The default of `TaskSchedule.max_catch_up_runs`.",
+        value: CoreValue::Integer(DEFAULT_MAX_CATCH_UP_RUNS as i64),
+    },
+    CoreConstant {
+        name: "DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS",
+        doc: "The default of `ScheduleConfig.check_interval_seconds`.",
+        value: CoreValue::Integer(DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS as i64),
+    },
+];
+
+/// The defaults of a task schedule.
+pub const SCHEDULE_DEFAULTS: ConstantModule = ConstantModule {
+    file: "schedule_defaults.py",
+    doc: "The defaults of a task schedule of horsies-core, generated from its Rust
+\
+          constants.",
+    constants: &SCHEDULE_DEFAULT_CONSTANTS,
+};
+
 /// Every generated module of core constants, in file order.
-pub const CONSTANT_MODULES: [ConstantModule; 5] = [
+pub const CONSTANT_MODULES: [ConstantModule; 8] = [
     MONITORING_BOUNDS,
     BROKER_BOUNDS,
     BROKER_POOL_DEFAULTS,
     EXIT_CODES,
     CHILD_BOUNDS,
+    TASK_BOUNDS,
+    QUEUE_DEFAULTS,
+    SCHEDULE_DEFAULTS,
 ];
 
 /// The text of one module of core constants.
@@ -244,7 +359,8 @@ pub fn render_constant_module(module: &ConstantModule) -> String {
     for constant in module.constants {
         text.push_str(&format!(
             "\n{}: Final = {}\n",
-            constant.name, constant.value
+            constant.name,
+            constant.value.python_literal()
         ));
         if let Some(doc) = docstring(constant.doc, "") {
             text.push_str(&doc);
@@ -268,12 +384,12 @@ mod tests {
                 CoreConstant {
                     name: "MAX_ROWS",
                     doc: "The most rows.",
-                    value: 1_000,
+                    value: CoreValue::Integer(1_000),
                 },
                 CoreConstant {
                     name: "SPAN_SECONDS",
                     doc: "",
-                    value: 86_400,
+                    value: CoreValue::Integer(86_400),
                 },
             ],
         };
@@ -355,18 +471,20 @@ mod tests {
     /// once, and the two codes of the worker process.
     #[test]
     fn the_exit_codes_are_every_code_of_the_core_and_distinct() {
-        let values: BTreeSet<i64> = EXIT_CODES
+        let values: BTreeSet<CoreValue> = EXIT_CODES
             .constants
             .iter()
             .map(|constant| constant.value)
             .collect();
         assert_eq!(values.len(), EXIT_CODES.constants.len());
-        let mut expected: BTreeSet<i64> = horsies_core::frame_protocol::ChildExitCode::ALL
+        let mut expected: BTreeSet<CoreValue> = horsies_core::frame_protocol::ChildExitCode::ALL
             .into_iter()
-            .map(|code| i64::from(code.code()))
+            .map(|code| CoreValue::Integer(i64::from(code.code())))
             .collect();
-        expected.insert(i64::from(RUNNER_HEARTBEAT_LOST_EXIT_CODE));
-        expected.insert(i64::from(LIVENESS_LOCK_LOST_EXIT_CODE));
+        expected.insert(CoreValue::Integer(i64::from(
+            RUNNER_HEARTBEAT_LOST_EXIT_CODE,
+        )));
+        expected.insert(CoreValue::Integer(i64::from(LIVENESS_LOCK_LOST_EXIT_CODE)));
         assert_eq!(values, expected);
     }
 
@@ -385,6 +503,35 @@ mod tests {
             "\nCANCELLED_WRITE_END_SECONDS: Final = {}\n",
             CANCELLED_WRITE_END.as_secs()
         )));
+    }
+
+    /// Each new export is rendered with the core's value, the one source.
+    #[test]
+    fn the_task_bounds_queue_and_schedule_defaults_hold_the_core_values() {
+        let rendered = render_constant_module(&TASK_BOUNDS);
+        for (name, value) in [
+            ("MIN_TASK_TIMEOUT_MS", MIN_TASK_TIMEOUT_MS as i64),
+            ("MAX_TASK_TIMEOUT_MS", MAX_TASK_TIMEOUT_MS as i64),
+            (
+                "IDEMPOTENCY_KEY_MAX_BYTES",
+                IDEMPOTENCY_KEY_MAX_BYTES as i64,
+            ),
+        ] {
+            assert!(
+                rendered.contains(&format!("\n{name}: Final = {value}\n")),
+                "{name}"
+            );
+        }
+        assert_eq!(MIN_TASK_TIMEOUT_MS, 1_000);
+        assert_eq!(MAX_TASK_TIMEOUT_MS, u64::from(u32::MAX));
+        assert_eq!(IDEMPOTENCY_KEY_MAX_BYTES, 255);
+        let rendered = render_constant_module(&QUEUE_DEFAULTS);
+        assert!(rendered.contains("\nDEFAULT_QUEUE_NAME: Final = 'default'\n"));
+        assert!(rendered.contains("\nDEFAULT_QUEUE_PRIORITY: Final = 100\n"));
+        let rendered = render_constant_module(&SCHEDULE_DEFAULTS);
+        assert!(rendered.contains("\nDEFAULT_SCHEDULE_ENABLED: Final = True\n"));
+        assert!(rendered.contains("\nDEFAULT_SCHEDULE_TIMEZONE: Final = 'UTC'\n"));
+        assert!(rendered.contains("\nDEFAULT_MAX_CATCH_UP_RUNS: Final = 100\n"));
     }
 
     #[test]

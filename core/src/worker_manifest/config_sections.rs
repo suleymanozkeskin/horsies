@@ -16,13 +16,13 @@ use std::collections::BTreeMap;
 
 use crate::core::config::bounded::BoundedU32;
 use crate::core::config::worker_profile::{
-    ChildPreload, DrainTimeout, ExecutorThreadsSetting, IsolatedSetting, MemoryLimitSetting,
-    PoolSizeSetting, SharedAsyncSetting, SharedPool, SharedRecycle, SharedThreadSetting,
-    TaskLimitSetting, WorkerProfile,
+    checked_worker_profiles, input, ChildPreload, DrainTimeout, ExecutorThreadsSetting,
+    IsolatedSetting, MemoryLimitSetting, PoolSizeSetting, SharedAsyncSetting, SharedPool,
+    SharedRecycle, SharedThreadSetting, TaskLimitSetting, WorkerProfile,
 };
 use crate::core::config::{
-    AppConfig, CustomQueueConfig, PausedWorkflowAge, PayloadPolicy, QueueMode, RecoveryConfig,
-    RetentionConfig, WorkerResilienceConfig,
+    AppConfig, ClusterCapSetting, CustomQueueConfig, PausedWorkflowAge, PayloadPolicy, QueueMode,
+    RecoveryConfig, RetentionConfig, WorkerResilienceConfig,
 };
 use crate::core::history::periods::RetentionDays;
 use crate::worker_manifest as wire;
@@ -90,7 +90,7 @@ pub enum RecoveryField {
     RunningStaleThresholdMs,
     FinalizingStaleThresholdMs,
     CrashedWorkerRecoveryGraceMs,
-    Phase2QuarantineAfterAttempts,
+    FinalizationQuarantineAfterAttempts,
     WorkflowRecoveryFailureLimit,
     CheckIntervalMs,
     OrphanTaskAuditIntervalMs,
@@ -114,17 +114,17 @@ pub enum RetentionField {
     QueueRetention {
         queue: String,
     },
-    PartitionMaintenanceIntervalS,
-    RetentionSweepIntervalS,
+    PartitionMaintenanceIntervalSeconds,
+    RetentionSweepIntervalSeconds,
     RetentionDeleteBatchSize,
 }
 
 /// A field of the resilience section (`WorkerResilienceConfig`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResilienceField {
-    DbRetryInitialMs,
-    DbRetryMaxMs,
-    DbRetryMaxAttempts,
+    DatabaseRetryInitialMs,
+    DatabaseRetryMaxMs,
+    DatabaseRetryMaxAttempts,
     NotifyPollIntervalMs,
 }
 
@@ -194,7 +194,7 @@ impl RecoveryField {
             Self::RunningStaleThresholdMs => "running_stale_threshold_ms",
             Self::FinalizingStaleThresholdMs => "finalizing_stale_threshold_ms",
             Self::CrashedWorkerRecoveryGraceMs => "crashed_worker_recovery_grace_ms",
-            Self::Phase2QuarantineAfterAttempts => "phase2_quarantine_after_attempts",
+            Self::FinalizationQuarantineAfterAttempts => "finalization_quarantine_after_attempts",
             Self::WorkflowRecoveryFailureLimit => "workflow_recovery_failure_limit",
             Self::CheckIntervalMs => "check_interval_ms",
             Self::OrphanTaskAuditIntervalMs => "orphan_task_audit_interval_ms",
@@ -225,8 +225,10 @@ impl RetentionField {
                 FieldSegment::Member("queue_retention"),
                 FieldSegment::Key(queue.as_str()),
             ],
-            Self::PartitionMaintenanceIntervalS => member("partition_maintenance_interval_s"),
-            Self::RetentionSweepIntervalS => member("retention_sweep_interval_s"),
+            Self::PartitionMaintenanceIntervalSeconds => {
+                member("partition_maintenance_interval_seconds")
+            }
+            Self::RetentionSweepIntervalSeconds => member("retention_sweep_interval_seconds"),
             Self::RetentionDeleteBatchSize => member("retention_delete_batch_size"),
         }
     }
@@ -235,9 +237,9 @@ impl RetentionField {
 impl ResilienceField {
     const fn config_name(self) -> &'static str {
         match self {
-            Self::DbRetryInitialMs => "db_retry_initial_ms",
-            Self::DbRetryMaxMs => "db_retry_max_ms",
-            Self::DbRetryMaxAttempts => "db_retry_max_attempts",
+            Self::DatabaseRetryInitialMs => "database_retry_initial_ms",
+            Self::DatabaseRetryMaxMs => "database_retry_max_ms",
+            Self::DatabaseRetryMaxAttempts => "database_retry_max_attempts",
             Self::NotifyPollIntervalMs => "notify_poll_interval_ms",
         }
     }
@@ -254,17 +256,26 @@ impl PayloadField {
 
 /// The config sections of `config`. Pure: no I/O.
 ///
-/// - Every profile of the config goes in: the worker checks the profile set
-///   and picks the profile that the start asks for.
-/// - The builder does not depend on `AppConfig::validate`: it checks each
-///   manifest bound itself.
+/// - Every profile of the config goes in, in its checked form
+///   ([`checked_worker_profiles`]), whose bounds are the bounds of the
+///   manifest fields: the worker checks the profile set and picks the
+///   profile that the start asks for.
+/// - For the other sections, the builder does not depend on
+///   `AppConfig::validate`: it checks each manifest bound itself.
 ///
 /// Errors: [`ManifestBoundRefused`] for the first value outside its
 /// manifest bound, in this order: the claim values (`prefetch_buffer`,
 /// `claim_lease_ms`, `max_claim_renew_age_ms`, `cluster_wide_cap`, each
 /// custom queue in config order), then the recovery, retention (each mapped
-/// queue in name order), resilience and payload sections. A profile has no
-/// refusal: each of its values already has the bound of its manifest field.
+/// queue in name order), resilience and payload sections.
+///
+/// # Panics
+///
+/// When a profile has a value outside its bound. `AppConfig::validate`
+/// refuses each such value with its path, and a client builds the sections
+/// only of a config that validation accepted (the Rust `Horsies::new`, the
+/// TypeScript `Horsies.create`), so a value outside its bound here is a
+/// defect of the client.
 pub fn config_sections(config: &AppConfig) -> Result<ConfigSections, ManifestBoundRefused> {
     let claim = claim_manifest(config)?;
     let recovery = recovery_manifest(&config.recovery)?;
@@ -272,8 +283,7 @@ pub fn config_sections(config: &AppConfig) -> Result<ConfigSections, ManifestBou
     let resilience = resilience_manifest(&config.resilience)?;
     let payload = payload_manifest(&config.payload)?;
     Ok(ConfigSections {
-        profiles: config
-            .worker_profiles
+        profiles: checked_profiles(&config.worker_profiles)
             .iter()
             .map(|(name, profile)| (name.clone(), profile_manifest(profile)))
             .collect(),
@@ -285,8 +295,30 @@ pub fn config_sections(config: &AppConfig) -> Result<ConfigSections, ManifestBou
     })
 }
 
-/// `profile` with every value given. Total: each config value already has
-/// the bound of its manifest field. Pure.
+/// Every profile of the config in its checked form, by name. Pure.
+///
+/// Panics when a profile has a value outside its bound, with the path and
+/// the bound of each such value: a defect of the client
+/// ([`config_sections`]).
+fn checked_profiles(
+    profiles: &BTreeMap<String, input::WorkerProfile>,
+) -> BTreeMap<String, WorkerProfile> {
+    match checked_worker_profiles(profiles) {
+        Ok(checked) => checked,
+        Err(refusals) => panic!(
+            "the worker manifest is built from a config that AppConfig::validate refuses, a \
+             defect of the client: {}",
+            refusals
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
+    }
+}
+
+/// `profile` with every value given. Total: each value of a checked
+/// profile has the bound of its manifest field. Pure.
 fn profile_manifest(profile: &WorkerProfile) -> wire::WorkerProfileManifest {
     wire::WorkerProfileManifest {
         isolated: isolated_manifest(&profile.isolated),
@@ -316,7 +348,7 @@ fn isolated_manifest(setting: &IsolatedSetting) -> wire::Isolated {
             pool: wire::IsolatedPoolManifest {
                 min_size: wire::ChildPoolMinSize(children.pool.min_size),
                 max_size: wire::ChildPoolConnections(children.pool.max_size.connections),
-                check: children.pool.check,
+                pre_ping: children.pool.pre_ping,
             },
             task_send_pool: wire::ChildPoolConnections(children.task_send_pool.connections),
         },
@@ -371,7 +403,7 @@ fn shared_pool(pool: &SharedPool) -> wire::SharedPoolManifest {
     wire::SharedPoolManifest {
         min_size: wire::ChildPoolMinSize(pool.min_size),
         max_size: pool_max_size(pool.max_size),
-        check: pool.check,
+        pre_ping: pool.pre_ping,
     }
 }
 
@@ -442,9 +474,11 @@ fn claim_manifest(config: &AppConfig) -> Result<wire::WorkerClaimManifest, Manif
         config.max_claim_renew_age_ms,
         ConfigField::MaxClaimRenewAgeMs,
     )?);
+    // The manifest keeps its own tags (`TASKS`, `NO_LIMIT`) for the two
+    // config states.
     let cluster_wide_cap = match config.cluster_wide_cap {
-        None => wire::ClusterWideCap::NoLimit,
-        Some(tasks) => wire::ClusterWideCap::Tasks {
+        ClusterCapSetting::NoClusterCap => wire::ClusterWideCap::NoLimit,
+        ClusterCapSetting::ClusterCap { tasks } => wire::ClusterWideCap::Tasks {
             tasks: wire::LimitTasks(bounded(tasks, ConfigField::ClusterWideCap)?),
         },
     };
@@ -507,13 +541,13 @@ fn recovery_manifest(
 ) -> Result<wire::RecoveryManifest, ManifestBoundRefused> {
     let field = ConfigField::Recovery;
     Ok(wire::RecoveryManifest {
-        auto_requeue_stale_claimed: config.auto_requeue_stale_claimed,
+        requeue_stale_claimed: config.requeue_stale_claimed,
         claimed_stale_threshold_ms: wire::ClaimedStaleThresholdMs(bounded_wide(
             config.claimed_stale_threshold_ms,
             field(RecoveryField::ClaimedStaleThresholdMs),
         )?),
-        auto_terminate_orphaned_workflow_tasks: config.auto_terminate_orphaned_workflow_tasks,
-        auto_fail_stale_running: config.auto_fail_stale_running,
+        terminate_orphaned_workflow_tasks: config.terminate_orphaned_workflow_tasks,
+        fail_stale_running: config.fail_stale_running,
         running_stale_threshold_ms: wire::StaleThresholdMs(bounded_wide(
             config.running_stale_threshold_ms,
             field(RecoveryField::RunningStaleThresholdMs),
@@ -526,9 +560,9 @@ fn recovery_manifest(
             config.crashed_worker_recovery_grace_ms,
             field(RecoveryField::CrashedWorkerRecoveryGraceMs),
         )?),
-        phase2_quarantine_after_attempts: wire::RecoveryPassLimit(bounded(
-            config.phase2_quarantine_after_attempts,
-            field(RecoveryField::Phase2QuarantineAfterAttempts),
+        finalization_quarantine_after_attempts: wire::RecoveryPassLimit(bounded(
+            config.finalization_quarantine_after_attempts,
+            field(RecoveryField::FinalizationQuarantineAfterAttempts),
         )?),
         workflow_recovery_failure_limit: wire::RecoveryPassLimit(bounded(
             config.workflow_recovery_failure_limit,
@@ -582,7 +616,7 @@ fn retention_manifest(
             )?),
         },
     };
-    let paused_workflow_auto_cancel_after = match config.paused_workflow_auto_cancel_after {
+    let paused_workflow_cancel_after = match config.paused_workflow_cancel_after {
         None => wire::PausedWorkflowExpiry::NoExpiry,
         Some(age) => wire::PausedWorkflowExpiry::After {
             micros: paused_age_micros(age),
@@ -600,7 +634,7 @@ fn retention_manifest(
     Ok(wire::RetentionManifest {
         worker_state_retention,
         terminal_record_retention,
-        paused_workflow_auto_cancel_after,
+        paused_workflow_cancel_after,
         history_leaf_horizon_days: wire::HistoryLeafHorizonDays(bounded(
             config.history_leaf_horizon_days,
             field(RetentionField::HistoryLeafHorizonDays),
@@ -611,13 +645,13 @@ fn retention_manifest(
         )?),
         retention_periods,
         queue_retention,
-        partition_maintenance_interval_s: wire::MaintenanceIntervalSeconds(bounded_wide(
-            config.partition_maintenance_interval_s,
-            field(RetentionField::PartitionMaintenanceIntervalS),
+        partition_maintenance_interval_seconds: wire::MaintenanceIntervalSeconds(bounded_wide(
+            config.partition_maintenance_interval_seconds,
+            field(RetentionField::PartitionMaintenanceIntervalSeconds),
         )?),
-        retention_sweep_interval_s: wire::SweepIntervalSeconds(bounded_wide(
-            config.retention_sweep_interval_s,
-            field(RetentionField::RetentionSweepIntervalS),
+        retention_sweep_interval_seconds: wire::SweepIntervalSeconds(bounded_wide(
+            config.retention_sweep_interval_seconds,
+            field(RetentionField::RetentionSweepIntervalSeconds),
         )?),
         retention_delete_batch_size: wire::DeleteBatchSize(bounded(
             config.retention_delete_batch_size,
@@ -687,20 +721,20 @@ fn resilience_manifest(
 ) -> Result<wire::ResilienceManifest, ManifestBoundRefused> {
     let field = ConfigField::Resilience;
     Ok(wire::ResilienceManifest {
-        db_retry_initial_ms: wire::RetryInitialMs(bounded_wide(
-            config.db_retry_initial_ms,
-            field(ResilienceField::DbRetryInitialMs),
+        database_retry_initial_ms: wire::RetryInitialMs(bounded_wide(
+            config.database_retry_initial_ms,
+            field(ResilienceField::DatabaseRetryInitialMs),
         )?),
-        db_retry_max_ms: wire::RetryMaxMs(bounded_wide(
-            config.db_retry_max_ms,
-            field(ResilienceField::DbRetryMaxMs),
+        database_retry_max_ms: wire::RetryMaxMs(bounded_wide(
+            config.database_retry_max_ms,
+            field(ResilienceField::DatabaseRetryMaxMs),
         )?),
-        db_retry_max_attempts: match config.db_retry_max_attempts {
+        database_retry_max_attempts: match config.database_retry_max_attempts {
             0 => wire::RetryAttemptLimit::NoLimit,
             attempts => wire::RetryAttemptLimit::Attempts {
                 attempts: wire::RetryAttemptCount(bounded_wide(
                     attempts,
-                    field(ResilienceField::DbRetryMaxAttempts),
+                    field(ResilienceField::DatabaseRetryMaxAttempts),
                 )?),
             },
         },

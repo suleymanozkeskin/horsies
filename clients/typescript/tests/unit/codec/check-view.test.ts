@@ -20,7 +20,7 @@ import {
 import { err, ok } from "../../../horsies/src/wire/result.ts";
 import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
 
-const NOT_A_NUMBER: CheckFailure = { issues: [{ path: "$", code: "invalid_type" }] };
+const NOT_A_NUMBER: CheckFailure = { issues: [{ kind: "zodIssue", path: "$", code: "invalid_type" }] };
 
 function viewOf<V>(kind: Kind, value: V): unknown {
   const viewed = checkView(kind, value, "$", 0);
@@ -89,7 +89,7 @@ describe("checkView", () => {
 
     const viewed = checkView(kind, {}, "$", 0);
 
-    assert.deepEqual(viewed.ok ? "" : [viewed.error.kind, viewed.error.path], ["CheckFailed", "$.n"]);
+    assert.deepEqual(viewed.ok ? "" : [viewed.error.refusal, viewed.error.path], ["CheckFailed", "$.n"]);
   });
 
   test("a default that the writer refused is a defect: checkKind refuses that kind", () => {

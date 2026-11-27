@@ -2,8 +2,8 @@
 // into the generated read types.
 //
 // - A read sends one statement and writes nothing. It does not install the schema.
-// - Expected failures are values: the core's `MonitoringQueryError` (`DB_OPERATION_FAILED`,
-//   `HISTORY_CONTRACT_VIOLATION`) or `QUERY_REFUSED` before any connect.
+// - Expected failures are values: the core's `MonitoringQueryError` (`DATABASE_OPERATION_FAILED`,
+//   `HISTORY_CONTRACT_VIOLATION`) or `invalidInput` (`INVALID_INPUT`) before any connect.
 // - A process-state refusal of the core throws (`CoreError`); a defect crashes loud (`CoreDefect`).
 
 import type { TaskAbsenceReason } from "../_catalog/history.ts";
@@ -17,7 +17,7 @@ import {
   decodeTaskListPage,
   decodeWorkflowRunDetail,
   decodeWorkflowRunSummary,
-  decodeWorkflowTaskDetail,
+  decodeWorkflowNodeDetail,
   type Facets,
   type ScheduleStateInfo,
   type StatusCount,
@@ -25,7 +25,7 @@ import {
   type TaskListPage,
   type WorkflowRunDetail,
   type WorkflowRunSummary,
-  type WorkflowTaskDetail,
+  type WorkflowNodeDetail,
 } from "../_catalog/monitoring_models.ts";
 import type { TaskId, WorkflowId } from "../contract/ids.ts";
 import type { NativeEnvelope } from "../native/call/envelope.ts";
@@ -34,10 +34,17 @@ import { unreachable } from "../native/call/never.ts";
 import type { MonitoringReadOutcome, MonitoringReadsAddon } from "../native/facades/monitoring-reads.ts";
 import type { NativeCoreHandle } from "../native/handle/addon.ts";
 import { err, ok, type Result } from "../wire/result.ts";
-import type { MonitoringQueryCoreError } from "../_catalog/monitoring_errors.ts";
 import { raiseDefect } from "../native/call/defect.ts";
 import { ClientDefect } from "../thrown-errors.ts";
-import { type MonitoringReadError, monitoringQueryError, queryRefused, type QueryRefused } from "./errors.ts";
+import {
+  type MonitoringQueryError,
+  type MonitoringReadError,
+  monitoringQueryError,
+  queryRefused,
+  type QueryRefused,
+} from "./errors.ts";
+import type { RelayedAddon } from "./seat-calls.ts";
+import type { SeatRelayFullOutcome } from "../seats/relay-full.ts";
 import {
   decodeCoreModel,
   decodedOrDefect,
@@ -53,22 +60,22 @@ import {
   taskFacetsArg,
   type TaskListQuery,
   taskListArg,
-  type TaskStatsQuery,
-  taskStatsArg,
+  type TaskStatusCountsQuery,
+  taskStatusCountsArg,
   wholeNumber,
   type WorkflowRunsQuery,
   workflowRunsArg,
 } from "./query.ts";
 
-/** The smallest task index of a workflow node: the core reads it as a 32-bit integer. */
-const MIN_TASK_INDEX = -2_147_483_648;
+/** The smallest node index of a workflow run: the core reads it as a 32-bit integer. */
+const MIN_NODE_INDEX = -2_147_483_648;
 
-/** The largest task index of a workflow node. */
-const MAX_TASK_INDEX = 2_147_483_647;
+/** The largest node index of a workflow run. */
+const MAX_NODE_INDEX = 2_147_483_647;
 
 /** A task by id: its detail, or why no table holds it. */
 export type TaskDetailRead =
-  | { readonly kind: "found"; readonly detail: TaskDetail }
+  | { readonly kind: "found"; readonly taskDetail: TaskDetail }
   | { readonly kind: "notFound"; readonly taskId: TaskId; readonly reason: TaskAbsenceReason };
 
 /** A workflow run by id, or no run. */
@@ -76,30 +83,30 @@ export type WorkflowRunRead =
   | { readonly kind: "found"; readonly run: WorkflowRunDetail }
   | { readonly kind: "notFound"; readonly workflowId: WorkflowId };
 
-/** A node of a workflow run by its task index, or no node. */
+/** A node of a workflow run by its node index, or no node. */
 export type WorkflowNodeRead =
-  | { readonly kind: "found"; readonly node: WorkflowTaskDetail }
-  | { readonly kind: "notFound"; readonly workflowId: WorkflowId; readonly taskIndex: number };
+  | { readonly kind: "found"; readonly node: WorkflowNodeDetail }
+  | { readonly kind: "notFound"; readonly workflowId: WorkflowId; readonly nodeIndex: number };
 
 /** The addon and the handle that the reads call. */
 export interface ReadTarget {
-  readonly addon: MonitoringReadsAddon;
+  readonly addon: RelayedAddon<MonitoringReadsAddon>;
   readonly handle: NativeCoreHandle;
 }
 
 /** The count of each task status in the window: all seven statuses, in a fixed order. */
-export async function taskStats(
+export async function taskStatusCounts(
   target: ReadTarget,
-  query: TaskStatsQuery,
+  query: TaskStatusCountsQuery,
 ): Promise<Result<readonly StatusCount[], MonitoringReadError>> {
-  const arg = taskStatsArg(query);
+  const arg = taskStatusCountsArg(query);
 
   if (!arg.ok) {
     return arg;
   }
 
-  return readModel("taskStats", () => target.addon.readTaskStats(target.handle, arg.value), (text) =>
-    modelList("taskStats", text, decodeStatusCount),
+  return readModel("taskStatusCounts", () => target.addon.readTaskStatusCounts(target.handle, arg.value), (text) =>
+    modelList("taskStatusCounts", text, decodeStatusCount),
   );
 }
 
@@ -148,7 +155,7 @@ export async function listTasks(
 }
 
 /** The names of the workflows that have runs, at most 10,000. */
-export async function workflowNames(target: ReadTarget): Promise<Result<readonly string[], MonitoringQueryCoreError>> {
+export async function workflowNames(target: ReadTarget): Promise<Result<readonly string[], MonitoringQueryError>> {
   return readCoreModel("workflowNames", () => target.addon.readWorkflowNames(target.handle), (text) => {
     const items = listItems("workflowNames", wireJsonOfCoreText("workflowNames", text));
 
@@ -175,7 +182,7 @@ export async function workflowRuns(
 /** The state of every schedule, at most 10,000. */
 export async function schedules(
   target: ReadTarget,
-): Promise<Result<readonly ScheduleStateInfo[], MonitoringQueryCoreError>> {
+): Promise<Result<readonly ScheduleStateInfo[], MonitoringQueryError>> {
   return readCoreModel("schedules", () => target.addon.readSchedules(target.handle), (text) =>
     modelList("schedules", text, decodeScheduleStateInfo),
   );
@@ -185,7 +192,7 @@ export async function schedules(
 export async function workflowRun(
   target: ReadTarget,
   workflowId: WorkflowId,
-): Promise<Result<WorkflowRunRead, MonitoringQueryCoreError>> {
+): Promise<Result<WorkflowRunRead, MonitoringQueryError>> {
   return readCoreModel("workflowRun", () => target.addon.readWorkflowRun(target.handle, workflowId), (text) => {
     const value = wireJsonOfCoreText("workflowRun", text);
 
@@ -195,13 +202,13 @@ export async function workflowRun(
   });
 }
 
-/** One node of a workflow run by its task index, or `notFound`. */
+/** One node of a workflow run by its node index, or `notFound`. */
 export async function workflowNode(
   target: ReadTarget,
   workflowId: WorkflowId,
-  taskIndex: number,
+  nodeIndex: number,
 ): Promise<Result<WorkflowNodeRead, MonitoringReadError>> {
-  const index = taskIndexOf(taskIndex);
+  const index = nodeIndexOf(nodeIndex);
 
   if (!index.ok) {
     return index;
@@ -213,8 +220,8 @@ export async function workflowNode(
     const value = wireJsonOfCoreText("workflowNode", text);
 
     return value === null
-      ? Object.freeze({ kind: "notFound", workflowId, taskIndex: index.value })
-      : Object.freeze({ kind: "found", node: decodedOrDefect("workflowNode", decodeWorkflowTaskDetail(value)) });
+      ? Object.freeze({ kind: "notFound", workflowId, nodeIndex: index.value })
+      : Object.freeze({ kind: "found", node: decodedOrDefect("workflowNode", decodeWorkflowNodeDetail(value)) });
   });
 }
 
@@ -222,40 +229,42 @@ export async function workflowNode(
 export async function taskDetail(
   target: ReadTarget,
   taskId: TaskId,
-): Promise<Result<TaskDetailRead, MonitoringQueryCoreError>> {
+): Promise<Result<TaskDetailRead, MonitoringQueryError>> {
   const outcome = await nativeValueAsync("readTaskDetail", () => target.addon.readTaskDetail(target.handle, taskId));
 
   switch (outcome.kind) {
     case "json":
       return ok(
-        Object.freeze({ kind: "found", detail: decodeCoreModel("taskDetail", outcome.text, decodeTaskDetail) }),
+        Object.freeze({ kind: "found", taskDetail: decodeCoreModel("taskDetail", outcome.text, decodeTaskDetail) }),
       );
     case "absent":
       return ok(Object.freeze({ kind: "notFound", taskId, reason: outcome.reason }));
     case "failed":
       return err(monitoringQueryError(outcome.error));
+    case "seatRelayFull":
+      return err(outcome.error);
     default:
       return unreachable(outcome);
   }
 }
 
 /** A task index that the core reads as a 32-bit integer, or the refusal. Pure. */
-function taskIndexOf(taskIndex: number): Result<number, QueryRefused> {
-  const whole = wholeNumber("taskIndex", taskIndex);
+function nodeIndexOf(nodeIndex: number): Result<number, QueryRefused> {
+  const whole = wholeNumber("nodeIndex", nodeIndex);
 
   if (!whole.ok) {
     return whole;
   }
 
-  return whole.value >= MIN_TASK_INDEX && whole.value <= MAX_TASK_INDEX
+  return whole.value >= MIN_NODE_INDEX && whole.value <= MAX_NODE_INDEX
     ? whole
-    : err(queryRefused("taskIndex", `taskIndex must be from ${MIN_TASK_INDEX} to ${MAX_TASK_INDEX}; got ${taskIndex}`));
+    : err(queryRefused("nodeIndex", `nodeIndex must be from ${MIN_NODE_INDEX} to ${MAX_NODE_INDEX}; got ${nodeIndex}`));
 }
 
 /** Call the addon once and give the decoded model, the refusal of the query, or the core's error. */
 async function readModel<T>(
   read: string,
-  answer: () => Promise<NativeEnvelope<MonitoringReadOutcome>>,
+  answer: () => Promise<NativeEnvelope<MonitoringReadOutcome | SeatRelayFullOutcome>>,
   decode: (text: string) => T,
 ): Promise<Result<T, MonitoringReadError>> {
   const outcome = await nativeValueAsync(read, answer);
@@ -267,6 +276,8 @@ async function readModel<T>(
       return err(queryRefused(outcome.field, outcome.reason));
     case "failed":
       return err(monitoringQueryError(outcome.error));
+    case "seatRelayFull":
+      return err(outcome.error);
     default:
       return unreachable(outcome);
   }
@@ -278,9 +289,9 @@ async function readModel<T>(
  */
 async function readCoreModel<T>(
   read: string,
-  answer: () => Promise<NativeEnvelope<MonitoringReadOutcome>>,
+  answer: () => Promise<NativeEnvelope<MonitoringReadOutcome | SeatRelayFullOutcome>>,
   decode: (text: string) => T,
-): Promise<Result<T, MonitoringQueryCoreError>> {
+): Promise<Result<T, MonitoringQueryError>> {
   const outcome = await nativeValueAsync(read, answer);
 
   switch (outcome.kind) {
@@ -292,6 +303,8 @@ async function readCoreModel<T>(
       );
     case "failed":
       return err(monitoringQueryError(outcome.error));
+    case "seatRelayFull":
+      return err(outcome.error);
     default:
       return unreachable(outcome);
   }

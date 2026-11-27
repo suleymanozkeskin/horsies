@@ -64,7 +64,7 @@ async fn drop_own_database(settings: &DatabaseSettings) {
         "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
         settings.database_name.replace('"', "\"\"")
     );
-    sqlx::query(&statement)
+    sqlx::query(sqlx::AssertSqlSafe(statement))
         .execute(&mut maintenance)
         .await
         .expect("drop the database of the test");

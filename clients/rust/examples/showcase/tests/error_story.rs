@@ -6,7 +6,7 @@ mod support;
 use acme_showcase::app::build_app_for_url;
 use acme_showcase::tasks::promotions::{apply_promotions, compute_loyalty_points};
 use acme_showcase::{simulate, tuning};
-use horsies::{ReadError, SchemaMode, TaskOutcome, UserErrorCode, WaitLimit};
+use horsies::{CustomErrorCode, ReadError, SchemaMode, TaskOutcome, WaitLimit};
 use serial_test::serial;
 
 fn id_for(rate: f64, label: &str, avoid: Option<(&str, f64)>) -> String {
@@ -25,10 +25,10 @@ fn id_for(rate: f64, label: &str, avoid: Option<(&str, f64)>) -> String {
 fn failed_code<T, E>(read: Result<TaskOutcome<T, E>, ReadError>) -> String
 where
     T: std::fmt::Debug,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     match read {
-        Ok(TaskOutcome::Failed(error)) => error.code().text(),
+        Ok(TaskOutcome::Failed(error)) => error.code().as_str().to_owned(),
         other => panic!("expected a task error, got {other:?}"),
     }
 }
@@ -75,7 +75,7 @@ async fn three_error_codes_cross_the_worker() {
         .await
         .expect("send the loyalty task");
 
-    let limit = WaitLimit::parse(Some(support::RESULT_WAIT)).expect("the wait limit");
+    let limit = WaitLimit::Within(support::RESULT_WAIT);
     assert_eq!(failed_code(bundle.get(limit).await), "UNHANDLED_EXCEPTION");
     assert_eq!(failed_code(size.get(limit).await), "DATA_CORRUPTION");
     assert_eq!(failed_code(loyalty.get(limit).await), "LOYALTY_ENGINE_BUG");

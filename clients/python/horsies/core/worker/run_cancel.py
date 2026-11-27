@@ -3,9 +3,9 @@ through ``TaskRuntime.cancel_state``, and where the run is, so that an
 operator cancel goes to the body only.
 
 The worker sends ``CancelRunFrame`` when an operator cancelled the task of a
-run (``cancel_task`` with ``include_running=True``): the cancel statement
-moved the row to history and recorded the attempt as ``CANCELLED``. The
-child gives the cancel to the task code and reports the end of the run as
+run (``cancel_task`` with ``policy=CancelPolicy.INCLUDE_RUNNING``): the
+cancel statement moved the row to history and recorded the attempt as
+``CANCELLED``. The child gives the cancel to the task code and reports the end of the run as
 cancelled, whatever the body returned.
 
 The phases of a run, in order:

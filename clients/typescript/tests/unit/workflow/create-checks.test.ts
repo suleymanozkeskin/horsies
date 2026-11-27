@@ -24,15 +24,15 @@ function createRefusals(workflows: readonly object[]): readonly { readonly code:
 
 /** A valid workflow with no params, named `name`. */
 function namedWorkflow(name: string): object {
-  return defineWorkflow({ name, definitionKey: "tests.named.v1", output: h.int(), params: {} }, (w) => ({
-    output: w.task(ping, {}, { id: "a" }),
+  return defineWorkflow({ name, definitionKey: "tests.named.v1", outputType: h.int(), parameters: {} }, (w) => ({
+    output: w.task(ping, {}, { nodeId: "a" }),
   }));
 }
 
 /** A valid workflow with no params, named `keyed`, with the definition key `definitionKey`. */
 function keyedWorkflow(definitionKey: string): object {
-  return defineWorkflow({ name: "keyed", definitionKey, output: h.int(), params: {} }, (w) => ({
-    output: w.task(ping, {}, { id: "a" }),
+  return defineWorkflow({ name: "keyed", definitionKey, outputType: h.int(), parameters: {} }, (w) => ({
+    output: w.task(ping, {}, { nodeId: "a" }),
   }));
 }
 
@@ -110,9 +110,9 @@ describe("checkWorkflowsAtCreate", () => {
 
   test("a key of another workflow, and a workflow listed twice: HRS-017", () => {
     const sameKey = defineWorkflow(
-      { name: "other", definitionKey: "tests.plain.v1", output: h.int(), params: {} },
+      { name: "other", definitionKey: "tests.plain.v1", outputType: h.int(), parameters: {} },
       (w) => ({
-        output: w.task(ping, {}, { id: "a" }),
+        output: w.task(ping, {}, { nodeId: "a" }),
       }),
     );
 
@@ -121,11 +121,13 @@ describe("checkWorkflowsAtCreate", () => {
   });
 
   test("params with a key and no check cases: HRS-027", () => {
-    // SAFETY: the types require check cases for params with a key; the create check refuses them at run time too.
-    const noCases = defineWorkflow(
-      { name: "c", definitionKey: "tests.c.v1", output: h.int(), params: { n: h.int() } } as never,
+    const int = h.int();
+
+    const noCases = defineWorkflow<{ readonly n: typeof int }, typeof int>(
+      // SAFETY: the types require check cases for params with a key; the create check refuses them at run time too.
+      { name: "c", definitionKey: "tests.c.v1", outputType: int, parameters: { n: int } } as never,
       (w) => ({
-        output: w.task(ping, {}, { id: "a" }),
+        output: w.task(ping, {}, { nodeId: "a" }),
       }),
     );
 
@@ -135,9 +137,9 @@ describe("checkWorkflowsAtCreate", () => {
   test("an error rule outside fail and pause: HRS-033; params that do not compile: HRS-105", () => {
     // SAFETY: the types refuse this error rule; the create check refuses it at run time too.
     const badRule = defineWorkflow(
-      { name: "d", definitionKey: "tests.d.v1", output: h.int(), params: {}, onError: "stop" as never },
+      { name: "d", definitionKey: "tests.d.v1", outputType: h.int(), parameters: {}, onError: "stop" as never },
       (w) => ({
-        output: w.task(ping, {}, { id: "a" }),
+        output: w.task(ping, {}, { nodeId: "a" }),
       }),
     );
 
@@ -145,40 +147,40 @@ describe("checkWorkflowsAtCreate", () => {
       {
         name: "e",
         definitionKey: "tests.e.v1",
-        output: h.int(),
-        params: { workflow_ctx: h.int() },
-        checkCases: [{ workflow_ctx: 1 }],
+        outputType: h.int(),
+        parameters: { workflow_context: h.int() },
+        checkCases: [{ workflow_context: 1 }],
       },
-      (w) => ({ output: w.task(ping, {}, { id: "a" }) }),
+      (w) => ({ output: w.task(ping, {}, { nodeId: "a" }) }),
     );
 
     assert.deepEqual(createCodes([badRule]), ["HRS-033"]);
     assert.deepEqual(createCodes([badParams]), ["HRS-105"]);
   });
 
-  test("a refusal of the params has a params path; a refusal of the declared output keeps the output path", () => {
+  test("a refusal of the parameters has a parameters path; a refusal of the declared output has an outputType path", () => {
     const badParams = defineWorkflow(
       {
         name: "params",
         definitionKey: "tests.params.v1",
-        output: h.int(),
-        params: { workflow_ctx: h.int() },
-        checkCases: [{ workflow_ctx: 1 }],
+        outputType: h.int(),
+        parameters: { workflow_context: h.int() },
+        checkCases: [{ workflow_context: 1 }],
       },
-      (w) => ({ output: w.task(ping, {}, { id: "a" }) }),
+      (w) => ({ output: w.task(ping, {}, { nodeId: "a" }) }),
     );
     // SAFETY: a JavaScript caller can give an output that the types refuse; the create check refuses it.
 
     const badOutput = defineWorkflow(
-      { name: "out", definitionKey: "tests.out.v1", output: h.int().optional() as never, params: {} },
-      ((w: WorkflowBuilder) => ({ output: w.task(ping, {}, { id: "a" }) })) as never,
+      { name: "out", definitionKey: "tests.out.v1", outputType: h.int().optional() as never, parameters: {} },
+      ((w: WorkflowBuilder) => ({ output: w.task(ping, {}, { nodeId: "a" }) })) as never,
     );
 
     const [params] = checkedAtCreate([badParams]).refusals;
     const [output] = checkedAtCreate([badOutput]).refusals;
 
-    assert.match(params?.message ?? "", /^workflows\[0\] params: params\.workflow_ctx: /u);
-    assert.match(output?.message ?? "", /^workflows\[0\] out: output: .*\[WireKind\]$/u);
+    assert.match(params?.message ?? "", /^workflows\[0\] params: parameters\.workflow_context: /u);
+    assert.match(output?.message ?? "", /^workflows\[0\] out: outputType: .*\[WireKind\]$/u);
   });
 
   test("a workflow with no params is built once with every spec check", () => {
@@ -211,15 +213,15 @@ describe("checkWorkflows", () => {
       {
         name: "f",
         definitionKey: "tests.f.v1",
-        output: h.int(),
-        params: { n: h.int() },
+        outputType: h.int(),
+        parameters: { n: h.int() },
         checkCases: [{ n: "one" } as never],
       },
-      (w) => ({ output: w.task(ping, {}, { id: "a" }) }),
+      (w) => ({ output: w.task(ping, {}, { nodeId: "a" }) }),
     );
 
     const throws = defineWorkflow(
-      { name: "g", definitionKey: "tests.g.v1", output: h.int(), params: { n: h.int() }, checkCases: [{ n: 1 }] },
+      { name: "g", definitionKey: "tests.g.v1", outputType: h.int(), parameters: { n: h.int() }, checkCases: [{ n: 1 }] },
       () => {
         throw new RangeError("no");
       },
@@ -231,9 +233,9 @@ describe("checkWorkflows", () => {
 
   test("a check case whose build fails a spec check gives the finding", () => {
     const finding = defineWorkflow(
-      { name: "i", definitionKey: "tests.i.v1", output: h.int(), params: { n: h.int() }, checkCases: [{ n: 1 }] },
+      { name: "i", definitionKey: "tests.i.v1", outputType: h.int(), parameters: { n: h.int() }, checkCases: [{ n: 1 }] },
       (w) => ({
-        output: w.task(ping, {}, { id: "bad id" }),
+        output: w.task(ping, {}, { nodeId: "bad id" }),
       }),
     );
 
@@ -242,10 +244,10 @@ describe("checkWorkflows", () => {
 
   test("a child that includes itself with the same params and no wait: HRS-037", () => {
     const loop: object = defineWorkflow(
-      { name: "loop", definitionKey: "tests.loop.v1", output: h.int(), params: {} },
+      { name: "loop", definitionKey: "tests.loop.v1", outputType: h.int(), parameters: {} },
       (w) => {
         // SAFETY: the test nests the workflow in itself; the contract of `loop` is complete when the build runs.
-        const again = w.subWorkflow(loop as never, {}, { id: "again" });
+        const again = w.subWorkflow(loop as never, {}, { nodeId: "again" });
 
         // SAFETY: the child's declared output is `h.int()`; the self reference leaves its type unknown here.
         return { output: again as NodeRef<number, string, "again"> };
@@ -265,8 +267,8 @@ describe("checkWorkflows", () => {
       {
         name: "child",
         definitionKey: "tests.impure_child.v1",
-        output: h.int(),
-        params: {
+        outputType: h.int(),
+        parameters: {
           n: z
             .number()
             .int()
@@ -274,12 +276,12 @@ describe("checkWorkflows", () => {
         },
         checkCases: [{ n: 1 }],
       },
-      (w) => ({ output: w.task(ping, {}, { id: "a" }) }),
+      (w) => ({ output: w.task(ping, {}, { nodeId: "a" }) }),
     );
 
     const parent = defineWorkflow(
-      { name: "parent", definitionKey: "tests.impure_parent.v1", output: h.int(), params: {} },
-      (w) => ({ output: w.subWorkflow(child, { n: 2 }, { id: "child" }) }),
+      { name: "parent", definitionKey: "tests.impure_parent.v1", outputType: h.int(), parameters: {} },
+      (w) => ({ output: w.subWorkflow(child, { n: 2 }, { nodeId: "child" }) }),
     );
 
     assert.deepEqual(checkCodes([child, parent]), []);
@@ -295,14 +297,14 @@ describe("checkWorkflows", () => {
       {
         name: "deep",
         definitionKey: "tests.deep.v1",
-        output: h.int(),
-        params: { level: h.int() },
+        outputType: h.int(),
+        parameters: { level: h.int() },
         checkCases: [{ level: 0 }],
       },
       // SAFETY: the test nests the workflow in itself; the contract of `deep` is complete when the build runs.
       (w, { level }) => ({
         // SAFETY: as above; the child's declared output is `h.int()`.
-        output: w.subWorkflow(deep as never, { level: level + 1 }, { id: "next" }) as NodeRef<number, string, "next">,
+        output: w.subWorkflow(deep as never, { level: level + 1 }, { nodeId: "next" }) as NodeRef<number, string, "next">,
       }),
     );
 

@@ -7,35 +7,44 @@ import uuid
 from dataclasses import dataclass, field
 from typing import ClassVar
 
+from horsies._catalog.error_detail import NoCause
 from horsies._catalog.monitoring import MonitoringQueryErrorCode, TaskActionErrorCode
 from horsies._catalog.status import TaskStatus
 
-__all__ = ['MonitoringQueryDbOperationFailed', 'MonitoringQueryHistoryContractViolation', 'TaskActionNotFound', 'TaskActionNotCancellable', 'TaskActionWorkflowTask', 'TaskActionDbOperationFailed', 'TaskActionStoredDataInvalid', 'MonitoringQueryCoreError', 'TaskActionCoreError']
+__all__ = ['MonitoringQueryDatabaseOperationFailed', 'MonitoringQueryHistoryContractViolation', 'TaskActionNotFound', 'TaskActionNotCancellable', 'TaskActionIsWorkflowTask', 'TaskActionDatabaseOperationFailed', 'TaskActionStoredDataInvalid', 'MonitoringQueryCoreError', 'TaskActionCoreError']
 
 
 @dataclass(slots=True, frozen=True)
-class MonitoringQueryDbOperationFailed:
+class MonitoringQueryDatabaseOperationFailed:
     """The query failed with a database or driver error, or the core of this
     process could not run it. Nothing changed.
 
     ``retryable`` is the core's classification of the cause: ``True`` when
-    the condition may clear, for example a lost connection. ``exception``
+    the condition may clear, for example a lost connection. ``cause``
     is the core's class of the cause (a ``CoreFailure`` leaf class, with
     the read as its subject), or the ``CoreCallRefusal`` of the core
     boundary.
     """
 
-    code: ClassVar[MonitoringQueryErrorCode] = MonitoringQueryErrorCode.DB_OPERATION_FAILED
+    code: ClassVar[MonitoringQueryErrorCode] = MonitoringQueryErrorCode.DATABASE_OPERATION_FAILED
     message: str = field(repr=False)
     retryable: bool
-    exception: BaseException = field(repr=False)
+    cause: BaseException = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
 class MonitoringQueryHistoryContractViolation:
     """Stored history data does not decode. Nothing changed.
 
-    ``exception`` is the ``HistoryContractError``: for example a history
+    ``cause`` is the ``HistoryContractError``: for example a history
     status that is not a ``TaskStatus`` member, an attempt snapshot that
     does not decode, or an EXPLAIN payload that the row estimate cannot
     read. A repeat gives the same result until the stored row or the
@@ -45,7 +54,15 @@ class MonitoringQueryHistoryContractViolation:
     code: ClassVar[MonitoringQueryErrorCode] = MonitoringQueryErrorCode.HISTORY_CONTRACT_VIOLATION
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
-    exception: BaseException = field(repr=False)
+    cause: BaseException = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
@@ -61,14 +78,22 @@ class TaskActionNotFound:
     message: str = field(repr=False)
     task_id: uuid.UUID
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
 class TaskActionNotCancellable:
     """The task's status does not admit the cancel. Nothing changed.
 
     ``current_status`` is the status that the cancel found: a terminal
-    status, or ``RUNNING`` when ``include_running`` is ``False``. A call
-    with ``include_running=True`` cancels a ``RUNNING`` task.
+    status, or ``RUNNING`` with the policy ``PENDING_OR_CLAIMED_ONLY``. A
+    call with the policy ``INCLUDE_RUNNING`` cancels a ``RUNNING`` task.
     """
 
     code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.TASK_NOT_CANCELLABLE
@@ -77,9 +102,17 @@ class TaskActionNotCancellable:
     task_id: uuid.UUID
     current_status: TaskStatus
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
-class TaskActionWorkflowTask:
+class TaskActionIsWorkflowTask:
     """The task belongs to a workflow. Nothing changed.
 
     Only the workflow primitives drive a workflow task: pause, resume and
@@ -92,14 +125,22 @@ class TaskActionWorkflowTask:
     task_id: uuid.UUID
     current_status: TaskStatus
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
-class TaskActionDbOperationFailed:
+class TaskActionDatabaseOperationFailed:
     """The cancel statement failed with a database or driver error, or the
     core of this process could not run it.
 
     ``retryable`` is the core's classification of the cause: ``True`` when
-    the condition may clear, for example a lost connection. ``exception``
+    the condition may clear, for example a lost connection. ``cause``
     is the core's class of the cause (a ``CoreFailure`` leaf class, with the
     subject ``cancel_task``), or the ``CoreCallRefusal`` of the core boundary. The statement wrote nothing, or it
     committed and its reply was lost: a repeated cancel tells which,
@@ -107,18 +148,26 @@ class TaskActionDbOperationFailed:
     ``CANCELLED``.
     """
 
-    code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.DB_OPERATION_FAILED
+    code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.DATABASE_OPERATION_FAILED
     message: str = field(repr=False)
     retryable: bool
     task_id: uuid.UUID
-    exception: BaseException = field(repr=False)
+    cause: BaseException = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
 class TaskActionStoredDataInvalid:
     """Stored task data does not parse. Nothing changed: the cancel refused the task.
 
-    ``exception`` is an ``OutcomeDecodeError`` with the core's message, for
+    ``cause`` is an ``OutcomeDecodeError`` with the core's message, for
     example a history status that is not a task status. A repeat gives the
     same result until the stored row changes.
     """
@@ -127,11 +176,19 @@ class TaskActionStoredDataInvalid:
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
     task_id: uuid.UUID
-    exception: BaseException = field(repr=False)
+    cause: BaseException = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 type MonitoringQueryCoreError = (
-    MonitoringQueryDbOperationFailed
+    MonitoringQueryDatabaseOperationFailed
     | MonitoringQueryHistoryContractViolation
 )
 """Every failure of a monitoring query that the core gives: one class per state."""
@@ -140,8 +197,8 @@ type MonitoringQueryCoreError = (
 type TaskActionCoreError = (
     TaskActionNotFound
     | TaskActionNotCancellable
-    | TaskActionWorkflowTask
-    | TaskActionDbOperationFailed
+    | TaskActionIsWorkflowTask
+    | TaskActionDatabaseOperationFailed
     | TaskActionStoredDataInvalid
 )
 """Every failure of a task action that the core gives: one class per state."""

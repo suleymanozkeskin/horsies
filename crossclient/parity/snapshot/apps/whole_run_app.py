@@ -27,6 +27,7 @@ import asyncio
 import os
 import time
 from datetime import timedelta
+from enum import Enum
 from typing import Final
 
 from pydantic import SecretStr
@@ -34,9 +35,15 @@ from pydantic import SecretStr
 from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.outcome import Succeeded, TaskOutcome
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.models.tasks import Execution, RetryPolicy, TaskError, TaskResult
+from horsies.core.models.tasks import (
+    Execution,
+    OperationalCode,
+    RetryPolicy,
+    TaskError,
+)
 from horsies.core.models.workflow import (
     OnError,
     SubWorkflowNode,
@@ -53,6 +60,7 @@ from horsies.core.models.worker_profile import (
     TaskLimit,
     WorkerProfile,
 )
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.config import ChildPreload
 
 DATABASE_URL_ENV: Final = 'DUALRUN_WORKER_DATABASE_URL'
@@ -103,8 +111,16 @@ PAST_THE_DEADLINE_S: Final = 30.0
 SHARED_TIMEOUT_MS: Final = 30_000
 """The deadline of a shared task that ends in time."""
 
-RETRY_POLICY: Final = RetryPolicy.fixed([1, 1], auto_retry_for=['TRANSIENT'])
-"""Two retries one second apart for the code `TRANSIENT`."""
+
+class WholeRunCode(str, Enum):
+    """The code that `RETRY_POLICY` retries on."""
+
+    TRANSIENT = 'TRANSIENT'
+
+
+RETRY_POLICY: Final = RetryPolicy.fixed([1, 1], retry_for=[WholeRunCode.TRANSIENT])
+"""Two retries one second apart for the code `TRANSIENT`. A task with this
+policy declares `error_codes=WholeRunCode`."""
 
 
 def _marker(name: str) -> str:
@@ -151,7 +167,7 @@ def _database_url() -> str:
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr(_database_url()), pool_size=5, max_overflow=5
     ),
     recovery=RecoveryConfig(
@@ -164,25 +180,25 @@ config = AppConfig(
     worker_profiles={
         ISOLATED: WorkerProfile(
             isolated=IsolatedChildren(count=1),
-            preload=ChildPreload.NONE,
+            preload=ChildPreload.NO_PRELOAD,
             drain_timeout=timedelta(seconds=5),
         ),
         SHARED_ASYNC: WorkerProfile(
             isolated=NoIsolatedChildren(),
             shared_async=SharedAsyncChildren(count=1, seats=4),
-            preload=ChildPreload.NONE,
+            preload=ChildPreload.NO_PRELOAD,
             drain_timeout=timedelta(seconds=5),
         ),
         SHARED_THREAD: WorkerProfile(
             isolated=NoIsolatedChildren(),
             shared_thread=SharedThreadChildren(count=1, seats=4),
-            preload=ChildPreload.NONE,
+            preload=ChildPreload.NO_PRELOAD,
             drain_timeout=timedelta(seconds=5),
         ),
         SPLIT: WorkerProfile(
             isolated=IsolatedChildren(count=1),
             shared_async=SharedAsyncChildren(count=1, seats=4),
-            preload=ChildPreload.NONE,
+            preload=ChildPreload.NO_PRELOAD,
             drain_timeout=timedelta(seconds=5),
         ),
         ISOLATED_RECYCLED: WorkerProfile(
@@ -190,7 +206,7 @@ config = AppConfig(
                 count=1,
                 recycle=IsolatedRecycle(after=TaskLimit(tasks=2)),
             ),
-            preload=ChildPreload.NONE,
+            preload=ChildPreload.NO_PRELOAD,
             drain_timeout=timedelta(seconds=5),
         ),
     },
@@ -199,101 +215,101 @@ config = AppConfig(
 app = Horsies(config)
 
 
-@app.task(task_name='whole_run.double')
-def double(*, value: int) -> TaskResult[int, TaskError]:
+@app.task(name='whole_run.double')
+def double(*, value: int) -> Result[int, TaskError]:
     """A plain success."""
-    return TaskResult(ok=value * 2)
+    return Ok(value * 2)
 
 
-@app.task(task_name='whole_run.refuse')
-def refuse(*, value: int) -> TaskResult[int, TaskError]:
+@app.task(name='whole_run.refuse')
+def refuse(*, value: int) -> Result[int, TaskError]:
     """A task error with no retry."""
-    return TaskResult(err=TaskError(error_code='REFUSED', message=f'refused {value}'))
+    return Err(TaskError(code='REFUSED', message=f'refused {value}'))
 
 
-@app.task(task_name='whole_run.transient', retry_policy=RETRY_POLICY)
-def transient(*, value: int) -> TaskResult[int, TaskError]:
+@app.task(name='whole_run.transient', error_codes=WholeRunCode, retry_policy=RETRY_POLICY)
+def transient(*, value: int) -> Result[int, TaskError]:
     """A task error that the policy retries until the retries run out."""
-    return TaskResult(
-        err=TaskError(error_code='TRANSIENT', message=f'transient {value}')
+    return Err(
+        TaskError(code='TRANSIENT', message=f'transient {value}')
     )
 
 
-@app.task(task_name='whole_run.sleep_past_deadline', timeout_ms=SHORT_TIMEOUT_MS)
-def sleep_past_deadline() -> TaskResult[str, TaskError]:
+@app.task(name='whole_run.sleep_past_deadline', timeout_ms=SHORT_TIMEOUT_MS)
+def sleep_past_deadline() -> Result[str, TaskError]:
     """An isolated task that the parent kills at its deadline."""
     time.sleep(PAST_THE_DEADLINE_S)
-    return TaskResult(ok='late')
+    return Ok('late')
 
 
-@app.task(task_name='whole_run.crash')
-def crash() -> TaskResult[str, TaskError]:
+@app.task(name='whole_run.crash')
+def crash() -> Result[str, TaskError]:
     """A child that exits in the middle of its task."""
     os._exit(9)
 
 
 @app.task(
-    task_name='whole_run.double_async',
+    name='whole_run.double_async',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
-async def double_async(*, value: int) -> TaskResult[int, TaskError]:
+async def double_async(*, value: int) -> Result[int, TaskError]:
     """A plain success on an async seat."""
     await asyncio.sleep(0)
-    return TaskResult(ok=value * 2)
+    return Ok(value * 2)
 
 
 @app.task(
-    task_name='whole_run.async_past_deadline',
+    name='whole_run.async_past_deadline',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHORT_TIMEOUT_MS,
 )
-async def async_past_deadline() -> TaskResult[str, TaskError]:
+async def async_past_deadline() -> Result[str, TaskError]:
     """An async seat whose task the child cancels at its deadline."""
     await asyncio.sleep(PAST_THE_DEADLINE_S)
-    return TaskResult(ok='late')
+    return Ok('late')
 
 
 @app.task(
-    task_name='whole_run.double_thread',
+    name='whole_run.double_thread',
     execution=Execution.SHARED_THREAD,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
-def double_thread(*, value: int) -> TaskResult[int, TaskError]:
+def double_thread(*, value: int) -> Result[int, TaskError]:
     """A plain success on a thread seat."""
-    return TaskResult(ok=value * 2)
+    return Ok(value * 2)
 
 
 @app.task(
-    task_name='whole_run.async_neighbour',
+    name='whole_run.async_neighbour',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
-async def async_neighbour() -> TaskResult[str, TaskError]:
+async def async_neighbour() -> Result[str, TaskError]:
     """A seat that runs while its neighbour blocks the loop. Its policy does
     not retry `NEIGHBOUR_BLOCKED_LOOP`."""
     _write_marker(NEIGHBOUR_RUNNING)
     await asyncio.sleep(PAST_THE_DEADLINE_S)
-    return TaskResult(ok='late')
+    return Ok('late')
 
 
 @app.task(
-    task_name='whole_run.blocks_loop_once',
+    name='whole_run.blocks_loop_once',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=['TASK_BLOCKED_LOOP']),
+    retry_policy=RetryPolicy.fixed([1], retry_for=[OperationalCode.TASK_BLOCKED_LOOP]),
 )
-async def blocks_loop_once() -> TaskResult[str, TaskError]:
+async def blocks_loop_once() -> Result[str, TaskError]:
     """The first attempt waits until its neighbour runs, then blocks the
     loop past the block limit. The retry, in the isolated child, returns."""
     if not _first_call(LOOP_BLOCKED):
-        return TaskResult(ok='unblocked')
+        return Ok('unblocked')
     if not await _wait_for_marker(NEIGHBOUR_RUNNING):
-        return TaskResult(
-            err=TaskError(error_code='NO_NEIGHBOUR', message='the neighbour never ran'),
+        return Err(
+            TaskError(code='NO_NEIGHBOUR', message='the neighbour never ran'),
         )
     time.sleep(PAST_THE_DEADLINE_S)
-    return TaskResult(ok='late')
+    return Ok('late')
 
 
 # The loop holds only weak references to its tasks.
@@ -305,51 +321,51 @@ async def _left_work() -> None:
     _write_marker(LEFT_WORK_ENDED)
 
 
-@app.task(task_name='whole_run.leaves_work')
-async def leaves_work(*, value: int) -> TaskResult[int, TaskError]:
+@app.task(name='whole_run.leaves_work')
+async def leaves_work(*, value: int) -> Result[int, TaskError]:
     """An isolated async task that starts work and returns without awaiting
     it: `body_returned`, then `left_work_ended`."""
     _LEFT_WORK.append(asyncio.get_running_loop().create_task(_left_work()))
-    return TaskResult(ok=value * 2)
+    return Ok(value * 2)
 
 
 @app.task(
-    task_name='whole_run.sleep_then_double',
+    name='whole_run.sleep_then_double',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
-async def sleep_then_double(*, value: int) -> TaskResult[int, TaskError]:
+async def sleep_then_double(*, value: int) -> Result[int, TaskError]:
     """A seat that is still running when the stop arrives; the drain lets it
     end."""
     await asyncio.sleep(DRAIN_TASK_S)
-    return TaskResult(ok=value * 2)
+    return Ok(value * 2)
 
 
 @app.task(
-    task_name='whole_run.thread_past_deadline',
+    name='whole_run.thread_past_deadline',
     execution=Execution.SHARED_THREAD,
     timeout_ms=SHORT_TIMEOUT_MS,
 )
-def thread_past_deadline() -> TaskResult[str, TaskError]:
+def thread_past_deadline() -> Result[str, TaskError]:
     """A thread seat that cannot stop at its deadline: the child is killed
     when no run of it has time left."""
     time.sleep(PAST_THE_DEADLINE_S)
-    return TaskResult(ok='late')
+    return Ok('late')
 
 
-@app.task(task_name='whole_run.waits_for_release')
-def waits_for_release() -> TaskResult[str, TaskError]:
+@app.task(name='whole_run.waits_for_release')
+def waits_for_release() -> Result[str, TaskError]:
     """The first node of the pause chain: it runs until the runner paused
     the workflow and wrote the release marker."""
     _write_marker(FIRST_NODE_RUNNING)
     deadline = time.monotonic() + MARKER_WAIT_S
     while not os.path.exists(_marker(FIRST_NODE_RELEASED)):
         if time.monotonic() > deadline:
-            return TaskResult(
-                err=TaskError(error_code='NOT_RELEASED', message='no release marker'),
+            return Err(
+                TaskError(code='NOT_RELEASED', message='no release marker'),
             )
         time.sleep(MARKER_POLL_S)
-    return TaskResult(ok='released')
+    return Ok('released')
 
 
 class ChildChain(WorkflowDefinition[int]):
@@ -365,33 +381,33 @@ class ChildChain(WorkflowDefinition[int]):
     def build_with(  # pyright: ignore[reportIncompatibleMethodOverride]
         cls, app: Horsies, value: int,
     ) -> WorkflowSpec[int]:
-        child = TaskNode(fn=double, kwargs={'value': value})
+        child = TaskNode(function=double, kwargs={'value': value})
         return app.workflow(
             name=cls.name,
-            tasks=[child],
+            nodes=[child],
             output=child,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
-            workflow_def_cls=cls,
+            workflow_definition=cls,
         )
 
 
-_chain_first = TaskNode(fn=double, kwargs={'value': 1}, node_id='first')
+_chain_first = TaskNode(function=double, kwargs={'value': 1}, node_id='first')
 _chain_sub = SubWorkflowNode(
-    workflow_def=ChildChain,
+    workflow_definition=ChildChain,
     kwargs={'value': 2},
     waits_for=[_chain_first],
     node_id='sub',
 )
 _chain_last = TaskNode(
-    fn=double,
+    function=double,
     kwargs={'value': 3},
     waits_for=[_chain_sub],
     node_id='last',
 )
 chain_with_subworkflow = app.workflow(
     name='whole_run_chain',
-    tasks=[_chain_first, _chain_sub, _chain_last],
+    nodes=[_chain_first, _chain_sub, _chain_last],
     output=_chain_last,
     on_error=OnError.FAIL,
     definition_key='crossclient.parity.snapshot.whole_run.chain.v1',
@@ -408,25 +424,25 @@ class ChildFromResult(WorkflowDefinition[int]):
 
     @classmethod
     def build_with(  # pyright: ignore[reportIncompatibleMethodOverride]
-        cls, app: Horsies, doubled: TaskResult[int, TaskError],
+        cls, app: Horsies, doubled: TaskOutcome[int, TaskError],
     ) -> WorkflowSpec[int]:
         match doubled:
-            case TaskResult(ok=int() as value):
+            case Succeeded(value):
                 pass
             case _:
                 raise ValueError(f'{cls.name} takes a completed result, not {doubled!r}')
         grandchild = SubWorkflowNode(
-            workflow_def=ChildChain,
+            workflow_definition=ChildChain,
             kwargs={'value': value},
             node_id='grandchild',
         )
         return app.workflow(
             name=cls.name,
-            tasks=[grandchild],
+            nodes=[grandchild],
             output=grandchild,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
-            workflow_def_cls=cls,
+            workflow_definition=cls,
         )
 
 
@@ -444,16 +460,16 @@ class RefusedChild(WorkflowDefinition[int]):
         raise ValueError(f'{cls.name} refuses value {value}')
 
 
-_from_first = TaskNode(fn=double, kwargs={'value': 5}, node_id='first')
+_from_first = TaskNode(function=double, kwargs={'value': 5}, node_id='first')
 _from_sub = SubWorkflowNode(
-    workflow_def=ChildFromResult,
+    workflow_definition=ChildFromResult,
     waits_for=[_from_first],
     args_from={'doubled': _from_first},
     node_id='sub',
 )
 chain_from_result = app.workflow(
     name='whole_run_chain_from_result',
-    tasks=[_from_first, _from_sub],
+    nodes=[_from_first, _from_sub],
     output=_from_sub,
     on_error=OnError.FAIL,
     definition_key='crossclient.parity.snapshot.whole_run.chain_from_result.v1',
@@ -461,16 +477,16 @@ chain_from_result = app.workflow(
 """A task, then a sub-workflow that the worker builds from the task's
 result; the child's start builds a grandchild."""
 
-_refused_first = TaskNode(fn=double, kwargs={'value': 6}, node_id='first')
+_refused_first = TaskNode(function=double, kwargs={'value': 6}, node_id='first')
 _refused_sub = SubWorkflowNode(
-    workflow_def=RefusedChild,
+    workflow_definition=RefusedChild,
     kwargs={'value': 7},
     waits_for=[_refused_first],
     node_id='sub',
 )
 chain_with_refused_child = app.workflow(
     name='whole_run_chain_with_refused_child',
-    tasks=[_refused_first, _refused_sub],
+    nodes=[_refused_first, _refused_sub],
     output=_refused_sub,
     on_error=OnError.FAIL,
     definition_key='crossclient.parity.snapshot.whole_run.refused_chain.v1',
@@ -478,16 +494,16 @@ chain_with_refused_child = app.workflow(
 """A task, then a sub-workflow whose build in the worker raises: the node
 and the workflow fail."""
 
-_pause_first = TaskNode(fn=waits_for_release, node_id='first')
+_pause_first = TaskNode(function=waits_for_release, node_id='first')
 _pause_second = TaskNode(
-    fn=double,
+    function=double,
     kwargs={'value': 4},
     waits_for=[_pause_first],
     node_id='second',
 )
 pause_chain = app.workflow(
     name='whole_run_pause_chain',
-    tasks=[_pause_first, _pause_second],
+    nodes=[_pause_first, _pause_second],
     output=_pause_second,
     on_error=OnError.FAIL,
     definition_key='crossclient.parity.snapshot.whole_run.pause_chain.v1',

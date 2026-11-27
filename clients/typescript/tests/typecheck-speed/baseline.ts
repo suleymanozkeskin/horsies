@@ -1,49 +1,76 @@
-// The recorded baselines of the typecheck-speed check and the verdict of a session against
-// one of them. A baseline compares only on the machine, with the Bun binary, that recorded it.
+// The recorded baselines of the typecheck-speed check and the verdict of a measurement against
+// one of them. A baseline is a ratio of the app time to the control time, so the speed of the CPU
+// cancels; the ratio still differs per operating system and CPU architecture, so a baseline compares
+// only with the platform, the architecture and the Bun binary that recorded it (plus the run and session counts).
+// The two projects are not part of the key: a change of the public API changes the projects, and a slower
+// type-check of the changed projects is what this check exists to find. The fingerprints of the projects that
+// recorded a baseline are stored with it and printed next to the current ones; they never refuse a verdict.
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { availableParallelism, cpus } from "node:os";
 
-import { describeCause, medianOf, millisecondsText, spreadOf } from "./measure.ts";
+import { describeCause } from "./measure.ts";
+import { medianOfRatios, type Ratio, ratioText, spreadOfRatios, sumOfRatios } from "./ratio.ts";
 
-/** The machine and the Bun binary of a measurement. Times of another machine or Bun do not compare. */
+/**
+ * The machine that recorded a baseline. `platform` and `arch` are part of the key of the baseline (`findBaseline`);
+ * `cpuModel` and `logicalCores` are information only.
+ */
 export interface MachineIdentity {
   readonly platform: string;
   readonly arch: string;
   readonly cpuModel: string;
   readonly logicalCores: number;
-  readonly bun: string;
 }
+
+/**
+ * What a measurement must match to compare with a stored baseline. The ratio depends on the operating system, the CPU
+ * architecture and the Bun binary that runs `bun check`; it does not depend on the CPU speed.
+ */
+export interface BaselineKey {
+  /** The operating system of the measuring process (`process.platform`). */
+  readonly platform: string;
+  /** The CPU architecture of the measuring process (`process.arch`). */
+  readonly arch: string;
+  /** The Bun binary: version and revision. */
+  readonly bun: string;
+  readonly runsPerSession: number;
+  /** The count of session ratios. */
+  readonly sessions: number;
+}
+
+/** The fingerprints of the two projects of a measurement. Information only: they are not part of `BaselineKey`. */
+export interface ProjectFingerprints {
+  /** SHA-256 of the control project (`projectSha256`). */
+  readonly controlSha256: string;
+  /** SHA-256 of the app project (`projectSha256`). */
+  readonly appSha256: string;
+}
+
+/** Whether the projects of a measurement are the projects that recorded a baseline. */
+export type ProjectsComparison = "same" | "changed";
 
 /** One baseline as `baseline.json` stores it. */
 export interface StoredBaseline {
-  readonly machine: MachineIdentity;
-  /** SHA-256 of the generated project (`projectSha256`). */
-  readonly projectSha256: string;
+  readonly bun: string;
+  readonly controlSha256: string;
+  readonly appSha256: string;
   readonly runsPerSession: number;
-  /** The median of each recorded session, as ISO 8601 durations (`PT0.029512S`). */
-  readonly sessionMedians: readonly string[];
+  readonly recordedOn: MachineIdentity;
+  /** The ratio of each recorded session: the app median divided by the control median. */
+  readonly sessionRatios: readonly number[];
 }
 
 export interface StoredBaselineFile {
   readonly entries: readonly StoredBaseline[];
 }
 
-/** What a measurement must match to compare with a stored baseline. */
-export interface BaselineKey {
-  readonly machine: MachineIdentity;
-  readonly projectSha256: string;
-  readonly runsPerSession: number;
-  /** The count of session medians. */
-  readonly sessions: number;
-}
-
 /** The center and the run-to-run noise of a baseline. */
 export interface Baseline {
-  /** The median of the session medians. */
-  readonly median: Temporal.Duration;
-  /** The slowest session median minus the fastest session median. */
-  readonly noise: Temporal.Duration;
+  /** The median of the session ratios. */
+  readonly median: Ratio;
+  /** The largest session ratio minus the smallest session ratio. */
+  readonly noise: Ratio;
 }
 
 export type MachineLookup = { readonly kind: "identified"; readonly machine: MachineIdentity } | { readonly kind: "cpuModelNotReported" };
@@ -55,18 +82,17 @@ export type BaselineParse =
   | { readonly kind: "unreadable"; readonly text: string; readonly cause: string };
 
 export type Verdict =
-  | { readonly kind: "withinNoise"; readonly measured: Temporal.Duration; readonly limit: Temporal.Duration }
-  | { readonly kind: "slower"; readonly measured: Temporal.Duration; readonly limit: Temporal.Duration };
+  | { readonly kind: "withinNoise"; readonly measured: Ratio; readonly limit: Ratio }
+  | { readonly kind: "slower"; readonly measured: Ratio; readonly limit: Ratio };
 
 export type BaselineFileWrite = { readonly kind: "written" } | { readonly kind: "notWritten"; readonly cause: string };
 
-/** The facts that the operating system and the runtime report about this process's machine. */
+/** The facts that the operating system reports about this process's machine. */
 export interface MachineFacts {
   readonly platform: string;
   readonly arch: string;
   readonly cpuModels: readonly string[];
   readonly logicalCores: number;
-  readonly bun: string;
 }
 
 /** The identity of a machine. The first CPU's model names the CPU. */
@@ -79,19 +105,23 @@ export function machineFrom(facts: MachineFacts): MachineLookup {
 
   return {
     kind: "identified",
-    machine: { platform: facts.platform, arch: facts.arch, cpuModel, logicalCores: facts.logicalCores, bun: facts.bun },
+    machine: { platform: facts.platform, arch: facts.arch, cpuModel, logicalCores: facts.logicalCores },
   };
 }
 
-/** The machine that runs this process, and its Bun binary. */
+/** The machine that runs this process. */
 export function currentMachine(): MachineLookup {
   return machineFrom({
     platform: process.platform,
     arch: process.arch,
     cpuModels: cpus().map((cpu) => cpu.model),
     logicalCores: availableParallelism(),
-    bun: `${Bun.version}+${Bun.revision.slice(0, 9)}`,
   });
+}
+
+/** The Bun binary that runs this process: its version and the start of its revision. */
+export function currentBun(): string {
+  return `${Bun.version}+${Bun.revision.slice(0, 9)}`;
 }
 
 /** SHA-256 over each path and its content, in path order. */
@@ -109,68 +139,84 @@ export function projectSha256(files: ReadonlyMap<string, string>): string {
   return hash.digest("hex");
 }
 
-export function sameMachine(one: MachineIdentity, two: MachineIdentity): boolean {
-  return (
-    one.platform === two.platform &&
-    one.arch === two.arch &&
-    one.cpuModel === two.cpuModel &&
-    one.logicalCores === two.logicalCores &&
-    one.bun === two.bun
-  );
-}
-
-/** The stored baseline with the machine, the project, the run count and the session count of `key`. */
+/**
+ * The stored baseline with the platform, the architecture, the Bun binary, the run count and the
+ * session count of `key`. The projects do not decide. A platform with no recorded baseline is `noMatch`: the check gives no verdict there.
+ */
 export function findBaseline(file: StoredBaselineFile, key: BaselineKey): BaselineLookup {
   const stored = file.entries.find(
     (entry) =>
-      sameMachine(entry.machine, key.machine) &&
-      entry.projectSha256 === key.projectSha256 &&
+      entry.recordedOn.platform === key.platform &&
+      entry.recordedOn.arch === key.arch &&
+      entry.bun === key.bun &&
       entry.runsPerSession === key.runsPerSession &&
-      entry.sessionMedians.length === key.sessions,
+      entry.sessionRatios.length === key.sessions,
   );
 
   return stored === undefined ? { kind: "noMatch" } : { kind: "found", stored };
 }
 
-/** Reads the session medians of a stored baseline. Needs an odd, non-zero count of them. */
+/** Reads the session ratios of a stored baseline. Needs an odd, non-zero count of finite ratios above 0. */
 export function parseBaseline(stored: StoredBaseline): BaselineParse {
-  if (stored.sessionMedians.length % 2 !== 1) {
-    return { kind: "unreadable", text: `${stored.sessionMedians.length} session medians`, cause: "the count is not odd" };
+  if (stored.sessionRatios.length % 2 !== 1) {
+    return { kind: "unreadable", text: `${stored.sessionRatios.length} session ratios`, cause: "the count is not odd" };
   }
 
-  const medians: Temporal.Duration[] = [];
+  const ratios: Ratio[] = [];
 
-  for (const text of stored.sessionMedians) {
-    try {
-      medians.push(Temporal.Duration.from(text));
-    } catch (error) {
-      return { kind: "unreadable", text, cause: describeCause(error) };
+  for (const value of stored.sessionRatios) {
+    if (!Number.isFinite(value) || value <= 0) {
+      return { kind: "unreadable", text: String(value), cause: "a session ratio must be a finite number above 0" };
     }
+
+    ratios.push({ appPerControl: value });
   }
 
-  return { kind: "parsed", baseline: { median: medianOf(medians), noise: spreadOf(medians) } };
+  return { kind: "parsed", baseline: { median: medianOfRatios(ratios), noise: spreadOfRatios(ratios) } };
 }
 
-/** Slower when the measured median is above the baseline median plus the noise. */
-export function judge(baseline: Baseline, measured: Temporal.Duration): Verdict {
-  const limit = baseline.median.add(baseline.noise);
+/** Slower when the measured ratio is above the baseline median plus the noise. */
+export function judge(baseline: Baseline, measured: Ratio): Verdict {
+  const limit = sumOfRatios(baseline.median, baseline.noise);
 
-  return Temporal.Duration.compare(measured, limit) > 0 ? { kind: "slower", measured, limit } : { kind: "withinNoise", measured, limit };
+  return measured.appPerControl > limit.appPerControl ? { kind: "slower", measured, limit } : { kind: "withinNoise", measured, limit };
 }
 
-/** A stored baseline of `key` with the given session medians, one per session of `key`. */
-export function storedBaselineOf(key: BaselineKey, sessionMedians: readonly Temporal.Duration[]): StoredBaseline {
+/** Whether `projects` are the projects that recorded `stored`. */
+export function compareProjects(stored: StoredBaseline, projects: ProjectFingerprints): ProjectsComparison {
+  return stored.controlSha256 === projects.controlSha256 && stored.appSha256 === projects.appSha256 ? "same" : "changed";
+}
+
+/** A stored baseline of `key` with the given session ratios, one per session of `key`, and the fingerprints of its projects. */
+export function storedBaselineOf(
+  key: BaselineKey,
+  projects: ProjectFingerprints,
+  recordedOn: MachineIdentity,
+  sessionRatios: readonly Ratio[],
+): StoredBaseline {
   return {
-    machine: key.machine,
-    projectSha256: key.projectSha256,
+    bun: key.bun,
+    controlSha256: projects.controlSha256,
+    appSha256: projects.appSha256,
     runsPerSession: key.runsPerSession,
-    sessionMedians: sessionMedians.map((median) => median.toString()),
+    recordedOn,
+    sessionRatios: sessionRatios.map((ratio) => ratio.appPerControl),
   };
 }
 
-/** The file with `entry` in place of the entry of the same machine. Entries of other machines stay. */
+/**
+ * The file with `entry` in place of the entry of the same platform, architecture and Bun binary. The entries of other
+ * platforms, architectures and Bun binaries stay.
+ */
 export function withRecordedBaseline(file: StoredBaselineFile, entry: StoredBaseline): StoredBaselineFile {
-  return { entries: [...file.entries.filter((stored) => !sameMachine(stored.machine, entry.machine)), entry] };
+  const kept = file.entries.filter((stored) => !sameBaselinePlatform(stored, entry));
+
+  return { entries: [...kept, entry] };
+}
+
+/** Whether two stored baselines have the same platform, architecture and Bun binary. */
+function sameBaselinePlatform(one: StoredBaseline, two: StoredBaseline): boolean {
+  return one.recordedOn.platform === two.recordedOn.platform && one.recordedOn.arch === two.recordedOn.arch && one.bun === two.bun;
 }
 
 export function writeBaselineFile(path: string, file: StoredBaselineFile): BaselineFileWrite {
@@ -184,9 +230,9 @@ export function writeBaselineFile(path: string, file: StoredBaselineFile): Basel
 }
 
 export function describeMachine(machine: MachineIdentity): string {
-  return `${machine.platform} ${machine.arch}, ${machine.cpuModel}, ${machine.logicalCores} cores, bun ${machine.bun}`;
+  return `${machine.platform} ${machine.arch}, ${machine.cpuModel}, ${machine.logicalCores} cores`;
 }
 
 export function describeBaseline(baseline: Baseline): string {
-  return `median ${millisecondsText(baseline.median)}, noise ${millisecondsText(baseline.noise)}`;
+  return `median ${ratioText(baseline.median)}, noise ${ratioText(baseline.noise)}`;
 }

@@ -30,7 +30,8 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, assert_never
 
 from horsies._core import ChildSpecBuilt, ChildSpecRefused, ChildSpecRequest
-from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
+from horsies.core.models.outcome import TaskOutcome
+from horsies.core.models.tasks import OperationalCode, TaskError
 from horsies.core.types.result import Err, Ok
 from horsies.core.workflows.child_build import (
     ChildBuildFailed,
@@ -50,8 +51,8 @@ type ChildSpecSource = Callable[[ChildSpecRequest], ChildSpecBuilt | ChildSpecRe
 
 def _dependency_results(
     broker: PostgresBroker, request: ChildSpecRequest,
-) -> dict[int, TaskResult[Any, TaskError]]:
-    """The result of each terminal dependency of the node, by index. Does no I/O."""
+) -> dict[int, TaskOutcome[Any, TaskError]]:
+    """The outcome of each terminal dependency of the node, by index. Does no I/O."""
     from horsies.core.workflows.engine import terminal_dependency_result
 
     workflow_id = str(request.parent_workflow_id)
@@ -113,7 +114,7 @@ def build_child_spec(
                         node.workflow_id,
                         node.task_index,
                         f'Child workflow {spec.name} does not encode as spec data: {refused}',
-                        OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
+                        OperationalCode.WORKFLOW_ENQUEUE_FAILED,
                     ))
                 case _ as unreachable:
                     assert_never(unreachable)

@@ -4,7 +4,7 @@
 import { RESERVATION_WINDOW_MICROS_MAX, RESERVATION_WINDOW_MICROS_MIN } from "../_catalog/manifest.ts";
 import { RETENTION_DAYS_MAX, RETENTION_DAYS_MIN } from "../_catalog/worker_manifest.ts";
 import type {
-  CallerKeyArg,
+  IdempotencyKeyArg,
   DeadlineArg,
   RerunCommandArg,
   RerunPolicyArg,
@@ -15,7 +15,7 @@ import { err, ok } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { invalidCommand, invalidPolicy } from "./errors.ts";
 import type { RerunInvalidCommand, RerunInvalidPolicy, RerunRequestRefused } from "./errors.ts";
-import type { RerunCommand, RerunDeadline, RerunPolicy, RerunRetention } from "./types.ts";
+import type { RerunCommand, RerunDeadline, RerunEnqueuePolicy, RerunRetention } from "./types.ts";
 
 /** The command and the policy of one rerun, as the addon takes them. */
 export interface RerunRequest {
@@ -36,9 +36,9 @@ const NANOSECONDS_PER_MINUTE = 60_000_000_000n;
 const NANOSECONDS_PER_HOUR = 3_600_000_000_000n;
 const NANOSECONDS_PER_DAY = 86_400_000_000_000n;
 
-const CALLER_KEY_RULE = "callerKey must be well-formed text: it holds a lone UTF-16 surrogate";
+const IDEMPOTENCY_KEY_RULE = "idempotencyKey must be well-formed text: it holds a lone UTF-16 surrogate";
 
-const DEADLINE_RULE = "deadline.at must be from 0001-01-01T00:00:00Z to 9999-12-31T23:59:59.999999Z";
+const GOOD_UNTIL_RULE = "goodUntil.at must be from 0001-01-01T00:00:00Z to 9999-12-31T23:59:59.999999Z";
 
 const RETENTION_RULE = `retention.days must be a whole number from ${RETENTION_DAYS_MIN} to ${RETENTION_DAYS_MAX}`;
 
@@ -50,7 +50,7 @@ const WINDOW_MICROSECOND_RULE = "reservationWindow must be a whole number of mic
 const WINDOW_RANGE_RULE = `reservationWindow must be more than 0 and at most 30 days (${RESERVATION_WINDOW_MICROS_MAX} microseconds)`;
 
 /** The records of `command` and `policy`, or the refusal of the first field that breaks its rule. Pure. */
-export function parseRerunRequest(command: RerunCommand, policy: RerunPolicy): Result<RerunRequest, RerunRequestRefused> {
+export function parseRerunRequest(command: RerunCommand, policy: RerunEnqueuePolicy): Result<RerunRequest, RerunRequestRefused> {
   const commandArg = parseCommand(command);
 
   if (!commandArg.ok) {
@@ -68,22 +68,22 @@ export function parseRerunRequest(command: RerunCommand, policy: RerunPolicy): R
 
 /** The record of `command`. Pure. */
 function parseCommand(command: RerunCommand): Result<RerunCommandArg, RerunInvalidCommand> {
-  const deadline = parseDeadline(command.deadline);
+  const goodUntil = parseDeadline(command.goodUntil);
 
-  if (!deadline.ok) {
-    return deadline;
+  if (!goodUntil.ok) {
+    return goodUntil;
   }
 
-  const callerKey = parseCallerKey(command.callerKey);
+  const idempotencyKey = parseIdempotencyKey(command.idempotencyKey);
 
-  if (!callerKey.ok) {
-    return callerKey;
+  if (!idempotencyKey.ok) {
+    return idempotencyKey;
   }
 
-  return ok({ sourceTaskId: command.sourceTaskId, deadline: deadline.value, callerKey: callerKey.value });
+  return ok({ sourceTaskId: command.sourceTaskId, goodUntil: goodUntil.value, idempotencyKey: idempotencyKey.value });
 }
 
-/** The record of `deadline`: the instant cut toward the past to the microsecond. Pure. */
+/** The record of `goodUntil`: the instant cut toward the past to the microsecond. Pure. */
 function parseDeadline(deadline: RerunDeadline): Result<DeadlineArg, RerunInvalidCommand> {
   switch (deadline.kind) {
     case "none":
@@ -93,7 +93,7 @@ function parseDeadline(deadline: RerunDeadline): Result<DeadlineArg, RerunInvali
 
       return epochMicros >= DEADLINE_EARLIEST_MICROS && epochMicros <= DEADLINE_LATEST_MICROS
         ? ok({ kind: "until", epochMicros })
-        : err(invalidCommand(DEADLINE_RULE));
+        : err(invalidCommand(GOOD_UNTIL_RULE));
     }
 
     default:
@@ -101,17 +101,17 @@ function parseDeadline(deadline: RerunDeadline): Result<DeadlineArg, RerunInvali
   }
 }
 
-/** The record of a caller key; an omitted key is an unkeyed rerun. Pure. */
-function parseCallerKey(callerKey: string | undefined): Result<CallerKeyArg, RerunInvalidCommand> {
-  if (callerKey === undefined) {
+/** The record of an idempotency key; an omitted key is an unkeyed rerun. Pure. */
+function parseIdempotencyKey(key: string | undefined): Result<IdempotencyKeyArg, RerunInvalidCommand> {
+  if (key === undefined) {
     return ok({ kind: "unkeyed" });
   }
 
-  return callerKey.isWellFormed() ? ok({ kind: "keyed", key: callerKey }) : err(invalidCommand(CALLER_KEY_RULE));
+  return key.isWellFormed() ? ok({ kind: "keyed", key }) : err(invalidCommand(IDEMPOTENCY_KEY_RULE));
 }
 
 /** The record of `policy`. Pure. */
-function parsePolicy(policy: RerunPolicy): Result<RerunPolicyArg, RerunInvalidPolicy> {
+function parsePolicy(policy: RerunEnqueuePolicy): Result<RerunPolicyArg, RerunInvalidPolicy> {
   const retention = parseRetention(policy.retention);
 
   if (!retention.ok) {
@@ -126,7 +126,7 @@ function parsePolicy(policy: RerunPolicy): Result<RerunPolicyArg, RerunInvalidPo
 
   return ok({
     retention: retention.value,
-    rerunInput: policy.rerunInput,
+    rerunInput: policy.retainRerunInput,
     reservationWindowMicros: windowMicros.value,
   });
 }
@@ -136,7 +136,7 @@ function parseRetention(retention: RerunRetention): Result<RetentionArg, RerunIn
   switch (retention.kind) {
     case "forever":
       return ok({ kind: "forever" });
-    case "days":
+    case "period":
       return Number.isInteger(retention.days) && retention.days >= RETENTION_DAYS_MIN && retention.days <= RETENTION_DAYS_MAX
         ? ok({ kind: "days", days: retention.days })
         : err(invalidPolicy(RETENTION_RULE));

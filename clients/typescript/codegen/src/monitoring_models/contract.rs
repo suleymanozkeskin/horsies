@@ -498,7 +498,7 @@ mod tests {
 
         assert_eq!(models.len(), 27);
         assert_eq!(models[0].name, "Breakdown");
-        assert_eq!(models[26].name, "WorkflowTaskDetail");
+        assert_eq!(models[26].name, "WorkflowRunSummary");
     }
 
     #[test]

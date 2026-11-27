@@ -1,7 +1,12 @@
 //! The expansion of `#[horsies::task]` and `#[horsies::blocking_task]`: the
 //! function as written, the compile-time checks of its retry codes, and a
-//! module of the same name with `register`, the send helpers, `handle`,
+//! module of the same name with `register`, the send helpers, `function`,
 //! `node` and the input field tokens.
+//!
+//! The module holds no state. Each send helper takes the app that it sends
+//! through and finds the task's typed function in that app; `node()` names
+//! the task, and the workflow builder of an app resolves it against that
+//! app. So two apps of one process share no registration.
 //!
 //! Every path in the expansion starts at `::horsies`, so the user's crate
 //! needs no other dependency for it.
@@ -104,13 +109,16 @@ fn task_module(
     let function_type = quote! { ::horsies::TaskFunction<#input, #output, #code> };
     let handle_type = quote! { ::horsies::TaskHandle<#output, #code> };
     let send_result = quote! { ::std::result::Result<#handle_type, ::horsies::TaskSendError> };
+    // The app parameter of the send helpers resolves at the definition site
+    // of the expansion, so a task parameter named `app` binds apart from it.
+    let app = syn::Ident::new("app", proc_macro2::Span::mixed_site());
     let input_items = input_struct(signature);
-    let params_items = params_module(signature);
+    let fields_items = fields_module(signature);
     let send_params = send_params(signature);
     let build_input = build_input(signature);
     let registered = registered_task(signature, fn_name, input, code, kind);
-    let workflow_ctx = match attrs.workflow_ctx {
-        true => quote! { .with_workflow_ctx() },
+    let workflow_context = match attrs.workflow_context {
+        true => quote! { .with_workflow_context() },
         false => quote! {},
     };
     let runtime_capture = match signature.takes_runtime {
@@ -129,106 +137,79 @@ fn task_module(
 
             #input_items
 
-            #params_items
+            #fields_items
 
             const TASK_NAME: &str = #task_name;
 
-            /// The function that the first `register` in this process
-            /// returned; the send helpers send through it.
-            static FUNCTION: ::std::sync::OnceLock<#function_type> =
-                ::std::sync::OnceLock::new();
-
             /// Register the task on `app` and return its typed function.
-            /// The first registration in a process also serves `send`,
-            /// `schedule`, `with_options` and `node` of this module.
+            /// The send helpers and the workflow builders of `app` find the
+            /// task after this.
             pub fn register(
                 app: &mut ::horsies::Horsies,
             ) -> ::std::result::Result<#function_type, ::horsies::HorsiesError> {
                 #runtime_capture
-                let task = #registered #workflow_ctx .with_task_options(#options);
+                let task = #registered #workflow_context .with_task_options(#options);
                 app.register(TASK_NAME, task)?;
-                let function =
-                    <#function_type>::__registered(app, TASK_NAME)?;
-                let _first_registration =
-                    FUNCTION.set(::std::clone::Clone::clone(&function));
-                ::std::result::Result::Ok(function)
-            }
-
-            fn registered() -> ::std::result::Result<
-                &'static #function_type,
-                ::horsies::TaskSendError,
-            > {
-                FUNCTION
-                    .get()
-                    .ok_or_else(|| ::horsies::__private::send_before_register(TASK_NAME))
+                <#function_type>::__registered(app, TASK_NAME)
             }
 
             /// The typed function of the task in the app of `runtime`.
-            pub fn handle(
+            pub fn function(
                 runtime: &::horsies::TaskRuntime,
             ) -> ::std::result::Result<#function_type, ::horsies::TaskFunctionNotFound> {
-                runtime.task_handle::<#input, #output, #code>(TASK_NAME)
+                runtime.task_function::<#input, #output, #code>(TASK_NAME)
             }
 
-            /// Send the task now.
-            pub async fn send(#send_params) -> #send_result {
+            /// Send the task now through `app`, the app that registered
+            /// it.
+            ///
+            /// Errors: the send errors; `VALIDATION_FAILED` when `app` does
+            /// not register the task, and nothing is written.
+            pub async fn send(#app: &::horsies::Horsies, #send_params) -> #send_result {
                 let input: #input = #build_input;
-                registered()?.send(input).await
+                ::horsies::__private::send_function::<#input, #output, #code>(#app, TASK_NAME)?
+                    .send(input)
+                    .await
             }
 
-            /// Send the task to run after `delay`.
-            pub async fn schedule(
-                delay: ::horsies::WholeSeconds,
-                #send_params
-            ) -> #send_result {
-                let input: #input = #build_input;
-                registered()?.schedule(delay, input).await
+            /// The send helpers with per-send options: a delay, a deadline,
+            /// an idempotency key, a retention.
+            pub fn with_options(options: ::horsies::TaskSendOptions) -> WithOptions {
+                WithOptions { options }
             }
 
-            /// The send helpers with per-send options.
-            pub fn with_options(options: ::horsies::TaskSendOptions) -> SendOptions {
-                SendOptions { options }
-            }
-
-            /// Per-send options of this task's send helpers.
-            pub struct SendOptions {
+            /// Per-send options of this task's send helpers. A send takes
+            /// them; clone them for one more send.
+            #[derive(::std::clone::Clone, ::std::fmt::Debug)]
+            pub struct WithOptions {
                 options: ::horsies::TaskSendOptions,
             }
 
-            impl SendOptions {
-                /// Send the task now with these options.
-                pub async fn send(&self, #send_params) -> #send_result {
-                    let input: #input = #build_input;
-                    registered()?
-                        .with_options(::std::clone::Clone::clone(&self.options))
-                        .send(input)
-                        .await
-                }
-
-                /// Send the task to run after `delay` with these options.
-                pub async fn schedule(
-                    &self,
-                    delay: ::horsies::WholeSeconds,
+            impl WithOptions {
+                /// Send the task through `app` with these options: now, or
+                /// after their delay. The send owns the options, so its
+                /// future borrows only `app`:
+                /// `name::with_options(options).send(&app, ..)` is one
+                /// expression, also when the future is kept in a binding.
+                ///
+                /// Errors: as `send`.
+                pub async fn send(
+                    self,
+                    #app: &::horsies::Horsies,
                     #send_params
                 ) -> #send_result {
                     let input: #input = #build_input;
-                    registered()?
-                        .with_options(::std::clone::Clone::clone(&self.options))
-                        .schedule(delay, input)
+                    ::horsies::__private::send_function::<#input, #output, #code>(#app, TASK_NAME)?
+                        .send_with_options(self.options, input)
                         .await
                 }
             }
 
-            /// A workflow node of the task, with the queue, priority and
-            /// options of its registration.
-            pub fn node() -> ::std::result::Result<
-                ::horsies::TaskNode<#output, #input>,
-                ::horsies::HorsiesError,
-            > {
-                FUNCTION
-                    .get()
-                    .map(|function| function.node())
-                    .ok_or_else(|| ::horsies::__private::node_before_register(TASK_NAME))
+            /// A workflow node of the task with an empty input `{}`. The
+            /// workflow builder that takes it resolves the queue, the
+            /// priority and the options of the task against its own app.
+            pub fn node() -> ::horsies::TaskNode<#output, #input> {
+                ::horsies::__private::task_node::<#output, #input>(TASK_NAME)
             }
         }
     }
@@ -237,13 +218,13 @@ fn task_module(
 /// The `TaskOptions` of the registration: the attribute values, with the
 /// default class `ISOLATED` and the default grace of a `SHARED_ASYNC` task.
 fn task_options(attrs: &TaskAttrs) -> TokenStream {
-    let queue_name = match &attrs.queue {
+    let queue = match &attrs.queue {
         Some(queue) => {
             quote! { ::std::option::Option::Some(::std::string::String::from(#queue)) }
         }
         None => quote! { ::std::option::Option::None },
     };
-    let (retry_policy, auto_retry_for) = match &attrs.retry {
+    let (retry_policy, retry_for) = match &attrs.retry {
         Retry::NoRetry => (
             quote! { ::std::option::Option::None },
             quote! { ::std::option::Option::None },
@@ -272,9 +253,7 @@ fn task_options(attrs: &TaskAttrs) -> TokenStream {
             let value = proc_macro2::Literal::u32_suffixed(grace.value);
             (
                 quote! { ::horsies::Execution::Isolated },
-                quote! {
-                    ::std::option::Option::Some(::horsies::__private::cancel_grace(#value))
-                },
+                quote! { ::std::option::Option::Some(#value) },
             )
         }
         (ExecutionClass::Isolated, None) => (
@@ -289,24 +268,20 @@ fn task_options(attrs: &TaskAttrs) -> TokenStream {
             let value = proc_macro2::Literal::u32_suffixed(grace.value);
             (
                 quote! { ::horsies::Execution::SharedAsync },
-                quote! {
-                    ::std::option::Option::Some(::horsies::__private::cancel_grace(#value))
-                },
+                quote! { ::std::option::Option::Some(#value) },
             )
         }
         (ExecutionClass::SharedAsync, None) => (
             quote! { ::horsies::Execution::SharedAsync },
-            quote! {
-                ::std::option::Option::Some(::horsies::__private::DEFAULT_CANCEL_GRACE)
-            },
+            quote! { ::std::option::Option::Some(::horsies::DEFAULT_CANCEL_GRACE_MS) },
         ),
     };
     quote! {
         ::horsies::TaskOptions {
             task_name: ::std::string::String::from(TASK_NAME),
-            queue_name: #queue_name,
+            queue: #queue,
             good_until: ::std::option::Option::None,
-            auto_retry_for: #auto_retry_for,
+            retry_for: #retry_for,
             retry_policy: #retry_policy,
             timeout_ms: #timeout_ms,
             execution: #execution,
@@ -315,7 +290,7 @@ fn task_options(attrs: &TaskAttrs) -> TokenStream {
     }
 }
 
-/// One `const` assertion per `auto_retry_for` code: a built-in code, or a
+/// One `const` assertion per `retry_for` code: a built-in code, or a
 /// code of the task's code type `E`. The assertions sit next to the
 /// function, so `E` resolves as in its signature.
 fn retry_code_checks(attrs: &TaskAttrs, code: &Type, cfg_attrs: &[&Attribute]) -> TokenStream {
@@ -327,7 +302,7 @@ fn retry_code_checks(attrs: &TaskAttrs, code: &Type, cfg_attrs: &[&Attribute]) -
         let literal = &entry.code;
         // `assert!` reads its message as a format string with no argument.
         let message = format!(
-            "auto_retry_for of task '{}': {} is neither a built-in code nor a code of {}",
+            "retry_for of task '{}': {} is neither a built-in code nor a code of {}",
             attrs.name.value(),
             literal.value(),
             code_type_text
@@ -339,7 +314,7 @@ fn retry_code_checks(attrs: &TaskAttrs, code: &Type, cfg_attrs: &[&Attribute]) -
             const _: () = ::core::assert!(
                 ::horsies::__private::is_retry_code(
                     #literal,
-                    <#code as ::horsies::UserErrorCode>::CODES,
+                    <#code as ::horsies::CustomErrorCode>::CODES,
                 ),
                 #message
             );
@@ -349,8 +324,8 @@ fn retry_code_checks(attrs: &TaskAttrs, code: &Type, cfg_attrs: &[&Attribute]) -
 }
 
 /// The `RegisteredTask` of the function: a body struct that decodes the
-/// input, calls the function and stores what it returned. Its meta declares
-/// the codes of the code type `code` (`UserErrorCode::CODES`); the
+/// input, calls the function and stores what it returned. Its metadata declares
+/// the codes of the code type `code` (`CustomErrorCode::CODES`); the
 /// registration checks them.
 fn registered_task(
     signature: &Signature,
@@ -369,10 +344,10 @@ fn registered_task(
     };
     let decode = decode_statement(signature, input);
     let call = call_expression(signature, fn_name);
-    let meta = quote! {
-        ::horsies::__private::TaskMeta::for_input::<#input>()
+    let metadata = quote! {
+        ::horsies::__private::TaskMetadata::for_input::<#input>()
             .in_module(::horsies::__private::parent_module(::std::module_path!()))
-            .with_error_codes(<#code as ::horsies::UserErrorCode>::CODES)
+            .with_error_codes(<#code as ::horsies::CustomErrorCode>::CODES)
     };
     let validate_call = match &signature.input {
         InputShape::Unit(_) => quote! { ::horsies::__private::decode_unit_input(input) },
@@ -419,7 +394,7 @@ fn registered_task(
 
             ::horsies::__private::RegisteredTask::Async {
                 task: ::std::sync::Arc::new(__HorsiesBody { #runtime_init }),
-                meta: #meta,
+                metadata: #metadata,
             }
         }},
         BodyKind::Blocking => quote! {{
@@ -439,7 +414,7 @@ fn registered_task(
 
             ::horsies::__private::RegisteredTask::Blocking {
                 task: ::std::sync::Arc::new(__HorsiesBody { #runtime_init }),
-                meta: #meta,
+                metadata: #metadata,
             }
         }},
     }
@@ -514,10 +489,10 @@ fn input_struct(signature: &Signature) -> TokenStream {
     }
 }
 
-/// `params::<name>()`: the field token of each parameter of a wrapped
+/// `fields::<name>()`: the field token of each parameter of a wrapped
 /// input. The key is the name that serde reads: a raw identifier without
 /// its `r#`.
-fn params_module(signature: &Signature) -> TokenStream {
+fn fields_module(signature: &Signature) -> TokenStream {
     let InputShape::Wrapped(params) = &signature.input else {
         return quote! {};
     };
@@ -533,7 +508,7 @@ fn params_module(signature: &Signature) -> TokenStream {
     });
     quote! {
         /// The field tokens of the task's input, for workflow nodes.
-        pub mod params {
+        pub mod fields {
             use super::*;
             #(#tokens)*
         }

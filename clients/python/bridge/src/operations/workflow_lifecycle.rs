@@ -6,15 +6,15 @@
 //! `WorkflowNotRunning`, `WorkflowAbsent`, or a failure. Cancel:
 //! `WorkflowCancelled`, `WorkflowNotCancellable`, `WorkflowAbsent`, or a
 //! failure. A failure is the generated class of the core's
-//! `HandleOperationError` (`horsies._catalog.workflow_handle_errors`:
-//! `HandleDbOperationFailed` or `HandleStoredDataInvalid`), built in Rust
+//! `WorkflowHandleError` (`horsies._catalog.workflow_handle_errors`:
+//! `WorkflowHandleDatabaseOperationFailed` or `WorkflowHandleStoredDataInvalid`), built in Rust
 //! (`catalog_errors`) with the core's message. The Python client maps the
 //! records to the `HandleResult` of `pause_workflow` and
 //! `WorkflowHandle.cancel_async`, and returns a failure as it is. A row
 //! outside a function's contract panics in the core and raises
 //! `PanicException`, as Python raises `OutcomeDecodeError`.
 
-use horsies_core::{HandleOperation, HandleOperationError, HandleResult};
+use horsies_core::{HandleOperation, HandleResult, WorkflowHandleError};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -59,7 +59,7 @@ pub struct WorkflowAbsent {
     pub workflow_id: Uuid,
 }
 
-/// A failed handle operation: `DB_OPERATION_FAILED` (the connect, the
+/// A failed handle operation: `DATABASE_OPERATION_FAILED` (the connect, the
 /// client family check or the statement failed; the statement wrote
 /// nothing, or it committed and its reply was lost) or
 /// `STORED_DATA_INVALID` (a stored value of the workflow does not parse,
@@ -68,7 +68,7 @@ pub struct WorkflowAbsent {
 #[derive(Debug)]
 pub struct HandleFailure {
     pub operation: HandleOperation,
-    pub error: HandleOperationError,
+    pub error: WorkflowHandleError,
 }
 
 impl HandleFailure {
@@ -79,7 +79,7 @@ impl HandleFailure {
         error: horsies_core::BrokerError,
     ) -> Self {
         Self {
-            error: HandleOperationError::connect_failed(&operation, workflow_id, error),
+            error: WorkflowHandleError::connect_failed(&operation, workflow_id, error),
             operation,
         }
     }
@@ -148,21 +148,21 @@ impl<'py> IntoPyObject<'py> for WorkflowTransitionOutcome {
 fn failed_record(
     transition: Transition,
     workflow_id: Uuid,
-    error: HandleOperationError,
+    error: WorkflowHandleError,
 ) -> WorkflowTransitionOutcome {
     match error {
-        HandleOperationError::WorkflowNotFound { .. } => {
+        WorkflowHandleError::NotFound { .. } => {
             WorkflowTransitionOutcome::Absent(WorkflowAbsent { workflow_id })
         }
-        HandleOperationError::DbOperationFailed { .. }
-        | HandleOperationError::StoredDataInvalid { .. } => {
+        WorkflowHandleError::DatabaseOperationFailed { .. }
+        | WorkflowHandleError::StoredDataInvalid { .. } => {
             WorkflowTransitionOutcome::Failed(HandleFailure {
                 operation: transition.operation(),
                 error,
             })
         }
-        HandleOperationError::ResumeRecoveryFailed { .. }
-        | HandleOperationError::AsyncContext { .. } => panic!(
+        WorkflowHandleError::ResumeRecoveryFailed { .. }
+        | WorkflowHandleError::AsyncContext { .. } => panic!(
             "a pause or cancel of workflow {workflow_id} answered {} (a defect): {}",
             error.code(),
             error.message()
@@ -242,7 +242,7 @@ pub async fn cancel_workflow_operation(
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::{BrokerError, HandleErrorCode, WorkflowError};
+    use horsies_core::{BrokerError, WorkflowError, WorkflowHandleErrorCode};
 
     use super::*;
 
@@ -250,35 +250,42 @@ mod tests {
         Uuid::from_u128(7)
     }
 
-    fn handle_error(code: HandleErrorCode, retryable: bool) -> HandleOperationError {
+    fn handle_error(code: WorkflowHandleErrorCode, retryable: bool) -> WorkflowHandleError {
         let message = format!("planned {code}");
         let workflow_id = workflow();
         let cause = || WorkflowError::Broker(BrokerError::ConnectionFailed("refused".to_owned()));
         match code {
-            HandleErrorCode::WorkflowNotFound => HandleOperationError::WorkflowNotFound {
+            WorkflowHandleErrorCode::WorkflowNotFound => WorkflowHandleError::NotFound {
                 message,
                 workflow_id,
             },
-            HandleErrorCode::DbOperationFailed => HandleOperationError::DbOperationFailed {
-                message,
-                retryable,
-                workflow_id,
-                cause: cause(),
-            },
-            HandleErrorCode::StoredDataInvalid => HandleOperationError::StoredDataInvalid {
+            WorkflowHandleErrorCode::DatabaseOperationFailed => {
+                WorkflowHandleError::DatabaseOperationFailed {
+                    message,
+                    retryable,
+                    workflow_id,
+                    cause: cause(),
+                }
+            }
+            WorkflowHandleErrorCode::StoredDataInvalid => WorkflowHandleError::StoredDataInvalid {
                 message,
                 workflow_id,
                 cause: WorkflowError::InvalidStatus("BOGUS".to_owned()),
             },
-            HandleErrorCode::ResumeRecoveryFailed => HandleOperationError::ResumeRecoveryFailed {
+            WorkflowHandleErrorCode::ResumeRecoveryFailed => {
+                WorkflowHandleError::ResumeRecoveryFailed {
+                    message,
+                    workflow_id,
+                    cause: cause(),
+                }
+            }
+            WorkflowHandleErrorCode::AsyncContext => WorkflowHandleError::AsyncContext {
                 message,
                 workflow_id,
-                cause: cause(),
             },
-            HandleErrorCode::AsyncContext => HandleOperationError::AsyncContext {
-                message,
-                workflow_id,
-            },
+            WorkflowHandleErrorCode::InvalidWorkflowId => {
+                panic!("no handle operation gives {code}")
+            }
         }
     }
 
@@ -313,7 +320,10 @@ mod tests {
                 transition_outcome(
                     transition,
                     workflow(),
-                    Err(handle_error(HandleErrorCode::WorkflowNotFound, false))
+                    Err(handle_error(
+                        WorkflowHandleErrorCode::WorkflowNotFound,
+                        false
+                    ))
                 ),
                 WorkflowTransitionOutcome::Absent(_)
             ));
@@ -327,24 +337,36 @@ mod tests {
         let WorkflowTransitionOutcome::Failed(failed) = transition_outcome(
             Transition::Pause,
             workflow(),
-            Err(handle_error(HandleErrorCode::DbOperationFailed, true)),
+            Err(handle_error(
+                WorkflowHandleErrorCode::DatabaseOperationFailed,
+                true,
+            )),
         ) else {
             panic!("a database failure gives a failure");
         };
         assert_eq!(failed.operation, HandleOperation::Pause);
-        assert_eq!(failed.error.code(), HandleErrorCode::DbOperationFailed);
-        assert_eq!(failed.error.message(), "planned DB_OPERATION_FAILED");
+        assert_eq!(
+            failed.error.code(),
+            WorkflowHandleErrorCode::DatabaseOperationFailed
+        );
+        assert_eq!(failed.error.message(), "planned DATABASE_OPERATION_FAILED");
         assert!(failed.error.retryable());
 
         let WorkflowTransitionOutcome::Failed(invalid) = transition_outcome(
             Transition::Cancel,
             workflow(),
-            Err(handle_error(HandleErrorCode::StoredDataInvalid, false)),
+            Err(handle_error(
+                WorkflowHandleErrorCode::StoredDataInvalid,
+                false,
+            )),
         ) else {
             panic!("stored data that does not parse gives a failure");
         };
         assert_eq!(invalid.operation, HandleOperation::Cancel);
-        assert_eq!(invalid.error.code(), HandleErrorCode::StoredDataInvalid);
+        assert_eq!(
+            invalid.error.code(),
+            WorkflowHandleErrorCode::StoredDataInvalid
+        );
         assert!(!invalid.error.retryable());
     }
 
@@ -370,7 +392,7 @@ mod tests {
         assert!(failed.error.retryable());
         assert!(matches!(
             failed.error,
-            HandleOperationError::DbOperationFailed {
+            WorkflowHandleError::DatabaseOperationFailed {
                 cause: WorkflowError::Broker(BrokerError::ConnectionFailed(_)),
                 ..
             }
@@ -383,7 +405,10 @@ mod tests {
         let _ = transition_outcome(
             Transition::Pause,
             workflow(),
-            Err(handle_error(HandleErrorCode::ResumeRecoveryFailed, false)),
+            Err(handle_error(
+                WorkflowHandleErrorCode::ResumeRecoveryFailed,
+                false,
+            )),
         );
     }
 }

@@ -12,8 +12,8 @@ import type {
   AttemptEnded,
   AttemptRecord,
   AttemptRecorded,
-  Execution,
 } from "../../../horsies/src/_catalog/events.ts";
+import type { Execution } from "../../../horsies/src/_catalog/monitoring_models.ts";
 import type { WireJson } from "../../../horsies/src/_catalog/wire_json.ts";
 import { refusalText, withItem } from "./support/wire-items.ts";
 
@@ -117,7 +117,7 @@ const EXPECTED: ReadonlyMap<string, AnyEvent> = new Map<string, AnyEvent>([
       queue: "default",
       execution: "SHARED_ASYNC",
       attempt: 1,
-      childKind: "ISOLATED",
+      childExecution: "ISOLATED",
       childPid: 4242,
       slotWait: Temporal.Duration.from({ microseconds: 250 }),
     },
@@ -154,7 +154,7 @@ const EXPECTED: ReadonlyMap<string, AnyEvent> = new Map<string, AnyEvent>([
       2,
       {
         kind: "reportedByChild",
-        result: { kind: "failed", errorCode: { kind: "user", code: "RATE_LIMITED" } },
+        result: { kind: "failed", errorCode: { kind: "custom", code: "RATE_LIMITED" } },
         start: { kind: "reported", startedAt: STARTED_AT },
       },
       Temporal.Duration.from({ seconds: 2 }),
@@ -167,7 +167,7 @@ const EXPECTED: ReadonlyMap<string, AnyEvent> = new Map<string, AnyEvent>([
       1,
       {
         kind: "reportedByChild",
-        result: { kind: "failed", errorCode: { kind: "library", code: "TASK_EXCEPTION" } },
+        result: { kind: "failed", errorCode: { kind: "builtIn", code: "TASK_EXCEPTION" } },
         start: { kind: "notReported" },
       },
       Temporal.Duration.from({ milliseconds: 5 }),
@@ -255,7 +255,7 @@ const EXPECTED: ReadonlyMap<string, AnyEvent> = new Map<string, AnyEvent>([
     {
       kind: "ChildStarted",
       at: AT,
-      childKind: "SHARED_THREAD",
+      childExecution: "SHARED_THREAD",
       slot: 3,
       childPid: 4243,
       bootDuration: Temporal.Duration.from({ milliseconds: 850 }),
@@ -266,7 +266,7 @@ const EXPECTED: ReadonlyMap<string, AnyEvent> = new Map<string, AnyEvent>([
     {
       kind: "ChildReplaced",
       at: AT,
-      childKind: "ISOLATED",
+      childExecution: "ISOLATED",
       slot: 0,
       childPid: 4242,
       reason: "MEMORY_LIMIT",
@@ -277,12 +277,12 @@ const EXPECTED: ReadonlyMap<string, AnyEvent> = new Map<string, AnyEvent>([
     {
       kind: "SlotDown",
       at: AT,
-      childKind: "SHARED_ASYNC",
+      childExecution: "SHARED_ASYNC",
       slot: 1,
       cause: { kind: "resourceShortage", errno: "EMFILE" },
     },
   ],
-  ["slot_recovered", { kind: "SlotRecovered", at: AT, childKind: "SHARED_ASYNC", slot: 1 }],
+  ["slot_recovered", { kind: "SlotRecovered", at: AT, childExecution: "SHARED_ASYNC", slot: 1 }],
 ]);
 
 /**
@@ -424,7 +424,7 @@ void describe("the closed types of an event", () => {
     assert(event.kind === "AttemptEnded");
     assert(event.end.kind === "reportedByChild");
     assert(event.end.result.kind === "failed");
-    assert.deepEqual(event.end.result.errorCode, { kind: "library", code: "TASK_EXCEPTION" });
+    assert.deepEqual(event.end.result.errorCode, { kind: "builtIn", code: "TASK_EXCEPTION" });
   });
 
   void test("an internal field is checked and is not a member", () => {

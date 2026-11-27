@@ -57,7 +57,7 @@ from horsies import JsonValue
 def validate_input(
     *,
     data: dict[str, JsonValue],
-) -> TaskResult[dict[str, JsonValue], TaskError]:
+) -> Result[dict[str, JsonValue], TaskError]:
     ...
 ```
 

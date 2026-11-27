@@ -85,7 +85,7 @@ async fn a_send_inside_a_span_stores_the_carrier_of_its_send_span() {
     global::set_tracer_provider(provider.clone());
     global::set_text_map_propagator(TraceContextPropagator::new());
     let (database, worker) = covered_database().await;
-    let mut app = Horsies::new(AppConfig::for_database_url(database.url())).expect("the app");
+    let mut app = Horsies::new(AppConfig::from_database_url(database.url())).expect("the app");
     let echo_function = echo::register(&mut app).expect("register echo");
 
     let caller = Context::current_with_span(provider.tracer("caller").start("caller"));

@@ -27,8 +27,8 @@ fn sample() -> Value {
                 "input_json": "{\"day\":\"2026-11-17\"}",
                 "dependencies": [],
                 "args_from": {},
-                "workflow_ctx_from": [],
-                "allow_failed_deps": false,
+                "workflow_context_from": [],
+                "allow_failed_dependencies": false,
                 "join": {"kind": "ALL"},
                 "body": {
                     "kind": "TASK",
@@ -44,8 +44,8 @@ fn sample() -> Value {
                 "input_json": "{}",
                 "dependencies": [0],
                 "args_from": {"rows": 0},
-                "workflow_ctx_from": [],
-                "allow_failed_deps": false,
+                "workflow_context_from": [],
+                "allow_failed_dependencies": false,
                 "join": {"kind": "ALL"},
                 "body": {
                     "kind": "SUB_WORKFLOW",
@@ -60,8 +60,8 @@ fn sample() -> Value {
                 "input_json": "{}",
                 "dependencies": [0, 1],
                 "args_from": {},
-                "workflow_ctx_from": ["fetch"],
-                "allow_failed_deps": true,
+                "workflow_context_from": ["fetch"],
+                "allow_failed_dependencies": true,
                 "join": {"kind": "QUORUM", "min_success": 1},
                 "body": {
                     "kind": "TASK",
@@ -118,7 +118,7 @@ fn a_spec_reads_into_the_core_spec_and_its_queue_classes() {
         Some("{\"good_until\":\"2026-11-18T00:00:00+00:00\"}")
     );
     assert_eq!(fetch.good_until, None);
-    assert_eq!(fetch.workflow_ctx_from, None);
+    assert_eq!(fetch.workflow_context_from, None);
     assert!(!fetch.is_subworkflow);
 
     let report = &spec.tasks[1];
@@ -129,15 +129,18 @@ fn a_spec_reads_into_the_core_spec_and_its_queue_classes() {
         report.sub_definition_key.as_deref(),
         Some("tests.report.v1")
     );
-    assert_eq!(report.sub_workflow_params, SubWorkflowParams::NotGiven);
+    assert_eq!(report.sub_workflow_params, SubWorkflowParameters::NotGiven);
     assert_eq!(report.dependencies, vec![0]);
     assert_eq!(report.args_from, HashMap::from([("rows".to_owned(), 0)]));
 
     let publish = &spec.tasks[2];
     assert_eq!(publish.join, JoinType::Quorum);
     assert_eq!(publish.min_success, Some(1));
-    assert!(publish.allow_failed_deps);
-    assert_eq!(publish.workflow_ctx_from, Some(vec!["fetch".to_owned()]));
+    assert!(publish.allow_failed_dependencies);
+    assert_eq!(
+        publish.workflow_context_from,
+        Some(vec!["fetch".to_owned()])
+    );
     assert_eq!(publish.task_options_json, None);
     assert_eq!(publish.node_id.as_deref(), Some("publish"));
 }

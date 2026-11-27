@@ -21,11 +21,11 @@ import pytest
 from sqlalchemy import text
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode
+from horsies.core.models.tasks import OperationalCode, OutcomeCode
 from horsies.core.task_decorator import TaskHandle
 
 from tests.broker_resources_support import current_resources
-from tests.e2e.helpers.assertions import assert_ok, unwrap_send
+from tests.e2e.helpers.assertions import read_succeeded, succeeded_value, unwrap_send
 from tests.e2e.helpers.db import wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
@@ -50,7 +50,7 @@ def _make_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(basic_tasks.healthcheck.send())
-        return handle.get(timeout_ms=2000).is_ok()
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
@@ -63,7 +63,7 @@ def _make_thread_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(shared_thread_tasks.thread_sleep.send(seconds=0))
-        return handle.get(timeout_ms=2000).is_ok()
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
@@ -75,9 +75,8 @@ READY_CHECKS: dict[str, Callable[[], Callable[[], bool]]] = {
 
 
 async def _value(handle: TaskHandle[str]) -> str:
-    result = await asyncio.to_thread(handle.get, timeout_ms=RESULT_TIMEOUT_MS)
-    assert_ok(result)
-    return result.unwrap()
+    result = await asyncio.to_thread(handle.get, wait_ms=RESULT_TIMEOUT_MS)
+    return succeeded_value(result)
 
 
 async def _rows(
@@ -106,10 +105,9 @@ async def test_thread_tasks_run_at_once_and_a_timeout_leaves_neighbours_finished
     ):
         isolated = unwrap_send(await basic_tasks.pid_task.send_async())
         isolated_result = await asyncio.to_thread(
-            isolated.get, timeout_ms=RESULT_TIMEOUT_MS
+            isolated.get, wait_ms=RESULT_TIMEOUT_MS
         )
-        assert_ok(isolated_result)
-        isolated_pid = str(isolated_result.unwrap())
+        isolated_pid = str(succeeded_value(isolated_result))
         hang = unwrap_send(await shared_thread_tasks.thread_hang.send_async())
         sleepers = [
             unwrap_send(
@@ -233,6 +231,6 @@ async def test_a_thread_row_with_no_stored_timeout_fails_once(
             result = json.loads(text_value)
         case decoded:
             result = decoded
-    assert row.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value
+    assert row.error_code == OperationalCode.WORKER_SERIALIZATION_ERROR.value
     assert row.retry_count == 0
     assert '"field": "timeout_ms"' in json.dumps(result)

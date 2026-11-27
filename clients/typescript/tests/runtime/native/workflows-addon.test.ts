@@ -18,7 +18,7 @@ import { buildCoreHandle, type CoreHandle } from "../../../horsies/src/native/ha
 import type { NativeSendRules } from "../../../horsies/src/native/sends/addon.ts";
 import { checkAppConfig } from "../../../horsies/src/native/sends/sends.ts";
 import { type ChildSpecSourceFunction, workflowsAddon } from "../../../horsies/src/native/workflows/addon.ts";
-import { DEFAULT_QUEUE_PRIORITY } from "../../../horsies/src/send/bounds.ts";
+import { DEFAULT_QUEUE_PRIORITY } from "../../../horsies/src/_catalog/send_bounds.ts";
 import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
 import { addonConversionFacts } from "../../../horsies/src/workflow/core.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
@@ -97,13 +97,13 @@ describe("the spec data parse of the addon", () => {
 /** The send rules of the accepted config of `queues` with a database URL. */
 function sendRulesOf(queues: QueueConfigInput): NativeSendRules {
   const broker = { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } } as const;
-  const config = parseAppConfig({ ...queues, broker }, () => undefined);
+  const config = parseAppConfig({ ...queues, database: broker }, () => undefined);
 
   if (!config.ok) {
     assert.fail(`the config is refused: ${JSON.stringify(config.error)}`);
   }
 
-  const checked = checkAppConfig(config.value.coreConfigJson);
+  const checked = checkAppConfig(config.value.coreConfigJson, config.value.schemaMode);
 
   if (checked.kind !== "accepted") {
     assert.fail(`the core refuses the config: ${JSON.stringify(checked.refusals)}`);
@@ -119,7 +119,7 @@ function conversionFactsOf(
 ): ReturnType<typeof addonConversionFacts> {
   const handle = buildCoreHandle(manifestJson(UNUSED_DATABASE_URL, false), "PRODUCER");
 
-  return addonConversionFacts({ handle, rules, options: new Map(), queueNames, resendOnTransientErr: false });
+  return addonConversionFacts({ handle, rules, options: new Map(), queueNames, resendOnTransientError: false });
 }
 
 describe("the conversion facts of a main thread, from the core", () => {
@@ -154,11 +154,11 @@ describe("the child spec source registration", () => {
 });
 
 describe("the workflow reads of a workflow that does not exist, with a database", () => {
-  test("the status is the class HandleWorkflowNotFound", async () => {
+  test("the status is the class WorkflowHandleNotFound", async () => {
     const handle = testHandle();
     const read = envelopeValue(await workflowsAddon().workflowStatus(handle.native, randomUUID()));
 
-    assert.equal(read.kind === "failed" ? read.error.class : read.kind, "HandleWorkflowNotFound");
+    assert.equal(read.kind === "failed" ? read.error.class : read.kind, "WorkflowHandleNotFound");
     await handle.close();
   });
 

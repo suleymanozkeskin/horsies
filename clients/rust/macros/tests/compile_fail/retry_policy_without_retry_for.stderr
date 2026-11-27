@@ -1,0 +1,19 @@
+error: `retry_policy` needs `retry_for`: the codes whose failures retry
+ --> tests/compile_fail/retry_policy_without_retry_for.rs:5:15
+  |
+5 | #[task("bad", retry_policy = RetryPolicy::fixed(vec![1], true).expect("a valid policy"))]
+  |               ^^^^^^^^^^^^
+
+warning: unused import: `std::convert::Infallible`
+ --> tests/compile_fail/retry_policy_without_retry_for.rs:1:5
+  |
+1 | use std::convert::Infallible;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `RetryPolicy` and `TaskError`
+ --> tests/compile_fail/retry_policy_without_retry_for.rs:3:21
+  |
+3 | use horsies::{task, RetryPolicy, TaskError};
+  |                     ^^^^^^^^^^^  ^^^^^^^^^

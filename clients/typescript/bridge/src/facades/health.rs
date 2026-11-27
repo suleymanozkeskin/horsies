@@ -1,6 +1,6 @@
 //! The health reads on the handle: the worker ping, the worker state
-//! snapshots, the stale and expired task lists, and the class coverage and
-//! report.
+//! snapshots, the stale and expired task lists, and the execution class
+//! coverage and report.
 //!
 //! - Each read connects the handle's broker and installs the schema once
 //!   per handle, as a send does (Rust `Horsies::ping_workers` and the reads
@@ -11,7 +11,7 @@
 //!   is not a whole number above 0, a history limit or a stale threshold
 //!   outside its rule) is `INVALID_INPUT`, answered at once with no connect.
 //! - The reads write nothing but the schema install. Failures are the raw
-//!   record of the core's `BrokerOperationError`, with the read as the
+//!   record of the core's `DatabaseOperationError`, with the read as the
 //!   subject of its exception.
 
 use std::future::Future;
@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use horsies_core::handle::HandleListener;
 use horsies_core::{
-    checked_history_limit, ping_listener_disabled, BrokerError, BrokerOperationError,
-    BrokerOperationFailedCode, BrokerOperationSource, PostgresBroker, StaleMinutes,
+    checked_history_limit, ping_listener_disabled, BrokerError, BrokerOperationSource,
+    DatabaseOperationError, DatabaseOperationFailedCode, PostgresBroker, StaleMinutes,
     StaleThresholdRefusal,
 };
 use napi::bindgen_prelude::{Object, ToNapiValue};
@@ -33,8 +33,8 @@ use crate::call::operation::{guarded_start, spawn_operation};
 use crate::call::thrown::Envelope;
 use crate::facades::answer::answered_at_once;
 use crate::facades::health_records::{
-    ClassCoverageRecord, ClassReportRecord, ExpiredTaskList, StaleTaskList, WorkerPongRecord,
-    WorkerStateRecord,
+    ExecutionClassCoverageRecord, ExecutionClassReportRecord, ExpiredTaskList, StaleTaskList,
+    WorkerPongRecord, WorkerStateRecord,
 };
 use crate::facades::monitoring_query::whole_number;
 use crate::handle::core_handle::{BrokerConnection, CoreHandle};
@@ -115,17 +115,17 @@ pub fn ping_workers<'env>(
     env: &'env Env,
     handle: &CoreHandle,
     target: PingTargetArg,
-    timeout_ms: f64,
+    wait_ms: f64,
     min_responses: MinResponsesArg,
 ) -> napi::Result<Object<'env>> {
     let subject = "ping_workers";
     let listener = handle.connection().lazy_handle().listener();
-    let check = move || ping_request(target, timeout_ms, &min_responses, listener);
+    let check = move || ping_request(target, wait_ms, &min_responses, listener);
     health_read(
         env,
         handle,
         subject,
-        BrokerOperationFailedCode::WorkerPingFailed,
+        DatabaseOperationFailedCode::WorkerPingFailed,
         check,
         |broker, request| async move {
             let target_worker_id = match &request.target {
@@ -255,31 +255,42 @@ pub fn get_expired_tasks<'env>(env: &'env Env, handle: &CoreHandle) -> napi::Res
 }
 
 /// For each pending stream, whether a live worker can run it.
-#[napi(ts_return_type = "Promise<NativeEnvelope<NativeOutcome<ClassCoverageRecord>>>")]
-pub fn get_class_coverage<'env>(env: &'env Env, handle: &CoreHandle) -> napi::Result<Object<'env>> {
+#[napi(ts_return_type = "Promise<NativeEnvelope<NativeOutcome<ExecutionClassCoverageRecord>>>")]
+pub fn get_execution_class_coverage<'env>(
+    env: &'env Env,
+    handle: &CoreHandle,
+) -> napi::Result<Object<'env>> {
     monitoring_read(
         env,
         handle,
-        "get_class_coverage",
+        "get_execution_class_coverage",
         || Ok(()),
         |broker, ()| async move {
             broker
-                .get_class_coverage()
+                .get_execution_class_coverage()
                 .await
-                .map(ClassCoverageRecord::from)
+                .map(ExecutionClassCoverageRecord::from)
         },
     )
 }
 
 /// The pending streams and the budget load of each live worker.
-#[napi(ts_return_type = "Promise<NativeEnvelope<NativeOutcome<ClassReportRecord>>>")]
-pub fn get_class_report<'env>(env: &'env Env, handle: &CoreHandle) -> napi::Result<Object<'env>> {
+#[napi(ts_return_type = "Promise<NativeEnvelope<NativeOutcome<ExecutionClassReportRecord>>>")]
+pub fn get_execution_class_report<'env>(
+    env: &'env Env,
+    handle: &CoreHandle,
+) -> napi::Result<Object<'env>> {
     monitoring_read(
         env,
         handle,
-        "get_class_report",
+        "get_execution_class_report",
         || Ok(()),
-        |broker, ()| async move { broker.get_class_report().await.map(ClassReportRecord::from) },
+        |broker, ()| async move {
+            broker
+                .get_execution_class_report()
+                .await
+                .map(ExecutionClassReportRecord::from)
+        },
     )
 }
 
@@ -294,11 +305,11 @@ fn monitoring_read<'env, Arg, Record, Check, Read, Answer>(
 where
     Arg: Send + 'static,
     Record: ToNapiValue + Send + 'static,
-    Check: FnOnce() -> Result<Arg, BrokerOperationError>,
+    Check: FnOnce() -> Result<Arg, DatabaseOperationError>,
     Read: FnOnce(Arc<PostgresBroker>, Arg) -> Answer + Send + 'static,
-    Answer: Future<Output = Result<Record, BrokerOperationError>> + Send + 'static,
+    Answer: Future<Output = Result<Record, DatabaseOperationError>> + Send + 'static,
 {
-    let code = BrokerOperationFailedCode::MonitoringQueryFailed;
+    let code = DatabaseOperationFailedCode::MonitoringQueryFailed;
     health_read(env, handle, subject, code, check, read)
 }
 
@@ -309,16 +320,16 @@ fn health_read<'env, Arg, Record, Check, Read, Answer>(
     env: &'env Env,
     handle: &CoreHandle,
     subject: &'static str,
-    code: BrokerOperationFailedCode,
+    code: DatabaseOperationFailedCode,
     check: Check,
     read: Read,
 ) -> napi::Result<Object<'env>>
 where
     Arg: Send + 'static,
     Record: ToNapiValue + Send + 'static,
-    Check: FnOnce() -> Result<Arg, BrokerOperationError>,
+    Check: FnOnce() -> Result<Arg, DatabaseOperationError>,
     Read: FnOnce(Arc<PostgresBroker>, Arg) -> Answer + Send + 'static,
-    Answer: Future<Output = Result<Record, BrokerOperationError>> + Send + 'static,
+    Answer: Future<Output = Result<Record, DatabaseOperationError>> + Send + 'static,
 {
     match guarded_start(subject, || Ok(check())) {
         Err(thrown) => answered_at_once(env, Envelope::<Outcome<Record>>::Thrown(thrown)),
@@ -340,12 +351,12 @@ where
 async fn initialized_read<Record, Read, Answer>(
     connection: BrokerConnection,
     subject: &'static str,
-    code: BrokerOperationFailedCode,
+    code: DatabaseOperationFailedCode,
     read: Read,
 ) -> Outcome<Record>
 where
     Read: FnOnce(Arc<PostgresBroker>) -> Answer,
-    Answer: Future<Output = Result<Record, BrokerOperationError>>,
+    Answer: Future<Output = Result<Record, DatabaseOperationError>>,
 {
     let broker = match connection.lazy_handle().initialized_broker().await {
         Ok(broker) => broker,
@@ -361,11 +372,11 @@ where
 /// text of the Python and Rust clients (`{read} failed: {error}`) and the
 /// broker error as its cause. Pure.
 fn connect_failure(
-    code: BrokerOperationFailedCode,
+    code: DatabaseOperationFailedCode,
     read: &str,
     error: BrokerError,
-) -> BrokerOperationError {
-    BrokerOperationError::operation_failed(
+) -> DatabaseOperationError {
+    DatabaseOperationError::operation_failed(
         code,
         format!("{read} failed: {error}"),
         BrokerOperationSource::Broker(error),
@@ -377,13 +388,13 @@ fn connect_failure(
 /// listener. A handle with no listener is `LISTENER_DISABLED`. Pure.
 fn ping_request(
     target: PingTargetArg,
-    timeout_ms: f64,
+    wait_ms: f64,
     min_responses: &MinResponsesArg,
     listener: HandleListener,
-) -> Result<PingRequest, BrokerOperationError> {
-    let window = match positive_count(timeout_ms) {
+) -> Result<PingRequest, DatabaseOperationError> {
+    let window = match positive_count(wait_ms) {
         Some(milliseconds) => Duration::from_millis(milliseconds),
-        None => return Err(refused_count("timeoutMs", timeout_ms)),
+        None => return Err(refused_count("waitMs", wait_ms)),
     };
     let min_responses = match min_responses {
         MinResponsesArg::FullWindow => None,
@@ -407,7 +418,7 @@ fn ping_request(
 
 /// The checked limit of a history read: `None` reads every retained
 /// snapshot. A limit of 0 or less is refused with the core's text. Pure.
-fn history_limit(limit: &HistoryLimitArg) -> Result<Option<i64>, BrokerOperationError> {
+fn history_limit(limit: &HistoryLimitArg) -> Result<Option<i64>, DatabaseOperationError> {
     match limit {
         HistoryLimitArg::AllRetained => Ok(None),
         HistoryLimitArg::Newest { count } => match whole_number("limit.count", *count) {
@@ -418,7 +429,7 @@ fn history_limit(limit: &HistoryLimitArg) -> Result<Option<i64>, BrokerOperation
 }
 
 /// The checked stale threshold, with the core's text for a refusal. Pure.
-fn stale_threshold(minutes: f64) -> Result<StaleMinutes, BrokerOperationError> {
+fn stale_threshold(minutes: f64) -> Result<StaleMinutes, DatabaseOperationError> {
     let refusal = match whole_number("thresholdMinutes", minutes) {
         Ok(whole) => match StaleMinutes::parse(whole) {
             Ok(threshold) => return Ok(threshold),
@@ -442,19 +453,21 @@ fn positive_count(value: f64) -> Option<u64> {
 
 /// `INVALID_INPUT` for a count of `field` that is not a whole number above
 /// 0. Pure.
-fn refused_count(field: &str, value: f64) -> BrokerOperationError {
-    BrokerOperationError::invalid_input(format!(
+fn refused_count(field: &str, value: f64) -> DatabaseOperationError {
+    DatabaseOperationError::invalid_input(format!(
         "{field} must be a whole number from 1 to 9007199254740991, got {value}"
     ))
 }
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::BrokerErrorCode;
+    use horsies_core::DatabaseErrorCode;
 
     use super::*;
 
-    fn code_of<T: std::fmt::Debug>(refused: Result<T, BrokerOperationError>) -> BrokerErrorCode {
+    fn code_of<T: std::fmt::Debug>(
+        refused: Result<T, DatabaseOperationError>,
+    ) -> DatabaseErrorCode {
         match refused {
             Err(error) => error.code(),
             Ok(value) => panic!("a refusal, got {value:?}"),
@@ -489,7 +502,7 @@ mod tests {
                     &MinResponsesArg::FullWindow,
                     HandleListener::Process
                 )),
-                BrokerErrorCode::InvalidInput,
+                DatabaseErrorCode::InvalidInput,
                 "{refused}"
             );
         }
@@ -506,7 +519,7 @@ mod tests {
                     &min,
                     HandleListener::Process
                 )),
-                BrokerErrorCode::InvalidInput,
+                DatabaseErrorCode::InvalidInput,
                 "{refused}"
             );
         }
@@ -532,7 +545,7 @@ mod tests {
                 &MinResponsesArg::FullWindow,
                 HandleListener::Disabled,
             )),
-            BrokerErrorCode::ListenerDisabled
+            DatabaseErrorCode::ListenerDisabled
         );
     }
 
@@ -549,7 +562,7 @@ mod tests {
         for refused in [0.0, -1.0, 2.5] {
             assert_eq!(
                 code_of(history_limit(&HistoryLimitArg::Newest { count: refused })),
-                BrokerErrorCode::InvalidInput,
+                DatabaseErrorCode::InvalidInput,
                 "{refused}"
             );
         }
@@ -568,7 +581,7 @@ mod tests {
         for refused in [-1.0, 525_601.0, 0.5] {
             assert_eq!(
                 code_of(stale_threshold(refused)),
-                BrokerErrorCode::InvalidInput,
+                DatabaseErrorCode::InvalidInput,
                 "{refused}"
             );
         }
@@ -577,11 +590,11 @@ mod tests {
     #[test]
     fn a_connect_failure_has_the_code_of_the_read_and_the_retry_rule_of_the_cause() {
         let failure = connect_failure(
-            BrokerOperationFailedCode::MonitoringQueryFailed,
+            DatabaseOperationFailedCode::MonitoringQueryFailed,
             "list_worker_states",
             BrokerError::ListenerClosed,
         );
-        assert_eq!(failure.code(), BrokerErrorCode::MonitoringQueryFailed);
+        assert_eq!(failure.code(), DatabaseErrorCode::MonitoringQueryFailed);
         assert_eq!(
             failure.retryable(),
             BrokerError::ListenerClosed.is_retryable()

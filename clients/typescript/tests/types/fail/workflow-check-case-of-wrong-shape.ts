@@ -9,9 +9,9 @@ const ping = defineTask({ name: "ping", input: { n: h.int() }, output: h.null() 
 export const flow = defineWorkflow(
   {
     name: "flow",
-    definitionKey: "tests.flow.v1", output: h.null(),
-    params: { n: h.int() },
+    definitionKey: "tests.flow.v1", outputType: h.null(),
+    parameters: { n: h.int() },
     checkCases: [{ n: "seven" }],
   },
-  (w, { n }) => ({ output: w.task(ping, { n }, { id: "ping" }) }),
+  (w, { n }) => ({ output: w.task(ping, { n }, { nodeId: "ping" }) }),
 );

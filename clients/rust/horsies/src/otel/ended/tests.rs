@@ -45,30 +45,30 @@ fn ended_at() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp_nanos(1_700_000_030_500_654_321)
 }
 
-/// One way the worker ends an attempt: its reason, and the kind of the
-/// child that ran it.
+/// One way the worker ends an attempt: its reason, and the execution class
+/// of the child that ran it.
 #[derive(Debug, Clone, Copy)]
 struct WorkerEnd {
     reason: WorkerDecision,
-    child_kind: Execution,
+    child_execution: Execution,
     code: &'static str,
 }
 
 const TIMEOUT_KILL: WorkerEnd = WorkerEnd {
     reason: WorkerDecision::TimedOut,
-    child_kind: Execution::Isolated,
+    child_execution: Execution::Isolated,
     code: "TASK_TIMEOUT",
 };
 
 const CRASH: WorkerEnd = WorkerEnd {
     reason: WorkerDecision::ChildLost,
-    child_kind: Execution::SharedThread,
+    child_execution: Execution::SharedThread,
     code: "WORKER_CRASHED",
 };
 
 const BLOCKED_LOOP: WorkerEnd = WorkerEnd {
     reason: WorkerDecision::TaskBlockedLoop,
-    child_kind: Execution::SharedAsync,
+    child_execution: Execution::SharedAsync,
     code: "TASK_BLOCKED_LOOP",
 };
 
@@ -86,7 +86,7 @@ fn ended_attempt<'a>(
         queue_name: QUEUE_NAME,
         attempt: AttemptNumber::try_from(2).unwrap(),
         worker_id: WORKER_ID,
-        execution: end.child_kind,
+        execution: end.child_execution,
         workflow,
         carrier,
         reason: end.reason,
@@ -147,7 +147,7 @@ fn each_end_makes_one_span_under_the_send_with_its_times_status_and_attributes()
             ("horsies.task.id", task_id_text.as_str()),
             ("horsies.task.name", TASK_NAME),
             ("horsies.task.attempt", "2"),
-            ("horsies.task.execution", end.child_kind.as_str()),
+            ("horsies.task.execution", end.child_execution.as_str()),
             ("horsies.worker.id", WORKER_ID),
             ("horsies.queue", QUEUE_NAME),
             ("messaging.system", "horsies"),
@@ -250,7 +250,7 @@ fn a_task_with_no_carrier_gets_a_root_span() {
 /// turns them off; the handler child makes them only with `MakeSpans`.
 #[test]
 fn the_switch_of_the_app_chooses_the_scope_of_the_handler_child() {
-    let mut app = Horsies::new(crate::AppConfig::for_database_url(
+    let mut app = Horsies::new(crate::AppConfig::from_database_url(
         "postgresql://localhost/horsies",
     ))
     .unwrap();

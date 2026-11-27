@@ -83,7 +83,7 @@ use super::run_work::{
     left_report, millis_since, stuck_report, Alive, CancelCause, Fire, PollsNow, RoundsEnd,
     RunCancelSignal, RunPolls, RunScope, SignalState, WorkWait, ISOLATED_LEFTOVER_GRACE,
 };
-use crate::core::task::error::{OperationalErrorCode, TaskError};
+use crate::core::task::error::{OperationalCode, TaskError};
 use crate::core::task::fencing::FencingToken;
 use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskModule};
 use crate::core::task::result::TaskResult;
@@ -318,7 +318,7 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame, scope: &R
         } => unreachable!("{NO_DEADLINE_IN_ISOLATED}"),
     }
     let end = match work {
-        IsolatedWork::Refusal(refusal) => refusal_end(&refusal),
+        IsolatedWork::Refusal(refusal) => refusal_end(&facts.task_name, &refusal),
         IsolatedWork::Run => match prepare(&context.app, &facts.task_name, &input) {
             Prepared::Ended(end) => end,
             Prepared::Body { task, input } => {
@@ -379,24 +379,24 @@ pub(super) async fn isolated_body(
 ) -> RawTaskResult {
     let span = body.span();
     let result = match task {
-        RegisteredTask::Async { task, meta } => joined_result(
+        RegisteredTask::Async { task, metadata } => joined_result(
             task_name,
-            meta.module,
+            metadata.module,
             scope
                 .spawn_body(task_name, async_body_in(task, input, span))
                 .await,
         ),
-        RegisteredTask::Blocking { task, meta } => {
+        RegisteredTask::Blocking { task, metadata } => {
             let name = task_name.to_owned();
             let token = scope.fencing_token();
             let cancel = scope.cancel_signal();
             let thread = tokio::task::spawn_blocking(move || {
-                run_blocking_body(&task, &input, &name, meta.module, &span, token, cancel)
+                run_blocking_body(&task, &input, &name, metadata.module, &span, token, cancel)
             });
             match thread.await {
                 Ok(result) => result,
-                Err(error) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledException,
+                Err(error) => TaskResult::Err(TaskError::built_in(
+                    OperationalCode::UnhandledException,
                     format!(
                         "the thread of blocking task '{task_name}' ended with no result: {error}"
                     ),
@@ -783,9 +783,10 @@ async fn async_seat(seat: AsyncSeat, run: SharedRunFrame, work: AsyncSeatWork) {
                     },
                     _,
                 ) => unreachable!("{NO_DEADLINE_BEFORE_BODY}"),
-                (SignalState::NotFired, AsyncSeatWork::Refusal(refusal)) => {
-                    (SeatEnd::Finished(refusal_end(&refusal)), Marker::Write)
-                }
+                (SignalState::NotFired, AsyncSeatWork::Refusal(refusal)) => (
+                    SeatEnd::Finished(refusal_end(&facts.task_name, &refusal)),
+                    Marker::Write,
+                ),
                 (SignalState::NotFired, AsyncSeatWork::Task { timeout, grace }) => {
                     let body = SeatBody {
                         run_ref,
@@ -830,8 +831,8 @@ fn joined_result(
     match joined {
         Ok(Ok(result)) => result,
         Ok(Err(record)) => TaskResult::Err(super::panic::panic_error(task_name, module, record)),
-        Err(error) => TaskResult::Err(TaskError::builtin(
-            OperationalErrorCode::UnhandledException,
+        Err(error) => TaskResult::Err(TaskError::built_in(
+            OperationalCode::UnhandledException,
             format!("the async body of task '{task_name}' ended with no result: {error}"),
         )),
     }
@@ -886,7 +887,7 @@ async fn async_body(
         match prepare(&context.app, &facts.task_name, input) {
             Prepared::Ended(end) => return (SeatEnd::Finished(end), Marker::Write),
             Prepared::Body { task, input } => match *task {
-                RegisteredTask::Async { task, meta } => (task, meta.module, input),
+                RegisteredTask::Async { task, metadata } => (task, metadata.module, input),
                 RegisteredTask::Blocking { .. } => {
                     return (
                         SeatEnd::Finished(kind_mismatch_end(&facts.task_name, "shared async")),
@@ -1348,7 +1349,8 @@ fn thread_seat(seat: &ThreadSeat, run: &SharedRunFrame, work: ThreadSeatWork) {
             };
             let (end, marker) = match work {
                 ThreadSeatWork::Refusal(refusal) => {
-                    end_without_body(context, run_ref, &seat.cancel.gate, refusal_end(&refusal))
+                    let end = refusal_end(&facts.task_name, &refusal);
+                    end_without_body(context, run_ref, &seat.cancel.gate, end)
                 }
                 ThreadSeatWork::Task { timeout } => {
                     let body = ThreadBody {
@@ -1601,7 +1603,7 @@ fn thread_body(seat: &ThreadSeat, body: &ThreadBody<'_>) -> (SeatEnd, Marker) {
     let (task, module, input) = match prepare(&context.app, &facts.task_name, input) {
         Prepared::Ended(end) => return end_without_body(context, run_ref, &cancel.gate, end),
         Prepared::Body { task, input } => match *task {
-            RegisteredTask::Blocking { task, meta } => (task, meta.module, input),
+            RegisteredTask::Blocking { task, metadata } => (task, metadata.module, input),
             RegisteredTask::Async { .. } => {
                 let end = kind_mismatch_end(&facts.task_name, "shared thread");
                 return end_without_body(context, run_ref, &cancel.gate, end);

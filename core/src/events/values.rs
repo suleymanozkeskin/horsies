@@ -21,7 +21,7 @@ use crate::core::config::worker_profile::{
 };
 use crate::core::task::Execution;
 use crate::core::{
-    BuiltInTaskCode, ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode, TaskErrorCode,
+    BuiltInTaskCode, ContractCode, OperationalCode, OutcomeCode, RetrievalCode, TaskErrorCode,
 };
 use crate::telemetry::labels::ReleaseReason;
 use crate::telemetry::trace_carrier::MAX_TRACE_CARRIER_BYTES;
@@ -37,9 +37,9 @@ pub const MAX_EVENT_TASK_NAME_CHARS: usize = 255;
 /// least one byte, so every queue name fits in an event.
 pub const MAX_EVENT_QUEUE_NAME_CHARS: usize = MAX_QUEUE_NAME_BYTES;
 
-/// The most characters of a user error code that an event carries. A longer
-/// code is [`AttemptErrorCode::UserOverBound`].
-pub const MAX_EVENT_USER_CODE_CHARS: usize = 128;
+/// The most characters of a custom error code that an event carries. A longer
+/// code is [`AttemptErrorCode::CustomOverBound`].
+pub const MAX_EVENT_CUSTOM_CODE_CHARS: usize = 128;
 
 /// The most characters of a stored trace carrier that an event carries: the
 /// byte bound of the stored text. A character has at least one byte, so every
@@ -70,9 +70,9 @@ pub type TaskName = BoundedText<MAX_EVENT_TASK_NAME_CHARS>;
 /// The name of a queue.
 pub type QueueName = BoundedText<MAX_EVENT_QUEUE_NAME_CHARS>;
 
-/// The text of a user error code, at most [`MAX_EVENT_USER_CODE_CHARS`]
+/// The text of a custom error code, at most [`MAX_EVENT_CUSTOM_CODE_CHARS`]
 /// characters.
-pub type UserCodeText = BoundedText<MAX_EVENT_USER_CODE_CHARS>;
+pub type CustomCodeText = BoundedText<MAX_EVENT_CUSTOM_CODE_CHARS>;
 
 /// The text of a stored trace carrier, at most
 /// [`MAX_EVENT_TRACE_CARRIER_CHARS`] characters.
@@ -99,7 +99,7 @@ pub const BUILT_IN_TASK_CODES: CodeUnion = CodeUnion {
     python_name: "BuiltInTaskCode",
     doc: "A built-in task error code: a member of one of the four built-in code catalogs.",
     catalogs: &[
-        <OperationalErrorCode as CodeEnum>::CATALOG,
+        <OperationalCode as CodeEnum>::CATALOG,
         <ContractCode as CodeEnum>::CATALOG,
         <RetrievalCode as CodeEnum>::CATALOG,
         <OutcomeCode as CodeEnum>::CATALOG,
@@ -110,7 +110,7 @@ impl EventValue for BuiltInTaskCode {
     const FORM: ValueForm = ValueForm::Codes(&BUILT_IN_TASK_CODES);
 
     fn to_wire(&self) -> Result<WireValue, EncodeRefusal> {
-        Ok(WireValue::String(self.value()))
+        Ok(WireValue::String(self.as_str().to_owned()))
     }
 
     fn from_wire(wire: &WireValue) -> Result<Self, DecodeRefusal> {
@@ -140,10 +140,10 @@ pub enum AttemptErrorCode {
     /// A built-in code of horsies.
     BuiltIn { code: BuiltInTaskCode },
     /// A code that the task chose, of at most 128 characters.
-    User { code: UserCodeText },
+    Custom { code: CustomCodeText },
     /// A code that the task chose, of more than 128 characters. The event
     /// does not carry it; the attempt row and the history row keep it.
-    UserOverBound,
+    CustomOverBound,
 }
 
 impl From<&TaskErrorCode> for AttemptErrorCode {
@@ -152,16 +152,18 @@ impl From<&TaskErrorCode> for AttemptErrorCode {
             TaskErrorCode::BuiltIn(built_in) => Self::BuiltIn {
                 code: built_in.clone(),
             },
-            TaskErrorCode::User(user) => match UserCodeText::new(user.as_str().to_owned()) {
-                Ok(text) => Self::User { code: text },
-                Err(_over_bound) => Self::UserOverBound,
-            },
+            TaskErrorCode::Custom(custom) => {
+                match CustomCodeText::new(custom.as_str().to_owned()) {
+                    Ok(text) => Self::Custom { code: text },
+                    Err(_over_bound) => Self::CustomOverBound,
+                }
+            }
         }
     }
 }
 
 /// How a run ended after an operator cancelled its task (`cancel_task` with
-/// `include_running`). The cancel statement recorded the attempt as
+/// the policy `INCLUDE_RUNNING`). The cancel statement recorded the attempt as
 /// `CANCELLED` and moved the task to history; what the body returned is
 /// dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::EventSchema)]
@@ -186,7 +188,7 @@ pub enum ChildResult {
     /// read. The attempt outcome is `FAILED`.
     Failed { error_code: AttemptErrorCode },
     /// The worker code of the child failed, not the task. The attempt
-    /// outcome is `WORKER_FAILURE`, with the code `BROKER_ERROR`.
+    /// outcome is `WORKER_FAILURE`, with the code `DATABASE_ERROR`.
     WorkerFailure,
     /// The deadline of a shared run fired in its child before the task
     /// ended, and the child ended the run at the deadline. The attempt
@@ -242,9 +244,9 @@ impl WorkerDecision {
     pub fn error_code(self) -> BuiltInTaskCode {
         match self {
             Self::TimedOut => OutcomeCode::TaskTimeout.into(),
-            Self::TaskBlockedLoop => OperationalErrorCode::TaskBlockedLoop.into(),
-            Self::NeighbourBlockedLoop => OperationalErrorCode::NeighbourBlockedLoop.into(),
-            Self::ChildLost => OperationalErrorCode::WorkerCrashed.into(),
+            Self::TaskBlockedLoop => OperationalCode::TaskBlockedLoop.into(),
+            Self::NeighbourBlockedLoop => OperationalCode::NeighbourBlockedLoop.into(),
+            Self::ChildLost => OperationalCode::WorkerCrashed.into(),
             Self::KilledAfterCancel | Self::LostAfterCancel => OutcomeCode::TaskCancelled.into(),
         }
     }
@@ -298,10 +300,10 @@ pub enum AttemptEnd {
         /// worker): the start of the span.
         #[event_schema(internal)]
         placed_at: DateTime<Utc>,
-        /// Internal: the kind of the child that ran the attempt, the
-        /// `horsies.task.execution` of the span.
+        /// Internal: the execution class of the child that ran the
+        /// attempt, the `horsies.task.execution` of the span.
         #[event_schema(internal)]
-        child_kind: Execution,
+        child_execution: Execution,
         /// Internal: the worker that claimed the task and ended the attempt.
         #[event_schema(internal)]
         worker_id: WorkerIdText,

@@ -14,9 +14,12 @@
 //!   `Variant` of the code enum; or `code_field = "field"` and
 //!   `code_subset = "Name"`: `code` is the field `field`, a `Literal`
 //!   subset `Name` that converts into the code enum (`From`);
-//! - `never_retryable`: `retryable: ClassVar[bool] = False`;
+//! - `never_retryable`: `retryable: ClassVar[bool] = False`; or
+//!   `always_retryable`: `retryable: ClassVar[bool] = True`, for a class whose
+//!   same call, unchanged, can succeed later. A variant takes at most one of the two;
 //! - `exception = "BaseException"` or `exception = "BaseException | NoCause"`:
-//!   the last slot, `exception`, the core's exception class of the cause.
+//!   the type of the last slot, `cause`, the core's exception class of the
+//!   cause.
 //!
 //! The variant's `///` lines are the class doc. Each named field other than
 //! the code field has one of:
@@ -24,7 +27,7 @@
 //! - `#[error_slot(python = "Type")]`, with `hidden` for
 //!   `field(repr=False)`: an instance field. `Type` is a variant of
 //!   `horsies_core::error_catalog::SlotType`.
-//! - `#[error_slot(cause)]`: the typed cause that the `exception` slot is
+//! - `#[error_slot(cause)]`: the typed cause that the `cause` slot is
 //!   built from (`horsies_core::error_catalog::ExceptionCause`). A variant
 //!   has at most one, and only with `exception`.
 //! - `#[error_slot(skip)]`: a field that the class does not show.
@@ -67,13 +70,15 @@ enum CodeSource {
     Field { field: Ident, subset: String },
 }
 
-/// Whether a class never clears.
+/// Whether a class has a fixed `retryable`: never, always, or none (a
+/// field of the variant gives it, or the class has no `retryable`).
 enum Retry {
     NeverRetryable,
+    AlwaysRetryable,
     ByField,
 }
 
-/// The declared type of the `exception` slot, when the class has one.
+/// The declared type of the `cause` slot, when the class has one.
 enum ExceptionSlot {
     Absent,
     Exception,
@@ -187,6 +192,11 @@ fn class_parts(variant: &Variant, code: &Path) -> syn::Result<ClassParts> {
         Retry::NeverRetryable => {
             slots.push(quote!(
                 ::horsies_core::error_catalog::ErrorSlot::NeverRetryable
+            ));
+        }
+        Retry::AlwaysRetryable => {
+            slots.push(quote!(
+                ::horsies_core::error_catalog::ErrorSlot::AlwaysRetryable
             ));
         }
         Retry::ByField => {}
@@ -383,7 +393,7 @@ fn values_arm(variant: &Variant) -> syn::Result<TokenStream> {
         (ExceptionSlot::Exception | ExceptionSlot::ExceptionOrNoCause, Some(cause)) => {
             bound.push(cause);
             values.push(slot_value(
-                "exception",
+                "cause",
                 quote!(::horsies_core::error_catalog::SlotData::Exception(
                     ::horsies_core::error_catalog::ExceptionCause::exception_value(#cause)
                 )),
@@ -418,7 +428,7 @@ enum Repr {
 /// What a field gives the class.
 enum FieldSlot {
     Skip,
-    /// The typed cause of the `exception` slot.
+    /// The typed cause of the `cause` slot.
     Cause,
     Slot {
         python_type: String,
@@ -504,7 +514,10 @@ fn class_settings(variant: &Variant) -> syn::Result<ClassSettings> {
                 .map(ToString::to_string)
                 .unwrap_or_default();
             match key.as_str() {
-                "never_retryable" => retry = Retry::NeverRetryable,
+                "never_retryable" => retry = fixed_retry(&retry, Retry::NeverRetryable, &meta)?,
+                "always_retryable" => {
+                    retry = fixed_retry(&retry, Retry::AlwaysRetryable, &meta)?;
+                }
                 "class" => class = Some(meta.value()?.parse::<LitStr>()?.value()),
                 "code" => member = Some(meta.value()?.parse::<LitStr>()?.parse::<Ident>()?),
                 "code_field" => {
@@ -526,7 +539,7 @@ fn class_settings(variant: &Variant) -> syn::Result<ClassSettings> {
                 }
                 _ => {
                     return Err(meta.error(
-                        "the error_class keys are class, code, code_field, code_subset, never_retryable and exception",
+                        "the error_class keys are class, code, code_field, code_subset, never_retryable, always_retryable and exception",
                     ))
                 }
             }
@@ -555,6 +568,21 @@ fn class_settings(variant: &Variant) -> syn::Result<ClassSettings> {
         retry,
         exception,
     })
+}
+
+/// The retry of a variant after one more retry key: `fixed`, when the
+/// variant has no fixed retry yet. A second retry key is refused.
+fn fixed_retry(
+    current: &Retry,
+    fixed: Retry,
+    meta: &syn::meta::ParseNestedMeta<'_>,
+) -> syn::Result<Retry> {
+    match current {
+        Retry::ByField => Ok(fixed),
+        Retry::NeverRetryable | Retry::AlwaysRetryable => {
+            Err(meta.error("error_class takes one of never_retryable and always_retryable, once"))
+        }
+    }
 }
 
 fn catalog_settings(attrs: &[Attribute], ident: &Ident) -> syn::Result<CatalogSettings> {
@@ -623,18 +651,18 @@ mod tests {
     #[test]
     fn a_class_records_its_code_its_retry_its_fields_and_its_cause() {
         let text = derive_text(syn::parse_quote! {
-            #[error_catalog(module = "broker_errors", code = "BrokerErrorCode", union = "BrokerCoreError", union_doc = "Every core failure.")]
+            #[error_catalog(module = "broker_errors", code = "DatabaseErrorCode", union = "DatabaseCoreError", union_doc = "Every core failure.")]
             enum BrokerError {
                 /// The id holds another command.
-                #[error_class(class = "BrokerPayloadMismatch", code = "PayloadMismatch", never_retryable)]
+                #[error_class(class = "DatabasePayloadMismatch", code = "PayloadMismatch", never_retryable)]
                 PayloadMismatch {
                     #[error_slot(python = "Str", hidden)]
                     message: String,
                 },
                 /// A broker operation failed.
-                #[error_class(class = "BrokerOperationFailed", code_field = "code", code_subset = "BrokerOperationFailedCode", exception = "BaseException")]
+                #[error_class(class = "DatabaseOperationFailed", code_field = "code", code_subset = "DatabaseOperationFailedCode", exception = "BaseException")]
                 OperationFailed {
-                    code: BrokerOperationFailedCode,
+                    code: DatabaseOperationFailedCode,
                     #[error_slot(python = "Str", hidden)]
                     message: String,
                     #[error_slot(python = "Bool")]
@@ -647,16 +675,16 @@ mod tests {
         .expect("the derive accepts the enum");
         assert!(text.contains("python_module:\"broker_errors\""), "{text}");
         assert!(text.contains(
-            "python_class:\"BrokerPayloadMismatch\",doc:\"Theidholdsanothercommand.\",slots:&[::horsies_core::error_catalog::ErrorSlot::CodeMember{member:\"PAYLOAD_MISMATCH\"},::horsies_core::error_catalog::ErrorSlot::NeverRetryable,::horsies_core::error_catalog::ErrorSlot::Field{name:\"message\",python_type:::horsies_core::error_catalog::SlotType::Str,repr:::horsies_core::error_catalog::SlotRepr::Hidden,},]"
+            "python_class:\"DatabasePayloadMismatch\",doc:\"Theidholdsanothercommand.\",slots:&[::horsies_core::error_catalog::ErrorSlot::CodeMember{member:\"PAYLOAD_MISMATCH\"},::horsies_core::error_catalog::ErrorSlot::NeverRetryable,::horsies_core::error_catalog::ErrorSlot::Field{name:\"message\",python_type:::horsies_core::error_catalog::SlotType::Str,repr:::horsies_core::error_catalog::SlotRepr::Hidden,},]"
         ), "{text}");
         assert!(text.contains(
-            "ErrorSlot::CodeSubset{subset:\"BrokerOperationFailedCode\"},::horsies_core::error_catalog::ErrorSlot::Field{name:\"message\""
+            "ErrorSlot::CodeSubset{subset:\"DatabaseOperationFailedCode\"},::horsies_core::error_catalog::ErrorSlot::Field{name:\"message\""
         ), "{text}");
         assert!(text.contains(
             "ErrorSlot::Field{name:\"retryable\",python_type:::horsies_core::error_catalog::SlotType::Bool,repr:::horsies_core::error_catalog::SlotRepr::Shown,},::horsies_core::error_catalog::ErrorSlot::Exception{python_type:::horsies_core::error_catalog::ExceptionType::Exception,},]"
         ), "{text}");
         assert!(
-            text.contains("Self::PayloadMismatch{..}=>BrokerErrorCode::PayloadMismatch"),
+            text.contains("Self::PayloadMismatch{..}=>DatabaseErrorCode::PayloadMismatch"),
             "{text}"
         );
         assert!(
@@ -664,9 +692,53 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("Self::OperationFailed{..}=>\"BrokerOperationFailed\""),
+            text.contains("Self::OperationFailed{..}=>\"DatabaseOperationFailed\""),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_class_whose_state_may_clear_records_a_retryable_that_is_always_true() {
+        let text = derive_text(syn::parse_quote! {
+            #[error_catalog(module = "task_send_errors", code = "TaskSendErrorCode", union = "U", union_doc = "u")]
+            enum SendError {
+                /// The key is held.
+                #[error_class(class = "TaskSendIdempotencyKeyConflict", code = "IdempotencyKeyConflict", always_retryable)]
+                IdempotencyKeyConflict {
+                    #[error_slot(python = "Str", hidden)]
+                    message: String,
+                },
+            }
+        })
+        .expect("the derive accepts the enum");
+        assert!(text.contains(
+            "slots:&[::horsies_core::error_catalog::ErrorSlot::CodeMember{member:\"IDEMPOTENCY_KEY_CONFLICT\"},::horsies_core::error_catalog::ErrorSlot::AlwaysRetryable,::horsies_core::error_catalog::ErrorSlot::Field{name:\"message\""
+        ), "{text}");
+    }
+
+    #[test]
+    fn two_retry_keys_on_one_variant_are_refused() {
+        for keys in [
+            quote::quote!(never_retryable, always_retryable),
+            quote::quote!(always_retryable, never_retryable),
+            quote::quote!(always_retryable, always_retryable),
+        ] {
+            let error = derive_text(syn::parse_quote! {
+                #[error_catalog(module = "m", code = "Code", union = "U", union_doc = "u")]
+                enum Failure {
+                    #[error_class(class = "Failed", code = "Failed", #keys)]
+                    Failed {
+                        #[error_slot(python = "Str", hidden)]
+                        message: String,
+                    },
+                }
+            })
+            .expect_err("the derive refuses the enum");
+            assert!(
+                error.contains("one of never_retryable and always_retryable"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -729,10 +801,10 @@ mod tests {
     #[test]
     fn the_values_follow_the_instance_slots_and_the_exception_comes_from_the_cause() {
         let text = values_text(syn::parse_quote! {
-            #[error_catalog(module = "broker_errors", code = "BrokerErrorCode", union = "U", union_doc = "u")]
+            #[error_catalog(module = "broker_errors", code = "DatabaseErrorCode", union = "U", union_doc = "u")]
             enum BrokerError {
                 /// A broker operation failed.
-                #[error_class(class = "BrokerOperationFailed", code_field = "code", code_subset = "Sub", exception = "BaseException")]
+                #[error_class(class = "DatabaseOperationFailed", code_field = "code", code_subset = "Sub", exception = "BaseException")]
                 OperationFailed {
                     code: Sub,
                     #[error_slot(python = "Str", hidden)]
@@ -766,7 +838,7 @@ mod tests {
              ::horsies_core::error_catalog::SlotValue{name:\"code\",value:::horsies_core::error_catalog::SlotData::member(&::horsies_core::error_catalog::ErrorEnum::error_code(self)),},\
              ::horsies_core::error_catalog::SlotValue{name:\"message\",value:::horsies_core::error_catalog::SlotData::Str(::core::convert::AsRef::<str>::as_ref(message)),},\
              ::horsies_core::error_catalog::SlotValue{name:\"retryable\",value:::horsies_core::error_catalog::SlotData::Bool(*retryable),},\
-             ::horsies_core::error_catalog::SlotValue{name:\"exception\",value:::horsies_core::error_catalog::SlotData::Exception(::horsies_core::error_catalog::ExceptionCause::exception_value(cause)),},]"
+             ::horsies_core::error_catalog::SlotValue{name:\"cause\",value:::horsies_core::error_catalog::SlotData::Exception(::horsies_core::error_catalog::ExceptionCause::exception_value(cause)),},]"
         ), "{text}");
         assert!(text.contains(
             "Self::NotCancellable{task_id,workflow_id,current_status,..}=>::std::vec![\

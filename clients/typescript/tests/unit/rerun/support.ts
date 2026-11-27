@@ -5,6 +5,7 @@ import type {
   AppRerunAnswer,
   CallerRowArg,
   CallerStatementRecord,
+  RegisteredTaskCodesArg,
   WriteDecodeRecord,
 } from "../../../horsies/src/native/facades/rerun.ts";
 import { TaskId } from "../../../horsies/src/contract/ids.ts";
@@ -19,7 +20,7 @@ import type {
   CallerTransaction,
 } from "../../../horsies/src/rerun/caller.ts";
 import type { RerunRequest } from "../../../horsies/src/rerun/parse.ts";
-import type { RerunCommand, RerunPolicy } from "../../../horsies/src/rerun/types.ts";
+import type { RerunCommand, RerunEnqueuePolicy } from "../../../horsies/src/rerun/types.ts";
 import type { Result } from "../../../horsies/src/wire/result.ts";
 
 /** The task id of a canonical UUID text. */
@@ -37,13 +38,21 @@ export const SOURCE_TASK_ID: TaskId = taskIdOf("01890a5d-ac96-774b-bcce-b302099a
 export const NEW_TASK_ID: TaskId = taskIdOf("01890a5d-ac96-774b-bcce-b302099a8058");
 
 /** An unkeyed command with no deadline. */
-export const COMMAND: RerunCommand = { sourceTaskId: SOURCE_TASK_ID, deadline: { kind: "none" } };
+export const COMMAND: RerunCommand = { sourceTaskId: SOURCE_TASK_ID, goodUntil: { kind: "none" } };
 
 /** A policy that keeps the new task for 7 days and keeps its input, with a key window of one day. */
-export const POLICY: RerunPolicy = {
-  retention: { kind: "days", days: 7 },
-  rerunInput: "keep",
+export const POLICY: RerunEnqueuePolicy = {
+  retention: { kind: "period", days: 7 },
+  retainRerunInput: "keep",
   reservationWindow: Temporal.Duration.from({ days: 1 }),
+};
+
+/** The declared custom codes of an app that lists two tasks: `charge` declares `CARD_DECLINED`, `ping` declares none. */
+export const CODES: RegisteredTaskCodesArg = {
+  tasks: [
+    { taskName: "charge", codes: ["CARD_DECLINED"] },
+    { taskName: "ping", codes: [] },
+  ],
 };
 
 /** The carrier of an active span. */
@@ -80,9 +89,20 @@ export const WRITE_STATEMENT: CallerStatementRecord = {
 
 /** The calls that a fake bridge got, in order. */
 export type BridgeCall =
-  | { readonly call: "rerunTask"; readonly handle: CoreHandle; readonly request: RerunRequest; readonly trace: TraceArgument }
+  | {
+      readonly call: "rerunTask";
+      readonly handle: CoreHandle;
+      readonly request: RerunRequest;
+      readonly trace: TraceArgument;
+      readonly codes: RegisteredTaskCodesArg;
+    }
   | { readonly call: "readStatement"; readonly request: RerunRequest }
-  | { readonly call: "prepareWrite"; readonly trace: TraceArgument; readonly readRow: CallerRowArg }
+  | {
+      readonly call: "prepareWrite";
+      readonly trace: TraceArgument;
+      readonly readRow: CallerRowArg;
+      readonly codes: RegisteredTaskCodesArg;
+    }
   | { readonly call: "decodeRow"; readonly row: CallerRowArg };
 
 /** The answers of a fake bridge. */
@@ -108,8 +128,8 @@ export function fakeBridge(answers: BridgeAnswers): { readonly bridge: RerunBrid
   return {
     calls,
     bridge: {
-      rerunTask: async (handle, request, trace) => {
-        calls.push({ call: "rerunTask", handle, request, trace });
+      rerunTask: async (handle, request, trace, codes) => {
+        calls.push({ call: "rerunTask", handle, request, trace, codes });
 
         return answers.rerunTask;
       },
@@ -118,8 +138,8 @@ export function fakeBridge(answers: BridgeAnswers): { readonly bridge: RerunBrid
 
         return READ_STATEMENT;
       },
-      prepareWrite: (_request, trace, readRow) => {
-        calls.push({ call: "prepareWrite", trace, readRow });
+      prepareWrite: (_request, trace, readRow, codes) => {
+        calls.push({ call: "prepareWrite", trace, readRow, codes });
 
         return answers.preparation === "write" ? { kind: "write", write } : answers.preparation;
       },

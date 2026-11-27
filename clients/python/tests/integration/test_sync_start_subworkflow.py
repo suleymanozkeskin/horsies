@@ -28,14 +28,14 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
     SubWorkflowNode,
     TaskNode,
     WorkflowDefinition,
     WorkflowSpec,
 )
-from horsies.core.types.result import is_ok
+from horsies.core.types.result import Ok, Result, is_ok
 from horsies.core.workflows.registry import (
     register_workflow_definition,
     unregister_workflow_definition,
@@ -65,14 +65,14 @@ SEEN_LOCK = threading.Lock()
 APP: Final = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(database_url=SecretStr(DB_URL)),
+        database=PostgresConfig(database_url=SecretStr(DB_URL)),
     ),
 )
 
 
-@APP.task(task_name='sync_start_subworkflow.value')
-def value_task(*, value: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=value)
+@APP.task(name='sync_start_subworkflow.value')
+def value_task(*, value: int) -> Result[int, TaskError]:
+    return Ok(value)
 
 
 class SyncStartChild(WorkflowDefinition[int]):
@@ -87,7 +87,7 @@ class SyncStartChild(WorkflowDefinition[int]):
     ) -> WorkflowSpec[int]:
         with SEEN_LOCK:
             SEEN.append(BuildSeen(value=value, thread_id=threading.get_ident()))
-        node: TaskNode[int] = TaskNode(fn=value_task, kwargs={'value': value})
+        node: TaskNode[int] = TaskNode(function=value_task, kwargs={'value': value})
         return app.workflow(cls.name, [node], output=node, definition_key=cls.definition_key)
 
 
@@ -137,7 +137,7 @@ def test_a_sync_start_with_a_sub_workflow_root_runs_build_with(
     registered_child: None,
 ) -> None:
     root: SubWorkflowNode[int] = SubWorkflowNode(
-        workflow_def=SyncStartChild, kwargs={'value': CHILD_VALUE},
+        workflow_definition=SyncStartChild, kwargs={'value': CHILD_VALUE},
     )
     spec = APP.workflow(
         'sync_start_subworkflow.parent',
@@ -159,7 +159,7 @@ def test_a_sync_start_with_a_sub_workflow_root_runs_build_with(
     assert [build.value for build in seen] == [CHILD_VALUE]
     assert seen[0].thread_id != caller_thread_id
     # The start wrote the pre-built child of the root.
-    tasks, _ = _on_a_thread(handle.tasks)
+    tasks, _ = _on_a_thread(handle.nodes)
     assert is_ok(tasks), tasks
     [node] = tasks.ok_value
     assert node.sub_workflow_id is not None

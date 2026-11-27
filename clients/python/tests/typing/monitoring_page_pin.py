@@ -10,11 +10,12 @@ makes an unneeded ignore comment an error, so a read that accepts a plain
 
 from __future__ import annotations
 
-from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.app import Horsies
 from horsies.core.history.reads.pages import HistoryWindow
 from horsies.monitoring import (
     BreakdownLimit,
     MonitoringWindow,
+    SortDirection,
     TaskPage,
     WorkflowRunsLimit,
     list_tasks,
@@ -23,26 +24,26 @@ from horsies.monitoring import (
 )
 
 
-async def a_plain_integer_is_not_a_limit(broker: PostgresBroker) -> None:
+async def a_plain_integer_is_not_a_limit(app: Horsies) -> None:
     await list_workflow_runs(
-        broker,
-        name=None,
+        app,
+        workflow_name=None,
         status=None,
         limit=30,  # pyright: ignore[reportArgumentType]
     )
 
 
 async def one_read_refuses_the_limit_of_another(
-    broker: PostgresBroker, window: MonitoringWindow,
+    app: Horsies, window: MonitoringWindow,
 ) -> None:
     await list_workflow_runs(
-        broker,
-        name=None,
+        app,
+        workflow_name=None,
         status=None,
         limit=BreakdownLimit(value=1),  # pyright: ignore[reportArgumentType]
     )
     await task_breakdown(
-        broker,
+        app,
         window=window,
         group_by='queue',
         statuses=[],
@@ -57,10 +58,10 @@ async def one_read_refuses_the_limit_of_another(
 
 
 async def a_plain_integer_is_not_a_page(
-    broker: PostgresBroker, window: MonitoringWindow,
+    app: Horsies, window: MonitoringWindow,
 ) -> None:
     await list_tasks(
-        broker,
+        app,
         window=window,
         statuses=[],
         task_names=[],
@@ -69,17 +70,17 @@ async def a_plain_integer_is_not_a_page(
         error_codes=[],
         error_categories=[],
         retried_only=False,
-        sort_by='enqueued_at',
-        sort_dir='desc',
+        sort_field='enqueued_at',
+        sort_direction=SortDirection.DESCENDING,
         page=50,  # pyright: ignore[reportArgumentType]
     )
 
 
 async def a_page_value_is_accepted(
-    broker: PostgresBroker, window: MonitoringWindow,
+    app: Horsies, window: MonitoringWindow,
 ) -> None:
     await list_tasks(
-        broker,
+        app,
         window=window,
         statuses=[],
         task_names=[],
@@ -88,17 +89,17 @@ async def a_page_value_is_accepted(
         error_codes=[],
         error_categories=[],
         retried_only=False,
-        sort_by='enqueued_at',
-        sort_dir='desc',
+        sort_field='enqueued_at',
+        sort_direction=SortDirection.DESCENDING,
         page=TaskPage(offset=0, limit=50),
     )
 
 
 async def a_history_window_is_not_a_monitoring_window(
-    broker: PostgresBroker, unbounded: HistoryWindow,
+    app: Horsies, unbounded: HistoryWindow,
 ) -> None:
     await list_tasks(
-        broker,
+        app,
         window=unbounded,  # pyright: ignore[reportArgumentType]
         statuses=[],
         task_names=[],
@@ -107,7 +108,7 @@ async def a_history_window_is_not_a_monitoring_window(
         error_codes=[],
         error_categories=[],
         retried_only=False,
-        sort_by='enqueued_at',
-        sort_dir='desc',
+        sort_field='enqueued_at',
+        sort_direction=SortDirection.DESCENDING,
         page=TaskPage(offset=0, limit=50),
     )

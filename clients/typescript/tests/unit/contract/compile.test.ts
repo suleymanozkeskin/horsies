@@ -31,6 +31,9 @@ function schemaOfRelease(version: { readonly major: number; readonly minor: numb
   return { ...schema, _zod: { ...schema._zod, version } } as unknown as ParameterSchema;
 }
 
+/** An upstream task of output `h.int()`, the source of an `h.taskOutcome` parameter. */
+const intSource = defineTask({ name: "int_source", input: {}, output: h.int() });
+
 /** A Standard Schema of another vendor. */
 const otherVendorSchema = { "~standard": { vendor: "valibot", version: 1 }, _zod: { def: { type: "string" } } } as const;
 
@@ -66,7 +69,7 @@ describe("compileContract", () => {
 
   test("a required upstream outcome makes the task workflow-node-only", () => {
     const outcome = compileContract(
-      defineTask({ name: "t", input: { upstream: h.resultOf(h.int()), n: h.int() }, output: h.null() }),
+      defineTask({ name: "t", input: { upstream: h.taskOutcome(intSource), n: h.int() }, output: h.null() }),
     );
 
     assert.deepEqual(outcome.ok ? outcome.value.send : undefined, { kind: "workflowNodeOnly", upstream: ["upstream"] });
@@ -74,7 +77,7 @@ describe("compileContract", () => {
 
   test("an optional upstream outcome is left out of the send form", () => {
     const outcome = compileContract(
-      defineTask({ name: "t", input: { upstream: h.resultOf(h.int()).optional(), n: h.int() }, output: h.null() }),
+      defineTask({ name: "t", input: { upstream: h.taskOutcome(intSource).optional(), n: h.int() }, output: h.null() }),
     );
 
     const send = outcome.ok ? outcome.value.send : undefined;
@@ -131,11 +134,11 @@ describe("compileContract", () => {
   });
 
   test("the kind of a parameter with a refused name is still checked", () => {
-    const contract = defineTask({ name: "t", input: { workflow_ctx: h.float().default(Number.NaN) }, output: h.null() });
+    const contract = defineTask({ name: "t", input: { workflow_context: h.float().default(Number.NaN) }, output: h.null() });
 
     assert.deepEqual(refusalsOf(contract), [
-      ["ParameterName", "input.workflow_ctx"],
-      ["WireKind", "input.workflow_ctx"],
+      ["ParameterName", "input.workflow_context"],
+      ["WireKind", "input.workflow_context"],
     ]);
   });
 
@@ -171,9 +174,9 @@ describe("compileContract", () => {
     assert.deepEqual(refusalsOf(contract), [["WireKind", "output"]]);
   });
 
-  test("an h.resultOf output is WireKind at output", () => {
+  test("an h.taskOutcome output is WireKind at output", () => {
     // SAFETY: as above, an output that the static type refuses.
-    const contract = defineTask({ name: "t", input: {}, output: h.resultOf(h.int()) as never });
+    const contract = defineTask({ name: "t", input: {}, output: h.taskOutcome(intSource) as never });
 
     assert.deepEqual(refusalsOf(contract), [["WireKind", "output"]]);
   });

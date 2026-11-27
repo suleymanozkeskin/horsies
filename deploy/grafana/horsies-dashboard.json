@@ -1447,7 +1447,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Child slots that are down, by kind.",
+      "description": "Child slots that are down, by execution.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1491,8 +1491,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (kind) (horsies_worker_slots_down)",
-          "legendFormat": "{{kind}}",
+          "expr": "sum by (execution) (horsies_worker_slots_down)",
+          "legendFormat": "{{execution}}",
           "refId": "A",
           "range": true
         }
@@ -1549,8 +1549,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (kind, reason) (increase(horsies_worker_children_replaced_total[$__rate_interval]))",
-          "legendFormat": "{{kind}} {{reason}}",
+          "expr": "sum by (execution, reason) (increase(horsies_worker_children_replaced_total[$__rate_interval]))",
+          "legendFormat": "{{execution}} {{reason}}",
           "refId": "A",
           "range": true
         }
@@ -1607,8 +1607,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.95, sum by (kind, le) (rate(horsies_worker_child_boot_duration_seconds_bucket[$__rate_interval])))",
-          "legendFormat": "{{kind}}",
+          "expr": "histogram_quantile(0.95, sum by (execution, le) (rate(horsies_worker_child_boot_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{execution}}",
           "refId": "A",
           "range": true
         }

@@ -29,7 +29,7 @@ class SendForm(Enum):
 
     RETRY_OF_ASYNC_CONTEXT = 'retry_of_async_context'
     """A blocking send on the thread of the running event loop, refused with
-    `ASYNC_CONTEXT` before any statement; then two `retry_send` calls with
+    `ASYNC_CONTEXT` before any statement; then two `resend` calls with
     its error, which write one task under the prepared id."""
 
 
@@ -77,7 +77,7 @@ class Health(Enum):
     PINGED = 'pinged'
     """After the actions: `ping_database`; `ping_workers` until each worker
     of the scenario answered, at most `PING_ATTEMPTS` pings of
-    `PING_WINDOW_S` (`send.py`); then a ping of the first worker that
+    `PING_WAIT_MS` (`send.py`); then a ping of the first worker that
     answered, by its id. The send process prints one ping line with the
     counts of the answers."""
 

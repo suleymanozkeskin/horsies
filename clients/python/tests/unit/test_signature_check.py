@@ -5,7 +5,8 @@ Covers the strict signature validator per design-doc §2:
 - Per-allowed-type acceptance.
 - Per-rejected-type rejection (Any, object, bare containers, bytes, set,
   TypedDict, TypeVar, Path, Callable, ...).
-- TaskResult[OkT, TaskError] return enforcement + custom-err rejection.
+- Result[OkT, TaskError] return enforcement + custom-err rejection.
+- TaskOutcome[OkT, TaskError] args_from parameters.
 - BaseModel / dataclass recursive field walk; INTERNAL_CODEC_TYPES exempt.
 - JsonValue position rules (boundary vs. generic-parameter).
 - Discriminated union acceptance via Annotated[..., Field(discriminator=...)].
@@ -35,7 +36,7 @@ from typing import (
 )
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from horsies.core.codec.json_value import JsonValue
 from horsies.core.codec.signature_check import (
@@ -43,12 +44,14 @@ from horsies.core.codec.signature_check import (
     SignatureValidationError,
     check_task_signature,
 )
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow.context import (
     SubWorkflowSummary,
     WorkflowContext,
-    WorkflowMeta,
+    WorkflowMetadata,
 )
+from horsies.core.types.result import Err, Ok, Result
 
 
 # ---------------------------------------------------------------------------
@@ -141,47 +144,47 @@ def _check(fn: Callable[..., Any], *, task_name: str = 'test_task') -> None:
 
 class TestAllowedScalars:
     def test_str_param(self) -> None:
-        def f(*, x: str) -> TaskResult[int, TaskError]: ...
+        def f(*, x: str) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_int_param(self) -> None:
-        def f(*, x: int) -> TaskResult[int, TaskError]: ...
+        def f(*, x: int) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_float_param(self) -> None:
-        def f(*, x: float) -> TaskResult[int, TaskError]: ...
+        def f(*, x: float) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_bool_param(self) -> None:
-        def f(*, x: bool) -> TaskResult[int, TaskError]: ...
+        def f(*, x: bool) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_datetime_param(self) -> None:
-        def f(*, x: datetime.datetime) -> TaskResult[int, TaskError]: ...
+        def f(*, x: datetime.datetime) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_date_param(self) -> None:
-        def f(*, x: datetime.date) -> TaskResult[int, TaskError]: ...
+        def f(*, x: datetime.date) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_time_param(self) -> None:
-        def f(*, x: datetime.time) -> TaskResult[int, TaskError]: ...
+        def f(*, x: datetime.time) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_uuid_param(self) -> None:
-        def f(*, x: uuid.UUID) -> TaskResult[int, TaskError]: ...
+        def f(*, x: uuid.UUID) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_decimal_param(self) -> None:
-        def f(*, x: decimal.Decimal) -> TaskResult[int, TaskError]: ...
+        def f(*, x: decimal.Decimal) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_enum_param(self) -> None:
-        def f(*, x: _Color) -> TaskResult[int, TaskError]: ...
+        def f(*, x: _Color) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_intenum_param(self) -> None:
-        def f(*, x: _Status) -> TaskResult[int, TaskError]: ...
+        def f(*, x: _Status) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_enum_with_non_scalar_value_rejected(self) -> None:
@@ -191,34 +194,34 @@ class TestAllowedScalars:
         fails enum-by-value decode on the consumer — the validator must
         reject it at registration instead.
         """
-        def f(*, x: _TupleValued) -> TaskResult[int, TaskError]: ...
+        def f(*, x: _TupleValued) -> Result[int, TaskError]: ...
         with pytest.raises(
             SignatureValidationError, match='JSON-native scalars'
         ):
             _check(f)
 
     def test_enum_with_mixed_scalar_values_allowed(self) -> None:
-        def f(*, x: _MixedScalarValued) -> TaskResult[int, TaskError]: ...
+        def f(*, x: _MixedScalarValued) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_enum_with_nan_value_rejected(self) -> None:
         """NaN is not JSON-native: it encodes to None on the wire, so the
         consumer can never reconstruct the member by value."""
-        def f(*, x: _NaNValued) -> TaskResult[int, TaskError]: ...
+        def f(*, x: _NaNValued) -> Result[int, TaskError]: ...
         with pytest.raises(
             SignatureValidationError, match='JSON-native scalars'
         ):
             _check(f)
 
     def test_enum_with_infinity_values_rejected(self) -> None:
-        def f(*, x: _InfValued) -> TaskResult[int, TaskError]: ...
+        def f(*, x: _InfValued) -> Result[int, TaskError]: ...
         with pytest.raises(
             SignatureValidationError, match='JSON-native scalars'
         ):
             _check(f)
 
     def test_enum_with_finite_float_value_allowed(self) -> None:
-        def f(*, x: _FiniteFloatValued) -> TaskResult[int, TaskError]: ...
+        def f(*, x: _FiniteFloatValued) -> Result[int, TaskError]: ...
         _check(f)
 
 
@@ -229,31 +232,31 @@ class TestAllowedScalars:
 
 class TestAllowedStructured:
     def test_basemodel_param(self) -> None:
-        def f(*, u: _User) -> TaskResult[int, TaskError]: ...
+        def f(*, u: _User) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_dataclass_param(self) -> None:
-        def f(*, o: _Order) -> TaskResult[int, TaskError]: ...
+        def f(*, o: _Order) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_list_of_primitive(self) -> None:
-        def f(*, xs: list[int]) -> TaskResult[int, TaskError]: ...
+        def f(*, xs: list[int]) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_dict_str_primitive(self) -> None:
-        def f(*, d: dict[str, int]) -> TaskResult[int, TaskError]: ...
+        def f(*, d: dict[str, int]) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_tuple_variadic(self) -> None:
-        def f(*, t: tuple[int, ...]) -> TaskResult[int, TaskError]: ...
+        def f(*, t: tuple[int, ...]) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_tuple_fixed_shape(self) -> None:
-        def f(*, t: tuple[int, str, bool]) -> TaskResult[int, TaskError]: ...
+        def f(*, t: tuple[int, str, bool]) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_nested_containers(self) -> None:
-        def f(*, xs: list[dict[str, list[int]]]) -> TaskResult[int, TaskError]: ...
+        def f(*, xs: list[dict[str, list[int]]]) -> Result[int, TaskError]: ...
         _check(f)
 
 
@@ -264,35 +267,35 @@ class TestAllowedStructured:
 
 class TestAllowedOptionalAnnotatedLiteral:
     def test_optional_primitive(self) -> None:
-        def f(*, x: Optional[int]) -> TaskResult[int, TaskError]: ...
+        def f(*, x: Optional[int]) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_pipe_none(self) -> None:
-        def f(*, x: int | None) -> TaskResult[int, TaskError]: ...
+        def f(*, x: int | None) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_optional_model(self) -> None:
-        def f(*, u: Optional[_User]) -> TaskResult[int, TaskError]: ...
+        def f(*, u: Optional[_User]) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_annotated_passthrough(self) -> None:
-        def f(*, x: Annotated[int, 'positive']) -> TaskResult[int, TaskError]: ...
+        def f(*, x: Annotated[int, 'positive']) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_literal_primitive(self) -> None:
-        def f(*, x: Literal['a', 'b', 'c']) -> TaskResult[int, TaskError]: ...
+        def f(*, x: Literal['a', 'b', 'c']) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_literal_int(self) -> None:
-        def f(*, x: Literal[1, 2, 3]) -> TaskResult[int, TaskError]: ...
+        def f(*, x: Literal[1, 2, 3]) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_literal_with_a_str_enum(self) -> None:
-        def f(*, x: Literal[_Text.A]) -> TaskResult[int, TaskError]: ...
+        def f(*, x: Literal[_Text.A]) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_literal_with_a_plain_enum_is_refused(self) -> None:
-        def f(*, x: Literal[_Color.RED, _Color.GREEN]) -> TaskResult[int, TaskError]: ...
+        def f(*, x: Literal[_Color.RED, _Color.GREEN]) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='Literal'):
             _check(f)
 
@@ -304,59 +307,59 @@ class TestAllowedOptionalAnnotatedLiteral:
 
 class TestAllowedUnions:
     def test_int_or_str(self) -> None:
-        def f(*, x: int | str) -> TaskResult[int, TaskError]: ...
+        def f(*, x: int | str) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_int_or_str_or_none(self) -> None:
-        def f(*, x: int | str | None) -> TaskResult[int, TaskError]: ...
+        def f(*, x: int | str | None) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_all_primitives_union(self) -> None:
-        def f(*, x: bool | int | float | str) -> TaskResult[int, TaskError]: ...
+        def f(*, x: bool | int | float | str) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_discriminated_union(self) -> None:
-        def f(*, p: _Pet) -> TaskResult[int, TaskError]: ...
+        def f(*, p: _Pet) -> Result[int, TaskError]: ...
         _check(f)
 
 
 # ---------------------------------------------------------------------------
-# Allowed: TaskResult ok-slot recursion, JsonValue at boundary
+# Allowed: Result ok-slot recursion, JsonValue at boundary
 # ---------------------------------------------------------------------------
 
 
 class TestAllowedReturnAndJsonValue:
     def test_return_with_model_ok(self) -> None:
-        def f() -> TaskResult[_User, TaskError]: ...
+        def f() -> Result[_User, TaskError]: ...
         _check(f)
 
     def test_return_with_list_ok(self) -> None:
-        def f() -> TaskResult[list[int], TaskError]: ...
+        def f() -> Result[list[int], TaskError]: ...
         _check(f)
 
     def test_return_with_jsonvalue_ok(self) -> None:
-        def f() -> TaskResult[JsonValue, TaskError]: ...
+        def f() -> Result[JsonValue, TaskError]: ...
         _check(f)
 
     def test_return_with_dict_jsonvalue_ok(self) -> None:
-        def f() -> TaskResult[dict[str, JsonValue], TaskError]: ...
+        def f() -> Result[dict[str, JsonValue], TaskError]: ...
         _check(f)
 
     def test_return_with_list_jsonvalue_ok(self) -> None:
-        def f() -> TaskResult[list[JsonValue], TaskError]: ...
+        def f() -> Result[list[JsonValue], TaskError]: ...
         _check(f)
 
     def test_jsonvalue_param(self) -> None:
-        def f(*, payload: JsonValue) -> TaskResult[int, TaskError]: ...
+        def f(*, payload: JsonValue) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_jsonvalue_in_dict_param(self) -> None:
-        def f(*, d: dict[str, JsonValue]) -> TaskResult[int, TaskError]: ...
+        def f(*, d: dict[str, JsonValue]) -> Result[int, TaskError]: ...
         _check(f)
 
-    def test_taskresult_as_kwarg(self) -> None:
-        # Common workflow pattern: downstream consumes upstream's TaskResult.
-        def f(*, upstream: TaskResult[_User, TaskError]) -> TaskResult[int, TaskError]: ...
+    def test_outcome_as_kwarg(self) -> None:
+        # Common workflow pattern: downstream consumes upstream's TaskOutcome.
+        def f(*, upstream: TaskOutcome[_User, TaskError]) -> Result[int, TaskError]: ...
         _check(f)
 
 
@@ -367,22 +370,26 @@ class TestAllowedReturnAndJsonValue:
 
 class TestInternalTypesExempt:
     def test_workflow_context_param(self) -> None:
-        def f(*, ctx: WorkflowContext) -> TaskResult[int, TaskError]: ...
+        def f(*, ctx: WorkflowContext) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_workflow_meta_param(self) -> None:
-        def f(*, meta: WorkflowMeta) -> TaskResult[int, TaskError]: ...
+        def f(*, meta: WorkflowMetadata) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_internal_codec_types_contains_expected(self) -> None:
         assert TaskError in INTERNAL_CODEC_TYPES
         assert WorkflowContext in INTERNAL_CODEC_TYPES
-        assert WorkflowMeta in INTERNAL_CODEC_TYPES
+        assert WorkflowMetadata in INTERNAL_CODEC_TYPES
         assert SubWorkflowSummary in INTERNAL_CODEC_TYPES
 
-    def test_internal_codec_types_does_not_contain_taskresult(self) -> None:
-        # TaskResult is a structural codec primitive, NOT in INTERNAL_CODEC_TYPES.
-        assert TaskResult not in INTERNAL_CODEC_TYPES
+    def test_internal_codec_types_does_not_contain_result_or_outcome(self) -> None:
+        # Result (Ok / Err) and TaskOutcome (Succeeded / Failed) are
+        # structural codec primitives, NOT in INTERNAL_CODEC_TYPES.
+        assert Ok not in INTERNAL_CODEC_TYPES
+        assert Err not in INTERNAL_CODEC_TYPES
+        assert Succeeded not in INTERNAL_CODEC_TYPES
+        assert Failed not in INTERNAL_CODEC_TYPES
 
 
 # ---------------------------------------------------------------------------
@@ -392,54 +399,80 @@ class TestInternalTypesExempt:
 
 class TestRejectedAnyObject:
     def test_any_param_rejected(self) -> None:
-        def f(*, x: Any) -> TaskResult[int, TaskError]: ...
+        def f(*, x: Any) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='banned type `Any`'):
             _check(f)
 
     def test_object_param_rejected(self) -> None:
-        def f(*, x: object) -> TaskResult[int, TaskError]: ...
+        def f(*, x: object) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='banned type `object`'):
             _check(f)
 
     def test_any_in_return_ok_slot_rejected(self) -> None:
-        def f() -> TaskResult[Any, TaskError]: ...
+        def f() -> Result[Any, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='banned type `Any`'):
             _check(f)
 
     def test_dict_str_any_rejected(self) -> None:
-        def f(*, d: dict[str, Any]) -> TaskResult[int, TaskError]: ...
+        def f(*, d: dict[str, Any]) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='banned type `Any`'):
             _check(f)
 
     def test_list_any_rejected(self) -> None:
-        def f(*, xs: list[Any]) -> TaskResult[int, TaskError]: ...
+        def f(*, xs: list[Any]) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='banned type `Any`'):
             _check(f)
 
-    def test_taskresult_dict_str_any_rejected(self) -> None:
-        def f() -> TaskResult[dict[str, Any], TaskError]: ...
+    def test_result_dict_str_any_rejected(self) -> None:
+        def f() -> Result[dict[str, Any], TaskError]: ...
         with pytest.raises(SignatureValidationError, match='banned type `Any`'):
             _check(f)
 
 
 class TestRejectedBareContainers:
     def test_bare_dict_rejected(self) -> None:
-        def f(*, d: dict) -> TaskResult[int, TaskError]: ...  # pyright: ignore[reportMissingTypeArgument, reportUnknownParameterType]
+        def f(*, d: dict) -> Result[int, TaskError]: ...  # pyright: ignore[reportMissingTypeArgument, reportUnknownParameterType]
         with pytest.raises(SignatureValidationError, match='bare dict'):
             _check(f)  # pyright: ignore[reportUnknownArgumentType]
 
     def test_bare_list_rejected(self) -> None:
-        def f(*, xs: list) -> TaskResult[int, TaskError]: ...  # pyright: ignore[reportMissingTypeArgument, reportUnknownParameterType]
+        def f(*, xs: list) -> Result[int, TaskError]: ...  # pyright: ignore[reportMissingTypeArgument, reportUnknownParameterType]
         with pytest.raises(SignatureValidationError, match='bare list'):
             _check(f)  # pyright: ignore[reportUnknownArgumentType]
 
     def test_bare_tuple_rejected(self) -> None:
-        def f(*, t: tuple) -> TaskResult[int, TaskError]: ...  # pyright: ignore[reportMissingTypeArgument, reportUnknownParameterType]
+        def f(*, t: tuple) -> Result[int, TaskError]: ...  # pyright: ignore[reportMissingTypeArgument, reportUnknownParameterType]
         with pytest.raises(SignatureValidationError, match='bare tuple'):
             _check(f)  # pyright: ignore[reportUnknownArgumentType]
 
+    def test_tuple_rest_item_rejected(self) -> None:
+        def f(*, t: tuple[int, *tuple[bool, ...]]) -> Result[int, TaskError]: ...
+        with pytest.raises(SignatureValidationError, match='unpacked item') as info:
+            _check(f, task_name='rest_task')
+        message = str(info.value)
+        assert 'rest_task' in message
+        assert 't' in info.value.detail.headline
+        assert 'tuple[T, ...]' in info.value.detail.fix
+
+    def test_tuple_rest_item_in_head_rejected(self) -> None:
+        def f(*, t: tuple[*tuple[bool, ...], int]) -> Result[int, TaskError]: ...
+        with pytest.raises(SignatureValidationError, match='unpacked item'):
+            _check(f)
+
+    def test_tuple_rest_item_nested_in_list_rejected(self) -> None:
+        def f(*, t: list[tuple[int, *tuple[bool, ...]]]) -> Result[int, TaskError]: ...
+        with pytest.raises(SignatureValidationError, match='unpacked item'):
+            _check(f)
+
+    def test_pydantic_stores_rest_item_nested(self) -> None:
+        """The reason for the refusal: pydantic reads this annotation as a nested tuple."""
+        adapter = TypeAdapter(tuple[int, *tuple[bool, ...]])
+        assert adapter.dump_python((1, (True, False)), mode='json') == [1, [True, False]]  # pyright: ignore[reportArgumentType]  # the nested value is the form this test pins
+        with pytest.raises(ValidationError):
+            adapter.validate_python([1, True, False])
+
     def test_dict_nonstr_key_rejected(self) -> None:
-        def f(*, d: dict[int, str]) -> TaskResult[int, TaskError]: ...
+        def f(*, d: dict[int, str]) -> Result[int, TaskError]: ...
         with pytest.raises(
             SignatureValidationError,
             match='dict key type must be str',
@@ -454,52 +487,52 @@ class TestRejectedBareContainers:
 
 class TestRejectedExoticTypes:
     def test_bytes_rejected(self) -> None:
-        def f(*, x: bytes) -> TaskResult[int, TaskError]: ...
+        def f(*, x: bytes) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='bytes'):
             _check(f)
 
     def test_set_rejected(self) -> None:
-        def f(*, xs: set[int]) -> TaskResult[int, TaskError]: ...
+        def f(*, xs: set[int]) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='set'):
             _check(f)
 
     def test_frozenset_rejected(self) -> None:
-        def f(*, xs: frozenset[int]) -> TaskResult[int, TaskError]: ...
+        def f(*, xs: frozenset[int]) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='frozenset'):
             _check(f)
 
     def test_path_rejected(self) -> None:
-        def f(*, p: pathlib.Path) -> TaskResult[int, TaskError]: ...
+        def f(*, p: pathlib.Path) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='filesystem-local'):
             _check(f)
 
     def test_purepath_rejected(self) -> None:
-        def f(*, p: pathlib.PurePath) -> TaskResult[int, TaskError]: ...
+        def f(*, p: pathlib.PurePath) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='filesystem-local'):
             _check(f)
 
     def test_typeddict_rejected(self) -> None:
-        def f(*, u: _UserTypedDict) -> TaskResult[int, TaskError]: ...
+        def f(*, u: _UserTypedDict) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='TypedDict'):
             _check(f)
 
     def test_unbounded_typevar_rejected(self) -> None:
-        def f(*, x: _UnboundedTV) -> TaskResult[int, TaskError]: ...  # pyright: ignore[reportInvalidTypeVarUse]
+        def f(*, x: _UnboundedTV) -> Result[int, TaskError]: ...  # pyright: ignore[reportInvalidTypeVarUse]
         with pytest.raises(SignatureValidationError, match='TypeVar'):
             _check(f)
 
     def test_bounded_typevar_rejected(self) -> None:
-        def f(*, x: _BoundedTV) -> TaskResult[int, TaskError]: ...  # pyright: ignore[reportInvalidTypeVarUse]
+        def f(*, x: _BoundedTV) -> Result[int, TaskError]: ...  # pyright: ignore[reportInvalidTypeVarUse]
         with pytest.raises(SignatureValidationError, match='TypeVar'):
             _check(f)
 
     def test_callable_rejected(self) -> None:
-        def f(*, cb: Callable[[int], int]) -> TaskResult[int, TaskError]: ...
+        def f(*, cb: Callable[[int], int]) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='Callable'):
             _check(f)
 
     def test_bare_basemodel_rejected(self) -> None:
-        def f(*, m: BaseModel) -> TaskResult[int, TaskError]: ...
+        def f(*, m: BaseModel) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='bare'):
             _check(f)
 
@@ -511,45 +544,45 @@ class TestRejectedExoticTypes:
 
 class TestRejectedUnions:
     def test_bare_model_union_rejected(self) -> None:
-        def f(*, p: _Cat | _Dog) -> TaskResult[int, TaskError]: ...
+        def f(*, p: _Cat | _Dog) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='discriminator'):
             _check(f)
 
     def test_mixed_union_model_int_rejected(self) -> None:
-        def f(*, x: _User | int) -> TaskResult[int, TaskError]: ...
+        def f(*, x: _User | int) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='discriminator'):
             _check(f)
 
     def test_mixed_primitive_with_datetime_rejected(self) -> None:
-        def f(*, x: datetime.datetime | str) -> TaskResult[int, TaskError]: ...
+        def f(*, x: datetime.datetime | str) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError):
             _check(f)
 
 
 # ---------------------------------------------------------------------------
-# Rejected: TaskResult return shape
+# Rejected: Result return shape
 # ---------------------------------------------------------------------------
 
 
 class TestRejectedReturnShape:
-    def test_non_taskresult_return_rejected(self) -> None:
+    def test_non_result_return_rejected(self) -> None:
         def f() -> int: ...
         with pytest.raises(
             SignatureValidationError,
-            match='return type must be TaskResult',
+            match='return type must be Result',
         ):
             _check(f)
 
-    def test_taskresult_wrong_err_type_rejected(self) -> None:
-        def f() -> TaskResult[int, ValueError]: ...
+    def test_result_wrong_err_type_rejected(self) -> None:
+        def f() -> Result[int, ValueError]: ...
         with pytest.raises(
             SignatureValidationError,
             match='error parameter must be TaskError',
         ):
             _check(f)
 
-    def test_taskresult_with_object_err_type_rejected(self) -> None:
-        def f() -> TaskResult[int, Exception]: ...
+    def test_result_with_object_err_type_rejected(self) -> None:
+        def f() -> Result[int, Exception]: ...
         with pytest.raises(SignatureValidationError):
             _check(f)
 
@@ -566,7 +599,7 @@ class TestVariadics:
     # reverted.
 
     def test_var_positional_rejected_even_when_typed(self) -> None:
-        def f(*values: int) -> TaskResult[int, TaskError]: ...
+        def f(*values: int) -> Result[int, TaskError]: ...
         with pytest.raises(
             SignatureValidationError,
             match=r'\*args \(VAR_POSITIONAL\)',
@@ -574,7 +607,7 @@ class TestVariadics:
             _check(f)
 
     def test_var_keyword_rejected_even_when_typed(self) -> None:
-        def f(**values: int) -> TaskResult[int, TaskError]: ...
+        def f(**values: int) -> Result[int, TaskError]: ...
         with pytest.raises(
             SignatureValidationError,
             match=r'\*\*kwargs \(VAR_KEYWORD\)',
@@ -582,12 +615,12 @@ class TestVariadics:
             _check(f)
 
     def test_var_positional_untyped_rejected(self) -> None:
-        def f(*args) -> TaskResult[int, TaskError]: ...  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+        def f(*args) -> Result[int, TaskError]: ...  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         with pytest.raises(SignatureValidationError):
             _check(f)  # pyright: ignore[reportUnknownArgumentType]
 
     def test_var_keyword_untyped_rejected(self) -> None:
-        def f(**kw) -> TaskResult[int, TaskError]: ...  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+        def f(**kw) -> Result[int, TaskError]: ...  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         with pytest.raises(SignatureValidationError):
             _check(f)  # pyright: ignore[reportUnknownArgumentType]
 
@@ -596,7 +629,7 @@ class TestVariadics:
         # args at every producer, so a positional-only param would
         # register cleanly but could never be invoked via the queue's
         # kwargs-only path. Reject at registration to fail loudly.
-        def f(x: int, /) -> TaskResult[int, TaskError]: ...
+        def f(x: int, /) -> Result[int, TaskError]: ...
         with pytest.raises(
             SignatureValidationError,
             match='positional-only',
@@ -604,7 +637,7 @@ class TestVariadics:
             _check(f)
 
     def test_positional_only_mixed_with_keyword_rejected(self) -> None:
-        def f(x: int, /, y: int) -> TaskResult[int, TaskError]: ...
+        def f(x: int, /, y: int) -> Result[int, TaskError]: ...
         with pytest.raises(
             SignatureValidationError,
             match='positional-only',
@@ -620,7 +653,7 @@ class TestKeywordOnly:
     # registration so the mistake cannot be written.
 
     def test_positional_or_keyword_rejected(self) -> None:
-        def f(x: int) -> TaskResult[int, TaskError]: ...
+        def f(x: int) -> Result[int, TaskError]: ...
         with pytest.raises(
             SignatureValidationError,
             match='keyword-only',
@@ -628,17 +661,17 @@ class TestKeywordOnly:
             _check(f)
 
     def test_keyword_only_accepted(self) -> None:
-        def f(*, x: int) -> TaskResult[int, TaskError]: ...
+        def f(*, x: int) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_no_arg_task_accepted(self) -> None:
-        def f() -> TaskResult[int, TaskError]: ...
+        def f() -> Result[int, TaskError]: ...
         _check(f)
 
     def test_first_positional_among_keyword_only_rejected(self) -> None:
         # One plain param ahead of keyword-only params still fails: every
         # param must be keyword-only, and the validator stops at the first.
-        def f(x: int, *, y: int) -> TaskResult[int, TaskError]: ...
+        def f(x: int, *, y: int) -> Result[int, TaskError]: ...
         with pytest.raises(
             SignatureValidationError,
             match='keyword-only',
@@ -646,7 +679,7 @@ class TestKeywordOnly:
             _check(f)
 
     def test_fix_message_names_the_star_syntax(self) -> None:
-        def f(x: int) -> TaskResult[int, TaskError]: ...
+        def f(x: int) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match=r'\*,'):
             _check(f)
 
@@ -673,7 +706,7 @@ class _ModelWithDictAnyField(BaseModel):
 
 class TestRecursiveFieldWalk:
     def test_basemodel_field_with_any_rejected(self) -> None:
-        def f(*, m: _ModelWithAnyField) -> TaskResult[int, TaskError]: ...
+        def f(*, m: _ModelWithAnyField) -> Result[int, TaskError]: ...
         with pytest.raises(
             SignatureValidationError,
             match="BaseModel field '_ModelWithAnyField.payload'",
@@ -681,7 +714,7 @@ class TestRecursiveFieldWalk:
             _check(f)
 
     def test_dataclass_field_with_any_rejected(self) -> None:
-        def f(*, m: _DataclassWithAnyField) -> TaskResult[int, TaskError]: ...
+        def f(*, m: _DataclassWithAnyField) -> Result[int, TaskError]: ...
         with pytest.raises(
             SignatureValidationError,
             match="dataclass field '_DataclassWithAnyField.payload'",
@@ -689,18 +722,18 @@ class TestRecursiveFieldWalk:
             _check(f)
 
     def test_basemodel_field_dict_str_any_rejected(self) -> None:
-        def f(*, m: _ModelWithDictAnyField) -> TaskResult[int, TaskError]: ...
+        def f(*, m: _ModelWithDictAnyField) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='Any'):
             _check(f)
 
     def test_taskerror_walk_skipped(self) -> None:
         # TaskError has `data: Optional[Any]` etc. — only safe because it's
         # exempt. If the walk weren't skipped, this would fail.
-        def f(*, err: TaskError) -> TaskResult[int, TaskError]: ...
+        def f(*, err: TaskError) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_workflow_context_walk_skipped(self) -> None:
-        def f(*, ctx: WorkflowContext) -> TaskResult[int, TaskError]: ...
+        def f(*, ctx: WorkflowContext) -> Result[int, TaskError]: ...
         _check(f)
 
 
@@ -723,7 +756,7 @@ class TestJsonValuePositions:
         # generic-arg walker sees `JsonValue` and rejects via the
         # "JsonValue may not appear as a generic parameter of a user
         # type" branch in `_classify`.
-        def f(*, c: _UserContainer[JsonValue]) -> TaskResult[int, TaskError]: ...
+        def f(*, c: _UserContainer[JsonValue]) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError):
             _check(f)
 
@@ -767,22 +800,22 @@ class TestGenericBaseModelParameterized:
         # `Box[int]` as a banned TypeVar. The walk now uses
         # `model_fields[name].annotation`, which Pydantic substitutes
         # to the concrete `int`.
-        def f(*, b: _Box[int]) -> TaskResult[int, TaskError]: ...
+        def f(*, b: _Box[int]) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_box_str_accepted(self) -> None:
-        def f(*, b: _Box[str]) -> TaskResult[int, TaskError]: ...
+        def f(*, b: _Box[str]) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_nested_generic_accepted(self) -> None:
-        def f(*, b: _NestedBox[int]) -> TaskResult[int, TaskError]: ...
+        def f(*, b: _NestedBox[int]) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_generic_substitution_with_any_still_rejected(self) -> None:
         # Substituting `Any` at the generic-arg position must still fail —
         # the generic-arg loop classifies each substitution at
         # `json_value_allowed_position=False` and the Any check fires.
-        def f(*, b: _Box[Any]) -> TaskResult[int, TaskError]: ...
+        def f(*, b: _Box[Any]) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError, match='Any'):
             _check(f)
 
@@ -827,15 +860,15 @@ class TestRecursiveModels:
         # raw RecursionError at @app.task time (not even a
         # SignatureValidationError, since the task_decorator only catches
         # the latter).
-        def f(*, n: _RecursiveNode) -> TaskResult[int, TaskError]: ...
+        def f(*, n: _RecursiveNode) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_self_referential_dataclass_does_not_recursion_error(self) -> None:
-        def f(*, d: _RecursiveDC) -> TaskResult[int, TaskError]: ...
+        def f(*, d: _RecursiveDC) -> Result[int, TaskError]: ...
         _check(f)
 
     def test_mutually_recursive_basemodels(self) -> None:
-        def f(*, a: _MutualA) -> TaskResult[int, TaskError]: ...
+        def f(*, a: _MutualA) -> Result[int, TaskError]: ...
         _check(f)
 
 
@@ -846,7 +879,7 @@ class TestRecursiveModels:
 
 class TestErrorMessageShape:
     def test_error_names_task_position_banned_fix_docs(self) -> None:
-        def f(*, x: Any) -> TaskResult[int, TaskError]: ...
+        def f(*, x: Any) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError) as exc_info:
             check_task_signature(f, task_name='my_task')
         msg = str(exc_info.value)
@@ -858,7 +891,7 @@ class TestErrorMessageShape:
         assert 'internals/serialization/' in msg
 
     def test_error_for_return_names_return_position(self) -> None:
-        def f() -> TaskResult[Any, TaskError]: ...
+        def f() -> Result[Any, TaskError]: ...
         with pytest.raises(SignatureValidationError) as exc_info:
             check_task_signature(f, task_name='my_task')
         assert 'return' in str(exc_info.value).lower()
@@ -866,7 +899,7 @@ class TestErrorMessageShape:
     def test_error_for_banned_var_positional_names_param(self) -> None:
         # `*args` now rejected at the variadic check before the element-type
         # check is reached; the error names the variadic position.
-        def f(*args: Any) -> TaskResult[int, TaskError]: ...
+        def f(*args: Any) -> Result[int, TaskError]: ...
         with pytest.raises(SignatureValidationError) as exc_info:
             check_task_signature(f, task_name='my_task')
         assert "parameter '*args'" in str(exc_info.value)
@@ -882,7 +915,7 @@ class TestMissingAnnotations:
         # Strict validator rejects missing annotations directly. (There is
         # no existing `TASK_PARAM_NO_TYPE` check in errors.py; the only
         # adjacent code, HRS-100 TASK_NO_RETURN_TYPE, handles return only.)
-        def f(*, x) -> TaskResult[int, TaskError]: ...  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+        def f(*, x) -> Result[int, TaskError]: ...  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         with pytest.raises(
             SignatureValidationError,
             match='parameter has no type annotation',

@@ -20,7 +20,8 @@ import pytest
 from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import Execution, TaskError, TaskResult
+from horsies.core.models.tasks import Execution, TaskError
+from horsies.core.types.result import Ok, Result
 from horsies.core.worker.row_class import (
     registered_task_classes,
 )
@@ -65,23 +66,23 @@ class TestRegisteredClasses:
     def test_a_real_app_registers_each_declared_class(self) -> None:
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr('postgresql://u:p@localhost/db'),
                 ),
             ),
         )
 
         @app.task('plain')
-        def plain() -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedFunction]
-            return TaskResult(ok=1)
+        def plain() -> Result[int, TaskError]:  # pyright: ignore[reportUnusedFunction]
+            return Ok(1)
 
         @app.task('awaited', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
-        async def awaited() -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedFunction]
-            return TaskResult(ok=1)
+        async def awaited() -> Result[int, TaskError]:  # pyright: ignore[reportUnusedFunction]
+            return Ok(1)
 
         @app.task('threaded', execution=Execution.SHARED_THREAD, timeout_ms=1000)
-        def threaded() -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedFunction]
-            return TaskResult(ok=1)
+        def threaded() -> Result[int, TaskError]:  # pyright: ignore[reportUnusedFunction]
+            return Ok(1)
 
         classes = registered_task_classes(
             (name, task.task_options_json) for name, task in app.tasks.items()

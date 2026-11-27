@@ -59,7 +59,7 @@ export type RequiredWire = Wire<unknown, unknown, "required", "value">;
 export type Result<T, E> = Ok<T> | Err<E>;
 
 // @public
-export type Role = "value" | "resultOf";
+export type Role = "value" | "taskOutcome";
 
 // @public
 export type SentOf<W extends AnyWire> = W[typeof wireSent];
@@ -80,7 +80,7 @@ export interface Wire<V, S = V, P extends Presence = "required", R extends Role 
     readonly [wireSent]: S;
     // (undocumented)
     readonly [wireValue]: V;
-    default(value: S): Wire<V, S, "defaulted", R>;
+    default(value: S | (() => S)): Wire<V, S, "defaulted", R>;
     nullable(): Wire<V | null, S | null, P, R>;
     optional(): Wire<V, S, "optional", R>;
 }

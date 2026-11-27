@@ -31,6 +31,11 @@
 //! A converter writes the members of a value in the model's order, the tag
 //! first for a variant. In the wire value an integer is a `bigint` and an
 //! object is a `Map`. The package writes the text with its codec writer.
+//!
+//! A choice that another rendered module declares with the same text is
+//! shared: the manifest module imports it from that module and declares
+//! none. The worker manifest shares `Execution` with the monitoring models,
+//! so the package has one type of the core's execution class.
 
 use horsies_core::manifest_schema::{
     IntBound, ManifestField, ManifestModule, ManifestShape, ManifestType, MemberDefault,
@@ -38,9 +43,11 @@ use horsies_core::manifest_schema::{
     WORKER_MANIFEST, WORKFLOW_SPEC_DATA,
 };
 
+use crate::events::SharedType;
 use crate::model::{
     field_value_type, manifest_type_name, tagged_variant_type_name, ItemType, ValueType,
 };
+use crate::monitoring_models::{self, MONITORING_MODELS_MODULE};
 use crate::output::{catalog_file, GeneratedFile};
 use crate::ts_text::{
     bigint_literal, camel_case_of_pascal, import_types, integer_literal, is_identifier,
@@ -90,17 +97,67 @@ const BODY_INDENT: &str = "  ";
 /// The indent of a statement of a `case` of a converter's `switch`.
 const CASE_INDENT: &str = "      ";
 
-/// The files of the manifest modules, in a fixed order. Pure.
+/// The choices of the worker manifest that it imports: the execution
+/// class, the core's one `Execution`, which the monitoring models declare.
+const WORKER_MANIFEST_SHARED_TYPES: &[SharedType] = &[SharedType {
+    name: "Execution",
+    module: MONITORING_MODELS_MODULE,
+}];
+
+/// The files of the manifest modules, in a fixed order. The render panics
+/// when a shared type of the worker manifest is declared otherwise in its
+/// module.
 pub fn generated_files() -> Vec<GeneratedFile> {
+    let monitoring: Vec<(&str, String)> = monitoring_models::generated_files()
+        .iter()
+        .map(|file| (MONITORING_MODELS_MODULE, file.text().to_owned()))
+        .collect();
+    assert_shared_declarations(&WORKER_MANIFEST, WORKER_MANIFEST_SHARED_TYPES, &monitoring);
     [
-        (PRODUCER_MANIFEST_MODULE, PRODUCER_MANIFEST),
-        (SCHEDULER_MANIFEST_MODULE, SCHEDULER_MANIFEST),
-        (WORKER_MANIFEST_MODULE, WORKER_MANIFEST),
-        (WORKFLOW_SPEC_MODULE, WORKFLOW_SPEC_DATA),
+        (PRODUCER_MANIFEST_MODULE, PRODUCER_MANIFEST, &[][..]),
+        (SCHEDULER_MANIFEST_MODULE, SCHEDULER_MANIFEST, &[][..]),
+        (
+            WORKER_MANIFEST_MODULE,
+            WORKER_MANIFEST,
+            WORKER_MANIFEST_SHARED_TYPES,
+        ),
+        (WORKFLOW_SPEC_MODULE, WORKFLOW_SPEC_DATA, &[][..]),
     ]
     .iter()
-    .map(|(stem, module)| catalog_file(stem, render_manifest_module(module)))
+    .map(|(stem, module, shared)| {
+        catalog_file(stem, render_manifest_module_sharing(module, shared))
+    })
     .collect()
+}
+
+/// Panic unless each type of `shared` is a choice of `module`, and its
+/// module, whose text `module_texts` gives by stem, declares it as the
+/// manifest module would: the same name, the same values, in the same
+/// order.
+fn assert_shared_declarations(
+    module: &ManifestModule,
+    shared: &[SharedType],
+    module_texts: &[(&str, String)],
+) {
+    for shared_type in shared {
+        let manifest_type = find_type(module, shared_type.name);
+        match manifest_type.shape {
+            ManifestShape::Choice { .. } => {}
+            ManifestShape::Record { .. } | ManifestShape::Tagged { .. } => panic!(
+                "the shared type {} of the manifest module of {} is not a choice",
+                shared_type.name, module.root
+            ),
+        }
+        let declaration = type_declarations(manifest_type).join("\n\n");
+        let declared = module_texts.iter().any(|(stem, text)| {
+            *stem == shared_type.module && text.contains(&format!("\n{declaration}\n"))
+        });
+        assert!(
+            declared,
+            "{}.ts does not declare {} as the manifest module of {} does:\n{declaration}",
+            shared_type.module, shared_type.name, module.root,
+        );
+    }
 }
 
 /// The file of the schedule pattern module. Pure.
@@ -121,6 +178,17 @@ pub fn schedule_pattern_files() -> Vec<GeneratedFile> {
 /// record has no field, a variant holds the fields of a type that is not a
 /// record, or a member default is on a field that is not an integer.
 pub fn render_manifest_module(module: &ManifestModule) -> String {
+    render_manifest_module_sharing(module, &[])
+}
+
+/// The text of the TypeScript module of `module`, as
+/// [`render_manifest_module`] gives it, except that each type of `shared`
+/// is imported from its module (type-only, before the wire type) and not
+/// declared. Pure.
+///
+/// Panics as [`render_manifest_module`] does, and when a type of `shared`
+/// is no type of the module.
+fn render_manifest_module_sharing(module: &ManifestModule, shared: &[SharedType]) -> String {
     let root = find_type(module, module.root);
     match root.shape {
         ManifestShape::Record { .. } | ManifestShape::Tagged { .. } => {}
@@ -129,7 +197,15 @@ pub fn render_manifest_module(module: &ManifestModule) -> String {
             module.root
         ),
     }
-    let mut sections = vec![import_types(&[WIRE_JSON_TYPE], WIRE_JSON_MODULE)];
+    let mut imports: Vec<String> = shared
+        .iter()
+        .map(|shared_type| {
+            let _known_type = find_type(module, shared_type.name);
+            import_types(&[shared_type.name], shared_type.module)
+        })
+        .collect();
+    imports.push(import_types(&[WIRE_JSON_TYPE], WIRE_JSON_MODULE));
+    let mut sections = vec![imports.join("\n")];
     sections.push(format!(
         "export const {VERSION_CONSTANT} = {};",
         integer_literal(i128::from(module.version))
@@ -137,6 +213,10 @@ pub fn render_manifest_module(module: &ManifestModule) -> String {
     sections.extend(module.int_bounds().into_iter().map(bound_constants));
     sections.extend(member_default_constants(module));
     for manifest_type in module.types {
+        let name = manifest_type_name(manifest_type);
+        if shared.iter().any(|shared_type| shared_type.name == name) {
+            continue;
+        }
         sections.extend(type_declarations(manifest_type));
     }
     if uses_integer_helper(module) {
@@ -226,6 +306,7 @@ fn field_parts(value: ValueType) -> (Container, ItemType) {
         ValueType::Int(bound) => (Container::Single, ItemType::Int(bound)),
         ValueType::Named(name) => (Container::Single, ItemType::Named(name)),
         ValueType::TimeOfDay => (Container::Single, ItemType::TimeOfDay),
+        ValueType::Duration(bound) => (Container::Single, ItemType::Duration(bound)),
         ValueType::List(item) => (Container::List, item),
         ValueType::Map(item) => (Container::Map, item),
         ValueType::Optional(item) => (Container::Optional, item),
@@ -249,6 +330,7 @@ fn item_type_text(item: ItemType) -> String {
         },
         ItemType::Named(name) => name.to_owned(),
         ItemType::TimeOfDay => "Temporal.PlainTime".to_owned(),
+        ItemType::Duration(_) => "Temporal.Duration".to_owned(),
     }
 }
 
@@ -377,6 +459,9 @@ enum Conversion {
     Converter(String),
     /// A time of day: its text.
     TimeOfDayText,
+    /// A length of time: its ISO 8601 duration text. The core's reader
+    /// checks the form and the bound.
+    DurationText,
 }
 
 /// How an item of `module` becomes its wire value. Pure.
@@ -394,6 +479,7 @@ fn item_wire(module: &ManifestModule, item: ItemType) -> ItemWire {
             ManifestShape::Choice { .. } => ItemWire::AsIs,
         },
         ItemType::TimeOfDay => ItemWire::Converted(Conversion::TimeOfDayText),
+        ItemType::Duration(_) => ItemWire::Converted(Conversion::DurationText),
     }
 }
 
@@ -404,7 +490,7 @@ fn conversion_expression(conversion: &Conversion, access: &str, subject: &str) -
             format!("{INTEGER_HELPER}({access}, {})", string_literal(subject))
         }
         Conversion::Converter(name) => format!("{name}({access})"),
-        Conversion::TimeOfDayText => format!("{access}.toString()"),
+        Conversion::TimeOfDayText | Conversion::DurationText => format!("{access}.toString()"),
     }
 }
 
@@ -510,7 +596,8 @@ fn member_default_constant(holder: &str, field: &ManifestField) -> Option<String
             | ValueType::List(_)
             | ValueType::Map(_)
             | ValueType::Optional(_)
-            | ValueType::TimeOfDay) => panic!(
+            | ValueType::TimeOfDay
+            | ValueType::Duration(_)) => panic!(
                 "{holder}.{} has a member default, but its value {value:?} is not an integer",
                 field.name
             ),
@@ -1117,6 +1204,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_length_of_time_is_a_duration_whose_wire_value_is_its_text() {
+        let every = PythonValue::Duration(EVERY_BOUND);
+        assert_eq!(field_type_text(&field("every", every)), "Temporal.Duration");
+        assert_eq!(
+            member_entry(&SAMPLE, "Root", &field("every", every)),
+            "[\"every\", value.every.toString()]"
+        );
+    }
+
+    const EVERY_BOUND: IntBound = IntBound {
+        name: "EVERY_SECONDS",
+        min: 1,
+        max: 31_536_000,
+    };
+
     const DAILY: ManifestType = ManifestType {
         python_name: "Daily",
         doc: "",
@@ -1468,10 +1571,7 @@ mod tests {
         assert_eq!(
             bounds,
             [
-                "INTERVAL_SECONDS",
-                "INTERVAL_MINUTES",
-                "INTERVAL_HOURS",
-                "INTERVAL_DAYS",
+                "INTERVAL_EVERY_SECONDS",
                 "HOURLY_MINUTE",
                 "HOURLY_SECOND",
                 "MONTHLY_DAY",
@@ -1495,13 +1595,14 @@ mod tests {
         );
         for part in [
             "\nexport interface SchedulePatternInterval extends IntervalSchedule {\n  \
-             readonly type: \"interval\";\n}\n",
-            "\n  readonly seconds: number | null;\n",
+             readonly kind: \"interval\";\n}\n",
+            "\n  readonly every: Temporal.Duration;\n",
+            "new Map<string, WireJson>([[\"every\", value.every.toString()]])",
             "\n  readonly time: Temporal.PlainTime;\n",
             "\nexport type Weekday =\n  | \"monday\"\n",
             "\nexport function schedulePatternToWire(value: SchedulePattern): \
-             ReadonlyMap<string, WireJson> {\n  switch (value.type) {\n",
-            "\n        [\"type\", \"cron\"],\n        ...cronScheduleToWire(value),\n",
+             ReadonlyMap<string, WireJson> {\n  switch (value.kind) {\n",
+            "\n        [\"kind\", \"cron\"],\n        ...cronScheduleToWire(value),\n",
         ] {
             assert!(text.contains(part), "{part}");
         }
@@ -1527,8 +1628,66 @@ mod tests {
             WORKFLOW_SPEC_DATA,
         ];
         for (file, module) in files.iter().zip(modules.iter()) {
-            assert_eq!(file.text(), render_manifest_module(module));
+            let shared: &[SharedType] = match module.root == WORKER_MANIFEST.root {
+                true => WORKER_MANIFEST_SHARED_TYPES,
+                false => &[],
+            };
+            assert_eq!(file.text(), render_manifest_module_sharing(module, shared));
         }
+    }
+
+    /// The text of the generated worker manifest module.
+    fn worker_manifest_text() -> String {
+        generated_files()
+            .into_iter()
+            .find(|file| file.relative_path() == Path::new("src/_catalog/worker_manifest.ts"))
+            .map(|file| file.text().to_owned())
+            .expect("the worker manifest is generated")
+    }
+
+    #[test]
+    fn the_worker_manifest_imports_the_execution_of_the_monitoring_models() {
+        let text = worker_manifest_text();
+
+        assert!(text.contains(
+            "\nimport type { Execution } from \"./monitoring_models.ts\";\n\
+             import type { WireJson } from \"./wire_json.ts\";\n"
+        ));
+        assert!(!text.contains("export type Execution ="));
+        assert!(text.contains("\n  readonly execution: Execution;\n"));
+    }
+
+    #[test]
+    fn the_monitoring_models_declare_the_execution_of_the_worker_manifest() {
+        let monitoring: Vec<(&str, String)> = monitoring_models::generated_files()
+            .iter()
+            .map(|file| (MONITORING_MODELS_MODULE, file.text().to_owned()))
+            .collect();
+
+        assert_shared_declarations(&WORKER_MANIFEST, WORKER_MANIFEST_SHARED_TYPES, &monitoring);
+    }
+
+    #[test]
+    #[should_panic(expected = "monitoring_models.ts does not declare Execution")]
+    fn a_shared_type_that_its_module_declares_otherwise_is_a_defect() {
+        let other = "\nexport type Execution =\n  | \"ISOLATED\";\n".to_owned();
+
+        assert_shared_declarations(
+            &WORKER_MANIFEST,
+            WORKER_MANIFEST_SHARED_TYPES,
+            &[(MONITORING_MODELS_MODULE, other)],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "is not a choice")]
+    fn a_shared_type_that_is_not_a_choice_is_a_defect() {
+        let shared = [SharedType {
+            name: WORKER_MANIFEST.root,
+            module: MONITORING_MODELS_MODULE,
+        }];
+
+        assert_shared_declarations(&WORKER_MANIFEST, &shared, &[]);
     }
 
     #[test]

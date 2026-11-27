@@ -1,0 +1,114 @@
+// `h.taskOutcome(contract)` with a task contract and with a workflow contract: the value and the code of the outcome
+// are typed by the contract; a node fits when its output and its codes fit; a sub-workflow node feeds a parameter
+// declared with its workflow contract; a check case gives the outcome of each such param.
+
+import { defineTask, type Horsies } from "../../../horsies/src/index.ts";
+import { h } from "../../../horsies/src/wire/public.ts";
+import type { TaskOutcomeWire } from "../../../horsies/src/wire/public.ts";
+import { defineWorkflow, type UpstreamCode, type UpstreamValue } from "../../../horsies/src/workflow/public.ts";
+
+declare const app: Horsies;
+
+type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+
+type Expect<T extends true> = T;
+
+const validateOrder = defineTask({
+  name: "validate_order",
+  input: {},
+  output: h.object({ total: h.int() }),
+  errorCodes: ["EMPTY_ORDER", "INVALID_EMAIL"],
+});
+
+const emptyOnly = defineTask({ name: "empty_only", input: {}, output: h.object({ total: h.int() }), errorCodes: ["EMPTY_ORDER"] });
+
+const regionTotal = defineWorkflow(
+  {
+    name: "region_total",
+    definitionKey: "tests.region_total.v1",
+    parameters: { region: h.string() },
+    outputType: h.object({ total: h.int() }),
+    checkCases: [{ region: "eu" }],
+  },
+  (w) => ({ output: w.task(validateOrder, {}, { nodeId: "validate" }) }),
+);
+
+const chargeOrder = defineTask({
+  name: "charge_order",
+  input: { order: h.taskOutcome(validateOrder) },
+  output: h.int(),
+  errorCodes: ["UPSTREAM_FAILED"],
+});
+
+const report = defineTask({ name: "report", input: { total: h.int() }, output: h.int() });
+const sumRegions = defineTask({ name: "sum_regions", input: { region: h.taskOutcome(regionTotal) }, output: h.int() });
+
+export type Checks = [
+  Expect<Equal<UpstreamValue<TaskOutcomeWire<typeof validateOrder>>, { total: number }>>,
+  Expect<Equal<UpstreamCode<TaskOutcomeWire<typeof validateOrder>>, "EMPTY_ORDER" | "INVALID_EMAIL">>,
+  Expect<Equal<UpstreamValue<TaskOutcomeWire<typeof regionTotal>>, { total: number }>>,
+  Expect<Equal<UpstreamCode<TaskOutcomeWire<typeof regionTotal>>, string>>,
+];
+
+export const charge = app.implement(chargeOrder, ({ order }, { ok, err }) => {
+  if (order.kind === "failed") {
+    const code: string = order.error.code;
+
+    if (order.error.kind === "custom") {
+      const custom: "EMPTY_ORDER" | "INVALID_EMAIL" = order.error.code;
+
+      return err({ code: "UPSTREAM_FAILED", message: custom });
+    }
+
+    return err({ code: "UPSTREAM_FAILED", message: code });
+  }
+
+  return ok(order.value.total);
+});
+
+export const sum = app.implement(sumRegions, ({ region }, { ok }) =>
+  ok(region.kind === "succeeded" ? region.value.total : 0),
+);
+
+export const fulfil = defineWorkflow(
+  { name: "fulfil", definitionKey: "tests.fulfil.v1", parameters: {}, outputType: h.int() },
+  (w) => {
+    const validated = w.task(validateOrder, {}, { nodeId: "validate" });
+    const emptyChecked = w.task(emptyOnly, {}, { nodeId: "empty_only" });
+    const eu = w.subWorkflow(regionTotal, { region: "eu" }, { nodeId: "eu" });
+
+    w.task(chargeOrder, { order: validated }, { nodeId: "charge" });
+    w.task(chargeOrder, { order: emptyChecked }, { nodeId: "charge_empty_only" });
+
+    return { output: w.task(sumRegions, { region: eu }, { nodeId: "sum" }) };
+  },
+);
+
+export const child = defineWorkflow(
+  {
+    name: "child",
+    definitionKey: "tests.child.v1",
+    parameters: { order: h.taskOutcome(validateOrder), note: h.string().optional() },
+    outputType: h.int(),
+    checkCases: [
+      { order: { kind: "succeeded", value: { total: 3 } } },
+      {
+        order: {
+          kind: "failed",
+          error: {
+            kind: "custom",
+            code: "EMPTY_ORDER",
+            message: null,
+            data: null,
+            exception: null,
+            subWorkflow: null,
+          },
+        },
+        note: "empty",
+      },
+    ],
+  },
+  (w, { order }) => ({
+    output: w.task(report, { total: order.kind === "succeeded" ? order.value.total : 0 }, { nodeId: "report" }),
+  }),
+);

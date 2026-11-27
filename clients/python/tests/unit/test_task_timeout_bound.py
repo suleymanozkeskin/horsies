@@ -6,7 +6,7 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from horsies.core.app import Horsies
-from horsies.core.errors import ErrorCode, TaskDefinitionError
+from horsies.core.errors import HorsiesErrorCode, TaskDefinitionError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
@@ -14,8 +14,8 @@ from horsies.core.models.tasks import (
     MIN_TASK_TIMEOUT_MS,
     TaskError,
     TaskOptions,
-    TaskResult,
 )
+from horsies.core.types.result import Ok, Result
 
 pytestmark = pytest.mark.unit
 
@@ -23,7 +23,7 @@ pytestmark = pytest.mark.unit
 def _app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr('postgresql://user:pass@127.0.0.1:1/none'),
             ),
         ),
@@ -53,8 +53,8 @@ class TestTaskDecorator:
         app = _app()
 
         @app.task('at_the_limit', timeout_ms=MAX_TASK_TIMEOUT_MS)
-        def at_the_limit(*, n: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=n)
+        def at_the_limit(*, n: int) -> Result[int, TaskError]:
+            return Ok(n)
 
         assert 'at_the_limit' in app.tasks
         assert at_the_limit is app.tasks['at_the_limit']
@@ -72,8 +72,8 @@ class TestTaskDecorator:
         with pytest.raises(TaskDefinitionError) as raised:
 
             @app.task('above_the_limit', timeout_ms=ms)
-            def above_the_limit(*, n: int) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedFunction]
-                return TaskResult(ok=n)
+            def above_the_limit(*, n: int) -> Result[int, TaskError]:  # pyright: ignore[reportUnusedFunction]
+                return Ok(n)
 
-        assert raised.value.code is ErrorCode.TASK_INVALID_OPTIONS
+        assert raised.value.code is HorsiesErrorCode.TASK_INVALID_OPTIONS
         assert str(MAX_TASK_TIMEOUT_MS) in str(raised.value)

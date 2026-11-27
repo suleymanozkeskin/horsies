@@ -34,7 +34,7 @@ from horsies.core.types.result import is_err
 from horsies.core.worker.child_main import CORE_STOPPED_EXIT_CODE
 
 from tests.broker_resources_support import current_resources
-from tests.e2e.helpers.assertions import unwrap_send
+from tests.e2e.helpers.assertions import read_succeeded, succeeded_value, unwrap_send
 from tests.e2e.helpers.db import wait_for_all_terminal
 from tests.e2e.helpers.worker import run_worker, worker_log_tail
 from tests.e2e.tasks import instance_core_stopped_child as instance
@@ -62,7 +62,7 @@ def _make_ready_check() -> Callable[[], bool]:
             if is_err(sent):
                 return False
             handle = sent.ok_value
-        return handle.get(timeout_ms=2000).is_ok()
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
@@ -75,9 +75,8 @@ async def _wait_for_file(path: Path) -> None:
 
 
 async def _ok_pid(handle: TaskHandle[int]) -> int:
-    result = await handle.get_async(timeout_ms=RESULT_TIMEOUT_MS)
-    assert result.is_ok(), result
-    return result.ok_value
+    result = await handle.get_async(wait_ms=RESULT_TIMEOUT_MS)
+    return succeeded_value(result)
 
 
 async def _wait_for_log_line(worker: subprocess.Popen[str], line: str) -> str:

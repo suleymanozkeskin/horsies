@@ -23,8 +23,10 @@ use crate::broker::claims::{
 };
 use crate::broker::workflow_stop_before_start::stop_before_start;
 use crate::broker::{BrokerError, OrphanSelfHeal, PostgresBroker, PrestartExpiry, StopBeforeStart};
+use crate::core::codec::JsonText;
 use crate::core::lifecycle::OwnedClaim;
-use crate::core::task::error::{OperationalErrorCode, TaskError};
+use crate::core::task::error::{OperationalCode, TaskError};
+use crate::core::task::execution::{MAX_CANCEL_GRACE_MS, MIN_CANCEL_GRACE_MS};
 use crate::core::task::fencing::FencingToken;
 use crate::core::task::fn_trait::{RawTaskResult, RegisteredTask, TaskModule};
 use crate::core::task::result::TaskResult;
@@ -36,6 +38,7 @@ use crate::worker::executor::protocol::{
     FailureDetail, ResultEnvelopeText, RunEnd, StopReason, StoredOptionsRefusal, TaskInputText,
     MAX_BODY_BYTES,
 };
+use crate::worker::retry::{MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS};
 
 /// What every run of one child shares.
 #[derive(Clone)]
@@ -422,18 +425,40 @@ fn error_envelope(error: TaskError) -> RunEnd {
     RunEnd::Result(ResultEnvelopeText::new(text))
 }
 
-/// The end of a run whose stored options the worker cannot use: no task
-/// code runs, and the task fails with `WORKER_SERIALIZATION_ERROR`.
-pub(super) fn refusal_end(refusal: &StoredOptionsRefusal) -> RunEnd {
-    let reason = match refusal {
-        StoredOptionsRefusal::OptionsUnreadable(reason)
-        | StoredOptionsRefusal::TimeoutValueInvalid(reason)
-        | StoredOptionsRefusal::CancelGraceInvalid(reason) => reason.as_str(),
+/// The end of a run of task `task_name` whose stored options the worker
+/// cannot use: no task code runs, and the task fails with
+/// `WORKER_SERIALIZATION_ERROR`. The message is the reason. `data` holds
+/// `task_name` and the stored `field` that the worker cannot use, and for
+/// `timeout_ms` and `cancel_grace_ms` the bounds `min_ms` and `max_ms`, in
+/// this order (Python `_stored_timeout_refusal_response`). Pure.
+pub(super) fn refusal_end(task_name: &str, refusal: &StoredOptionsRefusal) -> RunEnd {
+    let (reason, data) = match refusal {
+        StoredOptionsRefusal::OptionsUnreadable(reason) => (
+            reason,
+            serde_json::json!({ "task_name": task_name, "field": "task_options" }),
+        ),
+        StoredOptionsRefusal::TimeoutValueInvalid(reason) => (
+            reason,
+            serde_json::json!({
+                "task_name": task_name,
+                "field": "timeout_ms",
+                "min_ms": MIN_TASK_TIMEOUT_MS,
+                "max_ms": MAX_TASK_TIMEOUT_MS,
+            }),
+        ),
+        StoredOptionsRefusal::CancelGraceInvalid(reason) => (
+            reason,
+            serde_json::json!({
+                "task_name": task_name,
+                "field": "cancel_grace_ms",
+                "min_ms": MIN_CANCEL_GRACE_MS,
+                "max_ms": MAX_CANCEL_GRACE_MS,
+            }),
+        ),
     };
-    error_envelope(TaskError::builtin(
-        OperationalErrorCode::WorkerSerializationError,
-        reason,
-    ))
+    let mut error = TaskError::built_in(OperationalCode::WorkerSerializationError, reason.as_str());
+    error.data = Some(JsonText::of_engine_value(&data));
+    error_envelope(error)
 }
 
 /// A run ready for its body, or the end of a run that cannot start one.
@@ -452,13 +477,13 @@ pub(super) fn prepare(app: &ChildApp, task_name: &str, input: &TaskInputText) ->
     let task = match app.registry.get(task_name) {
         Ok(task) => task.clone(),
         Err(error) => {
-            return Prepared::Ended(error_envelope(TaskError::builtin(
-                OperationalErrorCode::WorkerResolutionError,
+            return Prepared::Ended(error_envelope(TaskError::built_in(
+                OperationalCode::WorkerResolutionError,
                 format!("task '{task_name}' is not registered in this binary: {error}"),
             )))
         }
     };
-    match build_task_input(input.as_str(), task.accepts_workflow_ctx()) {
+    match build_task_input(input.as_str(), task.accepts_workflow_context()) {
         Ok(input) => Prepared::Body {
             task: Box::new(task),
             input,
@@ -475,13 +500,13 @@ pub(super) fn result_end(result: TaskResult<Vec<u8>>) -> RunEnd {
         TaskResult::Ok(bytes) => match serde_json::from_slice::<&RawValue>(&bytes) {
             Ok(raw) => match serde_json::to_string(&TaskResult::Ok(raw)) {
                 Ok(text) => RunEnd::Result(ResultEnvelopeText::new(text)),
-                Err(error) => error_envelope(TaskError::builtin(
-                    OperationalErrorCode::WorkerSerializationError,
+                Err(error) => error_envelope(TaskError::built_in(
+                    OperationalCode::WorkerSerializationError,
                     format!("failed to encode the result envelope: {error}"),
                 )),
             },
-            Err(error) => error_envelope(TaskError::builtin(
-                OperationalErrorCode::WorkerSerializationError,
+            Err(error) => error_envelope(TaskError::built_in(
+                OperationalCode::WorkerSerializationError,
                 format!("failed to parse task result JSON: {error}"),
             )),
         },

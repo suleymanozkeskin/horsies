@@ -22,10 +22,10 @@ import pytest
 
 from horsies.core.telemetry.send_telemetry import NO_SEND_TELEMETRY
 from horsies.core.models.payload import PayloadPolicy
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.task_decorator import create_task_wrapper
-from horsies.core.types.result import Ok
+from horsies.core.types.result import Ok, Result
 
 pytestmark = [pytest.mark.unit]
 
@@ -33,8 +33,8 @@ MAPPED_QUEUE = 'emails'
 PERIOD_KEY = 'standard_7d'
 
 
-def good_fn(*, x: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=x)
+def good_fn(*, x: int) -> Result[int, TaskError]:
+    return Ok(x)
 
 
 def _make_app(retention: RetentionConfig) -> MagicMock:
@@ -50,12 +50,12 @@ def _make_app(retention: RetentionConfig) -> MagicMock:
     app.config.custom_queues = None
     app.config.exception_mapper = {}
     app.config.default_unhandled_error_code = 'UNHANDLED_EXCEPTION'
-    app.config.resend_on_transient_err = False
+    app.config.resend_on_transient_error = False
     app.config.payload = PayloadPolicy()
     app.config.retention = retention
     app.are_sends_suppressed.return_value = False
     app.send_telemetry.return_value = NO_SEND_TELEMETRY
-    app.validate_queue_name.return_value = MAPPED_QUEUE
+    app.validate_queue.return_value = MAPPED_QUEUE
     return app
 
 
@@ -76,8 +76,8 @@ def _stamp(
     match path:
         case 'send':
             result = target.send(x=1)
-        case 'schedule':
-            result = target.schedule(60, x=1)
+        case 'delayed_send':
+            result = wrapper.with_options(delay_seconds=60, **send_options).send(x=1)
         case unknown:
             raise AssertionError(f'unknown send path {unknown!r}')
     assert result.is_ok(), result
@@ -224,14 +224,14 @@ def test_json_task_options_do_not_carry_the_class() -> None:
 
 # --- The delayed path resolves exactly as the immediate one does -------------
 #
-# Every row below was WRONG before this fix: `.schedule()` never touched
+# Every row below was WRONG before this fix: the delayed send never touched
 # retention, so the payload kept its dataclass default and the broker was
 # handed `standard_30d` no matter what the queue mapped or the caller asked
-# for. Parametrized against `.send()` so the two paths cannot drift: a rule
+# for. Parametrized against a send now so the two paths cannot drift: a rule
 # that holds for one and not the other fails here.
 
 
-@pytest.mark.parametrize('path', ['send', 'schedule'])
+@pytest.mark.parametrize('path', ['send', 'delayed_send'])
 class TestEveryPathResolvesAlike:
     def test_a_mapped_queue_resolves(self, path: str) -> None:
         assert _stamp(_make_app(_MAPPED), path)['retention_class_key'] == (
@@ -284,11 +284,15 @@ class TestEveryPathResolvesAlike:
         app = _make_app(_MAPPED)
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
-        options = wrapper.with_options(retention=timedelta(days=9))
+        match path:
+            case 'send':
+                options = wrapper.with_options(retention=timedelta(days=9))
+            case _:
+                options = wrapper.with_options(
+                    retention=timedelta(days=9), delay_seconds=60,
+                )
 
-        result = (
-            options.send(x=1) if path == 'send' else options.schedule(60, x=1)
-        )
+        result = options.send(x=1)
 
         assert result.is_err(), result
         assert not broker.enqueue.called, (

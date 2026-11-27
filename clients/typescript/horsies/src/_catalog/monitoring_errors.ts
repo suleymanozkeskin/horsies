@@ -3,21 +3,24 @@
 import type { CoreCause } from "./error_detail.ts";
 import type { TaskStatus } from "./status.ts";
 
-export interface MonitoringQueryDbOperationFailed {
-  readonly code: "DB_OPERATION_FAILED";
+export interface MonitoringQueryDatabaseOperationFailed {
+  readonly kind: "databaseOperationFailed";
+  readonly code: "DATABASE_OPERATION_FAILED";
   readonly message: string;
   readonly retryable: boolean;
-  readonly exception: CoreCause;
+  readonly cause: CoreCause;
 }
 
 export interface MonitoringQueryHistoryContractViolation {
+  readonly kind: "historyContractViolation";
   readonly code: "HISTORY_CONTRACT_VIOLATION";
   readonly retryable: false;
   readonly message: string;
-  readonly exception: CoreCause;
+  readonly cause: CoreCause;
 }
 
 export interface TaskActionNotFound {
+  readonly kind: "notFound";
   readonly code: "TASK_NOT_FOUND";
   readonly retryable: false;
   readonly message: string;
@@ -25,6 +28,7 @@ export interface TaskActionNotFound {
 }
 
 export interface TaskActionNotCancellable {
+  readonly kind: "notCancellable";
   readonly code: "TASK_NOT_CANCELLABLE";
   readonly retryable: false;
   readonly message: string;
@@ -32,7 +36,8 @@ export interface TaskActionNotCancellable {
   readonly currentStatus: TaskStatus;
 }
 
-export interface TaskActionWorkflowTask {
+export interface TaskActionIsWorkflowTask {
+  readonly kind: "isWorkflowTask";
   readonly code: "TASK_IS_WORKFLOW_TASK";
   readonly retryable: false;
   readonly message: string;
@@ -40,39 +45,41 @@ export interface TaskActionWorkflowTask {
   readonly currentStatus: TaskStatus;
 }
 
-export interface TaskActionDbOperationFailed {
-  readonly code: "DB_OPERATION_FAILED";
+export interface TaskActionDatabaseOperationFailed {
+  readonly kind: "databaseOperationFailed";
+  readonly code: "DATABASE_OPERATION_FAILED";
   readonly message: string;
   readonly retryable: boolean;
   readonly taskId: string;
-  readonly exception: CoreCause;
+  readonly cause: CoreCause;
 }
 
 export interface TaskActionStoredDataInvalid {
+  readonly kind: "storedDataInvalid";
   readonly code: "STORED_DATA_INVALID";
   readonly retryable: false;
   readonly message: string;
   readonly taskId: string;
-  readonly exception: CoreCause;
+  readonly cause: CoreCause;
 }
 
 export type MonitoringQueryCoreError =
-  | MonitoringQueryDbOperationFailed
+  | MonitoringQueryDatabaseOperationFailed
   | MonitoringQueryHistoryContractViolation;
 
 export type TaskActionCoreError =
   | TaskActionNotFound
   | TaskActionNotCancellable
-  | TaskActionWorkflowTask
-  | TaskActionDbOperationFailed
+  | TaskActionIsWorkflowTask
+  | TaskActionDatabaseOperationFailed
   | TaskActionStoredDataInvalid;
 
-export interface NativeMonitoringQueryDbOperationFailed {
-  readonly class: "MonitoringQueryDbOperationFailed";
+export interface NativeMonitoringQueryDatabaseOperationFailed {
+  readonly class: "MonitoringQueryDatabaseOperationFailed";
   readonly slots: {
     readonly message: string;
     readonly retryable: boolean;
-    readonly exception: CoreCause;
+    readonly cause: CoreCause;
   };
 }
 
@@ -80,7 +87,7 @@ export interface NativeMonitoringQueryHistoryContractViolation {
   readonly class: "MonitoringQueryHistoryContractViolation";
   readonly slots: {
     readonly message: string;
-    readonly exception: CoreCause;
+    readonly cause: CoreCause;
   };
 }
 
@@ -101,8 +108,8 @@ export interface NativeTaskActionNotCancellable {
   };
 }
 
-export interface NativeTaskActionWorkflowTask {
-  readonly class: "TaskActionWorkflowTask";
+export interface NativeTaskActionIsWorkflowTask {
+  readonly class: "TaskActionIsWorkflowTask";
   readonly slots: {
     readonly message: string;
     readonly task_id: string;
@@ -110,13 +117,13 @@ export interface NativeTaskActionWorkflowTask {
   };
 }
 
-export interface NativeTaskActionDbOperationFailed {
-  readonly class: "TaskActionDbOperationFailed";
+export interface NativeTaskActionDatabaseOperationFailed {
+  readonly class: "TaskActionDatabaseOperationFailed";
   readonly slots: {
     readonly message: string;
     readonly retryable: boolean;
     readonly task_id: string;
-    readonly exception: CoreCause;
+    readonly cause: CoreCause;
   };
 }
 
@@ -125,21 +132,21 @@ export interface NativeTaskActionStoredDataInvalid {
   readonly slots: {
     readonly message: string;
     readonly task_id: string;
-    readonly exception: CoreCause;
+    readonly cause: CoreCause;
   };
 }
 
 /** The value that the bridge gives: the class name and the instance slots by core name. */
 export type NativeMonitoringQueryCoreError =
-  | NativeMonitoringQueryDbOperationFailed
+  | NativeMonitoringQueryDatabaseOperationFailed
   | NativeMonitoringQueryHistoryContractViolation;
 
 /** The value that the bridge gives: the class name and the instance slots by core name. */
 export type NativeTaskActionCoreError =
   | NativeTaskActionNotFound
   | NativeTaskActionNotCancellable
-  | NativeTaskActionWorkflowTask
-  | NativeTaskActionDbOperationFailed
+  | NativeTaskActionIsWorkflowTask
+  | NativeTaskActionDatabaseOperationFailed
   | NativeTaskActionStoredDataInvalid;
 
 function unknownClass(converter: string, raw: { readonly class: string }): never {
@@ -149,34 +156,36 @@ function unknownClass(converter: string, raw: { readonly class: string }): never
 /** The frozen value of `raw`. A class name that this build does not know throws. */
 export function monitoringQueryCoreErrorFromNative(raw: NativeMonitoringQueryCoreError): MonitoringQueryCoreError {
   switch (raw.class) {
-    case "MonitoringQueryDbOperationFailed": {
-      const value: MonitoringQueryDbOperationFailed = {
-        code: "DB_OPERATION_FAILED",
+    case "MonitoringQueryDatabaseOperationFailed": {
+      const value: MonitoringQueryDatabaseOperationFailed = {
+        kind: "databaseOperationFailed",
+        code: "DATABASE_OPERATION_FAILED",
         message: raw.slots.message,
         retryable: raw.slots.retryable,
-        exception: Object.freeze({ ...raw.slots.exception }),
+        cause: Object.freeze({ ...raw.slots.cause }),
       };
 
       return Object.freeze(
         Object.defineProperties(value, {
           message: { enumerable: false },
-          exception: { enumerable: false },
+          cause: { enumerable: false },
         }),
       );
     }
 
     case "MonitoringQueryHistoryContractViolation": {
       const value: MonitoringQueryHistoryContractViolation = {
+        kind: "historyContractViolation",
         code: "HISTORY_CONTRACT_VIOLATION",
         retryable: false,
         message: raw.slots.message,
-        exception: Object.freeze({ ...raw.slots.exception }),
+        cause: Object.freeze({ ...raw.slots.cause }),
       };
 
       return Object.freeze(
         Object.defineProperties(value, {
           message: { enumerable: false },
-          exception: { enumerable: false },
+          cause: { enumerable: false },
         }),
       );
     }
@@ -194,6 +203,7 @@ export function taskActionCoreErrorFromNative(raw: NativeTaskActionCoreError): T
   switch (raw.class) {
     case "TaskActionNotFound": {
       const value: TaskActionNotFound = {
+        kind: "notFound",
         code: "TASK_NOT_FOUND",
         retryable: false,
         message: raw.slots.message,
@@ -209,6 +219,7 @@ export function taskActionCoreErrorFromNative(raw: NativeTaskActionCoreError): T
 
     case "TaskActionNotCancellable": {
       const value: TaskActionNotCancellable = {
+        kind: "notCancellable",
         code: "TASK_NOT_CANCELLABLE",
         retryable: false,
         message: raw.slots.message,
@@ -223,8 +234,9 @@ export function taskActionCoreErrorFromNative(raw: NativeTaskActionCoreError): T
       );
     }
 
-    case "TaskActionWorkflowTask": {
-      const value: TaskActionWorkflowTask = {
+    case "TaskActionIsWorkflowTask": {
+      const value: TaskActionIsWorkflowTask = {
+        kind: "isWorkflowTask",
         code: "TASK_IS_WORKFLOW_TASK",
         retryable: false,
         message: raw.slots.message,
@@ -239,36 +251,38 @@ export function taskActionCoreErrorFromNative(raw: NativeTaskActionCoreError): T
       );
     }
 
-    case "TaskActionDbOperationFailed": {
-      const value: TaskActionDbOperationFailed = {
-        code: "DB_OPERATION_FAILED",
+    case "TaskActionDatabaseOperationFailed": {
+      const value: TaskActionDatabaseOperationFailed = {
+        kind: "databaseOperationFailed",
+        code: "DATABASE_OPERATION_FAILED",
         message: raw.slots.message,
         retryable: raw.slots.retryable,
         taskId: raw.slots.task_id,
-        exception: Object.freeze({ ...raw.slots.exception }),
+        cause: Object.freeze({ ...raw.slots.cause }),
       };
 
       return Object.freeze(
         Object.defineProperties(value, {
           message: { enumerable: false },
-          exception: { enumerable: false },
+          cause: { enumerable: false },
         }),
       );
     }
 
     case "TaskActionStoredDataInvalid": {
       const value: TaskActionStoredDataInvalid = {
+        kind: "storedDataInvalid",
         code: "STORED_DATA_INVALID",
         retryable: false,
         message: raw.slots.message,
         taskId: raw.slots.task_id,
-        exception: Object.freeze({ ...raw.slots.exception }),
+        cause: Object.freeze({ ...raw.slots.cause }),
       };
 
       return Object.freeze(
         Object.defineProperties(value, {
           message: { enumerable: false },
-          exception: { enumerable: false },
+          cause: { enumerable: false },
         }),
       );
     }

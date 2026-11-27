@@ -40,10 +40,10 @@ const LOCK_WAIT_POLLS: u32 = 400;
 /// The wait between two polls for a lock wait.
 const LOCK_WAIT_POLL: StdDuration = StdDuration::from_millis(25);
 
-fn crash_policy(auto_retry_for: &str) -> String {
+fn crash_policy(retry_for: &str) -> String {
     format!(
-        r#"{{"retry_policy": {{"max_retries": 3, "intervals": [5, 5, 5], "backoff_strategy": "fixed",
-            "jitter": false, "max_delay_seconds": null, "auto_retry_for": ["{auto_retry_for}"]}}}}"#
+        r#"{{"retry_policy": {{"max_retries": 3, "intervals_seconds": [5, 5, 5], "backoff_strategy": "fixed",
+            "jitter": false, "max_delay_seconds": null, "retry_for": ["{retry_for}"]}}}}"#
     )
 }
 
@@ -77,7 +77,7 @@ fn crash_write(task_id: Uuid, retry: RetryRequest) -> FinishFailedAttempt {
 /// A worker-level failure: the worker reports it, and it is never retried.
 fn worker_failure(task_id: Uuid) -> FinishFailedAttempt {
     FinishFailedAttempt {
-        error_code: Some("BROKER_ERROR".to_owned()),
+        error_code: Some("DATABASE_ERROR".to_owned()),
         attempt: AttemptFailure {
             kind: AttemptFailureKind::WorkerFailure,
             error_message: Some("the worker lost the task".to_owned()),

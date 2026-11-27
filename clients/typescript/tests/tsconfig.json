@@ -11,5 +11,5 @@
   // These files import the addon declarations that a native build writes. The compile-fail cases
   // (`types/fail/`) must not compile, and the consumer project (`types/consumer/`) imports the built package: the
   // type-test runner (`types/run.ts`) compiles both.
-  "exclude": ["native-declarations", "node_modules", "types/fail", "types/consumer"]
+  "exclude": ["e2e/entry/package.ts", "native-declarations", "node_modules", "types/fail", "types/consumer"]
 }

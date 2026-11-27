@@ -4,7 +4,8 @@
 // 2. The static check without the schedules: a refusal prints the `worker-startup` report.
 // 3. The child command of this process.
 // 4. The start members and `prepareWorker`: the manifest bounds, the profile, the connection settings, and no
-//    `SHARED_THREAD` children (the TypeScript worker has no thread seat isolates).
+//    `SHARED_THREAD` children on a runtime other than Node (Node caps the JavaScript heap of a worker thread with
+//    `resourceLimits`; Bun ignores them, so a seat isolate out of heap would not end alone).
 // 5. The run on the core's process runtime, with the core handle that `Horsies.create` built for the app (so the
 //    child spec source that the app registers there builds the sub-workflow children), and the stop on `SIGTERM`
 //    and `SIGINT`. The stop handlers stay until the process ends: `cli.run` ends it after the log wait.
@@ -18,7 +19,14 @@ import type { AppContext } from "../app/context.ts";
 import { type CoreChecks, refusalOfCore } from "../app/core-checks.ts";
 import { type CheckReport, checkReport, reportText } from "../check/report.ts";
 import { staticCheck } from "../check/static-check.ts";
-import type { NativePreparedWorker, WorkerBootCauseName, WorkerFailCauseName, WorkerPreparation, WorkerRunEnded } from "../native/worker/addon.ts";
+import type {
+  NativePreparedWorker,
+  SeatIsolateMemory,
+  WorkerBootCauseName,
+  WorkerFailCauseName,
+  WorkerPreparation,
+  WorkerRunEnded,
+} from "../native/worker/addon.ts";
 import { raiseDefect } from "../native/call/defect.ts";
 import { unreachable } from "../native/call/never.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
@@ -26,7 +34,7 @@ import { setPanicRule } from "../native/process-core/process-core.ts";
 import { checkAppConfig, checkTaskOptions, parseDeclaredErrorCodes } from "../native/sends/sends.ts";
 import { prepareWorker, requestWorkerStop, runWorker } from "../native/worker/worker.ts";
 import { appCoreHandle } from "../app/core-access.ts";
-import { configureLogging } from "../logging.ts";
+import { type CommandLogging, configureCommandLogging } from "../logging.ts";
 import { ClientDefect, CoreError } from "../thrown-errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import {
@@ -58,9 +66,15 @@ export type WorkerRunError =
   | { readonly kind: "manifestBound"; readonly path: string; readonly min: bigint; readonly max: bigint }
   /** The profile set or the requested profile is refused (the core's report). Nothing started. */
   | { readonly kind: "profileRefused"; readonly report: CheckReport }
-  /** The connection settings fail the broker config check. Nothing started. */
+  /**
+   * The connection settings fail the broker config check of the plan. The config check of `Horsies.create` makes the
+   * same check first, so an app that `Horsies.create` accepted does not reach this refusal. Nothing started.
+   */
   | { readonly kind: "connectionSettingsRefused"; readonly cause: string }
-  /** The profile starts `SHARED_THREAD` children; the TypeScript worker has no thread seat isolates. Nothing started. */
+  /**
+   * The profile starts `SHARED_THREAD` children, and the runtime of this process is not Node, so it does not cap the
+   * JavaScript heap of a worker thread (Bun ignores `resourceLimits`). Nothing started.
+   */
   | { readonly kind: "sharedThreadUnavailable"; readonly profile: string }
   /** The core of this process refused the call: it could not start, it stopped, or this process is a fork. */
   | { readonly kind: "coreRefused"; readonly error: CoreError }
@@ -71,7 +85,7 @@ export type WorkerRunError =
 
 /** What the worker run does that has effects. The process gives the addon's; a test gives fakes. */
 export interface WorkerRunDeps {
-  /** Set the thresholds of the core log of this process. */
+  /** Set the default threshold of the core log of this process, and the app's log format. */
   setLogLevel(level: WorkerLogLevel): void;
   /** Set the panic rule of a worker process (`ABORT_PROCESS`). */
   setWorkerPanicRule(): void;
@@ -233,7 +247,7 @@ export function workerRunErrorText(error: WorkerRunError): string {
     case "connectionSettingsRefused":
       return `the connection settings are refused: ${error.cause}`;
     case "sharedThreadUnavailable":
-      return `workerProfiles[${JSON.stringify(error.profile)}].sharedThread: the TypeScript worker has no thread seat isolates, so it does not start SHARED_THREAD children; run the profile's tasks in isolated or shared async children`;
+      return `workerProfiles[${JSON.stringify(error.profile)}].sharedThread: SHARED_THREAD children run on Node only: Node caps the JavaScript heap of each seat isolate (resourceLimits), and this runtime does not (Bun ignores resourceLimits), so a seat isolate at that heap's end would not end alone; run the worker on Node, or run the profile's tasks in isolated or shared async children`;
     case "coreRefused":
       return `the core refused the worker: ${error.error.name}: ${error.error.message}`;
     case "bootFailed":
@@ -247,7 +261,7 @@ export function workerRunErrorText(error: WorkerRunError): string {
 
 /** The worker functions of the addon that the worker run calls. A test gives fakes. */
 export interface NativeWorkerCalls {
-  prepareWorker(appConfigJson: string, startJson: string): WorkerPreparation;
+  prepareWorker(appConfigJson: string, startJson: string, seatIsolates: SeatIsolateMemory): WorkerPreparation;
   runWorker(worker: NativePreparedWorker, handle: CoreHandle): Promise<WorkerRunEnded>;
   requestWorkerStop(worker: NativePreparedWorker): void;
 }
@@ -263,18 +277,56 @@ export function processWorkerRunDeps(
   context: AppContext,
   stopOnSignals: (requestStop: () => void) => void,
   native: NativeWorkerCalls = NATIVE_WORKER_CALLS,
+  commandLogging: CommandLogging = configureCommandLogging,
 ): WorkerRunDeps {
   return {
-    setLogLevel: (level) => configureLogging({ levels: { default: level } }),
+    setLogLevel: (level) => commandLogging(level, context.config.logFormat),
     setWorkerPanicRule: () => setPanicRule("ABORT_PROCESS"),
     coreChecks: { checkAppConfig, parseDeclaredErrorCodes, checkTaskOptions },
     launchFacts: processLaunchFacts,
     writeLine: (line) => {
       process.stderr.write(`${line}\n`);
     },
-    prepare: (appConfigJson, startJson) => native.prepareWorker(appConfigJson, startJson),
+    prepare: (appConfigJson, startJson) =>
+      native.prepareWorker(appConfigJson, startJson, seatIsolateMemoryOf(runtimeNameOf(process.versions))),
     run: async (worker) => native.runWorker(worker, appCoreHandle(context.core)),
     requestStop: (worker) => native.requestWorkerStop(worker),
     stopOnSignals,
   };
+}
+
+/** The runtime of a process, by the version facts that it reports (`process.versions`). */
+export type RuntimeName = "node" | "bun" | "deno" | "unknown";
+
+/** The version facts of a runtime that tell it apart: Bun and Deno also report a `node` version. */
+export type RuntimeVersions = { readonly node?: string | undefined; readonly bun?: string | undefined; readonly deno?: string | undefined };
+
+/** The runtime of `versions`: Bun or Deno by their own version fact; Node when only the Node version is there. Pure. */
+export function runtimeNameOf(versions: RuntimeVersions): RuntimeName {
+  if (versions.bun !== undefined) {
+    return "bun";
+  }
+
+  if (versions.deno !== undefined) {
+    return "deno";
+  }
+
+  return versions.node === undefined ? "unknown" : "node";
+}
+
+/**
+ * Whether the worker threads of `runtime` have a cap of their JavaScript heap: `CAPPED` on Node only (its
+ * `resourceLimits` are measured); Bun ignores `resourceLimits`, and no other runtime is in the support promise. Pure.
+ */
+export function seatIsolateMemoryOf(runtime: RuntimeName): SeatIsolateMemory {
+  switch (runtime) {
+    case "node":
+      return "CAPPED";
+    case "bun":
+    case "deno":
+    case "unknown":
+      return "NOT_CAPPED";
+    default:
+      return unreachable(runtime);
+  }
 }

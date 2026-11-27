@@ -113,9 +113,9 @@ pub enum LivenessRecovery {
 
 impl LivenessRecovery {
     /// The rule of the worker's recovery config: the peers recover RUNNING
-    /// rows of a gone owner only with `auto_fail_stale_running`.
+    /// rows of a gone owner only with `fail_stale_running`.
     pub fn from_config(recovery: &RecoveryConfig) -> Self {
-        match recovery.auto_fail_stale_running {
+        match recovery.fail_stale_running {
             true => Self::FailClosed,
             false => Self::LogOnly,
         }

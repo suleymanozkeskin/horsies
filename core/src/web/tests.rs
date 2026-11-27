@@ -24,7 +24,7 @@ use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::AppConfig;
 
 use super::app::{build_router, WebState};
-use super::auth::{MonitoringAuthPolicy, MonitoringRequest, INTENT_HEADER, INTENT_VALUE};
+use super::auth::{MonitoringAuthorizationPolicy, MonitoringRequest, INTENT_HEADER, INTENT_VALUE};
 use super::common::{parse_fastapi_bool, QueryValues};
 use super::events::{
     data_frame, degraded_frame, EventBroadcaster, EventCoalescer, TopicEvent, CHANNEL_TOPICS,
@@ -32,9 +32,10 @@ use super::events::{
 };
 use super::fleet_metrics::WebFleetMetrics;
 use super::handler::{
-    AccessGrant, AccessNeed, GrantedAccess, MonitoringHandler, MonitoringHandlerConfig,
+    AccessGrant, AccessNeed, Actions, GrantedAccess, MonitoringHandler, MonitoringHandlerConfig,
     RequestParts, ResponseForm, ResponseParts, Verdict,
 };
+use super::request_body::WorkflowActionBody;
 use super::routes::task_not_found_text;
 use super::schema::{
     SchemaProbe, SchemaReader, SchemaState, SchemaStatus, SCHEMA_INCOMPATIBLE, SCHEMA_UNKNOWN,
@@ -49,7 +50,7 @@ use super::trace_link::{TraceLink, TraceLinkTemplate};
 struct AllowAll;
 
 #[async_trait]
-impl MonitoringAuthPolicy for AllowAll {
+impl MonitoringAuthorizationPolicy for AllowAll {
     async fn can_view(&self, _request: MonitoringRequest<'_>) -> bool {
         true
     }
@@ -63,7 +64,7 @@ impl MonitoringAuthPolicy for AllowAll {
 struct ViewOnly;
 
 #[async_trait]
-impl MonitoringAuthPolicy for ViewOnly {
+impl MonitoringAuthorizationPolicy for ViewOnly {
     async fn can_view(&self, _request: MonitoringRequest<'_>) -> bool {
         true
     }
@@ -74,20 +75,20 @@ impl MonitoringAuthPolicy for ViewOnly {
 }
 
 /// A policy of the router tests that allows a request with a value of the
-/// header that is not blank; actions only when `allow_actions`.
+/// header that is not blank; actions only when `actions` is enabled.
 struct TrustedHeader {
     header_name: axum::http::HeaderName,
-    allow_actions: bool,
+    actions: Actions,
 }
 
 impl TrustedHeader {
     fn new(
         header_name: &str,
-        allow_actions: bool,
+        actions: Actions,
     ) -> Result<Self, axum::http::header::InvalidHeaderName> {
         Ok(Self {
             header_name: axum::http::HeaderName::try_from(header_name)?,
-            allow_actions,
+            actions,
         })
     }
 
@@ -101,13 +102,16 @@ impl TrustedHeader {
 }
 
 #[async_trait]
-impl MonitoringAuthPolicy for TrustedHeader {
+impl MonitoringAuthorizationPolicy for TrustedHeader {
     async fn can_view(&self, request: MonitoringRequest<'_>) -> bool {
         self.identified(request)
     }
 
     async fn can_act(&self, request: MonitoringRequest<'_>) -> bool {
-        self.allow_actions && self.identified(request)
+        match self.actions {
+            Actions::Enabled => self.identified(request),
+            Actions::Disabled => false,
+        }
     }
 }
 
@@ -168,9 +172,9 @@ fn fixed_probe(schema: SchemaStatus) -> Arc<SchemaProbe> {
 
 fn test_state(
     pool: &TestPool,
-    auth_policy: Arc<dyn MonitoringAuthPolicy>,
+    authorization_policy: Arc<dyn MonitoringAuthorizationPolicy>,
     schema_probe: Arc<SchemaProbe>,
-    actions_enabled: bool,
+    actions: Actions,
     assets: Arc<dyn super::spa::AssetStore>,
 ) -> WebState {
     let broker = Arc::new(PostgresBroker::from_test_url(
@@ -184,12 +188,12 @@ fn test_state(
         )),
         events: EventBroadcaster::with_debounce(Arc::clone(&broker), Duration::from_millis(25)),
         broker,
-        auth_policy,
+        authorization_policy,
         schema_probe,
         task_stats_cache: Arc::new(TaskStatsCache::new()),
         task_facets_cache: Arc::new(ReadCache::new()),
         task_breakdown_cache: Arc::new(ReadCache::new()),
-        actions_enabled,
+        actions,
         ui_config: MonitoringUiConfig::default(),
         assets,
         children: Arc::new(TestChildSpecs::empty()),
@@ -199,15 +203,15 @@ fn test_state(
 }
 
 fn test_router(
-    auth_policy: Arc<dyn MonitoringAuthPolicy>,
+    authorization_policy: Arc<dyn MonitoringAuthorizationPolicy>,
     schema: SchemaStatus,
-    actions_enabled: bool,
+    actions: Actions,
 ) -> Router {
     build_router(test_state(
         &lazy_pool(),
-        auth_policy,
+        authorization_policy,
         fixed_probe(schema),
-        actions_enabled,
+        actions,
         MemoryAssets::standard(),
     ))
 }
@@ -253,13 +257,13 @@ async fn json(response: axum::response::Response) -> serde_json::Value {
 #[tokio::test]
 async fn every_declared_api_route_is_view_authorized() {
     let router = test_router(
-        Arc::new(TrustedHeader::new("X-Forwarded-User", true).unwrap()),
+        Arc::new(TrustedHeader::new("X-Forwarded-User", Actions::Enabled).unwrap()),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
     let reads = [
         "/api/meta",
-        "/api/tasks/stats",
+        "/api/tasks/status-counts",
         "/api/tasks/facets",
         "/api/tasks/breakdown",
         "/api/tasks",
@@ -303,7 +307,7 @@ async fn action_guard_order_is_authorization_then_intent_then_schema() {
     let unknown = status(SchemaState::Unknown, None);
     let action = "/api/tasks/not-a-uuid/cancel";
 
-    let response = test_router(Arc::new(ViewOnly), unknown, true)
+    let response = test_router(Arc::new(ViewOnly), unknown, Actions::Enabled)
         .oneshot(action_request(action))
         .await
         .unwrap();
@@ -313,7 +317,7 @@ async fn action_guard_order_is_authorization_then_intent_then_schema() {
         serde_json::json!({"detail": "Not authorized."})
     );
 
-    let response = test_router(Arc::new(AllowAll), unknown, false)
+    let response = test_router(Arc::new(AllowAll), unknown, Actions::Disabled)
         .oneshot(request(Method::POST, action))
         .await
         .unwrap();
@@ -323,7 +327,7 @@ async fn action_guard_order_is_authorization_then_intent_then_schema() {
         serde_json::json!({"detail": "Not authorized."})
     );
 
-    let response = test_router(Arc::new(AllowAll), unknown, true)
+    let response = test_router(Arc::new(AllowAll), unknown, Actions::Enabled)
         .oneshot(request(Method::POST, action))
         .await
         .unwrap();
@@ -333,7 +337,7 @@ async fn action_guard_order_is_authorization_then_intent_then_schema() {
         serde_json::json!({"detail": "Missing X-Horsies-Intent: action header."})
     );
 
-    let response = test_router(Arc::new(AllowAll), unknown, true)
+    let response = test_router(Arc::new(AllowAll), unknown, Actions::Enabled)
         .oneshot(action_request(action))
         .await
         .unwrap();
@@ -355,7 +359,7 @@ async fn an_action_with_another_intent_value_is_refused() {
         .body(Body::from("{}"))
         .expect("action request");
 
-    let response = test_router(Arc::new(AllowAll), unknown, true)
+    let response = test_router(Arc::new(AllowAll), unknown, Actions::Enabled)
         .oneshot(wrong_intent)
         .await
         .expect("the router answers");
@@ -372,7 +376,7 @@ async fn task_action_body_defaults_when_absent_and_malformed_json_is_422() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
     let absent = Request::builder()
         .method(Method::POST)
@@ -402,6 +406,250 @@ async fn task_action_body_defaults_when_absent_and_malformed_json_is_422() {
     assert!(body["detail"][0].get("input").is_some());
 }
 
+/// An action request to `uri` with the JSON body text `body`.
+fn json_action_request(uri: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(INTENT_HEADER, INTENT_VALUE)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_owned()))
+        .expect("action request")
+}
+
+/// The 422 body of the unknown body key `key` with the value `input`: the
+/// `extra_forbidden` issue, its message, and the keys that the body type
+/// declares.
+fn unknown_key_refusal(
+    key: &str,
+    input: &serde_json::Value,
+    message: &str,
+    known_keys: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({"detail": [{
+        "type": "extra_forbidden",
+        "loc": ["body", key],
+        "msg": message,
+        "input": input,
+        "ctx": {"known_keys": known_keys},
+    }]})
+}
+
+/// The router of the action tests: every verdict allows, the schema
+/// matches, and the pool is lazy and unreachable, so a request that passed
+/// the body and the path id answers 503 at its first statement.
+fn allowed_action_router() -> Router {
+    test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Match, Some(crate::expected_schema_version())),
+        Actions::Enabled,
+    )
+}
+
+/// The task cancel body refuses a key that `CancelTaskBody` does not
+/// declare with 422 `extra_forbidden`, before the path id and any
+/// statement. The issue names the first unknown key in body order, its
+/// value and the known keys. The known body, `{}` and no body are accepted:
+/// the refusal is then the path id's. A known key with a value of the wrong
+/// type, and JSON that is not an object, are 422 `value_error`.
+#[tokio::test]
+async fn the_task_cancel_body_refuses_an_unknown_key_and_accepts_the_known_body() {
+    let router = allowed_action_router();
+    let path = format!("/api/tasks/{}/cancel", Uuid::new_v4());
+
+    for (body, key, input) in [
+        (
+            r#"{"include_running": true}"#,
+            "include_running",
+            serde_json::json!(true),
+        ),
+        (
+            r#"{"polcy": "INCLUDE_RUNNING"}"#,
+            "polcy",
+            serde_json::json!("INCLUDE_RUNNING"),
+        ),
+        (
+            r#"{"policy": "INCLUDE_RUNNING", "zeta": 1, "alpha": 2}"#,
+            "zeta",
+            serde_json::json!(1),
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(json_action_request(&path, body))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{body}"
+        );
+        assert_eq!(
+            json(response).await,
+            unknown_key_refusal(
+                key,
+                &input,
+                &format!("Unknown key \"{key}\". Known keys: \"policy\"."),
+                &serde_json::json!(["policy"]),
+            ),
+            "{body}"
+        );
+    }
+
+    for body in [r#"{"policy": "INCLUDE_RUNNING"}"#, "{}", ""] {
+        let response = router
+            .clone()
+            .oneshot(json_action_request("/api/tasks/not-a-uuid/cancel", body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(
+            json(response).await,
+            not_a_uuid_refusal("task_id"),
+            "{body}"
+        );
+    }
+
+    for (body, start) in [
+        (r#"{"policy": true}"#, "invalid type: boolean `true`"),
+        (r#"{"policy": "yes"}"#, "unknown variant `yes`"),
+    ] {
+        let wrong_value = router
+            .clone()
+            .oneshot(json_action_request(&path, body))
+            .await
+            .unwrap();
+        assert_eq!(
+            wrong_value.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{body}"
+        );
+        let wrong_value = json(wrong_value).await;
+        assert_eq!(wrong_value["detail"][0]["type"], "value_error", "{body}");
+        assert_eq!(
+            wrong_value["detail"][0]["loc"],
+            serde_json::json!(["body"]),
+            "{body}"
+        );
+        assert!(
+            wrong_value["detail"][0]["msg"]
+                .as_str()
+                .is_some_and(|message| message.starts_with(start)),
+            "{wrong_value}"
+        );
+    }
+
+    for body in ["[true]", "true", "null"] {
+        let response = router
+            .clone()
+            .oneshot(json_action_request(&path, body))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{body}"
+        );
+        assert_eq!(
+            json(response).await,
+            serde_json::json!({"detail": [{
+                "type": "value_error",
+                "loc": ["body"],
+                "msg": "Input should be a valid JSON object",
+                "input": body,
+            }]}),
+            "{body}"
+        );
+    }
+}
+
+/// A workflow action body has no keys: a key is refused with 422
+/// `extra_forbidden` and the known keys `[]`, before the path id and any
+/// statement. `{}` and no body are accepted: the refusal is then the path
+/// id's.
+async fn assert_the_workflow_body_has_no_keys(action: &str) {
+    let router = allowed_action_router();
+    let path = format!("/api/workflows/{}/{action}", Uuid::new_v4());
+
+    let response = router
+        .clone()
+        .oneshot(json_action_request(
+            &path,
+            r#"{"policy": "INCLUDE_RUNNING"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{action}"
+    );
+    assert_eq!(
+        json(response).await,
+        unknown_key_refusal(
+            "policy",
+            &serde_json::json!("INCLUDE_RUNNING"),
+            "Unknown key \"policy\". Known keys: none.",
+            &serde_json::json!([]),
+        ),
+        "{action}"
+    );
+
+    for body in ["{}", ""] {
+        let response = router
+            .clone()
+            .oneshot(json_action_request(
+                &format!("/api/workflows/not-a-uuid/{action}"),
+                body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{action} {body}"
+        );
+        assert_eq!(
+            json(response).await,
+            not_a_uuid_refusal("workflow_id"),
+            "{action} {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_workflow_pause_body_refuses_every_key() {
+    assert_the_workflow_body_has_no_keys("pause").await;
+}
+
+#[tokio::test]
+async fn the_workflow_resume_body_refuses_every_key() {
+    assert_the_workflow_body_has_no_keys("resume").await;
+}
+
+#[tokio::test]
+async fn the_workflow_cancel_body_refuses_every_key() {
+    assert_the_workflow_body_has_no_keys("cancel").await;
+}
+
+/// `WorkflowActionBody` refuses every key for any serde reader, and reads
+/// `{}`.
+#[test]
+fn the_workflow_body_type_refuses_every_key() {
+    let refused = serde_json::from_str::<WorkflowActionBody>(r#"{"policy": "INCLUDE_RUNNING"}"#)
+        .expect_err("a key that the type does not declare");
+    assert!(
+        refused
+            .to_string()
+            .starts_with("unknown field `policy`, there are no fields"),
+        "{refused}"
+    );
+    assert_eq!(
+        serde_json::from_str::<WorkflowActionBody>("{}").ok(),
+        Some(WorkflowActionBody {})
+    );
+}
+
 #[test]
 fn fastapi_boolean_vocabulary_is_exhaustive() {
     for value in [
@@ -424,7 +672,7 @@ async fn query_and_path_validation_preserve_location_input_and_window_refusals()
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
 
     for field in ["since", "until"] {
@@ -439,7 +687,7 @@ async fn query_and_path_validation_preserve_location_input_and_window_refusals()
                 .clone()
                 .oneshot(request(
                     Method::GET,
-                    &format!("/api/tasks/stats?{field}={value}"),
+                    &format!("/api/tasks/status-counts?{field}={value}"),
                 ))
                 .await
                 .unwrap();
@@ -472,13 +720,13 @@ async fn query_and_path_validation_preserve_location_input_and_window_refusals()
         ),
         (
             "/api/workflows/00000000-0000-0000-0000-000000000000/tasks/not-an-int",
-            serde_json::json!(["path", "task_index"]),
+            serde_json::json!(["path", "node_index"]),
             serde_json::json!("not-an-int"),
             "int_parsing",
         ),
         (
             "/api/workflows/not-a-uuid/tasks/not-an-int",
-            serde_json::json!(["path", "task_index"]),
+            serde_json::json!(["path", "node_index"]),
             serde_json::json!("not-an-int"),
             "int_parsing",
         ),
@@ -524,12 +772,12 @@ async fn the_meta_reports_the_trace_link_template_or_null() {
         &lazy_pool(),
         Arc::new(AllowAll),
         fixed_probe(schema),
-        true,
+        Actions::Enabled,
         MemoryAssets::standard(),
     );
     linked.ui_config.trace_link =
         TraceLink::Template(TraceLinkTemplate::parse(TEMPLATE).expect("the template is valid"));
-    let plain = test_router(Arc::new(AllowAll), schema, true);
+    let plain = test_router(Arc::new(AllowAll), schema, Actions::Enabled);
 
     let linked_meta = json(
         build_router(linked)
@@ -570,7 +818,7 @@ async fn schema_state_matrix_controls_meta_and_actions_without_blocking_reads() 
         (SchemaState::Unknown, None, false, Some(SCHEMA_UNKNOWN)),
     ];
     for (state, version, compatible, reason) in cases {
-        let router = test_router(Arc::new(AllowAll), status(state, version), true);
+        let router = test_router(Arc::new(AllowAll), status(state, version), Actions::Enabled);
         let meta_response = router
             .clone()
             .oneshot(request(Method::GET, "/api/meta"))
@@ -580,7 +828,11 @@ async fn schema_state_matrix_controls_meta_and_actions_without_blocking_reads() 
         let meta = json(meta_response).await;
         assert_eq!(meta["schema_compatible"], compatible);
         assert_eq!(meta["schema_state"], serde_json::to_value(state).unwrap());
-        assert_eq!(meta["actions_enabled"], compatible);
+        let actions = match compatible {
+            true => "ENABLED",
+            false => "DISABLED",
+        };
+        assert_eq!(meta["actions"], actions);
         assert_eq!(
             meta["schema_version"],
             serde_json::to_value(version).unwrap()
@@ -618,7 +870,7 @@ async fn every_action_route_inherits_the_schema_gate() {
             SchemaState::Mismatch,
             Some(crate::expected_schema_version() - 1),
         ),
-        true,
+        Actions::Enabled,
     );
     for path in [
         "/api/tasks/id/cancel",
@@ -735,7 +987,7 @@ async fn failed_listener_sends_one_degraded_frame_and_closes() {
             SchemaState::Match,
             Some(crate::expected_schema_version()),
         )),
-        true,
+        Actions::Enabled,
         MemoryAssets::standard(),
     );
     let response = build_router(state)
@@ -760,9 +1012,9 @@ async fn failed_listener_sends_one_degraded_frame_and_closes() {
 async fn spa_is_public_mountable_injected_and_traversal_safe() {
     let mut state = test_state(
         &lazy_pool(),
-        Arc::new(TrustedHeader::new("X-Forwarded-User", false).unwrap()),
+        Arc::new(TrustedHeader::new("X-Forwarded-User", Actions::Disabled).unwrap()),
         fixed_probe(status(SchemaState::Unknown, None)),
-        false,
+        Actions::Disabled,
         MemoryAssets::standard(),
     );
     state.ui_config.custom_css_url = Some("/brand/override.css".to_owned());
@@ -870,7 +1122,11 @@ fn the_runtime_config_is_the_text_of_python_json_dumps() {
 /// a built asset is served with the bytes of its file.
 #[tokio::test]
 async fn a_built_asset_is_served_with_its_bytes() {
-    let router = test_router(Arc::new(AllowAll), status(SchemaState::Unknown, None), true);
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Unknown, None),
+        Actions::Enabled,
+    );
 
     let asset = router
         .oneshot(request(Method::GET, "/assets/app.js"))
@@ -886,7 +1142,11 @@ async fn a_built_asset_is_served_with_its_bytes() {
 /// with no custom stylesheet, the page gets no stylesheet link.
 #[tokio::test]
 async fn no_custom_css_means_no_extra_stylesheet() {
-    let router = test_router(Arc::new(AllowAll), status(SchemaState::Unknown, None), true);
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Unknown, None),
+        Actions::Enabled,
+    );
 
     let page = router.oneshot(request(Method::GET, "/")).await.unwrap();
 
@@ -997,7 +1257,7 @@ async fn missing_embedded_index_is_a_factual_503_while_api_still_answers() {
         &lazy_pool(),
         Arc::new(AllowAll),
         fixed_probe(status(SchemaState::Unknown, None)),
-        true,
+        Actions::Enabled,
         MemoryAssets::empty(),
     );
     let router = build_router(state);
@@ -1075,17 +1335,20 @@ async fn worker_list_carries_the_slot_health() {
         .iter()
         .find(|entry| entry["worker_id"] == worker_id.as_str())
         .expect("the worker is listed");
-    assert_eq!(worker["slot_health"], "slots_down");
     assert_eq!(
-        worker["down_slots"],
-        serde_json::json!([{
-            "slot": 1,
-            "cause": "the OS ran short of a resource (EMFILE)",
-            "detail": "OSError: [Errno 24] Too many open files",
-            "down_since": "2026-11-10T12:00:00Z",
-            "failed_boots": 2,
-        }])
+        worker["slot_health"],
+        serde_json::json!({
+            "kind": "slots_down",
+            "slots": [{
+                "slot": 1,
+                "cause": "the OS ran short of a resource (EMFILE)",
+                "detail": "OSError: [Errno 24] Too many open files",
+                "down_since": "2026-11-10T12:00:00Z",
+                "failed_boots": 2,
+            }],
+        })
     );
+    assert!(worker.get("down_slots").is_none(), "{worker}");
     assert_eq!(
         worker["queue_max_concurrency"],
         serde_json::json!({"default": 3})
@@ -1144,7 +1407,7 @@ fn worker_list_ages_are_measured_to_the_read_time() {
         .expect("a valid instant");
     let started_at = snapshot_at - chrono::TimeDelta::hours(1);
     let threshold =
-        chrono::TimeDelta::seconds(crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S as i64);
+        chrono::TimeDelta::seconds(crate::core::defaults::WORKER_STATE_LIVE_WINDOW_SECONDS as i64);
     let one_microsecond = chrono::TimeDelta::microseconds(1);
     let fresh_age = chrono::TimeDelta::microseconds(30_000_250);
 
@@ -1167,16 +1430,16 @@ fn worker_list_ages_are_measured_to_the_read_time() {
         Some("default".to_owned()),
     ));
 
-    assert_eq!(fresh.snapshot_age_s, Some(fresh_age));
+    assert_eq!(fresh.snapshot_age_seconds, Some(fresh_age));
     assert!(!fresh.stale);
     assert_eq!(
-        fresh.uptime_s,
+        fresh.uptime_seconds,
         Some(chrono::TimeDelta::hours(1) + fresh_age)
     );
-    assert_eq!(at_threshold.snapshot_age_s, Some(threshold));
+    assert_eq!(at_threshold.snapshot_age_seconds, Some(threshold));
     assert!(!at_threshold.stale, "stale only past the live window");
     assert_eq!(
-        past_threshold.snapshot_age_s,
+        past_threshold.snapshot_age_seconds,
         Some(threshold + one_microsecond)
     );
     assert!(
@@ -1184,8 +1447,8 @@ fn worker_list_ages_are_measured_to_the_read_time() {
         "stale one microsecond past the live window"
     );
     let encoded = serde_json::to_value(&fresh).expect("serialize the worker state");
-    assert_eq!(encoded["snapshot_age_s"], serde_json::json!(30.00025));
-    assert_eq!(encoded["uptime_s"], serde_json::json!(3630.00025));
+    assert_eq!(encoded["snapshot_age_seconds"], serde_json::json!(30.00025));
+    assert_eq!(encoded["uptime_seconds"], serde_json::json!(3630.00025));
 }
 
 /// The `profile` of a worker state is an object tagged by `kind`: a stored
@@ -1321,15 +1584,17 @@ async fn a_snapshot_ten_minutes_old_in_database_time_is_stale() {
         .expect("the worker is listed");
     assert_eq!(worker["stale"], true);
     assert!(
-        worker["snapshot_age_s"].is_f64() && worker["uptime_s"].is_f64(),
+        worker["snapshot_age_seconds"].is_f64() && worker["uptime_seconds"].is_f64(),
         "the durations are JSON floats: {worker}"
     );
-    let age = worker["snapshot_age_s"]
+    let age = worker["snapshot_age_seconds"]
         .as_f64()
         .expect("an age in seconds");
-    assert!(age >= 600.0, "snapshot_age_s {age}");
-    let uptime = worker["uptime_s"].as_f64().expect("an uptime in seconds");
-    assert!(uptime >= 3_600.0, "uptime_s {uptime}");
+    assert!(age >= 600.0, "snapshot_age_seconds {age}");
+    let uptime = worker["uptime_seconds"]
+        .as_f64()
+        .expect("an uptime in seconds");
+    assert!(uptime >= 3_600.0, "uptime_seconds {uptime}");
 }
 
 /// Python `test_web_api.py::TestWorkerReads::test_class_report_answers_with_streams_and_budgets`.
@@ -1397,20 +1662,20 @@ async fn class_report_answers_with_streams_and_budgets() {
         .unwrap();
 
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["live_window_s"], 120);
+    assert_eq!(body["live_window_seconds"], 120.0);
     assert!(body.get("not_recorded").is_none());
     let streams: Vec<&serde_json::Value> = body["streams"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|stream| stream["queue_name"] == queue.as_str())
+        .filter(|stream| stream["queue"] == queue.as_str())
         .collect();
     let [stream] = streams.as_slice() else {
         panic!("one stream of the test queue: {body}");
     };
     assert_eq!(stream["execution"], "ISOLATED");
     assert_eq!(stream["coverage"], serde_json::json!({"kind": "unserved"}));
-    assert_eq!(stream["wait"]["kind"], "waiting");
+    assert_eq!(stream["wait"]["kind"], "due");
     let worker = body["workers"]
         .as_array()
         .unwrap()
@@ -1424,7 +1689,6 @@ async fn class_report_answers_with_streams_and_budgets() {
             "capacity": 8,
             "serves": ["SHARED_ASYNC"],
             "in_flight": 0,
-            "free": 8,
         }])
     );
 }
@@ -1464,8 +1728,8 @@ async fn migrated_state() -> WebState {
         )),
         events: EventBroadcaster::with_debounce(Arc::clone(&broker), Duration::from_millis(25)),
         broker,
-        auth_policy: Arc::new(AllowAll),
-        actions_enabled: true,
+        authorization_policy: Arc::new(AllowAll),
+        actions: Actions::Enabled,
         ui_config: MonitoringUiConfig::default(),
         assets: MemoryAssets::standard(),
         children: Arc::new(TestChildSpecs::empty()),
@@ -1512,7 +1776,7 @@ async fn task_stats_route_reuses_a_successful_scope_within_the_ttl() {
     clean_w4(&migrated_pool().await, &prefix).await;
     let task_id = seed_pending(&migrated_pool().await, &prefix).await;
     let task_name = format!("{prefix}task_{}", task_id.simple());
-    let path = format!("/api/tasks/stats?task_name={task_name}");
+    let path = format!("/api/tasks/status-counts?task_name={task_name}");
     let router = build_router(state.clone());
 
     let first = router
@@ -1546,7 +1810,7 @@ async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
 
     let checks = [
         "/api/meta",
-        "/api/tasks/stats?retried_only=1",
+        "/api/tasks/status-counts?retried_only=1",
         "/api/tasks/facets?retried_only=ON",
         "/api/tasks/breakdown?retried_only=yes",
         "/api/tasks?status=PENDING&status=RUNNING&retried_only=true",
@@ -1759,7 +2023,7 @@ async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
     let database = crate::test_support::TestDatabase::create_empty().await;
     let broker = Arc::new(
         PostgresBroker::connect_observe_only(
-            &AppConfig::for_database_url(database.url()).broker,
+            &AppConfig::from_database_url(database.url()).database,
             crate::ClientFamily::Rust,
         )
         .await
@@ -1806,7 +2070,7 @@ async fn a_task_path_id_that_is_not_a_uuid_is_invalid_input() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
     let read = router
         .clone()
@@ -1828,13 +2092,13 @@ async fn a_task_path_id_that_is_not_a_uuid_is_invalid_input() {
 /// routes: 404 with the not-found text of the Python web app, which takes
 /// the id as text (`get_workflow_run`, `get_workflow_node`), and no database
 /// call (the router's pool is lazy and unreachable). An index that is not an
-/// integer is still FastAPI's 422, and it names only `task_index`.
+/// integer is still FastAPI's 422, and it names only `node_index`.
 #[tokio::test]
 async fn a_workflow_read_path_id_that_is_not_a_uuid_is_not_found() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
     let run = router
         .clone()
@@ -1871,7 +2135,7 @@ async fn a_workflow_read_path_id_that_is_not_a_uuid_is_not_found() {
         .as_array()
         .expect("the 422 body lists the refused parameters");
     assert_eq!(issues.len(), 1, "{body}");
-    assert_eq!(issues[0]["loc"], serde_json::json!(["path", "task_index"]));
+    assert_eq!(issues[0]["loc"], serde_json::json!(["path", "node_index"]));
     assert_eq!(issues[0]["type"], "int_parsing");
 }
 
@@ -1884,7 +2148,7 @@ async fn a_workflow_read_path_id_that_python_refuses_is_not_found() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
     let id = "URN:UUID:00345678-abcd-4f12-8456-7890abcdef12";
     for (path, detail) in [
@@ -1917,7 +2181,7 @@ async fn a_workflow_action_path_id_that_is_not_a_uuid_is_invalid_input() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
     let refusal = not_a_uuid_refusal("workflow_id");
     for path in [
@@ -1940,7 +2204,7 @@ async fn a_node_index_outside_the_integer_column_is_not_found() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
     let run_id = uuid::Uuid::new_v4();
     let huge = "1".repeat(40);
@@ -1974,7 +2238,7 @@ async fn a_node_index_outside_the_integer_column_is_not_found() {
     assert_eq!(body["detail"][0]["type"], "int_parsing_size", "{body}");
     assert_eq!(
         body["detail"][0]["loc"],
-        serde_json::json!(["path", "task_index"])
+        serde_json::json!(["path", "node_index"])
     );
 }
 
@@ -2002,7 +2266,7 @@ async fn a_task_detail_read_that_fails_is_not_a_not_found() {
         "Task detail",
         &crate::monitoring::MonitoringQueryError::HistoryContractViolation {
             message: "task detail history read failed: bad row".to_owned(),
-            source: crate::monitoring::HistoryContractSource(
+            cause: crate::monitoring::HistoryContractSource(
                 crate::monitoring::MonitoringQueryErrorSource::History(
                     crate::core::history::errors::HistoryError::Contract("bad row".to_owned()),
                 ),
@@ -2015,7 +2279,7 @@ async fn a_task_detail_read_that_fails_is_not_a_not_found() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
     let read = router
         .oneshot(request(
@@ -2032,7 +2296,10 @@ async fn a_task_detail_read_that_fails_is_not_a_not_found() {
 const FAILING_READS: [(&str, &str); 4] = [
     ("/api/workflows/names", "Workflow names query failed: "),
     ("/api/workers", "Worker state query failed: "),
-    ("/api/workers/classes", "Class report query failed: "),
+    (
+        "/api/workers/classes",
+        "Execution class report query failed: ",
+    ),
     ("/api/workers/w1/history", "Worker history query failed: "),
 ];
 
@@ -2083,7 +2350,7 @@ async fn a_database_failure_that_may_clear_is_503_on_every_route_kind() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
 
     assert_failures_answer(&router, StatusCode::SERVICE_UNAVAILABLE).await;
@@ -2106,7 +2373,7 @@ async fn a_database_failure_that_stays_is_500_on_every_route_kind() {
             SchemaState::Match,
             Some(crate::expected_schema_version()),
         )),
-        true,
+        Actions::Enabled,
         MemoryAssets::standard(),
     );
     let broker = Arc::clone(&state.broker);
@@ -2195,7 +2462,7 @@ async fn the_stats_route_answers_the_seven_status_cards_in_a_fixed_order() {
     let state = migrated_state().await;
 
     let response = build_router(state)
-        .oneshot(request(Method::GET, "/api/tasks/stats"))
+        .oneshot(request(Method::GET, "/api/tasks/status-counts"))
         .await
         .unwrap();
 
@@ -2229,12 +2496,12 @@ async fn an_unknown_error_category_is_a_bad_request_on_every_task_route() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     );
 
     for path in [
         "/api/tasks?error_category=NOT_A_FAMILY",
-        "/api/tasks/stats?error_category=NOT_A_FAMILY",
+        "/api/tasks/status-counts?error_category=NOT_A_FAMILY",
         "/api/tasks/facets?error_category=NOT_A_FAMILY",
         "/api/tasks/breakdown?group_by=worker&error_category=NOT_A_FAMILY",
     ] {
@@ -2313,7 +2580,7 @@ async fn the_run_route_answers_the_run_its_failed_indices_and_its_edges() {
         .unwrap();
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["run"]["id"], run_id.to_string());
+    assert_eq!(body["run"]["workflow_id"], run_id.to_string());
     assert_eq!(body["failed_indices"], serde_json::json!([0]));
     assert_eq!(body["edges"], serde_json::json!([]));
     // The run and each node carry their timing. The run began 120 s before
@@ -2660,7 +2927,7 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
     let url = database.url().to_owned();
     let broker = Arc::new(
         PostgresBroker::connect_observe_only(
-            &AppConfig::for_database_url(&url).broker,
+            &AppConfig::from_database_url(&url).database,
             crate::ClientFamily::Rust,
         )
         .await
@@ -2670,7 +2937,7 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
         Arc::clone(&broker),
         Arc::new(TestChildSpecs::empty()),
         MonitoringHandlerConfig {
-            actions_enabled: true,
+            actions: Actions::Enabled,
             ui: MonitoringUiConfig::default(),
             client_version: env!("CARGO_PKG_VERSION").to_owned(),
             heartbeat: HEARTBEAT,
@@ -2703,7 +2970,7 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
     assert_eq!(objects, (None, None, None, 0));
 }
 
-fn granted_handler(actions_enabled: bool) -> MonitoringHandler {
+fn granted_handler(actions: Actions) -> MonitoringHandler {
     let mut state = test_state(
         &lazy_pool(),
         Arc::new(GrantedAccess),
@@ -2711,7 +2978,7 @@ fn granted_handler(actions_enabled: bool) -> MonitoringHandler {
             SchemaState::Match,
             Some(crate::expected_schema_version()),
         )),
-        actions_enabled,
+        actions,
         MemoryAssets::standard(),
     );
     state.client_version = "9.9.9-client".to_owned();
@@ -2754,7 +3021,7 @@ fn body_json(response: &ResponseParts) -> serde_json::Value {
 /// assets and every other path.
 #[tokio::test]
 async fn the_handler_asks_the_verdicts_of_the_python_routes() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
     let id = Uuid::nil();
     for (method, path, need) in [
         (
@@ -2763,7 +3030,11 @@ async fn the_handler_asks_the_verdicts_of_the_python_routes() {
             AccessNeed::ViewReportAct,
         ),
         (Method::GET, "/api/tasks".to_owned(), AccessNeed::View),
-        (Method::GET, "/api/tasks/stats".to_owned(), AccessNeed::View),
+        (
+            Method::GET,
+            "/api/tasks/status-counts".to_owned(),
+            AccessNeed::View,
+        ),
         (
             Method::GET,
             "/api/tasks/facets".to_owned(),
@@ -2862,7 +3133,7 @@ async fn the_handler_asks_the_verdicts_of_the_python_routes() {
     assert_eq!(events.need, AccessNeed::View);
     assert_eq!(events.form, ResponseForm::EventStream);
 
-    let view_only = granted_handler(false);
+    let view_only = granted_handler(Actions::Disabled);
     let cancel = view_only.route_access(&Method::POST, &format!("/api/tasks/{id}/cancel"));
     assert_eq!(cancel.need, AccessNeed::View);
 }
@@ -2871,7 +3142,7 @@ async fn the_handler_asks_the_verdicts_of_the_python_routes() {
 /// the verdicts of the grant; no database is reachable here.
 #[tokio::test]
 async fn the_handler_serves_the_routes_with_the_verdicts_of_the_grant() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
 
     let refused = handler
         .handle(
@@ -2965,7 +3236,7 @@ async fn the_handler_serves_the_routes_with_the_verdicts_of_the_grant() {
 /// the act guard refuses without a verdict to act.
 #[tokio::test]
 async fn an_action_while_actions_are_disabled_is_refused_without_asking_to_act() {
-    let handler = granted_handler(false);
+    let handler = granted_handler(Actions::Disabled);
 
     let refused = handler
         .handle(
@@ -2984,7 +3255,7 @@ async fn an_action_while_actions_are_disabled_is_refused_without_asking_to_act()
 #[tokio::test]
 #[should_panic(expected = "does not answer the need")]
 async fn a_grant_that_skips_a_needed_verdict_is_a_defect() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
     let _ = handler
         .handle(
             parts(Method::GET, "/api/meta"),
@@ -2996,7 +3267,7 @@ async fn a_grant_that_skips_a_needed_verdict_is_a_defect() {
 #[tokio::test]
 #[should_panic(expected = "is the event stream")]
 async fn the_event_stream_has_no_single_response() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
     let _ = handler
         .handle(
             parts(Method::GET, "/api/events"),
@@ -3009,7 +3280,7 @@ async fn the_event_stream_has_no_single_response() {
 /// the host has no stream to open.
 #[tokio::test]
 async fn a_refused_view_of_the_event_stream_is_answered_by_the_guard() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
 
     let refused = handler
         .handle(
@@ -3029,7 +3300,7 @@ async fn a_refused_view_of_the_event_stream_is_answered_by_the_guard() {
 /// refused verdict is answered first by the guards.
 #[tokio::test]
 async fn a_body_over_the_bound_is_refused_after_the_verdicts() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
     let over = axum::body::Bytes::from(vec![b' '; super::handler::MAX_REQUEST_BODY_BYTES + 1]);
 
     let too_large = handler
@@ -3062,16 +3333,48 @@ async fn a_body_over_the_bound_is_refused_after_the_verdicts() {
     assert_eq!(refused.status, StatusCode::FORBIDDEN);
 }
 
+/// The size bound comes before the key check of the body: on every action
+/// route, a body over the bound whose object has an unknown key is refused
+/// with 413, not with the 422 of the key.
+#[tokio::test]
+async fn a_body_over_the_bound_with_an_unknown_key_is_413_on_every_action_route() {
+    let handler = granted_handler(Actions::Enabled);
+    let mut over = br#"{"include_runing": true}"#.to_vec();
+    over.resize(super::handler::MAX_REQUEST_BODY_BYTES + 1, b' ');
+    let over = axum::body::Bytes::from(over);
+
+    for path in failing_actions() {
+        let response = handler
+            .handle(
+                RequestParts {
+                    body: over.clone(),
+                    ..action_parts(&path)
+                },
+                grant(Verdict::Allowed, Verdict::Allowed),
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::PAYLOAD_TOO_LARGE, "{path}");
+        assert_eq!(
+            body_json(&response),
+            serde_json::json!({"detail": format!(
+                "The request body is over {} bytes.",
+                super::handler::MAX_REQUEST_BODY_BYTES
+            )}),
+            "{path}"
+        );
+    }
+}
+
 /// The free `route_access` is the handler's answer for the same switch.
 #[tokio::test]
 async fn route_access_follows_the_actions_switch() {
     let path = format!("/api/workflows/{}/resume", Uuid::nil());
     assert_eq!(
-        super::handler::route_access(true, &Method::POST, &path),
-        granted_handler(true).route_access(&Method::POST, &path)
+        super::handler::route_access(Actions::Enabled, &Method::POST, &path),
+        granted_handler(Actions::Enabled).route_access(&Method::POST, &path)
     );
     assert_eq!(
-        super::handler::route_access(false, &Method::POST, &path).need,
+        super::handler::route_access(Actions::Disabled, &Method::POST, &path).need,
         AccessNeed::View
     );
 }
@@ -3080,7 +3383,7 @@ async fn route_access_follows_the_actions_switch() {
 /// path are public (a 405 and the page).
 #[tokio::test]
 async fn metrics_needs_the_view_verdict() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
     for (method, path, need) in [
         (Method::GET, "/metrics", AccessNeed::View),
         (Method::HEAD, "/metrics", AccessNeed::View),
@@ -3100,7 +3403,7 @@ async fn metrics_needs_the_view_verdict() {
 /// with no fleet series, and the status is still 200.
 #[tokio::test]
 async fn metrics_serves_the_fleet_text_behind_the_view_verdict() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
     let refused = handler
         .handle(
             parts(Method::GET, "/metrics"),
@@ -3159,7 +3462,7 @@ async fn metrics_serves_the_fleet_text_behind_the_view_verdict() {
 /// degraded frame and ends.
 #[tokio::test]
 async fn an_event_stream_without_a_listener_degrades_and_ends() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
     let mut frames = handler.subscribe_events().await;
 
     let first = tokio::time::timeout(Duration::from_secs(5), frames.next())

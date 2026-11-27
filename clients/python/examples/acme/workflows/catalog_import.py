@@ -58,7 +58,7 @@ class CatalogImport(WorkflowDefinition[None]):
         """
         nodes: list[TaskNode[Any] | SubWorkflowNode[Any]] = [
             TaskNode(
-                fn=catalog_import_chunk,
+                function=catalog_import_chunk,
                 kwargs={'import_id': import_id, 'chunk_index': index},
                 node_id=f'chunk_{index:02d}',
             )
@@ -66,7 +66,7 @@ class CatalogImport(WorkflowDefinition[None]):
         ]
         return app.workflow(
             name=cls.name,
-            tasks=nodes,
+            nodes=nodes,
             on_error=OnError.FAIL,
         )
 
@@ -74,7 +74,7 @@ class CatalogImport(WorkflowDefinition[None]):
 _CHECK_IMPORT: Final[str] = 'IMPORT-CHECK'
 
 
-@app.workflow_builder(
+@app.check_workflow_builder(
     cases=[{'import_id': _CHECK_IMPORT, 'chunks': tuning.CATALOG_IMPORT_CHUNKS}],
 )
 def build_catalog_import(*, import_id: str, chunks: int) -> WorkflowSpec[Any]:

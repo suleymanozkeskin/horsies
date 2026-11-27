@@ -28,8 +28,8 @@ from horsies import (
     Err,
     Horsies,
     Ok,
+    Result,
     TaskError,
-    TaskResult,
     WorkflowDefinition,
     WorkflowSpec,
     WorkflowStartCommandConflict,
@@ -42,8 +42,8 @@ WORKFLOW_ID_NAMESPACE = uuid.UUID("6f1d5c0e-8a54-4c57-9a0e-2b7a4f3c9d10")
 
 
 @app.task("onboard_customer")
-def onboard_customer(*, customer_id: str) -> TaskResult[str, TaskError]:
-    return TaskResult(ok=customer_id)
+def onboard_customer(*, customer_id: str) -> Result[str, TaskError]:
+    return Ok(customer_id)
 
 
 class OnboardingWorkflow(WorkflowDefinition[str]):
@@ -59,7 +59,7 @@ class OnboardingWorkflow(WorkflowDefinition[str]):
         **_kwargs: Any,
     ) -> WorkflowSpec[str]:
         onboard = onboard_customer.node(node_id="onboard")(customer_id=customer_id)
-        return app.workflow(name=cls.name, tasks=[onboard], output=onboard)
+        return app.workflow(name=cls.name, nodes=[onboard], output=onboard)
 
 
 def onboarding_workflow_id(customer_id: str) -> str:
@@ -95,7 +95,7 @@ The start inserts the workflow row. When the id exists, the start locks that row
 | Row of a run started before this release | `Ok(handle)` for the existing workflow. The row has no stored start command, so the start does not compare it. Horsies logs a warning. |
 | Value that is not a UUID | `Err(WorkflowStartValidationFailed)`. See `HRS-032`. |
 
-`WorkflowStartCommandConflict` and `WorkflowStartIdConflict` are never retryable. `retry_start()` refuses them. Send the same start command, or use another id.
+`WorkflowStartCommandConflict` and `WorkflowStartIdConflict` are never retryable. `resend_start()` refuses them. Send the same start command, or use another id.
 
 Other rules:
 
@@ -103,7 +103,7 @@ Other rules:
 - Runs started before this release are not checked. A start with their id and their name returns their handle.
 - `Ok(handle)` does not tell whether this call created the workflow. The handle can point to a workflow that is already `COMPLETED` or `FAILED`.
 - Two starts with the same id at the same time: the first commit wins. The second start waits for it. Then it returns the existing handle (same start command) or `WorkflowStartCommandConflict` (another start command).
-- A start that failed before its transaction committed leaves no row. The same id can start again. `retry_start()` builds the same spec again, so a first attempt that committed is found as the same start command. See `retry_start()` in [Workflow API](/horsies/concepts/workflows/workflow-api/).
+- A start that failed before its transaction committed leaves no row. The same id can start again. `resend_start()` builds the same spec again, so a first attempt that committed is found as the same start command. See `resend_start()` in [Workflow API](/horsies/concepts/workflows/workflow-api/).
 
 ## What the Start Command Is
 
@@ -112,14 +112,14 @@ The core computes the start command from the spec. No client computes it. The ro
 The start command holds:
 
 - The workflow: name, `definition_key`, `on_error`, the output node, the success policy.
-- Each node of the top-level workflow, in index order: index, `node_id`, task name, kwargs (as the client encoded them, byte for byte), queue, priority, dependencies, `args_from`, `workflow_ctx_from`, `allow_failed_deps`, join rule, `min_success`, task options (with `good_until` merged in), retention class, whether the node is a sub-workflow node, its sub-workflow `definition_key`, and whether it gives params.
+- Each node of the top-level workflow, in index order: index, `node_id`, task name, kwargs (as the client encoded them, byte for byte), queue, priority, dependencies, `args_from`, `workflow_context_from`, `allow_failed_dependencies`, join rule, `min_success`, task options (with `good_until` merged in), retention class, whether the node is a sub-workflow node, its sub-workflow `definition_key`, and whether it gives params.
 
 The start command does not hold:
 
 - The `workflow_id`.
 - The call time (`sent_at`).
 - The trace carrier.
-- `resend_on_transient_err`.
+- `resend_on_transient_error`.
 - The child workflows that the sub-workflow roots build at the start. Their ids are new on each start.
 
 ## Retention Ends the Protection

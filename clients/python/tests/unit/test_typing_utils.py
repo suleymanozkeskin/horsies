@@ -9,8 +9,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from horsies.core.errors import ErrorCode, WorkflowValidationError
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
+from horsies.core.models.outcome import TaskOutcome
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Result
 from horsies.core.models.workflow.nodes import TaskNode, SubWorkflowNode
 from horsies.core.models.workflow.typing_utils import (
     _get_inspect_target,
@@ -19,7 +21,8 @@ from horsies.core.models.workflow.typing_utils import (
     _signature_accepts_kwargs,
     _valid_kwarg_names,
     _resolved_type_hints,
-    _extract_taskresult_ok_type,
+    _extract_outcome_ok_type,
+    _extract_return_ok_type,
     _normalize_resolved_ok_type,
     _resolve_task_fn_ok_type,
     _resolve_workflow_def_ok_type,
@@ -53,7 +56,7 @@ def _plain_fn(x: int, y: str) -> str:
     return f"{x}{y}"  # pragma: no cover
 
 
-def _fn_with_workflow_ctx(workflow_ctx: Any, x: int) -> None:
+def _fn_with_workflow_ctx(workflow_context: Any, x: int) -> None:
     pass  # pragma: no cover
 
 
@@ -61,13 +64,13 @@ def _fn_no_workflow_ctx(x: int) -> None:
     pass  # pragma: no cover
 
 
-def _fn_returns_task_result(x: int) -> TaskResult[str, TaskError]:
+def _fn_returns_task_result(x: int) -> Result[str, TaskError]:
     ...  # pragma: no cover
 
 
 def _fn_returns_optional_task_result(
     x: int,
-) -> TaskResult[int, TaskError] | None:
+) -> Result[int, TaskError] | None:
     ...  # pragma: no cover
 
 
@@ -99,7 +102,7 @@ class TestGetInspectTarget:
         def original() -> None:
             pass  # pragma: no cover
 
-        wrapper._original_fn = original  # type: ignore[attr-defined]
+        wrapper._original_function = original  # type: ignore[attr-defined]
 
         # Act
         result = _get_inspect_target(wrapper)
@@ -112,7 +115,7 @@ class TestGetInspectTarget:
         def wrapper() -> None:
             pass  # pragma: no cover
 
-        wrapper._original_fn = "not_callable"  # type: ignore[attr-defined]
+        wrapper._original_function = "not_callable"  # type: ignore[attr-defined]
 
         # Act
         result = _get_inspect_target(wrapper)
@@ -181,7 +184,7 @@ class TestGetSignature:
         def wrapper(*args: Any, **kwargs: Any) -> None:
             pass  # pragma: no cover
 
-        wrapper._original_fn = original  # type: ignore[attr-defined]
+        wrapper._original_function = original  # type: ignore[attr-defined]
 
         # Act
         sig = _get_signature(wrapper)
@@ -341,7 +344,7 @@ class TestResolvedTypeHints:
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             ...  # pragma: no cover
 
-        wrapper._original_fn = original  # type: ignore[attr-defined]
+        wrapper._original_function = original  # type: ignore[attr-defined]
 
         # Act
         hints = _resolved_type_hints(wrapper)
@@ -352,25 +355,25 @@ class TestResolvedTypeHints:
 
 
 # =============================================================================
-# TestExtractTaskResultOkType
+# TestExtractOutcomeOkType
 # =============================================================================
 
 
 @pytest.mark.unit
-class TestExtractTaskResultOkType:
-    """Tests for _extract_taskresult_ok_type()."""
+class TestExtractOutcomeOkType:
+    """Tests for _extract_outcome_ok_type()."""
 
     def test_none_annotation_returns_none(self) -> None:
-        assert _extract_taskresult_ok_type(None) is None
+        assert _extract_outcome_ok_type(None) is None
 
-    def test_task_result_with_two_args_extracts_ok_type(self) -> None:
-        annotation = TaskResult[int, TaskError]
-        result = _extract_taskresult_ok_type(annotation)
+    def test_task_outcome_with_two_args_extracts_ok_type(self) -> None:
+        annotation = TaskOutcome[int, TaskError]
+        result = _extract_outcome_ok_type(annotation)
         assert result is int
 
-    def test_task_result_wrong_arg_count_returns_none(self) -> None:
+    def test_task_outcome_wrong_arg_count_returns_none(self) -> None:
         # Arrange: manually construct a generic alias with only 1 arg
-        # TaskResult normally requires 2 args, but we can test the guard
+        # TaskOutcome normally requires 2 args, but we can test the guard
         # by mocking get_args to return a tuple of length != 2
         with patch(
             "horsies.core.models.workflow.typing_utils.get_args",
@@ -379,39 +382,62 @@ class TestExtractTaskResultOkType:
         ), patch(
             "horsies.core.models.workflow.typing_utils.get_origin",
             autospec=True,
-            return_value=TaskResult,
+            return_value=TaskOutcome,
         ):
-            result = _extract_taskresult_ok_type(TaskResult)
+            result = _extract_outcome_ok_type(TaskOutcome)
 
         assert result is None
 
-    def test_optional_task_result_extracts_ok_type(self) -> None:
-        # Union[TaskResult[int, TaskError], None]
-        annotation = Union[TaskResult[int, TaskError], None]
-        result = _extract_taskresult_ok_type(annotation)
+    def test_optional_task_outcome_extracts_ok_type(self) -> None:
+        # Union[TaskOutcome[int, TaskError], None]
+        annotation = Union[TaskOutcome[int, TaskError], None]
+        result = _extract_outcome_ok_type(annotation)
         assert result is int
 
     def test_union_with_none_extracts_ok_type(self) -> None:
-        annotation = Union[None, TaskResult[str, TaskError]]
-        result = _extract_taskresult_ok_type(annotation)
+        annotation = Union[None, TaskOutcome[str, TaskError]]
+        result = _extract_outcome_ok_type(annotation)
         assert result is str
 
     def test_pipe_syntax_union_extracts_ok_type(self) -> None:
-        # Python 3.10+ pipe syntax: TaskResult[int, TaskError] | None
-        annotation = TaskResult[int, TaskError] | None
-        result = _extract_taskresult_ok_type(annotation)
+        # Python 3.10+ pipe syntax: TaskOutcome[int, TaskError] | None
+        annotation = TaskOutcome[int, TaskError] | None
+        result = _extract_outcome_ok_type(annotation)
         assert result is int
 
     def test_ambiguous_union_returns_none(self) -> None:
-        # Two different TaskResult extractions → ambiguous
-        annotation = Union[TaskResult[int, TaskError], TaskResult[str, TaskError]]
-        result = _extract_taskresult_ok_type(annotation)
+        # Two different TaskOutcome extractions → ambiguous
+        annotation = Union[TaskOutcome[int, TaskError], TaskOutcome[str, TaskError]]
+        result = _extract_outcome_ok_type(annotation)
         assert result is None
 
     def test_unrelated_type_returns_none(self) -> None:
-        assert _extract_taskresult_ok_type(int) is None
-        assert _extract_taskresult_ok_type(str) is None
-        assert _extract_taskresult_ok_type(list[int]) is None
+        assert _extract_outcome_ok_type(int) is None
+        assert _extract_outcome_ok_type(str) is None
+        assert _extract_outcome_ok_type(list[int]) is None
+
+    def test_result_annotation_is_not_an_outcome_slot(self) -> None:
+        # A return annotation `Result[T, E]` is not an args_from slot.
+        assert _extract_outcome_ok_type(Result[int, TaskError]) is None
+
+
+# =============================================================================
+# TestExtractReturnOkType
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestExtractReturnOkType:
+    """Tests for _extract_return_ok_type()."""
+
+    def test_result_annotation_extracts_ok_type(self) -> None:
+        assert _extract_return_ok_type(Result[int, TaskError]) is int
+
+    def test_not_a_result_annotation_returns_none(self) -> None:
+        assert _extract_return_ok_type(None) is None
+        assert _extract_return_ok_type(int) is None
+        assert _extract_return_ok_type(TaskOutcome[int, TaskError]) is None
+        assert _extract_return_ok_type(Result[int, TaskError] | None) is None
 
 
 # =============================================================================
@@ -455,7 +481,7 @@ class TestResolveTaskFnOkType:
         assert _resolve_task_fn_ok_type(fn) is int
 
     def test_return_annotation_fallback_via_hints(self) -> None:
-        # Arrange: function with TaskResult return annotation
+        # Arrange: function with Result return annotation
         # Act / Assert
         result = _resolve_task_fn_ok_type(_fn_returns_task_result)
         assert result is str
@@ -465,7 +491,7 @@ class TestResolveTaskFnOkType:
         # sig.return_annotation. Because `from __future__ import annotations`
         # makes annotations strings, we need to mock _get_signature to return
         # a signature with the real type object as return_annotation.
-        real_annotation = TaskResult[float, TaskError]
+        real_annotation = Result[float, TaskError]
         mock_sig = inspect.Signature(
             parameters=[
                 inspect.Parameter("x", inspect.Parameter.POSITIONAL_OR_KEYWORD),
@@ -661,7 +687,7 @@ class TestResolveSourceNodeOkType:
 
     def test_task_node_delegates_to_resolve_task_fn(self) -> None:
         # Arrange
-        def fn() -> TaskResult[int, TaskError]:
+        def fn() -> Result[int, TaskError]:
             ...  # pragma: no cover
 
         fn.task_ok_type = int  # type: ignore[attr-defined]
@@ -670,7 +696,7 @@ class TestResolveSourceNodeOkType:
         mock_fn.task_ok_type = int
 
         node = MagicMock(spec=TaskNode)
-        node.fn = mock_fn
+        node.function = mock_fn
 
         # Act
         with patch(
@@ -688,7 +714,7 @@ class TestResolveSourceNodeOkType:
         # Arrange
         mock_def = MagicMock()
         node = MagicMock(spec=SubWorkflowNode)
-        node.workflow_def = mock_def
+        node.workflow_definition = mock_def
 
         # Act
         with patch(
@@ -764,7 +790,7 @@ class TestValidateWorkflowGenericOutputMatch:
             with pytest.raises(WorkflowValidationError) as exc_info:
                 validate_workflow_generic_output_match(mock_cls, mock_spec)
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
         assert "config.output" in exc_info.value.message
         assert "WorkflowDefinition[int]" in exc_info.value.message
 
@@ -850,7 +876,7 @@ class TestValidateWorkflowGenericOutputMatch:
             with pytest.raises(WorkflowValidationError) as exc_info:
                 validate_workflow_generic_output_match(mock_cls, mock_spec)
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
 
     def test_compatible_types_no_error(self) -> None:
         # Arrange

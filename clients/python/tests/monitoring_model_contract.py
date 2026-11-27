@@ -1,7 +1,10 @@
 """The wire contract of the monitoring read models, from their Pydantic schemas.
 
 The core returns the JSON of its serde models, and ``horsies.monitoring``
-validates it into the Pydantic models of ``horsies.monitoring.models``. This
+validates it into the Pydantic models of ``horsies.monitoring.models``. The
+worker routes answer with the health dataclasses that
+``horsies.monitoring.models`` imports (``DownSlot``, ``ExecutionClassReport``,
+...), read with a ``TypeAdapter``. This
 module reduces the Pydantic JSON schema of each model to its contract: the
 field names, and per field the kind of value it holds. The core compares the
 JSON schema of each Rust model with this contract
@@ -49,7 +52,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Final, cast, get_args, get_origin
 
-from pydantic import BaseModel
+from pydantic import TypeAdapter
 from pydantic.fields import FieldInfo
 
 from horsies.monitoring import models
@@ -68,10 +71,10 @@ CONTRACT_PATH: Final = (
 )
 
 # The models whose JSON the core writes for a read or a web response, by the
-# name of both the Pydantic class and the Rust type.
-CONTRACT_MODELS: Final[tuple[type[BaseModel], ...]] = (
-    models.TaskAttemptInfo,
-    models.LeafTaskInfo,
+# name of both the Pydantic class (or health dataclass) and the Rust type.
+CONTRACT_MODELS: Final[tuple[type, ...]] = (
+    models.TaskAttemptDetail,
+    models.TaskRowInfo,
     models.StatusCount,
     models.FacetValue,
     models.ErrorFacet,
@@ -83,17 +86,17 @@ CONTRACT_MODELS: Final[tuple[type[BaseModel], ...]] = (
     models.TaskListPage,
     models.TaskDetail,
     models.WorkflowRunSummary,
-    models.WorkflowNodeInfo,
+    models.WorkflowNodeSummary,
     models.WorkflowEdge,
     models.WorkflowRunDetail,
-    models.WorkflowTaskDetail,
-    models.DownSlotInfo,
+    models.WorkflowNodeDetail,
+    models.DownSlot,
     models.WorkerStateInfo,
-    models.BudgetLoadInfo,
-    models.WorkerClassLoadInfo,
-    models.PendingStreamInfo,
-    models.ClassReportInfo,
-    models.WorkerPingInfo,
+    models.BudgetLoad,
+    models.WorkerExecutionClassLoad,
+    models.PendingStream,
+    models.ExecutionClassReport,
+    models.WorkerPong,
     models.LivenessReport,
     models.WorkerHistoryPoint,
     models.ScheduleStateInfo,
@@ -105,10 +108,7 @@ of the claim of a segment of the timing of a node of a run
 (``WorkflowRunDetail``). A deeper schema is a defect of the reduction."""
 
 INLINE_KIND_NAMES: Final[Mapping[Place, str]] = {
-    ('EndpointTerminalInfo', 'status'): 'TerminalNodeStatus',
-    ('PendingStreamInfo', 'coverage'): 'StreamCoverageInfo',
-    ('PendingStreamInfo', 'wait'): 'StreamWaitInfo',
-    ('WorkerStateInfo', 'slot_health'): 'SlotHealthKind',
+    ('NodeEndpointTerminalInfo', 'status'): 'TerminalNodeStatus',
 }
 """The name of each union and enum that a contract model writes inline, by
 its field: the name of the Rust type."""
@@ -293,10 +293,10 @@ MODEL_KIND_NAMES: Final = KindNames(
 
 
 def model_contract(
-    model: type[BaseModel], names: KindNames = MODEL_KIND_NAMES
+    model: type, names: KindNames = MODEL_KIND_NAMES
 ) -> dict[str, Kind]:
     """The contract of one model: its fields and their kinds."""
-    schema = model.model_json_schema(mode='serialization')
+    schema = TypeAdapter(model).json_schema(mode='serialization')
     reduction = _Reduction(defs=_mapping(schema.get('$defs', {})), names=names)
     return _fields(schema, reduction, 0, owner=model.__name__, without=None)
 

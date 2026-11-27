@@ -1,8 +1,8 @@
 ---
 title: Task Errors
-summary: TaskError<E> with the library codes and the task's own code enum, the UserErrorCode derive, and the data and exception of a stored error.
+summary: TaskError<E> with the built-in codes and the task's own code enum, the CustomErrorCode derive, and the data and exception of a stored error.
 related: [defining-tasks, retrieving-results, ../../tasks/errors]
-tags: [rust, errors, TaskError, UserErrorCode, BuiltInTaskCode]
+tags: [rust, errors, TaskError, CustomErrorCode, BuiltInTaskCode]
 ---
 
 # Task Errors
@@ -11,12 +11,12 @@ A task body returns `Result<T, TaskError<E>>`. `E` is the code type of the task'
 
 ## The Code Type
 
-Derive `horsies::UserErrorCode` on an enum of unit variants. Each variant's code is its name in UPPER_SNAKE_CASE.
+Derive `horsies::CustomErrorCode` on an enum of unit variants. Each variant's code is its name in UPPER_SNAKE_CASE.
 
 ```rust
-use horsies::UserErrorCode;
+use horsies::CustomErrorCode;
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum ChargeCode {
     CardDeclined,   // CARD_DECLINED
     RateLimited,    // RATE_LIMITED
@@ -29,7 +29,7 @@ These are compile errors:
 - two variants with one code;
 - a code with the name of a built-in code or of a reserved code (`WORKFLOW_STOPPED`).
 
-`std::convert::Infallible` is the code type of a task with no codes of its own. A hand-written `UserErrorCode` impl keeps the same contract.
+`std::convert::Infallible` is the code type of a task with no codes of its own. A hand-written `CustomErrorCode` impl keeps the same contract.
 
 `CODES` are the task's [declared error codes](/horsies/tasks/errors/#declared-error-codes). The task macros (`#[task]`, `#[blocking_task]`, `async_task_fn!`, `blocking_task_fn!`) fill them from the code type, with no other user work. `register` checks them:
 
@@ -44,9 +44,9 @@ The derive refuses a built-in or reserved name and a repeated code at compile ti
 ## TaskError
 
 ```rust
-use horsies::{task, OperationalErrorCode, TaskError, UserErrorCode};
+use horsies::{task, CustomErrorCode, TaskError, OperationalCode};
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum ChargeCode {
     CardDeclined,
 }
@@ -54,19 +54,19 @@ enum ChargeCode {
 #[task("charge_card")]
 async fn charge_card(amount_cents: u64) -> Result<String, TaskError<ChargeCode>> {
     if amount_cents == 0 {
-        return Err(TaskError::library(OperationalErrorCode::TaskException, "nothing to charge"));
+        return Err(TaskError::built_in(OperationalCode::TaskException, "nothing to charge"));
     }
-    Err(TaskError::user(ChargeCode::CardDeclined, "the issuer declined the card")
+    Err(TaskError::custom(ChargeCode::CardDeclined, "the issuer declined the card")
         .with_data(serde_json::json!({ "amount_cents": amount_cents })))
 }
 ```
 
 | Item | Returns |
 |------|---------|
-| `TaskError::user(code, message)` | An error with a code of `E` |
-| `TaskError::library(code, message)` | An error with a library code (`BuiltInTaskCode` or one of its four families) |
+| `TaskError::custom(code, message)` | An error with a custom code: a code of `E` |
+| `TaskError::built_in(code, message)` | An error with a built-in code (`BuiltInTaskCode` or one of its four families) |
 | `.with_data(value)` | This error with `data`. Never fails; see [Data](#data) |
-| `.code()` | `&TaskErrorCode<E>`: `Library(BuiltInTaskCode)` or `User(E)` |
+| `.code()` | `&TaskErrorCode<E>`: `BuiltIn(BuiltInTaskCode)` or `Custom(E)` |
 | `.message()` | `Option<&str>` |
 | `.data()` | `Option<&JsonText>`: the stored text; `decode::<T>()` reads it, an integer of any width with all its digits |
 | `.exception()` | `Option<&ExceptionRecord>`: set by the library for a panic of the task body |
@@ -74,7 +74,7 @@ async fn charge_card(amount_cents: u64) -> Result<String, TaskError<ChargeCode>>
 
 `TaskErrorCode::text()` returns the stored code text. The fields of `TaskError` are private. The exception record and the sub-workflow failure are set only by the library.
 
-The library code catalogs are `BuiltInTaskCode` and its four families, `OperationalErrorCode`, `ContractCode`, `RetrievalCode` and `OutcomeCode`, with the names and the wire values of the shared catalog.
+The built-in code catalogs are `BuiltInTaskCode` and its four families, `OperationalCode`, `ContractCode`, `RetrievalCode` and `OutcomeCode`, with the names and the wire values of the shared catalog.
 
 ## Data
 
@@ -93,8 +93,8 @@ A value cannot be stored when:
 | The input does not decode with the task's input type | `WORKER_SERIALIZATION_ERROR`. The stored error names the type, the field path and the kind of failure; a part of the message that comes from the input is written as `<input>` |
 | The returned value does not read back with the output type | `WORKER_SERIALIZATION_ERROR`. The child encodes the value, decodes the text with `T`, encodes it again, and stores the result only when the two texts are equal |
 
-The other library codes (timeouts, crashes, cancels, expiry) are on the [Errors Reference](/horsies/tasks/errors/).
+The other built-in codes (timeouts, crashes, cancels, expiry) are on the [Errors Reference](/horsies/tasks/errors/).
 
 ## Reading a Stored Error
 
-A read returns the task's error inside `TaskOutcome::Failed`; see [Retrieving Results](/horsies/rust/tasks/retrieving-results/). A stored error whose user code `E` does not name is the read error `ReadError::UnknownUserCode`, with the code text and the code type that the read asked for: the task that stored it has another code type, or a version of the enum without that code.
+A read returns the task's error inside `TaskOutcome::Failed`; see [Retrieving Results](/horsies/rust/tasks/retrieving-results/). A stored error whose custom code `E` does not name is the read error `ReadError::UnknownCustomCode` (`UNKNOWN_CUSTOM_CODE`), with the stored code text (`stored_code`) and the code type that the read asked for: the task that stored it has another code type, or a version of the enum without that code.

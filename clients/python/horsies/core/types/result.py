@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
+from types import UnionType
 from typing import (
     Any,
     Awaitable,
@@ -13,6 +15,8 @@ from typing import (
     Type,
     TypeVar,
     Union,
+    get_args,
+    get_origin,
 )
 
 from typing_extensions import TypeIs
@@ -123,7 +127,7 @@ class Ok(Generic[T]):
         """
         return self._value
 
-    def unwrap_or_raise(self, e: object) -> T:
+    def unwrap_or_raise(self, exception: object) -> T:
         """
         Return the value.
         """
@@ -330,11 +334,11 @@ class Err(Generic[E]):
         """
         return op(self._value)
 
-    def unwrap_or_raise(self, e: Type[TBE]) -> NoReturn:
+    def unwrap_or_raise(self, exception: Type[TBE]) -> NoReturn:
         """
         The contained result is ``Err``, so raise the exception with the value.
         """
-        raise e(self._value)
+        raise exception(self._value)
 
     def map(self, op: object) -> Err[E]:
         """
@@ -468,3 +472,44 @@ def is_err(result: Result[T, E]) -> TypeIs[Err[E]]:
 
     """
     return result.is_err()
+
+
+@dataclass(frozen=True, slots=True)
+class ResultTypeArguments:
+    """The two type arguments of a `Result[T, E]` annotation."""
+
+    ok_type: object
+    err_type: object
+
+
+@dataclass(frozen=True, slots=True)
+class NotAResultAnnotation:
+    """The annotation is not a union of exactly one `Ok[T]` and one `Err[E]`."""
+
+
+def result_type_arguments(
+    annot: object,
+) -> ResultTypeArguments | NotAResultAnnotation:
+    """Split a `Result[T, E]` annotation into `T` and `E`. Pure.
+
+    `Result[T, E]` is the union `Ok[T] | Err[E]` at run time, so the
+    annotation is a union with exactly two members: one `Ok[...]` and one
+    `Err[...]`, in either order, each with one type argument that is not a
+    type variable. Any other annotation is `NotAResultAnnotation`: a bare
+    `Ok`, and a bare `Result`, whose arguments are the type variables of the
+    alias.
+    """
+    if get_origin(annot) is not Union and get_origin(annot) is not UnionType:
+        return NotAResultAnnotation()
+    members = get_args(annot)
+    ok_members = [member for member in members if get_origin(member) is Ok]
+    err_members = [member for member in members if get_origin(member) is Err]
+    if len(members) != 2 or len(ok_members) != 1 or len(err_members) != 1:
+        return NotAResultAnnotation()
+    ok_args = get_args(ok_members[0])
+    err_args = get_args(err_members[0])
+    if len(ok_args) != 1 or len(err_args) != 1:
+        return NotAResultAnnotation()
+    if isinstance(ok_args[0], TypeVar) or isinstance(err_args[0], TypeVar):
+        return NotAResultAnnotation()
+    return ResultTypeArguments(ok_type=ok_args[0], err_type=err_args[0])

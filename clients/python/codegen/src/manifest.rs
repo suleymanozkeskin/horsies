@@ -5,10 +5,10 @@
 //! type, the integer bounds the core's parser enforces, and the dump
 //! function that gives the manifest's JSON text.
 //!
-//! The renderer has no Python form for a time of day, an optional value or
-//! a variant that holds the fields of a record type: only the schedule
-//! pattern schema (`SCHEDULE_PATTERN`) uses them, and the Python package
-//! keeps its own pattern models. A module that holds one of them is a
+//! The renderer has no Python form for a time of day, a length of time, an
+//! optional value or a variant that holds the fields of a record type: only
+//! the schedule pattern schema (`SCHEDULE_PATTERN`) uses them, and the
+//! Python package keeps its own pattern models. A module that holds one of them is a
 //! defect of the caller, and the renderer stops with a panic that names it.
 
 use horsies_core::manifest_schema::{
@@ -296,7 +296,7 @@ fn python_type(value: PythonValue) -> String {
         PythonValue::Named(name) => name.to_owned(),
         PythonValue::List(item) => format!("tuple[{}, ...]", python_type(item.value())),
         PythonValue::Map(item) => format!("dict[str, {}]", python_type(item.value())),
-        PythonValue::Optional(_) | PythonValue::TimeOfDay => {
+        PythonValue::Optional(_) | PythonValue::TimeOfDay | PythonValue::Duration(_) => {
             panic!("the Python renderer has no form for the manifest value {value:?}")
         }
     }
@@ -532,6 +532,12 @@ mod tests {
     #[should_panic(expected = "the Python renderer has no form for the manifest value TimeOfDay")]
     fn a_time_of_day_has_no_python_form() {
         let _refused = python_type(PythonValue::TimeOfDay);
+    }
+
+    #[test]
+    #[should_panic(expected = "the Python renderer has no form for the manifest value Duration")]
+    fn a_length_of_time_has_no_python_form() {
+        let _refused = python_type(PythonValue::Duration(BOUND));
     }
 
     #[test]

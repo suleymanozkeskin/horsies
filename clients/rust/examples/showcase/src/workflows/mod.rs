@@ -86,27 +86,33 @@ impl RegisteredWorkflows {
 ///
 /// Errors: the first registration refusal.
 pub fn register_all(app: &mut Horsies) -> Result<RegisteredWorkflows, HorsiesError> {
-    let shipping = app.workflow_template::<shipping::Shipping>()?;
+    let shipping = app.register_workflow_definition_with::<shipping::Shipping>()?;
     app.check_workflow_builder(
         shipping::Shipping::name(),
-        |params: &shipping::ShippingParams| shipping::Shipping::build_with(params.clone()),
+        |builder, params: &shipping::ShippingParams| {
+            shipping::Shipping::build_with(builder, params.clone())
+        },
     )
     .case(shipping::check_params())
     .register()?;
 
-    let order_fulfillment = app.workflow_template::<order_fulfillment::OrderFulfillment>()?;
+    let order_fulfillment =
+        app.register_workflow_definition_with::<order_fulfillment::OrderFulfillment>()?;
     app.check_workflow_builder(
         order_fulfillment::OrderFulfillment::name(),
-        |order: &Order| order_fulfillment::OrderFulfillment::build_with(order.clone()),
+        |builder, order: &Order| {
+            order_fulfillment::OrderFulfillment::build_with(builder, order.clone())
+        },
     )
     .case(order_fulfillment::check_order())
     .register()?;
 
-    let returns_review = app.workflow_template::<returns_review::ReturnsReview>()?;
+    let returns_review =
+        app.register_workflow_definition_with::<returns_review::ReturnsReview>()?;
     app.check_workflow_builder(
         returns_review::ReturnsReview::name(),
-        |params: &returns_review::ReturnsParams| {
-            returns_review::ReturnsReview::build_with(params.clone())
+        |builder, params: &returns_review::ReturnsParams| {
+            returns_review::ReturnsReview::build_with(builder, params.clone())
         },
     )
     .case(returns_review::check_params())

@@ -98,10 +98,18 @@ export type BodyForm = "ASYNC" | "BLOCKING";
 /** Whether the child records the facts of its task bodies. */
 export type BodyFactsMode = "NO_SCOPE" | "SPANS";
 
+/**
+ * Whether the child host writes the workflow context into the input of a task: `TAKES_CONTEXT` for a task with
+ * `workflowContext: true` (the core then writes the `workflow_context` member for a node with `workflowContextFrom`),
+ * `NO_CONTEXT` for any other task (the core removes the member).
+ */
+export type TaskContextUse = "TAKES_CONTEXT" | "NO_CONTEXT";
+
 /** One task of the child, by its name. */
 export interface ChildTaskEntry {
   readonly name: string;
   readonly form: BodyForm;
+  readonly context: TaskContextUse;
 }
 
 /** What the package gives the child host. */

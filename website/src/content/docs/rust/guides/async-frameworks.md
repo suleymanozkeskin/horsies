@@ -20,11 +20,11 @@ A web service on tokio (axum, actix-web, a gRPC server) sends tasks and reads re
 ```rust
 use std::convert::Infallible;
 
-use axum::extract::Path;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::Router;
-use horsies::{task, AppConfig, Horsies, HorsiesError, TaskError, TaskSendError};
+use horsies::{task, AppConfig, Horsies, HorsiesError, TaskError, TaskFunction, TaskSendError};
 
 #[task("send_receipt")]
 async fn send_receipt(order_id: String) -> Result<(), TaskError<Infallible>> {
@@ -32,16 +32,22 @@ async fn send_receipt(order_id: String) -> Result<(), TaskError<Infallible>> {
     Ok(())
 }
 
-fn build_app() -> Result<Horsies, HorsiesError> {
-    let mut app = Horsies::new(AppConfig::for_database_url(
+/// The typed function of `send_receipt` on the app of the service.
+type Receipt = TaskFunction<send_receipt::Input, (), Infallible>;
+
+fn build_app() -> Result<(Horsies, Receipt), HorsiesError> {
+    let mut app = Horsies::new(AppConfig::from_database_url(
         "postgresql://app:secret@db.example.com:5432/horsies",
     ))?;
-    let _receipt = send_receipt::register(&mut app)?;
-    Ok(app)
+    let receipt = send_receipt::register(&mut app)?;
+    Ok((app, receipt))
 }
 
-async fn receipt_route(Path(order_id): Path<String>) -> Result<String, StatusCode> {
-    match send_receipt::send(order_id).await {
+async fn receipt_route(
+    State(receipt): State<Receipt>,
+    Path(order_id): Path<String>,
+) -> Result<String, StatusCode> {
+    match receipt.send(send_receipt::Input { order_id }).await {
         Ok(handle) => Ok(handle.task_id().to_string()),
         Err(TaskSendError::EnqueueFailed { retryable: true, .. }) => {
             Err(StatusCode::SERVICE_UNAVAILABLE)
@@ -52,16 +58,18 @@ async fn receipt_route(Path(order_id): Path<String>) -> Result<String, StatusCod
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _app = build_app()?;
-    let router = Router::new().route("/orders/{order_id}/receipt", post(receipt_route));
+    let (_app, receipt) = build_app()?;
+    let router = Router::new()
+        .route("/orders/{order_id}/receipt", post(receipt_route))
+        .with_state(receipt);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
     axum::serve(listener, router).await?;
     Ok(())
 }
 ```
 
-- `task_name::send` sends through the function of the first `task_name::register` in the process, so a handler needs no state. A send before `register` is `ValidationFailed`.
-- A `TaskFunction` is `Clone`, `Send` and `Sync`: put it in the router state to send through a function that the handler gets as an argument.
+- The handler sends through the `TaskFunction` that `register` returned. A `TaskFunction` is `Clone`, `Send` and `Sync`: put it in the router state. It sends through the app that registered it.
+- The generated `task_name::send(&app, ...)` takes the app that it sends through. No send reads a process-wide app. A send through an app that does not register the task is `ValidationFailed`.
 - Each handler awaits the async form. A send, a read and a workflow start run their statements on the app's pool.
 - The error of a send is a closed catalog: see [Sending Tasks](/horsies/rust/tasks/sending-tasks/#tasksenderror).
 

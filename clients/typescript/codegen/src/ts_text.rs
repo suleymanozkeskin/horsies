@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn pascal_case_becomes_camel_case() {
         assert_eq!(camel_case_of_pascal("ReportedByChild"), "reportedByChild");
-        assert_eq!(camel_case_of_pascal("UserOverBound"), "userOverBound");
+        assert_eq!(camel_case_of_pascal("CustomOverBound"), "customOverBound");
         assert_eq!(camel_case_of_pascal(""), "");
     }
 

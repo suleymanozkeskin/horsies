@@ -1,18 +1,20 @@
 // The public names of the config types. The app hub's export line of the main entry point names this module.
 
-export type { AppConfigInput, ClaimMode } from "./app-config.ts";
+export type { AppConfigInput, ClaimMode, ClusterCapSetting } from "./app-config.ts";
 
 export type {
-  BrokerConfigInput,
-  BrokerConnection,
+  DatabaseConfigInput,
+  DatabaseConnection,
   PoolRecycle,
   RerunInputDefault,
   SessionDatabase,
   TcpKeepalives,
   TcpUserTimeout,
-} from "./broker.ts";
+} from "./database.ts";
 
 export type { PayloadBound, PayloadPolicyInput } from "./payload.ts";
+
+export type { LogFormat, SchemaMode } from "./process-settings.ts";
 
 export type { CustomQueueInput, QueueConfigInput, TaskCap } from "./queues.ts";
 
@@ -32,18 +34,25 @@ export type { Secret } from "./secret.ts";
 
 export type {
   ClaimLimitsInput,
-  IsolatedChildrenInput,
+  ExecutorThreads,
+  IsolatedChildren,
   IsolatedPoolInput,
   IsolatedRecycleInput,
+  IsolatedSetting,
   MemoryLimit,
+  NoIsolatedChildren,
+  NoSharedAsyncChildren,
+  NoSharedThreadChildren,
   ParentCpu,
   ParentPoolInput,
   PoolSize,
-  SharedAsyncChildrenInput,
+  SharedAsyncChildren,
+  SharedAsyncSetting,
   SharedPoolInput,
   SharedPoolSize,
   SharedRecycleInput,
-  SharedThreadChildrenInput,
+  SharedThreadChildren,
+  SharedThreadSetting,
   TaskLimit,
   WorkerProfileInput,
 } from "./worker-profiles.ts";

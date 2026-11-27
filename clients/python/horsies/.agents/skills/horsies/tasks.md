@@ -8,9 +8,9 @@ Covers all parameters, error codes, serialization rules, retry patterns, and pit
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 @app.task(
-    task_name: str,
+    name: str,
     *,
-    queue_name: str | None = None,
+    queue: str | None = None,
     retry_policy: RetryPolicy | None = None,
     exception_mapper: dict[type[BaseException], str] | None = None,
     default_unhandled_error_code: str | None = None,
@@ -18,18 +18,18 @@ Covers all parameters, error codes, serialization rules, retry patterns, and pit
     execution: Execution = Execution.ISOLATED,
     cancel_grace_ms: int | None = None,
 )
-def my_task(*, ...) -> TaskResult[T, TaskError]: ...
+def my_task(*, ...) -> Result[T, TaskError]: ...
 ```
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `task_name` | `str` | required | Unique identifier. An empty name raises `TaskDefinitionError(HRS-102)`. Duplicate names raise `RegistryError(HRS-301)`. |
-| `queue_name` | `str \| None` | `None` | Must be `None` in DEFAULT mode (raises `HRS-200`); must match a configured queue in CUSTOM mode (unrecognized raises `HRS-103`). |
+| `name` | `str` | required | Unique identifier. An empty name raises `TaskDefinitionError(HRS-102)`. Duplicate names raise `RegistryError(HRS-301)`. |
+| `queue` | `str \| None` | `None` | Must be `None` in DEFAULT mode (raises `HRS-200`); must match a configured queue in CUSTOM mode (unrecognized raises `HRS-103`). |
 | `retry_policy` | `RetryPolicy \| None` | `None` | See RetryPolicy section. |
 | `exception_mapper` | `dict[type[BaseException], str] \| None` | `None` | Per-task exception-to-error-code mapping. See ExceptionMapper section. |
 | `default_unhandled_error_code` | `str \| None` | `None` | Override global default for unmapped exceptions. Must be `UPPER_SNAKE_CASE`. |
-| `error_codes` | `type[Enum] \| tuple[str, ...]` | `()` | The task's own error codes: an `Enum` class (its member values) or a tuple of strings. They are the values of the task's `error_code` metric label besides the built-in codes and `undeclared`; another user code counts as `undeclared` there. The values of the task's `exception_mapper` and of `AppConfig.exception_mapper` are added with no second declaration. The task function keeps the codes in `task_error_codes`; `horsies check` lists them. |
-| `timeout_ms` | `int \| None` | `None` | Execution time limit in ms, from 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295, about 49.7 days, the Rust port's `u32` limit), measured from the moment a child takes the task; time waiting for a free child does not count. On expiry the child and the subprocesses in its session are SIGKILLed, and after the child exits the task fails with `TASK_TIMEOUT`; retry is opt-in via `auto_retry_for`, and a retry never runs next to the killed attempt. A deadline that fires before user code starts requeues the task instead, also after the exit. If the child does not exit within 30 s of the kill, nothing is written and stale-task recovery takes the task; with stale RUNNING recovery off, the worker writes the row once it sees the exit (a stop ends that wait). Other tasks on the worker continue. Use it as a hang backstop, not as routine control flow. |
+| `error_codes` | `type[Enum] \| tuple[str, ...]` | `()` | The task's own error codes: an `Enum` class (its member values) or a tuple of strings. They are the values of the task's `error_code` metric label besides the built-in codes and `undeclared`; another custom code counts as `undeclared` there. The values of the task's `exception_mapper` and of `AppConfig.exception_mapper` are added with no second declaration. The task function keeps the codes in `error_codes`; `horsies check` lists them. |
+| `timeout_ms` | `int \| None` | `None` | Execution time limit in ms, from 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295, about 49.7 days, the Rust port's `u32` limit), measured from the moment a child takes the task; time waiting for a free child does not count. On expiry the child and the subprocesses in its session are SIGKILLed, and after the child exits the task fails with `TASK_TIMEOUT`; retry is opt-in via `retry_for`, and a retry never runs next to the killed attempt. A deadline that fires before user code starts requeues the task instead, also after the exit. If the child does not exit within 30 s of the kill, nothing is written and stale-task recovery takes the task; with stale RUNNING recovery off, the worker writes the row once it sees the exit (a stop ends that wait). Other tasks on the worker continue. Use it as a hang backstop, not as routine control flow. |
 | `execution` | `Execution` | `Execution.ISOLATED` | How a worker runs the task. `ISOLATED`: `def` or `async def`, `timeout_ms` optional. `SHARED_ASYNC`: `async def` only, `timeout_ms` required. `SHARED_THREAD`: `def` only, `timeout_ms` required. Every task row stores the class (`horsies_tasks.execution`), and a worker claims each class into the budget its claim plan routes it to (a worker with isolated children only runs every class isolated). |
 | `cancel_grace_ms` | `int \| None` | `None` | The time to stop after a cancel, from `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (10,000). `SHARED_ASYNC`: the time to the second cancel (at the deadline and after an operator cancel); `None` stores `DEFAULT_CANCEL_GRACE_MS` (1,000). `ISOLATED`: the time from an operator cancel to the kill of the child when the task has not stopped; `None` stores nothing, and the cancel is cooperative only. `SHARED_THREAD`: refused (`HRS-110`). The stored options hold the value in effect at send. |
 
@@ -37,14 +37,15 @@ def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 
 ### Validated at definition time
 
-- Return type annotation present and is `TaskResult[T, TaskError]` — missing raises `HRS-100`, wrong type raises `HRS-101`.
+- Return type annotation present and is `Result[T, TaskError]` (or the same union written `Ok[T] | Err[TaskError]`) — missing raises `HRS-100`, wrong type raises `HRS-101`.
 - Pre-decorated functions (with `__wrapped__` chain) are rejected — `HRS-104`.
 - The function is `def` or `async def`. A function that yields is rejected — `HRS-101`, for a generator and for an async generator.
 - `exception_mapper` keys must be `BaseException` subclasses, values must be `UPPER_SNAKE_CASE`.
-- `error_codes`: a value that is neither an `Enum` class nor a tuple raises `HRS-102`; a code that is empty, not `UPPER_SNAKE_CASE` or an exception class name raises `HRS-112`; a built-in code or `WORKFLOW_STOPPED` raises `HRS-212`; a code given twice raises `HRS-113`. One error per refused code; several come in one `MultipleValidationErrors`. A `TaskError` takes the plain `str` value of an `Enum` code (`ChargeCode.CARD_DECLINED.value`).
-- `queue_name` cross-validated against `AppConfig.queue_mode`.
+- `error_codes`: a value that is neither an `Enum` class nor a tuple raises `HRS-102`; a code that is empty, not `UPPER_SNAKE_CASE` or an exception class name raises `HRS-112`; a built-in code or `WORKFLOW_STOPPED` raises `HRS-212`; a code given twice raises `HRS-113`. One error per refused code; several come in one `MultipleValidationErrors`. `TaskError[C]` is generic in its custom code type, default `str`. A task with `error_codes=ChargeCode` that returns `Result[T, TaskError[ChargeCode]]` passes members (`ChargeCode.CARD_DECLINED`), and `TaskHandle.get()` and `args_from` parameters annotated `TaskOutcome[T, TaskError[ChargeCode]]` give members back; so do `WorkflowHandle.result_for(node)` and `WorkflowContext.result_for(node)` for a `TaskNode[T, ChargeCode]` (from `task.node()(...)`), the entries of `results()`, `tasks()` and an outputless `get()` map, and `app.get_result()` (typed `TaskError[Any]`). The error of a workflow from `WorkflowHandle.get()` and a `SubWorkflowNode` keep text: the failed node can be any task. `TaskError[E]` without `error_codes=E` raises `HRS-105`; a mapper or default code that `E` does not name raises `HRS-209`. A task that returns `TaskError` keeps `str` codes (`ChargeCode.CARD_DECLINED.value`).
+- `queue` cross-validated against `AppConfig.queue_mode`.
 - `good_until` rejected — raises `HRS-102` with help text directing to `.with_options()` or `.node()`.
-- Top-level `auto_retry_for` kwarg is rejected — it belongs inside `RetryPolicy`.
+- Top-level `retry_for` kwarg is rejected — it belongs inside `RetryPolicy`.
+- `retry_policy.retry_for` entries are code members: members of a built-in code enum, or members of the `Enum` class of `error_codes=`. A plain `str`, a member of another `Enum` class, or a custom member of a task that declares a tuple or no `error_codes` raises `HRS-102`; the notes name the task and the entry. One error per refused entry; several come in one `MultipleValidationErrors`.
 - `execution` rules, one code each, checked in this order (the first broken rule is reported): `SHARED_ASYNC` on a `def` function — `HRS-107`; `SHARED_THREAD` on an `async def` function — `HRS-108`; `SHARED_ASYNC` or `SHARED_THREAD` without `timeout_ms` — `HRS-109`; `cancel_grace_ms` with `SHARED_THREAD` — `HRS-110`; `cancel_grace_ms` outside 100 to 10,000 — `HRS-111`. A value that is not an `Execution` member raises `HRS-102`.
 - With `execution` written as a member, a type checker refuses the same declarations: the overloads require `timeout_ms` for a shared class and refuse `cancel_grace_ms` with `SHARED_THREAD`, and the decorator they return accepts only the function kind of the class. A class known only at run time requires `timeout_ms`.
 
@@ -58,7 +59,7 @@ Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]`
 - An attempt ends when its coroutine has ended and no work that it started is alive: asyncio tasks it created (itself or through a library, also tasks built with `asyncio.Task(...)`) and default-executor calls (`to_thread`, `run_in_executor(None, ...)`, `getaddrinfo`). The child waits for that work before it reports the end. Work of the start hooks belongs to no task.
 - A return before the deadline (a value, or an exception that the mapper turns into a result) with that work alive keeps what it returned; the deadline no longer applies. The child waits up to G for the work, then cancels it in the cancel rounds below and closes (`CloseReason.LEFTOVER_WORK`; replaced after its tasks end). Work still alive 0.3 s after that cancel is stuck: the task keeps its seat, the worker kills the child when every task left in it is stuck, then writes what the task returned (no `TASK_TIMEOUT`, no isolated retry). Any other end of the child whose exit the worker saw (an out-of-memory kill, a crash) also writes what the task returned. One child log line per such task names the work (up to 10 coroutine names) and how it ended: within the grace, cancelled, or stuck.
 - Timeout (T = deadline, G = `cancel_grace_ms`): at T the child cancels the task. When the attempt has ended, the worker writes `TASK_TIMEOUT`, the retry and the workflow step; neighbours continue. A value returned after the cancel is still `TASK_TIMEOUT`. At T + G, when the attempt is alive: a second cancel to the task and its asyncio tasks, then 2 more rounds 0.1 s apart; the child closes (no new task, replaced after its tasks end). Still alive 0.3 s after the second cancel: stuck; it keeps its seat; the worker kills the child when every task left in it is stuck (no task has time left). Those tasks get `TASK_TIMEOUT`, and a retry runs isolated (`execution = 'ISOLATED'` written with the retry). The `TASK_TIMEOUT` `data` has `task_id`, `timeout_ms` and `cancel_end`: `RETURNED_AFTER_SIGNAL` (ended within G after the cancel at T), `DROPPED_AFTER_GRACE` (alive at T + G, second cancel sent) or `KILLED_WITH_CHILD` (ended when the worker killed the child, before the child reported the end).
-- Blocked loop: a watchdog thread reports a loop that has not turned for 5 s, with the task and source line; the worker kills the child at once. The task that held it: `TASK_BLOCKED_LOOP` (retry isolated); other tasks before their deadline: `NEIGHBOUR_BLOCKED_LOOP` (retry only if `auto_retry_for` names it); tasks past their deadline: `TASK_TIMEOUT`. C code that holds the GIL stops the watchdog too: the worker timer at `timeout_ms + cancel_grace_ms + 10 s` kills a child that reported neither the second cancel nor the end, and a second check at `+ 20.3 s` kills a child that reported that cancel (or the cancel of left work) but neither the task stuck nor its end; tasks past their deadline get `TASK_TIMEOUT`, others the crash path; only a task already reported stuck retries isolated (at every kill by the worker whose exit was seen). A refusal still in flight 145 s after its placement kills its child; its writes are bounded below that. A crash with no known cause: every task `WORKER_CRASHED` (or its retry).
+- Blocked loop: a watchdog thread reports a loop that has not turned for 5 s, with the task and source line; the worker kills the child at once. The task that held it: `TASK_BLOCKED_LOOP` (retry isolated); other tasks before their deadline: `NEIGHBOUR_BLOCKED_LOOP` (retry only if `retry_for` names it); tasks past their deadline: `TASK_TIMEOUT`. C code that holds the GIL stops the watchdog too: the worker timer at `timeout_ms + cancel_grace_ms + 10 s` kills a child that reported neither the second cancel nor the end, and a second check at `+ 20.3 s` kills a child that reported that cancel (or the cancel of left work) but neither the task stuck nor its end; tasks past their deadline get `TASK_TIMEOUT`, others the crash path; only a task already reported stuck retries isolated (at every kill by the worker whose exit was seen). A refusal still in flight 145 s after its placement kills its child; its writes are bounded below that. A crash with no known cause: every task `WORKER_CRASHED` (or its retry).
 - Author rules: let `CancelledError` propagate (catch only to clean up and re-raise; anyio shielded scopes do not stop a `Task.cancel()`); give each client call its own timeout below the task timeout (for `asyncio.to_thread()`, a cancel never stops the thread); open long-lived clients in `@app.on_shared_async_child_start` (a client opened in a task carries that task's mark: its background work is cancelled after the task returns, and each task that opens it costs one child restart); do not block the loop; send with `send_async()`; await what you start; `timeout_ms` is required; module state is shared by the tasks of the child.
 - The RUNNING update and the finalizing marker run on an async connection pool of the child, so they do not block the loop. The worker process writes the runner heartbeats for every task of the child.
 - Recycling: `SharedRecycle.after_per_seat` (`tasks × seats` tasks) or `above` (RSS after a task). The child closes: no new task, its tasks finish, then a new child starts.
@@ -81,12 +82,12 @@ Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]`
 - A child creates its event loop at boot, before it reports ready, when the app has an `async def` task; an app with none gets no loop. When the loop cannot be created, the child fails its boot and no task reaches it. EMFILE / ENFILE / ENOMEM / EAGAIN can clear, so only that slot is down: it takes no task and boots again after a growing wait, while other children serve; when every slot is down, the worker exits non-zero after three failed starts. The log names the slot and the cause: `Slot <n> is down: the OS ran short of a resource (EMFILE): <error>`. Any other failure, such as an event loop policy that raises, repeats (`TaskLoopCreateFailed`): each failed start counts one of three attempts, also while other children serve.
 - A task that cancels a helper task in `finally` must also await it, for example `helper.cancel()` then `await asyncio.gather(helper, return_exceptions=True)`. Without the await, a helper that awaits while it stops (a close) is still on the loop when the task returns: the outcome waits for it, and the worker replaces the child. One worker log line per such task names the coroutine of each task left (up to 10) and how that work ended: `Task <name> (<id>) returned and left <n> task(s) on the event loop of child pid=<pid> (<names>); that work <end>`.
 - A thread of `asyncio.to_thread()` that outlives its task is not waited for and does not cause a replacement. At the stop, the child does not wait for it past the close (at most 7 seconds): it exits, and `atexit` handlers do not run. An idle executor does not count: its shutdown gets at least 1 second, and so does the close of the async generators.
-- In an `async def` task, send with `.send_async()` / `.schedule_async()`. The sync `.send()` / `.schedule()` return `Err(TaskSendAsyncContext)` there and enqueue nothing.
-- An exception, a wrong return, and the exception mappers give the same `TaskResult` as in a `def` task.
+- In an `async def` task, send with `.send_async()`. The sync `.send()` returns `Err(TaskSendAsyncContext)` there and enqueues nothing.
+- An exception, a wrong return, and the exception mappers give the same result as in a `def` task.
 
 ### Cancellation
 
-- An operator cancel of a running task (`cancel_task(broker, task_id, include_running=True)`, or the web UI) moves the task to history as `CANCELLED` at once, and writes its attempt row with outcome `CANCELLED` (`finished_at` = the cancel time, `recorded_by` `CANCEL`), in one statement. A waiting `handle.get()` returns `TASK_CANCELLED`. What the task returns after the cancel is dropped.
+- An operator cancel of a running task (`cancel_task(app, task_id, policy=CancelPolicy.INCLUDE_RUNNING)`, or the web UI) moves the task to history as `CANCELLED` at once, and writes its attempt row with outcome `CANCELLED` (`finished_at` = the cancel time, `recorded_by` `CANCEL`), in one statement. A waiting `handle.get()` returns `Ok(Failed(task_error))` with the code `TASK_CANCELLED`. What the task returns after the cancel is dropped.
 - The worker gives the cancel to the task code: a `NOTIFY` on `horsies_task_cancel`; a lost notice is found by one read after a listener reconnect, or after a runner heartbeat of the run that does not land (at most `runner_heartbeat_interval_ms`, default 30 s).
 - `async def` body (isolated or shared async): `asyncio.CancelledError` at the next `await`. Let it propagate; catch it only to clean up, then raise it again.
 - `def` body (isolated or shared thread): read the cancel state. The first parameter `runtime: TaskRuntime` (before the `*`) gives the run; `runtime.cancel_state()` returns `CancelNotRequested()` or `CancelRequested(cause)`. `CancelCause`: `OPERATOR` (an operator cancel), `DEADLINE` (the deadline of a `SHARED_ASYNC` or `SHARED_THREAD` run). The first cause stays.
@@ -96,7 +97,7 @@ Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]`
 - Tests: `TaskRuntime.for_test(task_id=..., cancel_state=CancelRequested(cause=CancelCause.OPERATOR))` gives a runtime with a fixed cancel state.
 
 ```python
-from horsies import CancelNotRequested, CancelRequested, TaskRuntime
+from horsies import CancelNotRequested, CancelRequested, Ok, Result, TaskError, TaskRuntime
 
 
 def import_batch(batch_id: str) -> None:
@@ -104,7 +105,7 @@ def import_batch(batch_id: str) -> None:
 
 
 @app.task('import_batches', timeout_ms=600_000, cancel_grace_ms=5_000)
-def import_batches(runtime: TaskRuntime, *, batch_ids: list[str]) -> TaskResult[int, TaskError]:
+def import_batches(runtime: TaskRuntime, *, batch_ids: list[str]) -> Result[int, TaskError]:
     done = 0
     for batch_id in batch_ids:
         match runtime.cancel_state():
@@ -113,7 +114,7 @@ def import_batches(runtime: TaskRuntime, *, batch_ids: list[str]) -> TaskResult[
             case CancelNotRequested():
                 import_batch(batch_id)
                 done += 1
-    return TaskResult(ok=done)
+    return Ok(done)
 ```
 
 ## `TaskRuntime` and the fencing token
@@ -125,43 +126,31 @@ from horsies import FencingToken, TaskRuntime
 
 
 @app.task('read_fence')
-def read_fence(runtime: TaskRuntime, *, order_id: str) -> TaskResult[FencingToken, TaskError]:
-    return TaskResult(ok=runtime.fencing_token)
+def read_fence(runtime: TaskRuntime, *, order_id: str) -> Result[FencingToken, TaskError]:
+    return Ok(runtime.fencing_token)
 ```
 
 - Rules: the first parameter, before the `*`; the annotation is exactly `TaskRuntime` (not `TaskRuntime | None`); no default; any name. `TaskRuntime` in any other place (keyword-only, a second positional parameter, a model field, the ok type) raises `HRS-105`.
-- Not part of the wire contract: `.send()`, `.schedule()`, `.node()()`, a schedule and a workflow node do not supply it. A kwarg with its name is refused (`TaskSendValidationFailed`, `HRS-205` for a schedule, `WORKFLOW_KWARGS_NOT_SERIALIZABLE` for a node).
+- Not part of the wire contract: `.send()`, `.node()()`, a schedule and a workflow node do not supply it. A kwarg with its name is refused (`TaskSendValidationFailed`, `HRS-205` for a schedule, `WORKFLOW_KWARGS_NOT_SERIALIZABLE` for a node).
 - Direct call (tests): `read_fence(TaskRuntime.for_test(task_id=uuid.uuid4(), attempt=second_attempt), order_id='o-1')`. `attempt` is an `AttemptNumber` (default the first attempt). `cancel_state` is a `RunCancelState` (default `CancelNotRequested()`). `AttemptNumber.parse(2)` returns `Ok(AttemptNumber)`, or `Err(AttemptNumberRefused)` for a number outside 1 to `2**31`. `for_test` cannot fail.
 - `runtime.fencing_token` is a frozen `FencingToken(task_id: uuid.UUID, value: int)`. Two reads in one attempt give the same token. An attempt that runs after another attempt of the same task gives a strictly greater `value`. No clock. Today `value` is the attempt number (1 to 21); compare values of one task id, do not depend on the number.
 - Pattern: use the task id in the fence key; at the start of the body take the fence (write the token when the stored value is lower or equal; no row changed means a later attempt holds it: stop); make each later write conditional on the stored value (one conditional statement, or a transaction that locks the fence row `FOR SHARE`). A read with no lock, then a write, is not enough.
 - Limits: a rerun and a workflow node that a resume starts again get a new task id, value from 1; a stale attempt with no later attempt (failed, cancelled, expired) is not refused; a write before the later attempt took the fence is not refused; two writes in one attempt have the same token (use an idempotency key); not exactly-once; work that the body starts reads the token only when the body passes it on.
 - Docs: `concepts/fencing-token`, `tasks/defining-tasks` (Task Runtime, Fencing Token), `operations/testing` (Pass a Task Runtime).
 
-## `TaskResult[T, TaskError]`
+## `Result[T, TaskError]`
 
-The only valid return type for task functions.
+The only valid return type of a task function. `Result`, `Ok` and `Err` come from `horsies`. `Ok[T] | Err[TaskError]` is the same annotation.
 
 ### Construction
 
-<!-- check: skip partial -- uses names that the page does not define -->
+<!-- check: skip elided -- shortens the arguments on purpose -->
 ```python
-TaskResult(ok=value)              # success (value can be None)
-TaskResult(err=TaskError(...))    # failure
-# Passing both or neither raises ValueError
+Ok(value)              # success (value can be None)
+Err(TaskError(...))    # failure
 ```
 
-### Methods and properties
-
-| Name | Returns | Behavior |
-|---|---|---|
-| `.is_ok()` | `bool` | `True` when success |
-| `.is_err()` | `bool` | `True` when error |
-| `.ok` | `T \| None` | Success value or `None` — safe, never raises |
-| `.err` | `E \| None` | Error value or `None` — safe, never raises |
-| `.ok_value` | `T` | Success value — **raises `ValueError`** if err |
-| `.err_value` | `E` | Error value — **raises `ValueError`** if ok |
-
-**`.ok` vs `.ok_value`**: `.ok` is safe (returns `None` on wrong side). `.ok_value` raises. Always guard with `is_ok()` / `is_err()` before using `_value` forms.
+A direct call of the task returns this `Result`. A read of the stored result returns a `ReadResult` (see Reading a Result below).
 
 ### Strict values
 
@@ -169,72 +158,128 @@ Every boundary validates in strict mode: `"7"`, `7.0` and `True` are refused for
 
 `@app.task` and each `SubWorkflowNode` refuse `Field(exclude=True)`, `exclude_if`, `extra='allow'`, `PlainValidator`, `WrapValidator`, `SkipValidation`, a schema hook, `Json[T]`, `Literal` with a plain `Enum`, an alias whose written key does not read back, and a default that does not hold its type. Use `AfterValidator` or `BeforeValidator`.
 
-`TaskError.data` must be JSON-native. It takes `JsonInput`, so a `list[str]` fits, and it gives `JsonValue`, an exact `list` or `dict`. A bad value becomes `{'data_refused': <cause>}`, and the code and message stay. A `TaskError` subclass with extra fields does not cross the wire: use `data`, and match on `error_code`.
+`TaskError.data` must be JSON-native. It takes `JsonInput`, so a `list[str]` fits, and it gives `JsonValue`, an exact `list` or `dict`. A bad value becomes `{'data_refused': <cause>}`, and the code and message stay. A `TaskError` subclass with extra fields does not cross the wire: use `data`, and match on `code`.
 
 Changing a model that a task takes or returns: see `SKILL.md`, Deployment facts.
 
 ### Runtime return-type validation
 
-The task wrapper validates the returned value against declared `T` using Pydantic's `TypeAdapter` in strict mode. A mismatch produces `TaskResult(err=TaskError(error_code=ContractCode.RETURN_TYPE_MISMATCH))` — does not raise. The error stores the actual type and the failing fields (`data`: `variant`, `expected_type`, `actual_type`, `validation_errors`, `validation_error_count`), not the returned value. Returning `None` instead of `TaskResult` produces `TASK_EXCEPTION`.
+The task wrapper validates the returned value against declared `T` using Pydantic's `TypeAdapter` in strict mode. A mismatch produces `Err(TaskError(code=ContractCode.RETURN_TYPE_MISMATCH))` — does not raise. The error stores the actual type and the failing fields (`data`: `variant`, `expected_type`, `actual_type`, `validation_errors`, `validation_error_count`), not the returned value. `variant` is `'ok'` for a wrong `Ok` value and `'err'` for a wrong `Err` value. A return that is not `Ok` or `Err`, `None` included, also produces `RETURN_TYPE_MISMATCH`, with `variant` `'not_a_task_result'`. `expected_type` is `'Result[<ok>, <err>]'`.
+
+## Reading a Result: `ReadResult[T, TaskError]`
+
+`TaskHandle.get()`, `WorkflowHandle.get()`, `WorkflowHandle.result_for()`, `app.get_result()` and their `*_async` forms return `ReadResult[T, TaskError]`. The result says whether the read worked. The outcome inside it says how the task ended.
+
+<!-- check: skip elided -- shows the library definition, not user code -->
+```python
+type TaskOutcome[T, E] = Succeeded[T] | Failed[E]
+type ReadResult[T, E] = Ok[Succeeded[T]] | Ok[Failed[E]] | Err[ReadError]
+```
+
+| Case | Meaning |
+|---|---|
+| `Ok(Succeeded(value))` | The task returned `Ok(value)` |
+| `Ok(Failed(task_error))` | The task returned `Err(task_error)`, or the library recorded the error for the task (`TASK_CANCELLED`, `TASK_TIMEOUT`, `WORKER_CRASHED`, `TASK_EXPIRED`, `RETURN_TYPE_MISMATCH`, the workflow codes, ...) |
+| `Err(read_error)` | The read gave no outcome. `read_error` is one `ReadError` class |
+
+Read it with one `match`. Do not call `.unwrap()` on a `ReadResult`: it gives the `TaskOutcome`, not the value.
+
+```python
+from horsies import Err, Failed, Ok, Succeeded, TaskHandle
+
+
+def show_total(handle: TaskHandle[int]) -> None:
+    match handle.get(wait_ms=30_000):
+        case Ok(Succeeded(value)):
+            print(value)
+        case Ok(Failed(task_error)):
+            print(task_error.code, task_error.message)
+        case Err(read_error):
+            print(read_error.code, read_error.message)
+```
+
+`TaskOutcome[T, TaskError]` is also the type of a workflow node input from `args_from`, of `WorkflowContext.result_for()` and of `TaskInfo.decoded_result`. Read it with `case Succeeded(value):` and `case Failed(error):`.
+
+### `ReadError`
+
+`ReadError` is a closed union of frozen classes, one per catalog code. A `match` on it is exhaustive under a type checker. Every class has `code` (a class variable: its catalog member) and `message` (the subject and the cause). `ReadDatabaseError` adds `retryable` (whether the cause may clear) and `cause` (the exception of the cause, or `NoCause()`). Match one class with its arm, for example `case Err(ReadWaitTimeout()):`.
+
+| Class | `code` | When |
+|---|---|---|
+| `ReadWaitTimeout` | `RetrievalCode.WAIT_TIMEOUT` | The task or the workflow had not ended when the wait limit passed. It may still run |
+| `ReadTaskNotFound` | `RetrievalCode.TASK_NOT_FOUND` | Neither the live table nor the task history holds the task. A handle built by id can race the commit of its send |
+| `ReadWorkflowNotFound` | `RetrievalCode.WORKFLOW_NOT_FOUND` | No workflow has the id of the handle |
+| `ReadResultNotAvailable` | `RetrievalCode.RESULT_NOT_AVAILABLE` | The task reached a terminal status and stored no result, or a handle with no broker holds no result |
+| `ReadResultNotReady` | `RetrievalCode.RESULT_NOT_READY` | `WorkflowHandle.result_for()`: the node stores no result yet |
+| `ReadWaitInsideTask` | `RetrievalCode.WAIT_INSIDE_TASK` | A result wait in a process that runs task bodies. Nothing was read |
+| `ReadAsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form |
+| `ReadInvalidInput` | `RetrievalCode.INVALID_INPUT` | `wait_ms` is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`. Nothing was read |
+| `ReadResultDeserializationError` | `OperationalCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types |
+| `ReadUnknownCustomCode` | `RetrievalCode.UNKNOWN_CUSTOM_CODE` | The stored error has a custom code that the declared `Enum` does not name (a row of another version of the task); `custom_code` is the stored text |
+| `ReadDatabaseError` | `OperationalCode.DATABASE_ERROR` | The database, the connection or the core call failed. A later read may succeed |
+| `ReadNoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The stored value succeeded, and this process has no declared type to read it with: the handle was built by id, or the task or workflow is not registered here |
+| `ReadWorkflowContextMissingId` | `ContractCode.WORKFLOW_CONTEXT_MISSING_ID` | `WorkflowHandle.result_for()` got a node with no `node_id`. Nothing was read |
 
 ## `TaskError`
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 class TaskError(BaseModel):
-    error_code: BuiltInTaskCode | str
+    code: BuiltInTaskCode | str
     message: str | None = None
     data: JsonValue = None  # takes JsonInput
     exception: dict[str, Any] | BaseException | None = None
 ```
 
-`error_code` is required and must not be null: `auto_retry_for` and outcome routing read it. `message` is optional, and domain errors typically set it. `data` carries structured context. `exception` populated by the library for unhandled exceptions.
+`code` is required and must not be null: `retry_for` and outcome routing read it. `message` is optional, and domain errors typically set it. `data` carries structured context. `exception` populated by the library for unhandled exceptions.
 
-**Construction rule**: reserved built-in code values must be passed as enum members, not raw strings. User-defined codes must be plain `str`, not `str, Enum` subclasses.
+**Construction rule**: reserved built-in code values must be passed as enum members, not raw strings. Custom codes must be plain `str`, not `str, Enum` subclasses.
 
 <!-- check: skip partial -- uses a name before the page defines it -->
 ```python
-TaskError(error_code=OperationalErrorCode.BROKER_ERROR, message="db down")  # OK
-TaskError(error_code="MY_CUSTOM_CODE", message="card declined")             # OK
-TaskError(error_code="BROKER_ERROR", message="db down")                     # ValueError — reserved
+TaskError(code=OperationalCode.DATABASE_ERROR, message="db down")  # OK
+TaskError(code="MY_CUSTOM_CODE", message="card declined")             # OK
+TaskError(code="DATABASE_ERROR", message="db down")                     # ValueError — reserved
 TaskError(message="card declined")                                          # ValueError — no code
 ```
 
-**Serialization**: built-in codes serialize as tagged dicts `{"__builtin_task_code__": "BROKER_ERROR"}` so round-trip identity is preserved. User strings serialize as plain strings.
+**Serialization**: built-in codes serialize as tagged dicts `{"__builtin_task_code__": "DATABASE_ERROR"}` so round-trip identity is preserved. Custom codes serialize as plain strings.
 
-**Deserialization**: use standard `model_validate()` / `model_validate_json()` everywhere. No special rehydration methods needed — works for nested models too.
+**Deserialization**: use standard `model_validate()` / `model_validate_json()` everywhere. No special rehydration methods needed — works for nested models too. The stored form (the `err` slot of a stored result) has the key `error_code` in place of `code`: `encode_task_error` writes it and `decode_task_error` reads it.
 
-**Stored data**: `TaskError` refuses a key that it does not declare, at construction and at decode. A stored error with an unknown key, or without `error_code`, is stored data that does not parse: `TaskHandle.get()` and `WorkflowHandle.get()` return `RESULT_DESERIALIZATION_ERROR` with the cause, and `app.get_result()` returns `Err(BrokerInvalidJsonPayload)`.
+**Stored data**: `TaskError` refuses a key that it does not declare, at construction and at decode. A stored error with an unknown key, or without the key `error_code` (the stored key of `code`), is stored data that does not parse: `TaskHandle.get()`, `WorkflowHandle.get()` and `app.get_result()` return `Err(ReadResultDeserializationError(...))` with the cause.
 
-### `SubWorkflowError`
+### `SubWorkflowFailure`
 
-Extends `TaskError` with `sub_workflow_id: str` and `sub_workflow_summary: SubWorkflowSummary[Any]`. Distinguish via pattern matching:
+Extends `TaskError` with `sub_workflow_id: str` and `sub_workflow_summary: SubWorkflowSummary[Any]`. Distinguish via pattern matching on the `Failed` error:
 
-<!-- check: skip partial -- uses a name before the page defines it -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
-match result.err:
-    case SubWorkflowError() as e:
-        e.sub_workflow_id  # available
-    case TaskError() as e:
+match outcome:  # a TaskOutcome[T, TaskError]
+    case Failed(SubWorkflowFailure() as error):
+        print(error.sub_workflow_id)  # available
+    case Failed(error):
         ...  # regular task error
+    case Succeeded(value):
+        ...
 ```
 
 ## Error Code Families
 
 The old flat `LibraryErrorCode` enum has been split into 4 families. The umbrella type alias is `BuiltInTaskCode`.
 
-### `OperationalErrorCode`
+### `OperationalCode`
 
 Infra-level failures during task execution, brokering, or worker processing:
 
-<!-- members: OperationalErrorCode -->
+<!-- members: OperationalCode -->
 - `UNHANDLED_EXCEPTION` — uncaught exception wrapped by library
 - `TASK_EXCEPTION` — the worker caught an exception outside the task wrapper, or a validator raised on a default
 - `WORKER_CRASHED` — worker process died during execution
-- `BROKER_ERROR` — DB/broker failure during result retrieval
+- `DATABASE_ERROR` — DB/broker failure during result retrieval (`read_error.code` of `ReadDatabaseError`)
 - `WORKER_RESOLUTION_ERROR` — task name not found in registry
 - `WORKER_SERIALIZATION_ERROR` — failed to serialize/deserialize arguments
-- `RESULT_DESERIALIZATION_ERROR` — a stored result or a stored workflow error is corrupt or does not decode
+- `RESULT_DESERIALIZATION_ERROR` — a stored result or a stored workflow error is corrupt or does not decode (`read_error.code` of `ReadResultDeserializationError`)
 - `WORKFLOW_ENQUEUE_FAILED` — workflow node failed during enqueue
 - `SUBWORKFLOW_LOAD_FAILED` — sub-workflow definition could not be loaded
 - `WORKFLOW_RECOVERY_LIMIT_REACHED` — workflow recovery raised a persistent error in `workflow_recovery_failure_limit` reaper passes, so the workflow failed closed
@@ -248,23 +293,24 @@ Infra-level failures during task execution, brokering, or worker processing:
 Violations of the declared API contract between task author and library:
 
 <!-- members: ContractCode -->
-- `RETURN_TYPE_MISMATCH` — returned value doesn't fit the declared type, or is not a `TaskResult`, including `None`
-- `WORKFLOW_CTX_MISSING_ID` — workflow context missing required ID
-- `NO_TYPE_AVAILABLE` — a typed decode needs the success type, but the task or workflow is not registered locally (for example a handle built from an id)
+- `RETURN_TYPE_MISMATCH` — returned value doesn't fit the declared type, or is not `Ok` or `Err`, including `None`
+- `WORKFLOW_CONTEXT_MISSING_ID` — workflow context missing required ID (`read_error.code` of `ReadWorkflowContextMissingId`)
+- `NO_TYPE_AVAILABLE` — a typed decode needs the success type, but the task or workflow is not registered locally (for example a handle built from an id) (`read_error.code` of `ReadNoTypeAvailable`)
 
 ### `RetrievalCode`
 
-Results from `handle.get()` / `handle.result_for()` when data is not (yet) available:
+The `code` of a read error (`read_error.code`) when `handle.get()` / `handle.result_for()` gives no outcome. A read never puts these codes in a `TaskError`. Each member has its `ReadError` class:
 
 <!-- members: RetrievalCode -->
-- `WAIT_TIMEOUT` — `get()` timed out; task may still be running, not cached, re-pollable
-- `TASK_NOT_FOUND` — task ID does not exist
-- `WORKFLOW_NOT_FOUND` — workflow ID does not exist, or retention removed the workflow after `get()` read its terminal status
-- `RESULT_NOT_AVAILABLE` — result cache never set
-- `RESULT_NOT_READY` — result not ready yet
-- `ASYNC_CONTEXT` — sync `get()` / `result_for()` called on a thread that runs an event loop; nothing ran, not cached — call `get_async()` / `result_for_async()`
-- `INVALID_INPUT` — an argument of `get()` / `get_async()` was refused before any read: `timeout_ms` must be None or an int from 0 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached
-- `WAIT_INSIDE_TASK` — a result wait (`TaskHandle.get()` / `get_async()`, `app.get_result()` / `get_result_async()`, `WorkflowHandle.get()` / `get_async()`) was called inside a worker child, also from a thread that the task started; it waited for nothing, not cached. It is the first check of the call, before `timeout_ms` and `ASYNC_CONTEXT`. The raw reads `app.get_raw_result()` and `broker.get_raw_result_record()` (and `*_async`) return `Err(BrokerWaitInsideTask)` there. A task never waits for another task: compose them as a workflow. `send()`, starting a workflow, `info()` and `workflow_ctx.result_for()` still work in a task
+- `WAIT_TIMEOUT` — `ReadWaitTimeout`: `get()` timed out; task may still be running, not cached, re-pollable
+- `TASK_NOT_FOUND` — `ReadTaskNotFound`: task ID does not exist
+- `WORKFLOW_NOT_FOUND` — `ReadWorkflowNotFound`: workflow ID does not exist, or retention removed the workflow after `get()` read its terminal status
+- `RESULT_NOT_AVAILABLE` — `ReadResultNotAvailable`: the task reached a terminal status and stored no result
+- `RESULT_NOT_READY` — `ReadResultNotReady`: the workflow node stores no result yet
+- `ASYNC_CONTEXT` — `ReadAsyncContext`: sync `get()` / `result_for()` called on a thread that runs an event loop; nothing ran, not cached — call `get_async()` / `result_for_async()`
+- `INVALID_INPUT` — `ReadInvalidInput`: an argument of `get()` / `get_async()` was refused before any read: `wait_ms` must be None or an int from 0 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached
+- `WAIT_INSIDE_TASK` — `ReadWaitInsideTask`: a result wait (`TaskHandle.get()` / `get_async()`, `app.get_result()` / `get_result_async()`, `WorkflowHandle.get()` / `get_async()`) was called inside a worker child, also from a thread that the task started; it waited for nothing, not cached. It is the first check of the call, before `timeout_ms` and `ASYNC_CONTEXT`. The raw reads `app.get_raw_result()` and `broker.get_raw_result_record()` (and `*_async`) return `Err(DatabaseWaitInsideTask)` there. A task never waits for another task: compose them as a workflow. `send()`, starting a workflow, `info()` and `workflow_context.result_for()` still work in a task
+- `UNKNOWN_CUSTOM_CODE` — `ReadUnknownCustomCode`: the stored error has a custom code that the declared code type of the task does not name; the same read gives the same error
 
 ### `OutcomeCode`
 
@@ -273,24 +319,24 @@ Terminal lifecycle outcomes for tasks and workflows:
 <!-- members: OutcomeCode -->
 - `TASK_CANCELLED` — task was cancelled
 - `TASK_EXPIRED` — task's `good_until` deadline passed before execution started (PENDING or CLAIMED)
-- `TASK_TIMEOUT` — task exceeded its `timeout_ms`; child process killed, retry opt-in via `auto_retry_for`
+- `TASK_TIMEOUT` — task exceeded its `timeout_ms`; child process killed, retry opt-in via `retry_for`
 - `WORKFLOW_PAUSED` — workflow is paused
-- `WORKFLOW_EXPIRED` — a paused workflow passed `paused_workflow_auto_cancel_after` and expired; `data` holds the policy name and the age
+- `WORKFLOW_EXPIRED` — a paused workflow passed `paused_workflow_cancel_after` and expired; `data` holds the policy name and the age
 - `WORKFLOW_FAILED` — workflow has failed
 - `WORKFLOW_CANCELLED` — workflow was cancelled
 - `UPSTREAM_SKIPPED` — upstream task was skipped
-- `SUBWORKFLOW_FAILED` — sub-workflow has failed
+- `SUB_WORKFLOW_FAILED` — sub-workflow has failed
 - `WORKFLOW_SUCCESS_CASE_NOT_MET` — success condition not satisfied
 - `WORKFLOW_OUTPUT_SKIPPED` — a `COMPLETED` workflow has no output: its output node, or a terminal node of an outputless workflow, is SKIPPED, and a success case does not require that node
 
 ### Reserved Built-In Codes
 
-All built-in code string values are globally reserved. User-defined error codes must be plain `str` and must not collide with any built-in value.
+All built-in code string values are globally reserved. Custom error codes must be plain `str` and must not collide with any built-in value.
 
 - `BUILTIN_CODE_REGISTRY` (from `horsies.core.models.tasks`) maps every reserved string to its canonical enum member
 - `horsies check` reports `HRS-212` (`CHECK_RESERVED_CODE_COLLISION`) when `exception_mapper` values or `default_unhandled_error_code` collide with a reserved code
 - The library default `UNHANDLED_EXCEPTION` for `default_unhandled_error_code` is intentionally built-in and is not flagged
-- User-defined `str, Enum` types degrade to plain `str` after JSON round-trip — only built-in families preserve enum identity
+- Custom `str, Enum` types degrade to plain `str` after JSON round-trip — only built-in families preserve enum identity
 
 ## `TaskFunction[P, T]`
 
@@ -301,9 +347,9 @@ All methods available after `@app.task(...)`:
 task_name: str
 
 # Direct call — bypasses queue, use only in tests
-def __call__(*args: P.args, **kwargs: P.kwargs) -> TaskResult[T, TaskError]
+def __call__(*args: P.args, **kwargs: P.kwargs) -> Result[T, TaskError]
 # AsyncTaskFunction[P, T] (an async def task) differs only here:
-# def __call__(*args: P.args, **kwargs: P.kwargs) -> Coroutine[Any, Any, TaskResult[T, TaskError]]
+# def __call__(*args: P.args, **kwargs: P.kwargs) -> Coroutine[Any, Any, Result[T, TaskError]]
 # RuntimeTaskFunction[P, T] / AsyncRuntimeTaskFunction[P, T] take the runtime first:
 # def __call__(runtime: TaskRuntime, /, *args: P.args, **kwargs: P.kwargs) -> ...
 
@@ -311,34 +357,26 @@ def __call__(*args: P.args, **kwargs: P.kwargs) -> TaskResult[T, TaskError]
 def send(*args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]
 async def send_async(*args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]
 
-# Enqueue with delay
-def schedule(delay: int, *args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]
-async def schedule_async(delay: int, *args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]
-
-# Per-send options builder (returns TaskSendOptions with .send/.send_async/.schedule/.schedule_async)
-def with_options(*, good_until: datetime | None = None, idempotency_key: str | None = None, retention: timedelta | None = <unset>) -> TaskSendOptions[P, T]
+# Per-send options builder (returns TaskFunctionWithOptions with .send/.send_async)
+def with_options(*, good_until: datetime | None = None, idempotency_key: str | None = None, retention: SendRetention = <unset>, delay_seconds: int | None = None) -> TaskFunctionWithOptions[P, T]
 # retention's default is absence, not 30 days: omitting it takes the
 # queue's mapping, while choosing timedelta(days=30) overrides one.
+# delay_seconds: whole seconds, 0 or more; None (the default) sends now.
 
-# Replay failed send with stored payload; another variant is a type error
-# (and fails an assertion at run time)
-def retry_send(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]]
-async def retry_send_async(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]]
-
-# Replay failed schedule with stored payload; another variant is a type error
-# (and fails an assertion at run time)
-def retry_schedule(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]]
-async def retry_schedule_async(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]]
+# Replay failed send with stored payload (the delay of the first send
+# included); another variant is a type error (and fails an assertion at run time)
+def resend(error: TaskSendResendable) -> TaskSendResult[TaskHandle[T]]
+async def resend_async(error: TaskSendResendable) -> TaskSendResult[TaskHandle[T]]
 
 # Workflow node builder (returns NodeFactory, call with task kwargs to get TaskNode)
 def node(
     *,
     waits_for: Sequence[TaskNode | SubWorkflowNode] | None = None,
-    workflow_ctx_from: Sequence[TaskNode | SubWorkflowNode] | None = None,
+    workflow_context_from: Sequence[TaskNode | SubWorkflowNode] | None = None,
     args_from: dict[str, TaskNode | SubWorkflowNode] | None = None,
     queue: str | None = None,
     priority: int | None = None,
-    allow_failed_deps: bool = False,
+    allow_failed_dependencies: bool = False,
     join: Literal['all', 'any', 'quorum'] = 'all',
     min_success: int | None = None,
     good_until: datetime | None = None,
@@ -348,9 +386,9 @@ def node(
 
 **Direct call vs `.send()`**: Direct call runs in current process, no queue, no retry, no persistence. For an `async def` task, the direct call returns a coroutine: `await` it. `.send()` enqueues for background execution by a worker.
 
-## `TaskSendOptions[P, T]` — Per-Send Options
+## `TaskFunctionWithOptions[P, T]` — Per-Send Options
 
-Returned by `task.with_options(...)`. Exposes `.send()`, `.send_async()`, `.schedule()`, and `.schedule_async()` with overridden options applied to this specific send.
+Returned by `task.with_options(...)`. Exposes `.send()` and `.send_async()` with overridden options applied to this specific send.
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -360,9 +398,12 @@ opts = my_task.with_options(good_until=deadline)
 
 opts.send(**kwargs)              # sync
 await opts.send_async(**kwargs)  # async
-opts.schedule(60, **kwargs)      # delayed
-await opts.schedule_async(60, **kwargs)  # delayed, async
+
+# Send after a delay of 60 seconds
+my_task.with_options(delay_seconds=60).send(**kwargs)
 ```
+
+**`delay_seconds`**: a whole number of seconds, `0` or more; the task becomes claimable after it. `None` (the default) and `0` send now. A negative value, a `bool`, a `float` or a `str` returns `Err(VALIDATION_FAILED)` before anything is written.
 
 **`good_until`**: timezone-aware `datetime` or `None`. Naive datetimes return `Err(VALIDATION_FAILED)`. Passing `good_until=None` explicitly clears any inherited deadline.
 
@@ -373,8 +414,10 @@ rows; a resend under the same key with a *different* request returns
 `Err(TaskSendIdempotencyKeyConflict)`. Its `owner_task_id` names the task
 that holds the key. While the owner task is
 live, the key stays reserved. After the owner task finishes, the key clears
-when the reservation window (24 h by default) has passed. The retry methods
-accept the error. A retry that changes the key of a sent task id returns
+when the reservation window (24 h by default) has passed; a send with the key
+after that time starts a new task. A repeat of the same send does not complete
+it, so the error is not retryable: send the same command as the owner task, or
+use another key. The resend methods refuse the error. A resend that changes the key of a sent task id returns
 `PAYLOAD_MISMATCH`. Keys are not a rerun contract — they deduplicate enqueues.
 
 **`retention`**: how long the terminal record is kept. Precedence,
@@ -388,11 +431,10 @@ highest first:
 So omitting the argument means "the queue's mapping if there is one, and
 30 days otherwise" — not 30 days unconditionally.
 
-This precedence holds on EVERY enqueue path — `.send()`, `.send_async()`,
-`.schedule()`, `.schedule_async()`, a `TaskSchedule` firing on its cron,
-and a workflow node's backing task. A cron fire resolves from the
-scheduler process's own config; a workflow node from the queue its node
-runs on. `.schedule*()` also carries `idempotency_key`.
+This precedence holds on EVERY enqueue path — `.send()`, `.send_async()`
+with or without a delay, a `TaskSchedule` firing on its cron, and a
+workflow node's backing task. A cron fire resolves from the scheduler
+process's own config; a workflow node from the queue its node runs on.
 
 A retention class is its period: the key is `standard_<days>d`
 (`standard_7d`, `standard_30d`). Valid values are `None` and a whole-day
@@ -414,7 +456,7 @@ await my_task.with_options(retention=None).send_async(**kwargs)
 await my_task.with_options(retention=timedelta(days=30)).send_async(**kwargs)
 ```
 
-**When to use `with_options()` vs `.node(good_until=...)`**: `with_options()` is for ad-hoc sends (`.send()`, `.send_async()`, `.schedule()`, `.schedule_async()`). For workflow nodes, use `.node(good_until=...)` — the deadline is evaluated at workflow start time, not at definition time.
+**When to use `with_options()` vs `.node(good_until=...)`**: `with_options()` is for ad-hoc sends (`.send()`, `.send_async()`). For workflow nodes, use `.node(good_until=...)` — the deadline is evaluated at workflow start time, not at definition time.
 
 ### Task Expiry Lifecycle
 
@@ -443,44 +485,46 @@ When used as a kwarg value in the second call of `.node()()`, the `NodeFactory` 
 producer = produce.node()(value=42)
 consumer = consume.node()(data=from_node(producer))
 # Equivalent to:
-# TaskNode(fn=consume, args_from={"data": producer}, waits_for=[producer])
+# TaskNode(function=consume, args_from={"data": producer}, waits_for=[producer])
 ```
 
 Raises `WorkflowValidationError(HRS-008)` if argument is not a `TaskNode` or `SubWorkflowNode`.
 
 ## `TaskHandle[T]`
 
-Returned by successful `.send()` / `.send_async()` / `.schedule()` / `.schedule_async()`.
+Returned by successful `.send()` / `.send_async()` / `.resend()` / `.resend_async()`.
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 task_id: UUID  # stable across retries of the same send
 
-def get(timeout_ms: int | None = None) -> TaskResult[T, TaskError]
-async def get_async(timeout_ms: int | None = None) -> TaskResult[T, TaskError]
+def get(wait_ms: int | None = None) -> ReadResult[T, TaskError]
+async def get_async(wait_ms: int | None = None) -> ReadResult[T, TaskError]
 
-def info(*, include_result: bool = False, include_failed_reason: bool = False, include_attempts: bool = False) -> BrokerResult[TaskInfo | None]
-async def info_async(*, include_result: bool = False, include_failed_reason: bool = False, include_attempts: bool = False) -> BrokerResult[TaskInfo | None]
+def info(*, include_result: bool = False, include_failed_reason: bool = False, include_attempts: bool = False) -> DatabaseResult[TaskInfo | None]
+async def info_async(*, include_result: bool = False, include_failed_reason: bool = False, include_attempts: bool = False) -> DatabaseResult[TaskInfo | None]
 ```
 
 ### Caching semantics
 
-- `WAIT_TIMEOUT` is **not** cached — subsequent `get()` calls re-poll from broker.
-- All other results **are** cached — repeated `get()` returns cached value without DB query.
+- An outcome (`Ok(Succeeded(...))`, `Ok(Failed(...))`) and the final read errors `ReadResultNotAvailable`, `ReadResultDeserializationError`, `ReadUnknownCustomCode` and `ReadNoTypeAvailable` **are** cached — repeated `get()` returns the cached value without DB query.
+- The other read errors (`ReadWaitTimeout`, `ReadTaskNotFound`, `ReadDatabaseError`, `ReadAsyncContext`, `ReadWaitInsideTask`, `ReadInvalidInput`) are **not** cached — subsequent `get()` calls read from the broker again.
 
 ### `TaskInfo` fields
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 task_id: UUID, task_name: str, status: TaskStatus
-queue_name: str, priority: int
+queue: str, priority: int
 retry_count: int, max_retries: int, next_retry_at: datetime | None
-sent_at: datetime | None, enqueued_at: datetime
+sent_at: datetime | None, due_at: datetime        # due_at: a worker may claim the task from this time
 claimed_at: datetime | None, started_at: datetime | None
 completed_at: datetime | None, failed_at: datetime | None
 worker_hostname: str | None, worker_pid: int | None, worker_process_name: str | None
-error_code: str | None                      # always returned (final TaskError.error_code, NULL if not failed)
-result: TaskResult[Any, TaskError] | None    # opt-in: include_result=True
+error_code: str | None                      # always returned (final TaskError.code, NULL if not failed)
+raw_result: dict[str, Any] | None           # opt-in: include_result=True; the stored envelope
+decoded_result: TaskOutcome[Any, TaskError] | None  # opt-in: include_result=True; set when this process decodes it
+result_decoded: bool                         # True when decoded_result is set
 failed_reason: str | None                    # opt-in: include_failed_reason=True
 attempts: list[TaskAttemptInfo] | None       # opt-in: include_attempts=True (None when not requested, [] when empty); newest first
 ```
@@ -497,7 +541,7 @@ error_code: str | None, error_message: str | None, failed_reason: str | None
 worker_id: str | None, worker_hostname: str | None, worker_pid: int | None, worker_process_name: str | None
 ```
 
-`TaskAttemptOutcome`: `COMPLETED` (success), `FAILED` (domain/library error or recoverable worker/process failure represented as a TaskResult), `WORKER_FAILURE` (legacy/rare worker failure path without a usable TaskResult), `CANCELLED` (an operator cancelled the running task; the cancel wrote the row, and `finished_at` is the cancel time).
+`TaskAttemptOutcome`: `COMPLETED` (success), `FAILED` (domain/library error or recoverable worker/process failure stored as a `TaskError`), `WORKER_FAILURE` (legacy/rare worker failure path without a usable stored `TaskError`), `CANCELLED` (an operator cancelled the running task; the cancel wrote the row, and `finished_at` is the cancel time).
 
 `TaskStatus`: `PENDING -> CLAIMED -> RUNNING -> COMPLETED | FAILED | CANCELLED | EXPIRED`. `is_terminal` is `True` for `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED`. `EXPIRED` means the task's `good_until` deadline passed before execution started (either PENDING or CLAIMED).
 
@@ -510,41 +554,41 @@ type TaskSendResult[T] = Result[T, TaskSendError]
 
 ### `TaskSendError`
 
-One frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure; `err.code` (a class variable) names its member. `payload`, `message` and `exception` are not in the repr.
+One frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure; `err.code` (a class variable) names its member. `payload`, `message` and `cause` are not in the repr.
 
 <!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 type TaskSendError = (
     TaskSendSuppressed               # message
     | TaskSendAsyncContext           # task_id, payload, message
-    | TaskSendValidationFailed       # message, exception
-    | TaskSendEnqueueFailed          # task_id, payload, message, retryable, exception
+    | TaskSendValidationFailed       # message, cause
+    | TaskSendEnqueueFailed          # task_id, payload, message, retryable, cause
     | TaskSendPayloadMismatch        # task_id, payload, message
     | TaskSendPayloadTooLarge        # message, size_bytes, limit_bytes
-    | TaskSendIdempotencyKeyConflict # task_id, payload, message, owner_task_id
+    | TaskSendIdempotencyKeyConflict # task_id, payload, message, owner_task_id; retryable is False
 )
-type TaskSendRetryable = (
+type TaskSendResendable = (
     TaskSendEnqueueFailed
     | TaskSendAsyncContext
-    | TaskSendIdempotencyKeyConflict
 )
+type TaskSendResendable = TaskSendEnqueueFailed | TaskSendAsyncContext
 ```
 
-`exception` is `BaseException | NoCause` on `TaskSendValidationFailed` and `TaskSendEnqueueFailed`. `NoCause()` means a check found the failure without a Python exception. `NoCause` is not an exception: match on `exception` before `raise ... from`, `exc_info=` or an error tracker call.
+`cause` is `BaseException | NoCause` on `TaskSendValidationFailed` and `TaskSendEnqueueFailed`. `NoCause()` means a check found the failure without a Python exception. `NoCause` is not an exception: match on `exception` before `raise ... from`, `exc_info=` or an error tracker call.
 
-Validation failure text never contains the refused value: each failure is `<loc>: <msg> [<type>]`, at most 10, and a message part that comes from the input is `<input>`. Text that your own validators write is kept as written. A kwarg that fails its declared type gives `TaskSendValidationFailed.exception` as a `ValueValidationError` (`horsies.core.codec`), not a pydantic `ValidationError`. A key from the input can be part of `<loc>` for a dict or mapping type, and for a key that `extra='forbid'` refuses.
+Validation failure text never contains the refused value: each failure is `<loc>: <msg> [<type>]`, at most 10, and a message part that comes from the input is `<input>`. Text that your own validators write is kept as written. A kwarg that fails its declared type gives `TaskSendValidationFailed.cause` as a `ValueValidationError` (`horsies.core.codec`), not a pydantic `ValidationError`. A key from the input can be part of `<loc>` for a dict or mapping type, and for a key that `extra='forbid'` refuses.
 
 ### `TaskSendErrorCode`
 
 <!-- members: TaskSendErrorCode -->
-| Code | Retry methods | When |
+| Code | Resend methods | When |
 |---|---|---|
 | `SEND_SUPPRESSED` | Refused | `.send()` called during worker import/discovery |
-| `ASYNC_CONTEXT` | Accepted | Sync `.send()` / `.schedule()` (or a sync retry) called inside a running event loop; nothing was enqueued — the error keeps the payload, so `retry_send_async(err)` / `retry_schedule_async(err)` completes the same send |
-| `VALIDATION_FAILED` | Refused | Serialization failed, invalid queue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), or cross-method retry attempted |
-| `ENQUEUE_FAILED` | Accepted | Broker/DB failure, or the core of this process could not run the send (`exception` is the core error: `TooManyPendingCalls` and `CoreCallTimedOut` are retryable; `CoreStartFailed` is not). The row may or may not exist. The `TaskSendPayload` keeps the task id, command and `sent_at` for the retry, which returns the task id if the first send was written; `retryable` is the core's classification |
-| `PAYLOAD_MISMATCH` | Refused | The task id exists, and the command or the idempotency key differs from the original send — the payload was altered between send and retry |
-| `IDEMPOTENCY_KEY_CONFLICT` | Accepted | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. A retry after the reservation ends is accepted |
+| `ASYNC_CONTEXT` | Accepted | Sync `.send()` (or a sync resend) called inside a running event loop; nothing was enqueued — the error keeps the payload, so `resend_async(err)` completes the same send |
+| `VALIDATION_FAILED` | Refused | Serialization failed, invalid queue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), or a resend of another task's error |
+| `ENQUEUE_FAILED` | Accepted | Broker/DB failure, or the core of this process could not run the send (`cause` is the core error: `TooManyPendingCalls` and `CoreCallTimedOut` are retryable; `RuntimeStartFailed` is not). The row may or may not exist. The `TaskSendPayload` keeps the task id, command, `sent_at` and delay for the resend, which returns the task id if the first send was written; `retryable` is the core's classification |
+| `PAYLOAD_MISMATCH` | Refused | The task id exists, and the command or the idempotency key differs from the original send — the payload was altered between send and resend |
+| `IDEMPOTENCY_KEY_CONFLICT` | Refused | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. `retryable` is `False`: a repeat of the same send does not complete it; send the same command, or use another key |
 | `PAYLOAD_TOO_LARGE` | Refused | The serialized input exceeded `payload.reject_bytes` bytes of UTF-8 text (off by default); nothing was enqueued — shrink the payload (pass a reference to external storage) or raise the limit |
 
 ### `TaskSendPayload`
@@ -562,24 +606,24 @@ class TaskSendPayload:
 
 Pre-serialized at send time. Never construct manually — created by the library internally.
 
-### Retry guard pattern
+### Resend guard pattern
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 match my_task.send(**kwargs):
     case Ok(handle):
-        result = handle.get(timeout_ms=5000)
+        result = handle.get(wait_ms=5000)
     case Err(TaskSendEnqueueFailed(retryable=True) as err):
-        match my_task.retry_send(err):
+        match my_task.resend(err):
             case Ok(handle):
-                result = handle.get(timeout_ms=5000)
-            case Err(retry_err):
-                log_permanent_failure(retry_err)
+                result = handle.get(wait_ms=5000)
+            case Err(resend_err):
+                log_permanent_failure(resend_err)
     case Err(err):
         log_permanent_failure(err)
 ```
 
-Cross-method retry is blocked: `retry_send` on a scheduled-task error returns `VALIDATION_FAILED`. `retry_schedule` on a non-scheduled error also returns `VALIDATION_FAILED`.
+`resend` takes the error of a send with a delay too, and sends it again with the same delay. The error of another task returns `VALIDATION_FAILED`.
 
 ## `RetryPolicy`
 
@@ -587,11 +631,11 @@ Always use the class methods:
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
-# Fixed backoff — intervals length defines max_retries
+# Fixed backoff — the length of intervals_seconds defines max_retries
 RetryPolicy.fixed(
-    intervals: list[int],                              # seconds, e.g. [60, 300, 900]
+    intervals_seconds: list[int],                      # e.g. [60, 300, 900]
     *,
-    auto_retry_for: list[str | BuiltInTaskCode],        # required
+    retry_for: list[BuiltInTaskCode | Enum],            # required: code members
     jitter: bool = True,
 )
 
@@ -600,7 +644,7 @@ RetryPolicy.exponential(
     base_seconds: int,
     *,
     max_retries: int,
-    auto_retry_for: list[str | BuiltInTaskCode],        # required
+    retry_for: list[BuiltInTaskCode | Enum],            # required: code members
     jitter: bool = True,
     max_delay_seconds: int | None = None,              # cap on each delay; None = no cap
 )
@@ -608,36 +652,53 @@ RetryPolicy.exponential(
 
 ### Validation rules
 
-- `fixed`: `intervals` must have 1–20 entries. Each entry is 1–86400 seconds. The number of entries is the number of retries.
+- `fixed`: `intervals_seconds` must have 1–20 entries. Each entry is 1–86400 seconds. The number of entries is the number of retries.
 - `exponential`: `base_seconds` is 1–86400. `max_retries` is 1–20.
 - `max_delay_seconds` (`exponential` only): `None` or an integer >= 1. The cap applies last, after backoff and jitter.
-- `auto_retry_for` must have at least 1 entry. Each entry must be `UPPER_SNAKE_CASE` — exception class names like `"TimeoutError"` are rejected.
-- A rule violation raises `pydantic.ValidationError` (a `ValueError` subclass) at the constructor call.
+- `retry_for` must have at least 1 entry. Each entry is a code member (see below). Pyright refuses a plain `str`.
+- A rule violation of the constructor raises `pydantic.ValidationError` (a `ValueError` subclass) at the constructor call. The constructor does not check the entries: `@app.task` checks them against the codes of the task.
 
 ### Jitter
 
 `jitter=True` (default) adds a random 0–25% to each delay; it never shortens a delay. Prevents thundering herd. Disable only in tests.
 
-### `auto_retry_for` valid values
+### `retry_for` valid values
 
-- User-defined domain codes: `"RATE_LIMITED"`, `"DEADLOCK"`, `"SERVICE_UNAVAILABLE"`
-- `BuiltInTaskCode` members that a task failure produces, for example `OperationalErrorCode.UNHANDLED_EXCEPTION`, `OperationalErrorCode.WORKER_CRASHED`, `OutcomeCode.TASK_TIMEOUT`
-- Plain strings matching `^[A-Z][A-Z0-9_]*$`
+- `BuiltInTaskCode` members that a task failure produces, for example `OperationalCode.UNHANDLED_EXCEPTION`, `OperationalCode.WORKER_CRASHED`, `OutcomeCode.TASK_TIMEOUT`
+- Members of the task's own code `Enum` class, declared with `error_codes=`: `ApiCode.RATE_LIMITED` with `error_codes=ApiCode`
 
-Retries only trigger when the error code on the stored result matches and `retry_count < max_retries`.
+`@app.task` refuses any other entry with `HRS-102`: a plain `str` (`"RATE_LIMITED"`), a member of another `Enum` class, or a custom member of a task that declares a tuple or no `error_codes`. A task that retries on a code of its own declares the code in an `Enum` class. The task body can return the member or its text: the stored code is the text in both cases.
+
+The stored policy holds the text of each code (`"RATE_LIMITED"`). A retry starts when the stored error code of the failure is in the list and `retry_count < max_retries`.
 
 ### Examples
 
-<!-- check: skip partial -- uses a name before the page defines it -->
 ```python
+class ApiCode(str, Enum):
+    RATE_LIMITED = "RATE_LIMITED"
+    TIMEOUT = "TIMEOUT"
+    DEADLOCK = "DEADLOCK"
+
 # 3 fixed retries: 1min, 5min, 15min
-RetryPolicy.fixed([60, 300, 900], auto_retry_for=["RATE_LIMITED"])
+RetryPolicy.fixed([60, 300, 900], retry_for=[ApiCode.RATE_LIMITED])
 
 # 5 exponential retries: 30s, 60s, 120s, 240s, 480s
-RetryPolicy.exponential(base_seconds=30, max_retries=5, auto_retry_for=["TIMEOUT"])
+RetryPolicy.exponential(base_seconds=30, max_retries=5, retry_for=[ApiCode.TIMEOUT])
 
 # Quick deadlock retries, no jitter
-RetryPolicy.fixed([1, 2, 5], auto_retry_for=["DEADLOCK"], jitter=False)
+RetryPolicy.fixed([1, 2, 5], retry_for=[ApiCode.DEADLOCK], jitter=False)
+
+# A built-in code and a code of the task
+@app.task(
+    "sync_orders",
+    error_codes=ApiCode,
+    retry_policy=RetryPolicy.fixed(
+        [60, 300],
+        retry_for=[OperationalCode.WORKER_CRASHED, ApiCode.RATE_LIMITED],
+    ),
+)
+def sync_orders() -> Result[int, TaskError[ApiCode]]:
+    return Err(TaskError(code=ApiCode.RATE_LIMITED))
 ```
 
 ## `ExceptionMapper`
@@ -662,7 +723,7 @@ exception_mapper={
 }
 ```
 
-Only invoked for unhandled exceptions. If the task returns `TaskResult(err=...)` explicitly, the mapper is never called.
+Only invoked for unhandled exceptions. If the task returns `Err(...)` explicitly, the mapper is never called.
 
 A `KeyboardInterrupt` is never mapped. In a worker, every other exception of a `def` or an `async def` body is mapped, `GeneratorExit` and `CancelledError` included. A direct call of an `async def` task outside a worker lets `GeneratorExit` pass, and a `CancelledError` while its asyncio task has a cancel request.
 
@@ -693,7 +754,7 @@ Serialized size is checked against `AppConfig.payload` (`PayloadPolicy`): above 
 
 - Custom class instances (not Pydantic/dataclass)
 - PEP 695 `type X = ...` aliases (`TypeAliasType`) anywhere in a model that
-  reaches a `TaskResult` ok slot — rejected by strict-serde at app startup
+  reaches the `T` of a task's `Result[T, TaskError]` — rejected by strict-serde at app startup
   (HRS-105), which surfaces far from the alias itself; use a plain assignment
   (`X = Literal[...]`) instead
 - `bytes`, `bytearray`
@@ -711,21 +772,18 @@ codec. Non-serializable return → `WORKER_SERIALIZATION_ERROR`.
 
 ### Stored-result decode failure
 
-Decode failures surface differently depending on which retrieval API the
-caller uses:
+`app.get_result(task_id, ...)`, `TaskHandle.get(...)` and
+`WorkflowHandle.get(...)` (and their `*_async` forms) return
+`Err(ReadResultDeserializationError(...))` when the stored envelope is
+malformed, misses the `__h_task_result__` marker, or does not decode as
+the registered types. The read error is apart from any `TaskError` of
+the task. The same read gives the same error until the stored value
+changes, so a `TaskHandle` caches it.
 
-- `app.get_result(task_id, ...)` returns
-  `Err(BrokerInvalidJsonPayload(...))` (code `INVALID_JSON_PAYLOAD`) when
-  the stored envelope is malformed, missing the `__h_task_result__`
-  marker, or fails typed decode against the registered `task_ok_type`.
-  Cross-process monitoring and debugging callers see the infrastructure
-  failure as an outer `Err`, distinct from any domain `TaskError`.
-
-- `TaskHandle.get(...)` returns
-  `TaskResult(err=TaskError(error_code=RESULT_DESERIALIZATION_ERROR))`
-  when the stored payload cannot be decoded — `handle.get()` always
-  returns a `TaskResult`, so the decode failure is folded into the
-  domain error surface.
+A successful stored value with no declared type in this process (a
+handle built by id, or a task that is not registered here) gives
+`Err(ReadNoTypeAvailable(...))`. Read the raw result
+(`app.get_raw_result()`), or import the task module.
 
 ## Common Pitfalls
 
@@ -768,32 +826,32 @@ from myapp.models import Config  # Pydantic model or dataclass
 my_task.send(cfg=Config(value=42))
 ```
 
-### Forgetting `TaskResult` wrapper
+### Forgetting the `Ok` wrapper
 
 <!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
-# WRONG — returns raw value, fails with UNHANDLED_EXCEPTION (AttributeError) at runtime
+# WRONG — returns a raw value: the result is Err(TaskError(code=RETURN_TYPE_MISMATCH))
 @app.task("bad")
-def bad(*, x: int) -> TaskResult[dict[str, int], TaskError]:
+def bad(*, x: int) -> Result[dict[str, int], TaskError]:
     return {"x": x}
 
 # CORRECT
 @app.task("good")
-def good(*, x: int) -> TaskResult[dict[str, int], TaskError]:
-    return TaskResult(ok={"x": x})
+def good(*, x: int) -> Result[dict[str, int], TaskError]:
+    return Ok({"x": x})
 ```
 
-### `auto_retry_for` at top level
+### `retry_for` at top level
 
 <!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # WRONG — rejected at definition time
-@app.task("t", auto_retry_for=["TIMEOUT"])
-def t() -> TaskResult[str, TaskError]: ...
+@app.task("t", retry_for=[OutcomeCode.TASK_TIMEOUT])
+def t() -> Result[str, TaskError]: ...
 
 # CORRECT — goes inside RetryPolicy
-@app.task("t", retry_policy=RetryPolicy.fixed([60], auto_retry_for=["TIMEOUT"]))
-def t() -> TaskResult[str, TaskError]: ...
+@app.task("t", retry_policy=RetryPolicy.fixed([60], retry_for=[OutcomeCode.TASK_TIMEOUT]))
+def t() -> Result[str, TaskError]: ...
 ```
 
 ### Decorator ordering — `HRS-104`
@@ -803,11 +861,11 @@ def t() -> TaskResult[str, TaskError]: ...
 # WRONG — @app.task sees already-wrapped function
 @app.task("t")
 @some_other_decorator
-def t() -> TaskResult[str, TaskError]: ...
+def t() -> Result[str, TaskError]: ...
 
 # CORRECT — @app.task must be applied to the raw function
 @app.task("t")
-def t() -> TaskResult[str, TaskError]: ...
+def t() -> Result[str, TaskError]: ...
 ```
 
 ### Sync calls inside a coroutine or a Jupyter cell → `ASYNC_CONTEXT`
@@ -817,31 +875,33 @@ def t() -> TaskResult[str, TaskError]: ...
 # WRONG — on a thread that runs an event loop, each sync call returns ASYNC_CONTEXT
 async def report(handle: TaskHandle[str]) -> None:
     send_r = my_task.send(value="test")      # Err(ASYNC_CONTEXT), nothing enqueued
-    result = handle.get(timeout_ms=5000)     # TaskError(ASYNC_CONTEXT), not cached
+    result = handle.get(wait_ms=5000)     # Err(ReadAsyncContext(...)), not cached
 
 # CORRECT — use the *_async forms
 async def report() -> None:
     handle = (await my_task.send_async(value="test")).unwrap()
-    result = await handle.get_async(timeout_ms=5000)
+    result = await handle.get_async(wait_ms=5000)
 ```
 
-### `WAIT_TIMEOUT` is not a terminal failure
+### `ReadWaitTimeout` is not a terminal failure
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-result = handle.get(timeout_ms=5000)
-if result.is_err() and result.err_value.error_code == RetrievalCode.WAIT_TIMEOUT:
-    # Task may still be running. NOT cached — calling get() again will re-poll.
-    check_again_later(handle.task_id)
+match handle.get(wait_ms=5000):
+    case Err(ReadWaitTimeout()):
+        # Task may still be running. NOT cached — calling get() again will re-poll.
+        check_again_later(handle.task_id)
+    case _:
+        ...
 ```
 
-### `queue_name` in DEFAULT mode
+### `queue` in DEFAULT mode
 
 <!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # WRONG — raises HRS-200 at definition time if app uses QueueMode.DEFAULT
-@app.task("t", queue_name="critical")
-def t() -> TaskResult[str, TaskError]: ...
+@app.task("t", queue="critical")
+def t() -> Result[str, TaskError]: ...
 ```
 
 ### `good_until` is a per-send concern, not a decorator option
@@ -869,16 +929,21 @@ from horsies import (
     # App and config
     Horsies, AppConfig, PostgresConfig,
     # Task result types
-    TaskResult, TaskError, SubWorkflowError, TaskInfo, TaskAttemptInfo,
+    TaskError, SubWorkflowFailure, TaskInfo, TaskAttemptInfo,
+    # Read result types: the outcome and the read errors
+    ReadResult, TaskOutcome, Succeeded, Failed, ReadError,
+    ReadWaitTimeout, ReadTaskNotFound, ReadWorkflowNotFound, ReadResultNotAvailable, ReadResultNotReady,
+    ReadWaitInsideTask, ReadAsyncContext, ReadInvalidInput, ReadResultDeserializationError, ReadUnknownCustomCode,
+    ReadDatabaseError, ReadNoTypeAvailable, ReadWorkflowContextMissingId,
     # The run of a task: cancel state
     TaskRuntime, RunCancelState, CancelNotRequested, CancelRequested, CancelCause,
     # Error code families
-    BuiltInTaskCode, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode,
+    BuiltInTaskCode, OperationalCode, ContractCode, RetrievalCode, OutcomeCode,
     # Retry
     RetryPolicy,
     # Send types
-    TaskHandle, TaskSendOptions, TaskSendResult, TaskSendError, TaskSendErrorCode, TaskSendPayload,
-    TaskSendRetryable, NoCause, TaskSendSuppressed, TaskSendAsyncContext, TaskSendValidationFailed,
+    TaskHandle, TaskFunctionWithOptions, TaskSendResult, TaskSendError, TaskSendErrorCode, TaskSendPayload,
+    TaskSendResendable, NoCause, TaskSendSuppressed, TaskSendAsyncContext, TaskSendValidationFailed,
     TaskSendEnqueueFailed, TaskSendPayloadMismatch, TaskSendPayloadTooLarge,
     TaskSendIdempotencyKeyConflict,
     # Exception mapper
@@ -886,13 +951,12 @@ from horsies import (
     # Status
     TaskStatus, TaskAttemptOutcome, TASK_TERMINAL_STATES,
     # Broker result (for handle.info()); match on the variant
-    BrokerResult, BrokerOperationError, BrokerErrorCode,
-    BrokerOperationFailed, BrokerEnqueueFailed, BrokerInvalidInput,
-    broker_error_cause,
+    DatabaseResult, DatabaseOperationError, DatabaseErrorCode,
+    DatabaseOperationFailed, DatabaseEnqueueFailed, DatabaseInvalidInput,
     # Node data flow helper
     from_node,
     # Rerun (re-execute a terminal task as a new request)
-    rerun_task, RerunTask, RerunEnqueuePolicy, RerunOutcome,
+    rerun_task_in_async, RerunCommand, RerunEnqueuePolicy, RerunOutcome,
     RerunEnqueued, RerunSourceLive, RerunSourceAbsent, RerunSourceCorrupt,
     RerunNotEligible, RerunInputUnavailable, RerunInputCorrupt,
     RerunKeyConflict, RerunKeyReplay, NotEligibleReason,
@@ -909,7 +973,7 @@ code and callers:
 
 - **Manual in-place retry is removed.** `RetryPolicy` still governs automatic
   retry of a live task; re-executing a *terminal* task is a new request via
-  `rerun_task`, with a new task id and recorded lineage.
+  `rerun_task_in_async`, with a new task id and recorded lineage.
 - Result and info reads still work after the move — they resolve across live
   and history.
 - Rerun eligibility is decided **at enqueue**: `retain_rerun_input_default`

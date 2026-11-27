@@ -2,7 +2,7 @@
 """The sync workflow facades call the core's blocking forms.
 
 ``WorkflowHandle``'s sync methods, ``start_workflow``,
-``pause_workflow_sync`` and ``resume_workflow_sync`` share one outcome
+``pause_workflow`` and ``resume_workflow`` share one outcome
 mapping with their async forms. For each catalog outcome of the core's
 record, and for each refusal before the core call, the sync facade returns
 the outcome of its async form (``outcome_shape``), calls the blocking form
@@ -29,20 +29,20 @@ from horsies.core.codec.json_io import SerializationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import NodeKey, TaskNode, WorkflowSpec
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow.handle_types import (
-    HandleDbOperationFailed,
-    HandleResumeRecoveryFailed,
-    HandleStoredDataInvalid,
+    WorkflowHandleDatabaseOperationFailed,
+    WorkflowHandleResumeRecoveryFailed,
+    WorkflowHandleStoredDataInvalid,
 )
-from horsies.core.types.result import is_ok
+from horsies.core.types.result import Ok, Result, is_ok
 from horsies.core.workflows.lifecycle import (
+    pause_workflow_async,
     pause_workflow,
-    pause_workflow_sync,
+    resume_workflow_async,
     resume_workflow,
-    resume_workflow_sync,
     start_workflow,
     start_workflow_async,
 )
@@ -69,14 +69,14 @@ CORE_REFUSAL: Final = core.TooManyPendingCalls('CoreHandle.call', 65_536)
 APP: Final = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
+        database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
     ),
 )
 
 
-@APP.task(task_name=TASK_NAME)
-def value_task(*, value: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=value)
+@APP.task(name=TASK_NAME)
+def value_task(*, value: int) -> Result[int, TaskError]:
+    return Ok(value)
 
 
 def _record(record_class: type, **fields: object) -> MagicMock:
@@ -88,35 +88,35 @@ def _record(record_class: type, **fields: object) -> MagicMock:
     return record
 
 
-def _db_operation_failed() -> HandleDbOperationFailed:
+def _db_operation_failed() -> WorkflowHandleDatabaseOperationFailed:
     """The core's answer of a read or write whose connection was lost."""
-    return HandleDbOperationFailed(
+    return WorkflowHandleDatabaseOperationFailed(
         message=f'Status failed for workflow {WORKFLOW_ID}: connection lost',
         retryable=True,
         workflow_id=WORKFLOW_ID,
-        exception=CONNECTION_LOST,
+        cause=CONNECTION_LOST,
     )
 
 
-def _stored_data_invalid() -> HandleStoredDataInvalid:
+def _stored_data_invalid() -> WorkflowHandleStoredDataInvalid:
     """The core's answer of a stored value that does not parse."""
-    return HandleStoredDataInvalid(
+    return WorkflowHandleStoredDataInvalid(
         message=f'Status failed for workflow {WORKFLOW_ID}: invalid status: BOGUS',
         workflow_id=WORKFLOW_ID,
-        exception=core.CoreContractViolation('workflow_status', 'invalid status: BOGUS'),
+        cause=core.CoreContractViolation('workflow_status', 'invalid status: BOGUS'),
     )
 
 
-def _recovery_failed() -> HandleResumeRecoveryFailed:
+def _recovery_failed() -> WorkflowHandleResumeRecoveryFailed:
     """The core's answer of a resume whose recovery pass failed after the
     commit."""
-    return HandleResumeRecoveryFailed(
+    return WorkflowHandleResumeRecoveryFailed(
         message=(
             f'Workflow {WORKFLOW_ID} resumed; the recovery pass for its tree failed: '
             'connection lost'
         ),
         workflow_id=WORKFLOW_ID,
-        exception=CONNECTION_LOST,
+        cause=CONNECTION_LOST,
     )
 
 
@@ -147,7 +147,7 @@ def _answering(method: str, answer: object) -> CoreAnswers:
 
 
 def _workflow_handle() -> WorkflowHandle[int]:
-    return WorkflowHandle(workflow_id=WORKFLOW_KEY, broker=APP.get_broker(), out_type=int)
+    return WorkflowHandle(workflow_id=WORKFLOW_KEY, broker=APP.get_broker(), output_type=int)
 
 
 async def _awaited(awaitable: Awaitable[object]) -> object:
@@ -188,8 +188,8 @@ FACADES: Final[dict[str, Facade]] = {
         },
     ),
     'WorkflowHandle.get': Facade(
-        blocking=lambda handle: handle.get(timeout_ms=250),
-        awaited=lambda handle: handle.get_async(timeout_ms=250),
+        blocking=lambda handle: handle.get(wait_ms=250),
+        awaited=lambda handle: handle.get_async(wait_ms=250),
         blocking_form='wait_workflow_result',
         arguments=(WORKFLOW_KEY,),
         keywords={'timeout_ms': 250},
@@ -224,7 +224,7 @@ FACADES: Final[dict[str, Facade]] = {
                 node_id=NODE_ID,
                 task_name=TASK_NAME,
                 result_json=_ok_envelope(5),
-                is_subworkflow=False,
+                is_sub_workflow=False,
                 sub_definition_key=None,
             ),
             'stored_corrupt': _record(
@@ -232,7 +232,7 @@ FACADES: Final[dict[str, Facade]] = {
                 node_id=NODE_ID,
                 task_name=TASK_NAME,
                 result_json='{',
-                is_subworkflow=False,
+                is_sub_workflow=False,
                 sub_definition_key=None,
             ),
             'not_stored': _record(core.NodeResultNotStored, node_id=NODE_ID),
@@ -255,7 +255,7 @@ FACADES: Final[dict[str, Facade]] = {
                         node_id=NODE_ID,
                         task_name=TASK_NAME,
                         result_json=_ok_envelope(5),
-                        is_subworkflow=False,
+                        is_sub_workflow=False,
                         sub_definition_key=None,
                     ),
                     _record(
@@ -263,7 +263,7 @@ FACADES: Final[dict[str, Facade]] = {
                         node_id='blocking_forms:1',
                         task_name=TASK_NAME,
                         result_json='{',
-                        is_subworkflow=False,
+                        is_sub_workflow=False,
                         sub_definition_key=None,
                     ),
                 ],
@@ -273,9 +273,9 @@ FACADES: Final[dict[str, Facade]] = {
             **HANDLE_FAILURES,
         },
     ),
-    'WorkflowHandle.tasks': Facade(
-        blocking=lambda handle: handle.tasks(),
-        awaited=lambda handle: handle.tasks_async(),
+    'WorkflowHandle.nodes': Facade(
+        blocking=lambda handle: handle.nodes(),
+        awaited=lambda handle: handle.nodes_async(),
         blocking_form='workflow_nodes',
         arguments=(WORKFLOW_KEY,),
         keywords={},
@@ -294,7 +294,7 @@ FACADES: Final[dict[str, Facade]] = {
                         completed_at=SENT_AT,
                         sub_workflow_id=None,
                         sub_workflow_summary_json=None,
-                        is_subworkflow=False,
+                        is_sub_workflow=False,
                         sub_definition_key=None,
                     ),
                 ],
@@ -313,7 +313,7 @@ FACADES: Final[dict[str, Facade]] = {
                         completed_at=None,
                         sub_workflow_id=None,
                         sub_workflow_summary_json='{',
-                        is_subworkflow=False,
+                        is_sub_workflow=False,
                         sub_definition_key=None,
                     ),
                 ],
@@ -349,9 +349,9 @@ FACADES: Final[dict[str, Facade]] = {
             **HANDLE_FAILURES,
         },
     ),
-    'pause_workflow_sync': Facade(
-        blocking=lambda handle: pause_workflow_sync(handle.broker, handle.workflow_id),
-        awaited=lambda handle: pause_workflow(handle.broker, handle.workflow_id),
+    'pause_workflow': Facade(
+        blocking=lambda handle: pause_workflow(handle.broker, handle.workflow_id),
+        awaited=lambda handle: pause_workflow_async(handle.broker, handle.workflow_id),
         blocking_form='pause_workflow',
         arguments=(WORKFLOW_KEY,),
         keywords={},
@@ -376,9 +376,9 @@ FACADES: Final[dict[str, Facade]] = {
             **HANDLE_FAILURES,
         },
     ),
-    'resume_workflow_sync': Facade(
-        blocking=lambda handle: resume_workflow_sync(handle.broker, handle.workflow_id),
-        awaited=lambda handle: resume_workflow(handle.broker, handle.workflow_id),
+    'resume_workflow': Facade(
+        blocking=lambda handle: resume_workflow(handle.broker, handle.workflow_id),
+        awaited=lambda handle: resume_workflow_async(handle.broker, handle.workflow_id),
         blocking_form='resume_workflow',
         arguments=(WORKFLOW_KEY,),
         keywords={},
@@ -430,8 +430,8 @@ def test_get_refuses_a_timeout_as_get_async_refuses_it() -> None:
     """A refused timeout is INVALID_INPUT before any core call, in both forms."""
     answers = _answering('wait_workflow_result', _record(core.WaitTimedOut))
 
-    blocking = _workflow_handle().get(timeout_ms=-1)
-    awaited = asyncio.run(_workflow_handle().get_async(timeout_ms=-1))
+    blocking = _workflow_handle().get(wait_ms=-1)
+    awaited = asyncio.run(_workflow_handle().get_async(wait_ms=-1))
 
     assert outcome_shape(blocking) == outcome_shape(awaited)
     answers.handle.wait_workflow_result.assert_not_called()
@@ -446,9 +446,9 @@ def test_get_with_no_limit_passes_no_limit() -> None:
 
 
 def test_result_for_refuses_a_node_without_an_id_as_its_async_form() -> None:
-    """A node with no node_id is WORKFLOW_CTX_MISSING_ID before any core call."""
+    """A node with no node_id is WORKFLOW_CONTEXT_MISSING_ID before any core call."""
     answers = _answering('workflow_node_result', _record(core.NodeResultNotStored))
-    node: TaskNode[int] = TaskNode(fn=value_task, kwargs={'value': 1})
+    node: TaskNode[int] = TaskNode(function=value_task, kwargs={'value': 1})
 
     blocking = _workflow_handle().result_for(node)
     awaited = asyncio.run(_workflow_handle().result_for_async(node))
@@ -466,7 +466,7 @@ def _spec(
     name: str = 'blocking_forms.flow',
     definition_key: str = 'blocking_forms.flow.v1',
 ) -> WorkflowSpec[int]:
-    node: TaskNode[int] = TaskNode(fn=value_task, kwargs={'value': 1})
+    node: TaskNode[int] = TaskNode(function=value_task, kwargs={'value': 1})
     return APP.workflow(name, [node], output=node, definition_key=definition_key)
 
 
@@ -496,7 +496,7 @@ START_ANSWERS: Final[dict[str, object]] = {
         retryable=True,
         workflow_name='blocking_forms.flow',
         workflow_id=WORKFLOW_ID,
-        exception=CONNECTION_LOST,
+        cause=CONNECTION_LOST,
     ),
     'core_cannot_run_the_call': CORE_REFUSAL,
 }
@@ -509,20 +509,20 @@ def test_start_workflow_gives_the_outcome_of_start_workflow_async(answer: str) -
 
     with patch('horsies._core.WorkflowStartRequest') as request_class:
         blocking = start_workflow(
-            _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_err=True,
+            _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_error=True,
         )
         blocking_request = request_class.call_args
         answers.handle.start_workflow_async.assert_not_called()
         awaited = asyncio.run(
             start_workflow_async(
-                _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_err=True,
+                _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_error=True,
             ),
         )
         awaited_request = request_class.call_args
 
     assert outcome_shape(blocking) == outcome_shape(awaited)
     assert blocking_request == awaited_request
-    assert blocking_request.kwargs['resend_on_transient_err'] is True
+    assert blocking_request.kwargs['resend_on_transient_error'] is True
     assert blocking_request.kwargs['workflow_id'] == WORKFLOW_KEY
     answers.handle.start_workflow.assert_called_once_with(request_class.return_value)
 

@@ -2,16 +2,17 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::broker::PostgresConfig;
+use super::broker::{PostgresConfig, PostgresConfigError};
+use super::no_member_after_the_tag;
 use super::payload::PayloadPolicy;
-use super::queue::{CustomQueueConfig, QueueMode};
+use super::queue::{CustomQueueConfig, QueueMode, DEFAULT_QUEUE_NAME};
 use super::recovery::RecoveryConfig;
 use super::resilience::WorkerResilienceConfig;
 use super::retention::RetentionConfig;
 use super::schedule::ScheduleConfig;
+use super::worker_profile::input::WorkerProfile;
 use super::worker_profile::{
-    describe_worker_profile, worker_profiles_claim_errors, worker_profiles_shape_errors,
-    WorkerProfile,
+    describe_config_profile, worker_profiles_claim_errors, worker_profiles_shape_errors,
 };
 use crate::core::defaults::{DEFAULT_CLAIM_LEASE_MS, MAX_CLAIM_RENEW_AGE_MS};
 use crate::core::error::HorsiesError;
@@ -33,12 +34,13 @@ pub struct AppConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_queues: Option<Vec<CustomQueueConfig>>,
 
-    /// PostgreSQL broker configuration.
-    pub broker: PostgresConfig,
+    /// PostgreSQL database configuration.
+    pub database: PostgresConfig,
 
-    /// Cluster-wide cap on concurrently RUNNING tasks. None = unlimited.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cluster_wide_cap: Option<u32>,
+    /// Cluster-wide cap on concurrently RUNNING tasks. Default:
+    /// [`ClusterCapSetting::NoClusterCap`].
+    #[serde(default)]
+    pub cluster_wide_cap: ClusterCapSetting,
 
     /// Prefetch buffer: 0 = hard cap mode, >0 = soft cap with lease.
     #[serde(default)]
@@ -68,13 +70,14 @@ pub struct AppConfig {
     #[serde(default)]
     pub retention: RetentionConfig,
 
-    /// Worker resilience configuration (DB retry backoff, poll interval).
+    /// Worker resilience configuration (database retry backoff, poll interval).
     #[serde(default)]
     pub resilience: WorkerResilienceConfig,
 
     /// Named worker settings: a worker runs the profile of its name. An app
     /// that runs no worker defines none. Every profile is checked with the
-    /// app config, not only the one that a worker starts with.
+    /// app config, not only the one that a worker starts with: each count,
+    /// size and limit against its bound, then the checks of the profile.
     #[serde(default)]
     pub worker_profiles: BTreeMap<String, WorkerProfile>,
 
@@ -96,7 +99,35 @@ pub struct AppConfig {
     /// Non-retryable errors (`Serialization`, `Migration`, `InvalidStatus`,
     /// `PayloadMismatch`) are returned immediately.
     #[serde(default)]
-    pub resend_on_transient_err: bool,
+    pub resend_on_transient_error: bool,
+}
+
+/// The cluster-wide cap of RUNNING tasks (Python `ClusterCap`,
+/// `NoClusterCap`). The JSON form is `{"kind": "cluster_cap", "tasks": 20}`
+/// or `{"kind": "no_cluster_cap"}`. [`AppConfig::validate`] refuses a cap of
+/// 0 tasks and a cap together with prefetch mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ClusterCapSetting {
+    /// At most `tasks` tasks are RUNNING at once across every queue of the
+    /// cluster.
+    ClusterCap { tasks: u32 },
+    /// No cluster-wide cap: only the queue and worker limits apply.
+    #[default]
+    #[serde(deserialize_with = "no_member_after_the_tag")]
+    NoClusterCap,
+}
+
+impl ClusterCapSetting {
+    /// The cap as the nullable parameter of the claim statement and of the
+    /// `horsies_worker_states.cluster_wide_cap` column: `None` for
+    /// [`Self::NoClusterCap`]. Pure.
+    pub const fn claim_parameter(self) -> Option<u32> {
+        match self {
+            Self::ClusterCap { tasks } => Some(tasks),
+            Self::NoClusterCap => None,
+        }
+    }
 }
 
 fn default_queue_mode() -> QueueMode {
@@ -117,7 +148,11 @@ pub enum AppConfigError {
     #[error("{0}")]
     Prefetch(String),
     #[error("{0}")]
-    Broker(String),
+    DatabaseInvalidUrl(String),
+    /// A TCP keepalive or user timeout value of the database config outside
+    /// its bound.
+    #[error("{0}")]
+    Keepalive(String),
     #[error("{0}")]
     Recovery(String),
     #[error("{0}")]
@@ -140,19 +175,20 @@ impl AppConfigError {
     /// Every refusal has a code. `Payload` has `CONFIG_INVALID_PAYLOAD`;
     /// Python refuses the same thresholds through a field bound
     /// (`Field(ge=1)`).
-    pub fn error_code(&self) -> Option<crate::core::error::ErrorCode> {
-        use crate::core::error::ErrorCode;
+    pub fn error_code(&self) -> Option<crate::core::error::HorsiesErrorCode> {
+        use crate::core::error::HorsiesErrorCode;
         match self {
-            Self::QueueMode(_) => Some(ErrorCode::ConfigInvalidQueueMode),
-            Self::ClusterCap(_) => Some(ErrorCode::ConfigInvalidClusterCap),
-            Self::Prefetch(_) => Some(ErrorCode::ConfigInvalidPrefetch),
-            Self::Broker(_) => Some(ErrorCode::BrokerInvalidUrl),
-            Self::Recovery(_) => Some(ErrorCode::ConfigInvalidRecovery),
-            Self::Retention(_) => Some(ErrorCode::ConfigInvalidRetention),
-            Self::Resilience(_) => Some(ErrorCode::ConfigInvalidResilience),
-            Self::Schedule(_) => Some(ErrorCode::ConfigInvalidSchedule),
-            Self::Payload(_) => Some(ErrorCode::ConfigInvalidPayload),
-            Self::WorkerProfile(_) => Some(ErrorCode::ConfigInvalidWorkerProfile),
+            Self::QueueMode(_) => Some(HorsiesErrorCode::ConfigInvalidQueueMode),
+            Self::ClusterCap(_) => Some(HorsiesErrorCode::ConfigInvalidClusterCap),
+            Self::Prefetch(_) => Some(HorsiesErrorCode::ConfigInvalidPrefetch),
+            Self::DatabaseInvalidUrl(_) => Some(HorsiesErrorCode::DatabaseInvalidUrl),
+            Self::Keepalive(_) => Some(HorsiesErrorCode::ConfigInvalidKeepalive),
+            Self::Recovery(_) => Some(HorsiesErrorCode::ConfigInvalidRecovery),
+            Self::Retention(_) => Some(HorsiesErrorCode::ConfigInvalidRetention),
+            Self::Resilience(_) => Some(HorsiesErrorCode::ConfigInvalidResilience),
+            Self::Schedule(_) => Some(HorsiesErrorCode::ConfigInvalidSchedule),
+            Self::Payload(_) => Some(HorsiesErrorCode::ConfigInvalidPayload),
+            Self::WorkerProfile(_) => Some(HorsiesErrorCode::ConfigInvalidWorkerProfile),
         }
     }
 
@@ -166,7 +202,8 @@ impl AppConfigError {
             Self::QueueMode(_)
             | Self::ClusterCap(_)
             | Self::Prefetch(_)
-            | Self::Broker(_)
+            | Self::DatabaseInvalidUrl(_)
+            | Self::Keepalive(_)
             | Self::Recovery(_)
             | Self::Retention(_)
             | Self::Resilience(_)
@@ -199,15 +236,15 @@ impl AppConfig {
     ///         priority: 1,
     ///         max_concurrency: Some(10),
     ///     }]),
-    ///     ..AppConfig::for_database_url("postgresql://localhost/mydb")
+    ///     ..AppConfig::from_database_url("postgresql://localhost/mydb")
     /// };
     /// ```
-    pub fn for_database_url(url: impl Into<String>) -> Self {
+    pub fn from_database_url(url: impl Into<String>) -> Self {
         Self {
             queue_mode: default_queue_mode(),
             custom_queues: None,
-            broker: PostgresConfig::from_url(url),
-            cluster_wide_cap: None,
+            database: PostgresConfig::from_database_url(url),
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: default_max_claim_renew_age_ms(),
@@ -217,7 +254,7 @@ impl AppConfig {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         }
     }
 
@@ -249,8 +286,8 @@ impl AppConfig {
         }
 
         // Cluster-wide cap and prefetch settings
-        if let Some(cap) = self.cluster_wide_cap {
-            lines.push(format!("  cluster_wide_cap: {}", cap));
+        if let ClusterCapSetting::ClusterCap { tasks } = self.cluster_wide_cap {
+            lines.push(format!("  cluster_wide_cap: {}", tasks));
         }
         lines.push(format!("  prefetch_buffer: {}", self.prefetch_buffer));
         if let Some(lease) = self.claim_lease_ms {
@@ -258,35 +295,32 @@ impl AppConfig {
         }
 
         // Broker config with masked password
-        let masked_url = mask_database_url(&self.broker.database_url);
-        lines.push("  broker:".to_owned());
+        let masked_url = mask_database_url(&self.database.database_url);
+        lines.push("  database:".to_owned());
         lines.push(format!("    database_url: {}", masked_url));
-        if let Some(session_database_url) = &self.broker.session_database_url {
-            lines.push(format!(
-                "    session_database_url: {}",
-                mask_database_url(session_database_url),
-            ));
+        if let super::broker::SessionDatabase::Separate { url } = &self.database.session_database {
+            lines.push(format!("    session_database: {}", mask_database_url(url)));
         }
         lines.push(format!(
             "    pgbouncer_transaction_mode: {}",
-            self.broker.pgbouncer_transaction_mode,
+            self.database.pgbouncer_transaction_mode,
         ));
-        lines.push(format!("    pool_size: {}", self.broker.pool_size));
-        lines.push(format!("    max_overflow: {}", self.broker.max_overflow));
+        lines.push(format!("    pool_size: {}", self.database.pool_size));
+        lines.push(format!("    max_overflow: {}", self.database.max_overflow));
 
         // Recovery config
         lines.push("  recovery:".to_owned());
         lines.push(format!(
-            "    auto_requeue_stale_claimed: {}",
-            self.recovery.auto_requeue_stale_claimed,
+            "    requeue_stale_claimed: {}",
+            self.recovery.requeue_stale_claimed,
         ));
         lines.push(format!(
             "    claimed_stale_threshold: {}ms",
             self.recovery.claimed_stale_threshold_ms,
         ));
         lines.push(format!(
-            "    auto_fail_stale_running: {}",
-            self.recovery.auto_fail_stale_running,
+            "    fail_stale_running: {}",
+            self.recovery.fail_stale_running,
         ));
         lines.push(format!(
             "    running_stale_threshold: {}ms",
@@ -330,16 +364,16 @@ impl AppConfig {
         // Resilience config
         lines.push("  resilience:".to_owned());
         lines.push(format!(
-            "    db_retry_initial: {}ms",
-            self.resilience.db_retry_initial_ms,
+            "    database_retry_initial: {}ms",
+            self.resilience.database_retry_initial_ms,
         ));
         lines.push(format!(
-            "    db_retry_max: {}ms",
-            self.resilience.db_retry_max_ms,
+            "    database_retry_max: {}ms",
+            self.resilience.database_retry_max_ms,
         ));
         lines.push(format!(
-            "    db_retry_max_attempts: {} (0=infinite)",
-            self.resilience.db_retry_max_attempts,
+            "    database_retry_max_attempts: {} (0=infinite)",
+            self.resilience.database_retry_max_attempts,
         ));
         lines.push(format!(
             "    notify_poll_interval: {}ms",
@@ -350,7 +384,10 @@ impl AppConfig {
         if !self.worker_profiles.is_empty() {
             lines.push("  worker_profiles:".to_owned());
             for (name, profile) in &self.worker_profiles {
-                lines.push(format!("    {name}: {}", describe_worker_profile(profile)));
+                lines.push(format!(
+                    "    {name}: {}",
+                    describe_config_profile(name, profile)
+                ));
             }
         }
 
@@ -423,7 +460,7 @@ impl AppConfig {
         }
 
         let declared_queues: Vec<&str> = match self.queue_mode {
-            QueueMode::Default => vec!["default"],
+            QueueMode::Default => vec![DEFAULT_QUEUE_NAME],
             QueueMode::Custom => self
                 .custom_queues
                 .iter()
@@ -439,12 +476,10 @@ impl AppConfig {
         }
 
         // Cluster-wide cap
-        if let Some(cap) = self.cluster_wide_cap {
-            if cap == 0 {
-                errors.push(AppConfigError::ClusterCap(
-                    "cluster_wide_cap must be positive".to_owned(),
-                ));
-            }
+        if self.cluster_wide_cap == (ClusterCapSetting::ClusterCap { tasks: 0 }) {
+            errors.push(AppConfigError::ClusterCap(
+                "cluster_wide_cap.tasks must be positive".to_owned(),
+            ));
         }
 
         // Prefetch + claim lease validation
@@ -498,15 +533,21 @@ impl AppConfig {
         }
 
         // Prefetch + cluster cap conflict
-        if self.cluster_wide_cap.is_some() && self.prefetch_buffer > 0 {
+        if matches!(self.cluster_wide_cap, ClusterCapSetting::ClusterCap { .. })
+            && self.prefetch_buffer > 0
+        {
             errors.push(AppConfigError::ClusterCap(
                 "cluster_wide_cap incompatible with prefetch mode".to_owned(),
             ));
         }
 
         // Broker validation
-        if let Err(e) = self.broker.validate() {
-            errors.push(AppConfigError::Broker(e.to_string()));
+        match self.database.validate() {
+            Ok(()) => {}
+            Err(PostgresConfigError::SocketValueOutOfBounds(refused)) => {
+                errors.push(AppConfigError::Keepalive(refused.to_string()));
+            }
+            Err(error) => errors.push(AppConfigError::DatabaseInvalidUrl(error.to_string())),
         }
 
         // Recovery validation
@@ -585,17 +626,17 @@ mod tests {
     use crate::core::config::broker::PostgresConfig;
     use crate::core::config::resilience::WorkerResilienceConfig;
 
-    fn valid_broker() -> PostgresConfig {
+    fn valid_database() -> PostgresConfig {
         PostgresConfig {
             database_url: "postgresql://localhost/test".to_owned(),
-            session_database_url: None,
+            session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
             pgbouncer_transaction_mode: false,
             pool_pre_ping: true,
             worker_pool_pre_ping: false,
             pool_size: 30,
             max_overflow: 30,
             retain_rerun_input_default: false,
-            pool_timeout: 30,
+            pool_timeout_seconds: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
             tcp_keepalives: Default::default(),
@@ -609,8 +650,8 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: valid_broker(),
-            cluster_wide_cap: None,
+            database: valid_database(),
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -619,7 +660,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         assert!(config.validate().is_empty());
     }
@@ -642,8 +683,8 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: valid_broker(),
-            cluster_wide_cap: None,
+            database: valid_database(),
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -652,7 +693,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         assert!(config.validate().is_empty());
         config.recovery = RecoveryConfig::default();
@@ -686,8 +727,8 @@ mod tests {
                 priority: 1,
                 max_concurrency: Some(5),
             }]),
-            broker: valid_broker(),
-            cluster_wide_cap: None,
+            database: valid_database(),
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -696,7 +737,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let errors = config.validate();
         assert_eq!(errors.len(), 1);
@@ -708,8 +749,8 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Custom,
             custom_queues: None,
-            broker: valid_broker(),
-            cluster_wide_cap: None,
+            database: valid_database(),
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -718,7 +759,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let errors = config.validate();
         assert_eq!(errors.len(), 1);
@@ -730,8 +771,8 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: valid_broker(),
-            cluster_wide_cap: None,
+            database: valid_database(),
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 5,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -740,7 +781,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let errors = config.validate();
         assert_eq!(errors.len(), 1);
@@ -752,8 +793,8 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: valid_broker(),
-            cluster_wide_cap: Some(100),
+            database: valid_database(),
+            cluster_wide_cap: ClusterCapSetting::ClusterCap { tasks: 100 },
             prefetch_buffer: 5,
             // Must be >= 2x claimer_heartbeat_interval_ms (default 30_000ms).
             claim_lease_ms: Some(60_000),
@@ -763,7 +804,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let errors = config.validate();
         assert_eq!(errors.len(), 1);
@@ -775,22 +816,22 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Custom,
             custom_queues: None,
-            broker: PostgresConfig {
+            database: PostgresConfig {
                 database_url: "mysql://localhost/db".to_owned(),
-                session_database_url: None,
+                session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
-                pool_timeout: 30,
+                pool_timeout_seconds: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
                 tcp_keepalives: Default::default(),
                 tcp_user_timeout: Default::default(),
             },
-            cluster_wide_cap: Some(0),
+            cluster_wide_cap: ClusterCapSetting::ClusterCap { tasks: 0 },
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -799,10 +840,10 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let errors = config.validate();
-        // custom_queues missing + invalid broker url + cluster_wide_cap=0
+        // custom_queues missing + invalid database url + cluster_wide_cap=0
         assert_eq!(errors.len(), 3);
     }
 
@@ -816,8 +857,8 @@ mod tests {
                 priority: 0,
                 max_concurrency: Some(5),
             }]),
-            broker: valid_broker(),
-            cluster_wide_cap: None,
+            database: valid_database(),
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -826,7 +867,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let errors = config.validate();
         assert!(
@@ -846,8 +887,8 @@ mod tests {
                 priority: 101,
                 max_concurrency: Some(5),
             }]),
-            broker: valid_broker(),
-            cluster_wide_cap: None,
+            database: valid_database(),
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -856,7 +897,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let errors = config.validate();
         assert!(
@@ -907,22 +948,22 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: PostgresConfig {
+            database: PostgresConfig {
                 database_url: "postgresql://user:secret@localhost/db".to_owned(),
-                session_database_url: None,
+                session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
-                pool_timeout: 30,
+                pool_timeout_seconds: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
                 tcp_keepalives: Default::default(),
                 tcp_user_timeout: Default::default(),
             },
-            cluster_wide_cap: None,
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -931,7 +972,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let output = config.format_for_logging();
         assert!(!output.contains("secret"), "password should be masked");
@@ -949,8 +990,8 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: valid_broker(),
-            cluster_wide_cap: None,
+            database: valid_database(),
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: MAX_CLAIM_RENEW_AGE_MS,
@@ -959,7 +1000,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         }
     }
 
@@ -1009,7 +1050,7 @@ mod tests {
     #[test]
     fn defaults_cluster_wide_cap_is_none() {
         let config = default_config();
-        assert!(config.cluster_wide_cap.is_none());
+        assert_eq!(config.cluster_wide_cap, ClusterCapSetting::NoClusterCap);
     }
 
     #[test]
@@ -1020,15 +1061,15 @@ mod tests {
 
     #[test]
     fn for_database_url_uses_expected_defaults() {
-        let config = AppConfig::for_database_url("postgresql://localhost/test");
+        let config = AppConfig::from_database_url("postgresql://localhost/test");
         assert!(matches!(config.queue_mode, QueueMode::Default));
         assert!(config.custom_queues.is_none());
-        assert_eq!(config.broker.database_url, "postgresql://localhost/test");
+        assert_eq!(config.database.database_url, "postgresql://localhost/test");
         assert_eq!(config.prefetch_buffer, 0);
         assert!(config.claim_lease_ms.is_none());
         assert_eq!(config.max_claim_renew_age_ms, MAX_CLAIM_RENEW_AGE_MS);
         assert!(config.schedule.is_none());
-        assert!(!config.resend_on_transient_err);
+        assert!(!config.resend_on_transient_error);
     }
 
     #[test]
@@ -1048,7 +1089,7 @@ mod tests {
     #[test]
     fn multi_error_cluster_cap_and_prefetch() {
         let mut config = default_config();
-        config.cluster_wide_cap = Some(10);
+        config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: 10 };
         config.prefetch_buffer = 5;
         // No claim_lease_ms => prefetch error + cluster_cap+prefetch conflict
         let errors = config.validate();
@@ -1120,7 +1161,7 @@ mod tests {
     #[test]
     fn cluster_wide_cap_zero_raises() {
         let mut config = default_config();
-        config.cluster_wide_cap = Some(0);
+        config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: 0 };
         let errors = config.validate();
         assert!(errors
             .iter()
@@ -1130,14 +1171,14 @@ mod tests {
     #[test]
     fn cluster_wide_cap_minimum_valid() {
         let mut config = default_config();
-        config.cluster_wide_cap = Some(1);
+        config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: 1 };
         assert!(config.validate().is_empty());
     }
 
     #[test]
     fn cluster_wide_cap_with_no_prefetch_valid() {
         let mut config = default_config();
-        config.cluster_wide_cap = Some(10);
+        config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: 10 };
         // prefetch_buffer is 0 (default) — no conflict
         assert!(config.validate().is_empty());
     }
@@ -1147,7 +1188,7 @@ mod tests {
     #[test]
     fn format_for_logging_cluster_wide_cap_displayed() {
         let mut config = default_config();
-        config.cluster_wide_cap = Some(50);
+        config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: 50 };
         let output = config.format_for_logging();
         assert!(output.contains("cluster_wide_cap: 50"));
     }
@@ -1157,6 +1198,53 @@ mod tests {
         let config = default_config();
         let output = config.format_for_logging();
         assert!(!output.contains("cluster_wide_cap"));
+    }
+
+    /// The JSON form of the cluster cap is tagged by `kind`; a plain number
+    /// (the form before the union) is refused.
+    #[test]
+    fn the_cluster_cap_json_form_is_tagged() {
+        let capped: AppConfig = serde_json::from_str(
+            r#"{"database": {"database_url": "postgresql://localhost/db"},
+                "cluster_wide_cap": {"kind": "cluster_cap", "tasks": 20}}"#,
+        )
+        .expect("a tagged cap parses");
+        assert_eq!(
+            capped.cluster_wide_cap,
+            ClusterCapSetting::ClusterCap { tasks: 20 }
+        );
+        let uncapped: AppConfig = serde_json::from_str(
+            r#"{"database": {"database_url": "postgresql://localhost/db"},
+                "cluster_wide_cap": {"kind": "no_cluster_cap"}}"#,
+        )
+        .expect("no cap parses");
+        assert_eq!(uncapped.cluster_wide_cap, ClusterCapSetting::NoClusterCap);
+        assert!(serde_json::from_str::<AppConfig>(
+            r#"{"database": {"database_url": "postgresql://localhost/db"},
+                "cluster_wide_cap": 20}"#,
+        )
+        .is_err());
+    }
+
+    /// A keepalive value outside its bound is a refusal with
+    /// `CONFIG_INVALID_KEEPALIVE`, not a URL refusal.
+    #[test]
+    fn a_keepalive_value_outside_its_bound_has_the_keepalive_code() {
+        let mut config = default_config();
+        config.database.tcp_keepalives = super::super::TcpKeepalivesConfig::On {
+            idle_seconds: 0,
+            interval_seconds: 10,
+            probes: 3,
+        };
+        let errors = config.validate();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(
+            errors[0].error_code(),
+            Some(crate::core::error::HorsiesErrorCode::ConfigInvalidKeepalive)
+        );
+        assert!(errors[0]
+            .to_string()
+            .contains("tcp_keepalives.idle_seconds"));
     }
 
     #[test]
@@ -1212,13 +1300,10 @@ mod tests {
                 name: "daily-job".to_owned(),
                 task_name: "my_task".to_owned(),
                 pattern: SchedulePattern::Interval(IntervalSchedule {
-                    seconds: Some(60),
-                    minutes: None,
-                    hours: None,
-                    days: None,
+                    every: std::time::Duration::from_secs(60),
                 }),
                 input: None,
-                queue_name: None,
+                queue: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
                 catch_up_missed: false,
@@ -1254,50 +1339,50 @@ mod tests {
             .contains("max_claim_renew_age_ms must be positive"));
         assert_eq!(
             errors[0].error_code(),
-            Some(crate::core::error::ErrorCode::ConfigInvalidPrefetch),
+            Some(crate::core::error::HorsiesErrorCode::ConfigInvalidPrefetch),
         );
     }
 
     /// Every config refusal carries Python's catalog code.
     #[test]
     fn every_refusal_carries_its_catalog_code() {
-        use crate::core::error::ErrorCode;
+        use crate::core::error::HorsiesErrorCode;
         let cases = [
             (
                 AppConfigError::QueueMode(String::new()),
-                Some(ErrorCode::ConfigInvalidQueueMode),
+                Some(HorsiesErrorCode::ConfigInvalidQueueMode),
             ),
             (
                 AppConfigError::ClusterCap(String::new()),
-                Some(ErrorCode::ConfigInvalidClusterCap),
+                Some(HorsiesErrorCode::ConfigInvalidClusterCap),
             ),
             (
                 AppConfigError::Prefetch(String::new()),
-                Some(ErrorCode::ConfigInvalidPrefetch),
+                Some(HorsiesErrorCode::ConfigInvalidPrefetch),
             ),
             (
-                AppConfigError::Broker(String::new()),
-                Some(ErrorCode::BrokerInvalidUrl),
+                AppConfigError::DatabaseInvalidUrl(String::new()),
+                Some(HorsiesErrorCode::DatabaseInvalidUrl),
             ),
             (
                 AppConfigError::Recovery(String::new()),
-                Some(ErrorCode::ConfigInvalidRecovery),
+                Some(HorsiesErrorCode::ConfigInvalidRecovery),
             ),
             (
                 AppConfigError::Retention(String::new()),
-                Some(ErrorCode::ConfigInvalidRetention),
+                Some(HorsiesErrorCode::ConfigInvalidRetention),
             ),
             (
                 AppConfigError::Resilience(String::new()),
-                Some(ErrorCode::ConfigInvalidResilience),
+                Some(HorsiesErrorCode::ConfigInvalidResilience),
             ),
             (
                 AppConfigError::Schedule(String::new()),
-                Some(ErrorCode::ConfigInvalidSchedule),
+                Some(HorsiesErrorCode::ConfigInvalidSchedule),
             ),
             (
                 AppConfigError::Payload(String::new()),
-                Some(ErrorCode::ConfigInvalidPayload),
+                Some(HorsiesErrorCode::ConfigInvalidPayload),
             ),
         ];
         for (error, code) in cases {
@@ -1306,19 +1391,19 @@ mod tests {
         }
 
         let mut config = default_config();
-        config.cluster_wide_cap = Some(0);
-        config.resilience.db_retry_initial_ms = 1;
+        config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: 0 };
+        config.resilience.database_retry_initial_ms = 1;
         let codes: Vec<_> = config
             .validate()
             .iter()
             .map(AppConfigError::error_code)
             .collect();
         assert!(
-            codes.contains(&Some(ErrorCode::ConfigInvalidClusterCap)),
+            codes.contains(&Some(HorsiesErrorCode::ConfigInvalidClusterCap)),
             "{codes:?}"
         );
         assert!(
-            codes.contains(&Some(ErrorCode::ConfigInvalidResilience)),
+            codes.contains(&Some(HorsiesErrorCode::ConfigInvalidResilience)),
             "{codes:?}"
         );
     }
@@ -1334,8 +1419,7 @@ mod tests {
                 name,
                 "my_task",
                 SchedulePattern::Interval(IntervalSchedule {
-                    seconds: Some(60),
-                    ..IntervalSchedule::default()
+                    every: std::time::Duration::from_secs(60),
                 }),
             )
         };
@@ -1360,22 +1444,22 @@ mod tests {
     /// config or in a nested config is refused, not dropped.
     #[test]
     fn unknown_keys_are_refused_at_every_level() {
-        let accepted = r#"{"broker": {"database_url": "postgresql://localhost/db"}}"#;
+        let accepted = r#"{"database": {"database_url": "postgresql://localhost/db"}}"#;
         let config: AppConfig = serde_json::from_str(accepted).expect("known keys only");
         assert!(config.validate().is_empty());
 
         let refused = [
-            r#"{"broker": {"database_url": "postgresql://localhost/db"}, "prefetch": 1}"#,
-            r#"{"broker": {"database_url": "postgresql://localhost/db", "pool": 1}}"#,
-            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+            r#"{"database": {"database_url": "postgresql://localhost/db"}, "prefetch": 1}"#,
+            r#"{"database": {"database_url": "postgresql://localhost/db", "pool": 1}}"#,
+            r#"{"database": {"database_url": "postgresql://localhost/db"},
                 "queue_mode": "custom", "custom_queues": [{"name": "a", "prio": 1}]}"#,
-            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+            r#"{"database": {"database_url": "postgresql://localhost/db"},
                 "payload": {"reject": 10}}"#,
-            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+            r#"{"database": {"database_url": "postgresql://localhost/db"},
                 "resilience": {"db_retry_initial": 500}}"#,
-            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+            r#"{"database": {"database_url": "postgresql://localhost/db"},
                 "recovery": {"check_interval": 500}}"#,
-            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+            r#"{"database": {"database_url": "postgresql://localhost/db"},
                 "schedule": {"schedules": [], "interval": 1}}"#,
         ];
         for json in refused {
@@ -1391,29 +1475,29 @@ mod tests {
     /// One TOML document per config level that `AppConfig` reaches, with its
     /// row key. The line `EXTRA` sits in the table of that level; the key
     /// goes there. The names are Python's models; the socket settings and
-    /// `pool_recycle` of `broker` are Rust forms of Python's flat
+    /// `pool_recycle` of `database` are Rust forms of Python's flat
     /// `PostgresConfig` fields, with a row per variant. A new nested config
     /// type needs a row.
     const CONFIG_LEVELS: [(&str, &str); 37] = [
         (
             "extra_app_config",
             "EXTRA
-[broker]
+[database]
 database_url = \"postgresql://localhost/db\"
 ",
         ),
         (
             "extra_postgres_config",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 EXTRA
 ",
         ),
         (
             "extra_pool_recycle",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
-[broker.pool_recycle]
+[database.pool_recycle]
 kind = \"AFTER_SECONDS\"
 seconds = 1800
 EXTRA
@@ -1421,9 +1505,9 @@ EXTRA
         ),
         (
             "extra_tcp_keepalives",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
-[broker.tcp_keepalives]
+[database.tcp_keepalives]
 kind = \"ON\"
 idle_seconds = 30
 interval_seconds = 10
@@ -1433,9 +1517,9 @@ EXTRA
         ),
         (
             "extra_tcp_user_timeout",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
-[broker.tcp_user_timeout]
+[database.tcp_user_timeout]
 kind = \"AFTER\"
 milliseconds = 30000
 EXTRA
@@ -1443,27 +1527,27 @@ EXTRA
         ),
         (
             "extra_pool_recycle_never",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
-[broker.pool_recycle]
+[database.pool_recycle]
 kind = \"NEVER\"
 EXTRA
 ",
         ),
         (
             "extra_tcp_keepalives_off",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
-[broker.tcp_keepalives]
+[database.tcp_keepalives]
 kind = \"OFF\"
 EXTRA
 ",
         ),
         (
             "extra_tcp_user_timeout_system_default",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
-[broker.tcp_user_timeout]
+[database.tcp_user_timeout]
 kind = \"SYSTEM_DEFAULT\"
 EXTRA
 ",
@@ -1471,7 +1555,7 @@ EXTRA
         (
             "extra_custom_queue_config",
             "queue_mode = \"custom\"
-[broker]
+[database]
 database_url = \"postgresql://localhost/db\"
 [[custom_queues]]
 name = \"a\"
@@ -1480,7 +1564,7 @@ EXTRA
         ),
         (
             "extra_payload_policy",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [payload]
 EXTRA
@@ -1488,7 +1572,7 @@ EXTRA
         ),
         (
             "extra_recovery_config",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [recovery]
 EXTRA
@@ -1496,7 +1580,7 @@ EXTRA
         ),
         (
             "extra_retention_config",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [retention]
 EXTRA
@@ -1504,7 +1588,7 @@ EXTRA
         ),
         (
             "extra_worker_resilience_config",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [resilience]
 EXTRA
@@ -1512,7 +1596,7 @@ EXTRA
         ),
         (
             "extra_worker_profile",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default]
 EXTRA
@@ -1520,7 +1604,7 @@ EXTRA
         ),
         (
             "extra_isolated_children",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"isolated_children\"
@@ -1530,7 +1614,7 @@ EXTRA
         ),
         (
             "extra_no_isolated_children",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"no_isolated_children\"
@@ -1539,7 +1623,7 @@ EXTRA
         ),
         (
             "extra_isolated_recycle",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"isolated_children\"
@@ -1550,7 +1634,7 @@ EXTRA
         ),
         (
             "extra_task_limit",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"isolated_children\"
@@ -1563,7 +1647,7 @@ EXTRA
         ),
         (
             "extra_no_task_limit",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"isolated_children\"
@@ -1575,7 +1659,7 @@ EXTRA
         ),
         (
             "extra_memory_limit",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"isolated_children\"
@@ -1588,7 +1672,7 @@ EXTRA
         ),
         (
             "extra_no_memory_limit",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"isolated_children\"
@@ -1600,7 +1684,7 @@ EXTRA
         ),
         (
             "extra_isolated_pool",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"isolated_children\"
@@ -1611,7 +1695,7 @@ EXTRA
         ),
         (
             "extra_pool_size",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.isolated]
 kind = \"isolated_children\"
@@ -1624,7 +1708,7 @@ EXTRA
         ),
         (
             "extra_shared_async_children",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_async]
 kind = \"shared_async_children\"
@@ -1635,7 +1719,7 @@ EXTRA
         ),
         (
             "extra_no_shared_async_children",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_async]
 kind = \"no_shared_async_children\"
@@ -1644,7 +1728,7 @@ EXTRA
         ),
         (
             "extra_shared_recycle",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_async]
 kind = \"shared_async_children\"
@@ -1656,7 +1740,7 @@ EXTRA
         ),
         (
             "extra_shared_pool",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_async]
 kind = \"shared_async_children\"
@@ -1668,7 +1752,7 @@ EXTRA
         ),
         (
             "extra_pool_size_setting",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_async]
 kind = \"shared_async_children\"
@@ -1682,7 +1766,7 @@ EXTRA
         ),
         (
             "extra_pool_size_from_seats",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_async]
 kind = \"shared_async_children\"
@@ -1695,7 +1779,7 @@ EXTRA
         ),
         (
             "extra_executor_threads",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_async]
 kind = \"shared_async_children\"
@@ -1709,7 +1793,7 @@ EXTRA
         ),
         (
             "extra_executor_threads_from_seats",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_async]
 kind = \"shared_async_children\"
@@ -1722,7 +1806,7 @@ EXTRA
         ),
         (
             "extra_shared_thread_children",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_thread]
 kind = \"shared_thread_children\"
@@ -1733,7 +1817,7 @@ EXTRA
         ),
         (
             "extra_no_shared_thread_children",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.shared_thread]
 kind = \"no_shared_thread_children\"
@@ -1742,7 +1826,7 @@ EXTRA
         ),
         (
             "extra_parent_pool",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.pool]
 EXTRA
@@ -1750,7 +1834,7 @@ EXTRA
         ),
         (
             "extra_claim_limits",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [worker_profiles.default.claim]
 EXTRA
@@ -1758,7 +1842,7 @@ EXTRA
         ),
         (
             "extra_schedule_config",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [schedule]
 EXTRA
@@ -1766,12 +1850,12 @@ EXTRA
         ),
         (
             "extra_task_schedule",
-            "[broker]
+            "[database]
 database_url = \"postgresql://localhost/db\"
 [[schedule.schedules]]
 name = \"a\"
 task_name = \"t\"
-pattern = { type = \"interval\", seconds = 5 }
+pattern = { kind = \"interval\", every = \"PT5S\" }
 EXTRA
 ",
         ),
@@ -1800,7 +1884,7 @@ EXTRA
 
     fn with_profiles(document: &str) -> AppConfig {
         serde_json::from_str(&format!(
-            r#"{{"broker": {{"database_url": "postgresql://localhost/db"}},
+            r#"{{"database": {{"database_url": "postgresql://localhost/db"}},
                 "worker_profiles": {document}}}"#
         ))
         .expect("the worker profiles parse")
@@ -1812,10 +1896,10 @@ EXTRA
     #[test]
     fn worker_profiles_default_to_none_and_are_kept_by_name() {
         let config: AppConfig =
-            serde_json::from_str(r#"{"broker": {"database_url": "postgresql://localhost/db"}}"#)
+            serde_json::from_str(r#"{"database": {"database_url": "postgresql://localhost/db"}}"#)
                 .expect("known keys only");
         assert!(config.worker_profiles.is_empty());
-        assert!(AppConfig::for_database_url("postgresql://localhost/db")
+        assert!(AppConfig::from_database_url("postgresql://localhost/db")
             .worker_profiles
             .is_empty());
 
@@ -1844,12 +1928,12 @@ EXTRA
         );
         assert_eq!(
             errors[0].error_code(),
-            Some(crate::core::error::ErrorCode::ConfigInvalidWorkerProfile),
+            Some(crate::core::error::HorsiesErrorCode::ConfigInvalidWorkerProfile),
         );
         let refusal = errors[0].to_horsies_error();
         assert_eq!(
             refusal.code,
-            Some(crate::core::error::ErrorCode::ConfigInvalidWorkerProfile),
+            Some(crate::core::error::HorsiesErrorCode::ConfigInvalidWorkerProfile),
         );
         assert_eq!(
             refusal.notes,
@@ -1860,7 +1944,7 @@ EXTRA
             .as_deref()
             .is_some_and(|help| help.contains("isolated=IsolatedChildren(count=4)")));
         assert_eq!(
-            crate::core::error::ErrorCode::ConfigInvalidWorkerProfile.to_string(),
+            crate::core::error::HorsiesErrorCode::ConfigInvalidWorkerProfile.to_string(),
             "HRS-218"
         );
     }
@@ -1890,13 +1974,39 @@ EXTRA
         );
     }
 
+    /// The JSON text of a config (the form that the TypeScript client sends)
+    /// with a count and a seat count outside their bounds parses; validation
+    /// refuses both values, each with its field path, in one list.
+    #[test]
+    fn a_profile_value_outside_its_bound_in_the_json_text_is_refused_with_its_path() {
+        let config = with_profiles(
+            r#"{"web": {"isolated": {"kind": "isolated_children", "count": 0},
+                "shared_async": {"kind": "shared_async_children", "count": 1, "seats": 1001}}}"#,
+        );
+
+        let errors = config.validate();
+
+        let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            messages,
+            [
+                "worker_profiles['web'].isolated.count: 0 is outside the bounds 1 to 1024",
+                "worker_profiles['web'].shared_async.seats: 1001 is outside the bounds 1 to 1000",
+            ],
+        );
+        assert!(errors.iter().all(|error| error.error_code()
+            == Some(crate::core::error::HorsiesErrorCode::ConfigInvalidWorkerProfile)));
+    }
+
     /// Python `test_worker_profile.py::TestAppConfigProfileChecks::test_log_config_lists_each_profile`.
     #[test]
     fn format_for_logging_lists_each_profile() {
         let config = with_profiles(
             r#"{"default": {"isolated": {"kind": "isolated_children", "count": 2}}}"#,
         );
-        let profile = config.worker_profiles["default"];
+        let profile = config.worker_profiles["default"]
+            .checked("default")
+            .expect("every value is inside its bound");
 
         let formatted = config.format_for_logging();
 
@@ -1908,7 +2018,8 @@ EXTRA
             )),
             "{formatted}",
         );
-        let without = AppConfig::for_database_url("postgresql://localhost/db").format_for_logging();
+        let without =
+            AppConfig::from_database_url("postgresql://localhost/db").format_for_logging();
         assert!(!without.contains("worker_profiles"), "{without}");
     }
 
@@ -1927,18 +2038,18 @@ EXTRA
     /// error that keeps `HRS-216`, with a note each.
     #[test]
     fn retention_refusals_keep_hrs_216_for_single_and_collected_errors() {
-        use crate::core::error::ErrorCode;
+        use crate::core::error::HorsiesErrorCode;
 
         let mut single = default_config();
         single.retention.history_leaf_horizon_days = 1;
         let error = config_refusal(&single);
-        assert_eq!(error.code, Some(ErrorCode::ConfigInvalidRetention));
+        assert_eq!(error.code, Some(HorsiesErrorCode::ConfigInvalidRetention));
 
         let mut collected = default_config();
         collected.retention.history_leaf_horizon_days = 1;
         collected.retention.heartbeat_leaf_horizon_hours = 1;
         let error = config_refusal(&collected);
-        assert_eq!(error.code, Some(ErrorCode::ConfigInvalidRetention));
+        assert_eq!(error.code, Some(HorsiesErrorCode::ConfigInvalidRetention));
         assert_eq!(error.notes.len(), 2);
     }
 }

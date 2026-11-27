@@ -3,7 +3,7 @@
 // - `includeRunning`: `PENDING`, `CLAIMED` and `RUNNING` move to `CANCELLED`. A running body sees `runtime.signal`
 //   abort with the cause `OPERATOR`; the statement records the running attempt with the outcome `CANCELLED`.
 // - `pendingOrClaimedOnly`: `PENDING` and `CLAIMED` only; no user code ran.
-// - One statement. `DB_OPERATION_FAILED` leaves the outcome unknown: nothing written, or committed with the reply lost.
+// - One statement. `DATABASE_OPERATION_FAILED` leaves the outcome unknown: nothing written, or committed with the reply lost.
 //   A repeat tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED`.
 // - A task of a workflow is refused (`TASK_IS_WORKFLOW_TASK`): use the workflow handle.
 
@@ -11,6 +11,7 @@ import { nativeValueAsync } from "../native/call/envelope.ts";
 import { unreachable } from "../native/call/never.ts";
 import { raiseDefect } from "../native/call/defect.ts";
 import type { CancelAddon, CancelPolicy } from "../native/facades/cancel.ts";
+import type { RelayedAddon } from "./seat-calls.ts";
 import type { NativeCoreHandle } from "../native/handle/addon.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
@@ -25,7 +26,7 @@ export interface CancelTaskOptions {
 
 /** The addon and the handle that the cancel calls. */
 export interface CancelTarget {
-  readonly addon: CancelAddon;
+  readonly addon: RelayedAddon<CancelAddon>;
   readonly handle: NativeCoreHandle;
 }
 
@@ -44,6 +45,8 @@ export async function cancelTask(
       return ok(Object.freeze({ taskId, wasStatus: leftStatus(outcome.record.wasStatus) }));
     case "failed":
       return err(taskActionError(outcome.error));
+    case "seatRelayFull":
+      return err(outcome.error);
     default:
       return unreachable(outcome);
   }

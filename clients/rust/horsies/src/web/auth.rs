@@ -1,12 +1,14 @@
 //! The access policy of the monitoring mount: user code that decides, per
 //! request, whether the request may read and whether it may act (Python
-//! `horsies.web.auth`).
+//! `horsies.web.authorization`).
 
 use std::future::Future;
 
 use axum::http::header::InvalidHeaderName;
 use axum::http::request::Parts;
 use axum::http::{Extensions, HeaderMap, HeaderName, Method, Uri, Version};
+
+use super::Actions;
 
 /// The facts of one request that a policy reads. The path of `uri` is the
 /// path inside the mount.
@@ -41,7 +43,7 @@ impl<'a> MonitoringRequest<'a> {
 /// reports it. The page and its assets ask nothing.
 ///
 /// Implement it with `async fn`; each future must be `Send`.
-pub trait MonitoringAuthPolicy: Send + Sync + 'static {
+pub trait MonitoringAuthorizationPolicy: Send + Sync + 'static {
     /// Whether the request may read.
     fn can_view(&self, request: MonitoringRequest<'_>) -> impl Future<Output = bool> + Send;
     /// Whether the request may run an action.
@@ -53,7 +55,7 @@ pub trait MonitoringAuthPolicy: Send + Sync + 'static {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AllowAll;
 
-impl MonitoringAuthPolicy for AllowAll {
+impl MonitoringAuthorizationPolicy for AllowAll {
     async fn can_view(&self, _request: MonitoringRequest<'_>) -> bool {
         true
     }
@@ -67,7 +69,7 @@ impl MonitoringAuthPolicy for AllowAll {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ViewOnly;
 
-impl MonitoringAuthPolicy for ViewOnly {
+impl MonitoringAuthorizationPolicy for ViewOnly {
     async fn can_view(&self, _request: MonitoringRequest<'_>) -> bool {
         true
     }
@@ -78,24 +80,22 @@ impl MonitoringAuthPolicy for ViewOnly {
 }
 
 /// Trust an identity header that a reverse proxy writes: a request with a
-/// value that is not blank may read, and may act when `allow_actions`.
+/// value that is not blank, with no blank comma-separated member, may read,
+/// and may act when `actions` is [`Actions::Enabled`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedHeader {
     header_name: HeaderName,
-    allow_actions: bool,
+    actions: Actions,
 }
 
 impl TrustedHeader {
     /// The policy of the header `header_name`.
     ///
     /// Errors: [`InvalidHeaderName`] for a name that is not a header name.
-    pub fn new(
-        header_name: impl AsRef<str>,
-        allow_actions: bool,
-    ) -> Result<Self, InvalidHeaderName> {
+    pub fn new(header_name: impl AsRef<str>, actions: Actions) -> Result<Self, InvalidHeaderName> {
         Ok(Self {
             header_name: HeaderName::try_from(header_name.as_ref())?,
-            allow_actions,
+            actions,
         })
     }
 
@@ -103,27 +103,34 @@ impl TrustedHeader {
         &self.header_name
     }
 
-    pub const fn allows_actions(&self) -> bool {
-        self.allow_actions
+    /// Whether an identified request may act.
+    pub const fn actions(&self) -> Actions {
+        self.actions
     }
 
-    /// Whether the request has the header with a value that is visible text
-    /// and not blank.
+    /// Whether the request has the header, and every value of it is visible
+    /// text with no blank comma-separated member. Two copies of the header
+    /// that an HTTP stack joins to `alice, ` are refused.
     fn identified(&self, request: MonitoringRequest<'_>) -> bool {
-        request
-            .headers
-            .get(&self.header_name)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| !value.trim().is_empty())
+        let mut values = request.headers.get_all(&self.header_name).iter().peekable();
+        values.peek().is_some()
+            && values.all(|value| {
+                value
+                    .to_str()
+                    .is_ok_and(|text| text.split(',').all(|member| !member.trim().is_empty()))
+            })
     }
 }
 
-impl MonitoringAuthPolicy for TrustedHeader {
+impl MonitoringAuthorizationPolicy for TrustedHeader {
     async fn can_view(&self, request: MonitoringRequest<'_>) -> bool {
         self.identified(request)
     }
 
     async fn can_act(&self, request: MonitoringRequest<'_>) -> bool {
-        self.allow_actions && self.identified(request)
+        match self.actions {
+            Actions::Enabled => self.identified(request),
+            Actions::Disabled => false,
+        }
     }
 }

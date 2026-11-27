@@ -4,7 +4,7 @@
 //! completed; a feed may fail.
 
 use horsies::{
-    HorsiesError, SuccessCase, SuccessPolicy, WorkflowDefConfig, WorkflowDefinition,
+    HorsiesError, SuccessCase, SuccessPolicy, WorkflowDefinition, WorkflowDefinitionConfig,
     WorkflowSpecBuilder,
 };
 
@@ -22,7 +22,7 @@ pub struct Restock;
 
 impl WorkflowDefinition for Restock {
     type Output = StockUpdate;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "restock"
@@ -32,31 +32,31 @@ impl WorkflowDefinition for Restock {
         "acme.restock.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let mut feeds = Vec::new();
         let mut feed_ids = Vec::new();
         for supplier in tuning::SUPPLIERS {
             let node_id = feed_node_id(supplier);
             feeds.push(
-                builder.task(sync_supplier_feed::node()?.node_id(node_id.clone()).set(
-                    sync_supplier_feed::params::supplier(),
+                builder.task(sync_supplier_feed::node().node_id(node_id.clone()).set(
+                    sync_supplier_feed::fields::supplier(),
                     (*supplier).to_owned(),
-                )?),
+                )?)?,
             );
             feed_ids.push(node_id);
         }
         let quorum = u32::try_from(tuning::RESTOCK_MIN_SUCCESSFUL_FEEDS.min(feeds.len()))
             .map_err(|_| HorsiesError::new("RESTOCK_MIN_SUCCESSFUL_FEEDS is above u32::MAX"))?;
         let update = builder.task(
-            update_stock_levels::node()?
+            update_stock_levels::node()
                 .node_id("update_stock_levels")
-                .set(update_stock_levels::params::feed_node_ids(), feed_ids)?
+                .set(update_stock_levels::fields::feed_node_ids(), feed_ids)?
                 .waits_for_all(feeds.iter().copied())
-                .workflow_ctx_from(feeds.iter().copied())
+                .workflow_context_from(feeds.iter().copied())
                 .join_quorum(quorum),
-        );
+        )?;
         let policy = SuccessPolicy::new(vec![SuccessCase::new([update])]).optional(feeds);
-        Ok(WorkflowDefConfig::new()
+        Ok(WorkflowDefinitionConfig::new()
             .output(update)
             .success_policy(policy))
     }

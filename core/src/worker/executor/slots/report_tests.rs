@@ -31,7 +31,7 @@ use crate::core::history::archive::attempts::{
 };
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
 use crate::core::lifecycle::{AttemptPlacement, OwnedClaim, SlotWait};
-use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
+use crate::core::task::error::{OperationalCode, OutcomeCode, TaskError};
 use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
 use crate::events::AttemptStart;
 use crate::test_support::migrated_pool;
@@ -71,7 +71,7 @@ fn error_envelope(error: &TaskError) -> ResultEnvelopeText {
 }
 
 /// The task produced nothing, so the worker writes its own account as the
-/// result: a `BROKER_ERROR` error whose message is the detail and whose
+/// result: a `DATABASE_ERROR` error whose message is the detail and whose
 /// data names the task. The detail is the reason of the task and of its
 /// attempt, and the write never retries.
 #[test]
@@ -85,7 +85,7 @@ fn a_worker_failure_records_its_detail_as_the_result_and_the_reason() {
         crate::core::lifecycle::AttemptPlacement::NotObserved,
     );
 
-    assert_eq!(write.error_code.as_deref(), Some("BROKER_ERROR"));
+    assert_eq!(write.error_code.as_deref(), Some("DATABASE_ERROR"));
     assert_eq!(write.failed_reason.as_deref(), Some("pool died"));
     assert_eq!(write.retry, RetryRequest::NoRetry);
     assert_eq!(
@@ -98,7 +98,7 @@ fn a_worker_failure_records_its_detail_as_the_result_and_the_reason() {
     );
     match read_task_result_text(&write.result_json) {
         Ok(TaskResultText::Err(error)) => {
-            assert_eq!(error.error_code.to_string(), "BROKER_ERROR");
+            assert_eq!(error.error_code.to_string(), "DATABASE_ERROR");
             assert_eq!(error.message.as_deref(), Some("pool died"));
             assert_eq!(
                 error.data_value(),
@@ -179,7 +179,7 @@ fn a_killed_or_lost_child_records_its_message_as_the_attempt_reason() {
     let claimed = claimed_plain();
     let text = "Worker child lost: child died: exit code 9";
     for code in [
-        OperationalErrorCode::WorkerCrashed,
+        OperationalCode::WorkerCrashed,
         LoopKillCode::TaskBlockedLoop.code(),
         LoopKillCode::NeighbourBlockedLoop.code(),
     ] {
@@ -246,7 +246,7 @@ fn a_timeout_records_its_text_as_the_attempt_reason() {
 /// reason.
 #[test]
 fn a_task_error_keeps_its_own_code_payload_and_message() {
-    let error = TaskError::new("MY_OWN_CODE", "boom").expect("a code of the task's own");
+    let error = TaskError::custom("MY_OWN_CODE", "boom").expect("a code of the task's own");
     let envelope = error_envelope(&error);
 
     let write = task_error_write(
@@ -275,7 +275,7 @@ fn a_task_error_keeps_its_own_code_payload_and_message() {
 #[test]
 fn each_failure_stores_the_spelling_of_its_code() {
     let claimed = claimed_plain();
-    let own = TaskError::new("MY_CODE", "m").expect("a code of the task's own");
+    let own = TaskError::custom("MY_CODE", "m").expect("a code of the task's own");
 
     let timed_out = killed_child_write(
         &claimed,
@@ -288,7 +288,7 @@ fn each_failure_stores_the_spelling_of_its_code() {
     let crashed = killed_child_write(
         &claimed,
         WORKER,
-        OperationalErrorCode::WorkerCrashed.into(),
+        OperationalCode::WorkerCrashed.into(),
         "m".to_owned(),
         RetryPlacement::SameClass,
         crate::core::lifecycle::AttemptPlacement::NotObserved,
@@ -313,14 +313,14 @@ fn each_failure_stores_the_spelling_of_its_code() {
 #[test]
 fn the_write_of_a_report_is_the_same_for_the_same_report() {
     let claimed = claimed_plain();
-    let error = TaskError::new("MY_OWN_CODE", "x").expect("a code of the task's own");
+    let error = TaskError::custom("MY_OWN_CODE", "x").expect("a code of the task's own");
     let envelope = error_envelope(&error);
     let timeout = TaskTimeoutMs::new(1_000).expect("1 s is a valid task timeout");
     let crash = || {
         killed_child_write(
             &claimed,
             WORKER,
-            OperationalErrorCode::WorkerCrashed.into(),
+            OperationalCode::WorkerCrashed.into(),
             "lost".to_owned(),
             RetryPlacement::SameClass,
             crate::core::lifecycle::AttemptPlacement::NotObserved,
@@ -393,7 +393,7 @@ fn each_failure_write_carries_the_claim_of_its_dispatch() {
         worker_id: WORKER.to_owned(),
         claimed_at: claimed.claimed_at,
     };
-    let error = TaskError::new("MY_OWN_CODE", "x").expect("a code of the task's own");
+    let error = TaskError::custom("MY_OWN_CODE", "x").expect("a code of the task's own");
 
     assert_eq!(
         worker_failure_write(
@@ -994,7 +994,7 @@ async fn attempt_rows(pool: &TestPool, task_id: Uuid) -> i64 {
 /// and a task error that no retry policy admits (Python
 /// `terminalization_for_refused_retry`).
 fn row_ending_reports() -> Vec<(&'static str, Seed, AttemptEnd)> {
-    let error = TaskError::new("MY_OWN_CODE", "x").expect("a code of the task's own");
+    let error = TaskError::custom("MY_OWN_CODE", "x").expect("a code of the task's own");
     vec![
         (
             "plain-success",
@@ -1394,7 +1394,7 @@ async fn archived_recorder(pool: &TestPool, task_id: Uuid) -> (DateTime<Utc>, Re
 #[tokio::test]
 async fn a_placed_end_records_the_claim_generation_plus_the_slot_wait() {
     let pool = migrated_pool().await;
-    let error = TaskError::new("MY_OWN_CODE", "x").expect("a code of the task's own");
+    let error = TaskError::custom("MY_OWN_CODE", "x").expect("a code of the task's own");
     let slot_wait = chrono::Duration::from_std(SLOT_WAIT).expect("a short wait");
     for (name, seed, end) in [
         (

@@ -52,8 +52,8 @@ export type SlotHealthRecord =
   | { readonly kind: "allSlotsServing" }
   | { readonly kind: "slotsDown"; readonly slots: DownSlotRecord[] };
 
-/** One claim budget of a worker. */
-export interface ClassBudgetRecord {
+/** One execution class budget of a worker. */
+export interface ExecutionClassBudgetRecord {
   readonly budget: ExecutionName;
   readonly capacity: bigint;
   readonly serves: ExecutionName[];
@@ -68,8 +68,17 @@ export interface QueueNumberRecord {
 /** A measure of a snapshot. */
 export type MeasureRecord = { readonly kind: "measured"; readonly value: number } | { readonly kind: "notMeasured" };
 
-/** The cluster-wide cap of a worker's claims. */
-export type ClusterCapRecord = { readonly kind: "capped"; readonly cap: number } | { readonly kind: "uncapped" };
+/** The cluster-wide cap that a worker ran with. */
+export type ClusterCapRecord = { readonly kind: "clusterCap"; readonly tasks: number } | { readonly kind: "noClusterCap" };
+
+/** A limit on a number of tasks. */
+export type TaskLimitRecord = { readonly kind: "taskLimit"; readonly tasks: number } | { readonly kind: "noTaskLimit" };
+
+/** The claim limits of a worker. */
+export interface ClaimLimitsRecord {
+  readonly perQueuePerPass: TaskLimitRecord;
+  readonly claimedPerWorker: TaskLimitRecord;
+}
 
 /** One worker state snapshot. */
 export interface WorkerStateRecord {
@@ -77,9 +86,8 @@ export interface WorkerStateRecord {
   readonly snapshotAtMicros: bigint;
   readonly hostname: string;
   readonly pid: number;
-  readonly processes: number;
-  readonly maxClaimBatch: number;
-  readonly maxClaimPerWorker: number;
+  readonly childCount: number;
+  readonly claimLimits: ClaimLimitsRecord;
   readonly clusterWideCap: ClusterCapRecord;
   readonly queues: string[];
   readonly queuePriorities: QueueNumberRecord[];
@@ -93,7 +101,7 @@ export interface WorkerStateRecord {
   readonly childrenMemoryMb: MeasureRecord;
   readonly workerStartedAtMicros: bigint;
   readonly slotHealth: SlotHealthRecord;
-  readonly classCapacity: ClassBudgetRecord[];
+  readonly executionClassBudgets: ExecutionClassBudgetRecord[];
   readonly profile: SnapshotProfileRecord;
 }
 
@@ -119,18 +127,18 @@ export type LastBeatRecord =
 
 /** A `RUNNING` task whose latest beat, or its start, is older than the threshold. */
 export interface StaleTaskRecord {
-  readonly id: string;
+  readonly taskId: string;
   readonly taskName: string;
   readonly workerHostname: RecordedTextRecord;
   readonly workerPid: RecordedPidRecord;
   readonly workerProcessName: RecordedTextRecord;
   readonly startedAtMicros: bigint;
-  readonly lastHeartbeat: LastBeatRecord;
+  readonly lastHeartbeatAt: LastBeatRecord;
 }
 
 /** A `PENDING` task past its `good_until`. */
 export interface ExpiredTaskRecord {
-  readonly id: string;
+  readonly taskId: string;
   readonly taskName: string;
   readonly queueName: string;
   readonly priority: number;
@@ -158,13 +166,13 @@ export type StreamStateRecord =
 
 /** The coverage of one pending stream. */
 export interface StreamCoverageRecord {
-  readonly queueName: string;
+  readonly queue: string;
   readonly execution: ExecutionName;
-  readonly state: StreamStateRecord;
+  readonly coverage: StreamStateRecord;
 }
 
 /** The fleet check. */
-export interface ClassCoverageRecord {
+export interface ExecutionClassCoverageRecord {
   readonly checkedAtMicros: bigint;
   readonly liveWorkers: bigint;
   readonly streams: StreamCoverageRecord[];
@@ -172,15 +180,15 @@ export interface ClassCoverageRecord {
 
 /** How long the rows of a pending stream wait. */
 export type StreamWaitRecord =
-  | { readonly kind: "oldestWaiting"; readonly enqueuedAtMicros: bigint; readonly waitMicros: bigint }
+  | { readonly kind: "due"; readonly oldestDueAtMicros: bigint; readonly waitMicros: bigint }
   | { readonly kind: "noneDue"; readonly nextDueAtMicros: bigint };
 
 /** One pending stream. */
 export interface PendingStreamRecord {
-  readonly queueName: string;
+  readonly queue: string;
   readonly execution: ExecutionName;
   readonly wait: StreamWaitRecord;
-  readonly state: StreamStateRecord;
+  readonly coverage: StreamStateRecord;
 }
 
 /** One claim budget of a live worker, with its rows in flight. */
@@ -192,17 +200,18 @@ export interface BudgetLoadRecord {
 }
 
 /** The claim budgets of one live worker. */
-export interface WorkerClassLoadRecord {
+export interface WorkerExecutionClassLoadRecord {
   readonly workerId: string;
   readonly snapshotAtMicros: bigint;
   readonly budgets: BudgetLoadRecord[];
 }
 
-/** The class report. */
-export interface ClassReportRecord {
+/** The execution class report. */
+export interface ExecutionClassReportRecord {
   readonly checkedAtMicros: bigint;
+  readonly liveWindowMicros: bigint;
   readonly streams: PendingStreamRecord[];
-  readonly workers: WorkerClassLoadRecord[];
+  readonly workers: WorkerExecutionClassLoadRecord[];
 }
 
 /** A health read's Promise of its envelope. */
@@ -213,7 +222,7 @@ export interface HealthAddon {
   pingWorkers(
     handle: NativeCoreHandle,
     target: PingTargetArg,
-    timeoutMs: number,
+    waitMs: number,
     minResponses: MinResponsesArg,
   ): HealthAnswer<WorkerPongRecord[]>;
   listWorkerStates(handle: NativeCoreHandle): HealthAnswer<WorkerStateRecord[]>;
@@ -225,8 +234,8 @@ export interface HealthAddon {
   ): HealthAnswer<WorkerStateRecord[]>;
   getStaleTasks(handle: NativeCoreHandle, thresholdMinutes: number): HealthAnswer<StaleTaskList>;
   getExpiredTasks(handle: NativeCoreHandle): HealthAnswer<ExpiredTaskList>;
-  getClassCoverage(handle: NativeCoreHandle): HealthAnswer<ClassCoverageRecord>;
-  getClassReport(handle: NativeCoreHandle): HealthAnswer<ClassReportRecord>;
+  getExecutionClassCoverage(handle: NativeCoreHandle): HealthAnswer<ExecutionClassCoverageRecord>;
+  getExecutionClassReport(handle: NativeCoreHandle): HealthAnswer<ExecutionClassReportRecord>;
 }
 
 /** The health read functions of the addon. Throws as `requireAddon` does. */

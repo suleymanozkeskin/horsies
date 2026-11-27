@@ -26,7 +26,7 @@ from pydantic import SecretStr
 
 from horsies.core import process_role as process_role_module
 from horsies.core.app import Horsies
-from horsies.core.brokers.result_types import BrokerWaitInsideTask
+from horsies.core.brokers.result_types import DatabaseWaitInsideTask
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import decode_task_result, encode_task_result
 from horsies.core.models.app import AppConfig
@@ -34,14 +34,14 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.task_send_types import TaskSendAsyncContext
 from horsies.core.models.tasks import (
     ContractCode,
-    OperationalErrorCode,
+    OperationalCode,
     TaskError,
-    TaskResult,
 )
+from horsies.core.models.outcome import Failed, ReadResult, Succeeded, TaskOutcome
 from horsies.core.models.workflow import NodeKey, WorkflowContext
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.process_role import ProcessRole
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.task_decorator import await_task_call_in_worker
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import child_runner
@@ -71,7 +71,7 @@ class MappedError(Exception):
 def _app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr(
                     'postgresql://user:password@localhost/unused'
                 ),
@@ -148,10 +148,19 @@ def _runner(
     return run
 
 
-def _result(wire: WireResult, ok_type: Any) -> TaskResult[Any, TaskError]:
+def _result(wire: WireResult, ok_type: Any) -> TaskOutcome[Any, TaskError]:
     ok, payload, reason = wire
     assert (ok, reason) == (True, None)
     return decode_task_result(loads_json(payload).unwrap(), ok_type)
+
+
+def _failed(outcome: TaskOutcome[Any, TaskError]) -> TaskError:
+    """The task error of a failed outcome; any other outcome fails the test."""
+    match outcome:
+        case Failed(error=error):
+            return error
+        case Succeeded():
+            pytest.fail(f'expected a failed outcome, got {outcome!r}')
 
 
 def _open_loop(task_loop: TaskLoop) -> asyncio.AbstractEventLoop:
@@ -170,12 +179,12 @@ class TestTheTaskLoop:
         seen: list[asyncio.AbstractEventLoop] = []
 
         @app.task('async_records_loop')
-        async def records_loop() -> TaskResult[int, TaskError]:
+        async def records_loop() -> Result[int, TaskError]:
             seen.append(asyncio.get_running_loop())
-            return TaskResult(ok=1)
+            return Ok(1)
 
         run = _runner(app, task_loop)
-        assert _result(run(records_loop.task_name), int).ok_value == 1
+        assert _result(run(records_loop.task_name), int) == Succeeded(1)
         assert seen == [_open_loop(task_loop)]
 
     def test_two_async_tasks_use_one_loop(self, task_loop: TaskLoop) -> None:
@@ -183,9 +192,9 @@ class TestTheTaskLoop:
         seen: list[asyncio.AbstractEventLoop] = []
 
         @app.task('async_records_loop')
-        async def records_loop() -> TaskResult[int, TaskError]:
+        async def records_loop() -> Result[int, TaskError]:
             seen.append(asyncio.get_running_loop())
-            return TaskResult(ok=1)
+            return Ok(1)
 
         run = _runner(app, task_loop)
         run(records_loop.task_name)
@@ -207,19 +216,19 @@ class TestTheTaskLoop:
         kept: list[asyncio.Future[int]] = []
 
         @app.task('async_makes_future')
-        async def makes_future() -> TaskResult[None, TaskError]:
+        async def makes_future() -> Result[None, TaskError]:
             kept.append(asyncio.get_running_loop().create_future())
-            return TaskResult(ok=None)
+            return Ok(None)
 
         @app.task('async_awaits_future')
-        async def awaits_future(*, value: int) -> TaskResult[int, TaskError]:
+        async def awaits_future(*, value: int) -> Result[int, TaskError]:
             # Set the result later, so that the await waits for it.
             asyncio.get_running_loop().call_soon(kept[0].set_result, value)
-            return TaskResult(ok=await kept[0])
+            return Ok(await kept[0])
 
         run = _runner(app, task_loop)
         run(makes_future.task_name)
-        assert _result(run(awaits_future.task_name, {'value': 7}), int).ok_value == 7
+        assert _result(run(awaits_future.task_name, {'value': 7}), int) == Succeeded(7)
 
     def test_a_sync_task_after_an_async_task_has_no_running_loop(
         self,
@@ -228,17 +237,17 @@ class TestTheTaskLoop:
         app = _app()
 
         @app.task('async_first')
-        async def first() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        async def first() -> Result[int, TaskError]:
+            return Ok(1)
 
         @app.task('sync_second')
-        def second() -> TaskResult[str, TaskError]:
+        def second() -> Result[str, TaskError]:
             ran = asyncio.run(asyncio.sleep(0, 'ran'))
-            return TaskResult(ok=f'{in_running_event_loop()}|{ran}')
+            return Ok(f'{in_running_event_loop()}|{ran}')
 
         run = _runner(app, task_loop)
         run(first.task_name)
-        assert _result(run(second.task_name), str).ok_value == 'False|ran'
+        assert _result(run(second.task_name), str) == Succeeded('False|ran')
 
     def test_the_sync_send_in_an_async_task_refuses_the_running_loop(
         self,
@@ -249,19 +258,19 @@ class TestTheTaskLoop:
         app = _app()
 
         @app.task('target')
-        def target() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def target() -> Result[int, TaskError]:
+            return Ok(1)
 
         @app.task('async_sends_sync')
-        async def sends_sync() -> TaskResult[str, TaskError]:
+        async def sends_sync() -> Result[str, TaskError]:
             match target.send():
                 case Err(TaskSendAsyncContext() as refused):
-                    return TaskResult(ok=refused.code.value)
+                    return Ok(refused.code.value)
                 case other:
-                    return TaskResult(ok=f'unexpected {other!r}')
+                    return Ok(f'unexpected {other!r}')
 
         run = _runner(app, task_loop)
-        assert _result(run(sends_sync.task_name), str).ok_value == 'ASYNC_CONTEXT'
+        assert _result(run(sends_sync.task_name), str) == Succeeded('ASYNC_CONTEXT')
 
 
 def _failing_tasks(app: Horsies) -> dict[str, tuple[str, str]]:
@@ -271,29 +280,29 @@ def _failing_tasks(app: Horsies) -> dict[str, tuple[str, str]]:
     """
 
     @app.task('sync_raises')
-    def sync_raises() -> TaskResult[int, TaskError]:
+    def sync_raises() -> Result[int, TaskError]:
         raise ValueError('boom')
 
     @app.task('async_raises')
-    async def async_raises() -> TaskResult[int, TaskError]:
+    async def async_raises() -> Result[int, TaskError]:
         await asyncio.sleep(0)
         raise ValueError('boom')
 
     @app.task('sync_raises_mapped')
-    def sync_raises_mapped() -> TaskResult[int, TaskError]:
+    def sync_raises_mapped() -> Result[int, TaskError]:
         raise MappedError('mapped')
 
     @app.task('async_raises_mapped')
-    async def async_raises_mapped() -> TaskResult[int, TaskError]:
+    async def async_raises_mapped() -> Result[int, TaskError]:
         raise MappedError('mapped')
 
     @app.task('sync_wrong_return')
-    def sync_wrong_return() -> TaskResult[int, TaskError]:
-        return TaskResult(ok='text')  # type: ignore[arg-type]
+    def sync_wrong_return() -> Result[int, TaskError]:
+        return Ok('text')  # type: ignore[arg-type]
 
     @app.task('async_wrong_return')
-    async def async_wrong_return() -> TaskResult[int, TaskError]:
-        return TaskResult(ok='text')  # type: ignore[arg-type]
+    async def async_wrong_return() -> Result[int, TaskError]:
+        return Ok('text')  # type: ignore[arg-type]
 
     return {
         'raises': (sync_raises.task_name, async_raises.task_name),
@@ -302,17 +311,17 @@ def _failing_tasks(app: Horsies) -> dict[str, tuple[str, str]]:
     }
 
 
-def _sync_body() -> TaskResult[int, TaskError]:
-    return TaskResult(ok=1)
+def _sync_body() -> Result[int, TaskError]:
+    return Ok(1)
 
 
-async def _async_body() -> TaskResult[int, TaskError]:
-    return TaskResult(ok=1)
+async def _async_body() -> Result[int, TaskError]:
+    return Ok(1)
 
 
-async def _plain_async_function() -> TaskResult[int, TaskError]:
+async def _plain_async_function() -> Result[int, TaskError]:
     """Not decorated, so it is no task function and has no task kind."""
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
 class _AttributeReadRaises:
@@ -383,8 +392,8 @@ class TestEntriesTheChildCannotRun:
 
         set_running.assert_called_once()
         assert (ok, reason) == (True, None)
-        error = decode_task_result(loads_json(payload).unwrap(), int).unwrap_err()
-        assert error.error_code is OperationalErrorCode.WORKER_RESOLUTION_ERROR
+        error = _failed(decode_task_result(loads_json(payload).unwrap(), int))
+        assert error.code is OperationalCode.WORKER_RESOLUTION_ERROR
 
     def test_an_async_task_in_a_child_with_no_task_loop_fails_resolution(
         self,
@@ -396,15 +405,15 @@ class TestEntriesTheChildCannotRun:
         ran: list[bool] = []
 
         @app.task('async_registered_late')
-        async def registered_late() -> TaskResult[int, TaskError]:
+        async def registered_late() -> Result[int, TaskError]:
             ran.append(True)
-            return TaskResult(ok=1)
+            return Ok(1)
 
         ok, payload, reason = _runner(app, no_task_loop)(registered_late.task_name)
 
         assert (ok, reason) == (True, None)
-        error = decode_task_result(loads_json(payload).unwrap(), int).unwrap_err()
-        assert error.error_code is OperationalErrorCode.WORKER_RESOLUTION_ERROR
+        error = _failed(decode_task_result(loads_json(payload).unwrap(), int))
+        assert error.code is OperationalCode.WORKER_RESOLUTION_ERROR
         assert 'no task loop' in (error.message or '')
         assert ran == []
         assert isinstance(no_task_loop.state, LoopNotCreated)
@@ -416,11 +425,11 @@ class TestEntriesTheChildCannotRun:
         app = _app()
 
         @app.task('sync_one')
-        def one() -> TaskResult[str, TaskError]:
-            return TaskResult(ok=f'{in_running_event_loop()}')
+        def one() -> Result[str, TaskError]:
+            return Ok(f'{in_running_event_loop()}')
 
         wire = _runner(app, no_task_loop)(one.task_name)
-        assert _result(wire, str).ok_value == 'False'
+        assert _result(wire, str) == Succeeded('False')
         assert isinstance(no_task_loop.state, LoopNotCreated)
 
     def test_a_task_the_registry_lacks_fails_resolution_after_running(
@@ -433,8 +442,8 @@ class TestEntriesTheChildCannotRun:
 
         set_running.assert_called_once()
         assert (ok, reason) == (True, None)
-        error = decode_task_result(loads_json(payload).unwrap(), int).unwrap_err()
-        assert error.error_code is OperationalErrorCode.WORKER_RESOLUTION_ERROR
+        error = _failed(decode_task_result(loads_json(payload).unwrap(), int))
+        assert error.code is OperationalCode.WORKER_RESOLUTION_ERROR
         assert 'not_registered' in (error.message or '')
 
 
@@ -448,9 +457,12 @@ def _refusal_text(code: object, message: str | None) -> str:
     return f'{operation}:{code.value if isinstance(code, Enum) else code}'
 
 
-def _task_refusal(result: TaskResult[Any, TaskError]) -> str:
-    error = result.unwrap_err()
-    return _refusal_text(error.error_code, error.message)
+def _read_refusal(read: ReadResult[Any, TaskError]) -> str:
+    match read:
+        case Err(err_value=read_error):
+            return _refusal_text(read_error.code, read_error.message)
+        case _:
+            return f'not refused: {read!r}'
 
 
 class TestResultWaitsInsideAnAsyncTask:
@@ -463,7 +475,7 @@ class TestResultWaitsInsideAnAsyncTask:
         is refused before it reads anything. ``send_async()`` still enqueues."""
         monkeypatch.setattr(process_role_module, '_role', ProcessRole.RUNS_NO_TASK_BODIES)
         app = Horsies(
-            AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))),
+            AppConfig(database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))),
         )
         broker = app.get_broker()
         enqueued: list[UUID] = []
@@ -473,24 +485,23 @@ class TestResultWaitsInsideAnAsyncTask:
             return Ok(task_id)
 
         @app.task('async_sent')
-        async def sent() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        async def sent() -> Result[int, TaskError]:
+            return Ok(1)
 
         @app.task('async_waits_inside_task')
-        async def waits_inside_task() -> TaskResult[list[str], TaskError]:
+        async def waits_inside_task() -> Result[list[str], TaskError]:
             match await sent.send_async():
                 case Ok(handle):
                     pass
                 case Err(send_err):
-                    return TaskResult(
-                        err=TaskError(error_code='SEND_FAILED', message=str(send_err)),
+                    return Err(
+                        TaskError(code='SEND_FAILED', message=str(send_err)),
                     )
             outcomes = [f'send_async:{handle.task_id == enqueued[0]}']
-            outcomes.append(_task_refusal(await handle.get_async()))
-            read = (await app.get_result_async(handle.task_id)).unwrap()
-            outcomes.append(_task_refusal(read))
+            outcomes.append(_read_refusal(await handle.get_async()))
+            outcomes.append(_read_refusal(await app.get_result_async(handle.task_id)))
             match await app.get_raw_result_async(handle.task_id):
-                case Err(BrokerWaitInsideTask(code=code, message=message)):
+                case Err(DatabaseWaitInsideTask(code=code, message=message)):
                     outcomes.append(_refusal_text(code, message))
                 case other:
                     outcomes.append(f'not refused: {other!r}')
@@ -498,8 +509,8 @@ class TestResultWaitsInsideAnAsyncTask:
                 workflow_id=uuid.UUID(WORKFLOW_ID),
                 broker=broker,
             )
-            outcomes.append(_task_refusal(await workflow.get_async()))
-            return TaskResult(ok=outcomes)
+            outcomes.append(_read_refusal(await workflow.get_async()))
+            return Ok(outcomes)
 
         with (
             patch.object(child_runner, '_run_child_start_hooks'),
@@ -509,13 +520,13 @@ class TestResultWaitsInsideAnAsyncTask:
         with patch.object(broker, 'enqueue_async', enqueue_async):
             wire = _runner(app, task_loop)(waits_inside_task.task_name)
 
-        assert _result(wire, list[str]).ok_value == [
+        assert _result(wire, list[str]) == Succeeded([
             'send_async:True',
             'TaskHandle.get_async():WAIT_INSIDE_TASK',
             'app.get_result_async():WAIT_INSIDE_TASK',
             'app.get_raw_result_async():WAIT_INSIDE_TASK',
             'WorkflowHandle.get_async():WAIT_INSIDE_TASK',
-        ]
+        ])
         assert len(enqueued) == 1
 
 
@@ -528,7 +539,7 @@ class TestTheSendPathLeavesNoLoopTask:
         the send path of horsies must leave none. Up to ``enqueue_async``,
         which the test replaces, the send runs its real code."""
         app = Horsies(
-            AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))),
+            AppConfig(database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))),
         )
         broker = app.get_broker()
         enqueued: list[UUID] = []
@@ -538,23 +549,23 @@ class TestTheSendPathLeavesNoLoopTask:
             return Ok(task_id)
 
         @app.task('async_sent_from_a_task')
-        async def sent() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        async def sent() -> Result[int, TaskError]:
+            return Ok(1)
 
         @app.task('async_sends')
-        async def sends() -> TaskResult[str, TaskError]:
+        async def sends() -> Result[str, TaskError]:
             match await sent.send_async():
                 case Ok(handle):
-                    return TaskResult(ok=str(handle.task_id))
+                    return Ok(str(handle.task_id))
                 case Err(send_err):
-                    return TaskResult(
-                        err=TaskError(error_code='SEND_FAILED', message=str(send_err)),
+                    return Err(
+                        TaskError(code='SEND_FAILED', message=str(send_err)),
                     )
 
         with patch.object(broker, 'enqueue_async', enqueue_async):
             wire = _runner(app, task_loop)(sends.task_name)
 
-        assert _result(wire, str).ok_value == str(enqueued[0])
+        assert _result(wire, str) == Succeeded(str(enqueued[0]))
         assert task_loop.report() == LoopHoldsNoTask()
 
 
@@ -567,7 +578,7 @@ class TestTheSameOutcomesAsASyncTask:
             (
                 'raises',
                 {
-                    '__builtin_task_code__': OperationalErrorCode.UNHANDLED_EXCEPTION.value
+                    '__builtin_task_code__': OperationalCode.UNHANDLED_EXCEPTION.value
                 },
             ),
             ('raises_mapped', 'MAPPED_BY_APP'),
@@ -603,7 +614,7 @@ class TestASelfCancel:
     def _cancelling_app(mapper: dict[type[BaseException], str]) -> Horsies:
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr(
                         'postgresql://user:password@localhost/unused'
                     ),
@@ -613,22 +624,22 @@ class TestASelfCancel:
         )
 
         @app.task('async_cancels_itself')
-        async def cancels_itself() -> TaskResult[int, TaskError]:
+        async def cancels_itself() -> Result[int, TaskError]:
             current = asyncio.current_task()
             assert current is not None
             current.cancel()
             await asyncio.sleep(0)
-            return TaskResult(ok=1)
+            return Ok(1)
 
         return app
 
     def test_the_mapper_names_the_code(self, task_loop: TaskLoop) -> None:
         app = self._cancelling_app({asyncio.CancelledError: 'CANCELLED_BY_BODY'})
 
-        error = _result(_runner(app, task_loop)('async_cancels_itself'), int).err_value
+        error = _failed(_result(_runner(app, task_loop)('async_cancels_itself'), int))
 
         assert error is not None
-        assert error.error_code == 'CANCELLED_BY_BODY'
+        assert error.code == 'CANCELLED_BY_BODY'
         assert error.message is not None and 'CancelledError' in error.message
 
     def test_with_no_mapping_it_gets_the_unhandled_code(
@@ -637,10 +648,10 @@ class TestASelfCancel:
     ) -> None:
         app = self._cancelling_app({})
 
-        error = _result(_runner(app, task_loop)('async_cancels_itself'), int).err_value
+        error = _failed(_result(_runner(app, task_loop)('async_cancels_itself'), int))
 
         assert error is not None
-        assert error.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert error.code == OperationalCode.UNHANDLED_EXCEPTION
 
     def test_the_direct_call_still_lets_the_cancel_pass(self) -> None:
         app = self._cancelling_app({asyncio.CancelledError: 'CANCELLED_BY_BODY'})
@@ -669,7 +680,7 @@ class TestAGeneratorExitFromTheBody:
     def _raising_app(mapper: dict[type[BaseException], str]) -> Horsies:
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr(
                         'postgresql://user:password@localhost/unused'
                     ),
@@ -679,20 +690,20 @@ class TestAGeneratorExitFromTheBody:
         )
 
         @app.task('sync_raises_generator_exit')
-        def sync_raises() -> TaskResult[int, TaskError]:
+        def sync_raises() -> Result[int, TaskError]:
             raise GeneratorExit('from the body')
 
         @app.task('async_raises_generator_exit')
-        async def async_raises() -> TaskResult[int, TaskError]:
+        async def async_raises() -> Result[int, TaskError]:
             await asyncio.sleep(0)
             raise GeneratorExit('from the body')
 
         @app.task('sync_raises_keyboard_interrupt')
-        def sync_interrupted() -> TaskResult[int, TaskError]:
+        def sync_interrupted() -> Result[int, TaskError]:
             raise KeyboardInterrupt
 
         @app.task('async_raises_keyboard_interrupt')
-        async def async_interrupted() -> TaskResult[int, TaskError]:
+        async def async_interrupted() -> Result[int, TaskError]:
             await asyncio.sleep(0)
             raise KeyboardInterrupt
 
@@ -706,12 +717,12 @@ class TestAGeneratorExitFromTheBody:
         app = self._raising_app({GeneratorExit: 'BODY_GENERATOR_EXIT'})
         run = _runner(app, task_loop)
 
-        sync_error = _result(run('sync_raises_generator_exit'), int).err_value
-        async_error = _result(run('async_raises_generator_exit'), int).err_value
+        sync_error = _failed(_result(run('sync_raises_generator_exit'), int))
+        async_error = _failed(_result(run('async_raises_generator_exit'), int))
 
         assert sync_error is not None and async_error is not None
-        assert sync_error.error_code == 'BODY_GENERATOR_EXIT'
-        assert async_error.error_code == 'BODY_GENERATOR_EXIT'
+        assert sync_error.code == 'BODY_GENERATOR_EXIT'
+        assert async_error.code == 'BODY_GENERATOR_EXIT'
 
     def test_with_no_mapping_it_gets_the_unhandled_code(
         self,
@@ -719,13 +730,13 @@ class TestAGeneratorExitFromTheBody:
     ) -> None:
         app = self._raising_app({})
 
-        error = _result(
+        error = _failed(_result(
             _runner(app, task_loop)('async_raises_generator_exit'),
             int,
-        ).err_value
+        ))
 
         assert error is not None
-        assert error.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert error.code == OperationalCode.UNHANDLED_EXCEPTION
 
     def test_a_keyboard_interrupt_still_skips_the_mappers(
         self,
@@ -736,21 +747,21 @@ class TestAGeneratorExitFromTheBody:
         app = self._raising_app({KeyboardInterrupt: 'NOT_USED'})
         run = _runner(app, task_loop)
 
-        sync_error = _result(run('sync_raises_keyboard_interrupt'), int).err_value
-        async_error = _result(run('async_raises_keyboard_interrupt'), int).err_value
+        sync_error = _failed(_result(run('sync_raises_keyboard_interrupt'), int))
+        async_error = _failed(_result(run('async_raises_keyboard_interrupt'), int))
 
         assert sync_error is not None and async_error is not None
-        assert sync_error.error_code == OperationalErrorCode.TASK_EXCEPTION
-        assert async_error.error_code == OperationalErrorCode.TASK_EXCEPTION
+        assert sync_error.code == OperationalCode.TASK_EXCEPTION
+        assert async_error.code == OperationalCode.TASK_EXCEPTION
 
     def test_the_direct_call_still_lets_it_pass(self) -> None:
         app = self._raising_app({GeneratorExit: 'BODY_GENERATOR_EXIT'})
 
         @app.task('async_raises_generator_exit_directly')
-        async def raises() -> TaskResult[int, TaskError]:
+        async def raises() -> Result[int, TaskError]:
             raise GeneratorExit('from the body')
 
-        async def call_directly() -> TaskResult[int, TaskError]:
+        async def call_directly() -> Result[int, TaskError]:
             return await raises()
 
         with pytest.raises(GeneratorExit):
@@ -763,10 +774,10 @@ class TestAGeneratorExitFromTheBody:
         ended: list[str],
     ) -> Any:
         @app.task('async_suspends')
-        async def suspends() -> TaskResult[int, TaskError]:
+        async def suspends() -> Result[int, TaskError]:
             try:
                 await awaited()
-                return TaskResult(ok=1)
+                return Ok(1)
             finally:
                 ended.append('finally')
 
@@ -812,17 +823,20 @@ class TestWorkflowContext:
         app = _app()
 
         @app.task('source_str')
-        def source_str() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='upstream')
+        def source_str() -> Result[str, TaskError]:
+            return Ok('upstream')
 
         @app.task('async_reads_ctx')
         async def reads_ctx(
             *,
-            workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[str, TaskError]:
-            assert workflow_ctx is not None
-            upstream = workflow_ctx.result_for(NodeKey[str]('node_a'))
-            return TaskResult(ok=f'{workflow_ctx.workflow_id}:{upstream.ok_value}')
+            workflow_context: WorkflowContext | None = None,
+        ) -> Result[str, TaskError]:
+            assert workflow_context is not None
+            match workflow_context.result_for(NodeKey[str]('node_a')):
+                case Succeeded(value=upstream):
+                    return Ok(f'{workflow_context.workflow_id}:{upstream}')
+                case Failed(error=upstream_error):
+                    return Err(upstream_error)
 
         kwargs = {
             '__h_workflow_ctx__': {
@@ -830,7 +844,7 @@ class TestWorkflowContext:
                 'task_index': 1,
                 'task_name': 'async_reads_ctx',
                 'results_by_id': {
-                    'node_a': encode_task_result(TaskResult(ok='upstream'), str),
+                    'node_a': encode_task_result(Ok('upstream'), str),
                 },
                 'task_name_by_id': {'node_a': source_str.task_name},
             },
@@ -838,5 +852,5 @@ class TestWorkflowContext:
 
         run = _runner(app, task_loop)
         assert (
-            _result(run(reads_ctx.task_name, kwargs), str).ok_value == 'wf-1:upstream'
+            _result(run(reads_ctx.task_name, kwargs), str) == Succeeded('wf-1:upstream')
         )

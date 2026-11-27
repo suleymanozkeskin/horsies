@@ -25,10 +25,10 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.task_decorator import TaskFunction
-from horsies.core.types.result import is_ok
+from horsies.core.types.result import Err, Ok, Result, is_ok
 from tests.integration.conftest import DB_URL
 
 pytestmark = [pytest.mark.integration]
@@ -36,7 +36,7 @@ pytestmark = [pytest.mark.integration]
 POOL_TIMEOUT_SECONDS = 3
 THREAD_JOIN_BOUND_SECONDS = 15.0
 RESULT_WAIT_MS = 300
-PING_WINDOW_SECONDS = 0.3
+PING_WAIT_MS = 300
 
 
 @pytest.fixture(scope='module')
@@ -64,17 +64,17 @@ def one_connection_app(schema_ready: None) -> Generator[OneConnectionApp, None, 
     """App whose broker pool holds exactly one connection, with one task."""
     app = Horsies(AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr(DB_URL),
             pool_size=1,
             max_overflow=0,
-            pool_timeout=POOL_TIMEOUT_SECONDS,
+            pool_timeout_seconds=POOL_TIMEOUT_SECONDS,
         ),
     ))
 
     @app.task('sync_bridge_echo')
-    def sync_bridge_echo(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def sync_bridge_echo(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     yield OneConnectionApp(app=app, echo=sync_bridge_echo)
     closed = app.get_broker().close()
@@ -110,10 +110,10 @@ def test_ping_workers_after_sync_workflow_wait(
         workflow_id=uuid.uuid4(), broker=broker,
     )
 
-    waited, _ = _timed_call(lambda: handle.get(timeout_ms=RESULT_WAIT_MS))
+    waited, _ = _timed_call(lambda: handle.get(wait_ms=RESULT_WAIT_MS))
     pinged, _ = _timed_call(
-        lambda: app.ping_workers(timeout_seconds=PING_WINDOW_SECONDS),
+        lambda: app.ping_workers(wait_ms=PING_WAIT_MS),
     )
 
-    assert waited.is_err(), waited
+    assert isinstance(waited, Err), waited
     assert is_ok(pinged), pinged

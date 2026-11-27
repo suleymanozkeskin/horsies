@@ -19,7 +19,7 @@ use crate::broker::pools::core_pool_for_test_url;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
 use crate::core::task::Execution;
-use crate::monitoring::{cancel_task, TaskActionError, TaskActionErrorCode};
+use crate::monitoring::{cancel_task, CancelPolicy, TaskActionError, TaskActionErrorCode};
 use crate::test_support::sql::{self, TestPool};
 use crate::TaskStatus;
 
@@ -142,9 +142,13 @@ async fn a_cancelled_claim_leaves_no_live_row_and_keeps_its_claim_time() {
     let task = LiveTask::claimed("alpha_task", WORKER);
     seed_live(&database.pool, &task).await;
 
-    let cancelled = cancel_task(&database.broker(), task.id, false)
-        .await
-        .expect("a claimed task is cancelled");
+    let cancelled = cancel_task(
+        &database.broker(),
+        task.id,
+        CancelPolicy::PendingOrClaimedOnly,
+    )
+    .await
+    .expect("a claimed task is cancelled");
 
     assert_eq!(cancelled.was_status, TaskStatus::Claimed);
     assert_eq!(live_status(&database.pool, task.id).await, None);
@@ -172,9 +176,13 @@ async fn an_unknown_stored_history_status_is_stored_data_invalid_and_nothing_cha
     seed_terminal(&database.pool, &task, Ending::failed("TASK_EXCEPTION")).await;
     set_history_status(&database.pool, task.id, "NOT_KNOWN").await;
 
-    let refused = cancel_task(&database.broker(), task.id, false)
-        .await
-        .expect_err("stored data that does not parse is refused");
+    let refused = cancel_task(
+        &database.broker(),
+        task.id,
+        CancelPolicy::PendingOrClaimedOnly,
+    )
+    .await
+    .expect_err("stored data that does not parse is refused");
 
     assert_eq!(refused.code(), TaskActionErrorCode::StoredDataInvalid);
     assert!(!refused.retryable());
@@ -203,7 +211,7 @@ async fn a_success_finalize_after_the_cancel_of_a_running_task_changes_nothing()
     seed_live(&database.pool, &task).await;
     let generation = claim_generation(&database.pool, task.id).await;
 
-    let cancelled = cancel_task(&database.broker(), task.id, true)
+    let cancelled = cancel_task(&database.broker(), task.id, CancelPolicy::IncludeRunning)
         .await
         .expect("a running task is cancelled with the opt-in");
     let finalized = terminalize(
@@ -281,7 +289,7 @@ async fn a_cancel_after_the_success_of_a_running_task_is_not_cancellable() {
         "{finalized:?}"
     );
 
-    let refused = cancel_task(&database.broker(), task.id, true)
+    let refused = cancel_task(&database.broker(), task.id, CancelPolicy::IncludeRunning)
         .await
         .expect_err("a completed task is not cancelled");
 
@@ -316,7 +324,7 @@ async fn a_cancel_after_a_retry_moves_the_pending_row_with_the_failed_attempt() 
         .expect("write the failed attempt with a retry");
     assert_eq!(retried, "RETRY_SCHEDULED");
 
-    let cancelled = cancel_task(&database.broker(), task.id, true)
+    let cancelled = cancel_task(&database.broker(), task.id, CancelPolicy::IncludeRunning)
         .await
         .expect("a pending task is cancelled");
 
@@ -336,7 +344,7 @@ async fn a_failed_attempt_after_the_cancel_of_a_running_task_writes_nothing() {
     let task = running_task("alpha_task");
     seed_live(&database.pool, &task).await;
     let generation = claim_generation(&database.pool, task.id).await;
-    let cancelled = cancel_task(&database.broker(), task.id, true)
+    let cancelled = cancel_task(&database.broker(), task.id, CancelPolicy::IncludeRunning)
         .await
         .expect("a running task is cancelled with the opt-in");
 
@@ -377,7 +385,7 @@ async fn a_cancel_after_stale_recovery_is_not_cancellable() {
         .expect("run the stale recovery");
     assert_eq!(recovered, "APPLIED");
 
-    let refused = cancel_task(&database.broker(), task.id, true)
+    let refused = cancel_task(&database.broker(), task.id, CancelPolicy::IncludeRunning)
         .await
         .expect_err("a failed task is not cancelled");
 
@@ -398,7 +406,7 @@ async fn stale_recovery_after_the_cancel_of_a_running_task_writes_nothing() {
     let database = SpecDatabase::create().await;
     let task = running_task("alpha_task");
     seed_live(&database.pool, &task).await;
-    let _cancelled = cancel_task(&database.broker(), task.id, true)
+    let _cancelled = cancel_task(&database.broker(), task.id, CancelPolicy::IncludeRunning)
         .await
         .expect("a running task is cancelled with the opt-in");
 
@@ -432,7 +440,7 @@ async fn the_cancel_of_a_row_the_claim_function_just_claimed_wins() {
     let broker = database.broker();
     assert_eq!(claim_once(&database.pool, WORKER).await, [task.id]);
 
-    let cancelled = cancel_task(&broker, task.id, false)
+    let cancelled = cancel_task(&broker, task.id, CancelPolicy::PendingOrClaimedOnly)
         .await
         .expect("the claimed row is cancelled");
 
@@ -458,7 +466,7 @@ async fn a_concurrent_claim_and_cancel_leave_one_consistent_outcome() {
     let broker = database.broker();
 
     let (cancelled, claimed) = tokio::join!(
-        cancel_task(&broker, task.id, false),
+        cancel_task(&broker, task.id, CancelPolicy::PendingOrClaimedOnly),
         claim_once(&database.pool, OTHER_WORKER),
     );
 

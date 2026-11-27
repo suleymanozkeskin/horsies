@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use horsies::{
-    task, AppConfig, Horsies, HorsiesError, TaskError, TaskOutcome, TaskRuntime, UserErrorCode,
+    task, AppConfig, CustomErrorCode, Horsies, HorsiesError, TaskError, TaskOutcome, TaskRuntime,
     WaitLimit, WorkflowSpec, WorkflowSpecBuilder,
 };
 use horsies_examples::{
@@ -23,7 +23,7 @@ use horsies_examples::{
 use uuid::Uuid;
 
 /// The codes of `start_report`'s own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum ReportCode {
     SpecRefused,
     StartFailed,
@@ -44,30 +44,34 @@ async fn format_report(
     }
 }
 
-/// The spec of the report of `region`, built at run time.
-fn report_spec(region: String) -> Result<WorkflowSpec, HorsiesError> {
-    let mut builder = WorkflowSpecBuilder::new("regional_report");
+/// The spec of the report of `region`, built at run time on `builder`, a
+/// workflow builder of the app.
+fn report_spec(
+    mut builder: WorkflowSpecBuilder,
+    region: String,
+) -> Result<WorkflowSpec, HorsiesError> {
     builder.definition_key("examples.regional_report.v1");
-    let sales = builder.task(fetch_sales::node()?.set(fetch_sales::params::region(), region)?);
+    let sales = builder.task(fetch_sales::node().set(fetch_sales::fields::region(), region)?)?;
     let report =
-        builder.task(format_report::node()?.arg_from(format_report::params::sales(), sales));
+        builder.task(format_report::node().arg_from(format_report::fields::sales(), sales))?;
     builder.output(report);
     builder.build()
 }
 
 #[task("start_report")]
 async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError<ReportCode>> {
-    let spec = report_spec(region)
-        .map_err(|refused| TaskError::user(ReportCode::SpecRefused, refused.to_string()))?;
+    // The runtime gives a builder of the app that runs the task.
+    let spec = report_spec(rt.workflow_builder("regional_report"), region)
+        .map_err(|refused| TaskError::custom(ReportCode::SpecRefused, refused.to_string()))?;
     let handle = rt
         .start::<String>(&spec)
         .await
-        .map_err(|error| TaskError::user(ReportCode::StartFailed, error.to_string()))?;
+        .map_err(|error| TaskError::custom(ReportCode::StartFailed, error.to_string()))?;
     Ok(handle.workflow_id())
 }
 
 fn build_app() -> Result<Horsies, HorsiesError> {
-    let mut config = AppConfig::for_database_url(database_url());
+    let mut config = AppConfig::from_database_url(database_url());
     config.worker_profiles = BTreeMap::from([(DEFAULT_PROFILE.to_owned(), isolated_profile())]);
     let mut app = Horsies::new(config)?;
     let _fetch_sales = fetch_sales::register(&mut app)?;
@@ -77,8 +81,8 @@ fn build_app() -> Result<Horsies, HorsiesError> {
 }
 
 async fn demo(app: Horsies) -> DemoResult {
-    let limit = WaitLimit::parse(Some(Duration::from_secs(60)))?;
-    let started = start_report::send("emea".to_owned()).await?;
+    let limit = WaitLimit::Within(Duration::from_secs(60));
+    let started = start_report::send(&app, "emea".to_owned()).await?;
     let workflow_id = match started.get(limit).await? {
         TaskOutcome::Succeeded(workflow_id) => workflow_id,
         TaskOutcome::Failed(error) => {

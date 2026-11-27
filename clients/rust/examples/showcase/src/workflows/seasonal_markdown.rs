@@ -1,7 +1,7 @@
 //! The seasonal markdown: mark each SKU down, then roll the sales of the
 //! campaign up.
 
-use horsies::{HorsiesError, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder};
+use horsies::{HorsiesError, WorkflowDefinition, WorkflowDefinitionConfig, WorkflowSpecBuilder};
 
 use crate::domain::SalesRollup;
 use crate::tasks::analytics::sales_rollup;
@@ -17,7 +17,7 @@ pub struct SeasonalMarkdown;
 
 impl WorkflowDefinition for SeasonalMarkdown {
     type Output = SalesRollup;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "seasonal_markdown"
@@ -27,30 +27,30 @@ impl WorkflowDefinition for SeasonalMarkdown {
         "acme.seasonal_markdown.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let mut markdowns = Vec::new();
         for (index, sku_number) in (1..=LAST_SKU).enumerate() {
             markdowns.push(
                 builder.task(
-                    update_price::node()?
+                    update_price::node()
                         .node_id(format!("update_price_{index:02}"))
                         .set(
-                            update_price::params::sku(),
+                            update_price::fields::sku(),
                             format!("ACME-SKU-{sku_number:04}"),
                         )?
-                        .set(update_price::params::campaign_id(), CAMPAIGN_ID.to_owned())?,
-                ),
+                        .set(update_price::fields::campaign_id(), CAMPAIGN_ID.to_owned())?,
+                )?,
             );
         }
         let rollup = builder.task(
-            sales_rollup::node()?
+            sales_rollup::node()
                 .node_id("sales_rollup")
                 .set(
-                    sales_rollup::params::window(),
+                    sales_rollup::fields::window(),
                     format!("markdown-{CAMPAIGN_ID}"),
                 )?
                 .waits_for_all(markdowns),
-        );
-        Ok(WorkflowDefConfig::new().output(rollup))
+        )?;
+        Ok(WorkflowDefinitionConfig::new().output(rollup))
     }
 }

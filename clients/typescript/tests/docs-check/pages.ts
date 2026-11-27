@@ -24,6 +24,7 @@ export const WALK_BOUNDS: WalkBounds = { folderDepth: 8, pages: 2_000, pageBytes
 export type WalkFailed =
   | { readonly kind: "ReadFailed"; readonly path: string; readonly cause: string }
   | { readonly kind: "NotAFolder"; readonly path: string }
+  | { readonly kind: "RequiredRootAbsent"; readonly path: string }
   | { readonly kind: "TooDeep"; readonly path: string; readonly bound: number }
   | { readonly kind: "TooManyPages"; readonly root: string; readonly bound: number }
   | { readonly kind: "PageTooLarge"; readonly path: string; readonly bytes: number; readonly bound: number };
@@ -147,6 +148,36 @@ export function readRoot(repositoryDir: string, root: string, bounds: WalkBounds
   return walked.ok ? { ok: true, value: { state: "read", root, pages: walk.pages } } : walked;
 }
 
+/** Whether a docs root may have no folder (`mayBeAbsent`) or must have one (`required`). */
+export type RootPresence = "mayBeAbsent" | "required";
+
+/** A docs root: its folder path from the repository folder, and its presence rule. */
+export type DocRoot = { readonly path: string; readonly presence: RootPresence };
+
+/**
+ * The pages of `root`, as `readRoot`. A root with the rule `required` and no folder fails with `RequiredRootAbsent`;
+ * a root with the rule `mayBeAbsent` and no folder is `absent`.
+ */
+export function readDocRoot(repositoryDir: string, root: DocRoot, bounds: WalkBounds = WALK_BOUNDS): Result<RootRead, WalkFailed> {
+  const read = readRoot(repositoryDir, root.path, bounds);
+
+  if (!read.ok || read.value.state !== "absent") {
+    return read;
+  }
+
+  switch (root.presence) {
+    case "mayBeAbsent":
+      return read;
+    case "required":
+      return { ok: false, error: { kind: "RequiredRootAbsent", path: root.path } };
+    default: {
+      const unreachable: never = root.presence;
+
+      return unreachable;
+    }
+  }
+}
+
 /** The text of a walk failure, for a message. */
 export function walkFailedText(failure: WalkFailed): string {
   switch (failure.kind) {
@@ -154,6 +185,8 @@ export function walkFailedText(failure: WalkFailed): string {
       return `${failure.path}: ${failure.cause}`;
     case "NotAFolder":
       return `${failure.path}: not a folder`;
+    case "RequiredRootAbsent":
+      return `${failure.path}: no folder, and the docs check needs it`;
     case "TooDeep":
       return `${failure.path}: more than ${failure.bound} folders below its docs root`;
     case "TooManyPages":

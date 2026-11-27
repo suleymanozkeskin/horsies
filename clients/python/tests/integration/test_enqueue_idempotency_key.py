@@ -25,8 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
-    BrokerIdempotencyKeyConflict,
-    BrokerResult,
+    DatabaseIdempotencyKeyConflict,
+    DatabaseResult,
 )
 from tests.task_ids import mint_task_id
 from horsies.core.models.broker import PostgresConfig
@@ -69,7 +69,7 @@ def resend_with_a_fresh_id(send: Send) -> Send:
 
 async def enqueue(
     broker: PostgresBroker, send: Send, key: str | None
-) -> BrokerResult[str]:
+) -> DatabaseResult[str]:
     return await broker.enqueue_async(
         TASK_NAME,
         task_id=send.task_id,
@@ -249,7 +249,7 @@ async def test_an_expired_key_applies_to_a_new_task_and_the_old_task_stays(
 
 async def send_concurrently(
     db_url: str, sends: tuple[Send, ...], key: str
-) -> tuple[BrokerResult[str], ...]:
+) -> tuple[DatabaseResult[str], ...]:
     """Run every send at once, each on its own pooled connection."""
     broker = PostgresBroker(
         PostgresConfig(
@@ -324,7 +324,7 @@ async def test_concurrent_sends_with_two_commands_classify_against_the_winner(
             case Ok(task_id):
                 assert send.input_json == winner.input_json
                 assert task_id == winner.task_id
-            case Err(BrokerIdempotencyKeyConflict(owner_task_id=owner)):
+            case Err(DatabaseIdempotencyKeyConflict(owner_task_id=owner)):
                 assert send.input_json != winner.input_json
                 assert owner == winner.task_id
             case Err(other):

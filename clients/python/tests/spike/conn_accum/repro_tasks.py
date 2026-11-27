@@ -11,15 +11,16 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result
 
 from tests.spike.conn_accum.repro_app import app
 from tests.spike.conn_accum.repro_db import app_engine
 
 
-@app.task(task_name='repro_app_db_task')
-def app_db_task(*, sleep_ms: int) -> TaskResult[str, TaskError]:
+@app.task(name='repro_app_db_task')
+def app_db_task(*, sleep_ms: int) -> Result[str, TaskError]:
     """Check out the app-owned engine and hold the connection across a slow query."""
     with app_engine.connect() as conn:
         conn.execute(text('SELECT pg_sleep(:s)'), {'s': sleep_ms / 1000.0})
-    return TaskResult(ok=f'ok:{sleep_ms}')
+    return Ok(f'ok:{sleep_ms}')

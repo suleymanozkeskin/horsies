@@ -13,7 +13,7 @@ export const validateOrder = defineTask({
   name: "validate_order",
   input: { orderId: h.uuid() },
   output: ValidatedOrder,
-  errors: ["EMPTY_ORDER"],
+  errorCodes: ["EMPTY_ORDER"],
 });
 
 type Order = h.Infer<typeof ValidatedOrder>;
@@ -42,4 +42,13 @@ of `h`: in a chain, an import that a block above makes already is dropped.
 import { h } from "horsies";
 
 export const orderTotal: number = h.decimal();
+```
+
+A block for the Bun runtime. It calls `Bun.serve`, so it compiles only when the blocks see the types of Bun.
+
+<!-- ts-check: alone -->
+```ts
+const server = Bun.serve({ port: 0, fetch: () => new Response("ok") });
+
+await server.stop();
 ```

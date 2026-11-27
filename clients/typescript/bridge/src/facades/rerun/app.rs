@@ -7,7 +7,7 @@
 //! transaction on the main core pool, and commits it.
 
 use horsies_core::telemetry::trace_carrier::SendTrace;
-use horsies_core::{RerunEnqueuePolicy, RerunTask};
+use horsies_core::{RegisteredTaskCodes, RerunCommand, RerunEnqueuePolicy};
 use napi::bindgen_prelude::Object;
 use napi::Env;
 use napi_derive::napi;
@@ -16,7 +16,8 @@ use crate::call::guard::CallKind;
 use crate::call::operation::{guarded_start, resolve, spawn_operation, EnvelopeResolver};
 use crate::call::thrown::{Envelope, NativeThrown};
 use crate::facades::rerun::arguments::{
-    rerun_command, rerun_policy, RerunCommandArg, RerunPolicyArg,
+    registered_task_codes, rerun_command, rerun_policy, RegisteredTaskCodesArg, RerunCommandArg,
+    RerunPolicyArg,
 };
 use crate::facades::rerun::records::{
     app_failure, connect_failed, AppRerunFailure, RerunOutcomeRecord, RERUN_SUBJECT,
@@ -37,16 +38,19 @@ pub enum AppRerunAnswer {
     Failed { error: AppRerunFailure },
 }
 
-/// The command, the policy and the trace of one rerun, as the core takes
-/// them.
+/// The command, the policy, the trace and the declared custom codes of one
+/// rerun, as the core takes them.
 struct AppRequest {
-    command: RerunTask,
+    command: RerunCommand,
     policy: RerunEnqueuePolicy,
     trace: SendTrace,
+    codes: RegisteredTaskCodes,
 }
 
 /// Rerun `command` with `policy` in a transaction of `handle`, and commit
-/// it. The new task stores the carrier of `trace`. Writes: a stop of the
+/// it. The new task stores the carrier of `trace`. `codes` are the declared
+/// custom codes of the calling app's tasks: the stored retry list of the
+/// source is checked against them before the write. Writes: a stop of the
 /// core during the call leaves the outcome unknown.
 ///
 /// A value that breaks a boundary rule resolves with `CLIENT_DEFECT`, and
@@ -62,9 +66,10 @@ pub fn rerun_task<'env>(
     command: RerunCommandArg,
     policy: RerunPolicyArg,
     trace: TraceArgument,
+    codes: RegisteredTaskCodesArg,
 ) -> napi::Result<Object<'env>> {
     let started = guarded_start(RERUN_SUBJECT, || {
-        app_request(command, &policy, trace).map_err(NativeThrown::from)
+        app_request(command, &policy, trace, &codes).map_err(NativeThrown::from)
     });
     match started {
         Ok(request) => {
@@ -90,11 +95,13 @@ fn app_request(
     command: RerunCommandArg,
     policy: &RerunPolicyArg,
     trace: TraceArgument,
+    codes: &RegisteredTaskCodesArg,
 ) -> Result<AppRequest, BoundaryRefusal> {
     Ok(AppRequest {
         command: rerun_command(command)?,
         policy: rerun_policy(policy)?,
         trace: trace.send_trace()?,
+        codes: registered_task_codes(codes)?,
     })
 }
 
@@ -111,7 +118,10 @@ async fn rerun_operation(connection: BrokerConnection, request: AppRequest) -> A
         }
     };
     let command = request.command.with_trace(request.trace);
-    match broker.rerun_task(command, request.policy).await {
+    match broker
+        .rerun_task(command, request.policy, &request.codes)
+        .await
+    {
         Ok(outcome) => AppRerunAnswer::Done {
             outcome: outcome.into(),
         },

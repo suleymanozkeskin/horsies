@@ -47,25 +47,26 @@ pub(crate) mod workflow_engine;
 // core re-exports
 pub use crate::core::RegisteredTask;
 pub use crate::core::{
-    error_code_label, mask_database_url, AnyNode, AppConfigError, BackoffStrategy, BuiltInTaskCode,
-    CancelGraceMs, CancelGraceOutOfRange, ContractCode, CronEnumTerm, CronNumericTerm, CronOrdinal,
-    CronSchedule, CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector,
-    DeclaredCodeRefusal, DeclaredCodesRefused, DeclaredErrorCode, DeclaredErrorCodes,
-    EnqueueRetention, ErrorCategory, ErrorCode, ErrorCodeLabel, Execution, ExecutionClass,
-    HandleErrorCode, HandleOperation, HandleOperationError, HandleResult, HourlySchedule,
-    IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, OnError, OperationalErrorCode,
-    OutcomeCode, PausedAgeRefused, PausedWorkflowAge, PayloadPolicy, PostgresConfig,
-    PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError, ResilienceConfigError,
-    RetentionChoice, RetentionClassKeyRefused, RetentionConfig, RetentionConfigError,
-    RetrievalCode, RetryPolicy, RetryPolicyError, ScheduleConfig, SchedulePattern,
-    StartRefusalCause, SubWorkflowFailure, SubWorkflowParams, SubWorkflowSummary, SuccessCase,
-    SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind,
-    TaskInfo, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
-    TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, UserCode, UserCodeRefused,
+    check_cancel_grace_ms, error_code_label, mask_database_url, AnyNode, AppConfigError,
+    BackoffStrategy, BuiltInTaskCode, CancelGraceOutOfRange, ContractCode, CronEnumTerm,
+    CronNumericTerm, CronOrdinal, CronSchedule, CustomCode, CustomCodeRefused, CustomQueueConfig,
+    CustomQueueConfigError, DailySchedule, DaySelector, DeclaredCodeRefusal, DeclaredCodesRefused,
+    DeclaredErrorCode, DeclaredErrorCodes, EnqueueRetention, ErrorCodeLabel, Execution,
+    ExecutionClass, HandleOperation, HandleResult, HorsiesErrorCategory, HorsiesErrorCode,
+    HourlySchedule, IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, OnError,
+    OperationalCode, OutcomeCode, PausedAgeRefused, PausedWorkflowAge, PayloadPolicy,
+    PostgresConfig, PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
+    ResilienceConfigError, RetentionChoice, RetentionClassKeyRefused, RetentionConfig,
+    RetentionConfigError, RetrievalCode, RetryPolicy, RetryPolicyError, ScheduleConfig,
+    SchedulePattern, StartRefusalCause, SubWorkflowFailure, SubWorkflowParameters,
+    SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError,
+    TaskErrorCode, TaskErrorKind, TaskInfo, TaskOptions, TaskRegistry, TaskResult, TaskSchedule,
+    TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus,
     ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig, WorkflowContext,
-    WorkflowMeta, WorkflowSpec, WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult,
-    WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES, UNDECLARED_LABEL,
-    WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
+    WorkflowHandleError, WorkflowHandleErrorCode, WorkflowMetadata, WorkflowNodeStatus,
+    WorkflowSpec, WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus,
+    DEFAULT_CANCEL_GRACE_MS, TASK_TERMINAL_STATES, UNDECLARED_LABEL, WF_TASK_TERMINAL_VALUES,
+    WORKFLOW_NODE_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };
 pub use crate::core::{AppConfig, HorsiesError};
 // A user value kept as its stored text: a sub-workflow summary output, the `data` of a task error.
@@ -73,14 +74,14 @@ pub use crate::core::codec::{JsonText, JsonTextRefused};
 
 // broker re-exports
 pub use crate::broker::{
-    expected_schema_version, BrokerCheckCause, BrokerError, BrokerErrorCode, BrokerOperationError,
-    BrokerOperationFailedCode, BrokerOperationSource, BrokerRefusalCause, BrokerResult,
-    CheckInterruption, CheckedSend, ConnectivityRefusal, DatabasePing, ExpiredTaskRow,
-    HeartbeatRow, ListenError, ListenProbeFailure, ListenerPlanError, PostgresBroker,
-    RawResultRead, RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow,
-    StoredEnvelopeRefused, StoredEnvelopeText, TaskAttemptRow, TaskInfoRead, TaskInfoRow,
-    WorkerPingRequest, WorkerPingStep, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
-    WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    expected_schema_version, BrokerCheckCause, BrokerError, BrokerOperationSource,
+    BrokerRefusalCause, CheckInterruption, CheckedSend, ConnectivityRefusal, DatabaseErrorCode,
+    DatabaseOperationError, DatabaseOperationFailedCode, DatabasePing, DatabaseResult,
+    ExpiredTaskRow, HeartbeatRow, ListenError, ListenProbeFailure, ListenerPlanError,
+    PostgresBroker, RawResultRead, RawResultRecord, SchemaInitializationMode, SessionCheckFailure,
+    StaleTaskRow, StoredEnvelopeRefused, StoredEnvelopeText, TaskAttemptRow, TaskInfoRead,
+    TaskInfoRow, WorkerPingRequest, WorkerPingStep, WorkerPong, WorkerPongPayload,
+    WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 // The node read of a task by its id: the workflow facts of the span of an
@@ -171,7 +172,7 @@ pub use crate::worker::executor::child_host::{
     ProcessRole, RunCancelSignal, RunCancelState, RunHandle, RunHandleRefused, RunSignalRefused,
     RunSpawnRefused, ThreadRole, WorkStopCause, CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND,
     HANDLER_DRAIN, HANDLER_ERROR_LOG_EVERY, HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS,
-    HANDLER_STATS_INTERVAL, HOST_LOOP_TURN_TICK, MAX_RUN_WORK, NODE_READER_STOP_BOUND,
+    HANDLER_STATISTICS_INTERVAL, HOST_LOOP_TURN_TICK, MAX_RUN_WORK, NODE_READER_STOP_BOUND,
     NODE_READ_QUEUE_SPANS,
 };
 // The fencing token of a run, which `run_fencing_token` gives.
@@ -180,6 +181,14 @@ pub use crate::core::task::{FencingToken, FencingTokenRefused};
 // The parent-child frame codec, for the Python child program and the
 // preload process: they speak it through `horsies._core`.
 pub use crate::worker::executor::protocol as frame_protocol;
+
+// The waits of the parent for a child: the ready frame of a booting child,
+// the exit after the end of its socket, the exit after a stop frame. A host
+// whose child process ends after `run_child_host` returns puts its own exit
+// bounds inside them.
+pub use crate::worker::executor::supervisor::{
+    CHANNEL_LOST_GRACE, CHILD_READY_TIMEOUT, CHILD_STOP_TIMEOUT,
+};
 
 // How the core ends the process from its own threads (a child at the end of
 // its parent, a worker that fails closed): `ChildApp::exit` and
@@ -195,6 +204,15 @@ pub use crate::worker::runner_beats::RUNNER_HEARTBEAT_LOST_EXIT_CODE;
 // The bounds of a task's `timeout_ms`: the check of a declared task
 // (`core::task::declared_options`) and a client's text of its refusal.
 pub use crate::worker::retry::{MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS};
+// The default route of a task, the idempotency key bound and the schedule
+// defaults: each is read by the clients from here (Python through the
+// generated `_catalog`).
+pub use crate::core::config::queue::{DEFAULT_QUEUE_NAME, DEFAULT_QUEUE_PRIORITY};
+pub use crate::core::config::schedule::{
+    DEFAULT_MAX_CATCH_UP_RUNS, DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, DEFAULT_SCHEDULE_ENABLED,
+    DEFAULT_SCHEDULE_TIMEZONE,
+};
+pub use crate::core::history::identity::keys::IDEMPOTENCY_KEY_MAX_BYTES;
 // The worker connection check of a client's live check (`check --live`):
 // on a connected broker (the Rust client), and on a lazy handle (the Python
 // bridge).
@@ -218,16 +236,17 @@ pub use crate::worker::{
 
 // worker state snapshot values
 pub use crate::broker::{
-    checked_history_limit, ping_listener_disabled, ping_min_responses_refused,
-    ping_timeout_refused, worker_history_limit_refused, ClassBudget, ClassBudgets,
-    ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth, SnapshotProfile,
+    checked_history_limit, ping_listener_disabled, ping_min_responses_refused, ping_wait_refused,
+    worker_history_limit_refused, ClearableBootCause, DownSlot, DownSlots, ExecutionClassBudget,
+    ExecutionClassBudgets, ShortageErrno, SlotHealth, SnapshotProfile,
     MAX_BOOT_FAILURE_DETAIL_CHARS,
 };
 
 // fleet check and class report
 pub use crate::broker::{
-    BudgetLoad, ClassCoverage, ClassReport, PendingStream, StreamCoverage, StreamCoverageState,
-    StreamWait, WorkerClassLoad, LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT,
+    BudgetLoad, ExecutionClassCoverage, ExecutionClassReport, PendingStream, StreamCoverage,
+    StreamCoverageState, StreamWait, WorkerExecutionClassLoad, LIVE_SNAPSHOT_ROW_LIMIT,
+    PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT,
 };
 
 // the stale and expired task lists of a client handle
@@ -243,7 +262,8 @@ pub use crate::broker::migrations::SchemaRefusal;
 pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
 pub use crate::core::history::rerun::{
-    NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunErrorCode, RerunOutcome, RerunTask,
+    DeclaredCodes, NotEligibleReason, RegisteredTaskCodes, RerunCommand, RerunEnqueuePolicy,
+    RerunError, RerunErrorCode, RerunOutcome,
 };
 // One core statement in a transaction that the caller owns: the Rust
 // client's adapters implement `CallerTransaction`; the core's own

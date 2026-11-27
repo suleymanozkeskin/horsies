@@ -25,12 +25,12 @@ from sqlalchemy import text
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.boot_failure import ResourceShortage, ShortageErrno
-from horsies.core.models.health import DownSlot, SlotsDown, WorkerStateSnapshot
+from horsies.core.models.health import DownSlot, SlotHealthSlotsDown, WorkerStateSnapshot
 from horsies.core.task_decorator import TaskFunction, TaskHandle
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from tests.broker_resources_support import current_resources
-from tests.e2e.helpers.assertions import assert_ok, unwrap_send
+from tests.e2e.helpers.assertions import assert_succeeded, read_succeeded, unwrap_send
 from tests.e2e.helpers.db import read_task
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import instance_task_loop_boot as boot
@@ -68,7 +68,7 @@ def _ready_check(healthcheck: TaskFunction[[], str]) -> Callable[[], bool]:
             if is_err(sent):
                 return False
             handle = sent.ok_value
-        return handle.get(timeout_ms=2000).is_ok()
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return check
 
@@ -152,9 +152,9 @@ async def test_a_task_loop_failure_at_boot_costs_one_attempt(
         ready_check=_ready_check(boot.healthcheck),
     ) as worker:
         handle = unwrap_send(await boot.async_pid.send_async())
-        result = await handle.get_async(timeout_ms=RESULT_TIMEOUT_MS)
+        result = await handle.get_async(wait_ms=RESULT_TIMEOUT_MS)
 
-        assert_ok(result)
+        assert_succeeded(result)
         assert loop_failures.read_text(encoding='ascii') == '0'
         assert worker.poll() is None
         async with current_resources(broker).session_factory() as session:
@@ -180,9 +180,9 @@ async def test_an_app_with_no_async_task_creates_no_task_loop(
         ready_check=_ready_check(sync_only.healthcheck),
     ) as worker:
         handle = unwrap_send(await sync_only.healthcheck.send_async())
-        result = await handle.get_async(timeout_ms=RESULT_TIMEOUT_MS)
+        result = await handle.get_async(wait_ms=RESULT_TIMEOUT_MS)
 
-        assert_ok(result)
+        assert_succeeded(result)
         assert worker.poll() is None
         assert loop_failures.read_text(encoding='ascii') == '100'
 
@@ -198,7 +198,7 @@ async def _degraded_snapshot(
         assert is_ok(listed), listed
         for snapshot in listed.ok_value:
             match snapshot.slot_health:
-                case SlotsDown() if snapshot.worker_started_at >= started_after:
+                case SlotHealthSlotsDown() if snapshot.worker_started_at >= started_after:
                     return snapshot
                 case _:
                     continue
@@ -225,12 +225,12 @@ async def test_a_slot_that_cannot_create_its_task_loop_leaves_the_worker_degrade
         ready_check=_ready_check(boot.healthcheck),
     ) as worker:
         handle = unwrap_send(await boot.async_pid.send_async())
-        assert_ok(await handle.get_async(timeout_ms=RESULT_TIMEOUT_MS))
+        assert_succeeded(await handle.get_async(wait_ms=RESULT_TIMEOUT_MS))
         snapshot = await _degraded_snapshot(broker, started_after)
         assert worker.poll() is None
 
     match snapshot.slot_health:
-        case SlotsDown(
+        case SlotHealthSlotsDown(
             slots=(
                 DownSlot(slot=1, cause=ResourceShortage(ShortageErrno.EMFILE)) as down,
             ),

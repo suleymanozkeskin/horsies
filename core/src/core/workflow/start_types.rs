@@ -27,7 +27,7 @@ pub enum WorkflowStartErrorCode {
     /// Infrastructure error: schema init, DB transaction. Conditionally retryable.
     EnqueueFailed,
     /// A sync or blocking start was called on a thread that runs an event loop or a tokio
-    /// runtime; its wait would stall that loop, so nothing was written. `retry_start` accepts it.
+    /// runtime; its wait would stall that loop, so nothing was written. `resend_start` accepts it.
     #[code_catalog(blocking_form_only)]
     AsyncContext,
 }
@@ -66,8 +66,8 @@ impl std::fmt::Display for WorkflowStartErrorCode {
 pub enum WorkflowStartError {
     /// The spec, its args or the retry input was refused. Nothing was written.
     ///
-    /// The same start is refused again. ``exception`` is ``NoCause()`` when a
-    /// check refused the input without a Python exception. The retry methods
+    /// The same start is refused again. ``cause`` is ``NoCause()`` when a
+    /// check refused the input without a Python exception. The resend methods
     /// refuse this error.
     // `workflow_id` is the id of the start: the caller's id, or the id
     // minted for it, as in Python.
@@ -91,7 +91,7 @@ pub enum WorkflowStartError {
     /// The workflow id exists for another workflow name. Nothing was written.
     ///
     /// ``existing_workflow_name`` names the workflow that holds the id. A start
-    /// with the same id is refused again; use another id. The retry methods
+    /// with the same id is refused again; use another id. The resend methods
     /// refuse this error.
     #[error_class(
         class = "WorkflowStartIdConflict",
@@ -115,7 +115,7 @@ pub enum WorkflowStartError {
     /// from the command of this start, or the run is a sub-workflow, which has
     /// no start command. ``workflow_id`` is the id of that run. A start with
     /// this id must send the same command; another command is refused again,
-    /// so send the same command or use another id. The retry methods refuse
+    /// so send the same command or use another id. The resend methods refuse
     /// this error.
     #[error_class(
         class = "WorkflowStartCommandConflict",
@@ -134,7 +134,7 @@ pub enum WorkflowStartError {
     ///
     /// ``retryable`` is the core's classification of the cause: ``True`` when
     /// the condition may clear, for example a lost connection. The transaction
-    /// rolled back, or its commit outcome is unknown. ``retry_start(err)``
+    /// rolled back, or its commit outcome is unknown. ``resend_start(err)``
     /// starts again with the same id; a workflow that the failed attempt
     /// committed comes back as the existing handle.
     #[error_class(
@@ -156,13 +156,13 @@ pub enum WorkflowStartError {
         #[error_slot(cause)]
         cause: Box<WorkflowError>,
     },
-    /// Sync ``start()`` or ``retry_start()`` was called on a thread that runs an event loop.
+    /// Sync ``start()`` or ``resend_start()`` was called on a thread that runs an event loop.
     ///
-    /// Nothing was written: the wait would stall that loop. ``retry_start_async(err)``
+    /// Nothing was written: the wait would stall that loop. ``resend_start_async(err)``
     /// starts the workflow with the same id; a sync call on that thread returns
     /// this error again.
     // The Rust client's blocking starts give it on a thread that runs a
-    // tokio runtime; `retry_start` completes the start with `workflow_id`.
+    // tokio runtime; `resend_start` completes the start with `workflow_id`.
     #[error_class(
         class = "WorkflowStartAsyncContext",
         code = "AsyncContext",
@@ -361,7 +361,7 @@ impl std::error::Error for WorkflowStartError {}
 /// `Err(WorkflowStartError)` on failure.
 pub type WorkflowStartResult<T> = Result<T, WorkflowStartError>;
 
-/// Validate whether a `WorkflowStartError` is eligible for retry_start.
+/// Validate whether a `WorkflowStartError` is eligible for resend_start.
 ///
 /// `EnqueueFailed` and `AsyncContext` errors can be retried: each carries the
 /// id of a start that wrote nothing or may have written. The error's
@@ -392,7 +392,7 @@ pub fn validate_start_retry(
         | WorkflowStartError::CommandConflict { .. } => {
             return Err(WorkflowStartError::ValidationFailed {
                 message: format!(
-                    "retry_start only accepts ENQUEUE_FAILED and ASYNC_CONTEXT errors, got {}",
+                    "resend_start only accepts ENQUEUE_FAILED and ASYNC_CONTEXT errors, got {}",
                     error.code(),
                 ),
                 workflow_name: spec_name.to_owned(),
@@ -536,7 +536,7 @@ mod tests {
         }
     }
 
-    // -- validate_start_retry (ported from Python test_workflow_retry_start.py) --
+    // -- validate_start_retry (ported from Python test_workflow_resend_start.py) --
 
     #[test]
     fn validate_retry_accepts_enqueue_failed() {
@@ -620,7 +620,7 @@ mod tests {
         assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
         assert_eq!(
             refused.message(),
-            "retry_start only accepts ENQUEUE_FAILED and ASYNC_CONTEXT errors, got \
+            "resend_start only accepts ENQUEUE_FAILED and ASYNC_CONTEXT errors, got \
              WORKFLOW_COMMAND_CONFLICT"
         );
         assert_eq!(refused.workflow_id(), error.workflow_id());
@@ -864,7 +864,7 @@ mod tests {
         let exception = error
             .slot_values()
             .into_iter()
-            .find(|slot| slot.name == "exception")
+            .find(|slot| slot.name == "cause")
             .map(|slot| slot.value);
         assert_eq!(
             exception,
@@ -890,7 +890,7 @@ mod tests {
             error
                 .slot_values()
                 .into_iter()
-                .find(|slot| slot.name == "exception")
+                .find(|slot| slot.name == "cause")
                 .map(|slot| slot.value)
         }
         let by_check = refused(StartRefusalCause::Check);

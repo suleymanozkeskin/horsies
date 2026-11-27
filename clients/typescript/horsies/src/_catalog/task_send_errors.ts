@@ -17,26 +17,30 @@ export interface TaskSendPayload {
 }
 
 export interface TaskSendSuppressed {
+  readonly kind: "suppressed";
   readonly code: "SEND_SUPPRESSED";
   readonly message: string;
 }
 
 export interface TaskSendValidationFailed {
+  readonly kind: "validationFailed";
   readonly code: "VALIDATION_FAILED";
   readonly message: string;
-  readonly exception: CoreCause | NoCause;
+  readonly cause: CoreCause | NoCause;
 }
 
 export interface TaskSendEnqueueFailed {
+  readonly kind: "enqueueFailed";
   readonly code: "ENQUEUE_FAILED";
   readonly taskId: string;
   readonly payload: TaskSendPayload;
   readonly message: string;
   readonly retryable: boolean;
-  readonly exception: CoreCause | NoCause;
+  readonly cause: CoreCause | NoCause;
 }
 
 export interface TaskSendPayloadMismatch {
+  readonly kind: "payloadMismatch";
   readonly code: "PAYLOAD_MISMATCH";
   readonly taskId: string;
   readonly payload: TaskSendPayload;
@@ -44,6 +48,7 @@ export interface TaskSendPayloadMismatch {
 }
 
 export interface TaskSendPayloadTooLarge {
+  readonly kind: "payloadTooLarge";
   readonly code: "PAYLOAD_TOO_LARGE";
   readonly message: string;
   readonly sizeBytes: bigint;
@@ -51,7 +56,9 @@ export interface TaskSendPayloadTooLarge {
 }
 
 export interface TaskSendIdempotencyKeyConflict {
+  readonly kind: "idempotencyKeyConflict";
   readonly code: "IDEMPOTENCY_KEY_CONFLICT";
+  readonly retryable: false;
   readonly taskId: string;
   readonly payload: TaskSendPayload;
   readonly message: string;
@@ -90,7 +97,7 @@ export interface NativeTaskSendValidationFailed {
   readonly class: "TaskSendValidationFailed";
   readonly slots: {
     readonly message: string;
-    readonly exception: CoreCause | NoCause;
+    readonly cause: CoreCause | NoCause;
   };
 }
 
@@ -101,7 +108,7 @@ export interface NativeTaskSendEnqueueFailed {
     readonly payload: NativeTaskSendPayload;
     readonly message: string;
     readonly retryable: boolean;
-    readonly exception: CoreCause | NoCause;
+    readonly cause: CoreCause | NoCause;
   };
 }
 
@@ -182,6 +189,7 @@ export function taskSendCoreErrorFromNative(raw: NativeTaskSendCoreError): TaskS
   switch (raw.class) {
     case "TaskSendSuppressed": {
       const value: TaskSendSuppressed = {
+        kind: "suppressed",
         code: "SEND_SUPPRESSED",
         message: raw.slots.message,
       };
@@ -195,40 +203,43 @@ export function taskSendCoreErrorFromNative(raw: NativeTaskSendCoreError): TaskS
 
     case "TaskSendValidationFailed": {
       const value: TaskSendValidationFailed = {
+        kind: "validationFailed",
         code: "VALIDATION_FAILED",
         message: raw.slots.message,
-        exception: Object.freeze({ ...raw.slots.exception }),
+        cause: Object.freeze({ ...raw.slots.cause }),
       };
 
       return Object.freeze(
         Object.defineProperties(value, {
           message: { enumerable: false },
-          exception: { enumerable: false },
+          cause: { enumerable: false },
         }),
       );
     }
 
     case "TaskSendEnqueueFailed": {
       const value: TaskSendEnqueueFailed = {
+        kind: "enqueueFailed",
         code: "ENQUEUE_FAILED",
         taskId: raw.slots.task_id,
         payload: taskSendPayloadFromNative(raw.slots.payload),
         message: raw.slots.message,
         retryable: raw.slots.retryable,
-        exception: Object.freeze({ ...raw.slots.exception }),
+        cause: Object.freeze({ ...raw.slots.cause }),
       };
 
       return Object.freeze(
         Object.defineProperties(value, {
           payload: { enumerable: false },
           message: { enumerable: false },
-          exception: { enumerable: false },
+          cause: { enumerable: false },
         }),
       );
     }
 
     case "TaskSendPayloadMismatch": {
       const value: TaskSendPayloadMismatch = {
+        kind: "payloadMismatch",
         code: "PAYLOAD_MISMATCH",
         taskId: raw.slots.task_id,
         payload: taskSendPayloadFromNative(raw.slots.payload),
@@ -245,6 +256,7 @@ export function taskSendCoreErrorFromNative(raw: NativeTaskSendCoreError): TaskS
 
     case "TaskSendPayloadTooLarge": {
       const value: TaskSendPayloadTooLarge = {
+        kind: "payloadTooLarge",
         code: "PAYLOAD_TOO_LARGE",
         message: raw.slots.message,
         sizeBytes: raw.slots.size_bytes,
@@ -260,7 +272,9 @@ export function taskSendCoreErrorFromNative(raw: NativeTaskSendCoreError): TaskS
 
     case "TaskSendIdempotencyKeyConflict": {
       const value: TaskSendIdempotencyKeyConflict = {
+        kind: "idempotencyKeyConflict",
         code: "IDEMPOTENCY_KEY_CONFLICT",
+        retryable: false,
         taskId: raw.slots.task_id,
         payload: taskSendPayloadFromNative(raw.slots.payload),
         message: raw.slots.message,

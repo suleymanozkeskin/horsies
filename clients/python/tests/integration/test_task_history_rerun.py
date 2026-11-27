@@ -26,11 +26,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from horsies._core import CoreContractViolation
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.periods import period_class_key
 from horsies import TaskAbsenceReason
 from horsies.core.history.rerun.operations import (
     NotEligibleReason,
+    RerunCommand,
     RerunEnqueued,
     RerunEnqueuePolicy,
     RerunInputCorrupt,
@@ -40,8 +40,7 @@ from horsies.core.history.rerun.operations import (
     RerunSourceAbsent,
     RerunSourceCorrupt,
     RerunSourceLive,
-    RerunTask,
-    rerun_task,
+    rerun_task_in_async,
 )
 from horsies.core.types.status import TaskStatus
 
@@ -186,10 +185,11 @@ class TestRerunEndToEnd:
             source = await seed_failed_source(connection)
             before = await history_row_bytes(connection, source)
 
-            outcome = await rerun_task(
+            outcome = await rerun_task_in_async(
                 connection,
-                RerunTask(source_task_id=UUID(source), deadline=deadline),
+                RerunCommand(source_task_id=UUID(source), good_until=deadline),
                 policy(),
+                registered_task_codes={},
             )
             assert isinstance(outcome, RerunEnqueued)
             assert outcome.source_task_id == UUID(source)
@@ -210,7 +210,7 @@ class TestRerunEndToEnd:
             # Lineage, atomic pair.
             assert str(row.rerun_of_task_id) == source
             assert str(row.rerun_root_task_id) == source
-            # Caller-explicit deadline.
+            # Caller-explicit good_until.
             assert row.good_until == deadline
             # Fresh runtime state.
             assert row.status == 'PENDING'
@@ -263,10 +263,11 @@ class TestRerunEndToEnd:
                 ),
             )
 
-            outcome = await rerun_task(
+            outcome = await rerun_task_in_async(
                 connection,
-                RerunTask(source_task_id=UUID(source), deadline=None),
+                RerunCommand(source_task_id=UUID(source), good_until=None),
                 policy(),
+                registered_task_codes={},
             )
 
             assert isinstance(outcome, RerunEnqueued)
@@ -280,10 +281,11 @@ class TestRerunEndToEnd:
         async with terminalization_schema.engine.begin() as connection:
             await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             source = await seed_failed_source(connection)
-            first = await rerun_task(
+            first = await rerun_task_in_async(
                 connection,
-                RerunTask(source_task_id=UUID(source), deadline=None),
+                RerunCommand(source_task_id=UUID(source), good_until=None),
                 policy(),
+                registered_task_codes={},
             )
             assert isinstance(first, RerunEnqueued)
             # Fail the first rerun for real, then rerun it. The row runs
@@ -307,12 +309,13 @@ class TestRerunEndToEnd:
                 error_code='X',
                 failed_reason='x',
             )
-            second = await rerun_task(
+            second = await rerun_task_in_async(
                 connection,
-                RerunTask(
-                    source_task_id=first.new_task_id, deadline=None
+                RerunCommand(
+                    source_task_id=first.new_task_id, good_until=None
                 ),
                 policy(),
+                registered_task_codes={},
             )
             assert isinstance(second, RerunEnqueued)
             assert second.source_task_id == first.new_task_id
@@ -326,10 +329,11 @@ class TestRerunEndToEnd:
             await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             await prepare_move_storage(connection, SECOND_CLASS, duration_days=SECOND_DAYS)
             source = await seed_failed_source(connection)
-            outcome = await rerun_task(
+            outcome = await rerun_task_in_async(
                 connection,
-                RerunTask(source_task_id=UUID(source), deadline=None),
+                RerunCommand(source_task_id=UUID(source), good_until=None),
                 policy(days=SECOND_DAYS),
+                registered_task_codes={},
             )
             assert isinstance(outcome, RerunEnqueued)
             row = await live_row(connection, str(outcome.new_task_id))
@@ -350,10 +354,11 @@ class TestRerunEndToEnd:
                 )
             ).scalar_one()
             with pytest.raises(ValueError, match='is not registered'):
-                await rerun_task(
+                await rerun_task_in_async(
                     connection,
-                    RerunTask(source_task_id=UUID(source), deadline=None),
+                    RerunCommand(source_task_id=UUID(source), good_until=None),
                     policy(days=NEVER_REGISTERED_DAYS),
+                    registered_task_codes={},
                 )
             after = (
                 await connection.execute(
@@ -369,10 +374,11 @@ class TestRerunEndToEnd:
         async with terminalization_schema.engine.begin() as connection:
             await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             source = await seed_failed_source(connection)
-            outcome = await rerun_task(
+            outcome = await rerun_task_in_async(
                 connection,
-                RerunTask(source_task_id=UUID(source), deadline=None),
+                RerunCommand(source_task_id=UUID(source), good_until=None),
                 policy(retain=False),
+                registered_task_codes={},
             )
             assert isinstance(outcome, RerunEnqueued)
             row = await live_row(connection, str(outcome.new_task_id))
@@ -397,10 +403,11 @@ class TestTypedRefusals:
             count_tasks = text('SELECT count(*) FROM horsies_tasks')
             before = (await connection.execute(count_tasks)).scalar_one()
 
-            outcome = await rerun_task(
+            outcome = await rerun_task_in_async(
                 connection,
-                RerunTask(source_task_id=UUID(source), deadline=None),
+                RerunCommand(source_task_id=UUID(source), good_until=None),
                 policy(),
+                registered_task_codes={},
             )
 
             assert isinstance(outcome, RerunInputCorrupt)
@@ -417,10 +424,11 @@ class TestTypedRefusals:
             live = await insert_live_task(
                 connection, class_key=CLASS_KEY, worker=WORKER
             )
-            outcome = await rerun_task(
+            outcome = await rerun_task_in_async(
                 connection,
-                RerunTask(source_task_id=UUID(live), deadline=None),
+                RerunCommand(source_task_id=UUID(live), good_until=None),
                 policy(),
+                registered_task_codes={},
             )
             assert outcome == RerunSourceLive(task_id=UUID(live))
 
@@ -431,10 +439,11 @@ class TestTypedRefusals:
         async with terminalization_schema.engine.begin() as connection:
             await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             ghost = str(uuid4())
-            outcome = await rerun_task(
+            outcome = await rerun_task_in_async(
                 connection,
-                RerunTask(source_task_id=UUID(ghost), deadline=None),
+                RerunCommand(source_task_id=UUID(ghost), good_until=None),
                 policy(),
+                registered_task_codes={},
             )
             assert isinstance(outcome, RerunSourceAbsent)
             assert outcome.task_id == UUID(ghost)
@@ -465,10 +474,11 @@ class TestTypedRefusals:
                 )
             ).one()
             assert done.outcome == 'APPLIED'
-            outcome = await rerun_task(
+            outcome = await rerun_task_in_async(
                 connection,
-                RerunTask(source_task_id=UUID(task_id), deadline=None),
+                RerunCommand(source_task_id=UUID(task_id), good_until=None),
                 policy(),
+                registered_task_codes={},
             )
             assert outcome == RerunNotEligible(
                 task_id=UUID(task_id),
@@ -503,10 +513,11 @@ class TestTypedRefusals:
                 error_code='X',
                 failed_reason='x',
             )
-            outcome = await rerun_task(
+            outcome = await rerun_task_in_async(
                 connection,
-                RerunTask(source_task_id=UUID(task_id), deadline=None),
+                RerunCommand(source_task_id=UUID(task_id), good_until=None),
                 policy(),
+                registered_task_codes={},
             )
             assert outcome == RerunNotEligible(
                 task_id=UUID(task_id),
@@ -532,10 +543,11 @@ class TestTypedRefusals:
                 error_code='X',
                 failed_reason='x',
             )
-            outcome = await rerun_task(
+            outcome = await rerun_task_in_async(
                 connection,
-                RerunTask(source_task_id=UUID(source), deadline=None),
+                RerunCommand(source_task_id=UUID(source), good_until=None),
                 policy(),
+                registered_task_codes={},
             )
             assert outcome == RerunInputUnavailable(
                 task_id=UUID(source),
@@ -557,10 +569,11 @@ class TestTypedRefusals:
                 ),
                 {'bad': b'tampered', 'task_id': source},
             )
-            outcome = await rerun_task(
+            outcome = await rerun_task_in_async(
                 connection,
-                RerunTask(source_task_id=UUID(source), deadline=None),
+                RerunCommand(source_task_id=UUID(source), good_until=None),
                 policy(),
+                registered_task_codes={},
             )
             assert isinstance(outcome, RerunInputCorrupt)
             assert 'digest' in outcome.detail
@@ -587,10 +600,11 @@ class TestTypedRefusals:
             )
             count_tasks = text('SELECT count(*) FROM horsies_tasks')
             tasks_before = (await connection.execute(count_tasks)).scalar_one()
-            outcome = await rerun_task(
+            outcome = await rerun_task_in_async(
                 connection,
-                RerunTask(source_task_id=UUID(source), deadline=None),
+                RerunCommand(source_task_id=UUID(source), good_until=None),
                 policy(),
+                registered_task_codes={},
             )
             assert isinstance(outcome, RerunInputCorrupt)
             assert detail in outcome.detail
@@ -607,24 +621,26 @@ class TestKeyedRerun:
         async with terminalization_schema.engine.begin() as connection:
             await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             source = await seed_failed_source(connection)
-            first = await rerun_task(
+            first = await rerun_task_in_async(
                 connection,
-                RerunTask(
+                RerunCommand(
                     source_task_id=UUID(source),
-                    deadline=None,
-                    caller_key='retry-batch-7',
+                    good_until=None,
+                    idempotency_key='retry-batch-7',
                 ),
                 policy(),
+                registered_task_codes={},
             )
             assert isinstance(first, RerunEnqueued)
-            replay = await rerun_task(
+            replay = await rerun_task_in_async(
                 connection,
-                RerunTask(
+                RerunCommand(
                     source_task_id=UUID(source),
-                    deadline=None,
-                    caller_key='retry-batch-7',
+                    good_until=None,
+                    idempotency_key='retry-batch-7',
                 ),
                 policy(),
+                registered_task_codes={},
             )
             assert replay == RerunKeyReplay(
                 existing_task_id=first.new_task_id
@@ -661,21 +677,21 @@ class TestStoredSourceDoesNotDecode:
         async with stored_history_status(session, source.id, 'UNKNOWN'):
             async with current_resources(broker).engine.begin() as connection:
                 tasks_before = (await connection.execute(count_tasks)).scalar_one()
-                outcome = await rerun_task(
+                outcome = await rerun_task_in_async(
                     connection,
-                    RerunTask(source_task_id=UUID(source.id), deadline=None),
+                    RerunCommand(source_task_id=UUID(source.id), good_until=None),
                     RerunEnqueuePolicy(
                         retention=timedelta(days=30),
                         retain_rerun_input=True,
                         reservation_window=timedelta(hours=24),
                     ),
+                    registered_task_codes={},
                 )
                 tasks_after = (await connection.execute(count_tasks)).scalar_one()
 
         assert isinstance(outcome, RerunSourceCorrupt)
         assert outcome.task_id == UUID(source.id)
-        assert isinstance(outcome.exception, HistoryContractError)
-        assert "'UNKNOWN'" in str(outcome.exception)
+        assert "'UNKNOWN'" in outcome.detail
         assert tasks_after == tasks_before
 
 
@@ -687,8 +703,8 @@ async def test_a_family_row_that_holds_no_client_family_raises_a_contract_violat
 
     The test writes it past the CHECK ``horsies_client_family_family_known``,
     which it drops first. The core answers ``RerunUnknownStoredFamily`` with
-    the stored value, and ``rerun_task`` raises its ``CoreContractViolation``
-    (subject ``rerun_task``) before any write.
+    the stored value, and ``rerun_task_in_async`` raises its
+    ``CoreContractViolation`` (subject ``rerun_task_in``) before any write.
     """
     async with terminalization_schema.engine.begin() as connection:
         await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
@@ -709,12 +725,13 @@ async def test_a_family_row_that_holds_no_client_family_raises_a_contract_violat
         before = (await connection.execute(count_tasks)).scalar_one()
 
         with pytest.raises(CoreContractViolation) as raised:
-            _ = await rerun_task(
+            _ = await rerun_task_in_async(
                 connection,
-                RerunTask(source_task_id=UUID(source), deadline=None),
+                RerunCommand(source_task_id=UUID(source), good_until=None),
                 policy(),
+                registered_task_codes={},
             )
 
-        assert raised.value.subject == 'rerun_task'
+        assert raised.value.subject == 'rerun_task_in'
         assert 'horsies_client_family.family holds "GO"' in raised.value.message
         assert (await connection.execute(count_tasks)).scalar_one() == before

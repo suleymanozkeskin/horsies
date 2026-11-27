@@ -18,7 +18,7 @@ from pydantic import SecretStr
 from horsies import AppConfig, Horsies, JsonLogs, PostgresConfig
 
 config = AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
     ),
     log_format=JsonLogs(),
@@ -61,9 +61,9 @@ order_log.addHandler(order_handler)
 
 
 @app.task('charge_card')
-def charge_card(*, amount_cents: int) -> TaskResult[str, TaskError]:
+def charge_card(*, amount_cents: int) -> Result[str, TaskError]:
     order_log.info('charging card')
-    return TaskResult(ok='charged')
+    return Ok('charged')
 ```
 
 Inside the body of a task in a worker child, each record of `order_log` gets:

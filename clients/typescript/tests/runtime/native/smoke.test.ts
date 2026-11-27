@@ -23,10 +23,10 @@ function outcomeText(outcome: { readonly kind: string } | { readonly kind: "fail
     : outcome.kind;
 }
 
-/** Whether `error` is `BrokerOperationFailed` with the code `code`. */
+/** Whether `error` is `DatabaseOperationFailed` with the code `code`. */
 function isOperationFailed(error: RawCatalogError, code: string): boolean {
   return (
-    error.class === "BrokerOperationFailed" &&
+    error.class === "DatabaseOperationFailed" &&
     error.slots.some((slot) => slot.value.kind === "codeMember" && slot.value.value === code)
   );
 }
@@ -53,11 +53,11 @@ describe("the bridge core with a database", () => {
     assert.equal(await handle.close(), undefined);
   });
 
-  test("a ping that cannot connect is the value BrokerOperationFailed with DB_PING_FAILED", async () => {
+  test("a ping that cannot connect is the value DatabaseOperationFailed with DATABASE_PING_FAILED", async () => {
     const handle = buildCoreHandle(manifestJson(REFUSED_DATABASE_URL, false), "PRODUCER");
     const ping = await handle.pingDatabase();
 
-    assert.ok(ping.kind === "failed" && isOperationFailed(ping.error, "DB_PING_FAILED"), outcomeText(ping));
+    assert.ok(ping.kind === "failed" && isOperationFailed(ping.error, "DATABASE_PING_FAILED"), outcomeText(ping));
   });
 
   test("an install that cannot connect is failed with SCHEMA_INIT_FAILED", async () => {

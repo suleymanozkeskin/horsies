@@ -1,6 +1,7 @@
 // A wire type: the stored form of a value and its TypeScript types. At run time it holds one node of the kind tree
 // and how the value is present when it is an object member.
 
+import { isFunction } from "../codec/values.ts";
 import { encodeValue } from "../codec/writer.ts";
 import type { AnyWire, ValueWire } from "./infer.ts";
 import { type DefaultText, type Kind, type MemberPresence, nullableKind, OPTIONAL, REQUIRED } from "./kinds.ts";
@@ -20,8 +21,8 @@ export declare const wireRole: unique symbol;
 /** How an object member is present: always, `.optional()` (it may be left out), or `.default(v)`. */
 export type Presence = "required" | "optional" | "defaulted";
 
-/** A plain value, or an upstream outcome that only a workflow node gives (`h.resultOf`), as a whole parameter. */
-export type Role = "value" | "resultOf";
+/** A plain value, or an upstream outcome that only a workflow node gives (`h.taskOutcome`), as a whole parameter. */
+export type Role = "value" | "taskOutcome";
 
 /** A wire type: `V` is the value that a reader gives, `S` the value that a sender gives. */
 export interface Wire<V, S = V, P extends Presence = "required", R extends Role = "value"> {
@@ -33,8 +34,12 @@ export interface Wire<V, S = V, P extends Presence = "required", R extends Role 
   optional(): Wire<V, S, "optional", R>;
   /** `null` or the value. */
   nullable(): Wire<V | null, S | null, P, R>;
-  /** A member that a sender may leave out; a reader fills `value`. The sender never stores the default. */
-  default(value: S): Wire<V, S, "defaulted", R>;
+  /**
+   * A member that a sender may leave out; a reader in worker form fills `value`. A function (`() => crypto.randomUUID()`)
+   * runs at each such decode, so each decode gets a new value (Python's `default_factory`). The sender never stores
+   * the default.
+   */
+  default(value: S | (() => S)): Wire<V, S, "defaulted", R>;
 }
 
 class WireType<V, S, P extends Presence, R extends Role> implements Wire<V, S, P, R> {
@@ -75,8 +80,9 @@ class WireType<V, S, P extends Presence, R extends Role> implements Wire<V, S, P
     return new WireType<V | null, S | null, P, R>(nullableKind(this.#kind), this.#presence);
   }
 
-  default(value: S): Wire<V, S, "defaulted", R> {
-    const presence: MemberPresence = Object.freeze({ mode: "defaulted", fallback: defaultText(this.#kind, value) });
+  default(value: S | (() => S)): Wire<V, S, "defaulted", R> {
+    const fallback = isFunction(value) ? computedDefault(this.#kind, value) : defaultText(this.#kind, value);
+    const presence: MemberPresence = Object.freeze({ mode: "defaulted", fallback });
 
     return new WireType<V, S, "defaulted", R>(this.#kind, presence);
   }
@@ -89,6 +95,14 @@ function defaultText<S>(kind: Kind, value: S): DefaultText {
   return Object.freeze(
     written.ok ? { state: "stored", text: written.value } : { state: "refused", refusal: written.error },
   );
+}
+
+/**
+ * The default of a default function: the reader calls it at each worker-form decode and writes its value under
+ * `kind`. The function does not run here, as Python does not call a `default_factory` at the definition. Pure.
+ */
+function computedDefault(kind: Kind, factory: () => unknown): DefaultText {
+  return Object.freeze({ state: "computed", source: factory, compute: () => encodeValue(kind, factory()) });
 }
 
 /** A required wire type of `kind`. */

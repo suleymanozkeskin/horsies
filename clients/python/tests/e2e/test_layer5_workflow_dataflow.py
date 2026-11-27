@@ -1,10 +1,10 @@
-"""Layer 5 e2e tests: workflow data flow (args_from, workflow_ctx, SKIPPED/FAILED propagation).
+"""Layer 5 e2e tests: workflow data flow (args_from, workflow_context, SKIPPED/FAILED propagation).
 
 Tests verify:
 - args_from wiring and serialization across worker boundaries
 - WorkflowContext.result_for() in real execution
 - SKIPPED vs FAILED propagation semantics
-- Mixed args_from and workflow_ctx usage
+- Mixed args_from and workflow_context usage
 
 All tests poll the database for the state they wait for.
 """
@@ -17,10 +17,17 @@ from typing import Any, Callable, cast
 import pytest
 
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.outcome import Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
+from horsies.core.models.workflow import WorkflowTerminalResults
 
-from horsies.core.models.tasks import TaskResult
-
-from tests.e2e.helpers.assertions import assert_err, assert_ok, start_ok_in_thread, unwrap_send
+from tests.e2e.helpers.assertions import (
+    assert_failed,
+    read_succeeded,
+    start_ok_in_thread,
+    succeeded_value,
+    unwrap_send,
+)
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.helpers.workflow import (
     get_workflow_tasks,
@@ -34,14 +41,13 @@ from tests.broker_resources_support import current_resources
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
 
 
-def _unwrap_task_value(value: Any) -> Any:
-    """Unwrap TaskResult value from workflow output."""
-    if isinstance(value, TaskResult):
-        task_result = cast(TaskResult[Any, Any], value)
-        if task_result.is_ok():
-            return task_result.unwrap()
-        return task_result  # Return error result as-is for inspection
-    return value
+def _unwrap_task_value(value: TaskOutcome[Any, TaskError] | None) -> Any:
+    """Unwrap the Succeeded value of a terminal outcome from workflow output."""
+    match value:
+        case Succeeded(succeeded_value_of_node):
+            return succeeded_value_of_node
+        case _:
+            return value  # Return a failed or missing outcome as-is for inspection
 
 
 def _make_ready_check() -> Callable[[], bool]:
@@ -54,8 +60,7 @@ def _make_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(healthcheck.send())
-        result = handle.get(timeout_ms=2000)
-        return result.is_ok()
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
@@ -83,11 +88,10 @@ async def test_args_from_single_dependency(broker: PostgresBroker) -> None:
         assert status == 'COMPLETED'
 
         # Get final result
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
         # B should have doubled A's value: 5 * 2 = 10
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         # Terminal task is B at index 1
         for key, value in output.items():
             if 'e2e_wf_double' in key:
@@ -120,11 +124,10 @@ async def test_args_from_multiple_dependencies(broker: PostgresBroker) -> None:
         )
         assert status == 'COMPLETED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
         # C should have summed A and B: 10 + 20 = 30
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_sum_two' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -135,20 +138,20 @@ async def test_args_from_multiple_dependencies(broker: PostgresBroker) -> None:
 
 
 # =============================================================================
-# T5.3: workflow_ctx result_for (A → B)
+# T5.3: workflow_context result_for (A → B)
 # =============================================================================
 
 
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
 async def test_workflow_ctx_single_dependency(broker: PostgresBroker) -> None:
-    """T5.3: B accesses A's result via workflow_ctx.result_for()."""
+    """T5.3: B accesses A's result via workflow_context.result_for()."""
     with run_worker(
         DEFAULT_INSTANCE,
         profile='isolated-1',
         ready_check=_make_ready_check(),
     ):
-        # spec_ctx_single: A produces 42, B reads it via workflow_ctx
+        # spec_ctx_single: A produces 42, B reads it via workflow_context
         handle = await start_ok_in_thread(wf_tasks.spec_ctx_single)
 
         status = await wait_for_workflow_completion(
@@ -156,11 +159,10 @@ async def test_workflow_ctx_single_dependency(broker: PostgresBroker) -> None:
         )
         assert status == 'COMPLETED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
         # B should have read A's value: 42
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_ctx_reader' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -171,14 +173,14 @@ async def test_workflow_ctx_single_dependency(broker: PostgresBroker) -> None:
 
 
 # =============================================================================
-# T5.4: workflow_ctx with multiple deps (A, B → C)
+# T5.4: workflow_context with multiple deps (A, B → C)
 # =============================================================================
 
 
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
 async def test_workflow_ctx_multiple_dependencies(broker: PostgresBroker) -> None:
-    """T5.4: C accesses both A and B via workflow_ctx and sums them."""
+    """T5.4: C accesses both A and B via workflow_context and sums them."""
     with run_worker(
         DEFAULT_INSTANCE,
         profile='isolated-1',
@@ -192,11 +194,10 @@ async def test_workflow_ctx_multiple_dependencies(broker: PostgresBroker) -> Non
         )
         assert status == 'COMPLETED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
         # C should have summed A and B via ctx: 100 + 200 = 300
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_ctx_sum' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -207,7 +208,7 @@ async def test_workflow_ctx_multiple_dependencies(broker: PostgresBroker) -> Non
 
 
 # =============================================================================
-# T5.5: FAILED propagation (allow_failed_deps=True)
+# T5.5: FAILED propagation (allow_failed_dependencies=True)
 # =============================================================================
 
 
@@ -220,7 +221,7 @@ async def test_failed_propagation(broker: PostgresBroker) -> None:
         profile='isolated-1',
         ready_check=_make_ready_check(),
     ):
-        # spec_failed_propagation: A fails with DELIBERATE_FAIL, B has allow_failed_deps=True
+        # spec_failed_propagation: A fails with DELIBERATE_FAIL, B has allow_failed_dependencies=True
         handle = await start_ok_in_thread(wf_tasks.spec_failed_propagation)
 
         status = await wait_for_workflow_completion(
@@ -243,9 +244,8 @@ async def test_failed_propagation(broker: PostgresBroker) -> None:
         ), f"B should be COMPLETED, got {db_tasks[1]['status']}"
 
         # Verify B received A's original error (not UPSTREAM_SKIPPED)
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
-        output = cast(dict[str, Any], result.unwrap())
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_check_upstream_skipped' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -271,8 +271,8 @@ async def test_skipped_propagation(broker: PostgresBroker) -> None:
         profile='isolated-1',
         ready_check=_make_ready_check(),
     ):
-        # spec_skipped_propagation: A fails, B is SKIPPED (no allow_failed_deps),
-        # C has allow_failed_deps=True and should see UPSTREAM_SKIPPED for B
+        # spec_skipped_propagation: A fails, B is SKIPPED (no allow_failed_dependencies),
+        # C has allow_failed_dependencies=True and should see UPSTREAM_SKIPPED for B
         handle = await start_ok_in_thread(wf_tasks.spec_skipped_propagation)
 
         status = await wait_for_workflow_completion(
@@ -289,7 +289,7 @@ async def test_skipped_propagation(broker: PostgresBroker) -> None:
             db_tasks[0]['status'] == 'FAILED'
         ), f"A should be FAILED, got {db_tasks[0]['status']}"
 
-        # B should be SKIPPED (default allow_failed_deps=False)
+        # B should be SKIPPED (default allow_failed_dependencies=False)
         assert (
             db_tasks[1]['status'] == 'SKIPPED'
         ), f"B should be SKIPPED, got {db_tasks[1]['status']}"
@@ -300,9 +300,8 @@ async def test_skipped_propagation(broker: PostgresBroker) -> None:
         ), f"C should be COMPLETED, got {db_tasks[2]['status']}"
 
         # Verify C's result indicates it received UPSTREAM_SKIPPED
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
-        output = cast(dict[str, Any], result.unwrap())
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_check_upstream_skipped' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -329,7 +328,7 @@ async def test_join_ctx_gating(broker: PostgresBroker) -> None:
         ready_check=_make_ready_check(),
     ):
         # spec_join_ctx_gating: A (100ms), B (300ms), C waits for both with join=any
-        # but workflow_ctx_from=[B], so C must wait for B
+        # but workflow_context_from=[B], so C must wait for B
         handle = await start_ok_in_thread(wf_tasks.spec_join_ctx_gating)
 
         status = await wait_for_workflow_completion(
@@ -356,9 +355,8 @@ async def test_join_ctx_gating(broker: PostgresBroker) -> None:
         ), 'C should start only after ctx dep B is terminal'
 
         # Verify C actually received B's result value via ctx
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
-        output = cast(dict[str, Any], result.unwrap())
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_ctx_reader_str' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -378,14 +376,14 @@ async def test_join_ctx_gating(broker: PostgresBroker) -> None:
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
 async def test_mixed_args_from_and_ctx(broker: PostgresBroker) -> None:
-    """T5.8: D receives data from both args_from (B) and workflow_ctx (C)."""
+    """T5.8: D receives data from both args_from (B) and workflow_context (C)."""
     with run_worker(
         DEFAULT_INSTANCE,
         profile='isolated-2',
         ready_check=_make_ready_check(),
     ):
         # spec_mixed_dataflow: A produces 7, B doubles (14), C produces 3
-        # D receives B via args_from and C via workflow_ctx
+        # D receives B via args_from and C via workflow_context
         handle = await start_ok_in_thread(wf_tasks.spec_mixed_dataflow)
 
         status = await wait_for_workflow_completion(
@@ -393,11 +391,10 @@ async def test_mixed_args_from_and_ctx(broker: PostgresBroker) -> None:
         )
         assert status == 'COMPLETED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
         # D should return {"from_args": 14, "from_ctx": 3}
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_mixed_reader' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -438,11 +435,10 @@ async def test_args_from_transitive_chain(broker: PostgresBroker) -> None:
         )
         assert status == 'COMPLETED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
         # C should have doubled B's doubled value: 3 * 2 * 2 = 12
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_double_chain' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -462,7 +458,7 @@ async def test_args_from_transitive_chain(broker: PostgresBroker) -> None:
 async def test_args_from_failed_dep_skips_and_fails_workflow(
     broker: PostgresBroker,
 ) -> None:
-    """T5.10: A fails, B (allow_failed_deps=False) is SKIPPED, workflow FAILED."""
+    """T5.10: A fails, B (allow_failed_dependencies=False) is SKIPPED, workflow FAILED."""
     with run_worker(
         DEFAULT_INSTANCE,
         profile='isolated-1',
@@ -487,8 +483,8 @@ async def test_args_from_failed_dep_skips_and_fails_workflow(
         ), f"B should be SKIPPED, got {db_tasks[1]['status']}"
 
         # handle.get() should surface the failure error code
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_err(result, 'DATAFLOW_FAIL')
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
+        assert_failed(result, 'DATAFLOW_FAIL')
 
 
 # =============================================================================
@@ -512,10 +508,9 @@ async def test_args_from_dict_serialization(broker: PostgresBroker) -> None:
         )
         assert status == 'COMPLETED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_receive_dict' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -538,14 +533,14 @@ async def test_args_from_dict_serialization(broker: PostgresBroker) -> None:
 
 
 # =============================================================================
-# T5.12: Same node via both args_from and workflow_ctx (dual injection)
+# T5.12: Same node via both args_from and workflow_context (dual injection)
 # =============================================================================
 
 
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
 async def test_dual_injection_same_node(broker: PostgresBroker) -> None:
-    """T5.12: B reads A via both args_from and workflow_ctx without interference."""
+    """T5.12: B reads A via both args_from and workflow_context without interference."""
     with run_worker(
         DEFAULT_INSTANCE,
         profile='isolated-1',
@@ -558,11 +553,10 @@ async def test_dual_injection_same_node(broker: PostgresBroker) -> None:
         )
         assert status == 'COMPLETED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
         # Both paths should deliver the same value (77)
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_dual_reader' in key:
                 unwrapped = _unwrap_task_value(value)

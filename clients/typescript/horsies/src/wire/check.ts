@@ -1,19 +1,25 @@
 // The checks of a kind tree that the static types cannot make. `Horsies.create` reports each refusal with the code
 // of a task signature refusal.
 
-import { MAX_VALUE_JSON_DEPTH } from "../codec/bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../_catalog/codec_bounds.ts";
+import type { JsonText } from "../codec/json-text.ts";
 import { isEngineKey } from "../codec/engine-keys.ts";
-import { itemPath, memberPath, ROOT_PATH } from "../codec/refusal.ts";
+import { type EncodeRefused, itemPath, memberPath, ROOT_PATH } from "../codec/refusal.ts";
 import { isNumber } from "../codec/values.ts";
 import {
   type DefaultText,
   type Kind,
+  type LazyKind,
   type LiteralMember,
   type Member,
   type MemberPresence,
   type ObjectKind,
   tagValues,
+  type TupleRest,
+  type UpstreamOutput,
 } from "./kinds.ts";
+import { MAX_KIND_WALK_DEPTH } from "./lazy.ts";
+import type { Result } from "./result.ts";
 import { unreachable } from "./unreachable.ts";
 
 /** The canonical decimal text of a non-negative integer of at most 10 digits: `0`, or digits with no leading zero. */
@@ -24,7 +30,10 @@ const MAX_ARRAY_INDEX = 2 ** 32 - 2;
 
 /** Why a kind tree cannot be a task's wire type. */
 export type KindRule =
-  /** The value of a `.default(value)` does not encode under its kind (for example `NaN` for `h.float()`). */
+  /**
+   * The value of a `.default(value)` does not encode under its kind (for example `NaN` for `h.float()`), or the first
+   * value of a default function does not (the check calls each default function once).
+   */
   | "DefaultNotStored"
   /** An object member has a name that only the engine writes. */
   | "EngineKeyMember"
@@ -36,6 +45,13 @@ export type KindRule =
   | "IntegerLikeMember"
   /** The kind nests more arrays and objects than a stored value may have, so no value fits it. */
   | "KindTooDeep"
+  /** The kind nests more kinds than the check walks (`MAX_KIND_WALK_DEPTH`): the walk fails closed. */
+  | "KindNodesTooDeep"
+  /**
+   * A lazy kind (`h.lazy`, a recursive zod schema) reaches itself through no array or object, for example a nullable
+   * or a union of itself: no stored value has a finite depth.
+   */
+  | "RecursiveWithoutLevel"
   /** A number member of a literal that is not a safe integer. */
   | "LiteralNotSafeInteger"
   /**
@@ -47,57 +63,114 @@ export type KindRule =
   | "UnionMemberNotPrimitive"
   /** A member of `h.union(tag, [...])` has no required string-literal tag member, or repeats a tag value. */
   | "UnionTagInvalid"
-  /** `h.resultOf` anywhere but as a whole task input parameter (optional or nullable too). */
-  | "ResultOfPlacement";
+  /** `h.taskOutcome` anywhere but as a whole task input parameter (optional or nullable too). */
+  | "TaskOutcomePlacement"
+  /** An `h.taskOutcome` parameter whose upstream contract has an output with no stored form. */
+  | "UpstreamOutputRefused";
 
-/** A refusal of a kind tree. `path` names the place in the type: `[*]` an array item, `.*` a record value. */
+/**
+ * A refusal of a kind tree. `path` names the place in the type: `[*]` an array item or the rest item of a tuple, `.*`
+ * a record value.
+ */
 export type KindRefused = { readonly rule: KindRule; readonly path: string; readonly detail: string };
 
-/** Every refusal of the kind tree of a value (an output, a member), in walk order. Empty: the kind is valid. Pure. */
+/**
+ * Every refusal of the kind tree of a value (an output, a member), in walk order. Empty: the kind is valid. Calls the
+ * getter of each lazy kind and each default function once; else pure.
+ */
 export function checkKind(kind: Kind): readonly KindRefused[] {
-  const refusals: KindRefused[] = [];
+  const found = newFound([]);
 
-  walk(kind, ROOT_PATH, 0, refusals);
+  walk(kind, topPlace(ROOT_PATH), found);
 
-  return refusals;
+  return found.refusals;
 }
 
 /**
  * Every refusal of the kind of one object member or task input parameter whose name the caller checks: the member's
- * default, then its kind tree, in walk order, at `$`. Pure.
+ * default, then its kind tree, in walk order, at `$`. Calls what `checkKind` calls.
  */
 export function checkMemberKind(kind: Kind, presence: MemberPresence): readonly KindRefused[] {
-  const refusals: KindRefused[] = [...defaultRefusals(presence, ROOT_PATH)];
+  const found = newFound(defaultRefusals(presence, ROOT_PATH));
 
-  walk(kind, ROOT_PATH, 0, refusals);
+  walk(kind, topPlace(ROOT_PATH), found);
 
-  return refusals;
+  return found.refusals;
 }
 
 /**
- * Every refusal of the kind of a task input, in walk order: a parameter may be an upstream outcome (`h.resultOf`),
- * nothing below a parameter may. Pure.
+ * Every refusal of the kind of a task input, in walk order: a parameter may be an upstream outcome (`h.taskOutcome`),
+ * nothing below a parameter may. Calls what `checkKind` calls.
  */
 export function checkParameters(parameters: ObjectKind): readonly KindRefused[] {
-  const refusals: KindRefused[] = [];
+  const found = newFound([]);
 
   for (const member of parameters.members) {
     const at = memberPath(ROOT_PATH, member.name);
 
-    refusals.push(...memberRefusals(member, at));
-    walk(parameterValueKind(member.kind), at, 0, refusals);
+    found.refusals.push(...memberRefusals(member, at));
+    walkParameter(parameterValue(member.kind), topPlace(at), found);
   }
 
-  return refusals;
+  return found.refusals;
 }
 
-/** The kind of the value of a parameter: the `ok` kind of an upstream outcome, or the parameter's own kind. */
-function parameterValueKind(kind: Kind): Kind {
+/**
+ * Where the walk is: the path in the type, the arrays and objects around it (`level`), and the kinds above it
+ * (`depth`, at most `MAX_KIND_WALK_DEPTH`).
+ */
+type Place = { readonly path: string; readonly level: number; readonly depth: number };
+
+/** What one check collects: the refusals in walk order, and the lazy nodes that it walked (each one once). */
+type Found = { readonly refusals: KindRefused[]; readonly lazies: Set<LazyKind> };
+
+function newFound(first: readonly KindRefused[]): Found {
+  return { refusals: [...first], lazies: new Set() };
+}
+
+function topPlace(path: string): Place {
+  return { path, level: 0, depth: 0 };
+}
+
+/** The value of a parameter: its own kind, or the upstream output of an upstream outcome. */
+type ParameterValue =
+  | { readonly kind: "value"; readonly value: Kind }
+  | { readonly kind: "upstream"; readonly output: UpstreamOutput };
+
+function walkParameter(value: ParameterValue, place: Place, found: Found): void {
+  switch (value.kind) {
+    case "value":
+      return walk(value.value, place, found);
+    case "upstream":
+      return walkUpstream(value.output, place, found);
+    default:
+      return unreachable(value, "walkParameter");
+  }
+}
+
+/** The refusals of the upstream output of a parameter: its kind tree, or the refusal of an output with no kind. */
+function walkUpstream(output: UpstreamOutput, place: Place, found: Found): void {
+  switch (output.state) {
+    case "compiled":
+      return walk(output.kind, { ...place, level: 0 }, found);
+    case "refused":
+      found.refusals.push({ rule: "UpstreamOutputRefused", path: place.path, detail: output.detail });
+
+      return;
+    default:
+      return unreachable(output, "walkUpstream");
+  }
+}
+
+/** The value of a parameter of `kind`: the upstream output of an upstream outcome, or the parameter's own kind. */
+function parameterValue(kind: Kind): ParameterValue {
   switch (kind.node) {
-    case "resultOf":
-      return kind.inner;
+    case "taskOutcome":
+      return { kind: "upstream", output: kind.output };
     case "nullable":
-      return kind.inner.node === "resultOf" ? kind.inner.inner : kind;
+      return kind.inner.node === "taskOutcome"
+        ? { kind: "upstream", output: kind.inner.output }
+        : { kind: "value", value: kind };
     case "null":
     case "boolean":
     case "int":
@@ -121,13 +194,22 @@ function parameterValueKind(kind: Kind): Kind {
     case "json":
     case "conversion":
     case "checked":
-      return kind;
+    case "lazy":
+      return { kind: "value", value: kind };
     default:
-      return unreachable(kind, "parameterValueKind");
+      return unreachable(kind, "parameterValue");
   }
 }
 
-function walk(kind: Kind, path: string, level: number, refusals: KindRefused[]): void {
+function walk(kind: Kind, place: Place, found: Found): void {
+  if (place.depth >= MAX_KIND_WALK_DEPTH) {
+    found.refusals.push({ rule: "KindNodesTooDeep", path: place.path, detail: `more than ${MAX_KIND_WALK_DEPTH} kinds` });
+
+    return;
+  }
+
+  const below: Place = { ...place, depth: place.depth + 1 };
+
   switch (kind.node) {
     case "null":
     case "boolean":
@@ -145,65 +227,99 @@ function walk(kind: Kind, path: string, level: number, refusals: KindRefused[]):
     case "json":
       return;
     case "literal":
-      return walkLiteral(kind.members, path, refusals);
+      return walkLiteral(kind.members, place.path, found.refusals);
     case "union":
-      return walkUnion(kind.members, path, level, refusals);
+      return walkUnion(kind.members, below, found);
     case "taggedUnion":
-      return walkTagged(kind.tag, kind.variants, path, level, refusals);
-    case "resultOf":
-      refusals.push({ rule: "ResultOfPlacement", path, detail: "h.resultOf is valid only as a whole task parameter" });
+      return walkTagged(kind.tag, kind.variants, below, found);
+    case "taskOutcome":
+      found.refusals.push({
+        rule: "TaskOutcomePlacement",
+        path: place.path,
+        detail: "h.taskOutcome is valid only as a whole task parameter",
+      });
 
-      return walk(kind.inner, path, 0, refusals);
+      return walkUpstream(kind.output, below, found);
     case "conversion":
-      return walk(kind.stored, path, level, refusals);
+      return walk(kind.stored, below, found);
     case "checked":
-      return walk(kind.inner, path, level, refusals);
     case "nullable":
-      return walk(kind.inner, path, level, refusals);
+      return walk(kind.inner, below, found);
+    case "lazy":
+      return walkLazy(kind, below, found);
     case "array":
-      return walkInside([kind.item], () => `${path}[*]`, path, level, refusals);
+      return walkInside([[`${place.path}[*]`, kind.item]], below, found);
     case "tuple":
-      return walkInside(kind.items, (index) => itemPath(path, index), path, level, refusals);
+      return walkInside(tupleInside(kind.items, kind.rest, place.path), below, found);
     case "record":
-      return walkInside([kind.value], () => `${path}.*`, path, level, refusals);
+      return walkInside([[`${place.path}.*`, kind.value]], below, found);
     case "object":
-      return walkMembers(kind.members, path, level, refusals);
+      return walkMembers(kind.members, below, found);
     default:
       return unreachable(kind, "checkKind");
   }
 }
 
-/** The kinds inside an array, a tuple or a record, one level down. */
-function walkInside(
-  kinds: readonly Kind[],
-  pathOf: (index: number) => string,
-  path: string,
-  level: number,
-  refusals: KindRefused[],
-): void {
-  if (level + 1 > MAX_VALUE_JSON_DEPTH) {
-    refusals.push(tooDeep(path));
+/** The kind of a lazy node, walked once per check: a later meeting is a cycle, which passes an array or object. */
+function walkLazy(kind: LazyKind, place: Place, found: Found): void {
+  if (found.lazies.has(kind)) {
+    return;
+  }
+
+  found.lazies.add(kind);
+  const level = kind.level();
+
+  switch (level.state) {
+    case "passesLevel":
+      return walk(kind.target(), place, found);
+    case "noLevel":
+      found.refusals.push({ rule: "RecursiveWithoutLevel", path: place.path, detail: level.detail });
+
+      return;
+    default:
+      return unreachable(level, "walkLazy");
+  }
+}
+
+/** The kinds inside a tuple with their paths: `[i]` a fixed item, `[*]` the rest item. Pure. */
+function tupleInside(items: readonly Kind[], rest: TupleRest, path: string): readonly (readonly [string, Kind])[] {
+  const fixed = items.map((item, index) => [itemPath(path, index), item] as const);
+
+  switch (rest.state) {
+    case "none":
+      return fixed;
+    case "items":
+      return [...fixed, [`${path}[*]`, rest.item]];
+    default:
+      return unreachable(rest, "tupleInside");
+  }
+}
+
+/** The kinds inside an array, a tuple or a record, one level down, each with its path. */
+function walkInside(inside: readonly (readonly [string, Kind])[], place: Place, found: Found): void {
+  if (place.level + 1 > MAX_VALUE_JSON_DEPTH) {
+    found.refusals.push(tooDeep(place.path));
 
     return;
   }
 
-  for (const [index, inner] of kinds.entries()) {
-    walk(inner, pathOf(index), level + 1, refusals);
+  for (const [path, inner] of inside) {
+    walk(inner, { path, level: place.level + 1, depth: place.depth }, found);
   }
 }
 
-function walkMembers(members: readonly Member[], path: string, level: number, refusals: KindRefused[]): void {
-  if (level + 1 > MAX_VALUE_JSON_DEPTH) {
-    refusals.push(tooDeep(path));
+function walkMembers(members: readonly Member[], place: Place, found: Found): void {
+  if (place.level + 1 > MAX_VALUE_JSON_DEPTH) {
+    found.refusals.push(tooDeep(place.path));
 
     return;
   }
 
   for (const member of members) {
-    const at = memberPath(path, member.name);
+    const at = memberPath(place.path, member.name);
 
-    refusals.push(...memberRefusals(member, at));
-    walk(member.kind, at, level + 1, refusals);
+    found.refusals.push(...memberRefusals(member, at));
+    walk(member.kind, { path: at, level: place.level + 1, depth: place.depth }, found);
   }
 }
 
@@ -247,11 +363,20 @@ function storedDefaultRefusals(fallback: DefaultText, path: string): readonly Ki
   switch (fallback.state) {
     case "stored":
       return [];
+    case "computed":
+      return computedDefaultRefusals(fallback.compute(), path);
     case "refused":
-      return [{ rule: "DefaultNotStored", path, detail: `the default is refused: ${fallback.refusal.kind}` }];
+      return [{ rule: "DefaultNotStored", path, detail: `the default is refused: ${fallback.refusal.refusal}` }];
     default:
       return unreachable(fallback, "storedDefaultRefusals");
   }
+}
+
+/** The refusal of the first value of a default function, when the writer refuses it. */
+function computedDefaultRefusals(text: Result<JsonText, EncodeRefused>, path: string): readonly KindRefused[] {
+  return text.ok
+    ? []
+    : [{ rule: "DefaultNotStored", path, detail: `the default function gives a refused value: ${text.error.refusal}` }];
 }
 
 function walkLiteral(members: readonly LiteralMember[], path: string, refusals: KindRefused[]): void {
@@ -294,20 +419,23 @@ function storedClasses(kind: Kind): readonly StoredClass[] {
       return storedClasses(kind.stored);
     case "checked":
       return storedClasses(kind.inner);
+    case "lazy":
+      // A node with no level stores no value; `walkLazy` refuses it.
+      return kind.level().state === "passesLevel" ? storedClasses(kind.target()) : [];
     case "array":
     case "tuple":
     case "record":
     case "object":
     case "taggedUnion":
     case "json":
-    case "resultOf":
+    case "taskOutcome":
       return ["container"];
     default:
       return unreachable(kind, "storedClasses");
   }
 }
 
-function walkUnion(members: readonly Kind[], path: string, level: number, refusals: KindRefused[]): void {
+function walkUnion(members: readonly Kind[], place: Place, found: Found): void {
   const counts = new Map<StoredClass, number>();
 
   for (const member of members) {
@@ -315,11 +443,11 @@ function walkUnion(members: readonly Kind[], path: string, level: number, refusa
       counts.set(stored, (counts.get(stored) ?? 0) + 1);
     }
 
-    walk(member, path, level, refusals);
+    walk(member, place, found);
   }
 
   for (const [stored, count] of counts) {
-    refusals.push(...unionClassRefusals(stored, count, path));
+    found.refusals.push(...unionClassRefusals(stored, count, place.path));
   }
 }
 
@@ -339,17 +467,12 @@ function unionClassRefusals(stored: StoredClass, count: number, path: string): r
   }
 }
 
-function walkTagged(
-  tag: string,
-  variants: readonly ObjectKind[],
-  path: string,
-  level: number,
-  refusals: KindRefused[],
-): void {
+function walkTagged(tag: string, variants: readonly ObjectKind[], place: Place, found: Found): void {
+  const { refusals } = found;
   const seen = new Set<string>();
 
   for (const [index, variant] of variants.entries()) {
-    const at = itemPath(path, index);
+    const at = itemPath(place.path, index);
     const values = tagValues(variant, tag);
     const presence = variant.byName.get(tag)?.presence.mode;
 
@@ -365,7 +488,7 @@ function walkTagged(
       seen.add(value);
     }
 
-    walk(variant, at, level, refusals);
+    walk(variant, { ...place, path: at }, found);
   }
 }
 

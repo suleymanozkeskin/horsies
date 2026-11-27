@@ -1,4 +1,4 @@
-// The shared parts of the commands: the `--loglevel` values and the flag parse.
+// The shared parts of the commands: the `--log-level` values and the flag parse.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
@@ -7,7 +7,7 @@ import { LOG_LEVELS, parseFlags, parseLogLevel, switchFlag, textFlag, usageError
 
 const FLAGS = { profile: { type: "string" }, live: { type: "boolean" } } as const;
 
-describe("the --loglevel values", () => {
+describe("the --log-level values", () => {
   test("each level of the core, in any case", () => {
     assert.deepEqual(LOG_LEVELS, ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]);
 
@@ -53,5 +53,24 @@ describe("the flag parse", () => {
       "usage: <entry> worker",
       "horsies worker: error: bad",
     ]);
+  });
+
+  test("a valid parse gives the values of the flags", () => {
+    const parsed = parseFlags(["--profile", "a", "--live"], FLAGS);
+
+    assert.deepEqual(parsed.ok && { ...parsed.value }, { profile: "a", live: true });
+  });
+
+  test("each refusal is a usage error with the message of the rule", () => {
+    const refusals: readonly (readonly [readonly string[], string])[] = [
+      [["--unknown"], "Unknown option '--unknown'"],
+      [["--profile"], "Option '--profile <value>' argument missing"],
+      [["--live=yes"], "Option '--live' does not take an argument"],
+      [["extra"], "Unexpected argument 'extra'. This command does not take positional arguments"],
+    ];
+
+    for (const [args, message] of refusals) {
+      assert.deepEqual(parseFlags(args, FLAGS), { ok: false, error: { kind: "usageError", message } }, args.join(" "));
+    }
   });
 });

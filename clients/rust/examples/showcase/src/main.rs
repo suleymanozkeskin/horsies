@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use acme_showcase::app::{build_app, WORKER_PROFILE};
 use acme_showcase::scenarios;
 use clap::{Args, Parser, Subcommand};
-use horsies::{AppRole, ChildArgs, ChildHostExit, ChildMode, SchemaMode, WorkerStart};
+use horsies::{AppRole, ChildArgs, ChildHostExit, ChildMode, SchemaMode, WorkerRunOptions};
 
 #[derive(Debug, Parser)]
 #[command(name = "acme", about = "Acme Clothing showcase")]
@@ -72,7 +72,7 @@ fn main() -> ExitCode {
         ChildMode::Child(args) => serve_child(args),
         ChildMode::BadArguments(error) => {
             eprintln!("acme: child mode cannot start: {error}");
-            exit_code(ChildHostExit::BadArguments.code())
+            exit_code(ChildHostExit::BadArguments.exit_code())
         }
         ChildMode::Worker => run_command(Cli::parse().command),
     }
@@ -163,7 +163,7 @@ async fn run_worker(options: WorkerOptions) -> Result<(), String> {
     let showcase = build_app(SchemaMode::MigrateAndValidate).map_err(|error| error.to_string())?;
     showcase
         .app
-        .run_worker(WorkerStart::profile(options.profile))
+        .run_worker(WorkerRunOptions::profile(options.profile))
         .await
         .map(|_stopped| ())
         .map_err(|error| error.to_string())
@@ -211,8 +211,8 @@ mod web {
         #[arg(long, default_value_t = 8600)]
         port: u16,
         /// none (a loopback host only) or trusted-header.
-        #[arg(long, value_enum, default_value_t = AuthMode::None)]
-        auth: AuthMode,
+        #[arg(long, value_enum, default_value_t = AuthorizationMode::None)]
+        authorization: AuthorizationMode,
         /// The identity header that the reverse proxy sets.
         #[arg(long, default_value = "X-Forwarded-User")]
         trusted_header: String,
@@ -225,7 +225,7 @@ mod web {
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-    pub(crate) enum AuthMode {
+    pub(crate) enum AuthorizationMode {
         None,
         TrustedHeader,
     }
@@ -234,19 +234,20 @@ mod web {
     /// DDL (`SchemaMode::ObserveOnly`).
     pub(crate) async fn run(options: WebOptions) -> Result<(), String> {
         let showcase = build_app(SchemaMode::ObserveOnly).map_err(|error| error.to_string())?;
+        let actions = match options.enable_actions {
+            true => Actions::Enabled,
+            false => Actions::Disabled,
+        };
         let monitoring = MonitoringConfig {
             ui: MonitoringUiConfig {
                 custom_css_url: options.custom_css_url.clone(),
-                trace_link: TraceLink::NoTraceLink,
+                trace_link: TraceLink::Text,
             },
-            actions: match options.enable_actions {
-                true => Actions::Enabled,
-                false => Actions::Disabled,
-            },
+            actions,
         };
-        let router = match (options.auth, options.enable_actions) {
-            (AuthMode::TrustedHeader, _) => {
-                let policy = TrustedHeader::new(&options.trusted_header, options.enable_actions)
+        let router = match (options.authorization, options.enable_actions) {
+            (AuthorizationMode::TrustedHeader, _) => {
+                let policy = TrustedHeader::new(&options.trusted_header, actions)
                     .map_err(|error| format!("invalid --trusted-header: {error}"))?;
                 eprintln!(
                     "SECURITY: the reverse proxy in front of this server must strip or overwrite \
@@ -255,15 +256,19 @@ mod web {
                 );
                 horsies::web::router(&showcase.app, monitoring, policy)
             }
-            (AuthMode::None, _) if !is_loopback_host(&options.host) => {
+            (AuthorizationMode::None, _) if !is_loopback_host(&options.host) => {
                 return Err(format!(
-                    "--auth none is only allowed on a loopback host; {:?} is reachable from the \
-                     network. Use --auth trusted-header behind a proxy.",
+                    "--authorization none is only allowed on a loopback host; {:?} is reachable \
+                     from the network. Use --authorization trusted-header behind a proxy.",
                     options.host
                 ));
             }
-            (AuthMode::None, true) => horsies::web::router(&showcase.app, monitoring, AllowAll),
-            (AuthMode::None, false) => horsies::web::router(&showcase.app, monitoring, ViewOnly),
+            (AuthorizationMode::None, true) => {
+                horsies::web::router(&showcase.app, monitoring, AllowAll)
+            }
+            (AuthorizationMode::None, false) => {
+                horsies::web::router(&showcase.app, monitoring, ViewOnly)
+            }
         };
         let listener = tokio::net::TcpListener::bind((options.host.as_str(), options.port))
             .await
@@ -365,14 +370,14 @@ mod tests {
 
     #[cfg(feature = "web")]
     #[test]
-    fn web_takes_the_auth_mode() {
-        Cli::try_parse_from(["acme", "web", "--auth", "none"]).expect("web");
+    fn web_takes_the_authorization_mode() {
+        Cli::try_parse_from(["acme", "web", "--authorization", "none"]).expect("web");
         Cli::try_parse_from([
             "acme",
             "web",
             "--host",
             "0.0.0.0",
-            "--auth",
+            "--authorization",
             "trusted-header",
         ])
         .expect("web behind a proxy");

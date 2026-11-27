@@ -1,0 +1,13 @@
+{
+  "name": "acme-showcase",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "horsies": "workspace:*",
+    "pg": "8.23.1",
+    "zod": "4.1.13"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1"
+  }
+}

@@ -9,7 +9,7 @@ The aggregate declares `join='quorum'` with `min_success=2`, so it fires as
 soon as two feeds land rather than waiting for all three, and the workflow
 COMPLETES with a failed branch still showing in the graph.
 
-It reads the feeds through `workflow_ctx_from` rather than `args_from`. Under a
+It reads the feeds through `workflow_context_from` rather than `args_from`. Under a
 quorum join an `args_from` source may not be terminal when the node fires, and
 its kwarg is then simply not injected; `WorkflowContext` makes the same
 uncertainty explicit — the aggregate asks `has_result` before reading, and
@@ -58,24 +58,24 @@ class Restock(WorkflowDefinition[RestockPlan]):
         """Build a fresh spec with one feed node per supplier."""
         feeds = [
             TaskNode(
-                fn=sync_supplier_feed,
+                function=sync_supplier_feed,
                 kwargs={'supplier': supplier},
                 node_id=_feed_node_id(supplier),
             )
             for supplier in suppliers
         ]
         aggregate = TaskNode(
-            fn=update_stock_levels,
+            function=update_stock_levels,
             kwargs={'feed_node_ids': [_feed_node_id(s) for s in suppliers]},
             waits_for=feeds,
-            workflow_ctx_from=feeds,
+            workflow_context_from=feeds,
             join='quorum',
             min_success=min(tuning.RESTOCK_MIN_SUCCESSFUL_FEEDS, len(feeds)),
             node_id='update_stock_levels',
         )
         return app.workflow(
             name=cls.name,
-            tasks=[*feeds, aggregate],
+            nodes=[*feeds, aggregate],
             on_error=OnError.FAIL,
             output=aggregate,
             # The quorum join decides when the aggregate *runs*; it does not
@@ -95,7 +95,7 @@ class Restock(WorkflowDefinition[RestockPlan]):
 _CHECK_SUPPLIERS: Final[list[str]] = list(tuning.SUPPLIERS)
 
 
-@app.workflow_builder(cases=[{'suppliers': _CHECK_SUPPLIERS}])
+@app.check_workflow_builder(cases=[{'suppliers': _CHECK_SUPPLIERS}])
 def build_restock(*, suppliers: list[str]) -> WorkflowSpec[RestockPlan]:
     """Build the restock DAG for a set of suppliers."""
     return Restock.build_with(app, suppliers=suppliers)

@@ -1,15 +1,19 @@
 // `Horsies.create`: the checks of the config and of each listed contract, in order, and the app context.
 //
-// Order of the refusals: the config (the TypeScript parse, then the core's check), then the contracts in list order
-// (the list, the queue, the wire types, then the core's checks of the codes and the options).
+// Order of the refusals: the config (the TypeScript parse, the tracing step, then the core's check), then the
+// contracts in list order (the list, the queue, the wire types, then the core's checks of the codes and the options).
+//
+// An accepted create then declares the `schedule` section (`schedules/app-member.ts`): its refusals go to the
+// schedules area of the refusal sink, which `check` and the scheduler start read, and never refuse the create.
 //
 // The thread rule: the addon loads only on the main thread of a process. On a main thread every check runs; the core's
 // checks call the addon's pure check functions, which start no core. On a worker thread only the checks that are
-// TypeScript code run, and no addon loads.
+// TypeScript code run, and no addon loads: a seat isolate reaches the core through the relay of its seat, another
+// worker thread has no core.
 
 import { isMainThread } from "node:worker_threads";
 
-import { type AppConfig, type AppConfigInput, parseAppConfig, resendOnTransientErr } from "../config/app-config.ts";
+import { type AppConfig, type AppConfigInput, parseAppConfig, resendOnTransientError } from "../config/app-config.ts";
 import { queueSetupOf } from "../config/queues.ts";
 import type { EnvironmentRead } from "../config/secret.ts";
 import type { AnyTaskContract } from "../contract/define-task.ts";
@@ -25,6 +29,16 @@ import {
   processRole,
   taskInfo,
 } from "../native/sends/sends.ts";
+import { workerThreadCore } from "../seats/channel.ts";
+import {
+  processTracingEnvironment,
+  recordTracingParts,
+  type TracingParts,
+  tracingPartsOf,
+} from "../telemetry/create-hook.ts";
+import { type OtelApiLoader, requireOtelApi } from "../telemetry/otel-api.ts";
+import { tracingSettingOf } from "../telemetry/tracing-config.ts";
+import { registeredHandlers } from "../events/register.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import type { QueueSetup } from "../config/queues.ts";
 import type { AnyWorkflowContract } from "../workflow/define.ts";
@@ -43,22 +57,30 @@ import {
 } from "./contract-list.ts";
 import { type AcceptedConfig, checkConfigWithCore, checkTaskWithCore, type CoreChecks } from "./core-checks.ts";
 import type { AddonCore, CoreAccess, ProducerCore } from "./core-access.ts";
-import { NO_OP_OBSERVER } from "./observers.ts";
-import type { Refusal } from "./refusal.ts";
+import type { HorsiesError } from "./refusal.ts";
 import { RefusalSink } from "./refusals.ts";
-import { NO_TELEMETRY } from "./telemetry.ts";
+import { declareSchedules, NATIVE_SCHEDULE_CALLS, type ScheduleCoreCalls, scheduleCoreAccess } from "../schedules/app-member.ts";
+import type { ScheduleSection } from "../schedules/entry.ts";
 import { initialSuppression, type ProcessStart, processStart, SuppressionState } from "./suppression.ts";
 
-/** The config of `Horsies.create`: the app config and the contract lists. */
+/** The config of `Horsies.create`: the app config, the contract lists and the schedules. */
 export type HorsiesConfig = AppConfigInput & {
   /** Every task contract of the app. A send of a contract that is not listed is refused. */
   readonly tasks: readonly AnyTaskContract[];
   /** Every workflow contract of the app. A start, or a sub-workflow node, of an unlisted workflow is refused. */
   readonly workflows?: readonly AnyWorkflowContract[];
+  /**
+   * The schedules of the app and the switches of the scheduler; the `scheduler` command runs them. Each refusal of the
+   * section (a contract that the app does not list, a queue that it does not admit, an input that does not fit the task
+   * or is over the payload bound, a zone that the runtime does not know, a pattern that breaks a rule, a repeated name,
+   * a check interval outside its bound) reaches the check of `check` and of the scheduler start; the worker start skips
+   * them. Left out: no scheduler runs.
+   */
+  readonly schedule?: ScheduleSection;
 };
 
 /** Why `Horsies.create` gives no app: every refusal, in order. */
-export type CreateRefused = { readonly refusals: NonEmpty<Refusal> };
+export type ValidationReport = { readonly refusals: NonEmpty<HorsiesError> };
 
 /** The facts of the process that `Horsies.create` reads. A test gives its own. */
 export interface CreateEnvironment {
@@ -76,6 +98,10 @@ export interface CreateEnvironment {
     options: ReadonlyMap<string, NativeTaskOptions>,
     workflows: WorkflowsOnMainThread,
   ) => AddonCore;
+  /** The load of the OpenTelemetry API; called only for `tracing: { kind: "otelTracing" }`, on every thread. */
+  readonly otelApi: OtelApiLoader;
+  /** The core's checks of a schedule declaration. Called on a main thread only, for a config with a `schedule` section. */
+  readonly scheduleCalls: () => ScheduleCoreCalls;
 }
 
 /** The facts of this process. Effects: reads the thread, the environment and the arguments. */
@@ -86,12 +112,15 @@ export function processEnvironment(): CreateEnvironment {
     processStart: processStart(),
     coreChecks: () => ({ checkAppConfig, parseDeclaredErrorCodes, checkTaskOptions }),
     addonCore: addonCoreOf,
+    otelApi: requireOtelApi,
+    scheduleCalls: () => NATIVE_SCHEDULE_CALLS,
   };
 }
 
 /** The app context of `config`, or every refusal in order. */
-export function createApp(config: HorsiesConfig, environment: CreateEnvironment): Result<AppContext, CreateRefused> {
+export function createApp(config: HorsiesConfig, environment: CreateEnvironment): Result<AppContext, ValidationReport> {
   const parsed = parseAppConfig(config, environment.environment);
+  const tracing = tracingPartsOf(tracingSettingOf(config.tracing), processTracingEnvironment(environment.otelApi));
   // The queue check reads only the queue fields of the input, so a refused config adds no false queue refusal.
   const queues = queueSetupOf(config);
   const list = checkContractList(config.tasks, queues);
@@ -102,39 +131,55 @@ export function createApp(config: HorsiesConfig, environment: CreateEnvironment)
     queues,
   });
 
+  const tracingRefusals = tracing.ok ? [] : [tracing.error];
+
+  // The core's checks need the parsed config: a refused parse leaves them out.
   if (!parsed.ok) {
-    return refused([...parsed.error, ...inListOrder(list.refusals), ...workflows.refusals]);
+    return refused([...parsed.error, ...tracingRefusals, ...inListOrder(list.refusals), ...workflows.refusals]);
   }
 
   if (!environment.mainThread) {
-    return list.refusals.length > 0 || workflows.refusals.length > 0
-      ? refused([...inListOrder(list.refusals), ...workflows.refusals])
-      : ok(contextOf(parsed.value, list.entries, { kind: "noCore" }, environment, workflows.registry));
+    return !tracing.ok || list.refusals.length > 0 || workflows.refusals.length > 0
+      ? refused([...tracingRefusals, ...inListOrder(list.refusals), ...workflows.refusals])
+      : ok(scheduledContext(contextOf(parsed.value, list.entries, workerThreadCore(), environment, tracing.value, workflows.registry), config, environment));
   }
 
   const checks = environment.coreChecks();
-  const accepted = checkConfigWithCore(checks, parsed.value.coreConfigJson);
+  const accepted = checkConfigWithCore(checks, parsed.value.coreConfigJson, parsed.value.schemaMode);
   const options = coreCheckedOptions(checks, list.entries);
 
   const refusals = [
+    ...tracingRefusals,
     ...(accepted.kind === "refused" ? accepted.refusals : []),
     ...inListOrder([...list.refusals, ...options.refusals]),
     ...workflows.refusals,
   ];
 
-  if (accepted.kind === "refused" || refusals.length > 0) {
+  if (!tracing.ok || accepted.kind === "refused" || refusals.length > 0) {
     return refused(refusals);
   }
 
   const onMainThread: WorkflowsOnMainThread = {
     registry: workflows.registry,
     queues,
-    resendOnTransientErr: resendOnTransientErr(parsed.value),
+    resendOnTransientError: resendOnTransientError(parsed.value),
   };
 
   const core: CoreAccess = { kind: "addon", ...environment.addonCore(accepted.value, options.options, onMainThread) };
 
-  return ok(contextOf(parsed.value, list.entries, core, environment, workflows.registry));
+  return ok(scheduledContext(contextOf(parsed.value, list.entries, core, environment, tracing.value, workflows.registry), config, environment));
+}
+
+/**
+ * `context` with the declaration of the `schedule` section of `config`, when it has one: the core's checks on a main
+ * thread, the checks that are TypeScript code in a worker thread. Each refusal goes to the refusal sink.
+ */
+function scheduledContext(context: AppContext, config: HorsiesConfig, environment: CreateEnvironment): AppContext {
+  if (config.schedule !== undefined) {
+    declareSchedules(context, config.schedule, scheduleCoreAccess(context, environment.scheduleCalls));
+  }
+
+  return context;
 }
 
 /** The core checks of each listed contract, in list order, and the checked options by task name. */
@@ -158,14 +203,14 @@ function coreCheckedOptions(
   return { options, refusals };
 }
 
-function refused(refusals: readonly Refusal[]): Result<AppContext, CreateRefused> {
+function refused(refusals: readonly HorsiesError[]): Result<AppContext, ValidationReport> {
   const [first, ...rest] = refusals;
 
   if (first === undefined) {
     throw new TypeError("createApp: a refused create with no refusal");
   }
 
-  const all: NonEmpty<Refusal> = Object.freeze([first, ...rest]);
+  const all: NonEmpty<HorsiesError> = Object.freeze([first, ...rest]);
 
   return err(Object.freeze({ refusals: all }));
 }
@@ -175,37 +220,42 @@ function contextOf(
   listed: readonly ListedEntry[],
   core: CoreAccess,
   environment: CreateEnvironment,
+  tracing: TracingParts,
   workflows: WorkflowRegistry,
 ): AppContext {
   const suppression = new SuppressionState(initialSuppression(environment.processStart), environment.environment);
 
-  return {
+  const context: AppContext = {
     config,
     listed,
     core,
     refusals: new RefusalSink(),
-    observer: NO_OP_OBSERVER,
+    observer: tracing.sendObserver,
     suppression,
     send: {
       contracts: contractLookupOf(listed),
-      resendOnTransientErr: resendOnTransientErr(config),
+      resendOnTransientError: resendOnTransientError(config),
       core,
-      observer: NO_OP_OBSERVER,
+      observer: tracing.sendObserver,
       suppression,
       pause: async (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
       now: () => Temporal.Now.instant(),
     },
     implementations: new Map(),
     workflows,
-    telemetry: NO_TELEMETRY,
+    telemetry: { handlers: () => registeredHandlers(context), tracing: tracing.setting },
   };
+
+  recordTracingParts(context, tracing);
+
+  return context;
 }
 
 /** The facts of the app's workflows that the core operations on a main thread read. */
 export type WorkflowsOnMainThread = {
   readonly registry: WorkflowRegistry;
   readonly queues: QueueSetup;
-  readonly resendOnTransientErr: boolean;
+  readonly resendOnTransientError: boolean;
 };
 
 /**
@@ -232,7 +282,7 @@ function addonCoreOf(
         rules: accepted.rules,
         options,
         queueNames: admittedQueueNames(workflows.queues),
-        resendOnTransientErr: workflows.resendOnTransientErr,
+        resendOnTransientError: workflows.resendOnTransientError,
       },
       workflows.registry,
     ),

@@ -15,7 +15,7 @@ import { statusLabel } from '@/lib/status-utils';
 import { instantMs } from '@/lib/time-text';
 import { traceLinkOf } from '@/lib/trace-link';
 import { cn } from '@/lib/utils';
-import type { LeafTask } from '@/types/workflows';
+import type { TaskRow } from '@/types/workflows';
 
 import { clockFrom, intervalMs, ownerAttempt, type PanelBase, type PanelModel } from './attempt-panel-model';
 import type { RecordedAttempt } from './attempt-story';
@@ -132,7 +132,7 @@ export function AttemptDetails({
   traceTemplate,
 }: {
   model: PanelModel;
-  leaf: LeafTask;
+  leaf: TaskRow;
   base: PanelBase;
   traceTemplate: string | null;
 }) {
