@@ -326,20 +326,22 @@ describe("layer 1: tasks", () => {
     const enqueued = [first.enqueuedAt];
 
     await suite.worker("isolated-1");
-    await pollUntilInfo(handle, 15_000, "the second retry", (info) => {
+    // The first interval would hold the boot of the worker, which the task waits for: the compared intervals are the
+    // waits between the three retries (1 s base: 2 s, then 4 s).
+    await pollUntilInfo(handle, 30_000, "the third retry", (info) => {
       if (info.retryCount === enqueued.length) {
         enqueued.push(info.enqueuedAt);
       }
 
       assert.deepEqual(info.sentAt, first.sentAt, "sentAt changed on a retry");
 
-      return enqueued.length > 2;
+      return enqueued.length > 3;
     });
 
-    const [start, firstRetry, secondRetry] = enqueued.map((instant) => instant.epochMilliseconds);
+    const [, firstRetry, secondRetry, thirdRetry] = enqueued.map((instant) => instant.epochMilliseconds);
 
-    assert.ok(start !== undefined && firstRetry !== undefined && secondRetry !== undefined);
-    assert.ok(secondRetry - firstRetry > firstRetry - start, `intervals ${String(firstRetry - start)} then ${String(secondRetry - firstRetry)} ms`);
+    assert.ok(firstRetry !== undefined && secondRetry !== undefined && thirdRetry !== undefined);
+    assert.ok(thirdRetry - secondRetry > secondRetry - firstRetry, `intervals ${String(secondRetry - firstRetry)} then ${String(thirdRetry - secondRetry)} ms`);
   });
 
   e2eTest("a code that the policy names is retried", "default", async (suite) => {
