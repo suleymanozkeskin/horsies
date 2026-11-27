@@ -16,7 +16,7 @@ import type { OtelApi } from "../../../../horsies/src/telemetry/otel-api.ts";
 import { otelSendObserver } from "../../../../horsies/src/telemetry/send-span.ts";
 import { err, ok } from "../../../../horsies/src/wire/result.ts";
 import { rawEnqueueFailed, TASK_ID } from "../../app/support.ts";
-import { installSdk, loadedApi, onlySpan, recordedNotMade, recordedWarnings, type TestSdk } from "../support.ts";
+import { apiWithBrokenSpanEnd, installSdk, loadedApi, onlySpan, recordedNotMade, recordedWarnings, SPAN_END_BROKEN, type TestSdk } from "../support.ts";
 
 const FACTS = { taskName: "report", queueName: "default", taskId: TASK_ID };
 const SENT: SendCallResult = ok(taskIdFromCore(TASK_ID, "the send span test"));
@@ -195,6 +195,26 @@ describe("the send span with no SDK or a broken SDK", () => {
 
     assert.deepEqual(traces, [{ kind: "noCarrier" }, { kind: "noCarrier" }]);
     assert.deepEqual(written, [`send ${TASK_ID} Error: the SDK is broken`]);
+  });
+});
+
+describe("a send span that cannot end", () => {
+  let sdk: TestSdk;
+
+  beforeEach(() => {
+    sdk = installSdk();
+  });
+
+  afterEach(() => {
+    sdk.remove();
+  });
+
+  test("a throw at the end of the span is one report of a span not made per process; each send result is unchanged", async () => {
+    const { observer, written } = observerOf(apiWithBrokenSpanEnd());
+
+    await sendThrough(observer, SENT);
+    await sendThrough(observer, FAILED);
+    assert.deepEqual(written, [`send ${TASK_ID} Error: ${SPAN_END_BROKEN}`]);
   });
 });
 

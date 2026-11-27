@@ -42,6 +42,17 @@ there is no migration contract between pre-1.0 versions.
     core's `try_subscribe_events` returns `EventStreamsRefused { open, bound }`.
     Python's `subscribe_events_async` answers `EventStreamRefused`. A stream
     that ends frees its place.
+- **Core: public constants for the client checks.**
+  `horsies_core` exports the idempotency key bound
+  (`IDEMPOTENCY_KEY_MAX_BYTES`, 255 UTF-8 bytes), the route of
+  `QueueMode::Default` (`DEFAULT_QUEUE_NAME`, `"default"`, and
+  `DEFAULT_QUEUE_PRIORITY`, 100), the defaults of a task schedule
+  (`DEFAULT_SCHEDULE_ENABLED`, `DEFAULT_SCHEDULE_TIMEZONE`,
+  `DEFAULT_MAX_CATCH_UP_RUNS`) and the bounds of `timeout_ms`
+  (`MIN_TASK_TIMEOUT_MS`, `MAX_TASK_TIMEOUT_MS`). The Python package reads them
+  from the generated `_catalog` modules `task_bounds`, `queue_defaults` and
+  `schedule_defaults`; the Rust client reads the queue route from the core.
+  No value changes.
 - **Codegen model: the schema of the schedule pattern.**
   `horsies_core::manifest_schema::SCHEDULE_PATTERN` lists the types of the
   `pattern_json` text of the scheduler manifest, in render order: `Weekday`,

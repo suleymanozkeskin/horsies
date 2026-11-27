@@ -302,6 +302,21 @@ describe("layer 1: tasks", () => {
     assert.equal(await failedCode(byId, CANCELLED_READ_MS), "TASK_CANCELLED");
   });
 
+  e2eTest("a rerun of a completed task is notEligible with COMPLETED_SOURCE, and writes nothing", "default", async (suite) => {
+    await suite.worker("isolated-1");
+
+    const handle = await sentHandle("e2e_simple", suite.app.send(basic.simple, { x: 5 }));
+
+    await succeeded(handle, RESULT_WAIT_MS);
+
+    const rerun = await suite.app.rerunTask(
+      { sourceTaskId: handle.taskId, goodUntil: { kind: "none" } },
+      { retention: { kind: "forever" }, retainRerunInput: "keep", reservationWindow: Temporal.Duration.from({ days: 1 }) },
+    );
+
+    assert.deepEqual(rerun, { ok: true, value: { kind: "notEligible", taskId: handle.taskId, reason: "COMPLETED_SOURCE" } });
+  });
+
   e2eTest("the info of a completed task names it and holds one attempt", "default", async (suite) => {
     await suite.worker("isolated-1");
 

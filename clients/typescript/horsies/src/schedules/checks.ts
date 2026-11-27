@@ -13,6 +13,7 @@
 // not run in a worker thread: no scheduler and no `check` runs there.
 
 import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
+import { DEFAULT_MAX_CATCH_UP_RUNS, DEFAULT_SCHEDULE_ENABLED, DEFAULT_SCHEDULE_TIMEZONE } from "../_catalog/schedule_defaults.ts";
 import { MAX_CATCH_UP_RUNS_MAX, MAX_CATCH_UP_RUNS_MIN } from "../_catalog/scheduler_manifest.ts";
 import { refusal, type HorsiesError } from "../app/refusal.ts";
 import { encodeParametersWithReadBack } from "../codec/read-back.ts";
@@ -23,7 +24,7 @@ import type { PatternCheck, RejectBound, TimezoneCheck } from "../native/schedul
 import type { ContractLookup, ListedTask } from "../send/send.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import { DEFAULT_MAX_CATCH_UP_RUNS, DEFAULT_SCHEDULE_TIMEZONE, type DeclaredEntry } from "./entry.ts";
+import type { DeclaredEntry } from "./entry.ts";
 import { patternRefusalText, patternText } from "./pattern.ts";
 import { checkedZone, type ZoneCheck } from "./zone.ts";
 
@@ -81,7 +82,7 @@ export function checkSchedule(
     return fields;
   }
 
-  if (entry.enabled === false) {
+  if (!(entry.enabled ?? DEFAULT_SCHEDULE_ENABLED)) {
     return ok({ kind: "disabled", name: entry.name });
   }
 

@@ -3,7 +3,7 @@
 // decodes the stored result envelope with the output kind of its upstream.
 
 import { unreachable } from "../wire/unreachable.ts";
-import type { UpstreamOutput } from "../wire/kinds.ts";
+import type { UpstreamCodes, UpstreamOutput } from "../wire/kinds.ts";
 import { type AnyWorkflowContract, workflowRecord } from "../workflow/define.ts";
 import { compileOutput } from "./compile.ts";
 import type { AnyTaskContract } from "./define-task.ts";
@@ -36,4 +36,30 @@ function outputOf(subject: string, holder: object): UpstreamOutput {
   const causes = compiled.error.map((refused) => `${refused.path}: ${refused.detail}`).join("; ");
 
   return Object.freeze({ state: "refused", detail: `the output of ${subject} has no stored form: ${causes}` });
+}
+
+/**
+ * The custom codes that the stored error of `contract` may hold: the declared `errorCodes` of a task contract, or
+ * every code (`open`) for a task with no `errorCodes` and for a workflow contract. Effects: none.
+ */
+export function upstreamCodesOf(contract: AnyTaskContract | AnyWorkflowContract): UpstreamCodes {
+  switch (contract.kind) {
+    case "task": {
+      const codes = contractRecord(contract).codes;
+
+      switch (codes.kind) {
+        case "open":
+          return Object.freeze({ state: "open" });
+        case "declared":
+          return Object.freeze({ state: "declared", upstream: `the task ${contract.name}`, codes: codes.codes });
+        default:
+          return unreachable(codes, "upstreamCodesOf");
+      }
+    }
+
+    case "workflow":
+      return Object.freeze({ state: "open" });
+    default:
+      return unreachable(contract, "upstreamCodesOf");
+  }
 }
