@@ -31,7 +31,8 @@ use crate::{
 /// The Python base class of a generated enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PythonEnumBase {
-    /// `class X(str, Enum)`: members compare equal to their text.
+    /// `class X(StrEnum)`: members compare equal to their text, and `str()`
+    /// and `f"{member}"` give the text.
     StrEnum,
     /// `class X(Enum)`.
     PlainEnum,

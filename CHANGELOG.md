@@ -90,6 +90,35 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Python: the built-in code enums print their code text.** The generated
+  code enums (`OperationalCode`, `ContractCode`, `RetrievalCode`,
+  `OutcomeCode`, `HorsiesErrorCode`, `DatabaseErrorCode`,
+  `TaskSendErrorCode`, `SeatRelayCode`, `WorkflowStartErrorCode`,
+  `WorkflowHandleErrorCode`, `MonitoringQueryErrorCode`,
+  `TaskActionErrorCode`, `MonitoringQueryRefusalCode`, `RerunErrorCode`) and
+  the generated text enums `TaskAbsenceReason`, `TaskAttemptOutcome`,
+  `WorkflowStatus` and `WorkflowNodeStatus` are `StrEnum` in place of
+  `(str, Enum)`. `str(code)` and `f"{code}"` give the code text
+  (`DATABASE_ERROR`); on Python 3.13 they gave `OperationalCode.DATABASE_ERROR`.
+  Matching, comparison, hashing and the stored text do not change.
+  `TaskStatus` stays a plain `Enum`. Enums that user code declares are not
+  affected.
+- **An upstream error with a code that the upstream task does not declare
+  refuses the input of the downstream task (Python and Rust).** A node input
+  that is an upstream outcome (`TaskOutcome` in Python, `TaskOutcome<S, E>` in
+  Rust) fails the run with `WORKER_SERIALIZATION_ERROR` when the stored error
+  of a task node holds a custom code that the upstream task does not declare
+  (`error_codes=` in Python, the declared codes of the code type in Rust). The
+  body does not run. An upstream task that declares no code reads any code, and
+  a sub-workflow node is not checked. The workflow context read and the result
+  read already refuse the same case.
+- **Rust: `check --live` connects with an observe-only handle.**
+  `Horsies::check_live` builds a handle of its own with
+  `SchemaMode::ObserveOnly`, as the Python and TypeScript checks do, runs the
+  connectivity check and the worker connection check on it, and closes it. The
+  app's handle does not connect and its schema mode does not apply. The result
+  of the check does not change.
+
 - **The Rust client's `sqlx` feature needs sqlx 0.9, and the minimum Rust
   is 1.95.** The `sqlx` feature of `horsies` builds against sqlx 0.9 (it was
   0.8). `rust-version` of `horsies` is `1.95` (it was `1.91`), and the

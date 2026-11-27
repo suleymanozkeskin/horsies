@@ -499,6 +499,35 @@ pub(crate) fn args_from_inner_text<'a>(
         })
 }
 
+/// The node that an `args_from` entry takes its result from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ArgsFromSource {
+    /// A task node: the entry has no definition key. The text is its task name.
+    Task(String),
+    /// A sub-workflow node: the entry has a definition key.
+    SubWorkflow,
+}
+
+/// The source of the `args_from` entry `value`, or `None` when `value` is not an
+/// entry that [`args_from_inner_text`] accepts. Pure.
+pub(crate) fn args_from_source(value: &RawValue) -> Option<ArgsFromSource> {
+    let entry = object_members(value.get()).ok()?;
+    let member = |key: &str| {
+        entry
+            .iter()
+            .find(|(member_name, _)| member_name == key)
+            .map(|(_, text)| *text)
+    };
+    match member("source_definition_key").map(RawValue::get) {
+        None | Some("null") => {}
+        Some(_) => return Some(ArgsFromSource::SubWorkflow),
+    }
+    let name = member("source_task_name")?;
+    serde_json::from_str::<String>(name.get())
+        .ok()
+        .map(ArgsFromSource::Task)
+}
+
 /// Whether `value` is a JSON string. A raw value starts at its first
 /// character. Pure.
 fn is_json_string(value: &RawValue) -> bool {

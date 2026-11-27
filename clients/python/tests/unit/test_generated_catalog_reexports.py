@@ -218,14 +218,14 @@ def test_public_path_is_the_generated_class_with_the_same_members(
 
 
 # The one re-exported class whose public base is `Enum` alone; every other
-# one is `str, Enum`.
+# one is `StrEnum`.
 PLAIN_ENUM_CLASSES: Final[frozenset[type[enum.Enum]]] = frozenset({status.TaskStatus})
 
 
 def test_every_re_exported_class_keeps_its_public_base() -> None:
     for public, _generated, _members in REEXPORTS:
         expected = (
-            (enum.Enum,) if public in PLAIN_ENUM_CLASSES else (str, enum.Enum)
+            (enum.Enum,) if public in PLAIN_ENUM_CLASSES else (enum.StrEnum,)
         )
         assert public.__bases__ == expected, public.__qualname__
 

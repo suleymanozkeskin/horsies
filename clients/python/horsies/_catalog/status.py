@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import Enum, StrEnum
 
 __all__ = ['TaskStatus', 'TASK_TERMINAL_STATES', 'TaskAttemptOutcome', 'WorkflowStatus', 'WORKFLOW_TERMINAL_STATES', 'WorkflowNodeStatus', 'WORKFLOW_NODE_TERMINAL_STATES']
 
@@ -57,7 +57,7 @@ TASK_TERMINAL_STATES: frozenset[TaskStatus] = frozenset(
 )
 
 
-class TaskAttemptOutcome(str, Enum):
+class TaskAttemptOutcome(StrEnum):
     """Outcome of a single task execution attempt.
 
     Recorded in `horsies_task_attempts.outcome`.
@@ -79,7 +79,7 @@ class TaskAttemptOutcome(str, Enum):
     """
 
 
-class WorkflowStatus(str, Enum):
+class WorkflowStatus(StrEnum):
     """Status of a workflow instance.
 
     State machine:
@@ -127,7 +127,7 @@ WORKFLOW_TERMINAL_STATES: frozenset[WorkflowStatus] = frozenset(
 )
 
 
-class WorkflowNodeStatus(str, Enum):
+class WorkflowNodeStatus(StrEnum):
     """Status of a single task/node within a workflow.
 
     State machine:

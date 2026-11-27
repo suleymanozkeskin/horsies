@@ -233,7 +233,7 @@ class TaskError(BaseModel):
 
 `code` is required and must not be null: `retry_for` and outcome routing read it. `message` is optional, and domain errors typically set it. `data` carries structured context. `exception` populated by the library for unhandled exceptions.
 
-**Construction rule**: reserved built-in code values must be passed as enum members, not raw strings. Custom codes must be plain `str`, not `str, Enum` subclasses.
+**Construction rule**: reserved built-in code values must be passed as enum members, not raw strings. Custom codes must be plain `str`, not `str, Enum` subclasses. The built-in code enums are `StrEnum`: `str(code)` and `f"{code}"` give the code text.
 
 <!-- check: skip partial -- uses a name before the page defines it -->
 ```python
@@ -278,7 +278,7 @@ Infra-level failures during task execution, brokering, or worker processing:
 - `WORKER_CRASHED` — worker process died during execution
 - `DATABASE_ERROR` — DB/broker failure during result retrieval (`read_error.code` of `ReadDatabaseError`)
 - `WORKER_RESOLUTION_ERROR` — task name not found in registry
-- `WORKER_SERIALIZATION_ERROR` — failed to serialize/deserialize arguments
+- `WORKER_SERIALIZATION_ERROR` — failed to serialize/deserialize arguments; also an `args_from` result whose stored error holds a custom code that the upstream task does not declare
 - `RESULT_DESERIALIZATION_ERROR` — a stored result or a stored workflow error is corrupt or does not decode (`read_error.code` of `ReadResultDeserializationError`)
 - `WORKFLOW_ENQUEUE_FAILED` — workflow node failed during enqueue
 - `SUBWORKFLOW_LOAD_FAILED` — sub-workflow definition could not be loaded

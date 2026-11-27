@@ -483,7 +483,11 @@ pub(super) fn prepare(app: &ChildApp, task_name: &str, input: &TaskInputText) ->
             )))
         }
     };
-    match build_task_input(input.as_str(), task.accepts_workflow_context()) {
+    match build_task_input(
+        input.as_str(),
+        task.accepts_workflow_context(),
+        &app.registry,
+    ) {
         Ok(input) => Prepared::Body {
             task: Box::new(task),
             input,
