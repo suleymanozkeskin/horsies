@@ -1,10 +1,12 @@
 // The typecheck-speed check. Each command runs `sessionsPerMeasurement` sessions. A session runs `runsPerSession`
 // runs of `bun check` on the control project, then the same on the app project, and takes the ratio of the app
-// median to the control median. The machine speed cancels in the ratio, so a baseline gives a verdict on any machine.
+// median to the control median. The CPU speed cancels in the ratio; the operating system and the CPU architecture do
+// not, so baseline.json holds one baseline per platform, architecture and Bun binary.
 //   bun tests/typecheck-speed/cli.ts check   exit 1 when the median of the session ratios is
 //                                            above the baseline median plus the baseline noise
-//   bun tests/typecheck-speed/cli.ts record  writes the baseline of this Bun binary
-// Exit 2: no verdict (no baseline for this Bun binary and these projects, a failed run, a file error, a wrong argument).
+//   bun tests/typecheck-speed/cli.ts record  writes the baseline of this platform, architecture and Bun binary
+// Exit 2: no verdict (no baseline for this platform, architecture, Bun binary and these projects, a failed run, a file
+// error, a wrong argument).
 // The control project is written to a new folder in the temporary directory. The app project is written to a new
 // folder next to this file, because its tsconfig refers to the package by a relative path. Both folders are removed
 // after the runs.
@@ -173,7 +175,9 @@ function check(key: BaselineKey, controlFiles: ReadonlyMap<string, string>, appF
   const lookup = findBaseline(recordedFile, key);
 
   if (lookup.kind === "noMatch") {
-    console.error("no baseline for this Bun binary and these projects; record one with `bun run typecheck-speed:record`");
+    console.error(
+      `no baseline for ${key.platform} ${key.arch}, this Bun binary and these projects; record one with \`bun run typecheck-speed:record\``,
+    );
     console.error(`recorded baselines: ${recordedBaselines()}`);
 
     return exitCodes.noVerdict;
@@ -254,6 +258,8 @@ function main(argument: string | undefined): number {
   const appFiles = appProjectFiles();
 
   const key: BaselineKey = {
+    platform: process.platform,
+    arch: process.arch,
     bun: currentBun(),
     controlSha256: projectSha256(controlFiles),
     appSha256: projectSha256(appFiles),
@@ -263,7 +269,7 @@ function main(argument: string | undefined): number {
 
   console.log(`control project: ${controlFiles.size} files, sha256 ${key.controlSha256}`);
   console.log(`app project: ${appFiles.size} files, sha256 ${key.appSha256}`);
-  console.log(`bun: ${key.bun}`);
+  console.log(`bun: ${key.bun}, platform: ${key.platform} ${key.arch}`);
 
   switch (parsedCommand.command) {
     case "check":

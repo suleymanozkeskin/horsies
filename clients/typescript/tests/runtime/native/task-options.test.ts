@@ -79,7 +79,7 @@ function retryOf(policy: RetryNotation): object {
         kind: "fixed",
         intervalsSeconds: policy.intervals,
         jitter: policy.jitter,
-        autoRetryFor: policy.auto_retry_for,
+        retryFor: policy.auto_retry_for,
       };
     case "exponential":
       return {
@@ -88,7 +88,7 @@ function retryOf(policy: RetryNotation): object {
         maxRetries: policy.max_retries,
         jitter: policy.jitter,
         ...(policy.max_delay_seconds === null ? {} : { maxDelaySeconds: policy.max_delay_seconds }),
-        autoRetryFor: policy.auto_retry_for,
+        retryFor: policy.auto_retry_for,
       };
     default: {
       const unexpected: never = policy.backoff_strategy;

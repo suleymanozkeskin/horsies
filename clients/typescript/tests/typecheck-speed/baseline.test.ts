@@ -25,7 +25,17 @@ import { createProjectFolder, removeProjectFolder } from "./measure.ts";
 import type { Ratio } from "./ratio.ts";
 
 const machine: MachineIdentity = { platform: "linux", arch: "x64", cpuModel: "Test CPU", logicalCores: 4 };
-const key: BaselineKey = { bun: "1.4.4+38afee6c8", controlSha256: "a".repeat(64), appSha256: "c".repeat(64), runsPerSession: 9, sessions: 3 };
+
+const key: BaselineKey = {
+  platform: "linux",
+  arch: "x64",
+  bun: "1.4.4+38afee6c8",
+  controlSha256: "a".repeat(64),
+  appSha256: "c".repeat(64),
+  runsPerSession: 9,
+  sessions: 3,
+};
+
 const sessionRatios: Ratio[] = [10, 9.5, 10.5].map((appPerControl) => ({ appPerControl }));
 const stored: StoredBaseline = storedBaselineOf(key, machine, sessionRatios);
 
@@ -72,17 +82,19 @@ describe("findBaseline", () => {
   const otherBun: StoredBaseline = storedBaselineOf({ ...key, bun: "1.4.5+0000000aa" }, machine, sessionRatios);
   const file: StoredBaselineFile = { entries: [otherBun, stored] };
 
-  test("found: the entry of the Bun binary, the two projects, the run count and the session count", () => {
+  test("found: the entry of the platform, the Bun binary, the two projects, the run count and the session count", () => {
     expect(findBaseline(file, key)).toEqual({ kind: "found", stored });
   });
 
-  test("found: the entry of another machine, because a ratio compares on any machine", () => {
-    const onOtherMachine = storedBaselineOf(key, { ...machine, cpuModel: "Other CPU" }, sessionRatios);
+  test("found: the entry of another CPU of the same platform, because the CPU speed cancels in the ratio", () => {
+    const onOtherCpu = storedBaselineOf(key, { ...machine, cpuModel: "Other CPU", logicalCores: 16 }, sessionRatios);
 
-    expect(findBaseline({ entries: [onOtherMachine] }, key)).toEqual({ kind: "found", stored: onOtherMachine });
+    expect(findBaseline({ entries: [onOtherCpu] }, key)).toEqual({ kind: "found", stored: onOtherCpu });
   });
 
   test.each([
+    ["another operating system", { ...key, platform: "darwin" }],
+    ["another CPU architecture", { ...key, arch: "arm64" }],
     ["another Bun binary", { ...key, bun: "1.4.6+0000000bb" }],
     ["another control project", { ...key, controlSha256: "b".repeat(64) }],
     ["another app project", { ...key, appSha256: "d".repeat(64) }],
@@ -141,11 +153,14 @@ describe("judge", () => {
 });
 
 describe("recording", () => {
-  test("withRecordedBaseline: replaces the entry of the same Bun binary and keeps the others", () => {
-    const other = storedBaselineOf({ ...key, bun: "1.4.5+0000000aa" }, machine, sessionRatios);
+  test("withRecordedBaseline: replaces the entry of the same platform and Bun binary and keeps the others", () => {
+    const otherBun = storedBaselineOf({ ...key, bun: "1.4.5+0000000aa" }, machine, sessionRatios);
+    const otherPlatform = storedBaselineOf(key, { ...machine, platform: "darwin", arch: "arm64" }, sessionRatios);
     const newer = storedBaselineOf(key, machine, [8, 8.5, 9].map((appPerControl) => ({ appPerControl })));
 
-    expect(withRecordedBaseline({ entries: [stored, other] }, newer)).toEqual({ entries: [other, newer] });
+    expect(withRecordedBaseline({ entries: [stored, otherBun, otherPlatform] }, newer)).toEqual({
+      entries: [otherBun, otherPlatform, newer],
+    });
   });
 
   test("writeBaselineFile written: the file holds the entries as JSON", () => {

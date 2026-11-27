@@ -97,7 +97,10 @@ const TEXT_PARSERS: PgTextParsers = {
 /**
  * The caller's transaction on `client`. Each statement runs on `client` and gives its one row; a
  * statement runs only when the client's status is an open transaction. Nothing here commits or rolls
- * back: after the rerun, the caller commits, or rolls back after an error.
+ * back: after the rerun, the caller commits, or rolls back after an error. After a statement of the
+ * caller's transaction fails, `pg` reports the failed state only after its next ready message, so a
+ * rerun started in that window gives `DRIVER_FAILED` instead of `NO_OPEN_TRANSACTION`; both leave
+ * nothing written.
  */
 export function pgTransaction(client: PgClient): CallerTransaction {
   return {
