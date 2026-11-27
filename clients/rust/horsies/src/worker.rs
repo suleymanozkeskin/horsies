@@ -275,7 +275,7 @@ mod tests {
     use horsies_core::core::config::worker_profile::ProfileSelectionRefused;
 
     use super::*;
-    use crate::{AppConfig, ChildPreload, ErrorCode, IsolatedChildren, WorkerProfile};
+    use crate::{AppConfig, ChildPreload, HorsiesErrorCode, IsolatedChildren, WorkerProfile};
 
     /// An app with the profile `web`: two isolated children. The config
     /// check refuses a profile that starts no children.
@@ -448,7 +448,7 @@ isolated = { kind = "isolated_children", count = 2 }
         let WorkerRunError::ProfileRefused { refusals } = refused else {
             panic!("an unknown profile is a profile refusal");
         };
-        assert_eq!(refusals[0].code, Some(ErrorCode::CliInvalidArgs));
+        assert_eq!(refusals[0].code, Some(HorsiesErrorCode::CliInvalidArgs));
         assert!(refusals[0].message.contains("unknown worker profile"));
     }
 

@@ -17,7 +17,7 @@ import textwrap
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.models import tracing as tracing_module
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
@@ -97,7 +97,7 @@ class TestSetting:
         _presence_is(monkeypatch, OtelApiMissing(module='opentelemetry.trace'))
         with pytest.raises(ConfigurationError) as raised:
             AppConfig(database=_BROKER, tracing=OtelTracing())
-        assert raised.value.code is ErrorCode.CONFIG_OTEL_API_MISSING
+        assert raised.value.code is HorsiesErrorCode.CONFIG_OTEL_API_MISSING
         assert raised.value.code.value == 'HRS-220'
         assert 'horsies[otel]' in raised.value.message
         assert raised.value.notes == ['the module opentelemetry.trace cannot be imported']

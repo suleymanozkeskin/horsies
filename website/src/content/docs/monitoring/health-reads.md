@@ -8,9 +8,9 @@ tags: [monitoring, health, liveness, worker, api]
 
 # Health Reads
 
-The health methods are on the `Horsies` app. Each method returns `BrokerResult[T]`: `Ok(value)` on success, or `Err(BrokerOperationError)` with a `retryable` flag on failure. What each read means, and what to do with its result, is on [Worker & Database Health](/horsies/monitoring/worker-health/).
+The health methods are on the `Horsies` app. Each method returns `DatabaseResult[T]`: `Ok(value)` on success, or `Err(DatabaseOperationError)` with a `retryable` flag on failure. What each read means, and what to do with its result, is on [Worker & Database Health](/horsies/monitoring/worker-health/).
 
-Each method has a sync variant with the same name without the `_async` suffix. The sync variant runs the read of the core on the calling thread, with the GIL released. On a thread that runs an event loop it returns `Err(BrokerAsyncContext)` (`ASYNC_CONTEXT`) and does no I/O.
+Each method has a sync variant with the same name without the `_async` suffix. The sync variant runs the read of the core on the calling thread, with the GIL released. On a thread that runs an event loop it returns `Err(DatabaseAsyncContext)` (`ASYNC_CONTEXT`) and does no I/O.
 
 ```python
 from pydantic import SecretStr
@@ -32,7 +32,7 @@ result = await app.ping_database_async()
 if is_ok(result):
     print(f"Postgres reachable in {result.ok_value.latency_ms:.1f} ms")
 else:
-    print(f"Unreachable: {result.err_value.code}")  # DB_PING_FAILED
+    print(f"Unreachable: {result.err_value.code}")  # DATABASE_PING_FAILED
 ```
 
 ### Ping the Workers
@@ -209,11 +209,11 @@ if is_ok(states) and is_ok(pongs):
 
 ## API Reference
 
-### `ping_database_async() -> BrokerResult[DatabasePing]`
+### `ping_database_async() -> DatabaseResult[DatabasePing]`
 
-**Returns:** `Ok(DatabasePing)` with `latency_ms: float`; `Err` with code `DB_PING_FAILED` on failure.
+**Returns:** `Ok(DatabasePing)` with `latency_ms: float`; `Err` with code `DATABASE_PING_FAILED` on failure.
 
-### `ping_workers_async(*, target: PingTarget = PingTargetEveryWorker(), wait_ms: int = 2_000, min_responses: MinResponses = MinResponsesFullWindow()) -> BrokerResult[list[WorkerPong]]`
+### `ping_workers_async(*, target: PingTarget = PingTargetEveryWorker(), wait_ms: int = 2_000, min_responses: MinResponses = MinResponsesFullWindow()) -> DatabaseResult[list[WorkerPong]]`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -223,15 +223,15 @@ if is_ok(states) and is_ok(pongs):
 
 **Returns:** `Ok(list[WorkerPong])`: one entry per distinct worker that replied, possibly empty. Each `WorkerPong` has `worker_id`, `hostname`, `pid`, `round_trip_ms`. `Err` with code `INVALID_INPUT` on a `wait_ms` that is not an `int` or is out of range, or a `count` below 1; `Err` with code `WORKER_PING_FAILED` on a reply-channel failure.
 
-### `list_worker_states_async() -> BrokerResult[list[WorkerStateSnapshot]]`
+### `list_worker_states_async() -> DatabaseResult[list[WorkerStateSnapshot]]`
 
 **Returns:** `Ok(list[WorkerStateSnapshot])`, the latest snapshot of each worker; `Err` with code `MONITORING_QUERY_FAILED` on failure, also when a stored `slots_down` or `class_capacity` column value does not have the shape that the worker writes. The message names the worker.
 
-### `get_worker_state_async(worker_id: str) -> BrokerResult[WorkerStateSnapshot | None]`
+### `get_worker_state_async(worker_id: str) -> DatabaseResult[WorkerStateSnapshot | None]`
 
 **Returns:** `Ok(WorkerStateSnapshot)`, `Ok(None)` if the worker is unknown, or `Err(MONITORING_QUERY_FAILED)`.
 
-### `get_worker_state_history_async(worker_id: str, *, limit: WorkerHistoryLimit = WorkerHistoryLimitAllRetained()) -> BrokerResult[list[WorkerStateSnapshot]]`
+### `get_worker_state_history_async(worker_id: str, *, limit: WorkerHistoryLimit = WorkerHistoryLimitAllRetained()) -> DatabaseResult[list[WorkerStateSnapshot]]`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -240,7 +240,7 @@ if is_ok(states) and is_ok(pongs):
 
 **Returns:** `Ok(list[WorkerStateSnapshot])`, newest first; `Err(INVALID_INPUT)` on a `count` that is not positive; `Err(MONITORING_QUERY_FAILED)` on a query failure.
 
-### `get_stale_tasks_async(threshold_minutes: int) -> BrokerResult[BoundedTaskList[StaleTaskRow]]`
+### `get_stale_tasks_async(threshold_minutes: int) -> DatabaseResult[BoundedTaskList[StaleTaskRow]]`
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -248,15 +248,15 @@ if is_ok(states) and is_ok(pongs):
 
 **Returns:** `Ok(BoundedTaskListComplete(rows))` with every stale task, or `Ok(BoundedTaskListTruncated(rows, bound))` with the first 10,000 when more match. Rows come ordered by the latest heartbeat, rows with none first, then by task id. `Err(INVALID_INPUT)` on a `threshold_minutes` that is not an `int` from 0 to 525,600; nothing is read. `Err(MONITORING_QUERY_FAILED)` on a query failure.
 
-### `get_expired_tasks_async() -> BrokerResult[BoundedTaskList[ExpiredTaskRow]]`
+### `get_expired_tasks_async() -> DatabaseResult[BoundedTaskList[ExpiredTaskRow]]`
 
 **Returns:** `Ok(BoundedTaskListComplete(rows))` with every PENDING task past its `good_until`, or `Ok(BoundedTaskListTruncated(rows, bound))` with the first 10,000 when more match. Rows come ordered by `good_until`, oldest first, then by task id. `Err(MONITORING_QUERY_FAILED)` on a query failure.
 
-### `get_execution_class_coverage_async() -> BrokerResult[ExecutionClassCoverage]`
+### `get_execution_class_coverage_async() -> DatabaseResult[ExecutionClassCoverage]`
 
 **Returns:** `Ok(ExecutionClassCoverage)`; `Err(MONITORING_QUERY_FAILED)` for the failures on [Does a live worker serve every pending class?](/horsies/monitoring/worker-health/#does-a-live-worker-serve-every-pending-class).
 
-### `get_execution_class_report_async() -> BrokerResult[ExecutionClassReport]`
+### `get_execution_class_report_async() -> DatabaseResult[ExecutionClassReport]`
 
 **Returns:** `Ok(ExecutionClassReport)`; `Err(MONITORING_QUERY_FAILED)` for the failures on [How long do pending tasks wait?](/horsies/monitoring/worker-health/#how-long-do-pending-tasks-wait-and-what-capacity-is-free).
 

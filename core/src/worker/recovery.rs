@@ -33,7 +33,7 @@ use crate::core::history::maintenance::coverage::{
 use crate::core::history::maintenance::pruning::PruneReach;
 use crate::core::lifecycle::StaleAttemptOutcome;
 use crate::core::python_text::python_isoformat_utc;
-use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
+use crate::core::{OperationalCode, TaskError, TaskErrorKind, TaskResult};
 use crate::db::{
     CheckoutClass, CorePool, IsolationLevel, ParameterType, RollbackOutcome, StatementBound,
     Transaction, TypedStatement,
@@ -1792,7 +1792,7 @@ fn stale_attempt_command(
     candidate: &StaleCandidate,
     thresholds: StaleRunningThresholds,
 ) -> Result<FinishStaleAttempt, serde_json::Error> {
-    let error_code = OperationalErrorCode::WorkerCrashed.to_string();
+    let error_code = OperationalCode::WorkerCrashed.to_string();
     let threshold_ms = thresholds.stale_after.get();
     let threshold_seconds = f64::from(threshold_ms) / 1000.0;
     let failed_reason = format!(
@@ -1800,7 +1800,7 @@ fn stale_attempt_command(
     );
     let task_error = TaskError {
         exception: None,
-        error_code: OperationalErrorCode::WorkerCrashed.into(),
+        error_code: OperationalCode::WorkerCrashed.into(),
         message: Some(failed_reason.clone()),
         kind: TaskErrorKind::Plain,
         data: Some(crate::core::codec::JsonText::of_engine_value(

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Annotated, ClassVar, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from horsies.core.errors import ConfigurationError, ErrorCode, ValidationReport, raise_collected
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode, ValidationReport, raise_collected
 
 
 class WorkerResilienceConfig(BaseModel):
@@ -42,7 +42,7 @@ class WorkerResilienceConfig(BaseModel):
             report.add(
                 ConfigurationError(
                     message='database_retry_max_ms must be >= database_retry_initial_ms',
-                    code=ErrorCode.CONFIG_INVALID_RESILIENCE,
+                    code=HorsiesErrorCode.CONFIG_INVALID_RESILIENCE,
                     notes=[
                         f'database_retry_initial_ms={self.database_retry_initial_ms}ms',
                         f'database_retry_max_ms={self.database_retry_max_ms}ms',

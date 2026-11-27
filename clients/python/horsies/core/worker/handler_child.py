@@ -74,7 +74,7 @@ from typing import TYPE_CHECKING, Final, NoReturn, assert_never
 
 from horsies import _core as core
 from horsies._catalog import events
-from horsies._catalog.broker_errors import BrokerOperationFailed
+from horsies._catalog.broker_errors import DatabaseOperationFailed
 from horsies._catalog.events import AnyEvent
 from horsies.core.codec.json_io import loads_json
 from horsies.core.event_handlers import EventHandler, HandlerChildStartHook, HandlerKind
@@ -432,12 +432,12 @@ class RunningHandler:
 def node_read_of(
     outcome: core.TaskWorkflowNodeLinked
     | core.TaskWorkflowNodeNotLinked
-    | BrokerOperationFailed,
+    | DatabaseOperationFailed,
 ) -> NodeRead:
     """The node read of the outcome of ``CoreHandle.task_workflow_node``.
     Pure."""
     match outcome:
-        case BrokerOperationFailed(code=code, message=message):
+        case DatabaseOperationFailed(code=code, message=message):
             return NodeReadFailed(detail=f'{code.value}: {message}')
         case core.TaskWorkflowNodeLinked(
             workflow_id=workflow_id,

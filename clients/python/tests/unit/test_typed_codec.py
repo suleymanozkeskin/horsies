@@ -508,17 +508,17 @@ class TestTaskErrorRoundTrip:
     that. Path-aware allowance scans only the user-controlled fields."""
 
     def test_builtin_code_round_trips(self) -> None:
-        from horsies.core.models.tasks import OperationalErrorCode, TaskError
+        from horsies.core.models.tasks import OperationalCode, TaskError
 
         err = TaskError(
-            error_code=OperationalErrorCode.BROKER_ERROR,
+            error_code=OperationalCode.DATABASE_ERROR,
             message='m',
             data={'k': 'v'},
         )
         encoded = encode_value(err, TaskError)
         decoded = decode_value(encoded, TaskError)
         assert isinstance(decoded, TaskError)
-        assert decoded.error_code == OperationalErrorCode.BROKER_ERROR
+        assert decoded.error_code == OperationalCode.DATABASE_ERROR
         assert decoded.data == {'k': 'v'}
         assert decoded.message == 'm'
 
@@ -532,21 +532,21 @@ class TestTaskErrorRoundTrip:
         assert decoded.error_code == 'my_user_code'
 
     def test_reserved_key_in_data_still_rejected(self) -> None:
-        from horsies.core.models.tasks import OperationalErrorCode, TaskError
+        from horsies.core.models.tasks import OperationalCode, TaskError
 
         # `data` is user-controlled and gets the full reserved-key scan.
         err = TaskError(
-            error_code=OperationalErrorCode.BROKER_ERROR,
+            error_code=OperationalCode.DATABASE_ERROR,
             data={'__h_evil__': 1},
         )
         with pytest.raises(StrictJsonError, match='reserved key'):
             encode_value(err, TaskError)
 
     def test_legacy_prefix_in_data_still_rejected(self) -> None:
-        from horsies.core.models.tasks import OperationalErrorCode, TaskError
+        from horsies.core.models.tasks import OperationalCode, TaskError
 
         err = TaskError(
-            error_code=OperationalErrorCode.BROKER_ERROR,
+            error_code=OperationalCode.DATABASE_ERROR,
             data={'__h_taskresult_envelope__': True},
         )
         with pytest.raises(StrictJsonError, match='reserved key'):
@@ -564,7 +564,7 @@ class TestTaskErrorRoundTrip:
         # validation.
         smuggled: Json = cast(Json, {
             'error_code': {
-                '__builtin_task_code__': 'BROKER_ERROR',
+                '__builtin_task_code__': 'DATABASE_ERROR',
                 '__h_extra__': 1,
             },
             'message': 'x',
@@ -581,7 +581,7 @@ class TestTaskErrorRoundTrip:
     ) -> None:
         smuggled: Json = cast(Json, {
             'error_code': {
-                '__builtin_task_code__': 'BROKER_ERROR',
+                '__builtin_task_code__': 'DATABASE_ERROR',
                 '__horsies_evil__': 1,
             },
             'message': None,
@@ -615,7 +615,7 @@ class TestTaskErrorRoundTrip:
         # "other": "y"}` would round-trip with `"other"` quietly gone.
         bogus: Json = cast(Json, {
             'error_code': {
-                '__builtin_task_code__': 'BROKER_ERROR',
+                '__builtin_task_code__': 'DATABASE_ERROR',
                 'other': 'y',
             },
             'message': None,
@@ -1566,7 +1566,7 @@ class TestValidateTaskResultEnvelope:
                 '__h_task_result__': True,
                 'ok': None,
                 'err': {
-                    'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+                    'error_code': {'__builtin_task_code__': 'DATABASE_ERROR'},
                     'message': 'm',
                     'data': None,
                     'exception': None,
@@ -1611,7 +1611,7 @@ class TestValidateTaskResultEnvelope:
                     '__h_task_result__': True,
                     'ok': 1,
                     'err': {
-                        'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+                        'error_code': {'__builtin_task_code__': 'DATABASE_ERROR'},
                         'message': 'm',
                     },
                 }),
@@ -1655,11 +1655,11 @@ class TestTaskResultEnvelopeRoundTrip:
         Regression: ``task_decorator`` builds
         ``Err(TaskError(exception=<live exc>, ...))`` for
         unhandled exceptions (and specifically for
-        ``WorkflowContextMissingIdError``). The worker hands that
+        ``WorkflowContextMissingId``). The worker hands that
         result to ``encode_task_result`` directly; without the
         in-encoder flatten the pydantic serializer rejects the live
         exception with ``PydanticSerializationError`` and the wrapper
-        folds the failure to ``OperationalErrorCode.TASK_EXCEPTION``,
+        folds the failure to ``OperationalCode.TASK_EXCEPTION``,
         clobbering the producer's declared ``error_code``.
         """
         from horsies.core.models.tasks import TaskError
@@ -1693,7 +1693,7 @@ class TestTaskResultEnvelopeRoundTrip:
 
 
 class TestDecodeTaskErrorPolymorphic:
-    """`decode_task_error` must preserve SubWorkflowError subclass fields.
+    """`decode_task_error` must preserve SubWorkflowFailure subclass fields.
 
     Plain ``TypeAdapter(TaskError)`` would silently drop
     ``sub_workflow_id`` / ``sub_workflow_summary`` on read. The
@@ -1703,27 +1703,27 @@ class TestDecodeTaskErrorPolymorphic:
 
     def test_plain_task_error_decodes(self) -> None:
         from horsies.core.models.tasks import (
-            OperationalErrorCode,
-            SubWorkflowError,
+            OperationalCode,
+            SubWorkflowFailure,
             TaskError,
         )
 
         payload: Json = cast(Json, {
-            'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+            'error_code': {'__builtin_task_code__': 'DATABASE_ERROR'},
             'message': 'plain',
             'data': None,
             'exception': None,
         })
         decoded = decode_task_error(payload)
         assert isinstance(decoded, TaskError)
-        assert not isinstance(decoded, SubWorkflowError)
-        assert decoded.error_code == OperationalErrorCode.BROKER_ERROR
+        assert not isinstance(decoded, SubWorkflowFailure)
+        assert decoded.error_code == OperationalCode.DATABASE_ERROR
         assert decoded.message == 'plain'
 
     def test_sub_workflow_error_preserves_subclass_fields(self) -> None:
         from horsies.core.models.tasks import (
-            OperationalErrorCode,
-            SubWorkflowError,
+            OperationalCode,
+            SubWorkflowFailure,
             TaskError,
         )
         from horsies.core.models.workflow.context import SubWorkflowSummary
@@ -1738,19 +1738,19 @@ class TestDecodeTaskErrorPolymorphic:
             skipped_tasks=0,
             error_summary='child boom',
         )
-        original = SubWorkflowError(
-            error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+        original = SubWorkflowFailure(
+            error_code=OperationalCode.UNHANDLED_EXCEPTION,
             message='subworkflow failed',
             sub_workflow_id='wf-abc',
             sub_workflow_summary=summary,
         )
 
-        encoded = encode_value(original, SubWorkflowError)
+        encoded = encode_value(original, SubWorkflowFailure)
         decoded = decode_task_error(encoded)
 
         # Polymorphic routing must return the concrete subclass, not
         # the base TaskError.
-        assert isinstance(decoded, SubWorkflowError)
+        assert isinstance(decoded, SubWorkflowFailure)
         assert isinstance(decoded, TaskError)
         assert decoded.sub_workflow_id == 'wf-abc'
         assert decoded.sub_workflow_summary.status == WorkflowStatus.FAILED
@@ -1758,7 +1758,7 @@ class TestDecodeTaskErrorPolymorphic:
         assert decoded.sub_workflow_summary.error_summary == 'child boom'
 
     def test_sub_workflow_error_round_trips_via_engine_emit_shape(self) -> None:
-        """End-to-end: SubWorkflowError survives the engine's emit path
+        """End-to-end: SubWorkflowFailure survives the engine's emit path
         through the consumer-side decode used by WorkflowHandle.
 
         Mirrors `engine.on_subworkflow_complete`, which writes the err
@@ -1773,8 +1773,8 @@ class TestDecodeTaskErrorPolymorphic:
         ``test_encode_task_result_preserves_sub_workflow_error_subclass``.
         """
         from horsies.core.models.tasks import (
-            OperationalErrorCode,
-            SubWorkflowError,
+            OperationalCode,
+            SubWorkflowFailure,
         )
         from horsies.core.models.workflow.context import SubWorkflowSummary
         from horsies.core.models.workflow.enums import WorkflowStatus
@@ -1788,8 +1788,8 @@ class TestDecodeTaskErrorPolymorphic:
             skipped_tasks=0,
             error_summary='child failed',
         )
-        original_err = SubWorkflowError(
-            error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+        original_err = SubWorkflowFailure(
+            error_code=OperationalCode.UNHANDLED_EXCEPTION,
             message='boom',
             sub_workflow_id='wf-xyz',
             sub_workflow_summary=summary,
@@ -1808,20 +1808,20 @@ class TestDecodeTaskErrorPolymorphic:
         assert isinstance(err_slot, dict)
         decoded = decode_task_error(cast(Json, err_slot))
 
-        assert isinstance(decoded, SubWorkflowError)
+        assert isinstance(decoded, SubWorkflowFailure)
         assert decoded.sub_workflow_id == 'wf-xyz'
         assert decoded.sub_workflow_summary.failed_tasks == 1
         assert decoded.sub_workflow_summary.error_summary == 'child failed'
 
     def test_encode_task_result_preserves_sub_workflow_error_subclass(self) -> None:
         """``encode_task_result`` routes through ``encode_task_error``
-        so an ``Err(SubWorkflowError(...))`` round-trips with
+        so an ``Err(SubWorkflowFailure(...))`` round-trips with
         ``sub_workflow_id`` / ``sub_workflow_summary`` intact.
 
         Regression: pre-fix the encode side called
         ``encode_value(err, TaskError)`` which silently stripped the
         subclass-only fields, breaking pattern matching on
-        ``SubWorkflowError`` for any code path that round-tripped
+        ``SubWorkflowFailure`` for any code path that round-tripped
         through ``encode_task_result`` (notably ``args_from`` /
         outputless-ctx envelopes and ``serialize_error_payload``).
         """
@@ -1830,8 +1830,8 @@ class TestDecodeTaskErrorPolymorphic:
             encode_task_result,
         )
         from horsies.core.models.tasks import (
-            OperationalErrorCode,
-            SubWorkflowError,
+            OperationalCode,
+            SubWorkflowFailure,
         )
         from horsies.core.models.workflow.context import SubWorkflowSummary
         from horsies.core.models.workflow.enums import WorkflowStatus
@@ -1845,8 +1845,8 @@ class TestDecodeTaskErrorPolymorphic:
             skipped_tasks=0,
             error_summary='both children boom',
         )
-        original_err = SubWorkflowError(
-            error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+        original_err = SubWorkflowFailure(
+            error_code=OperationalCode.UNHANDLED_EXCEPTION,
             message='subworkflow failed',
             sub_workflow_id='wf-pq',
             sub_workflow_summary=summary,
@@ -1859,7 +1859,7 @@ class TestDecodeTaskErrorPolymorphic:
 
         match decoded:
             case Failed(error=decoded_err):
-                assert isinstance(decoded_err, SubWorkflowError)
+                assert isinstance(decoded_err, SubWorkflowFailure)
                 assert decoded_err.sub_workflow_id == 'wf-pq'
                 assert decoded_err.sub_workflow_summary.status == WorkflowStatus.FAILED
                 assert decoded_err.sub_workflow_summary.failed_tasks == 2

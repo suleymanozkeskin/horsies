@@ -46,7 +46,36 @@ export type TracingSetting = { readonly kind: "noTracing" } | OtelTracingSetting
 /** The tracing of an app that leaves `tracing` out. */
 export const NO_TRACING: TracingSetting = Object.freeze({ kind: "noTracing" });
 
-/** The setting of `input`, with the defaults filled; `undefined` is `noTracing`. Pure. */
+/** `parentage` with the default filled. A value outside the union (a caller with no type check) is a `TypeError`. Pure. */
+function parentageOf(parentage: AttemptParentage | undefined): AttemptParentage {
+  switch (parentage) {
+    case undefined:
+      return "childOfSend";
+    case "childOfSend":
+    case "linkedToSend":
+      return parentage;
+    default:
+      return unreachable(parentage, "tracingSettingOf parentage");
+  }
+}
+
+/** `workerEndedSpans` with the default filled. A value outside the union is a `TypeError`. Pure. */
+function workerEndedSpansOf(workerEndedSpans: WorkerEndedSpans | undefined): WorkerEndedSpans {
+  switch (workerEndedSpans) {
+    case undefined:
+      return "makeSpans";
+    case "makeSpans":
+    case "noSpans":
+      return workerEndedSpans;
+    default:
+      return unreachable(workerEndedSpans, "tracingSettingOf workerEndedSpans");
+  }
+}
+
+/**
+ * The setting of `input`, with the defaults filled; `undefined` is `noTracing`. A `kind`, `parentage` or
+ * `workerEndedSpans` outside its union (a caller with no type check) is a `TypeError`. Pure.
+ */
 export function tracingSettingOf(input: TracingConfigInput | undefined): TracingSetting {
   if (input === undefined) {
     return NO_TRACING;
@@ -58,8 +87,8 @@ export function tracingSettingOf(input: TracingConfigInput | undefined): Tracing
     case "otelTracing":
       return Object.freeze({
         kind: "otelTracing",
-        parentage: input.parentage ?? "childOfSend",
-        workerEndedSpans: input.workerEndedSpans ?? "makeSpans",
+        parentage: parentageOf(input.parentage),
+        workerEndedSpans: workerEndedSpansOf(input.workerEndedSpans),
       });
     default:
       return unreachable(input, "tracingSettingOf");

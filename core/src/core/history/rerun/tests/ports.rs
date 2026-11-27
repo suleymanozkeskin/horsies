@@ -45,6 +45,7 @@ async fn a_refused_value_in_a_stored_envelope_fails_closed() {
             .rerun_task(
                 RerunTask::new(source, None, None),
                 policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE,
             )
             .await
             .expect("rerun outcome");

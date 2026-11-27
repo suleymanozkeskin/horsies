@@ -45,7 +45,7 @@ from horsies._catalog.manifest import (
     TcpUserTimeoutConfigSystemDefault,
     dump_producer_manifest,
 )
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.history.identity.keys import (
     IDEMPOTENCY_WINDOW_MAX,
@@ -247,7 +247,7 @@ def _refusal_of(field: str, value: int) -> ConfigurationError:
     with pytest.raises(ConfigurationError) as raised:
         PostgresConfig.model_validate({'database_url': MAIN_URL, field: value})
     error = raised.value
-    assert error.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+    assert error.code == HorsiesErrorCode.CONFIG_INVALID_DATABASE_POOL
     assert f'got: {field}={value}' in error.notes
     return error
 
@@ -259,7 +259,7 @@ def _recycle_refusal_of(seconds: int) -> ConfigurationError:
             pool_recycle=broker_config.PoolRecycleAfterSeconds(seconds=seconds),
         )
     error = raised.value
-    assert error.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+    assert error.code == HorsiesErrorCode.CONFIG_INVALID_DATABASE_POOL
     assert f'got: pool_recycle.seconds={seconds}' in error.notes
     return error
 
@@ -410,7 +410,7 @@ def test_a_tcp_value_past_the_core_bound_is_refused_by_the_config(
     field = path.partition('.')[0]
     with pytest.raises(ConfigurationError) as raised:
         PostgresConfig.model_validate({'database_url': MAIN_URL, field: setting})
-    assert raised.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
+    assert raised.value.code == HorsiesErrorCode.CONFIG_INVALID_KEEPALIVE
     assert f'got: {path}={value}' in raised.value.notes
 
 

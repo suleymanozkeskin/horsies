@@ -3,11 +3,12 @@
 // 1. The name, the node count, the node ids, and the references: every node that a node, the output or the success
 //    policy names is a node of this build. A finding here stops the checks.
 // 2. Every other check, with all findings together: the node options (queue, priority, deadline, join, context
-//    sources), the contracts and child workflows that the app lists, the success policy, and each node's input.
+//    sources), the contracts and child workflows that the app lists, the success policy, each node's input, and the
+//    output: an output node exactly when the workflow declares `outputType`, of the declared type (`HRS-025`).
 //
 // No cycle check is needed: a node can name only nodes that the build made before it.
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import type { SpecOnError } from "../_catalog/workflow_spec.ts";
 import { isArray, isObjectLike, isString } from "../codec/values.ts";
@@ -19,8 +20,8 @@ import type { ListedLookup } from "../send/send.ts";
 import type { QueueSetup } from "../config/queues.ts";
 import type { BuildRun, BuildSession, RecordedNode } from "./builder.ts";
 import { MAX_WORKFLOW_NODES, nodeSlot } from "./builder.ts";
-import type { WorkflowRecord } from "./define.ts";
-import { type CheckedPolicy, type CheckedSpec, finding, type SpecFinding } from "./findings.ts";
+import type { OutputDeclaration, WorkflowRecord } from "./define.ts";
+import { type CheckedOutput, type CheckedPolicy, type CheckedSpec, finding, type SpecFinding } from "./findings.ts";
 import { compileContract } from "../contract/compile.ts";
 import { storedFormFits } from "./kind-match.ts";
 import { checkNodes, type NodeTarget, sourceOutputOf } from "./node-checks.ts";
@@ -52,7 +53,9 @@ export type CheckedBuild = { readonly spec: CheckedSpec; readonly targets: Reado
 export type BuildChecked = Result<CheckedBuild, NonEmpty<SpecFinding>>;
 
 /** The parts of the returned object that gate 1 finds: the output node and the success policy, as node indexes. */
-type Returned = { readonly output: number; readonly policy: CheckedPolicy };
+type Returned = { readonly output: CheckedOutput; readonly policy: CheckedPolicy };
+
+const NO_OUTPUT: CheckedOutput = Object.freeze({ kind: "noOutput" });
 
 /** A run of a build that returned a value that is no thenable. */
 export type ReturnedRun = Extract<BuildRun, { readonly kind: "returned" }>;
@@ -65,7 +68,7 @@ export function checkBuild(record: WorkflowRecord, run: ReturnedRun, view: SpecA
   const session = run.session;
   const nodes = session.nodes();
   const first = gateOne(record, session, nodes);
-  const returnedParts = isObjectLike(run.returned) ? returnedOf(session, run.returned) : err([noOutput()]);
+  const returnedParts = isObjectLike(run.returned) ? returnedOf(session, run.returned) : err([noReturnedObject()]);
 
   if (!returnedParts.ok) {
     first.push(...returnedParts.error);
@@ -79,7 +82,7 @@ export function checkBuild(record: WorkflowRecord, run: ReturnedRun, view: SpecA
 
   const checked = checkNodes(nodes, session, view);
   const policy = policyFindings(returnedParts.value.policy);
-  const output = outputFindings(record, nodes[returnedParts.value.output], view);
+  const output = outputFindings(record, returnedParts.value.output, nodes, view);
   const second = [...(checked.ok ? [] : checked.error), ...policy, ...output];
   const [found, ...rest] = second;
 
@@ -132,11 +135,11 @@ function gateOne(record: WorkflowRecord, session: BuildSession, nodes: readonly 
   const findings: SpecFinding[] = [];
 
   if (record.name.trim() === "") {
-    findings.push(finding(ErrorCode.WORKFLOW_NO_NAME, "name", "a workflow name must not be empty", []));
+    findings.push(finding(HorsiesErrorCode.WORKFLOW_NO_NAME, "name", "a workflow name must not be empty", []));
   }
 
   if (nodes.length === 0) {
-    findings.push(finding(ErrorCode.WORKFLOW_NO_NODES, "nodes", "the build made no node", ["add at least one node"]));
+    findings.push(finding(HorsiesErrorCode.WORKFLOW_NO_NODES, "nodes", "the build made no node", ["add at least one node"]));
 
     return findings;
   }
@@ -145,7 +148,7 @@ function gateOne(record: WorkflowRecord, session: BuildSession, nodes: readonly 
     const detail = `the build made ${session.madeCount()} nodes, more than the limit of ${MAX_WORKFLOW_NODES}`;
 
     findings.push(
-      finding(ErrorCode.WORKFLOW_TOO_MANY_NODES, "nodes", detail, [
+      finding(HorsiesErrorCode.WORKFLOW_TOO_MANY_NODES, "nodes", detail, [
         "split the nodes into sub-workflow nodes; each child workflow has its own limit",
       ]),
     );
@@ -185,7 +188,7 @@ function idFindings(nodes: readonly RecordedNode[]): readonly SpecFinding[] {
       const detail = isString(id) ? `invalid node id ${JSON.stringify(id)}` : "invalid node id that is not a string";
 
       findings.push(
-        finding(ErrorCode.WORKFLOW_INVALID_NODE_ID, `nodes[${index}]`, detail, [
+        finding(HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID, `nodes[${index}]`, detail, [
           `a node id is a string that matches [A-Za-z0-9_\\-:.]+ and has at most ${MAX_NODE_ID_LENGTH} characters`,
         ]),
       );
@@ -200,7 +203,7 @@ function idFindings(nodes: readonly RecordedNode[]): readonly SpecFinding[] {
     } else {
       findings.push(
         finding(
-          ErrorCode.WORKFLOW_DUPLICATE_NODE_ID,
+          HorsiesErrorCode.WORKFLOW_DUPLICATE_NODE_ID,
           `nodes[${index}]`,
           `the node id "${id}" is also the id of nodes[${earlier}]`,
           [],
@@ -223,7 +226,7 @@ function referenceFindings(session: BuildSession, node: RecordedNode, index: num
   return named.some((value) => !isNodeOf(session, value))
     ? [
         finding(
-          ErrorCode.WORKFLOW_INVALID_DEPENDENCY,
+          HorsiesErrorCode.WORKFLOW_INVALID_DEPENDENCY,
           nodePlace(index, node),
           "the node names a node of another build",
           ["use the nodes that this build's w.task and w.subWorkflow returned"],
@@ -246,10 +249,17 @@ function isNodeOf(session: BuildSession, value: object): boolean {
   return slot.kind === "node" && slot.session === session;
 }
 
-/** `HRS-011`: the build returned no output node of its own. Pure. */
-function noOutput(): SpecFinding {
-  return finding(ErrorCode.WORKFLOW_INVALID_OUTPUT, "output", "the build returns no output node of this build", [
+/** `HRS-011`: the build returned an output that is no node of its own. Pure. */
+function foreignOutput(): SpecFinding {
+  return finding(HorsiesErrorCode.WORKFLOW_INVALID_OUTPUT, "output", "the build returns an output that is no node of this build", [
     "return { output: node } with a node that this build made",
+  ]);
+}
+
+/** `HRS-011`: the build returned a value that is not an object. Pure. */
+function noReturnedObject(): SpecFinding {
+  return finding(HorsiesErrorCode.WORKFLOW_INVALID_OUTPUT, "output", "the build returns a value that is not an object", [
+    "return { output: node } for a workflow with outputType, or {} for a workflow with none",
   ]);
 }
 
@@ -260,19 +270,23 @@ function indexIn(session: BuildSession, value: object): number | "foreign" {
   return slot.kind === "node" && slot.session === session ? slot.index : "foreign";
 }
 
-/** The output node and the success policy of the returned object (`HRS-011`, `HRS-012`). */
+/**
+ * The output node and the success policy of the returned object (`HRS-011`, `HRS-012`). An `output` member that is
+ * left out or `undefined` is no output node; gate 2 compares it with the workflow's declaration.
+ */
 function returnedOf(session: BuildSession, returned: object): Result<Returned, readonly SpecFinding[]> {
-  const output = "output" in returned ? returned.output : undefined;
-  const index = isObjectLike(output) ? indexIn(session, output) : "foreign";
+  const given = "output" in returned ? returned.output : undefined;
+  const index = given === undefined ? "absent" : isObjectLike(given) ? indexIn(session, given) : "foreign";
 
   if (index === "foreign") {
-    return err([noOutput()]);
+    return err([foreignOutput()]);
   }
 
+  const output: CheckedOutput = index === "absent" ? NO_OUTPUT : Object.freeze({ kind: "node", index });
   const policy = "successPolicy" in returned ? returned.successPolicy : undefined;
 
   if (policy === undefined) {
-    return ok({ output: index, policy: { kind: "noPolicy" } });
+    return ok({ output, policy: { kind: "noPolicy" } });
   }
 
   const read = isObjectLike(policy) ? policyOf(session, policy) : "foreign";
@@ -280,13 +294,13 @@ function returnedOf(session: BuildSession, returned: object): Result<Returned, r
   return read === "foreign"
     ? err([
         finding(
-          ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY,
+          HorsiesErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY,
           "successPolicy",
           "the policy names a node of another build",
           ["name only nodes that this build made"],
         ),
       ])
-    : ok({ output: index, policy: read });
+    : ok({ output, policy: read });
 }
 
 /** The cases and the optional nodes as indexes, or `foreign` when one is not a node of this build. Pure. */
@@ -335,10 +349,75 @@ function allObjects(values: readonly unknown[]): values is readonly object[] {
 }
 
 /**
+ * `HRS-025` when the output does not fit the workflow's declaration: an output node exactly when the workflow declares
+ * `outputType`, and the type check below when it does. Pure.
+ */
+function outputFindings(
+  record: WorkflowRecord,
+  output: CheckedOutput,
+  nodes: readonly RecordedNode[],
+  view: SpecAppView,
+): readonly SpecFinding[] {
+  const declaration: OutputDeclaration = record.outputDeclaration;
+
+  switch (declaration.kind) {
+    case "declared":
+      return declaredOutputFindings(record, output, nodes, view);
+    case "notDeclared":
+      return undeclaredOutputFindings(output);
+    default:
+      return unreachable(declaration, "outputFindings");
+  }
+}
+
+/** The output findings of a workflow with `outputType`: an output node of the declared type. Pure. */
+function declaredOutputFindings(
+  record: WorkflowRecord,
+  output: CheckedOutput,
+  nodes: readonly RecordedNode[],
+  view: SpecAppView,
+): readonly SpecFinding[] {
+  switch (output.kind) {
+    case "node":
+      return outputTypeFindings(record, nodes[output.index], view);
+    case "noOutput":
+      return [
+        finding(
+          HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
+          "output",
+          "the workflow declares outputType, but the build returns no output node",
+          ["return { output: node } with a node of the declared type, or leave out outputType"],
+        ),
+      ];
+    default:
+      return unreachable(output, "declaredOutputFindings");
+  }
+}
+
+/** The output findings of a workflow with no `outputType`: no output node. Pure. */
+function undeclaredOutputFindings(output: CheckedOutput): readonly SpecFinding[] {
+  switch (output.kind) {
+    case "node":
+      return [
+        finding(
+          HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
+          "output",
+          "the build returns an output node, but the workflow declares no outputType",
+          ["declare the output node's type as outputType, or return no output node"],
+        ),
+      ];
+    case "noOutput":
+      return [];
+    default:
+      return unreachable(output, "undeclaredOutputFindings");
+  }
+}
+
+/**
  * `HRS-025` when the output node's type is not the workflow's declared output: their kinds do not have the same
  * stored form. An output node of a contract that the app does not list has a finding of its own. Pure.
  */
-function outputFindings(
+function outputTypeFindings(
   record: WorkflowRecord,
   node: RecordedNode | undefined,
   view: SpecAppView,
@@ -347,13 +426,13 @@ function outputFindings(
   const output = node === undefined ? { kind: "notKnown" as const } : sourceOutputOf(node, view);
 
   if (!declared.ok) {
-    return [finding(ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH, "output", "the declared output does not compile", [])];
+    return [finding(HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH, "output", "the declared output does not compile", [])];
   }
 
   return output.kind === "known" && !storedFormFits(output.output, declared.value.output)
     ? [
         finding(
-          ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
+          HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
           "output",
           "the output node's type is not the declared output",
           ["return an output node whose output is the workflow's declared output"],
@@ -370,7 +449,7 @@ function policyFindings(policy: CheckedPolicy): readonly SpecFinding[] {
     case "cases":
       if (policy.cases.length === 0) {
         return [
-          finding(ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY, "successPolicy.cases", "a policy has no case", [
+          finding(HorsiesErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY, "successPolicy.cases", "a policy has no case", [
             "add at least one case",
           ]),
         ];
@@ -380,7 +459,7 @@ function policyFindings(policy: CheckedPolicy): readonly SpecFinding[] {
         required.length === 0
           ? [
               finding(
-                ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY,
+                HorsiesErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY,
                 `successPolicy.cases[${position}]`,
                 "a case has no required node",
                 ["add at least one node to required"],

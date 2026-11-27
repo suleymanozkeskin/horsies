@@ -15,7 +15,7 @@ from typing import Annotated, ClassVar, Literal, Union, assert_never
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.telemetry.otel_api import (
     OTEL_EXTRA,
     OTEL_EXTRA_INSTALL,
@@ -138,7 +138,7 @@ def tracing_errors(setting: OtelTracing | NoTracing) -> list[ConfigurationError]
             return [
                 ConfigurationError(
                     message=f'tracing=OtelTracing() needs the OpenTelemetry API ({OTEL_EXTRA})',
-                    code=ErrorCode.CONFIG_OTEL_API_MISSING,
+                    code=HorsiesErrorCode.CONFIG_OTEL_API_MISSING,
                     notes=[f'the module {module} cannot be imported'],
                     help_text=(
                         f'install the extra: {OTEL_EXTRA_INSTALL}, '

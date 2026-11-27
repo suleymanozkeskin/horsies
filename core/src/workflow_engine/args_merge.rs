@@ -6,7 +6,7 @@ use serde_json::value::RawValue;
 use uuid::Uuid;
 
 use crate::core::task::result::TaskResult;
-use crate::core::{OperationalErrorCode, OutcomeCode, TaskError, TaskErrorKind};
+use crate::core::{OperationalCode, OutcomeCode, TaskError, TaskErrorKind};
 
 use crate::workflow_engine::error::WorkflowError;
 
@@ -309,7 +309,7 @@ impl ArgsFromConflict {
                 }),
             )),
             ..TaskError::builtin(
-                OperationalErrorCode::WorkflowEnqueueFailed,
+                OperationalCode::WorkflowEnqueueFailed,
                 format!(
                     "args_from key '{}' conflicts with static kwarg ({node})",
                     self.key
@@ -586,7 +586,7 @@ pub(crate) fn missing_result_error(
     let node = node_id.unwrap_or("-");
     TaskError {
         exception: None,
-        error_code: OperationalErrorCode::ResultDeserializationError.into(),
+        error_code: OperationalCode::ResultDeserializationError.into(),
         data: Some(crate::core::codec::JsonText::of_engine_value(&serde_json::json!({ "dependency_index": dep_idx }))),
         message: Some(format!(
             "Dependency node {node} (index {dep_idx}, task {task_name}) is {status} with no stored result"
@@ -597,7 +597,7 @@ pub(crate) fn missing_result_error(
 
 fn dep_parse_error(dep_idx: i32, error: &serde_json::Error) -> TaskError {
     TaskError::builtin(
-        OperationalErrorCode::ResultDeserializationError,
+        OperationalCode::ResultDeserializationError,
         format!(
             "failed to parse upstream task result at index {}: {}",
             dep_idx, error

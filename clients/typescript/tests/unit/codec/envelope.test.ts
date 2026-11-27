@@ -54,7 +54,7 @@ describe("stored task error rules", () => {
   });
 
   test("ErrorFieldInvalid: a code that is null, a number, a built-in or reserved name as a custom code", () => {
-    for (const code of ["null", "1", '"BROKER_ERROR"', '"WORKFLOW_STOPPED"', '{"__builtin_task_code__":"X","a":1}']) {
+    for (const code of ["null", "1", '"DATABASE_ERROR"', '"WORKFLOW_STOPPED"', '{"__builtin_task_code__":"X","a":1}']) {
       assert.equal(errorRule(`{"error_code":${code}}`), "ErrorFieldInvalid", code);
     }
   });
@@ -94,7 +94,7 @@ describe("stored task error rules", () => {
 
     const floatCount = summary.replace('"total_tasks":1', '"total_tasks":1.0');
     const engineKeyOutput = summary.replace("{", '{"output":{"__h_x":1},');
-    const head = `{"error_code":{"__builtin_task_code__":"SUBWORKFLOW_FAILED"},"sub_workflow_id":"${id}"`;
+    const head = `{"error_code":{"__builtin_task_code__":"SUB_WORKFLOW_FAILED"},"sub_workflow_id":"${id}"`;
     const outcome = outcomeOf(JSON_KIND, `${ERROR_HEAD}${head},"sub_workflow_summary":${summary}}}`);
 
     assert(outcome.kind === "failed" && outcome.error.subWorkflow?.summary.output === null);

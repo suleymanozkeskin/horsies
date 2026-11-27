@@ -35,7 +35,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.result_types import BrokerErrorCode
+from horsies.core.brokers.result_types import DatabaseErrorCode
 from horsies.core.models.class_coverage import (
     BudgetLoad,
     NoneDue,
@@ -315,7 +315,7 @@ class TestClassCoverage:
 
         match await broker.get_execution_class_coverage_async():
             case Err(error):
-                assert error.code == BrokerErrorCode.MONITORING_QUERY_FAILED
+                assert error.code == DatabaseErrorCode.MONITORING_QUERY_FAILED
                 assert error.retryable is False
                 assert 'w-odd' in error.message
                 assert 'class_capacity is unreadable' in error.message
@@ -429,7 +429,7 @@ class TestClassReport:
 
         match await broker.get_execution_class_report_async():
             case Err(error):
-                assert error.code == BrokerErrorCode.MONITORING_QUERY_FAILED
+                assert error.code == DatabaseErrorCode.MONITORING_QUERY_FAILED
                 assert 'w1' in error.message
                 assert 'ISOLATED' in error.message
             case Ok(report):

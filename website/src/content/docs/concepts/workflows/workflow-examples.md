@@ -108,7 +108,7 @@ match await spec.start_async():
 # ... workflow pauses due to task failure ...
 
 # Resume the workflow
-resumed = await handle.resume_async()  # Ok(bool) or Err(HandleOperationError): match on it
+resumed = await handle.resume_async()  # Ok(bool) or Err(WorkflowHandleError): match on it
 ```
 
 See [Resume](/horsies/concepts/workflows/workflow-semantics/#resume) for what a resume does and how it can fail.
@@ -177,7 +177,7 @@ The entry for a dependency with no stored result:
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 Failed(TaskError(
-    error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+    error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
     message="Dependency node <node_id> (index <index>, task <task_name>) is <status> with no stored result",
     data={"dependency_index": <index>},
 ))
@@ -200,14 +200,22 @@ def partial_consumer(
 ## Retry Policies in Workflows
 
 ```python
-from horsies import RetryPolicy, Result, TaskError, JsonValue
+from enum import Enum
+
+from horsies import OperationalCode, RetryPolicy, Result, TaskError, JsonValue
+
+
+class FetchCode(str, Enum):
+    NETWORK_ERROR = "NETWORK_ERROR"
+
 
 @app.task(
     "fetch_data",
+    error_codes=FetchCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=1,
         max_retries=3,
-        auto_retry_for=["UNHANDLED_EXCEPTION", "NETWORK_ERROR"],
+        auto_retry_for=[OperationalCode.UNHANDLED_EXCEPTION, FetchCode.NETWORK_ERROR],
     ),
 )
 def fetch_data(*, url: str) -> Result[dict[str, JsonValue], TaskError]:
@@ -387,7 +395,7 @@ match await spec.start_async():
 await handle.get_async(timeout_ms=30000)
 
 # Now safe to access individual results (node_id keys)
-# results() returns Ok(dict) or Err(HandleOperationError)
+# results() returns Ok(dict) or Err(WorkflowHandleError)
 match handle.results():
     case Err(results_error):
         raise RuntimeError(results_error.message)

@@ -20,10 +20,15 @@ A checkout in one task body:
 ```python
 @app.task(
     "checkout",
+    error_codes=CheckoutCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=5,
-        auto_retry_for=["PAYMENTS_UNAVAILABLE", "MAIL_UNAVAILABLE", "WORKER_CRASHED"],
+        auto_retry_for=[
+            CheckoutCode.PAYMENTS_UNAVAILABLE,
+            CheckoutCode.MAIL_UNAVAILABLE,
+            OperationalCode.WORKER_CRASHED,
+        ],
     ),
 )
 def checkout(*, order: Order) -> Result[str, TaskError]:
@@ -47,6 +52,8 @@ The rules are on [Stale RUNNING Recovery](/horsies/workers/heartbeats-recovery/#
 Each step is a task with its own retry policy. A step takes the outcome of the step before it as a parameter of type `TaskOutcome[T, TaskError]`.
 
 ```python
+from enum import Enum
+
 import httpx
 from pydantic import BaseModel
 
@@ -55,6 +62,7 @@ from horsies import (
     Failed,
     JsonValue,
     Ok,
+    OperationalCode,
     Result,
     RetryPolicy,
     Succeeded,
@@ -67,6 +75,17 @@ PAYMENTS_URL = "https://payments.example.com/v1/charges"
 INVOICES_URL = "https://billing.example.com/v1/invoices"
 MESSAGES_URL = "https://mail.example.com/v1/messages"
 HTTP_TIMEOUT_SECONDS = 10.0
+
+
+class CheckoutCode(str, Enum):
+    """The codes of the steps. Each step declares them with `error_codes=`."""
+
+    PAYMENTS_UNAVAILABLE = "PAYMENTS_UNAVAILABLE"
+    CHARGE_REFUSED = "CHARGE_REFUSED"
+    BILLING_UNAVAILABLE = "BILLING_UNAVAILABLE"
+    INVOICE_REFUSED = "INVOICE_REFUSED"
+    MAIL_UNAVAILABLE = "MAIL_UNAVAILABLE"
+    MAIL_REFUSED = "MAIL_REFUSED"
 
 
 class Charge(BaseModel):
@@ -118,10 +137,11 @@ def post_with_key(
 
 @app.task(
     "charge_card",
+    error_codes=CheckoutCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=5,
-        auto_retry_for=["PAYMENTS_UNAVAILABLE", "WORKER_CRASHED"],
+        auto_retry_for=[CheckoutCode.PAYMENTS_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
     ),
 )
 def charge_card(
@@ -145,10 +165,11 @@ def charge_card(
 
 @app.task(
     "write_invoice",
+    error_codes=CheckoutCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=10,
         max_retries=5,
-        auto_retry_for=["BILLING_UNAVAILABLE", "WORKER_CRASHED"],
+        auto_retry_for=[CheckoutCode.BILLING_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
     ),
 )
 def write_invoice(
@@ -179,9 +200,10 @@ def write_invoice(
 
 @app.task(
     "send_receipt",
+    error_codes=CheckoutCode,
     retry_policy=RetryPolicy.fixed(
         [60, 300, 900],
-        auto_retry_for=["MAIL_UNAVAILABLE", "WORKER_CRASHED"],
+        auto_retry_for=[CheckoutCode.MAIL_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
     ),
 )
 def send_receipt(

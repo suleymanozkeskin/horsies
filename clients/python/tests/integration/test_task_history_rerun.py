@@ -190,6 +190,7 @@ class TestRerunEndToEnd:
                 connection,
                 RerunTask(source_task_id=UUID(source), deadline=deadline),
                 policy(),
+                registered_task_codes={},
             )
             assert isinstance(outcome, RerunEnqueued)
             assert outcome.source_task_id == UUID(source)
@@ -267,6 +268,7 @@ class TestRerunEndToEnd:
                 connection,
                 RerunTask(source_task_id=UUID(source), deadline=None),
                 policy(),
+                registered_task_codes={},
             )
 
             assert isinstance(outcome, RerunEnqueued)
@@ -284,6 +286,7 @@ class TestRerunEndToEnd:
                 connection,
                 RerunTask(source_task_id=UUID(source), deadline=None),
                 policy(),
+                registered_task_codes={},
             )
             assert isinstance(first, RerunEnqueued)
             # Fail the first rerun for real, then rerun it. The row runs
@@ -313,6 +316,7 @@ class TestRerunEndToEnd:
                     source_task_id=first.new_task_id, deadline=None
                 ),
                 policy(),
+                registered_task_codes={},
             )
             assert isinstance(second, RerunEnqueued)
             assert second.source_task_id == first.new_task_id
@@ -330,6 +334,7 @@ class TestRerunEndToEnd:
                 connection,
                 RerunTask(source_task_id=UUID(source), deadline=None),
                 policy(days=SECOND_DAYS),
+                registered_task_codes={},
             )
             assert isinstance(outcome, RerunEnqueued)
             row = await live_row(connection, str(outcome.new_task_id))
@@ -354,6 +359,7 @@ class TestRerunEndToEnd:
                     connection,
                     RerunTask(source_task_id=UUID(source), deadline=None),
                     policy(days=NEVER_REGISTERED_DAYS),
+                    registered_task_codes={},
                 )
             after = (
                 await connection.execute(
@@ -373,6 +379,7 @@ class TestRerunEndToEnd:
                 connection,
                 RerunTask(source_task_id=UUID(source), deadline=None),
                 policy(retain=False),
+                registered_task_codes={},
             )
             assert isinstance(outcome, RerunEnqueued)
             row = await live_row(connection, str(outcome.new_task_id))
@@ -401,6 +408,7 @@ class TestTypedRefusals:
                 connection,
                 RerunTask(source_task_id=UUID(source), deadline=None),
                 policy(),
+                registered_task_codes={},
             )
 
             assert isinstance(outcome, RerunInputCorrupt)
@@ -421,6 +429,7 @@ class TestTypedRefusals:
                 connection,
                 RerunTask(source_task_id=UUID(live), deadline=None),
                 policy(),
+                registered_task_codes={},
             )
             assert outcome == RerunSourceLive(task_id=UUID(live))
 
@@ -435,6 +444,7 @@ class TestTypedRefusals:
                 connection,
                 RerunTask(source_task_id=UUID(ghost), deadline=None),
                 policy(),
+                registered_task_codes={},
             )
             assert isinstance(outcome, RerunSourceAbsent)
             assert outcome.task_id == UUID(ghost)
@@ -469,6 +479,7 @@ class TestTypedRefusals:
                 connection,
                 RerunTask(source_task_id=UUID(task_id), deadline=None),
                 policy(),
+                registered_task_codes={},
             )
             assert outcome == RerunNotEligible(
                 task_id=UUID(task_id),
@@ -507,6 +518,7 @@ class TestTypedRefusals:
                 connection,
                 RerunTask(source_task_id=UUID(task_id), deadline=None),
                 policy(),
+                registered_task_codes={},
             )
             assert outcome == RerunNotEligible(
                 task_id=UUID(task_id),
@@ -536,6 +548,7 @@ class TestTypedRefusals:
                 connection,
                 RerunTask(source_task_id=UUID(source), deadline=None),
                 policy(),
+                registered_task_codes={},
             )
             assert outcome == RerunInputUnavailable(
                 task_id=UUID(source),
@@ -561,6 +574,7 @@ class TestTypedRefusals:
                 connection,
                 RerunTask(source_task_id=UUID(source), deadline=None),
                 policy(),
+                registered_task_codes={},
             )
             assert isinstance(outcome, RerunInputCorrupt)
             assert 'digest' in outcome.detail
@@ -591,6 +605,7 @@ class TestTypedRefusals:
                 connection,
                 RerunTask(source_task_id=UUID(source), deadline=None),
                 policy(),
+                registered_task_codes={},
             )
             assert isinstance(outcome, RerunInputCorrupt)
             assert detail in outcome.detail
@@ -615,6 +630,7 @@ class TestKeyedRerun:
                     caller_key='retry-batch-7',
                 ),
                 policy(),
+                registered_task_codes={},
             )
             assert isinstance(first, RerunEnqueued)
             replay = await rerun_task(
@@ -625,6 +641,7 @@ class TestKeyedRerun:
                     caller_key='retry-batch-7',
                 ),
                 policy(),
+                registered_task_codes={},
             )
             assert replay == RerunKeyReplay(
                 existing_task_id=first.new_task_id
@@ -669,6 +686,7 @@ class TestStoredSourceDoesNotDecode:
                         retain_rerun_input=True,
                         reservation_window=timedelta(hours=24),
                     ),
+                    registered_task_codes={},
                 )
                 tasks_after = (await connection.execute(count_tasks)).scalar_one()
 
@@ -713,6 +731,7 @@ async def test_a_family_row_that_holds_no_client_family_raises_a_contract_violat
                 connection,
                 RerunTask(source_task_id=UUID(source), deadline=None),
                 policy(),
+                registered_task_codes={},
             )
 
         assert raised.value.subject == 'rerun_task'

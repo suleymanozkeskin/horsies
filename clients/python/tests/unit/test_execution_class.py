@@ -26,7 +26,7 @@ from horsies.core.codec.task_options import (
     serialize_task_options,
     stored_execution,
 )
-from horsies.core.errors import ErrorCode, TaskDefinitionError
+from horsies.core.errors import HorsiesErrorCode, TaskDefinitionError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
@@ -190,7 +190,7 @@ class TestDeclarationsThatAreRefused:
                 return Ok(n)
 
         error = _definition_error(declare)
-        assert error.code is ErrorCode.TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF
+        assert error.code is HorsiesErrorCode.TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF
         assert 'async def' in error.message
 
     def test_shared_thread_on_an_async_def_function(self) -> None:
@@ -200,7 +200,7 @@ class TestDeclarationsThatAreRefused:
                 return Ok(n)
 
         error = _definition_error(declare)
-        assert error.code is ErrorCode.TASK_SHARED_THREAD_REQUIRES_DEF
+        assert error.code is HorsiesErrorCode.TASK_SHARED_THREAD_REQUIRES_DEF
 
     def test_shared_async_without_a_timeout(self) -> None:
         def declare(app: Horsies) -> None:
@@ -209,7 +209,7 @@ class TestDeclarationsThatAreRefused:
                 return Ok(n)
 
         error = _definition_error(declare)
-        assert error.code is ErrorCode.TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT
+        assert error.code is HorsiesErrorCode.TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT
         assert 'SHARED_ASYNC' in error.message
 
     def test_shared_thread_without_a_timeout(self) -> None:
@@ -219,7 +219,7 @@ class TestDeclarationsThatAreRefused:
                 return Ok(n)
 
         error = _definition_error(declare)
-        assert error.code is ErrorCode.TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT
+        assert error.code is HorsiesErrorCode.TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT
         assert 'SHARED_THREAD' in error.message
 
     @pytest.mark.parametrize(
@@ -236,7 +236,7 @@ class TestDeclarationsThatAreRefused:
                 return Ok(n)
 
         error = _definition_error(declare)
-        assert error.code is ErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE
+        assert error.code is HorsiesErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE
         assert 'execution is ISOLATED' in error.notes
         assert 'no hard stop' in error.help_text
 
@@ -252,7 +252,7 @@ class TestDeclarationsThatAreRefused:
                 return Ok(n)
 
         error = _definition_error(declare)
-        assert error.code is ErrorCode.TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC
+        assert error.code is HorsiesErrorCode.TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC
         assert 'execution is SHARED_THREAD' in error.notes
 
     @pytest.mark.parametrize(
@@ -277,7 +277,7 @@ class TestDeclarationsThatAreRefused:
                 return Ok(n)
 
         error = _definition_error(declare)
-        assert error.code is ErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE
+        assert error.code is HorsiesErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE
         text = str(error)
         assert str(MIN_CANCEL_GRACE_MS) in text
         assert str(MAX_CANCEL_GRACE_MS) in text
@@ -290,7 +290,7 @@ class TestDeclarationsThatAreRefused:
 
         assert (
             _definition_error(declare).code
-            is ErrorCode.TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF
+            is HorsiesErrorCode.TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF
         )
 
     def test_an_async_generator_is_refused_before_the_class_rules(self) -> None:
@@ -299,7 +299,7 @@ class TestDeclarationsThatAreRefused:
             async def bad(*, n: int):  # pyright: ignore[reportUnusedFunction]
                 yield n
 
-        assert _definition_error(declare).code is ErrorCode.TASK_INVALID_RETURN_TYPE
+        assert _definition_error(declare).code is HorsiesErrorCode.TASK_INVALID_RETURN_TYPE
 
     def test_a_value_that_is_not_a_class_is_an_invalid_option(self) -> None:
         def declare(app: Horsies) -> None:
@@ -307,7 +307,7 @@ class TestDeclarationsThatAreRefused:
             def bad(*, n: int) -> Result[int, TaskError]:  # pyright: ignore[reportUnusedFunction]
                 return Ok(n)
 
-        assert _definition_error(declare).code is ErrorCode.TASK_INVALID_OPTIONS
+        assert _definition_error(declare).code is HorsiesErrorCode.TASK_INVALID_OPTIONS
 
     def test_a_refused_task_is_not_registered(self) -> None:
         app = _app()
@@ -351,21 +351,21 @@ class TestDeclarationsThatAreRefused:
         errors = app.check().refusals
 
         assert [error.code for error in errors] == [
-            ErrorCode.TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF,
+            HorsiesErrorCode.TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF,
         ]
 
 
-VIOLATION_CODES: list[tuple[ExecutionRuleViolation, ErrorCode]] = [
-    (SharedAsyncOnDef(), ErrorCode.TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF),
-    (SharedThreadOnAsyncDef(), ErrorCode.TASK_SHARED_THREAD_REQUIRES_DEF),
+VIOLATION_CODES: list[tuple[ExecutionRuleViolation, HorsiesErrorCode]] = [
+    (SharedAsyncOnDef(), HorsiesErrorCode.TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF),
+    (SharedThreadOnAsyncDef(), HorsiesErrorCode.TASK_SHARED_THREAD_REQUIRES_DEF),
     (
         SharedWithoutTimeout(execution=Execution.SHARED_ASYNC),
-        ErrorCode.TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT,
+        HorsiesErrorCode.TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT,
     ),
-    (CancelGraceOnSharedThread(), ErrorCode.TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC),
+    (CancelGraceOnSharedThread(), HorsiesErrorCode.TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC),
     (
         CancelGraceOutOfRange(execution=Execution.SHARED_ASYNC),
-        ErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE,
+        HorsiesErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE,
     ),
 ]
 
@@ -375,7 +375,7 @@ class TestRuleCatalog:
     def test_each_violation_has_its_own_code(
         self,
         violation: ExecutionRuleViolation,
-        code: ErrorCode,
+        code: HorsiesErrorCode,
     ) -> None:
         error = execution_rule_error(violation, task_name='t', location=None)
         assert error.code is code

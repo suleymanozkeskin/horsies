@@ -2,10 +2,9 @@
 
 export type {
   CancelTaskError,
-  BrokerOperationFailedWith,
   HealthInputError,
   HealthReadError,
-  MonitoringCoreReadError,
+  MonitoringQueryError,
   MonitoringReadError,
   PingDatabaseError,
   PingWorkersError,
@@ -182,10 +181,10 @@ export type {
 
 export type {
   MonitoringQueryCoreError,
-  MonitoringQueryDbOperationFailed,
+  MonitoringQueryDatabaseOperationFailed,
   MonitoringQueryHistoryContractViolation,
   TaskActionCoreError,
-  TaskActionDbOperationFailed,
+  TaskActionDatabaseOperationFailed,
   TaskActionNotCancellable,
   TaskActionNotFound,
   TaskActionStoredDataInvalid,
@@ -193,10 +192,11 @@ export type {
 } from "../_catalog/monitoring_errors.ts";
 
 export type {
-  BrokerInvalidInput,
-  BrokerListenerDisabled,
-  BrokerOperationFailed,
-  BrokerOperationFailedCode,
+  DatabaseInvalidInput,
+  DatabaseListenerDisabled,
+  DatabaseOperationFailed,
+  DatabaseOperationFailedCode,
+  DatabaseOperationFailedCodeKind,
 } from "../_catalog/broker_errors.ts";
 
 

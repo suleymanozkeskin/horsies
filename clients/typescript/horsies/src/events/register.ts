@@ -16,7 +16,7 @@
 //
 // Once the handler child serves, a new member is a defect: the members of the child are fixed.
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import { isObjectLike, isString } from "../codec/values.ts";
 import { type AnyEvent, EVENT_TYPES } from "../_catalog/events.ts";
 import type { EventTypeName } from "../_catalog/worker_manifest.ts";
@@ -142,13 +142,13 @@ export function checkedHandler(
   const known = EVENT_TYPES.find((type) => type === eventType);
 
   if (known === undefined) {
-    return refused(ErrorCode.EVENT_HANDLER_UNKNOWN_EVENT_TYPE, path, `${String(eventType)} is not an event type`, [
+    return refused(HorsiesErrorCode.EVENT_HANDLER_UNKNOWN_EVENT_TYPE, path, `${String(eventType)} is not an event type`, [
       `take one of ${EVENT_TYPES.join(", ")}`,
     ]);
   }
 
   if (!(handler instanceof Function)) {
-    return refused(ErrorCode.EVENT_HANDLER_INVALID_SIGNATURE, path, "the handler is not a function", [
+    return refused(HorsiesErrorCode.EVENT_HANDLER_INVALID_SIGNATURE, path, "the handler is not a function", [
       "pass a function that takes one event",
     ]);
   }
@@ -156,7 +156,7 @@ export function checkedHandler(
   const named = nameRule(optionsName);
 
   if (named.kind === "refused") {
-    return refused(ErrorCode.EVENT_HANDLER_INVALID_NAME, path, named.reason, [
+    return refused(HorsiesErrorCode.EVENT_HANDLER_INVALID_NAME, path, named.reason, [
       `give a name of 1 to ${String(MAX_HANDLER_NAME_CHARS)} characters, other than ${UNKNOWN_HANDLER_NAME}`,
     ]);
   }
@@ -164,11 +164,11 @@ export function checkedHandler(
   const name = named.name;
 
   if (before.some((earlier) => earlier.name === name)) {
-    return refused(ErrorCode.EVENT_HANDLER_DUPLICATE_NAME, path, "an earlier handler has the name", ["give each handler its own name"]);
+    return refused(HorsiesErrorCode.EVENT_HANDLER_DUPLICATE_NAME, path, "an earlier handler has the name", ["give each handler its own name"]);
   }
 
   if (before.length >= MAX_EVENT_HANDLERS) {
-    return refused(ErrorCode.EVENT_HANDLER_LIMIT, path, `the app has ${String(MAX_EVENT_HANDLERS)} event handlers, the most`, [
+    return refused(HorsiesErrorCode.EVENT_HANDLER_LIMIT, path, `the app has ${String(MAX_EVENT_HANDLERS)} event handlers, the most`, [
       "let one handler take more work",
     ]);
   }
@@ -221,7 +221,7 @@ export function onHandlerChildStartFor(context: AppContext, hook: HandlerChildSt
   if (!(hook instanceof Function)) {
     context.refusals.record(
       "events",
-      refusal(ErrorCode.CONFIG_INVALID_CHILD_HOOK, position, "the hook is not a function", [
+      refusal(HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK, position, "the hook is not a function", [
         "pass a function with no parameters, sync or async",
       ]),
     );

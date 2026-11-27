@@ -26,7 +26,9 @@ use crate::config::{schedule_input_text, scheduler_manifest};
 use crate::process_state::{refuse_in_a_fork, runtime_for, RuntimeStartFailed};
 use crate::registry::resolve_task_queue;
 use crate::signals::stop_on_signals;
-use crate::{ErrorCode, Horsies, HorsiesError, ScheduleConfig, TaskSchedule, ValidationReport};
+use crate::{
+    Horsies, HorsiesError, HorsiesErrorCode, ScheduleConfig, TaskSchedule, ValidationReport,
+};
 
 /// The scheduler ran until a stop request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,7 +210,7 @@ impl Horsies {
                     "invalid queue configuration for schedule '{}'",
                     schedule.name
                 ))
-                .with_code(ErrorCode::ConfigInvalidSchedule)
+                .with_code(HorsiesErrorCode::ConfigInvalidSchedule)
                 .with_note(format!("underlying error: {}", cause.message))
                 .with_help("name a queue of the app config in the schedule, or none"),
             );
@@ -220,7 +222,7 @@ impl Horsies {
                     "schedule '{}' input does not read back as the input of task '{}'",
                     schedule.name, schedule.task_name
                 ))
-                .with_code(ErrorCode::ConfigInvalidSchedule)
+                .with_code(HorsiesErrorCode::ConfigInvalidSchedule)
                 .with_note(format!(
                     "input error: {}",
                     refused.message.as_deref().unwrap_or("no message")
@@ -245,7 +247,7 @@ impl Horsies {
             "scheduled task '{}' not registered",
             schedule.task_name
         ))
-        .with_code(ErrorCode::TaskNotRegistered)
+        .with_code(HorsiesErrorCode::TaskNotRegistered)
         .with_note(format!(
             "schedule '{}' references task '{}'",
             schedule.name, schedule.task_name
@@ -283,7 +285,7 @@ fn oversized_input(app: &Horsies, schedule: &TaskSchedule, size: usize) -> Optio
             "schedule '{}' input is {size} bytes, over payload.reject_bytes={limit}",
             schedule.name
         ))
-        .with_code(ErrorCode::ConfigInvalidSchedule)
+        .with_code(HorsiesErrorCode::ConfigInvalidSchedule)
         .with_note("every slot of the schedule sends the same input, so every enqueue is refused")
         .with_help("make the schedule's input smaller, or raise payload.reject_bytes")
     })
@@ -436,7 +438,7 @@ mod tests {
         assert_eq!(report.phase_name(), "scheduler-startup");
         assert_eq!(
             report.refusals()[0].code,
-            Some(ErrorCode::ConfigInvalidSchedule)
+            Some(HorsiesErrorCode::ConfigInvalidSchedule)
         );
         assert!(!report.to_string().contains("five"));
     }
@@ -472,7 +474,10 @@ mod tests {
         let schedule = app.config().schedule.clone().unwrap();
         let refusals = app.schedule_refusals(&schedule);
         assert_eq!(refusals.len(), 1);
-        assert_eq!(refusals[0].code, Some(ErrorCode::ConfigInvalidSchedule));
+        assert_eq!(
+            refusals[0].code,
+            Some(HorsiesErrorCode::ConfigInvalidSchedule)
+        );
         assert!(
             refusals[0].notes[0].contains("'options.stpe'"),
             "{}",
@@ -504,7 +509,7 @@ mod tests {
         let app = app_with(vec![schedule_without_input("every", "missing")], true);
         let schedule = app.config().schedule.clone().unwrap();
         let refusals = app.schedule_refusals(&schedule);
-        assert_eq!(refusals[0].code, Some(ErrorCode::TaskNotRegistered));
+        assert_eq!(refusals[0].code, Some(HorsiesErrorCode::TaskNotRegistered));
         assert!(refusals[0].notes.iter().any(|note| note.contains("count")));
         let text = refusals[0].to_string();
         assert!(text.contains("schedule 'every'"), "{text}");
@@ -539,7 +544,10 @@ mod tests {
         let schedule = app.config().schedule.clone().unwrap();
         let refusals = app.schedule_refusals(&schedule);
         assert_eq!(refusals.len(), 1);
-        assert_eq!(refusals[0].code, Some(ErrorCode::ConfigInvalidSchedule));
+        assert_eq!(
+            refusals[0].code,
+            Some(HorsiesErrorCode::ConfigInvalidSchedule)
+        );
         let text = refusals[0].to_string();
         assert!(text.contains("bad_queue_job"), "{text}");
         assert!(text.contains("nonexistent_queue"), "{text}");

@@ -15,7 +15,7 @@ from pydantic import SecretStr
 
 from horsies._core import RuntimeStartFailed
 from horsies.core.app import Horsies
-from horsies.core.errors import ErrorCode
+from horsies.core.errors import HorsiesErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig, SessionDatabaseSeparate
 from horsies.core.models.worker_profile import (
@@ -131,7 +131,7 @@ class TestCheckLiveWorkerConnections:
         with _live_core(refusals=[refusal]):
             errors = app.check(live=True).refusals
 
-        assert [error.code for error in errors] == [ErrorCode.CHECK_WORKER_CONNECTIONS]
+        assert [error.code for error in errors] == [HorsiesErrorCode.CHECK_WORKER_CONNECTIONS]
         assert errors[0].message == refusal.message
         assert errors[0].notes == refusal.notes
         assert errors[0].help_text == 'lower the child counts'
@@ -182,7 +182,7 @@ class TestCheckLiveWorkerConnections:
             errors = app.check(live=True).refusals
 
         assert [(error.code, error.notes) for error in errors] == [
-            (ErrorCode.CHECK_WORKER_CONNECTIONS, ['the core runtime could not start']),
+            (HorsiesErrorCode.CHECK_WORKER_CONNECTIONS, ['the core runtime could not start']),
         ]
         assert errors[0].message == 'the server connection limit could not be read'
         assert built[0].closes == 1
@@ -196,7 +196,7 @@ class TestCheckLiveWorkerConnections:
         ) as built:
             errors = app.check(live=True).refusals
 
-        assert [error.code for error in errors] == [ErrorCode.DATABASE_INVALID_URL]
+        assert [error.code for error in errors] == [HorsiesErrorCode.DATABASE_INVALID_URL]
         assert built[0].profiles == []
         assert built[0].closes == 1
 

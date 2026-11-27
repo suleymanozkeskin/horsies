@@ -154,11 +154,11 @@ describe("the child spec source registration", () => {
 });
 
 describe("the workflow reads of a workflow that does not exist, with a database", () => {
-  test("the status is the class HandleWorkflowNotFound", async () => {
+  test("the status is the class WorkflowHandleNotFound", async () => {
     const handle = testHandle();
     const read = envelopeValue(await workflowsAddon().workflowStatus(handle.native, randomUUID()));
 
-    assert.equal(read.kind === "failed" ? read.error.class : read.kind, "HandleWorkflowNotFound");
+    assert.equal(read.kind === "failed" ? read.error.class : read.kind, "WorkflowHandleNotFound");
     await handle.close();
   });
 

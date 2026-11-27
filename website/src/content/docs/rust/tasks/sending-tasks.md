@@ -63,7 +63,7 @@ The module holds no state. Each send finds the task's typed function in the app 
 A send runs these steps in order, and stops at the first refusal:
 
 1. A generated send finds the task in the app that it names: an app that does not register the task refuses with `ValidationFailed`.
-2. The suppression check: a suppressed send returns `SendSuppressed`.
+2. The suppression check: a suppressed send returns `Suppressed`.
 3. The retention of the send.
 4. The read-back of the input: encode it, decode the text with `A`, encode that value again. Two different texts refuse the send with `ValidationFailed` before any statement.
 5. The payload size: an input over `payload.reject_bytes` is `PayloadTooLarge`.
@@ -111,19 +111,19 @@ The meaning of the reservation window and of retention is on [Retention Config](
 
 | Variant | Code | Fields | Retry methods |
 |---------|------|--------|---------------|
-| `SendSuppressed` | `SEND_SUPPRESSED` | `message` | Refused |
+| `Suppressed` | `SEND_SUPPRESSED` | `message` | Refused |
 | `AsyncContext` | `ASYNC_CONTEXT` | `task_id`, `payload`, `message` | Accepted |
 | `ValidationFailed` | `VALIDATION_FAILED` | `message` | Refused |
 | `EnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable` | Accepted |
 | `PayloadMismatch` | `PAYLOAD_MISMATCH` | `task_id`, `payload`, `message` | Refused |
 | `PayloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `size_bytes`, `limit_bytes` | Refused |
-| `IdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` | Accepted |
+| `IdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` | Refused |
 
 - `ValidationFailed` with the cause `PreconditionFailed` is also the answer of a generated send through an app that does not register the task.
 - `EnqueueFailed`: the row may or may not exist. `retryable` is the classification of the cause.
 - `AsyncContext` is the error of a blocking send on a thread that runs a runtime. The async sends do not return it. See [Blocking API](/horsies/rust/tasks/blocking-api/#on-a-runtime-thread).
 - `PayloadMismatch`: the task id exists with another command or idempotency key; nothing was written.
-- `IdempotencyKeyConflict`: another task (`owner_task_id`) holds the key with another command; nothing was written.
+- `IdempotencyKeyConflict`: another task (`owner_task_id`) holds the key with another command; nothing was written. A repeat of the same send does not complete it: send the same command as the owner task, or use another key. A send with the key after the reservation ends starts a new task.
 - A send in a process that was forked without `exec` after the core's process runtime started panics, as every call that runs on the core: see [Process-State Refusals](/horsies/tasks/error-types/#process-state-refusals).
 
 The meaning of each code is on the [Errors Reference](/horsies/tasks/errors/#send-error-codes).
@@ -153,7 +153,7 @@ async fn send_with_one_retry(
 
 `retry_send(&error)` sends again the task of a failed send: the same task id and the same payload, as a repeat. The payload of a send with a delay keeps its delay. A task that an earlier call wrote answers with its task id, also after it finished, and does not run again. It refuses with `ValidationFailed`:
 
-- an error that carries no payload (only `AsyncContext`, `EnqueueFailed` and `IdempotencyKeyConflict` carry one);
+- an error that carries no payload (only `AsyncContext` and `EnqueueFailed` are sent again; `IdempotencyKeyConflict` is refused);
 - the error of another task.
 
 ### Resend on Transient Errors

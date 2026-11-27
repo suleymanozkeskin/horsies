@@ -11,7 +11,10 @@ pub use caller::{
     StatementValue,
 };
 pub use codes::RerunErrorCode;
-pub use operations::{NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask};
+pub use operations::{
+    DeclaredCodes, NotEligibleReason, RegisteredTaskCodes, RerunEnqueuePolicy, RerunError,
+    RerunOutcome, RerunTask,
+};
 pub use steps::{
     decode_rerun_write, prepare_rerun_write, rerun_read, RerunPreparation, RerunRefusal,
     RerunRowError, RerunWrite, RerunWriteOutcome,

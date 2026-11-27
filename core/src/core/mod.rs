@@ -24,13 +24,13 @@ pub use config::{
     SchedulePattern, SessionDatabase, TaskSchedule, Weekday, WeeklySchedule,
     WorkerResilienceConfig,
 };
-pub use error::{ErrorCategory, ErrorCode, HorsiesError, ValidationReport};
+pub use error::{HorsiesError, HorsiesErrorCategory, HorsiesErrorCode, ValidationReport};
 pub use registry::TaskRegistry;
 pub use task::{
     error_code_label, AsyncTaskFn, BackoffStrategy, BlockingTaskFn, BuiltInTaskCode, CancelGraceMs,
     CancelGraceOutOfRange, ContractCode, DeclaredCodeRefusal, DeclaredCodesRefused,
     DeclaredErrorCode, DeclaredErrorCodes, ErrorCodeLabel, ExceptionRecord, Execution,
-    ExecutionClass, OperationalErrorCode, OutcomeCode, RegisteredTask, RetrievalCode, RetryPolicy,
+    ExecutionClass, OperationalCode, OutcomeCode, RegisteredTask, RetrievalCode, RetryPolicy,
     RetryPolicyError, StoredErrorRefused, SubWorkflowFailure, TaskAttemptInfo, TaskError,
     TaskErrorCode, TaskErrorKind, TaskInfo, TaskOptions, TaskResult, TaskSendError,
     TaskSendErrorCode, TaskSendPayload, TaskSendResult, UserCode, UserCodeRefused,
@@ -38,9 +38,9 @@ pub use task::{
 };
 pub use types::{TaskAttemptOutcome, TaskStatus, TASK_TERMINAL_STATES, TASK_TERMINAL_VALUES};
 pub use workflow::{
-    AnyNode, HandleErrorCode, HandleOperation, HandleOperationError, HandleResult, JoinType,
-    NodeKey, OnError, StartRefusalCause, SubWorkflowParams, SubWorkflowSummary, SuccessCase,
-    SuccessPolicy, WorkflowContext, WorkflowMeta, WorkflowSpec, WorkflowStartError,
+    AnyNode, HandleOperation, HandleResult, JoinType, NodeKey, OnError, StartRefusalCause,
+    SubWorkflowParams, SubWorkflowSummary, SuccessCase, SuccessPolicy, WorkflowContext,
+    WorkflowHandleError, WorkflowHandleErrorCode, WorkflowMeta, WorkflowSpec, WorkflowStartError,
     WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus,
     WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };

@@ -33,7 +33,7 @@ const POLICY: RerunEnqueuePolicy = {
 
 /** The rerun area of a handle of `databaseUrl`, with no active span. */
 function areaOf(handle: CoreHandle): RerunArea {
-  return createRerunArea({ coreHandle: () => handle, activeCarrier: () => NO_ACTIVE_CARRIER });
+  return createRerunArea({ coreHandle: () => handle, activeCarrier: () => NO_ACTIVE_CARRIER, registeredCodes: () => ({ tasks: [] }) });
 }
 
 /** The task id of a canonical UUID text. */
@@ -107,7 +107,7 @@ describe("app.rerunTask with a database that cannot be reached", () => {
 
     assert.ok(!answer.ok && answer.error.code === "CONNECT_FAILED", JSON.stringify(answer));
     assert.equal(answer.error.retryable, true);
-    assert.equal(answer.error.exception.subject, "rerun_task");
+    assert.equal(answer.error.cause.subject, "rerun_task");
   });
 
   test("a window of 0 and of 31 days is INVALID_POLICY, not the connect failure", async () => {

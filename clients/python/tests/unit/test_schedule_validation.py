@@ -17,7 +17,7 @@ from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.json_value import JsonValue
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     HorsiesError,
     RegistryError,
 )
@@ -173,7 +173,7 @@ class TestPrepareSchedules:
             case Err(errors):
                 assert len(errors) == 1
                 assert isinstance(errors[0], ConfigurationError)
-                assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+                assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
                 assert 'not encodable' in errors[0].message
                 assert 'lone surrogate' in ' '.join(errors[0].notes)
             case Ok(encoded_kwargs):
@@ -196,7 +196,7 @@ class TestPrepareSchedules:
             case Err(errors):
                 assert len(errors) == 1
                 assert isinstance(errors[0], ConfigurationError)
-                assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+                assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
                 assert 'not encodable' in errors[0].message
                 assert (
                     'x: a validation error holds a lone surrogate'
@@ -220,7 +220,7 @@ class TestPrepareSchedules:
             case Err(errors):
                 assert len(errors) == 1
                 assert isinstance(errors[0], ConfigurationError)
-                assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+                assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
                 assert 'not encodable' in errors[0].message
                 assert (
                     'x: serialization failed: Circular reference detected'
@@ -245,7 +245,7 @@ class TestPrepareSchedules:
             case Err(errors):
                 assert len(errors) == 1
                 assert isinstance(errors[0], ConfigurationError)
-                assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+                assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
                 assert 'not encodable' in errors[0].message
                 assert 'nested deeper than' in ' '.join(errors[0].notes)
             case Ok(encoded_kwargs):
@@ -267,7 +267,7 @@ class TestPrepareSchedules:
             case Err(errors):
                 assert len(errors) == 1
                 assert isinstance(errors[0], ConfigurationError)
-                assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+                assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
                 assert (
                     'Circular reference detected (depth exceeded)'
                     in ' '.join(errors[0].notes)
@@ -355,7 +355,7 @@ class TestCollectScheduleErrors:
         )
         assert len(errors) == 1
         assert isinstance(errors[0], ConfigurationError)
-        assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'invalid timezone' in errors[0].message
 
     def test_unregistered_task(self) -> None:
@@ -363,7 +363,7 @@ class TestCollectScheduleErrors:
         errors = self._collect([_schedule(task_name='missing')], tasks={})
         assert len(errors) == 1
         assert isinstance(errors[0], RegistryError)
-        assert errors[0].code == ErrorCode.TASK_NOT_REGISTERED
+        assert errors[0].code == HorsiesErrorCode.TASK_NOT_REGISTERED
 
     def test_invalid_queue(self) -> None:
         """A queue that fails validate_queue is rejected."""
@@ -376,7 +376,7 @@ class TestCollectScheduleErrors:
         errors = self._collect([_schedule()], app=app)
         assert len(errors) == 1
         assert isinstance(errors[0], ConfigurationError)
-        assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'invalid queue configuration' in errors[0].message
 
     def test_signature_mismatch(self) -> None:
@@ -406,7 +406,7 @@ class TestCollectScheduleErrors:
         )
         assert len(errors) == 1
         assert isinstance(errors[0], ConfigurationError)
-        assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'not encodable' in errors[0].message
 
     def test_first_error_wins_per_schedule(self) -> None:
@@ -500,7 +500,7 @@ class TestCheckValidatesSchedules:
         app = self._bad_schedule_app()
         errors = app.check().refusals
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'invalid timezone' in errors[0].message
 
     def test_schedule_over_the_limit_surfaced_by_check(self) -> None:
@@ -523,7 +523,7 @@ class TestCheckValidatesSchedules:
         errors = app.check().refusals
 
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'payload.reject_bytes' in errors[0].message
 
     def test_worker_role_skips_schedule_validation(self) -> None:

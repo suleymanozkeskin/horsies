@@ -11,10 +11,10 @@
 //!   given handle's.
 //! - Each operation installs the schema once per handle first, as the Rust
 //!   client's handle does; a failed connect or install is
-//!   `DB_OPERATION_FAILED` (`HandleOperationError::connect_failed`).
+//!   `DATABASE_OPERATION_FAILED` (`WorkflowHandleError::connect_failed`).
 //! - A failed operation is a raw value of the handle catalog
-//!   (`HandleWorkflowNotFound`, `HandleDbOperationFailed`,
-//!   `HandleStoredDataInvalid`, `HandleResumeRecoveryFailed`), as the core
+//!   (`WorkflowHandleNotFound`, `WorkflowHandleDatabaseOperationFailed`,
+//!   `WorkflowHandleStoredDataInvalid`, `WorkflowHandleResumeRecoveryFailed`), as the core
 //!   gives it. It is the value of the envelope, not a throw.
 //! - Every stored text (a node's result envelope, the workflow's result and
 //!   error, a sub-workflow summary) passes the core's strict JSON check
@@ -34,9 +34,9 @@ use std::time::Duration;
 
 use horsies_core::core::codec::check_json_text;
 use horsies_core::{
-    HandleOperation, HandleOperationError, HandleResult, NodeResultsRead as CoreNodeResultsRead,
+    HandleOperation, HandleResult, NodeResultsRead as CoreNodeResultsRead,
     NodesRead as CoreNodesRead, PostgresBroker, StoredNode, StoredNodeResult, TerminalErrorStatus,
-    WorkflowEnd, WorkflowStatus, WorkflowWait,
+    WorkflowEnd, WorkflowHandleError, WorkflowStatus, WorkflowWait,
 };
 use napi::bindgen_prelude::{Object, ToNapiValue};
 use napi::Env;
@@ -346,7 +346,7 @@ pub fn workflow_id_of(text: &str) -> Result<Uuid, BoundaryRefusal> {
 }
 
 /// The connected broker of `producer`, with the schema installed once per
-/// handle, or `DB_OPERATION_FAILED` of `operation` on `workflow_id` with
+/// handle, or `DATABASE_OPERATION_FAILED` of `operation` on `workflow_id` with
 /// the broker error as its cause.
 pub async fn broker_for(
     producer: &ProducerHandle,
@@ -357,7 +357,7 @@ pub async fn broker_for(
         .lazy_handle()
         .initialized_broker()
         .await
-        .map_err(|error| HandleOperationError::connect_failed(operation, workflow_id, error))
+        .map_err(|error| WorkflowHandleError::connect_failed(operation, workflow_id, error))
 }
 
 /// The change of a pause or a resume `subject`. Pure.
@@ -782,16 +782,16 @@ mod tests {
             }
         );
         let WorkflowStatusRead::Failed { error } =
-            status_read_of(Err(HandleOperationError::not_found(workflow())))
+            status_read_of(Err(WorkflowHandleError::not_found(workflow())))
         else {
             panic!("a failed read is a catalog value");
         };
-        assert_eq!(class_of(&error), "HandleWorkflowNotFound");
+        assert_eq!(class_of(&error), "WorkflowHandleNotFound");
     }
 
     #[test]
     fn a_failed_connect_is_db_operation_failed() {
-        let error = HandleOperationError::connect_failed(
+        let error = WorkflowHandleError::connect_failed(
             &HandleOperation::Status,
             workflow(),
             BrokerError::ListenerClosed,
@@ -799,7 +799,7 @@ mod tests {
         let WorkflowStatusRead::Failed { error } = status_read_of(Err(error)) else {
             panic!("a failed connect is a catalog value");
         };
-        assert_eq!(class_of(&error), "HandleDbOperationFailed");
+        assert_eq!(class_of(&error), "WorkflowHandleDatabaseOperationFailed");
     }
 
     #[test]
@@ -923,8 +923,8 @@ mod tests {
             WorkflowWaitRead::NotFound
         );
         assert!(matches!(
-            wait_read_of(Err(HandleOperationError::not_found(workflow()))),
-            WorkflowWaitRead::Failed { error } if class_of(&error) == "HandleWorkflowNotFound"
+            wait_read_of(Err(WorkflowHandleError::not_found(workflow()))),
+            WorkflowWaitRead::Failed { error } if class_of(&error) == "WorkflowHandleNotFound"
         ));
     }
 
@@ -955,8 +955,8 @@ mod tests {
         assert_eq!(done_of(Ok(false)), HandleDone::Done);
         assert_eq!(done_of(Ok(true)), HandleDone::Done);
         assert!(matches!(
-            done_of(Err(HandleOperationError::not_found(workflow()))),
-            HandleDone::Failed { error } if class_of(&error) == "HandleWorkflowNotFound"
+            done_of(Err(WorkflowHandleError::not_found(workflow()))),
+            HandleDone::Failed { error } if class_of(&error) == "WorkflowHandleNotFound"
         ));
         assert_eq!(
             change_of(HandleOperation::Pause.subject(), Ok(true)),
@@ -965,9 +965,9 @@ mod tests {
         assert!(matches!(
             change_of(
                 HandleOperation::Pause.subject(),
-                Err(HandleOperationError::not_found(workflow()))
+                Err(WorkflowHandleError::not_found(workflow()))
             ),
-            HandleChange::Failed { error } if class_of(&error) == "HandleWorkflowNotFound"
+            HandleChange::Failed { error } if class_of(&error) == "WorkflowHandleNotFound"
         ));
     }
 

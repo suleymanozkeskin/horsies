@@ -33,7 +33,7 @@ from horsies.core.models.tasks import (
     MIN_CANCEL_GRACE_MS,
     MIN_TASK_TIMEOUT_MS,
     Execution,
-    OperationalErrorCode,
+    OperationalCode,
     TaskError,
 )
 from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
@@ -415,7 +415,7 @@ def test_a_def_task_is_refused_before_it_runs(steps: _Steps) -> None:
     envelope = _set_running(_run(_frame('seat_sync')))
 
     error = _failed(_result(envelope, int))
-    assert error.error_code == OperationalErrorCode.WORKER_RESOLUTION_ERROR
+    assert error.error_code == OperationalCode.WORKER_RESOLUTION_ERROR
     assert error.message == (
         'Failed to resolve seat_sync: the task is def, and a shared async '
         'child runs only async def tasks'
@@ -441,7 +441,7 @@ def test_a_refusal_fails_the_task_after_running_and_before_resolve(
         CancelGraceInvalid(reason=reason),
     ).envelope
     error = _failed(_result(envelope, int))
-    assert error.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+    assert error.error_code == OperationalCode.WORKER_SERIALIZATION_ERROR
     assert error.data == {
         'task_name': 'seat_double',
         'field': 'cancel_grace_ms',
@@ -475,7 +475,7 @@ def test_a_task_that_raises_is_mapped(steps: _Steps) -> None:
     envelope = _set_running(_run(_frame('seat_raises')))
 
     error = _failed(_result(envelope, int))
-    assert error.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+    assert error.error_code == OperationalCode.UNHANDLED_EXCEPTION
 
 
 def test_a_body_that_the_stopped_core_ended_ends_the_child_with_no_report(
@@ -522,7 +522,7 @@ def test_a_cancel_of_the_body_ends_the_run(steps: _Steps) -> None:
         envelope = _set_running(asyncio.run(cancel_after_start()))
 
     error = _failed(_result(envelope, int))
-    assert error.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+    assert error.error_code == OperationalCode.UNHANDLED_EXCEPTION
     assert 'CancelledError' in (error.message or '')
 
 

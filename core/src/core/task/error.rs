@@ -24,13 +24,13 @@ use crate::core::workflow::summary::SubWorkflowSummary;
 )]
 #[code_catalog(module = "task_codes", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum OperationalErrorCode {
+pub enum OperationalCode {
     /// The task panicked or raised an error that no exception mapper turned into a task error.
     UnhandledException,
     /// The worker caught an exception outside the task wrapper, or a validator raised on a default.
     TaskException,
     WorkerCrashed,
-    BrokerError,
+    DatabaseError,
     WorkerResolutionError,
     WorkerSerializationError,
     ResultDeserializationError,
@@ -53,12 +53,12 @@ pub enum OperationalErrorCode {
     WorkflowStartIncomplete,
 }
 
-impl OperationalErrorCode {
+impl OperationalCode {
     pub const ALL: [Self; 14] = [
         Self::UnhandledException,
         Self::TaskException,
         Self::WorkerCrashed,
-        Self::BrokerError,
+        Self::DatabaseError,
         Self::WorkerResolutionError,
         Self::WorkerSerializationError,
         Self::ResultDeserializationError,
@@ -82,17 +82,17 @@ impl OperationalErrorCode {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ContractCode {
     ReturnTypeMismatch,
-    WorkflowCtxMissingId,
+    WorkflowContextMissingId,
     /// A handle-level read (`TaskHandle.get`, `WorkflowHandle.get`) asked for a typed value, but the ok
     /// type cannot be obtained, for example on a handle rebuilt by id without the task or workflow
-    /// registered in this process. The result-returning form is `BrokerErrorCode.NO_TYPE_AVAILABLE`.
+    /// registered in this process. The result-returning form is `DatabaseErrorCode.NO_TYPE_AVAILABLE`.
     NoTypeAvailable,
 }
 
 impl ContractCode {
     pub const ALL: [Self; 3] = [
         Self::ReturnTypeMismatch,
-        Self::WorkflowCtxMissingId,
+        Self::WorkflowContextMissingId,
         Self::NoTypeAvailable,
     ];
 }
@@ -124,10 +124,14 @@ pub enum RetrievalCode {
     /// for nothing. Never cached: a task composes with other tasks through a workflow, not through a
     /// wait.
     WaitInsideTask,
+    /// The stored error has a custom code that the declared code type of the task does not name: a
+    /// row of another version of the task, or of a task with another code type. The same read gives
+    /// the same error until the stored value or the code type changes.
+    UnknownCustomCode,
 }
 
 impl RetrievalCode {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::WaitTimeout,
         Self::TaskNotFound,
         Self::WorkflowNotFound,
@@ -136,6 +140,7 @@ impl RetrievalCode {
         Self::AsyncContext,
         Self::InvalidInput,
         Self::WaitInsideTask,
+        Self::UnknownCustomCode,
     ];
 }
 
@@ -156,7 +161,7 @@ pub enum OutcomeCode {
     WorkflowFailed,
     WorkflowCancelled,
     UpstreamSkipped,
-    SubworkflowFailed,
+    SubWorkflowFailed,
     WorkflowSuccessCaseNotMet,
     /// A COMPLETED workflow has no output: its output node (or a terminal node of an outputless workflow) is
     /// SKIPPED.
@@ -173,13 +178,13 @@ impl OutcomeCode {
         Self::WorkflowFailed,
         Self::WorkflowCancelled,
         Self::UpstreamSkipped,
-        Self::SubworkflowFailed,
+        Self::SubWorkflowFailed,
         Self::WorkflowSuccessCaseNotMet,
         Self::WorkflowOutputSkipped,
     ];
 }
 
-impl std::fmt::Display for OperationalErrorCode {
+impl std::fmt::Display for OperationalCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -225,17 +230,17 @@ impl std::fmt::Display for OutcomeCode {
 
 /// Union of all built-in error code families.
 ///
-/// Matches Python's `BuiltInTaskCode = OperationalErrorCode | ContractCode | RetrievalCode | OutcomeCode`.
+/// Matches Python's `BuiltInTaskCode = OperationalCode | ContractCode | RetrievalCode | OutcomeCode`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BuiltInTaskCode {
-    Operational(OperationalErrorCode),
+    Operational(OperationalCode),
     Contract(ContractCode),
     Retrieval(RetrievalCode),
     Outcome(OutcomeCode),
 }
 
 impl BuiltInTaskCode {
-    /// Get the string value of the error code (e.g. "BROKER_ERROR").
+    /// Get the string value of the error code (e.g. "DATABASE_ERROR").
     pub fn value(&self) -> String {
         match self {
             Self::Operational(c) => {
@@ -250,7 +255,7 @@ impl BuiltInTaskCode {
     /// Try to parse a string into a BuiltInTaskCode.
     /// Returns None if the string does not match any known code.
     pub fn parse(text: &str) -> Option<Self> {
-        if let Ok(c) = serde_plain::from_str::<OperationalErrorCode>(text) {
+        if let Ok(c) = serde_plain::from_str::<OperationalCode>(text) {
             return Some(Self::Operational(c));
         }
         if let Ok(c) = serde_plain::from_str::<ContractCode>(text) {
@@ -272,7 +277,7 @@ impl std::fmt::Display for BuiltInTaskCode {
     }
 }
 
-/// Serializes as `{"__builtin_task_code__": "BROKER_ERROR"}`.
+/// Serializes as `{"__builtin_task_code__": "DATABASE_ERROR"}`.
 impl Serialize for BuiltInTaskCode {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
@@ -282,7 +287,7 @@ impl Serialize for BuiltInTaskCode {
     }
 }
 
-/// Deserializes from `{"__builtin_task_code__": "BROKER_ERROR"}`, exactly that one key (Python
+/// Deserializes from `{"__builtin_task_code__": "DATABASE_ERROR"}`, exactly that one key (Python
 /// `_scan_task_error_error_code`, `core/codec/typed.py:1253-1302`).
 impl<'de> Deserialize<'de> for BuiltInTaskCode {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -302,8 +307,8 @@ impl<'de> Deserialize<'de> for BuiltInTaskCode {
 }
 
 // Convenience From impls
-impl From<OperationalErrorCode> for BuiltInTaskCode {
-    fn from(c: OperationalErrorCode) -> Self {
+impl From<OperationalCode> for BuiltInTaskCode {
+    fn from(c: OperationalCode) -> Self {
         Self::Operational(c)
     }
 }
@@ -400,7 +405,7 @@ impl std::fmt::Display for UserCode {
 /// Error code discriminator: either a built-in code (4 families) or a user code.
 ///
 /// Serialization (Python `TaskError._serialize_error_code`, `core/models/tasks.py:313-327`):
-/// - Built-in: `{"__builtin_task_code__": "BROKER_ERROR"}`
+/// - Built-in: `{"__builtin_task_code__": "DATABASE_ERROR"}`
 /// - User: `"MY_CUSTOM_ERROR"`
 ///
 /// A read refuses `null`, a plain text that names a built-in or reserved code, an unknown built-in name, and a
@@ -456,8 +461,8 @@ impl From<BuiltInTaskCode> for TaskErrorCode {
         Self::BuiltIn(code)
     }
 }
-impl From<OperationalErrorCode> for TaskErrorCode {
-    fn from(code: OperationalErrorCode) -> Self {
+impl From<OperationalCode> for TaskErrorCode {
+    fn from(code: OperationalCode) -> Self {
         Self::BuiltIn(code.into())
     }
 }
@@ -486,7 +491,7 @@ impl From<UserCode> for TaskErrorCode {
 // The exception record
 // =============================================================================
 
-/// The stored form of an exception: Python's `FlattenedException`, five text keys
+/// The stored form of an exception: Python's `ExceptionRecord`, five text keys
 /// (`core/models/tasks.py:177-191`, written by `flatten_exception`, `core/codec/error_payload.py:96-118`).
 /// A read refuses a missing key and any other key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -529,14 +534,14 @@ pub const ERROR_DATA_DEPTH_LIMIT: usize = MAX_VALUE_JSON_DEPTH - 1;
 /// object are two of the levels.
 pub const SUMMARY_OUTPUT_DEPTH_LIMIT: usize = MAX_VALUE_JSON_DEPTH - 2;
 
-/// Which class a stored error has (Python: `TaskError` or its subclass `SubWorkflowError`,
+/// Which class a stored error has (Python: `TaskError` or its subclass `SubWorkflowFailure`,
 /// `core/models/tasks.py:352-367`). The stored object of a sub-workflow error has the two fields of
 /// [`SubWorkflowFailure`] at its top level, next to the four keys of every error.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaskErrorKind {
     /// A plain `TaskError`.
     Plain,
-    /// A failed child workflow (`SubWorkflowError`).
+    /// A failed child workflow (`SubWorkflowFailure`).
     SubWorkflow(Box<SubWorkflowFailure>),
 }
 
@@ -914,7 +919,7 @@ mod tests {
     fn sub_workflow_error(summary: SubWorkflowSummary) -> TaskError {
         TaskError {
             exception: None,
-            error_code: OutcomeCode::SubworkflowFailed.into(),
+            error_code: OutcomeCode::SubWorkflowFailed.into(),
             data: None,
             message: Some("Subworkflow 00000000-0000-0000-0000-000000000000 failed".to_owned()),
             kind: TaskErrorKind::SubWorkflow(Box::new(SubWorkflowFailure {
@@ -935,9 +940,9 @@ mod tests {
 
     #[test]
     fn builtin_code_tagged_serde() {
-        let code = BuiltInTaskCode::Operational(OperationalErrorCode::BrokerError);
+        let code = BuiltInTaskCode::Operational(OperationalCode::DatabaseError);
         let json = serde_json::to_string(&code).unwrap();
-        assert_eq!(json, r#"{"__builtin_task_code__":"BROKER_ERROR"}"#);
+        assert_eq!(json, r#"{"__builtin_task_code__":"DATABASE_ERROR"}"#);
         let back: BuiltInTaskCode = serde_json::from_str(&json).unwrap();
         assert_eq!(back, code);
     }
@@ -946,10 +951,10 @@ mod tests {
     #[test]
     fn a_built_in_tag_with_another_key_is_refused() {
         for text in [
-            r#"{"__builtin_task_code__":"BROKER_ERROR","other":1}"#,
-            r#"{"__builtin_task_code__":"BROKER_ERROR","__h_x":1}"#,
+            r#"{"__builtin_task_code__":"DATABASE_ERROR","other":1}"#,
+            r#"{"__builtin_task_code__":"DATABASE_ERROR","__h_x":1}"#,
             r#"{"__builtin_task_code__":"NOT_A_CODE"}"#,
-            r#"{"code":"BROKER_ERROR"}"#,
+            r#"{"code":"DATABASE_ERROR"}"#,
         ] {
             assert!(
                 serde_json::from_str::<TaskErrorCode>(text).is_err(),
@@ -960,7 +965,7 @@ mod tests {
 
     #[test]
     fn task_error_code_builtin_serde() {
-        let code = TaskErrorCode::BuiltIn(OperationalErrorCode::WorkerCrashed.into());
+        let code = TaskErrorCode::BuiltIn(OperationalCode::WorkerCrashed.into());
         let json = serde_json::to_string(&code).unwrap();
         assert_eq!(json, r#"{"__builtin_task_code__":"WORKER_CRASHED"}"#);
         let back: TaskErrorCode = serde_json::from_str(&json).unwrap();
@@ -983,7 +988,7 @@ mod tests {
         let dynamic = format!("{}_{}", "WORKFLOW", "PAUSED");
         for text in [
             "WORKFLOW_PAUSED",
-            "BROKER_ERROR",
+            "DATABASE_ERROR",
             "RETURN_TYPE_MISMATCH",
             "RESULT_NOT_READY",
             "TASK_TIMEOUT",
@@ -1168,7 +1173,7 @@ mod tests {
         let data = nested_list(ERROR_DATA_DEPTH_LIMIT);
         let err = TaskError {
             data: Some(text(&data)),
-            ..TaskError::builtin(OperationalErrorCode::BrokerError, "m")
+            ..TaskError::builtin(OperationalCode::DatabaseError, "m")
         };
         assert_eq!(err.storage_refusal(), None);
         let back: TaskError = serde_json::from_str(&serde_json::to_string(&err).unwrap()).unwrap();
@@ -1237,7 +1242,7 @@ mod tests {
     }
 
     /// Row 35 of the workflow ledger: `sub_workflow_id` and `sub_workflow_summary` are top-level fields of the
-    /// stored error, after the four keys (Python `SubWorkflowError`, `core/models/tasks.py:352-367`).
+    /// stored error, after the four keys (Python `SubWorkflowFailure`, `core/models/tasks.py:352-367`).
     #[test]
     fn a_sub_workflow_error_stores_its_fields_at_the_top_level() {
         let err = sub_workflow_error(failed_summary());
@@ -1245,7 +1250,7 @@ mod tests {
         assert_eq!(
             text,
             concat!(
-                r#"{"exception":null,"error_code":{"__builtin_task_code__":"SUBWORKFLOW_FAILED"},"data":null,"#,
+                r#"{"exception":null,"error_code":{"__builtin_task_code__":"SUB_WORKFLOW_FAILED"},"data":null,"#,
                 r#""message":"Subworkflow 00000000-0000-0000-0000-000000000000 failed","#,
                 r#""sub_workflow_id":"00000000-0000-0000-0000-000000000000","#,
                 r#""sub_workflow_summary":{"status":"FAILED","output":null,"total_tasks":3,"completed_tasks":1,"#,
@@ -1289,7 +1294,7 @@ mod tests {
     fn sub_workflow_details_none_for_plain_error() {
         let err = TaskError::new("SOME_OTHER_ERROR", "nope").unwrap();
         assert!(err.sub_workflow_details().is_none());
-        let bare = TaskError::builtin(OutcomeCode::SubworkflowFailed, "no child");
+        let bare = TaskError::builtin(OutcomeCode::SubWorkflowFailed, "no child");
         assert!(bare.sub_workflow_details().is_none());
     }
 
@@ -1315,14 +1320,14 @@ mod tests {
         let back = TaskError::from_stored_text(&stored.to_string()).unwrap();
         assert_eq!(
             back.error_code,
-            TaskErrorCode::from(OutcomeCode::SubworkflowFailed)
+            TaskErrorCode::from(OutcomeCode::SubWorkflowFailed)
         );
         assert!(back.sub_workflow_details().is_some());
     }
 
     #[test]
     fn all_operational_codes_round_trip() {
-        for code in OperationalErrorCode::ALL {
+        for code in OperationalCode::ALL {
             let builtin = BuiltInTaskCode::Operational(code);
             let json = serde_json::to_string(&builtin).unwrap();
             let back: BuiltInTaskCode = serde_json::from_str(&json).unwrap();
@@ -1330,16 +1335,16 @@ mod tests {
         }
     }
 
-    /// Python `OperationalErrorCode` names the two codes of a blocked event
+    /// Python `OperationalCode` names the two codes of a blocked event
     /// loop this way.
     #[test]
     fn the_blocked_loop_codes_have_python_names() {
         assert_eq!(
-            serde_json::to_string(&OperationalErrorCode::TaskBlockedLoop).unwrap(),
+            serde_json::to_string(&OperationalCode::TaskBlockedLoop).unwrap(),
             "\"TASK_BLOCKED_LOOP\""
         );
         assert_eq!(
-            serde_json::to_string(&OperationalErrorCode::NeighbourBlockedLoop).unwrap(),
+            serde_json::to_string(&OperationalCode::NeighbourBlockedLoop).unwrap(),
             "\"NEIGHBOUR_BLOCKED_LOOP\""
         );
     }
@@ -1368,7 +1373,7 @@ mod tests {
 
     #[test]
     fn builtin_from_str_known() {
-        assert!(BuiltInTaskCode::parse("BROKER_ERROR").is_some());
+        assert!(BuiltInTaskCode::parse("DATABASE_ERROR").is_some());
         assert!(BuiltInTaskCode::parse("WAIT_TIMEOUT").is_some());
         assert!(BuiltInTaskCode::parse("TASK_CANCELLED").is_some());
         assert!(BuiltInTaskCode::parse("NO_TYPE_AVAILABLE").is_some());
@@ -1408,6 +1413,7 @@ mod tests {
             "NO_TYPE_AVAILABLE",
             "ASYNC_CONTEXT",
             "WAIT_INSIDE_TASK",
+            "UNKNOWN_CUSTOM_CODE",
         ] {
             assert!(BuiltInTaskCode::parse(text).is_some(), "{text}");
             assert!(
@@ -1420,8 +1426,8 @@ mod tests {
     #[test]
     fn display_codes_and_errors() {
         assert_eq!(
-            BuiltInTaskCode::Operational(OperationalErrorCode::BrokerError).to_string(),
-            "BROKER_ERROR",
+            BuiltInTaskCode::Operational(OperationalCode::DatabaseError).to_string(),
+            "DATABASE_ERROR",
         );
         assert_eq!(user_code("CUSTOM").to_string(), "CUSTOM");
         assert_eq!(
@@ -1430,8 +1436,8 @@ mod tests {
         );
         let no_message = TaskError {
             message: None,
-            ..TaskError::builtin(OperationalErrorCode::BrokerError, "")
+            ..TaskError::builtin(OperationalCode::DatabaseError, "")
         };
-        assert_eq!(no_message.to_string(), "[BROKER_ERROR]");
+        assert_eq!(no_message.to_string(), "[DATABASE_ERROR]");
     }
 }

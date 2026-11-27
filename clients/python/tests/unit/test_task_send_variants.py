@@ -20,11 +20,11 @@ import pytest
 from tests.union_members import union_members
 from horsies.core.telemetry.send_telemetry import NO_SEND_TELEMETRY
 from horsies.core.brokers.result_types import (
-    BrokerEnqueueFailed,
-    BrokerOperationError,
+    DatabaseEnqueueFailed,
+    DatabaseOperationError,
 )
 from horsies.core.codec.validation_errors import ValueValidationError
-from horsies.core.errors import ErrorCode, HorsiesError
+from horsies.core.errors import HorsiesErrorCode, HorsiesError
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import (
     TaskSendAsyncContext,
@@ -71,13 +71,13 @@ def _every_variant() -> list[TaskSendError]:
     return [
         TaskSendSuppressed(message=message),
         TaskSendAsyncContext(task_id=TASK_ID, payload=payload, message=message),
-        TaskSendValidationFailed(message=message, exception=cause),
+        TaskSendValidationFailed(message=message, cause=cause),
         TaskSendEnqueueFailed(
             task_id=TASK_ID,
             payload=payload,
             message=message,
             retryable=True,
-            exception=cause,
+            cause=cause,
         ),
         TaskSendPayloadMismatch(task_id=TASK_ID, payload=payload, message=message),
         TaskSendPayloadTooLarge(message=message, size_bytes=2048, limit_bytes=1024),
@@ -113,7 +113,7 @@ def _wrapper(app: MagicMock) -> Any:
     return create_task_wrapper(good_fn, app, 'test.good_fn')
 
 
-def _broker_returning(app: MagicMock, error: BrokerOperationError) -> MagicMock:
+def _broker_returning(app: MagicMock, error: DatabaseOperationError) -> MagicMock:
     broker = MagicMock()
     broker.enqueue.return_value = Err(error)
     app.get_broker.return_value = broker
@@ -137,7 +137,6 @@ class TestVariantCatalog:
         assert set(get_args(TaskSendRetryable.__value__)) == {
             TaskSendEnqueueFailed,
             TaskSendAsyncContext,
-            TaskSendIdempotencyKeyConflict,
         }
 
     @pytest.mark.parametrize(
@@ -163,7 +162,7 @@ class TestValidationFailedCause:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert result.err_value.exception == NoCause()
+        assert result.err_value.cause == NoCause()
         assert 'positional' in result.err_value.message
         app.get_broker.assert_not_called()
 
@@ -176,12 +175,12 @@ class TestValidationFailedCause:
         assert is_err(result)
         err = result.err_value
         assert isinstance(err, TaskSendValidationFailed)
-        assert isinstance(err.exception, ValueValidationError)
-        assert err.exception.__context__ is None
-        assert err.exception.__cause__ is None
+        assert isinstance(err.cause, ValueValidationError)
+        assert err.cause.__context__ is None
+        assert err.cause.__cause__ is None
         assert '[int_type]' in err.message
         assert marker not in err.message
-        assert marker not in str(err.exception)
+        assert marker not in str(err.cause)
         app.get_broker.assert_not_called()
 
 
@@ -189,38 +188,38 @@ class TestValidationFailedCause:
 class TestEnqueueFailedCause:
     def test_broker_data_check_without_exception_gives_no_cause(self) -> None:
         app = _make_app()
-        _broker_returning(app, BrokerEnqueueFailed(
+        _broker_returning(app, DatabaseEnqueueFailed(
             message='task row is gone before the key was bound',
             retryable=False,
-            exception=NoCause(),
+            cause=NoCause(),
         ))
 
         result = _wrapper(app).send(x=1)
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendEnqueueFailed)
-        assert result.err_value.exception == NoCause()
+        assert result.err_value.cause == NoCause()
         assert result.err_value.retryable is False
 
     def test_broker_exception_is_kept(self) -> None:
         app = _make_app()
         cause = ConnectionError('db gone')
-        _broker_returning(app, BrokerEnqueueFailed(
+        _broker_returning(app, DatabaseEnqueueFailed(
             message='db gone',
             retryable=True,
-            exception=cause,
+            cause=cause,
         ))
 
         result = _wrapper(app).send(x=1)
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendEnqueueFailed)
-        assert result.err_value.exception is cause
+        assert result.err_value.cause is cause
         assert result.err_value.retryable is True
 
     @pytest.mark.parametrize('form', ['send', 'send_async', 'schedule', 'schedule_async'])
     def test_broker_init_failure_propagates(self, form: str) -> None:
-        """``get_broker()`` raises ``BROKER_INIT_FAILED`` as a fail-fast error.
+        """``get_broker()`` raises ``DATABASE_INIT_FAILED`` as a fail-fast error.
 
         Every send and schedule form lets it propagate; no form turns it
         into ``TaskSendEnqueueFailed``.
@@ -228,7 +227,7 @@ class TestEnqueueFailedCause:
         app = _make_app()
         init_failure = HorsiesError(
             message='Failed to initialize broker: bad url',
-            code=ErrorCode.BROKER_INIT_FAILED,
+            code=HorsiesErrorCode.DATABASE_INIT_FAILED,
         )
         app.get_broker.side_effect = init_failure
         wrapper = _wrapper(app)
@@ -254,8 +253,8 @@ class TestEnqueueFailedCause:
 class TestRetryRefusesOtherVariants:
     """A caller without a type checker can pass a refused variant."""
 
-    def test_the_fixture_has_four_refused_variants(self) -> None:
-        assert len(_refused_variants()) == 4
+    def test_the_fixture_has_five_refused_variants(self) -> None:
+        assert len(_refused_variants()) == 5
 
     @pytest.mark.parametrize(
         'error', _refused_variants(), ids=lambda error: type(error).__name__,

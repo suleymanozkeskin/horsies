@@ -5,7 +5,7 @@
 // The code of a refusal: a database URL has the code of the broker URL (`HRS-203`), a pool setting the code of a
 // broker pool value (`HRS-213`), and a socket setting the code of a keepalive or user timeout value (`HRS-215`).
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import {
   KEEPALIVE_PROBES_MAX,
   KEEPALIVE_PROBES_MIN,
@@ -90,27 +90,27 @@ export interface BrokerConfigInput {
 }
 
 /** A pool setting of the broker: a `u32` field. */
-const POOL_U32 = u32Field(ErrorCode.CONFIG_INVALID_BROKER_POOL);
+const POOL_U32 = u32Field(HorsiesErrorCode.CONFIG_INVALID_DATABASE_POOL);
 
 /** A keepalive idle time or interval, in seconds (`KeepaliveSeconds` of the core). */
 const KEEPALIVE_SECONDS: IntegerBound = Object.freeze({
   min: KEEPALIVE_SECONDS_MIN,
   max: KEEPALIVE_SECONDS_MAX,
-  code: ErrorCode.CONFIG_INVALID_KEEPALIVE,
+  code: HorsiesErrorCode.CONFIG_INVALID_KEEPALIVE,
 });
 
 /** A count of keepalive probes (`KeepaliveProbes` of the core). */
 const KEEPALIVE_PROBES: IntegerBound = Object.freeze({
   min: KEEPALIVE_PROBES_MIN,
   max: KEEPALIVE_PROBES_MAX,
-  code: ErrorCode.CONFIG_INVALID_KEEPALIVE,
+  code: HorsiesErrorCode.CONFIG_INVALID_KEEPALIVE,
 });
 
 /** A TCP user timeout, in milliseconds (`TcpUserTimeoutMs` of the core). */
 const TCP_USER_TIMEOUT_MS: IntegerBound = Object.freeze({
   min: TCP_USER_TIMEOUT_MS_MIN,
   max: TCP_USER_TIMEOUT_MS_MAX,
-  code: ErrorCode.CONFIG_INVALID_KEEPALIVE,
+  code: HorsiesErrorCode.CONFIG_INVALID_KEEPALIVE,
 });
 
 /** The core's `broker` object of `input`, with each secret read through `environment`. */

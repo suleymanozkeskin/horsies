@@ -43,7 +43,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import RetryPolicy, TaskError
+from horsies.core.models.tasks import OperationalCode, RetryPolicy, TaskError
 from horsies.core.types.result import Ok, Result
 
 from tests.e2e.helpers.env import e2e_database_url
@@ -168,7 +168,7 @@ def _wait_for_the_stop() -> None:
 
 @app.task(
     task_name='e2e_core_stops_during_body',
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=['WORKER_CRASHED']),
+    retry_policy=RetryPolicy.fixed([1], auto_retry_for=[OperationalCode.WORKER_CRASHED]),
 )
 def stops_during_body(*, runs_path: str, marker_path: str) -> Result[int, TaskError]:
     """Append the process id of the child to ``runs_path``, stop the core of
@@ -184,7 +184,7 @@ def stops_during_body(*, runs_path: str, marker_path: str) -> Result[int, TaskEr
 
 @app.task(
     task_name='e2e_core_stops_and_interrupts_body',
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=['WORKER_CRASHED']),
+    retry_policy=RetryPolicy.fixed([1], auto_retry_for=[OperationalCode.WORKER_CRASHED]),
 )
 def interrupted_in_body(*, first_run_path: str, marker_path: str) -> Result[int, TaskError]:
     """The first run (no file at ``first_run_path``) writes that file, stops

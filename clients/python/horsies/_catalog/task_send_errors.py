@@ -56,6 +56,14 @@ class TaskSendSuppressed:
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.SEND_SUPPRESSED
     message: str = field(repr=False)
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
 class TaskSendAsyncContext:
@@ -71,18 +79,34 @@ class TaskSendAsyncContext:
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
 class TaskSendValidationFailed:
     """The input was refused before anything was written.
 
-    ``exception`` is the cause, or ``NoCause()`` when a check refused the
+    ``cause`` is the exception of the cause, or ``NoCause()`` when a check refused the
     input without a Python exception. The retry methods refuse this error.
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.VALIDATION_FAILED
     message: str = field(repr=False)
-    exception: BaseException | NoCause = field(repr=False)
+    cause: BaseException | NoCause = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
@@ -91,7 +115,7 @@ class TaskSendEnqueueFailed:
 
     ``retryable`` is the core's classification of the cause. ``retry_send(err)``
     sends the same task id and payload again; the broker returns the existing
-    task for a duplicate. ``exception`` is ``NoCause()`` when the broker found
+    task for a duplicate. ``cause`` is ``NoCause()`` when the broker found
     the failure by a data check.
     """
 
@@ -100,7 +124,15 @@ class TaskSendEnqueueFailed:
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
     retryable: bool
-    exception: BaseException | NoCause = field(repr=False)
+    cause: BaseException | NoCause = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
@@ -114,6 +146,14 @@ class TaskSendPayloadMismatch:
     task_id: uuid.UUID
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
 
 
 @dataclass(slots=True, frozen=True)
@@ -129,23 +169,41 @@ class TaskSendPayloadTooLarge:
     size_bytes: int
     limit_bytes: int
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
 class TaskSendIdempotencyKeyConflict:
     """The idempotency key is reserved by another task with a different command.
 
     Nothing was written. ``owner_task_id`` names the task that holds the key.
-    ``retryable`` is ``True``: the conflict clears when the reservation ends.
-    The retry methods accept this error: a retry after the reservation ends
-    is accepted, and a retry before that returns the same error.
+    ``retryable`` is ``False``: a repeat of the same send does not complete
+    it. While the owner task is live, the repeat meets the same conflict.
+    After the reservation ends, the repeat starts a second task under the
+    key. To complete the send, send the same command as the owner task, or
+    use another key. The retry methods refuse this error.
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT
-    retryable: ClassVar[bool] = True
+    retryable: ClassVar[bool] = False
     task_id: uuid.UUID
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
     owner_task_id: uuid.UUID
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
 
 
 type TaskSendCoreError = (

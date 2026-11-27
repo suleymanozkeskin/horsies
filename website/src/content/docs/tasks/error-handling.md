@@ -21,7 +21,7 @@ Adjust to your needs.
 
 | Category | Source | Examples | Auto-Retry? |
 | -------- | ------ | -------- | ----------- |
-| Read errors | `handle.get()` gave no outcome | `WaitTimeout`, `BrokerError` | No |
+| Read errors | `handle.get()` gave no outcome | `WaitTimeout`, `ReadDatabaseError` | No |
 | Execution errors | Task raised an exception, or its worker process died | `UNHANDLED_EXCEPTION`, `TASK_EXCEPTION`, `WORKER_CRASHED` | If in `auto_retry_for` |
 | Domain errors | User returned error | `"RATE_LIMITED"`, `"VALIDATION_FAILED"` | If in `auto_retry_for` |
 
@@ -39,17 +39,26 @@ Handle errors when:
 
 ### Configure Automatic Retries
 
-The library handles retries automatically when `auto_retry_for` matches the error:
+The library handles retries automatically when `auto_retry_for` matches the error. The entries are code members: built-in members, and members of the `Enum` class that the task declares with `error_codes=`:
 
 ```python
-from horsies import RetryPolicy, Result, TaskError, JsonValue
+from enum import Enum
+
+from horsies import OperationalCode, RetryPolicy, Result, TaskError, JsonValue
+
+
+class FetchCode(str, Enum):
+    RATE_LIMITED = "RATE_LIMITED"
+    TIMEOUT = "TIMEOUT"
+
 
 @app.task(
     "fetch_api_data",
+    error_codes=FetchCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=3,
-        auto_retry_for=["UNHANDLED_EXCEPTION", "RATE_LIMITED"],
+        auto_retry_for=[OperationalCode.UNHANDLED_EXCEPTION, FetchCode.RATE_LIMITED],
     ),
 )
 def fetch_api_data(*, url: str) -> Result[dict[str, JsonValue], TaskError]:
@@ -70,10 +79,11 @@ To avoid try/except boilerplate for mapping exceptions to error codes, use `exce
 ```python
 @app.task(
     "fetch_api_data",
+    error_codes=FetchCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=3,
-        auto_retry_for=["RATE_LIMITED", "TIMEOUT"],
+        auto_retry_for=[FetchCode.RATE_LIMITED, FetchCode.TIMEOUT],
     ),
     exception_mapper={
         RateLimitError: "RATE_LIMITED",
@@ -300,7 +310,8 @@ if error.error_code == "RATE_LIMITED":
 # Correct - configure auto_retry_for on the retry policy
 @app.task(
     "my_task",
-    retry_policy=RetryPolicy.fixed([60, 120, 300], auto_retry_for=["RATE_LIMITED"]),
+    error_codes=FetchCode,
+    retry_policy=RetryPolicy.fixed([60, 120, 300], auto_retry_for=[FetchCode.RATE_LIMITED]),
 )
 def my_task() -> Result[str, TaskError]:
     ...

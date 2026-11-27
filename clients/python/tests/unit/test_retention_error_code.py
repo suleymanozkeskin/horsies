@@ -35,7 +35,7 @@ import pytest
 
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     MultipleValidationErrors,
 )
 from horsies.core.models import retention as retention_module
@@ -49,7 +49,7 @@ pytestmark = [pytest.mark.unit]
 _DB_URL = 'postgresql://u:p@localhost:5432/db'
 
 
-def _raised_codes(build: object) -> list[ErrorCode | None]:
+def _raised_codes(build: object) -> list[HorsiesErrorCode | None]:
     """Every error code one invalid configuration reports.
 
     `ConfigurationError.code` is optional, so the None stays in the
@@ -73,7 +73,7 @@ class TestRetentionModuleUsesOneCode:
         self,
     ) -> None:
         source = inspect.getsource(retention_module)
-        referenced = re.findall(r'ErrorCode\.([A-Z_]+)', source)
+        referenced = re.findall(r'HorsiesErrorCode\.([A-Z_]+)', source)
         assert referenced, 'no error codes found; the pattern stopped matching'
         assert set(referenced) == {'CONFIG_INVALID_RETENTION'}, (
             f'models/retention.py refuses with {sorted(set(referenced))}; '
@@ -90,15 +90,15 @@ class TestRetentionModuleUsesOneCode:
         assert len(referenced) == constructions, (
             f'{constructions} ConfigurationError constructions in '
             f'models/retention.py but {len(referenced)} readable code '
-            f'references; a refusal reaches ErrorCode by a route this '
+            f'references; a refusal reaches HorsiesErrorCode by a route this '
             f'test cannot audit'
         )
 
     def test_the_code_is_distinct_and_in_the_config_band(self) -> None:
-        code = ErrorCode.CONFIG_INVALID_RETENTION
-        assert code is not ErrorCode.CONFIG_INVALID_RECOVERY
+        code = HorsiesErrorCode.CONFIG_INVALID_RETENTION
+        assert code is not HorsiesErrorCode.CONFIG_INVALID_RECOVERY
         assert 200 <= int(code.value[4:]) <= 299
-        values = [member.value for member in ErrorCode]
+        values = [member.value for member in HorsiesErrorCode]
         assert values.count(code.value) == 1, 'error code values are unique'
 
     def test_the_moved_field_refusal_stays_a_recovery_code(self) -> None:
@@ -121,7 +121,7 @@ class TestRetentionModuleUsesOneCode:
             codes = _raised_codes(
                 lambda field=name: RecoveryConfig.model_validate({field: 1})
             )
-            assert codes == [ErrorCode.CONFIG_INVALID_RECOVERY], name
+            assert codes == [HorsiesErrorCode.CONFIG_INVALID_RECOVERY], name
 
 
 class TestEveryRefusalCarriesTheCode:
@@ -171,7 +171,7 @@ class TestEveryRefusalCarriesTheCode:
     def test_refusal_carries_the_retention_code(self, build: object) -> None:
         codes = _raised_codes(build)
         assert codes, 'the configuration was accepted; the case is vacuous'
-        assert set(codes) == {ErrorCode.CONFIG_INVALID_RETENTION}, (
+        assert set(codes) == {HorsiesErrorCode.CONFIG_INVALID_RETENTION}, (
             'refused with '
             f'{sorted(str(code) for code in codes)}'
         )
@@ -198,7 +198,7 @@ class TestEveryRefusalCarriesTheCode:
                 ),
             )
         )
-        assert codes == [ErrorCode.CONFIG_INVALID_RETENTION]
+        assert codes == [HorsiesErrorCode.CONFIG_INVALID_RETENTION]
 
     def test_the_queue_cross_check_is_the_refusal_being_measured(
         self,
@@ -229,5 +229,5 @@ class TestPublishedCodeTable:
             / 'tasks'
             / 'errors.md'
         ).read_text()
-        assert ErrorCode.CONFIG_INVALID_RETENTION.value in table
+        assert HorsiesErrorCode.CONFIG_INVALID_RETENTION.value in table
         assert 'CONFIG_INVALID_RETENTION' in table

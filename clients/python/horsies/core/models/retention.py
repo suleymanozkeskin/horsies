@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from horsies._catalog.worker_manifest import PAUSED_AGE_MICROS_MAX
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     ValidationReport,
     raise_collected,
 )
@@ -98,7 +98,7 @@ def _period_error(subject: str, refused: PeriodRefused) -> ConfigurationError:
     """The refusal of a period that is not whole days within the bounds."""
     return ConfigurationError(
         message=f'{subject}: {refused.reason}',
-        code=ErrorCode.CONFIG_INVALID_RETENTION,
+        code=HorsiesErrorCode.CONFIG_INVALID_RETENTION,
         notes=[
             'a retention class is identified by its period, and '
             'history partitions are daily',
@@ -239,7 +239,7 @@ class RetentionConfig(BaseModel):
                         f'paused_workflow_cancel_after ({age}) is longer '
                         f'than {PAUSED_WORKFLOW_AGE_MAX.days} days'
                     ),
-                    code=ErrorCode.CONFIG_INVALID_RETENTION,
+                    code=HorsiesErrorCode.CONFIG_INVALID_RETENTION,
                     notes=[
                         'the expiry subtracts the age from now(), and the '
                         "result must stay inside PostgreSQL's timestamp range",
@@ -368,7 +368,7 @@ class RetentionConfig(BaseModel):
                     report.add(
                         ConfigurationError(
                             message=f'retention period {period} listed twice',
-                            code=ErrorCode.CONFIG_INVALID_RETENTION,
+                            code=HorsiesErrorCode.CONFIG_INVALID_RETENTION,
                             notes=['a period has exactly one class'],
                             help_text='remove the repeated period',
                         )

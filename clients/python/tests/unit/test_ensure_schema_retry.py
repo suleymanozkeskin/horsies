@@ -9,7 +9,7 @@ import pytest
 
 from psycopg import InterfaceError, OperationalError
 
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerOperationFailed
+from horsies.core.brokers.result_types import DatabaseErrorCode, DatabaseOperationError, DatabaseOperationFailed
 from horsies.core.cli import _ensure_schema_with_retry
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.types.result import Err, Ok
@@ -19,14 +19,14 @@ def _schema_err(
     message: str,
     *,
     retryable: bool = True,
-    exception: BaseException | None = None,
-) -> Err[BrokerOperationError]:
+    cause: BaseException | None = None,
+) -> Err[DatabaseOperationError]:
     """Build an Err for schema init failure in tests."""
-    return Err(BrokerOperationFailed(
-        code=BrokerErrorCode.SCHEMA_INIT_FAILED,
+    return Err(DatabaseOperationFailed(
+        code=DatabaseErrorCode.SCHEMA_INIT_FAILED,
         message=message,
         retryable=retryable,
-        exception=exception or ConnectionError(message),
+        cause=cause or ConnectionError(message),
     ))
 
 
@@ -49,8 +49,8 @@ class TestEnsureSchemaWithRetry:
         broker = AsyncMock()
         broker.ensure_schema_initialized = AsyncMock(
             side_effect=[
-                _schema_err('connection refused', exception=OperationalError('connection refused')),
-                _schema_err('connection refused', exception=OperationalError('connection refused')),
+                _schema_err('connection refused', cause=OperationalError('connection refused')),
+                _schema_err('connection refused', cause=OperationalError('connection refused')),
                 Ok(None),
             ]
         )
@@ -71,7 +71,7 @@ class TestEnsureSchemaWithRetry:
             return_value=_schema_err(
                 'bad config',
                 retryable=False,
-                exception=ValueError('bad config'),
+                cause=ValueError('bad config'),
             ),
         )
         resilience = WorkerResilienceConfig()
@@ -87,7 +87,7 @@ class TestEnsureSchemaWithRetry:
         broker.ensure_schema_initialized = AsyncMock(
             return_value=_schema_err(
                 'connection refused',
-                exception=OperationalError('connection refused'),
+                cause=OperationalError('connection refused'),
             ),
         )
         resilience = WorkerResilienceConfig(
@@ -112,13 +112,13 @@ class TestEnsureSchemaWithRetry:
         """max_attempts=0 means infinite retries; verify it keeps going."""
         call_count = 0
 
-        def fail_then_succeed() -> Ok[None] | Err[BrokerOperationError]:
+        def fail_then_succeed() -> Ok[None] | Err[DatabaseOperationError]:
             nonlocal call_count
             call_count += 1
             if call_count <= 10:
                 return _schema_err(
                     'connection refused',
-                    exception=OperationalError('connection refused'),
+                    cause=OperationalError('connection refused'),
                 )
             return Ok(None)
 
@@ -141,9 +141,9 @@ class TestEnsureSchemaWithRetry:
         broker = AsyncMock()
         broker.ensure_schema_initialized = AsyncMock(
             side_effect=[
-                _schema_err('fail', exception=OperationalError('fail')),
-                _schema_err('fail', exception=OperationalError('fail')),
-                _schema_err('fail', exception=OperationalError('fail')),
+                _schema_err('fail', cause=OperationalError('fail')),
+                _schema_err('fail', cause=OperationalError('fail')),
+                _schema_err('fail', cause=OperationalError('fail')),
                 Ok(None),
             ]
         )
@@ -173,10 +173,10 @@ class TestEnsureSchemaWithRetry:
         broker = AsyncMock()
         broker.ensure_schema_initialized = AsyncMock(
             side_effect=[
-                _schema_err('fail', exception=OperationalError('fail')),
-                _schema_err('fail', exception=OperationalError('fail')),
-                _schema_err('fail', exception=OperationalError('fail')),
-                _schema_err('fail', exception=OperationalError('fail')),
+                _schema_err('fail', cause=OperationalError('fail')),
+                _schema_err('fail', cause=OperationalError('fail')),
+                _schema_err('fail', cause=OperationalError('fail')),
+                _schema_err('fail', cause=OperationalError('fail')),
                 Ok(None),
             ]
         )
@@ -209,7 +209,7 @@ class TestEnsureSchemaWithRetry:
         broker = AsyncMock()
         broker.ensure_schema_initialized = AsyncMock(
             side_effect=[
-                _schema_err('fail', exception=OperationalError('fail')),
+                _schema_err('fail', cause=OperationalError('fail')),
                 Ok(None),
             ],
         )
@@ -237,7 +237,7 @@ class TestEnsureSchemaWithRetry:
             side_effect=[
                 _schema_err(
                     'server closed connection',
-                    exception=InterfaceError('server closed connection'),
+                    cause=InterfaceError('server closed connection'),
                 ),
                 Ok(None),
             ],
@@ -259,7 +259,7 @@ class TestEnsureSchemaWithRetry:
         broker.ensure_schema_initialized = AsyncMock(
             return_value=_schema_err(
                 'connection refused',
-                exception=OperationalError('connection refused'),
+                cause=OperationalError('connection refused'),
             ),
         )
         resilience = WorkerResilienceConfig(
@@ -282,7 +282,7 @@ class TestEnsureSchemaWithRetry:
         broker = AsyncMock()
         broker.ensure_schema_initialized = AsyncMock(
             side_effect=[
-                _schema_err('connection refused', exception=OperationalError('connection refused')),
+                _schema_err('connection refused', cause=OperationalError('connection refused')),
                 Ok(None),
             ],
         )
@@ -310,7 +310,7 @@ class TestEnsureSchemaWithRetry:
         broker.ensure_schema_initialized = AsyncMock(
             return_value=_schema_err(
                 'connection refused',
-                exception=OperationalError('connection refused'),
+                cause=OperationalError('connection refused'),
             ),
         )
         resilience = WorkerResilienceConfig(

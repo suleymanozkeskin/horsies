@@ -415,7 +415,7 @@ mod tests {
                     format!("Schema initialization failed: {}", refused())
                 );
                 assert_eq!(
-                    slot(&failed, "exception"),
+                    slot(&failed, "cause"),
                     Some(SlotData::Exception(ExceptionValue::CoreFailure {
                         text: refused().to_string(),
                         retryable: true,

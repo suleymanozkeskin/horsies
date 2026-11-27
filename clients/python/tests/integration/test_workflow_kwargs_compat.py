@@ -26,7 +26,7 @@ from horsies.core.models.workflow import (
     OnError,
     WorkflowValidationError,
 )
-from horsies.core.errors import ErrorCode
+from horsies.core.errors import HorsiesErrorCode
 from horsies.core.types.result import Ok, Result
 
 from .conftest import make_simple_task, start_ok
@@ -195,6 +195,6 @@ class TestKwargsOnlyWrites:
                 output=node,
             )
 
-        assert exc.value.code == ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
 
 

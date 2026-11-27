@@ -23,7 +23,7 @@ from horsies.core.models.tasks import (
     BUILTIN_CODE_REGISTRY,
     BuiltInTaskCode,
     ContractCode,
-    OperationalErrorCode,
+    OperationalCode,
     OutcomeCode,
     RetrievalCode,
     TaskError,
@@ -43,9 +43,9 @@ class TestTaggedSerialization:
     """Built-in codes serialize as tagged dicts, user strings stay as plain strings."""
 
     def test_builtin_code_serializes_as_tagged_dict(self) -> None:
-        te = TaskError(error_code=OperationalErrorCode.BROKER_ERROR, message='err')
+        te = TaskError(error_code=OperationalCode.DATABASE_ERROR, message='err')
         data = te.model_dump(mode='json')
-        assert data['error_code'] == {'__builtin_task_code__': 'BROKER_ERROR'}
+        assert data['error_code'] == {'__builtin_task_code__': 'DATABASE_ERROR'}
 
     def test_user_string_serializes_as_plain_string(self) -> None:
         te = TaskError(error_code='MY_CUSTOM_CODE', message='custom')
@@ -59,8 +59,8 @@ class TestTaggedSerialization:
     @pytest.mark.parametrize(
         'code',
         [
-            OperationalErrorCode.WORKER_CRASHED,
-            ContractCode.WORKFLOW_CTX_MISSING_ID,
+            OperationalCode.WORKER_CRASHED,
+            ContractCode.WORKFLOW_CONTEXT_MISSING_ID,
             RetrievalCode.WAIT_TIMEOUT,
             OutcomeCode.WORKFLOW_PAUSED,
         ],
@@ -111,12 +111,12 @@ class TestRoundTripCoercion:
     @pytest.mark.parametrize(
         'code',
         [
-            OperationalErrorCode.BROKER_ERROR,
-            OperationalErrorCode.TASK_EXCEPTION,
+            OperationalCode.DATABASE_ERROR,
+            OperationalCode.TASK_EXCEPTION,
             ContractCode.NO_TYPE_AVAILABLE,
             RetrievalCode.RESULT_NOT_READY,
             OutcomeCode.WORKFLOW_PAUSED,
-            OutcomeCode.SUBWORKFLOW_FAILED,
+            OutcomeCode.SUB_WORKFLOW_FAILED,
         ],
         ids=lambda c: f'{type(c).__name__}.{c.name}',
     )
@@ -133,7 +133,7 @@ class TestRoundTripCoercion:
     @pytest.mark.parametrize(
         'code',
         [
-            OperationalErrorCode.WORKER_CRASHED,
+            OperationalCode.WORKER_CRASHED,
             ContractCode.RETURN_TYPE_MISMATCH,
             RetrievalCode.WAIT_TIMEOUT,
             OutcomeCode.TASK_CANCELLED,
@@ -203,7 +203,7 @@ class TestStrictConstruction:
 
     def test_reserved_string_rejected_operational(self) -> None:
         with pytest.raises(ValueError, match='reserved built-in error code'):
-            TaskError(error_code='BROKER_ERROR')
+            TaskError(error_code='DATABASE_ERROR')
 
     def test_reserved_string_rejected_contract(self) -> None:
         with pytest.raises(ValueError, match='reserved built-in error code'):
@@ -242,11 +242,11 @@ class TestStrictConstruction:
             pass
 
         with pytest.raises(ValueError, match='reserved built-in error code'):
-            TaskError(error_code=Sneaky('BROKER_ERROR'))
+            TaskError(error_code=Sneaky('DATABASE_ERROR'))
 
     def test_user_str_enum_with_reserved_value_rejected(self) -> None:
         class UserCode(str, _Enum):
-            COLLIDES = 'BROKER_ERROR'
+            COLLIDES = 'DATABASE_ERROR'
 
         with pytest.raises(ValueError, match='reserved built-in error code'):
             TaskError(error_code=UserCode.COLLIDES)
@@ -315,13 +315,13 @@ class TestNestedModelRoundTrip:
 
         original = Payload(
             error=TaskError(
-                error_code=OperationalErrorCode.BROKER_ERROR, message='err',
+                error_code=OperationalCode.DATABASE_ERROR, message='err',
             ),
         )
         raw = original.model_dump_json()
         restored = Payload.model_validate_json(raw)
 
-        assert restored.error.error_code is OperationalErrorCode.BROKER_ERROR
+        assert restored.error.error_code is OperationalCode.DATABASE_ERROR
 
     def test_nested_user_string_roundtrips(self) -> None:
         class Payload(BaseModel):
@@ -375,10 +375,10 @@ class TestMatchBehavior:
         assert matched
 
     def test_family_level_match(self) -> None:
-        te = TaskError(error_code=OperationalErrorCode.BROKER_ERROR, message='err')
+        te = TaskError(error_code=OperationalCode.DATABASE_ERROR, message='err')
         matched_family: str | None = None
         match te.error_code:
-            case OperationalErrorCode():
+            case OperationalCode():
                 matched_family = 'operational'
             case ContractCode():
                 matched_family = 'contract'
@@ -407,7 +407,7 @@ class TestMatchBehavior:
         te = TaskError(error_code='MY_CODE', message='custom')
         matched_family: str | None = None
         match te.error_code:
-            case OperationalErrorCode():
+            case OperationalCode():
                 matched_family = 'operational'
             case ContractCode():
                 matched_family = 'contract'
@@ -431,14 +431,14 @@ class TestBuiltinCodeRegistry:
     """Verify the BUILTIN_CODE_REGISTRY is complete and consistent."""
 
     def test_registry_contains_all_families(self) -> None:
-        for family in (OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode):
+        for family in (OperationalCode, ContractCode, RetrievalCode, OutcomeCode):
             for member in family:
                 assert member.value in BUILTIN_CODE_REGISTRY
                 assert BUILTIN_CODE_REGISTRY[member.value] is member
 
     def test_registry_count(self) -> None:
         expected = (
-            len(OperationalErrorCode)
+            len(OperationalCode)
             + len(ContractCode)
             + len(RetrievalCode)
             + len(OutcomeCode)
@@ -448,7 +448,7 @@ class TestBuiltinCodeRegistry:
     def test_no_cross_family_value_overlap(self) -> None:
         """Each string value appears in exactly one family."""
         all_values: dict[str, str] = {}
-        for family in (OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode):
+        for family in (OperationalCode, ContractCode, RetrievalCode, OutcomeCode):
             for member in family:
                 family_name = type(member).__name__
                 assert member.value not in all_values, (
@@ -470,48 +470,48 @@ class TestCheckReservedCodeCollision:
         from horsies.core.app import Horsies
         from horsies.core.models.app import AppConfig
         from horsies.core.models.broker import PostgresConfig
-        from horsies.core.errors import ErrorCode
+        from horsies.core.errors import HorsiesErrorCode
 
         app = Horsies(
             config=AppConfig(
                 database=PostgresConfig(database_url='postgresql://x/y'),
-                exception_mapper={ValueError: 'BROKER_ERROR'},
+                exception_mapper={ValueError: 'DATABASE_ERROR'},
             ),
         )
         errors = app._check_runtime_policy_safety()
         collision_errors = [
             e for e in errors
-            if e.code == ErrorCode.CHECK_RESERVED_CODE_COLLISION
+            if e.code == HorsiesErrorCode.CHECK_RESERVED_CODE_COLLISION
         ]
         assert len(collision_errors) == 1
-        assert 'BROKER_ERROR' in collision_errors[0].message
-        assert 'OperationalErrorCode' in collision_errors[0].message
+        assert 'DATABASE_ERROR' in collision_errors[0].message
+        assert 'OperationalCode' in collision_errors[0].message
 
     def test_global_default_collision_detected(self) -> None:
         from horsies.core.app import Horsies
         from horsies.core.models.app import AppConfig
         from horsies.core.models.broker import PostgresConfig
-        from horsies.core.errors import ErrorCode
+        from horsies.core.errors import HorsiesErrorCode
 
         app = Horsies(
             config=AppConfig(
                 database=PostgresConfig(database_url='postgresql://x/y'),
-                default_unhandled_error_code='BROKER_ERROR',
+                default_unhandled_error_code='DATABASE_ERROR',
             ),
         )
         errors = app._check_runtime_policy_safety()
         collision_errors = [
             e for e in errors
-            if e.code == ErrorCode.CHECK_RESERVED_CODE_COLLISION
+            if e.code == HorsiesErrorCode.CHECK_RESERVED_CODE_COLLISION
         ]
         assert len(collision_errors) == 1
-        assert 'BROKER_ERROR' in collision_errors[0].message
+        assert 'DATABASE_ERROR' in collision_errors[0].message
 
     def test_default_unhandled_exception_not_flagged(self) -> None:
         from horsies.core.app import Horsies
         from horsies.core.models.app import AppConfig
         from horsies.core.models.broker import PostgresConfig
-        from horsies.core.errors import ErrorCode
+        from horsies.core.errors import HorsiesErrorCode
 
         app = Horsies(
             config=AppConfig(
@@ -521,7 +521,7 @@ class TestCheckReservedCodeCollision:
         errors = app._check_runtime_policy_safety()
         collision_errors = [
             e for e in errors
-            if e.code == ErrorCode.CHECK_RESERVED_CODE_COLLISION
+            if e.code == HorsiesErrorCode.CHECK_RESERVED_CODE_COLLISION
         ]
         assert len(collision_errors) == 0
 
@@ -529,7 +529,7 @@ class TestCheckReservedCodeCollision:
         from horsies.core.app import Horsies
         from horsies.core.models.app import AppConfig
         from horsies.core.models.broker import PostgresConfig
-        from horsies.core.errors import ErrorCode
+        from horsies.core.errors import HorsiesErrorCode
 
         app = Horsies(
             config=AppConfig(
@@ -540,7 +540,7 @@ class TestCheckReservedCodeCollision:
         errors = app._check_runtime_policy_safety()
         collision_errors = [
             e for e in errors
-            if e.code == ErrorCode.CHECK_RESERVED_CODE_COLLISION
+            if e.code == HorsiesErrorCode.CHECK_RESERVED_CODE_COLLISION
         ]
         assert len(collision_errors) == 0
 
@@ -586,7 +586,7 @@ class TestCheckReservedCodeCollision:
         from horsies.core.app import Horsies
         from horsies.core.models.app import AppConfig
         from horsies.core.models.broker import PostgresConfig
-        from horsies.core.errors import ErrorCode
+        from horsies.core.errors import HorsiesErrorCode
 
         app = Horsies(
             config=AppConfig(
@@ -594,7 +594,7 @@ class TestCheckReservedCodeCollision:
             ),
         )
 
-        @app.task('boom', exception_mapper={ValueError: 'BROKER_ERROR'})
+        @app.task('boom', exception_mapper={ValueError: 'DATABASE_ERROR'})
         def boom() -> Result[int, TaskError]:
             return Ok(1)
 
@@ -604,10 +604,10 @@ class TestCheckReservedCodeCollision:
         errors = app._check_runtime_policy_safety()
         collision_errors = [
             e for e in errors
-            if e.code == ErrorCode.CHECK_RESERVED_CODE_COLLISION
+            if e.code == HorsiesErrorCode.CHECK_RESERVED_CODE_COLLISION
         ]
         assert len(collision_errors) == 1
-        assert 'BROKER_ERROR' in collision_errors[0].message
+        assert 'DATABASE_ERROR' in collision_errors[0].message
         assert "task 'boom'" in collision_errors[0].notes
 
     def test_frozen_global_mapper_collision_detected(self) -> None:
@@ -616,18 +616,18 @@ class TestCheckReservedCodeCollision:
         from horsies.core.app import Horsies
         from horsies.core.models.app import AppConfig
         from horsies.core.models.broker import PostgresConfig
-        from horsies.core.errors import ErrorCode
+        from horsies.core.errors import HorsiesErrorCode
 
         app = Horsies(
             config=AppConfig(
                 database=PostgresConfig(database_url='postgresql://x/y'),
-                exception_mapper=MappingProxyType({ValueError: 'BROKER_ERROR'}),
+                exception_mapper=MappingProxyType({ValueError: 'DATABASE_ERROR'}),
             ),
         )
         errors = app._check_runtime_policy_safety()
         collision_errors = [
             e for e in errors
-            if e.code == ErrorCode.CHECK_RESERVED_CODE_COLLISION
+            if e.code == HorsiesErrorCode.CHECK_RESERVED_CODE_COLLISION
         ]
         assert len(collision_errors) == 1
-        assert 'BROKER_ERROR' in collision_errors[0].message
+        assert 'DATABASE_ERROR' in collision_errors[0].message

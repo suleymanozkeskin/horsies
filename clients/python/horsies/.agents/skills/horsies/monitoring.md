@@ -158,8 +158,8 @@ error changes stored data. HTTP is the status of the web read routes.
 <!-- members: MonitoringQueryErrorCode -->
 | Code | Variant | Fields | `retryable` | HTTP | When |
 |---|---|---|---|---|---|
-| `DB_OPERATION_FAILED` | `MonitoringQueryDbOperationFailed` | `exception` (the core's class of the cause: `CoreServerError`, `CoreConnectionError`, ...; or `TooManyPendingCalls`, `CoreCallTimedOut`, `RuntimeStartFailed`) | the core's classification | 503 when `retryable`, else 500 | The database operation failed |
-| `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `task_stats`, `list_tasks`, `get_task_detail`, `get_workflow_run` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; or the detail read found the task live inside its own snapshot, where the live read had missed it (the staged function and the live read disagree); a repeat gives the same result until the stored row or the server changes |
+| `DATABASE_OPERATION_FAILED` | `MonitoringQueryDatabaseOperationFailed` | `cause` (the core's class of the cause: `CoreServerError`, `CoreConnectionError`, ...; or `TooManyPendingCalls`, `CoreCallTimedOut`, `RuntimeStartFailed`) | the core's classification | 503 when `retryable`, else 500 | The database operation failed |
+| `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `cause` (the `HistoryContractError`) | `False` | 500 | `task_stats`, `list_tasks`, `get_task_detail`, `get_workflow_run` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; or the detail read found the task live inside its own snapshot, where the live read had missed it (the staged function and the live read disagree); a repeat gives the same result until the stored row or the server changes |
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
@@ -402,8 +402,8 @@ cancel_task(broker, task_id: uuid.UUID, *, include_running=False) -> Result[Task
 | `TASK_NOT_FOUND` | `TaskActionNotFound` | — | `False` | 404 | No live or history row has the id; nothing changed |
 | `TASK_NOT_CANCELLABLE` | `TaskActionNotCancellable` | `current_status: TaskStatus` | `False` | 409 | The task is terminal, or `RUNNING` without `include_running=True`; nothing changed |
 | `TASK_IS_WORKFLOW_TASK` | `TaskActionWorkflowTask` | `current_status: TaskStatus` | `False` | 400 | The task belongs to a workflow; nothing changed |
-| `DB_OPERATION_FAILED` | `TaskActionDbOperationFailed` | `exception` (the core's class of the cause, or the refusal of the core boundary) | the core's classification | 503 when `retryable`, else 500 | The cancel statement failed: it wrote nothing, or it committed and its reply was lost. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
-| `STORED_DATA_INVALID` | `TaskActionStoredDataInvalid` | `exception` (the `OutcomeDecodeError`) | `False` | 500 | Stored data does not parse: the cancel outcome row does not decode, for example a history status that is not a `TaskStatus` member; nothing changed |
+| `DATABASE_OPERATION_FAILED` | `TaskActionDatabaseOperationFailed` | `cause` (the core's class of the cause, or the refusal of the core boundary) | the core's classification | 503 when `retryable`, else 500 | The cancel statement failed: it wrote nothing, or it committed and its reply was lost. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
+| `STORED_DATA_INVALID` | `TaskActionStoredDataInvalid` | `cause` (the `OutcomeDecodeError`) | `False` | 500 | Stored data does not parse: the cancel outcome row does not decode, for example a history status that is not a `TaskStatus` member; nothing changed |
 
 `cancel_task` raises `RuntimeError` when the cancel outcome contradicts the
 cancel function (a lost claim, or no observed status). That is a defect, not
@@ -445,10 +445,10 @@ from horsies.monitoring import (
     cancel_task, TaskCancelled,
     TaskActionError, TaskActionErrorCode,
     TaskActionNotFound, TaskActionNotCancellable, TaskActionWorkflowTask,
-    TaskActionDbOperationFailed, TaskActionStoredDataInvalid,
+    TaskActionDatabaseOperationFailed, TaskActionStoredDataInvalid,
     # Result / errors
     MonitoringResult, MonitoringQueryError, MonitoringQueryErrorCode,
-    MonitoringQueryDbOperationFailed, MonitoringQueryHistoryContractViolation,
+    MonitoringQueryDatabaseOperationFailed, MonitoringQueryHistoryContractViolation,
     # Vocabularies
     ErrorCategory, TaskSortField, TaskGroupBy, SortDirection,
     # Response models (unstable pre-1.0)

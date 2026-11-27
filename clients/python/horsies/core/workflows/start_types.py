@@ -35,6 +35,7 @@ from horsies._catalog.workflow_start_errors import (
     WorkflowStartIdConflict as WorkflowStartIdConflict,
     WorkflowStartValidationFailed as WorkflowStartValidationFailed,
 )
+from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Result
 
 
@@ -51,6 +52,14 @@ class WorkflowStartBrokerNotConfigured:
     message: str = field(repr=False)
     workflow_name: str
     workflow_id: str
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
 
 
 type WorkflowStartError = WorkflowStartCoreError | WorkflowStartBrokerNotConfigured

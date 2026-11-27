@@ -11,12 +11,12 @@ import type { RerunHost } from "../../../horsies/src/rerun/app-area.ts";
 import type { RerunError } from "../../../horsies/src/rerun/errors.ts";
 import type { RerunOutcome } from "../../../horsies/src/rerun/types.ts";
 import type { Result } from "../../../horsies/src/wire/result.ts";
-import { CARRIER, COMMAND, ENQUEUED_ANSWERS, NEW_TASK_ID, POLICY, SOURCE_TASK_ID, fakeBridge, unusedCoreHandle } from "./support.ts";
+import { CARRIER, CODES, COMMAND, ENQUEUED_ANSWERS, NEW_TASK_ID, POLICY, SOURCE_TASK_ID, fakeBridge, unusedCoreHandle } from "./support.ts";
 
 const HANDLE = unusedCoreHandle();
 
 /** A host with the test handle and an active span. */
-const HOST: RerunHost = { coreHandle: () => HANDLE, activeCarrier: () => CARRIER };
+const HOST: RerunHost = { coreHandle: () => HANDLE, activeCarrier: () => CARRIER, registeredCodes: () => CODES };
 
 /** The answer of `app.rerunTask` when the addon answers `rerunTask`. */
 async function rerunAnswering(rerunTask: Parameters<typeof fakeBridge>[0]["rerunTask"]): Promise<Result<RerunOutcome, RerunError>> {
@@ -52,6 +52,7 @@ describe("app.rerunTask", () => {
           policy: { retention: { kind: "days", days: 7 }, rerunInput: "keep", reservationWindowMicros: 86_400_000_000n },
         },
         trace: CARRIER,
+        codes: CODES,
       },
     ]);
   });
@@ -94,10 +95,11 @@ describe("app.rerunTask", () => {
 describe("app.rerunTask errors", () => {
   test("CONNECT_FAILED keeps the retry rule and the cause", async () => {
     assert.deepEqual(await errorOf({ code: "CONNECT_FAILED", message: "the rerun could not connect: refused", cause: CONNECTION_CAUSE }), {
+      kind: "connectFailed",
       code: "CONNECT_FAILED",
       retryable: true,
       message: "the rerun could not connect: refused",
-      exception: { kind: "coreFailure", failure: "connection", subject: "rerun_task", message: "connection refused", retryable: true },
+      cause: { kind: "coreFailure", failure: "connection", subject: "rerun_task", message: "connection refused", retryable: true },
     });
   });
 
@@ -105,11 +107,12 @@ describe("app.rerunTask errors", () => {
     const cause: CauseRecord = { kind: "server", subject: "rerun_task", sqlstate: "40001", message: "could not serialize access", retryable: true };
 
     assert.deepEqual(await errorOf({ code: "STATEMENT_FAILED", message: "database error: refused", cause, outcome: "unknown" }), {
+      kind: "statementFailed",
       code: "STATEMENT_FAILED",
       retryable: true,
       message: "database error: refused",
       stateAfter: "unknown",
-      exception: { kind: "coreFailure", failure: "server", subject: "rerun_task", message: "could not serialize access", retryable: true, sqlstate: "40001" },
+      cause: { kind: "coreFailure", failure: "server", subject: "rerun_task", message: "could not serialize access", retryable: true, sqlstate: "40001" },
     });
   });
 
@@ -117,10 +120,11 @@ describe("app.rerunTask errors", () => {
     const cause: CauseRecord = { kind: "preconditionFailed", subject: "rerun_task", message: "pools not opened", retryable: false };
 
     assert.deepEqual(await errorOf({ code: "FAMILY_CHECK_FAILED", message: "rerun refused: pools", cause }), {
+      kind: "familyCheckFailed",
       code: "FAMILY_CHECK_FAILED",
       retryable: false,
       message: "rerun refused: pools",
-      exception: { kind: "coreFailure", failure: "preconditionFailed", subject: "rerun_task", message: "pools not opened", retryable: false },
+      cause: { kind: "coreFailure", failure: "preconditionFailed", subject: "rerun_task", message: "pools not opened", retryable: false },
     });
   });
 
@@ -129,14 +133,39 @@ describe("app.rerunTask errors", () => {
     const error = await errorOf({ code: "FAMILY_CHECK_FAILED", message: "rerun refused: row", cause });
 
     assert.equal(error.retryable, false);
-    assert.deepEqual("exception" in error && error.exception, { kind: "coreFailure", failure: "contractViolation", subject: "rerun_task", message: "family row" });
+    assert.deepEqual("cause" in error && error.cause, { kind: "coreFailure", failure: "contractViolation", subject: "rerun_task", message: "family row" });
   });
 
   test("INVALID_POLICY of the core", async () => {
     assert.deepEqual(await errorOf({ code: "INVALID_POLICY", message: "invalid rerun policy: x" }), {
+      kind: "invalidPolicy",
       code: "INVALID_POLICY",
       retryable: false,
       message: "invalid rerun policy: x",
+    });
+  });
+
+  test("RETRY_CODE_NOT_DECLARED is not retryable and names the task and the code", async () => {
+    assert.deepEqual(
+      await errorOf({ code: "RETRY_CODE_NOT_DECLARED", message: "rerun refused: undeclared", taskName: "charge", retryCode: "CARD_DECLINED" }),
+      {
+        kind: "retryCodeNotDeclared",
+        code: "RETRY_CODE_NOT_DECLARED",
+        retryable: false,
+        message: "rerun refused: undeclared",
+        taskName: "charge",
+        retryCode: "CARD_DECLINED",
+      },
+    );
+  });
+
+  test("TASK_NOT_REGISTERED is not retryable and names the task", async () => {
+    assert.deepEqual(await errorOf({ code: "TASK_NOT_REGISTERED", message: "rerun refused: unlisted", taskName: "charge" }), {
+      kind: "taskNotRegistered",
+      code: "TASK_NOT_REGISTERED",
+      retryable: false,
+      message: "rerun refused: unlisted",
+      taskName: "charge",
     });
   });
 
@@ -144,27 +173,27 @@ describe("app.rerunTask errors", () => {
     const refusals: [AppRerunFailure, RerunError][] = [
       [
         { code: "CLASS_NOT_REGISTERED", message: "unknown retention class", classKey: "standard_8d" },
-        { code: "CLASS_NOT_REGISTERED", retryable: false, message: "unknown retention class", classKey: "standard_8d" },
+        { kind: "classNotRegistered", code: "CLASS_NOT_REGISTERED", retryable: false, message: "unknown retention class", classKey: "standard_8d" },
       ],
       [
         { code: "CALLER_KEY_REFUSED", message: "rerun idempotency key failed" },
-        { code: "CALLER_KEY_REFUSED", retryable: false, message: "rerun idempotency key failed" },
+        { kind: "callerKeyRefused", code: "CALLER_KEY_REFUSED", retryable: false, message: "rerun idempotency key failed" },
       ],
       [
         { code: "ID_MINT_REFUSED", message: "rerun identity mint failed" },
-        { code: "ID_MINT_REFUSED", retryable: false, message: "rerun identity mint failed" },
+        { kind: "idMintRefused", code: "ID_MINT_REFUSED", retryable: false, message: "rerun identity mint failed" },
       ],
       [
         { code: "CLIENT_FAMILY_MISMATCH", message: "rerun refused", stored: { kind: "recorded", family: "PYTHON" } },
-        { code: "CLIENT_FAMILY_MISMATCH", retryable: false, message: "rerun refused", stored: { kind: "recorded", family: "PYTHON" } },
+        { kind: "clientFamilyMismatch", code: "CLIENT_FAMILY_MISMATCH", retryable: false, message: "rerun refused", stored: { kind: "recorded", family: "PYTHON" } },
       ],
       [
         { code: "UNKNOWN_STORED_FAMILY", message: "rerun refused: corrupt", stored: "GO" },
-        { code: "UNKNOWN_STORED_FAMILY", retryable: false, message: "rerun refused: corrupt", stored: "GO" },
+        { kind: "unknownStoredFamily", code: "UNKNOWN_STORED_FAMILY", retryable: false, message: "rerun refused: corrupt", stored: "GO" },
       ],
       [
         { code: "CONTRACT_VIOLATION", message: "statement returned no row" },
-        { code: "CONTRACT_VIOLATION", retryable: false, message: "statement returned no row" },
+        { kind: "contractViolation", code: "CONTRACT_VIOLATION", retryable: false, message: "statement returned no row" },
       ],
     ];
 

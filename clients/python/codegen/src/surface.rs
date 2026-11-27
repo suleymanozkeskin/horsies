@@ -424,16 +424,16 @@ const CORE_SCHEDULER_PARAMETERS: &[StubParameter] = &[
     positional("manifest_json", "str"),
 ];
 
-const PING_OUTCOME: &str = "DatabasePingRecord | BrokerOperationFailed";
-const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | BrokerOperationFailed";
+const PING_OUTCOME: &str = "DatabasePingRecord | DatabaseOperationFailed";
+const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | DatabaseOperationFailed";
 /// A refused or failed send is a generated class of
 /// `horsies._catalog.broker_errors`, built in Rust.
-const SEND_OUTCOME: &str = "Enqueued | BrokerCoreEnqueueError";
+const SEND_OUTCOME: &str = "Enqueued | DatabaseCoreEnqueueError";
 const TASK_INFO_OUTCOME: &str =
-    "TaskInfoRecord | TaskInfoNotFound | BrokerOperationFailed | BrokerInvalidJsonPayload";
+    "TaskInfoRecord | TaskInfoNotFound | DatabaseOperationFailed | DatabaseInvalidJsonPayload";
 const TASK_WORKFLOW_NODE_OUTCOME: &str =
-    "TaskWorkflowNodeLinked | TaskWorkflowNodeNotLinked | BrokerOperationFailed";
-const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | BrokerOperationFailed | BrokerInvalidJsonPayload | BrokerInvalidInput";
+    "TaskWorkflowNodeLinked | TaskWorkflowNodeNotLinked | DatabaseOperationFailed";
+const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | DatabaseOperationFailed | DatabaseInvalidJsonPayload | DatabaseInvalidInput";
 const REQUEUE_STALE_CLAIMED_OUTCOME: &str =
     "StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed";
 const RELEASE_CLAIMS_OUTCOME: &str = "ClaimsReleased | ReleaseFailed";
@@ -489,7 +489,7 @@ const CHILD_SPEC_REFUSED_PARAMETERS: &[StubParameter] =
 /// A failed handle operation is a generated class of
 /// `horsies._catalog.workflow_handle_errors`, built in Rust.
 const RESUME_WORKFLOW_OUTCOME: &str = "WorkflowResumed | WorkflowNotPaused | WorkflowAbsent | \
-     HandleDbOperationFailed | HandleStoredDataInvalid | HandleResumeRecoveryFailed";
+     WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid | WorkflowHandleResumeRecoveryFailed";
 const FINISH_WORKFLOW_NODE_PARAMETERS: &[StubParameter] =
     &[positional("request", "NodeFinishRequest")];
 const ADVANCE_WORKFLOW_PARENTS_PARAMETERS: &[StubParameter] =
@@ -512,20 +512,20 @@ const RECOVER_WORKFLOW_PHASE2_PARAMETERS: &[StubParameter] = &[
     keyword("quarantine_after_attempts", "int"),
 ];
 const PAUSE_WORKFLOW_OUTCOME: &str = "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | \
-     HandleDbOperationFailed | HandleStoredDataInvalid";
+     WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 const CANCEL_WORKFLOW_OUTCOME: &str = "WorkflowCancelled | WorkflowNotCancellable | \
-     WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
+     WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 const WORKFLOW_STATUS_OUTCOME: &str =
-    "WorkflowStatusRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
+    "WorkflowStatusRead | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 const WAIT_WORKFLOW_RESULT_OUTCOME: &str = "WorkflowCompletedRead | WorkflowEndedRead | \
-     WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleDbOperationFailed | \
-     HandleStoredDataInvalid";
+     WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | \
+     WorkflowHandleStoredDataInvalid";
 const WORKFLOW_NODE_RESULTS_OUTCOME: &str = "WorkflowNodeResultsRead | WorkflowAbsent | \
-     HandleDbOperationFailed | HandleStoredDataInvalid";
+     WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 const WORKFLOW_NODE_RESULT_OUTCOME: &str = "StoredNodeResultRecord | NodeResultNotStored | \
-     HandleDbOperationFailed | HandleStoredDataInvalid";
+     WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 const WORKFLOW_NODES_OUTCOME: &str =
-    "WorkflowNodesRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
+    "WorkflowNodesRead | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 
 const START_ATTEMPT_OUTCOME: &str =
     "AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed";
@@ -972,17 +972,18 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
 /// `horsies._catalog.monitoring_errors`, built in Rust.
 const MONITORING_READ_OUTCOME: &str = "MonitoringJson | MonitoringQueryCoreError";
 const PING_WORKERS_OUTCOME: &str =
-    "WorkerPongsRecord | BrokerOperationFailed | BrokerInvalidInput | BrokerListenerDisabled";
+    "WorkerPongsRecord | DatabaseOperationFailed | DatabaseInvalidInput | DatabaseListenerDisabled";
 const WORKER_STATES_OUTCOME: &str =
-    "WorkerStatesRecord | BrokerOperationFailed | BrokerInvalidInput";
-const WORKER_STATE_OUTCOME: &str = "WorkerStateRecord | WorkerStateAbsent | BrokerOperationFailed";
+    "WorkerStatesRecord | DatabaseOperationFailed | DatabaseInvalidInput";
+const WORKER_STATE_OUTCOME: &str =
+    "WorkerStateRecord | WorkerStateAbsent | DatabaseOperationFailed";
 const EXECUTION_CLASS_COVERAGE_OUTCOME: &str =
-    "ExecutionClassCoverageRecord | BrokerOperationFailed";
-const EXECUTION_CLASS_REPORT_OUTCOME: &str = "ExecutionClassReportRecord | BrokerOperationFailed";
+    "ExecutionClassCoverageRecord | DatabaseOperationFailed";
+const EXECUTION_CLASS_REPORT_OUTCOME: &str = "ExecutionClassReportRecord | DatabaseOperationFailed";
 const STALE_TASK_LIST_OUTCOME: &str =
-    "StaleTaskListComplete | StaleTaskListTruncated | BrokerOperationFailed | BrokerInvalidInput";
+    "StaleTaskListComplete | StaleTaskListTruncated | DatabaseOperationFailed | DatabaseInvalidInput";
 const EXPIRED_TASK_LIST_OUTCOME: &str =
-    "ExpiredTaskListComplete | ExpiredTaskListTruncated | BrokerOperationFailed | BrokerInvalidInput";
+    "ExpiredTaskListComplete | ExpiredTaskListTruncated | DatabaseOperationFailed | DatabaseInvalidInput";
 const MONITORING_DETAIL_OUTCOME: &str =
     "MonitoringJson | TaskDetailAbsent | MonitoringQueryCoreError";
 
@@ -3330,6 +3331,20 @@ const HISTORY_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
+        name: "RerunRetryCodeNotDeclared",
+        doc: "The stored retry list of the source names the custom code retry_code, and the task task_name\nof the calling app does not declare it (RETRY_CODE_NOT_DECLARED). Nothing written.\nmessage names both; exception is a CorePreconditionFailed with the subject rerun_task,\nnot retryable.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_name", "str"), property("retry_code", "str"), property("message", "str"), property("exception", CORE_FAILURE_EXCEPTION)],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunTaskNotRegistered",
+        doc: "The stored retry list of the source names a custom code, and the calling app does not\nregister the task task_name (TASK_NOT_REGISTERED). Nothing written. message names the\ntask; exception is a CorePreconditionFailed with the subject rerun_task, not retryable.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_name", "str"), property("message", "str"), property("exception", CORE_FAILURE_EXCEPTION)],
+        methods: &[],
+    },
+    StubClass {
         name: "RerunEnqueuedRecord",
         doc: "The new task exists: this write, or this write already run in the caller's transaction.",
         constructor: Constructor::NoConstructor,
@@ -3996,9 +4011,9 @@ const FUNCTIONS: &[StubFunction] = &[
     },
     StubFunction {
         name: "prepare_rerun_write",
-        parameters: &[positional("read", "PreparedStatement"), positional("row", "tuple[object, ...]"), positional("command", "RerunCommandRecord"), positional("policy", "RerunPolicyRecord"), keyword("sent_at", "datetime.datetime")],
-        returns: TypeText::Plain("RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunCallerKeyRefused | IdMintRefused"),
-        doc: "Decide the rerun from the row of its read (a tuple in column order): the write, or the\nanswer that ends it with nothing written. Pure apart from the id mint. A row that does not\nfit the columns raises CoreDefect.",
+        parameters: &[positional("read", "PreparedStatement"), positional("row", "tuple[object, ...]"), positional("command", "RerunCommandRecord"), positional("policy", "RerunPolicyRecord"), keyword("registered_task_codes", "dict[str, tuple[str, ...]]"), keyword("sent_at", "datetime.datetime")],
+        returns: TypeText::Plain("RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunCallerKeyRefused | RerunRetryCodeNotDeclared | RerunTaskNotRegistered | IdMintRefused"),
+        doc: "Decide the rerun from the row of its read (a tuple in column order): the write, or the\nanswer that ends it with nothing written. registered_task_codes maps the name of each task\nthat the calling app registers to the custom codes that it declares; the stored retry\nlist of the source is checked against it. Pure apart from the id mint. A row that does not\nfit the columns raises CoreDefect; a code set that the core refuses raises ValueError.",
     },
     StubFunction {
         name: "prepare_worker",
@@ -4060,11 +4075,11 @@ const IMPORTS: &[StubImport] = &[
     StubImport {
         module: "horsies._catalog.broker_errors",
         names: &[
-            "BrokerCoreEnqueueError",
-            "BrokerInvalidInput",
-            "BrokerInvalidJsonPayload",
-            "BrokerListenerDisabled",
-            "BrokerOperationFailed",
+            "DatabaseCoreEnqueueError",
+            "DatabaseInvalidInput",
+            "DatabaseInvalidJsonPayload",
+            "DatabaseListenerDisabled",
+            "DatabaseOperationFailed",
         ],
     },
     StubImport {
@@ -4074,9 +4089,9 @@ const IMPORTS: &[StubImport] = &[
     StubImport {
         module: "horsies._catalog.workflow_handle_errors",
         names: &[
-            "HandleDbOperationFailed",
-            "HandleResumeRecoveryFailed",
-            "HandleStoredDataInvalid",
+            "WorkflowHandleDatabaseOperationFailed",
+            "WorkflowHandleResumeRecoveryFailed",
+            "WorkflowHandleStoredDataInvalid",
         ],
     },
     StubImport {

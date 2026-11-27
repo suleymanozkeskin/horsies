@@ -22,7 +22,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.tasks import (
-    OperationalErrorCode,
+    OperationalCode,
 )
 from horsies.core.types.result import Ok, is_err, is_ok
 from tests.integration.terminal_writes import complete_plain_task
@@ -136,7 +136,7 @@ async def _insert_retried_attempts(
             {
                 'task_id': task_id,
                 'attempt': attempt,
-                'error_code': OperationalErrorCode.TASK_EXCEPTION.value,
+                'error_code': OperationalCode.TASK_EXCEPTION.value,
                 'worker_id': worker_id,
                 'worker_hostname': worker_hostname,
                 'worker_pid': worker_pid,

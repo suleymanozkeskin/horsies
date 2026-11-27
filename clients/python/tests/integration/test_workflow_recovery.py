@@ -14,7 +14,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import dumps_json, loads_json
 from horsies.core.codec.typed import decode_task_result, encode_task_result
 from horsies.core.models.outcome import Failed, Succeeded
-from horsies.core.models.tasks import TaskError, OperationalErrorCode
+from horsies.core.models.tasks import TaskError, OperationalCode
 from horsies.core.models.workflow import (
     TaskNode,
 )
@@ -130,7 +130,7 @@ class TestWorkflowRecovery:
         # crash via workflow_tasks=RUNNING.
         real_err_result: Result[Any, TaskError] = Err(
             TaskError(
-                error_code=OperationalErrorCode.TASK_EXCEPTION,
+                error_code=OperationalCode.TASK_EXCEPTION,
                 message='real failure to preserve through recovery',
             ),
         )
@@ -178,7 +178,7 @@ class TestWorkflowRecovery:
             case Failed(error=recovered_error):
                 # Critical: the real err survives, not the synthetic WORKER_CRASHED.
                 assert recovered_error.error_code == (
-                    OperationalErrorCode.TASK_EXCEPTION
+                    OperationalCode.TASK_EXCEPTION
                 )
                 assert recovered_error.message == (
                     'real failure to preserve through recovery'

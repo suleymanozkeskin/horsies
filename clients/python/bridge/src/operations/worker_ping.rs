@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use horsies_core::handle::HandleListener;
 use horsies_core::{
-    ping_listener_disabled, ping_min_responses_refused, ping_wait_refused, BrokerOperationError,
-    BrokerOperationSource, WorkerPingStep, WorkerPong,
+    ping_listener_disabled, ping_min_responses_refused, ping_wait_refused, BrokerOperationSource,
+    DatabaseOperationError, WorkerPingStep, WorkerPong,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyInt, PyList, PyString};
@@ -105,7 +105,7 @@ fn ping_window(value: &Bound<'_, PyAny>) -> PyResult<Result<Duration, BrokerFail
         let type_name = value.get_type().name()?.to_string();
         return Ok(Err(BrokerFailure::of_operation_error(
             SUBJECT,
-            BrokerOperationError::invalid_input(format!(
+            DatabaseOperationError::invalid_input(format!(
                 "ping_workers request refused: wait_ms must be an int, not {type_name}"
             )),
         )));
@@ -120,7 +120,7 @@ fn ping_window(value: &Bound<'_, PyAny>) -> PyResult<Result<Duration, BrokerFail
         Ok(milliseconds) => Ok(Ok(Duration::from_millis(milliseconds))),
         Err(_) => Ok(Err(BrokerFailure::of_operation_error(
             SUBJECT,
-            BrokerOperationError::invalid_input(format!(
+            DatabaseOperationError::invalid_input(format!(
                 "wait_ms must be at most {}, got {}",
                 u64::MAX,
                 shown(value)?
@@ -168,7 +168,7 @@ fn ping_target(value: &Bound<'_, PyAny>) -> PyResult<Result<Option<String>, Brok
             let type_name = value.get_type().name()?.to_string();
             Ok(Err(BrokerFailure::of_operation_error(
                 SUBJECT,
-                BrokerOperationError::invalid_input(format!(
+                DatabaseOperationError::invalid_input(format!(
                     "ping_workers request refused: target_worker_id must be a str or None, not \
                      {type_name}"
                 )),
@@ -239,7 +239,7 @@ pub async fn ping_workers_operation(
         Err(error) => {
             return PingOutcome::Failed(BrokerFailure::of_operation_error(
                 SUBJECT,
-                BrokerOperationError::worker_ping_failed(
+                DatabaseOperationError::worker_ping_failed(
                     WorkerPingStep::Notify,
                     BrokerOperationSource::Broker(error),
                 ),

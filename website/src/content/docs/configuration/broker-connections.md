@@ -41,7 +41,7 @@ database = PostgresConfig(
 
 ### Refusals
 
-- A pool value outside its range is refused with `ConfigurationError` `HRS-213` (`CONFIG_INVALID_BROKER_POOL`), and a TCP value outside its range with `HRS-215` (`CONFIG_INVALID_KEEPALIVE`). `pool_size=0` and `max_overflow=-1` mean no limit in SQLAlchemy; they are refused, because the core always bounds its connections. The message of a refused value names its field, for example `tcp_keepalives.probes`.
+- A pool value outside its range is refused with `ConfigurationError` `HRS-213` (`CONFIG_INVALID_DATABASE_POOL`), and a TCP value outside its range with `HRS-215` (`CONFIG_INVALID_KEEPALIVE`). `pool_size=0` and `max_overflow=-1` mean no limit in SQLAlchemy; they are refused, because the core always bounds its connections. The message of a refused value names its field, for example `tcp_keepalives.probes`.
 - A URL that names a driver, such as `postgresql+psycopg://`, is refused with `ConfigurationError` `HRS-203`, and the error names the fix. horsies opens the database with psycopg 3.
 - `worker_child_pool_min_size`, `worker_child_pool_max_size`, `worker_child_pool_check`, `worker_pool_size` and `worker_max_overflow` were removed in 0.7.0; a config that sets one fails with `HRS-213`, and the error names the profile field that replaces it. See [Connection Pools and the Default Executor](/horsies/workers/worker-profiles/#connection-pools-and-the-default-executor).
 
@@ -184,9 +184,9 @@ that call. Nothing runs.
 | Sync call | Returns |
 |---|---|
 | `send()`, `schedule()`, `retry_send()`, `retry_schedule()` | `TaskSendAsyncContext` (`TaskSendErrorCode.ASYNC_CONTEXT`); the error keeps the payload for `retry_send_async()` / `retry_schedule_async()` |
-| `app.get_raw_result()`, `app.get_task_info()`, `app.ping_database()`, `app.ping_workers()`, `app.list_worker_states()`, `app.get_worker_state()`, `app.get_worker_state_history()`, `app.get_stale_tasks()`, `app.get_expired_tasks()`, `TaskHandle.info()`, `broker.enqueue()`, `broker.get_task_info()`, `broker.get_raw_result_record()`, `broker.close()` | `BrokerAsyncContext` (`BrokerErrorCode.ASYNC_CONTEXT`) |
+| `app.get_raw_result()`, `app.get_task_info()`, `app.ping_database()`, `app.ping_workers()`, `app.list_worker_states()`, `app.get_worker_state()`, `app.get_worker_state_history()`, `app.get_stale_tasks()`, `app.get_expired_tasks()`, `TaskHandle.info()`, `broker.enqueue()`, `broker.get_task_info()`, `broker.get_raw_result_record()`, `broker.close()` | `DatabaseAsyncContext` (`DatabaseErrorCode.ASYNC_CONTEXT`) |
 | `TaskHandle.get()`, `WorkflowHandle.get()`, `WorkflowHandle.result_for()`, `app.get_result()` | `Err(AsyncContext(...))` (`RetrievalCode.ASYNC_CONTEXT`), not kept by the handle |
-| `WorkflowHandle.status()`, `.results()`, `.tasks()`, `.cancel()`, `.pause()`, `.resume()`, `pause_workflow_sync()`, `resume_workflow_sync()` | `HandleAsyncContext` (`HandleErrorCode.ASYNC_CONTEXT`) |
+| `WorkflowHandle.status()`, `.results()`, `.tasks()`, `.cancel()`, `.pause()`, `.resume()`, `pause_workflow_sync()`, `resume_workflow_sync()` | `WorkflowHandleAsyncContext` (`WorkflowHandleErrorCode.ASYNC_CONTEXT`) |
 | `spec.start()`, `spec.retry_start()` | `WorkflowStartAsyncContext` (`WorkflowStartErrorCode.ASYNC_CONTEXT`); the error keeps the workflow id for `retry_start_async()` |
 | `app.check(live=True)` | `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`); the live check does not connect |
 

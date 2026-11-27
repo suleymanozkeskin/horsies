@@ -41,6 +41,7 @@ import type { PingDatabaseError, PingWorkersError } from "./monitoring/errors.ts
 import type { DatabasePing, PingWorkersOptions, WorkerPong } from "./monitoring/health-types.ts";
 import { type RerunArea, rerunAreaOfCore } from "./rerun/app-area.ts";
 import type { CallerTransaction } from "./rerun/caller.ts";
+import { registeredCodesOf } from "./rerun/registered-codes.ts";
 import type { CallerRerunError, RerunError } from "./rerun/errors.ts";
 import type { RerunCommand, RerunOutcome, RerunEnqueuePolicy } from "./rerun/types.ts";
 
@@ -54,7 +55,11 @@ export class Horsies {
   readonly #monitoringArea: MonitoringArea;
   readonly #rerunArea: RerunArea;
 
-  /** The monitoring reads, the health reads and the operator cancel. Each read writes nothing but a schema install. */
+  /**
+   * The monitoring reads, the health reads and the operator cancel. A monitoring read installs no schema and writes
+   * nothing. A health read installs the schema once per handle, as a send does; then it reads only. The cancel writes
+   * the cancellation.
+   */
   readonly monitoring: Monitoring;
 
   static {
@@ -72,7 +77,11 @@ export class Horsies {
     });
     this.#monitoringArea = createMonitoringArea(context.core);
     this.monitoring = this.#monitoringArea.monitoring;
-    this.#rerunArea = rerunAreaOfCore(context.core, () => context.observer.activeCarrier());
+    this.#rerunArea = rerunAreaOfCore(
+      context.core,
+      () => context.observer.activeCarrier(),
+      () => registeredCodesOf(context.listed),
+    );
     recordAppContext(this, context);
   }
 
@@ -172,7 +181,7 @@ export class Horsies {
   }
 
   /**
-   * Send again the payload of `ENQUEUE_FAILED` or `IDEMPOTENCY_KEY_CONFLICT`, under the same task id. Takes an error
+   * Send again the payload of `ENQUEUE_FAILED`, under the same task id. Takes an error
    * of another app instance too, when this app lists its task.
    */
   async resend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>> {
@@ -215,7 +224,7 @@ export class Horsies {
     return taskHandleOf(this.#context.core, readFormOf(contract), taskId);
   }
 
-  /** A timed `SELECT 1` round trip: the latency of the database, or `DB_PING_FAILED`. */
+  /** A timed `SELECT 1` round trip: the latency of the database, or `DATABASE_PING_FAILED`. */
   async pingDatabase(): Promise<Result<DatabasePing, PingDatabaseError>> {
     return this.#monitoringArea.pingDatabase();
   }

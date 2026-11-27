@@ -1,6 +1,6 @@
-"""Rust-style error display for horsies startup/validation errors.
+"""Diagnostic display for horsies startup/validation errors.
 
-`ErrorCode`, the `HRS-nnn` codes, is the catalog that `horsies-codegen`
+`HorsiesErrorCode`, the `HRS-nnn` codes, is the catalog that `horsies-codegen`
 renders from horsies-core into `horsies._catalog.error_codes`.
 """
 
@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from horsies._catalog.error_codes import ErrorCode as ErrorCode
+from horsies._catalog.error_codes import HorsiesErrorCode as HorsiesErrorCode
 
 # Absolute path to the horsies package directory.
 # Used by _find_user_frame to distinguish library frames from user code.
@@ -102,14 +102,14 @@ class SourceLocation:
 class HorsiesError(Exception):
     """Base exception for horsies startup/validation errors.
 
-    Provides Rust-style error formatting with:
+    ``format_diagnostic()`` formats it with:
     - Error code and category
     - Source location with code snippet
     - Notes and help text
     """
 
     message: str
-    code: ErrorCode | None = None
+    code: HorsiesErrorCode | None = None
     location: SourceLocation | None = None
     notes: list[str] = field(default_factory=lambda: [])
     help_text: str | None = None
@@ -145,8 +145,8 @@ class HorsiesError(Exception):
         self.location = SourceLocation.from_frame(frame)
         return self
 
-    def format_rust_style(self, use_colors: bool | None = None) -> str:
-        """Format the error in Rust style."""
+    def format_diagnostic(self, use_colors: bool | None = None) -> str:
+        """Format the error as a report: code, message, location, notes and help."""
         if use_colors is None:
             use_colors = _should_use_colors()
 
@@ -227,7 +227,7 @@ class HorsiesError(Exception):
         - Database storage
         - Non-terminal contexts
         """
-        return self.format_rust_style(use_colors=False)
+        return self.format_diagnostic(use_colors=False)
 
 
 class _NoColors:
@@ -302,7 +302,7 @@ class ValidationReport:
         """Return True if any refusal was collected."""
         return len(self.refusals) > 0
 
-    def format_rust_style(self, use_colors: bool | None = None) -> str:
+    def format_diagnostic(self, use_colors: bool | None = None) -> str:
         """Format all collected errors, then append an aborting summary."""
         if use_colors is None:
             use_colors = _should_use_colors()
@@ -311,7 +311,7 @@ class ValidationReport:
         parts: list[str] = []
 
         for error in self.refusals:
-            parts.append(error.format_rust_style(use_colors=use_colors))
+            parts.append(error.format_diagnostic(use_colors=use_colors))
 
         count = len(self.refusals)
         parts.append(
@@ -321,7 +321,7 @@ class ValidationReport:
         return '\n'.join(parts)
 
     def __str__(self) -> str:
-        return self.format_rust_style(use_colors=False)
+        return self.format_diagnostic(use_colors=False)
 
 
 @dataclass
@@ -342,12 +342,12 @@ class MultipleValidationErrors(HorsiesError):
         # Skip auto-location detection — location is per-error in the report
         super(HorsiesError, self).__init__(self.message)
 
-    def format_rust_style(self, use_colors: bool | None = None) -> str:
+    def format_diagnostic(self, use_colors: bool | None = None) -> str:
         """Delegate formatting to the underlying report."""
-        return self.report.format_rust_style(use_colors=use_colors)
+        return self.report.format_diagnostic(use_colors=use_colors)
 
     def __str__(self) -> str:
-        return self.format_rust_style(use_colors=False)
+        return self.format_diagnostic(use_colors=False)
 
 
 def raise_collected(report: ValidationReport) -> None:

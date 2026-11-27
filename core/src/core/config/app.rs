@@ -175,20 +175,20 @@ impl AppConfigError {
     /// Every refusal has a code. `Payload` has `CONFIG_INVALID_PAYLOAD`;
     /// Python refuses the same thresholds through a field bound
     /// (`Field(ge=1)`).
-    pub fn error_code(&self) -> Option<crate::core::error::ErrorCode> {
-        use crate::core::error::ErrorCode;
+    pub fn error_code(&self) -> Option<crate::core::error::HorsiesErrorCode> {
+        use crate::core::error::HorsiesErrorCode;
         match self {
-            Self::QueueMode(_) => Some(ErrorCode::ConfigInvalidQueueMode),
-            Self::ClusterCap(_) => Some(ErrorCode::ConfigInvalidClusterCap),
-            Self::Prefetch(_) => Some(ErrorCode::ConfigInvalidPrefetch),
-            Self::DatabaseInvalidUrl(_) => Some(ErrorCode::DatabaseInvalidUrl),
-            Self::Keepalive(_) => Some(ErrorCode::ConfigInvalidKeepalive),
-            Self::Recovery(_) => Some(ErrorCode::ConfigInvalidRecovery),
-            Self::Retention(_) => Some(ErrorCode::ConfigInvalidRetention),
-            Self::Resilience(_) => Some(ErrorCode::ConfigInvalidResilience),
-            Self::Schedule(_) => Some(ErrorCode::ConfigInvalidSchedule),
-            Self::Payload(_) => Some(ErrorCode::ConfigInvalidPayload),
-            Self::WorkerProfile(_) => Some(ErrorCode::ConfigInvalidWorkerProfile),
+            Self::QueueMode(_) => Some(HorsiesErrorCode::ConfigInvalidQueueMode),
+            Self::ClusterCap(_) => Some(HorsiesErrorCode::ConfigInvalidClusterCap),
+            Self::Prefetch(_) => Some(HorsiesErrorCode::ConfigInvalidPrefetch),
+            Self::DatabaseInvalidUrl(_) => Some(HorsiesErrorCode::DatabaseInvalidUrl),
+            Self::Keepalive(_) => Some(HorsiesErrorCode::ConfigInvalidKeepalive),
+            Self::Recovery(_) => Some(HorsiesErrorCode::ConfigInvalidRecovery),
+            Self::Retention(_) => Some(HorsiesErrorCode::ConfigInvalidRetention),
+            Self::Resilience(_) => Some(HorsiesErrorCode::ConfigInvalidResilience),
+            Self::Schedule(_) => Some(HorsiesErrorCode::ConfigInvalidSchedule),
+            Self::Payload(_) => Some(HorsiesErrorCode::ConfigInvalidPayload),
+            Self::WorkerProfile(_) => Some(HorsiesErrorCode::ConfigInvalidWorkerProfile),
         }
     }
 
@@ -1240,7 +1240,7 @@ mod tests {
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert_eq!(
             errors[0].error_code(),
-            Some(crate::core::error::ErrorCode::ConfigInvalidKeepalive)
+            Some(crate::core::error::HorsiesErrorCode::ConfigInvalidKeepalive)
         );
         assert!(errors[0]
             .to_string()
@@ -1342,50 +1342,50 @@ mod tests {
             .contains("max_claim_renew_age_ms must be positive"));
         assert_eq!(
             errors[0].error_code(),
-            Some(crate::core::error::ErrorCode::ConfigInvalidPrefetch),
+            Some(crate::core::error::HorsiesErrorCode::ConfigInvalidPrefetch),
         );
     }
 
     /// Every config refusal carries Python's catalog code.
     #[test]
     fn every_refusal_carries_its_catalog_code() {
-        use crate::core::error::ErrorCode;
+        use crate::core::error::HorsiesErrorCode;
         let cases = [
             (
                 AppConfigError::QueueMode(String::new()),
-                Some(ErrorCode::ConfigInvalidQueueMode),
+                Some(HorsiesErrorCode::ConfigInvalidQueueMode),
             ),
             (
                 AppConfigError::ClusterCap(String::new()),
-                Some(ErrorCode::ConfigInvalidClusterCap),
+                Some(HorsiesErrorCode::ConfigInvalidClusterCap),
             ),
             (
                 AppConfigError::Prefetch(String::new()),
-                Some(ErrorCode::ConfigInvalidPrefetch),
+                Some(HorsiesErrorCode::ConfigInvalidPrefetch),
             ),
             (
                 AppConfigError::Broker(String::new()),
-                Some(ErrorCode::DatabaseInvalidUrl),
+                Some(HorsiesErrorCode::DatabaseInvalidUrl),
             ),
             (
                 AppConfigError::Recovery(String::new()),
-                Some(ErrorCode::ConfigInvalidRecovery),
+                Some(HorsiesErrorCode::ConfigInvalidRecovery),
             ),
             (
                 AppConfigError::Retention(String::new()),
-                Some(ErrorCode::ConfigInvalidRetention),
+                Some(HorsiesErrorCode::ConfigInvalidRetention),
             ),
             (
                 AppConfigError::Resilience(String::new()),
-                Some(ErrorCode::ConfigInvalidResilience),
+                Some(HorsiesErrorCode::ConfigInvalidResilience),
             ),
             (
                 AppConfigError::Schedule(String::new()),
-                Some(ErrorCode::ConfigInvalidSchedule),
+                Some(HorsiesErrorCode::ConfigInvalidSchedule),
             ),
             (
                 AppConfigError::Payload(String::new()),
-                Some(ErrorCode::ConfigInvalidPayload),
+                Some(HorsiesErrorCode::ConfigInvalidPayload),
             ),
         ];
         for (error, code) in cases {
@@ -1402,11 +1402,11 @@ mod tests {
             .map(AppConfigError::error_code)
             .collect();
         assert!(
-            codes.contains(&Some(ErrorCode::ConfigInvalidClusterCap)),
+            codes.contains(&Some(HorsiesErrorCode::ConfigInvalidClusterCap)),
             "{codes:?}"
         );
         assert!(
-            codes.contains(&Some(ErrorCode::ConfigInvalidResilience)),
+            codes.contains(&Some(HorsiesErrorCode::ConfigInvalidResilience)),
             "{codes:?}"
         );
     }
@@ -1932,12 +1932,12 @@ EXTRA
         );
         assert_eq!(
             errors[0].error_code(),
-            Some(crate::core::error::ErrorCode::ConfigInvalidWorkerProfile),
+            Some(crate::core::error::HorsiesErrorCode::ConfigInvalidWorkerProfile),
         );
         let refusal = errors[0].to_horsies_error();
         assert_eq!(
             refusal.code,
-            Some(crate::core::error::ErrorCode::ConfigInvalidWorkerProfile),
+            Some(crate::core::error::HorsiesErrorCode::ConfigInvalidWorkerProfile),
         );
         assert_eq!(
             refusal.notes,
@@ -1948,7 +1948,7 @@ EXTRA
             .as_deref()
             .is_some_and(|help| help.contains("isolated=IsolatedChildren(count=4)")));
         assert_eq!(
-            crate::core::error::ErrorCode::ConfigInvalidWorkerProfile.to_string(),
+            crate::core::error::HorsiesErrorCode::ConfigInvalidWorkerProfile.to_string(),
             "HRS-218"
         );
     }
@@ -1999,7 +1999,7 @@ EXTRA
             ],
         );
         assert!(errors.iter().all(|error| error.error_code()
-            == Some(crate::core::error::ErrorCode::ConfigInvalidWorkerProfile)));
+            == Some(crate::core::error::HorsiesErrorCode::ConfigInvalidWorkerProfile)));
     }
 
     /// Python `test_worker_profile.py::TestAppConfigProfileChecks::test_log_config_lists_each_profile`.
@@ -2042,18 +2042,18 @@ EXTRA
     /// error that keeps `HRS-216`, with a note each.
     #[test]
     fn retention_refusals_keep_hrs_216_for_single_and_collected_errors() {
-        use crate::core::error::ErrorCode;
+        use crate::core::error::HorsiesErrorCode;
 
         let mut single = default_config();
         single.retention.history_leaf_horizon_days = 1;
         let error = config_refusal(&single);
-        assert_eq!(error.code, Some(ErrorCode::ConfigInvalidRetention));
+        assert_eq!(error.code, Some(HorsiesErrorCode::ConfigInvalidRetention));
 
         let mut collected = default_config();
         collected.retention.history_leaf_horizon_days = 1;
         collected.retention.heartbeat_leaf_horizon_hours = 1;
         let error = config_refusal(&collected);
-        assert_eq!(error.code, Some(ErrorCode::ConfigInvalidRetention));
+        assert_eq!(error.code, Some(HorsiesErrorCode::ConfigInvalidRetention));
         assert_eq!(error.notes.len(), 2);
     }
 }

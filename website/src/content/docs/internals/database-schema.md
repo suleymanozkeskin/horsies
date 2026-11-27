@@ -1,7 +1,7 @@
 ---
 title: Database Schema
 section: shared
-summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (migration chain 1000 to 1006).
+summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (migration chain 1000 to 1007).
 related: [../../configuration/broker-config]
 tags: [internals, database, schema, PostgreSQL, task-history]
 ---
@@ -19,6 +19,7 @@ The schema is a chain of migrations. Each migration runs in its own transaction,
 | 1004 | `core/migrations/1004_worker_profile_name.sql` | The name of the worker profile in each worker snapshot: the column `profile_name` and one `CHECK` on `horsies_worker_states` |
 | 1005 | `core/migrations/1005_claim_generation_by_status.sql` | The claim generation of a held task row: one `CHECK` on `horsies_tasks` (`horsies_tasks_claim_generation_by_status`) |
 | 1006 | `core/migrations/1006_typescript_client_family.sql` | The client family `TYPESCRIPT`: the `CHECK` `horsies_client_family_family_known` admits `PYTHON`, `RUST` and `TYPESCRIPT` |
+| 1007 | `core/migrations/1007_sub_workflow_failed_code.sql` | The code text `SUB_WORKFLOW_FAILED` in the two functions that write the error of a failed sub-workflow node (`horsies_task_error_envelope`, `horsies_workflow_child_node_result`) |
 
 The files of migration 1000:
 
@@ -148,6 +149,20 @@ Upgrade from version 1005 to version 1006 (also from an earlier version, after t
 - The text of the migration does not change the family row. In the install of a `TYPESCRIPT` client, its
   transaction writes the row `TYPESCRIPT` when the database has none. `TYPESCRIPT` is reserved for a TypeScript
   client; the Python and Rust clients never write it, and refuse a database that records it.
+
+Upgrade from version 1006 to version 1007 (also from an earlier version, after the migrations before it):
+
+- Drain the workflows before the upgrade: let every workflow end, and start no workflow until every process runs
+  this build.
+- Stop every process of an earlier build before the first start of this build, and upgrade every process
+  together. The first start applies migration 1007. A process of an earlier build that starts after it is
+  refused, because the database holds a newer version.
+- A database at version 1007 does not go back to an earlier build.
+- The migration replaces `horsies_task_error_envelope` and `horsies_workflow_child_node_result` in place. It takes
+  no table lock, rewrites no table and writes no row.
+- A row that holds the text `SUBWORKFLOW_FAILED` from before the upgrade keeps it. A read of such a stored result,
+  node result or workflow error fails closed (`RESULT_DESERIALIZATION_ERROR`; the monitoring node detail gives
+  `HISTORY_CONTRACT_VIOLATION`). Lists, counts and facets show the old text as a `DOMAIN` code.
 
 `horsies_migrations` has the sqlx form: `version`, `description`, `installed_on`, `success`, `checksum`
 (SHA-384 of the migration text) and `execution_time` (nanoseconds). The text of a released migration never

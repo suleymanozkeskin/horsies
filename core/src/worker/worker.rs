@@ -2424,7 +2424,7 @@ mod tests {
     use crate::core::config::recovery::RecoveryConfig;
     use crate::core::history::maintenance::coverage::StartupCoverageOutcome;
     use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskMeta};
-    use crate::core::task::{OperationalErrorCode, TaskError, TaskErrorCode, TaskResult, UserCode};
+    use crate::core::task::{OperationalCode, TaskError, TaskErrorCode, TaskResult, UserCode};
     use chrono::Utc;
     use futures::FutureExt;
     use serial_test::serial;
@@ -5159,7 +5159,7 @@ mod tests {
         let pool = test_pool().await;
         let broker = test_broker().await;
         clean(&pool).await;
-        let task_error_code = OperationalErrorCode::UnhandledException.to_string();
+        let task_error_code = OperationalCode::UnhandledException.to_string();
 
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
@@ -5291,7 +5291,7 @@ mod tests {
         let pool = test_pool().await;
         let broker = test_broker().await;
         clean(&pool).await;
-        let ser_error_code = OperationalErrorCode::WorkerSerializationError.to_string();
+        let ser_error_code = OperationalCode::WorkerSerializationError.to_string();
 
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;

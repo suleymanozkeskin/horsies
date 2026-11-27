@@ -35,7 +35,7 @@ use horsies_core::{
 };
 
 use crate::process_state::refuse_in_a_fork;
-use crate::{AppRole, ErrorCode, Horsies, HorsiesError, ValidationReport};
+use crate::{AppRole, Horsies, HorsiesError, HorsiesErrorCode, ValidationReport};
 
 /// The check passed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,7 +193,7 @@ pub(crate) fn connectivity_report(cause: &str) -> ValidationReport {
     ValidationReport::of(
         CHECK,
         vec![HorsiesError::new("broker connectivity check failed")
-            .with_code(ErrorCode::DatabaseInvalidUrl)
+            .with_code(HorsiesErrorCode::DatabaseInvalidUrl)
             .with_note(cause.to_owned())
             .with_help("check database_url in PostgresConfig")],
     )
@@ -218,7 +218,7 @@ fn listener_report(cause: &str) -> ValidationReport {
     ValidationReport::of(
         CHECK,
         vec![HorsiesError::new("broker listener capability check failed")
-            .with_code(ErrorCode::DatabaseInvalidUrl)
+            .with_code(HorsiesErrorCode::DatabaseInvalidUrl)
             .with_note(
                 "the session_database URL appears to be transaction-pooled; LISTEN \
                  notification was not delivered",
@@ -346,7 +346,7 @@ fn class_refusal(name: &str, options: &TaskOptions) -> Option<HorsiesError> {
 
 fn option_error(name: &str, message: String, help: &str) -> HorsiesError {
     HorsiesError::new(message)
-        .with_code(ErrorCode::TaskInvalidOptions)
+        .with_code(HorsiesErrorCode::TaskInvalidOptions)
         .with_note(format!("task '{name}'"))
         .with_help(help)
 }
@@ -438,7 +438,7 @@ mod tests {
             report
                 .refusals()
                 .iter()
-                .all(|error| error.code != Some(ErrorCode::DatabaseInvalidUrl)),
+                .all(|error| error.code != Some(HorsiesErrorCode::DatabaseInvalidUrl)),
             "{report}"
         );
     }
@@ -504,7 +504,7 @@ mod tests {
             ]
         );
         let error = &options_refusals("echo", &refused)[0];
-        assert_eq!(error.code, Some(ErrorCode::TaskInvalidOptions));
+        assert_eq!(error.code, Some(HorsiesErrorCode::TaskInvalidOptions));
         assert_eq!(error.notes, vec!["task 'echo'"]);
     }
 
@@ -643,7 +643,7 @@ mod tests {
         let report = refusal_report(&refused);
         let error = &report.refusals()[0];
         assert_eq!(error.message, "broker listener capability check failed");
-        assert_eq!(error.code, Some(ErrorCode::DatabaseInvalidUrl));
+        assert_eq!(error.code, Some(HorsiesErrorCode::DatabaseInvalidUrl));
         assert!(error.notes[0].contains("transaction-pooled"));
         assert_eq!(error.notes[1], "the listener stopped during the probe");
     }
@@ -653,7 +653,7 @@ mod tests {
         let report = connectivity_report("connection refused");
         assert_eq!(
             report.refusals()[0].code,
-            Some(ErrorCode::DatabaseInvalidUrl)
+            Some(HorsiesErrorCode::DatabaseInvalidUrl)
         );
         assert_eq!(report.refusals()[0].notes, vec!["connection refused"]);
     }

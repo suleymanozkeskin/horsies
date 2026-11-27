@@ -59,7 +59,7 @@ async def failed_in_the_last_day(
 """
 
 from horsies.monitoring.errors import (
-    MonitoringQueryDbOperationFailed,
+    MonitoringQueryDatabaseOperationFailed,
     MonitoringQueryError,
     MonitoringQueryErrorCode,
     MonitoringQueryHistoryContractViolation,
@@ -187,7 +187,7 @@ from horsies.monitoring.models import (
     WorkflowTaskDetail,
 )
 from horsies.monitoring.task_actions import (
-    TaskActionDbOperationFailed,
+    TaskActionDatabaseOperationFailed,
     TaskActionError,
     TaskActionErrorCode,
     TaskActionNotCancellable,
@@ -237,12 +237,12 @@ from horsies.monitoring.queries import (
 
 __all__ = [
     # Errors
-    'MonitoringQueryDbOperationFailed',
+    'MonitoringQueryDatabaseOperationFailed',
     'MonitoringQueryError',
     'MonitoringQueryErrorCode',
     'MonitoringQueryHistoryContractViolation',
     'MonitoringResult',
-    'TaskActionDbOperationFailed',
+    'TaskActionDatabaseOperationFailed',
     'TaskActionError',
     'TaskActionErrorCode',
     'TaskActionNotCancellable',

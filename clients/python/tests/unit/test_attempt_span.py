@@ -1153,7 +1153,7 @@ class TestTheOutcomeOfAResult:
         exception = ValueError('v')
         out: Result[int, TaskError] = Err(
             TaskError(
-                error_code=child_runner.OperationalErrorCode.TASK_EXCEPTION,
+                error_code=child_runner.OperationalCode.TASK_EXCEPTION,
                 message='m',
                 exception=exception,
             ),

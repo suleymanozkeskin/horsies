@@ -12,7 +12,7 @@ from pydantic import BaseModel, SecretStr, ValidationError
 import horsies
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     HorsiesError,
     MultipleValidationErrors,
 )
@@ -824,7 +824,7 @@ class TestAppConfigPoolChecks:
             _app_config({'p': profile})
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_WORKER_PROFILE
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE
         assert error.message == (
             "worker_profiles['p'].isolated.pool.min_size: 3 is above the pool "
             'max_size (1)'
@@ -863,7 +863,7 @@ class TestAppConfigPoolChecks:
             _app_config({'p': profile})
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_WORKER_PROFILE
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE
         assert error.message == (
             f"worker_profiles['p'].shared_async.pool.min_size: {derived + 1} is "
             f'above the pool max_size ({derived})'
@@ -947,7 +947,7 @@ class TestAppConfigParentPoolChecks:
             _app_config({'p': profile})
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_WORKER_PROFILE
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE
         assert error.message == (
             "worker_profiles['p'].pool.max_size: 2 connections is below the "
             'minimum of the pool of the worker process (3)'
@@ -991,7 +991,7 @@ class TestAppConfigProfileChecks:
     def test_a_profile_with_no_children_names_the_profile(self) -> None:
         with pytest.raises(ConfigurationError) as raised:
             _app_config({'empty': WorkerProfile()})
-        assert raised.value.code == ErrorCode.CONFIG_INVALID_WORKER_PROFILE
+        assert raised.value.code == HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE
         assert raised.value.message == (
             "worker_profiles['empty']: the profile starts no children"
         )
@@ -1003,7 +1003,7 @@ class TestAppConfigProfileChecks:
     def test_an_invalid_name_is_refused(self, name: str) -> None:
         with pytest.raises(ConfigurationError) as raised:
             _app_config({name: _isolated(1)})
-        assert raised.value.code == ErrorCode.CONFIG_INVALID_WORKER_PROFILE
+        assert raised.value.code == HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE
         assert raised.value.message == (
             f'worker_profiles[{name!r}]: the profile name is not valid'
         )
@@ -1022,7 +1022,7 @@ class TestAppConfigProfileChecks:
     ) -> None:
         with pytest.raises(ConfigurationError) as raised:
             _app_config({'small': _isolated(2, **{field: TaskLimit(tasks=3)})})
-        assert raised.value.code == ErrorCode.CONFIG_INVALID_WORKER_PROFILE
+        assert raised.value.code == HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE
         assert raised.value.message == (
             f"worker_profiles['small'].claim.{field}: 3 tasks is above the "
             'capacity of the worker (2)'
@@ -1131,7 +1131,7 @@ class TestAppConfigProfileChecks:
                 {'p': _isolated(1, claimed_per_worker=TaskLimit(tasks=1))},
                 prefetch_buffer=-1,
             )
-        assert raised.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert raised.value.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
 
     def test_log_config_lists_each_profile(self) -> None:
         config = _app_config({'default': _isolated(2)})

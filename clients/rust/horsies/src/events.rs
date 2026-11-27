@@ -76,12 +76,12 @@ impl Horsies {
     ///
     /// Errors: a [`HorsiesError`] with the code of the same refusal of the
     /// Python registration: `HRS-225`
-    /// ([`ErrorCode::EventHandlerInvalidName`](crate::ErrorCode::EventHandlerInvalidName))
+    /// ([`HorsiesErrorCode::EventHandlerInvalidName`](crate::HorsiesErrorCode::EventHandlerInvalidName))
     /// for a name that is empty, longer than 255 characters or `(unknown)`,
     /// `HRS-224`
-    /// ([`ErrorCode::EventHandlerDuplicateName`](crate::ErrorCode::EventHandlerDuplicateName))
+    /// ([`HorsiesErrorCode::EventHandlerDuplicateName`](crate::HorsiesErrorCode::EventHandlerDuplicateName))
     /// for a name that another handler has, and `HRS-226`
-    /// ([`ErrorCode::EventHandlerLimit`](crate::ErrorCode::EventHandlerLimit))
+    /// ([`HorsiesErrorCode::EventHandlerLimit`](crate::HorsiesErrorCode::EventHandlerLimit))
     /// for a 33rd handler. Nothing is registered then.
     pub fn on_event<E>(
         &mut self,
@@ -165,7 +165,7 @@ mod tests {
     use horsies_core::ChildStartHook;
 
     use super::*;
-    use crate::{AppConfig, ErrorCode};
+    use crate::{AppConfig, HorsiesErrorCode};
 
     fn app() -> Horsies {
         Horsies::new(AppConfig::from_database_url(
@@ -216,7 +216,10 @@ mod tests {
             repeated.message.contains("'audit' is registered already"),
             "{repeated}"
         );
-        assert_eq!(repeated.code, Some(ErrorCode::EventHandlerDuplicateName));
+        assert_eq!(
+            repeated.code,
+            Some(HorsiesErrorCode::EventHandlerDuplicateName)
+        );
         assert!(
             repeated.to_string().starts_with("error[HRS-224]: "),
             "{repeated}"
@@ -225,7 +228,10 @@ mod tests {
         for name in ["", "(unknown)"] {
             let refused = app.on_event::<AttemptEnded>(name, record_end).unwrap_err();
             assert!(refused.message.contains("name is refused"), "{refused}");
-            assert_eq!(refused.code, Some(ErrorCode::EventHandlerInvalidName));
+            assert_eq!(
+                refused.code,
+                Some(HorsiesErrorCode::EventHandlerInvalidName)
+            );
             assert!(
                 refused.to_string().starts_with("error[HRS-225]: "),
                 "{refused}"
@@ -246,7 +252,7 @@ mod tests {
         let refused = app
             .on_event::<AttemptEnded>("one.more", record_end)
             .unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::EventHandlerLimit));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::EventHandlerLimit));
         assert!(
             refused.to_string().starts_with("error[HRS-226]: "),
             "{refused}"

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.outcome import TaskOutcome
 from horsies.core.models.tasks import TaskError
 from horsies.core.types.result import Result
@@ -790,7 +790,7 @@ class TestValidateWorkflowGenericOutputMatch:
             with pytest.raises(WorkflowValidationError) as exc_info:
                 validate_workflow_generic_output_match(mock_cls, mock_spec)
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
         assert "config.output" in exc_info.value.message
         assert "WorkflowDefinition[int]" in exc_info.value.message
 
@@ -876,7 +876,7 @@ class TestValidateWorkflowGenericOutputMatch:
             with pytest.raises(WorkflowValidationError) as exc_info:
                 validate_workflow_generic_output_match(mock_cls, mock_spec)
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
 
     def test_compatible_types_no_error(self) -> None:
         # Arrange

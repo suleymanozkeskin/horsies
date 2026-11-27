@@ -2,7 +2,7 @@ use std::num::NonZeroU32;
 
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
-use crate::core::error::{ErrorCode, HorsiesError, ValidationReport};
+use crate::core::error::{HorsiesError, HorsiesErrorCode, ValidationReport};
 
 use crate::core::config::no_member_after_the_tag;
 use crate::core::config::socket::input::{
@@ -306,11 +306,11 @@ impl RemovedPoolField {
         }
     }
 
-    /// The refusal of the field, with `CONFIG_INVALID_BROKER_POOL` and the
+    /// The refusal of the field, with `CONFIG_INVALID_DATABASE_POOL` and the
     /// text of Python's refusal.
     pub fn refusal(self) -> HorsiesError {
         let refusal = HorsiesError::new(format!("{} was removed in 0.7.0", self.key()))
-            .with_code(ErrorCode::ConfigInvalidBrokerPool);
+            .with_code(HorsiesErrorCode::ConfigInvalidDatabasePool);
         match self {
             Self::WorkerChildPoolMinSize => child_pool_refusal(refusal, "min_size=N"),
             Self::WorkerChildPoolMaxSize => {
@@ -827,7 +827,7 @@ mod tests {
     }
 
     /// Python `test_app_config.py::TestPostgresConfigPgBouncer::test_a_removed_worker_pool_field_is_refused`:
-    /// any value is refused, `null` included, with `CONFIG_INVALID_BROKER_POOL`
+    /// any value is refused, `null` included, with `CONFIG_INVALID_DATABASE_POOL`
     /// and a help that names the pool of the worker process.
     #[test]
     fn a_removed_worker_pool_field_is_refused_by_name() {
@@ -843,11 +843,17 @@ mod tests {
                  pool.max_size connections",
             ),
         ];
-        assert_eq!(ErrorCode::ConfigInvalidBrokerPool.to_string(), "HRS-213");
-        assert!(ErrorCode::ConfigInvalidBrokerPool.is_config_error());
+        assert_eq!(
+            HorsiesErrorCode::ConfigInvalidDatabasePool.to_string(),
+            "HRS-213"
+        );
+        assert!(HorsiesErrorCode::ConfigInvalidDatabasePool.is_config_error());
         for (field, note) in cases {
             let refusal = field.refusal();
-            assert_eq!(refusal.code, Some(ErrorCode::ConfigInvalidBrokerPool));
+            assert_eq!(
+                refusal.code,
+                Some(HorsiesErrorCode::ConfigInvalidDatabasePool)
+            );
             assert_eq!(
                 refusal.message,
                 format!("{} was removed in 0.7.0", field.key())
@@ -905,7 +911,10 @@ mod tests {
         ];
         for (field, value, pool_argument) in cases {
             let refusal = field.refusal();
-            assert_eq!(refusal.code, Some(ErrorCode::ConfigInvalidBrokerPool));
+            assert_eq!(
+                refusal.code,
+                Some(HorsiesErrorCode::ConfigInvalidDatabasePool)
+            );
             assert_eq!(
                 refusal.message,
                 format!("{} was removed in 0.7.0", field.key())
@@ -953,7 +962,10 @@ mod tests {
         let refusal =
             removed_pool_field_refusal(fields).expect_err("three removed fields are refused");
 
-        assert_eq!(refusal.code, Some(ErrorCode::ConfigInvalidBrokerPool));
+        assert_eq!(
+            refusal.code,
+            Some(HorsiesErrorCode::ConfigInvalidDatabasePool)
+        );
         assert_eq!(
             first_lines(&refusal),
             [

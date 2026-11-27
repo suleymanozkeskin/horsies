@@ -13,7 +13,7 @@ import pytest
 
 from horsies.core.codec.json_io import SerializationError
 from horsies.core.errors import (
-    ErrorCode,
+    HorsiesErrorCode,
     MultipleValidationErrors,
     ValidationReport,
     WorkflowValidationError,
@@ -28,8 +28,8 @@ DEFECT_MARKER = 'defect-marker-7d41'
 
 def _prevalidation_defects() -> list[BaseException]:
     report = ValidationReport('workflow')
-    report.add(WorkflowValidationError('first', code=ErrorCode.WORKFLOW_NO_NAME))
-    report.add(WorkflowValidationError('second', code=ErrorCode.WORKFLOW_NO_NODES))
+    report.add(WorkflowValidationError('first', code=HorsiesErrorCode.WORKFLOW_NO_NAME))
+    report.add(WorkflowValidationError('second', code=HorsiesErrorCode.WORKFLOW_NO_NODES))
     defects: list[BaseException] = [
         ValueError(DEFECT_MARKER),
         MultipleValidationErrors(message=DEFECT_MARKER, report=report),

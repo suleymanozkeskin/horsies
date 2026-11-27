@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from horsies.core.defaults import WORKER_STATE_LIVE_WINDOW_SECONDS
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     ValidationReport,
     raise_collected,
 )
@@ -317,7 +317,7 @@ class RecoveryConfig(BaseModel):
                         # the field, which is the only object positioned
                         # to notice. The remedy living in retention does
                         # not make the refusal a retention refusal.
-                        code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                        code=HorsiesErrorCode.CONFIG_INVALID_RECOVERY,
                         notes=[
                             'it governs how long records live, not how '
                             'stalled work is detected',
@@ -402,7 +402,7 @@ class RecoveryConfig(BaseModel):
         return (
             ConfigurationError(
                 message=message,
-                code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                code=HorsiesErrorCode.CONFIG_INVALID_RECOVERY,
                 notes=[threshold_note, interval_note, *rule_notes],
                 help_text=(
                     f'set running_stale_threshold_ms >= {floor_ms}ms '
@@ -430,7 +430,7 @@ class RecoveryConfig(BaseModel):
             report.add(
                 ConfigurationError(
                     message='finalizing_stale_threshold_ms too low',
-                    code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                    code=HorsiesErrorCode.CONFIG_INVALID_RECOVERY,
                     notes=[
                         f'finalizing_stale_threshold_ms={self.finalizing_stale_threshold_ms}ms ({self.finalizing_stale_threshold_ms/1000:.1f}s)',
                         f'runner_heartbeat_interval_ms={self.runner_heartbeat_interval_ms}ms ({self.runner_heartbeat_interval_ms/1000:.1f}s)',
@@ -445,7 +445,7 @@ class RecoveryConfig(BaseModel):
             report.add(
                 ConfigurationError(
                     message='claimed_stale_threshold_ms too low',
-                    code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                    code=HorsiesErrorCode.CONFIG_INVALID_RECOVERY,
                     notes=[
                         f'claimed_stale_threshold_ms={self.claimed_stale_threshold_ms}ms ({self.claimed_stale_threshold_ms/1000:.1f}s)',
                         f'claimer_heartbeat_interval_ms={self.claimer_heartbeat_interval_ms}ms ({self.claimer_heartbeat_interval_ms/1000:.1f}s)',
@@ -470,7 +470,7 @@ class RecoveryConfig(BaseModel):
         if interval_ms > WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS:
             raise ConfigurationError(
                 message=_snapshot_interval_above_cap(interval_ms),
-                code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                code=HorsiesErrorCode.CONFIG_INVALID_RECOVERY,
                 notes=[
                     'the cap is half the live window '
                     f'(WORKER_STATE_LIVE_WINDOW_SECONDS={WORKER_STATE_LIVE_WINDOW_SECONDS}s)',

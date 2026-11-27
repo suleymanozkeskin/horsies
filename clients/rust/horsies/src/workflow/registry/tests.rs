@@ -22,7 +22,7 @@ fn registry() -> WorkflowRegistry {
     ))
 }
 
-fn codes(findings: &[HorsiesError]) -> Vec<Option<ErrorCode>> {
+fn codes(findings: &[HorsiesError]) -> Vec<Option<HorsiesErrorCode>> {
     findings.iter().map(|finding| finding.code).collect()
 }
 
@@ -235,14 +235,17 @@ fn a_definition_registers_once_by_key_and_by_name() {
     let again = registry
         .register(Definition::without_params::<Plain>(&tasks()).unwrap())
         .unwrap_err();
-    assert_eq!(again.code, Some(ErrorCode::WorkflowDuplicateDefinitionKey));
+    assert_eq!(
+        again.code,
+        Some(HorsiesErrorCode::WorkflowDuplicateDefinitionKey)
+    );
     let same_name = Definition {
         definition_key: "tests.plain.v2".to_owned(),
         ..Definition::without_params::<Plain>(&tasks()).unwrap()
     };
     assert_eq!(
         registry.register(same_name).unwrap_err().code,
-        Some(ErrorCode::WorkflowDuplicateDefinitionKey)
+        Some(HorsiesErrorCode::WorkflowDuplicateDefinitionKey)
     );
     assert!(registry.definition("tests.plain.v1").is_some());
 }
@@ -256,7 +259,7 @@ fn an_empty_name_or_key_is_refused() {
     };
     assert_eq!(
         registry.register(no_key).unwrap_err().code,
-        Some(ErrorCode::WorkflowNoDefinitionKey)
+        Some(HorsiesErrorCode::WorkflowNoDefinitionKey)
     );
     let no_name = Definition {
         name: String::new(),
@@ -264,7 +267,7 @@ fn an_empty_name_or_key_is_refused() {
     };
     assert_eq!(
         registry.register(no_name).unwrap_err().code,
-        Some(ErrorCode::WorkflowNoName)
+        Some(HorsiesErrorCode::WorkflowNoName)
     );
 }
 
@@ -273,7 +276,10 @@ fn a_spec_with_an_unregistered_child_is_refused() {
     let registry = registry();
     let spec = Root::<Countdown>::build(test_builder(Root::<Countdown>::name())).unwrap();
     let refused = registry.prepare(&spec).unwrap_err();
-    assert_eq!(refused.code, Some(ErrorCode::WorkflowMissingRequiredParams));
+    assert_eq!(
+        refused.code,
+        Some(HorsiesErrorCode::WorkflowMissingRequiredParams)
+    );
     registry
         .register(Definition::with_params::<Countdown>(&tasks()))
         .unwrap();
@@ -300,7 +306,7 @@ fn params_for_a_definition_without_params_are_refused() {
     let spec = Root::<Countdown>::build(test_builder(Root::<Countdown>::name())).unwrap();
     assert_eq!(
         registry.prepare(&spec).unwrap_err().code,
-        Some(ErrorCode::WorkflowSubworkflowParamsRequireBuildWith)
+        Some(HorsiesErrorCode::WorkflowSubworkflowParamsRequireBuildWith)
     );
 }
 
@@ -605,7 +611,7 @@ fn a_repeat_with_the_same_params_at_once_is_reported() {
         .unwrap();
     assert_eq!(
         codes(&registry.check_findings()),
-        vec![Some(ErrorCode::WorkflowSubworkflowSelfNesting)]
+        vec![Some(HorsiesErrorCode::WorkflowSubworkflowSelfNesting)]
     );
 }
 
@@ -620,7 +626,7 @@ fn a_nesting_past_the_depth_limit_at_once_is_reported() {
         .unwrap();
     assert_eq!(
         codes(&registry.check_findings()),
-        vec![Some(ErrorCode::WorkflowSubworkflowDepthLimit)]
+        vec![Some(HorsiesErrorCode::WorkflowSubworkflowDepthLimit)]
     );
 }
 
@@ -635,7 +641,7 @@ fn a_check_case_that_its_builder_refuses_is_reported() {
     }]);
     assert_eq!(
         codes(&registry.check_findings()),
-        vec![Some(ErrorCode::WorkflowCheckCaseInvalid)]
+        vec![Some(HorsiesErrorCode::WorkflowCheckCaseInvalid)]
     );
 }
 
@@ -647,13 +653,13 @@ fn a_refused_check_case_keeps_the_code_and_the_text_of_its_error() {
     registry.add_check_cases(vec![CheckCase {
         builder_name: "config_err".to_owned(),
         build: Arc::new(|| -> Result<WorkflowSpec, HorsiesError> {
-            Err(HorsiesError::new("bad config").with_code(ErrorCode::DatabaseInvalidUrl))
+            Err(HorsiesError::new("bad config").with_code(HorsiesErrorCode::DatabaseInvalidUrl))
         }),
     }]);
     let findings = registry.check_findings();
     assert_eq!(
         codes(&findings),
-        vec![Some(ErrorCode::WorkflowCheckCaseInvalid)]
+        vec![Some(HorsiesErrorCode::WorkflowCheckCaseInvalid)]
     );
     let text = findings[0].to_string();
     assert!(text.contains("config_err"), "{text}");
@@ -686,8 +692,8 @@ fn a_check_case_without_a_definition_key_is_reported() {
     assert_eq!(
         codes(&findings),
         vec![
-            Some(ErrorCode::WorkflowNoDefinitionKey),
-            Some(ErrorCode::WorkflowNoDefinitionKey),
+            Some(HorsiesErrorCode::WorkflowNoDefinitionKey),
+            Some(HorsiesErrorCode::WorkflowNoDefinitionKey),
         ]
     );
     assert!(
@@ -776,6 +782,6 @@ fn a_check_case_that_panics_is_reported() {
     }]);
     assert_eq!(
         codes(&registry.check_findings()),
-        vec![Some(ErrorCode::WorkflowCheckBuilderException)]
+        vec![Some(HorsiesErrorCode::WorkflowCheckBuilderException)]
     );
 }

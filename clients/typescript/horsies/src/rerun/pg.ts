@@ -59,7 +59,7 @@ export interface PgTextResult {
 }
 
 /**
- * The part of a `pg` client that the adapter calls: a `pg.Client` or a `pg.PoolClient` of `pg` 8.21.0
+ * The part of a `pg` client that the adapter calls: a `pg.Client` or a `pg.PoolClient` of `pg` 8.23.1
  * or later, on which the caller ran `BEGIN`. A `pg.Pool` has no `getTransactionStatus`, so this type
  * refuses it: each query of a pool can run on another connection, outside the caller's transaction.
  */

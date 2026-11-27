@@ -35,10 +35,14 @@ import {
   PLAIN_DATE_KIND,
   PLAIN_DATE_TIME_KIND,
   PLAIN_TIME_KIND,
+  NO_TUPLE_REST,
   STRING_KIND,
   taggedUnionKind,
+  tupleKind,
+  type TupleRest,
   UUID_KIND,
 } from "./kinds.ts";
+import { lazyKind } from "./lazy.ts";
 import { isTaskOutcomeKind, taskOutcomeKind, type TaskOutcomeWire } from "./task-outcome.ts";
 import { kindOf, presenceOf, type Wire, wireOf } from "./wire-type.ts";
 
@@ -118,6 +122,22 @@ export interface WireBuilders {
   array<W extends RequiredWire>(item: W): Wire<ValueOf<W>[], SentOf<W>[]>;
   /** A JSON array with one value per item type. */
   tuple<const T extends readonly RequiredWire[]>(items: T): Wire<TupleValue<T>, TupleSent<T>>;
+  /**
+   * A JSON array with one value per item type, then any number of `rest` values (zero or more). Python stores
+   * `tuple[T, ...]` so when `items` is empty.
+   */
+  tuple<const T extends readonly RequiredWire[], R extends RequiredWire>(
+    items: T,
+    rest: R,
+  ): Wire<[...TupleValue<T>, ...ValueOf<R>[]], [...TupleSent<T>, ...SentOf<R>[]]>;
+  /**
+   * The wire type that `getter` gives, for a recursive type: the getter returns a wire type that is built later and
+   * holds this one, as in `children: h.array(h.lazy(() => Tree))`. Give the recursive constant its type
+   * (`const Tree: Wire<TreeNode> = h.object(...)`). The getter runs once, at the first use of the type. A cycle must
+   * pass an array or an object: `Horsies.create` refuses a nullable or a union of itself (`RecursiveWithoutLevel`). A
+   * value deeper than the core's bound (200 levels of arrays and objects) is refused (`TooDeep`).
+   */
+  lazy<W extends RequiredWire>(getter: () => W): Wire<ValueOf<W>, SentOf<W>>;
   /** A JSON object with any string keys, stored in the value's own key order (integer-like keys first). */
   record<W extends RequiredWire>(
     value: W,
@@ -214,6 +234,20 @@ function isWireList(first: string | NonEmpty<RequiredWire>): first is NonEmpty<R
   return Array.isArray(first);
 }
 
+function tuple<const T extends readonly RequiredWire[]>(items: T): Wire<TupleValue<T>, TupleSent<T>>;
+function tuple<const T extends readonly RequiredWire[], R extends RequiredWire>(
+  items: T,
+  rest: R,
+): Wire<[...TupleValue<T>, ...ValueOf<R>[]], [...TupleSent<T>, ...SentOf<R>[]]>;
+function tuple(items: readonly RequiredWire[], rest?: RequiredWire): Wire<unknown, unknown> {
+  const kinds = items.map((item) => requiredKindOf(item, "tuple"));
+
+  const tail: TupleRest =
+    rest === undefined ? NO_TUPLE_REST : Object.freeze({ state: "items", item: requiredKindOf(rest, "tuple") });
+
+  return wireOf(tupleKind(kinds, tail));
+}
+
 /** A literal kind of the members. An empty list is a defect that the static types refuse. */
 function literalWire<const L extends NonEmpty<LiteralMember>>(members: L): Wire<L[number]> {
   if (members.length === 0) {
@@ -252,8 +286,9 @@ export const h: WireBuilders = Object.freeze({
     wireOf(objectKind(membersOf(members, (wire) => valueKindOf(wire, "object")))),
   array: <W extends RequiredWire>(item: W): Wire<ValueOf<W>[], SentOf<W>[]> =>
     wireOf(Object.freeze({ node: "array", item: requiredKindOf(item, "array") })),
-  tuple: <const T extends readonly RequiredWire[]>(items: T): Wire<TupleValue<T>, TupleSent<T>> =>
-    wireOf(Object.freeze({ node: "tuple", items: Object.freeze(items.map((item) => requiredKindOf(item, "tuple"))) })),
+  tuple,
+  lazy: <W extends RequiredWire>(getter: () => W): Wire<ValueOf<W>, SentOf<W>> =>
+    wireOf(lazyKind(() => requiredKindOf(getter(), "lazy"))),
   record: <W extends RequiredWire>(
     value: W,
   ): Wire<Readonly<Record<string, ValueOf<W>>>, Readonly<Record<string, SentOf<W>>>> =>

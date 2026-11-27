@@ -29,15 +29,17 @@ use crate::core::history::identity::keys::IdempotencyKeyError;
 use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::python_text::python_repr;
+use crate::core::task::BuiltInTaskCode;
 use crate::core::types::status::TaskStatus;
+use crate::worker::retry::{read_stored_options, StoredOptions, StoredRetry};
 
 use super::caller::{
     CallerColumn, CallerRow, CallerRowRefused, CallerStatement, CallerType, StatementValue,
 };
 use super::input_envelope::{decode_framed_rerun_input, InputEnvelopeDecodeError};
 use super::operations::{
-    NotEligibleReason, RerunEnqueuePolicy, RerunOutcome, RerunTask, RERUN_ENQUEUE,
-    RERUN_SOURCE_READ,
+    DeclaredCodes, NotEligibleReason, RegisteredTaskCodes, RerunEnqueuePolicy, RerunOutcome,
+    RerunTask, RERUN_ENQUEUE, RERUN_SOURCE_READ,
 };
 
 /// The result columns of the source read, in the order of its statement.
@@ -179,6 +181,17 @@ pub enum RerunPreparation {
     /// The caller key is not a valid idempotency key (Python raises
     /// `ValueError`). Nothing is written.
     CallerKeyRefused(IdempotencyKeyError),
+    /// The stored retry list of the source names the custom code `retry_code`,
+    /// and the task `task_name` of the calling app does not declare it.
+    /// Nothing is written.
+    RetryCodeNotDeclared {
+        task_name: String,
+        retry_code: String,
+    },
+    /// The stored retry list of the source names a custom code, and the
+    /// calling app does not register the task `task_name`. Nothing is
+    /// written.
+    TaskNotRegistered { task_name: String },
     /// The task id source refused to mint (the millisecond clock is outside
     /// the 48-bit range; Python raises `ValueError`). Nothing is written.
     IdMintRefused(Uuid7Error),
@@ -286,8 +299,10 @@ enum SourceRead {
 /// read): the client family (refused unless it is `own`, and refused as
 /// corrupt when it is not a client family), the class check,
 /// the location, the eligibility (workflow task, completed source), the
-/// input envelope, the stored options; then the write with a minted task
-/// id, sent at `sent_at`. Pure apart from the id mint.
+/// input envelope, the stored options, the codes of the stored retry list
+/// against `codes` (the declared custom codes of the calling app's tasks);
+/// then the write with a minted task id, sent at `sent_at`. Pure apart from
+/// the id mint.
 ///
 /// Errors: [`RerunRowError`] when the row does not fit the read's columns,
 /// or holds `NULL` where the function always sets a value.
@@ -296,6 +311,7 @@ pub fn prepare_rerun_write(
     row: &CallerRow,
     command: &RerunTask,
     policy: &RerunEnqueuePolicy,
+    codes: &RegisteredTaskCodes,
     own: ClientFamily,
     sent_at: DateTime<Utc>,
 ) -> Result<RerunPreparation, RerunRowError> {
@@ -325,7 +341,7 @@ pub fn prepare_rerun_write(
         SourceRead::Refused(refusal) => return Ok(RerunPreparation::Refused(refusal)),
         SourceRead::History(source) => source,
     };
-    Ok(prepare_write(source, command, policy, sent_at))
+    Ok(prepare_write(source, command, policy, codes, sent_at))
 }
 
 /// The location of the source and, for a history source, its facts.
@@ -457,6 +473,7 @@ fn prepare_write(
     source: RerunSource,
     command: &RerunTask,
     policy: &RerunEnqueuePolicy,
+    codes: &RegisteredTaskCodes,
     sent_at: DateTime<Utc>,
 ) -> RerunPreparation {
     let source_task_id = command.source_task_id();
@@ -537,6 +554,20 @@ fn prepare_write(
             return input_corrupt(source_task_id, &format!("stored input: {other}"));
         }
     };
+    match check_retry_codes(&source.task_name, framed.options.as_deref(), codes) {
+        Ok(()) => {}
+        Err(RetryCodeRefusal::NotDeclared { code }) => {
+            return RerunPreparation::RetryCodeNotDeclared {
+                task_name: source.task_name,
+                retry_code: code,
+            };
+        }
+        Err(RetryCodeRefusal::TaskNotRegistered) => {
+            return RerunPreparation::TaskNotRegistered {
+                task_name: source.task_name,
+            };
+        }
+    }
     let new_task_id = match mint_task_id() {
         Ok(task_id) => task_id,
         Err(refused) => return RerunPreparation::IdMintRefused(refused),
@@ -590,6 +621,59 @@ fn prepare_write(
         source_task_id: source.task_id,
         rerun_root_task_id: root_task_id,
     })
+}
+
+/// Why the stored retry list of a source does not pass
+/// [`check_retry_codes`].
+enum RetryCodeRefusal {
+    /// The app registers the task, and the task does not declare the custom
+    /// code `code`.
+    NotDeclared { code: String },
+    /// The list names a custom code, and the app does not register the task.
+    TaskNotRegistered,
+}
+
+/// Check the codes of the stored retry list in `options` against the
+/// declared custom codes of the calling app. Pure.
+///
+/// A built-in code passes for every task. A custom code passes when the app
+/// registers the task `task_name` and the task declares the code. Options
+/// with no retry policy hold no list to check, and neither does a policy
+/// that does not fit its rule: the worker refuses that policy when it runs
+/// the task (`WORKER_SERIALIZATION_ERROR`).
+///
+/// Errors: [`RetryCodeRefusal`] for the first custom code of the list that
+/// does not pass.
+fn check_retry_codes(
+    task_name: &str,
+    options: Option<&str>,
+    codes: &RegisteredTaskCodes,
+) -> Result<(), RetryCodeRefusal> {
+    let rule = match read_stored_options(options) {
+        StoredOptions::Readable {
+            retry: StoredRetry::Policy(rule),
+            ..
+        } => rule,
+        StoredOptions::Readable {
+            retry: StoredRetry::NoPolicy | StoredRetry::Invalid { .. },
+            ..
+        }
+        | StoredOptions::Unreadable { .. } => return Ok(()),
+    };
+    let declared = codes.of(task_name);
+    for code in rule.auto_retry_for() {
+        match (BuiltInTaskCode::parse(code), declared) {
+            (Some(_), _) => {}
+            (None, DeclaredCodes::Registered { custom }) if custom.get(code).is_some() => {}
+            (None, DeclaredCodes::Registered { .. }) => {
+                return Err(RetryCodeRefusal::NotDeclared { code: code.clone() });
+            }
+            (None, DeclaredCodes::TaskNotRegistered) => {
+                return Err(RetryCodeRefusal::TaskNotRegistered);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn input_corrupt(task_id: Uuid, detail: &str) -> RerunPreparation {

@@ -312,7 +312,7 @@ async fn run(pool: &TestPool, parent_spec: &WorkflowSpec) -> Uuid {
 // Reads
 // ---------------------------------------------------------------------------
 
-/// Python `_assert_subworkflow_error`: a `SUBWORKFLOW_FAILED` error of
+/// Python `_assert_subworkflow_error`: a `SUB_WORKFLOW_FAILED` error of
 /// `child_id` whose summary is FAILED with a failed task.
 pub(super) fn assert_subworkflow_error(
     result: &TaskResult<serde_json::Value>,
@@ -321,7 +321,7 @@ pub(super) fn assert_subworkflow_error(
     let error = error_of(result);
     assert_eq!(
         code(error).as_deref(),
-        Some("SUBWORKFLOW_FAILED"),
+        Some("SUB_WORKFLOW_FAILED"),
         "{error:?}"
     );
     let details = error

@@ -1,5 +1,5 @@
-// The rule `no-dropped-result`: an expression statement whose value is a horsies `Result`, or a `Promise` of one, is
-// an error. The statement drops the value, so the caller never reads which error the call gave.
+// The rule `no-dropped-result`: an expression statement whose value is a horsies `Result`, an array or a tuple of Results, or a
+// `Promise` of one of these, is an error. The statement drops the value, so the caller never reads which error the call gave.
 //
 // Passes:
 // - `void expression`: the explicit discard. Its value is `undefined`.

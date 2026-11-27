@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from horsies.core.app import Horsies
-from horsies.core.errors import ConfigurationError, ErrorCode, HorsiesError
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode, HorsiesError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
@@ -57,7 +57,7 @@ class TestDefaultModeRejectsQueueName:
             def my_task() -> Result[str, TaskError]:
                 return Ok('done')  # pragma: no cover
 
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE
         assert 'DEFAULT' in str(exc_info.value)
 
     def test_task_with_queue_name_default_string_raises(self) -> None:
@@ -68,7 +68,7 @@ class TestDefaultModeRejectsQueueName:
             def my_task() -> Result[str, TaskError]:
                 return Ok('done')  # pragma: no cover
 
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +85,7 @@ class TestCustomModeRequiresQueueName:
             def my_task() -> Result[str, TaskError]:
                 return Ok('done')  # pragma: no cover
 
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE
         assert 'CUSTOM' in str(exc_info.value)
 
 
@@ -103,7 +103,7 @@ class TestCustomModeRejectsUnknownQueue:
             def my_task() -> Result[str, TaskError]:
                 return Ok('done')  # pragma: no cover
 
-        assert exc_info.value.code == ErrorCode.TASK_INVALID_QUEUE
+        assert exc_info.value.code == HorsiesErrorCode.TASK_INVALID_QUEUE
         assert 'analytics' in str(exc_info.value)
         # Error should mention valid queues for actionability
         assert 'fast' in str(exc_info.value) or 'slow' in str(exc_info.value)
@@ -116,7 +116,7 @@ class TestCustomModeRejectsUnknownQueue:
             def my_task() -> Result[str, TaskError]:
                 return Ok('done')  # pragma: no cover
 
-        assert exc_info.value.code == ErrorCode.TASK_INVALID_QUEUE
+        assert exc_info.value.code == HorsiesErrorCode.TASK_INVALID_QUEUE
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +227,7 @@ class TestCheckCollectsQueueMismatch:
             app.validate_queue('custom_queue')
 
         error = exc_info.value
-        assert error.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE
         assert error.help_text is not None
         assert 'remove queue_name' in error.help_text or 'CUSTOM' in error.help_text
 
@@ -314,7 +314,7 @@ class TestWorkflowValidatesFrozenNodes:
             if isinstance(err, MultipleValidationErrors)
             else [err.code]
         )
-        assert ErrorCode.TASK_INVALID_QUEUE in codes
+        assert HorsiesErrorCode.TASK_INVALID_QUEUE in codes
 
     def test_frozen_node_with_valid_queue_is_accepted(self) -> None:
         """A frozen node on a valid queue passes (no false rejection)."""

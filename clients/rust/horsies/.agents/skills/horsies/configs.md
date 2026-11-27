@@ -22,7 +22,7 @@ operation. Every process of a deployment builds the same app in `main`.
   with a `ValidationReport` of the phase `config` that holds every refusal.
   `ValidationReport` converts into one `HorsiesError` (`?` in a function
   that returns `HorsiesError`).
-- `HorsiesError` has `code` (`Option<ErrorCode>`, `HRS-xxx`), `message`,
+- `HorsiesError` has `code` (`Option<HorsiesErrorCode>`, `HRS-xxx`), `message`,
   `notes` and `help_text`. The codes are on the shared docs page
   `tasks/errors` ("Config error codes").
 
@@ -256,7 +256,7 @@ fn register_hooks(app: &mut Horsies) -> Result<(), HorsiesError> {
 | `are_sends_suppressed()` | `true` after `suppress_sends(true)`, or when `HORSIES_SUPPRESS_SENDS` (`SUPPRESS_SENDS_ENV`) is `1`. The variable is read at each call |
 | `role()`, `set_role(AppRole)` | `AppRole::Producer` (a new app), `Worker` or `Scheduler`. The CLI runner sets it |
 
-A suppressed send returns `TaskSendError::SendSuppressed` and writes
+A suppressed send returns `TaskSendError::Suppressed` and writes
 nothing.
 
 ## Schedules
@@ -537,7 +537,7 @@ them with `HRS-218`. Leave `preload` at its default, `ChildPreload::NoPreload`.
 ```rust
 use horsies::{
     // App
-    Horsies, HorsiesError, ErrorCode, AppRole, SchemaMode, SUPPRESS_SENDS_ENV, CoreConnection,
+    Horsies, HorsiesError, HorsiesErrorCode, AppRole, SchemaMode, SUPPRESS_SENDS_ENV, CoreConnection,
     // Config
     AppConfig, PostgresConfig, QueueMode, CustomQueueConfig, PayloadPolicy, RecoveryConfig,
     RetentionConfig, WorkerResilienceConfig, PoolRecycle, TcpKeepalivesConfig,

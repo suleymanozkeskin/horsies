@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     MultipleValidationErrors,
 )
 from horsies.core.models.schedule import (
@@ -74,7 +74,7 @@ class TestIntervalSchedule:
             IntervalSchedule()
 
         exc = exc_info.value
-        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert exc.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'at least one time unit' in exc.message
         assert any('all time units' in note for note in exc.notes)
         assert exc.help_text is not None
@@ -187,7 +187,7 @@ class TestWeeklySchedule:
             )
 
         exc = exc_info.value
-        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert exc.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'duplicate days' in exc.message
         assert exc.help_text is not None
 
@@ -284,7 +284,7 @@ class TestTimeOfDay:
             build(datetime_time(9, 0, 0, tzinfo=offset))
 
         exc = exc_info.value
-        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert exc.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert exc.message == f'{pattern_name} time has a time zone'
         assert exc.notes == ['time: 09:00:00+02:00']
         assert exc.help_text == (
@@ -299,7 +299,7 @@ class TestTimeOfDay:
             build(datetime_time(9, 0, 0, 500))
 
         exc = exc_info.value
-        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert exc.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert exc.message == f'{pattern_name} time has microseconds'
         assert exc.notes == ['time: 09:00:00.000500']
         assert exc.help_text == (
@@ -450,7 +450,7 @@ class TestScheduleConfig:
             )
 
         exc = exc_info.value
-        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert exc.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'duplicate schedule names' in exc.message
         assert exc.help_text is not None
 

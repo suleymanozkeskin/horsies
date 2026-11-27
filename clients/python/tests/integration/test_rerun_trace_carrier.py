@@ -256,7 +256,12 @@ class TestAppRerunCarrier:
         async with terminalization_schema.engine.begin() as connection:
             source = await seeded_source(connection)
             with inside_caller_span():
-                outcome = await rerun_task(connection, command(source), policy())
+                outcome = await rerun_task(
+                    connection,
+                    command(source),
+                    policy(),
+                    registered_task_codes={},
+                )
 
             new_task_id = enqueued(outcome, source)
             assert await stored_trace(connection, new_task_id) == NO_STORED_TRACE

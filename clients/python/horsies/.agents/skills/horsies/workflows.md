@@ -209,7 +209,7 @@ Differences from `TaskNode`:
 - No `fn`, `queue`, `priority`, `good_until` fields.
 - `kwargs` forwarded to `workflow_def.build_with(app, **kwargs)` at execution time.
 - `args_from` injects the upstream `TaskOutcome` into `build_with()`.
-- The node follows the child's output: child COMPLETED with a `Succeeded` output → node COMPLETED with that output; child COMPLETED with a `Failed` output → node FAILED with that error (see SuccessPolicy / SuccessCase); child FAILED → node FAILED with `SubWorkflowError`.
+- The node follows the child's output: child COMPLETED with a `Succeeded` output → node COMPLETED with that output; child COMPLETED with a `Failed` output → node FAILED with that error (see SuccessPolicy / SuccessCase); child FAILED → node FAILED with `SubWorkflowFailure`.
 - Outputless child (`WorkflowDefinition[None]`, no `config.output`): the parent node completes with `Succeeded(None)`. The child's terminal-results map is top-level `handle.get()` behavior only and is never exposed as a nested subworkflow output.
 - A raise in the child start stops in the reaper's recovery, and the recovery limit bounds it (see Failure Semantics).
 - An exception in `build_with()` fails the node with `WORKFLOW_ENQUEUE_FAILED`. The child start parses the task options of each child root and of each child task with `good_until`. Options that do not parse (the `task_options_json` of the task function changed after registration) are a defect: the child start raises `SerializationError` and its transaction rolls back, as in the workflow start transaction.
@@ -256,10 +256,10 @@ match spec.start():
 | Variant | `code` | Other fields | `retryable` |
 |---|---|---|---|
 | `WorkflowStartBrokerNotConfigured` | `BROKER_NOT_CONFIGURED` | – | `False` |
-| `WorkflowStartValidationFailed` | `VALIDATION_FAILED` | `exception: BaseException \| NoCause` | `False` |
+| `WorkflowStartValidationFailed` | `VALIDATION_FAILED` | `cause: BaseException \| NoCause` | `False` |
 | `WorkflowStartIdConflict` | `WORKFLOW_ID_CONFLICT` | `existing_workflow_name: str` | `False` |
 | `WorkflowStartCommandConflict` | `WORKFLOW_COMMAND_CONFLICT` | – | `False` |
-| `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `exception: BaseException` | the core's classification |
+| `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `cause: BaseException` | the core's classification |
 | `WorkflowStartAsyncContext` | `ASYNC_CONTEXT` | – | `False` |
 
 ### WorkflowStartErrorCode
@@ -308,7 +308,7 @@ handle.workflow_id  # uuid.UUID — the workflow's id; str(handle.workflow_id) i
 `WorkflowHandle` is a `@dataclass` with `workflow_id: uuid.UUID` and `broker: PostgresBroker`; pyright refuses a `str` id. To reconnect to a workflow whose id you have as text (from a database, an HTTP request, or a previous session), parse it once with `WorkflowHandle.for_id(text, broker)`:
 
 - `Ok(handle)`: the text is a UUID in any spelling that `uuid.UUID` accepts (upper case, braces, `urn:uuid:`, no hyphens); `handle.workflow_id` is the UUID. Nothing is read.
-- `Err(HandleInvalidWorkflowId)`: the text is not a UUID. Fields: `message`, `workflow_id_text` (the text as given), `exception` (the `ValueError` of `uuid.UUID`). No handle is built. It is not a `HandleOperationError` variant.
+- `Err(WorkflowHandleInvalidWorkflowId)`: the text is not a UUID. Fields: `message`, `workflow_id_text` (the text as given), `cause` (the `ValueError` of `uuid.UUID`). No handle is built. It is not a `WorkflowHandleError` variant.
 
 ```python
 from horsies import Err, Ok, WorkflowHandle
@@ -321,13 +321,13 @@ match WorkflowHandle.for_id("3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f", app.get_brok
         print(invalid.message)         # the text is not a UUID
 ```
 
-All handle methods (`status`, `get`, `result_for`, `cancel`, `pause`, `resume`, `results`, `tasks`) work identically whether the handle came from `spec.start()` or `for_id`. If the `workflow_id` does not exist, `get` and `result_for` return `Err(WorkflowNotFound(...))`. The other methods return `Err(HandleWorkflowNotFound)`. `pause_workflow()`, `resume_workflow()` and their sync forms take the `uuid.UUID` too. The `workflow_id` of every handle error class is the canonical text of the UUID.
+All handle methods (`status`, `get`, `result_for`, `cancel`, `pause`, `resume`, `results`, `tasks`) work identically whether the handle came from `spec.start()` or `for_id`. If the `workflow_id` does not exist, `get` and `result_for` return `Err(WorkflowNotFound(...))`. The other methods return `Err(WorkflowHandleNotFound)`. `pause_workflow()`, `resume_workflow()` and their sync forms take the `uuid.UUID` too. The `workflow_id` of every handle error class is the canonical text of the UUID.
 
 ### Return types
 
 | Methods | Return type | A failure |
 |---|---|---|
-| `status`, `cancel`, `pause`, `resume`, `results`, `tasks` | `HandleResult[T]` = `Result[T, HandleOperationError]` | `Err(HandleOperationError)` |
+| `status`, `cancel`, `pause`, `resume`, `results`, `tasks` | `HandleResult[T]` = `Result[T, WorkflowHandleError]` | `Err(WorkflowHandleError)` |
 | `get`, `result_for` | `ReadResult[T, TaskError]` = `Ok[Succeeded[T]] \| Ok[Failed[TaskError]] \| Err[ReadError]` | `Err(ReadError)`: the read gave no outcome |
 
 The `*_async` forms have the same return types. Read `get` and `result_for` with one `match`. `Ok(Failed(task_error))` holds the error of the workflow or of the node: `task_error.error_code` names it (for example `WORKFLOW_FAILED`, `WORKFLOW_PAUSED`). `Err(read_error)` is a read that gave no outcome. `ReadError` is a closed union of frozen classes, one per catalog code, each with `code` and `message`.
@@ -363,11 +363,11 @@ def result_for(self, node: TaskNode[OkT] | NodeKey[OkT]) -> ReadResult[OkT, Task
 async def result_for_async(self, node: TaskNode[OkT] | NodeKey[OkT]) -> ReadResult[OkT, TaskError]
 
 # All outcomes keyed by node_id. Ok({}) before any node has a result;
-# Err(HandleWorkflowNotFound) when no workflow has the id.
+# Err(WorkflowHandleNotFound) when no workflow has the id.
 def results(self) -> HandleResult[dict[str, TaskOutcome[Any, TaskError]]]
 async def results_async(self) -> HandleResult[dict[str, TaskOutcome[Any, TaskError]]]
 
-# Task info list. Err(HandleWorkflowNotFound) when no workflow has the id.
+# Task info list. Err(WorkflowHandleNotFound) when no workflow has the id.
 def tasks(self) -> HandleResult[list[WorkflowTaskInfo]]
 async def tasks_async(self) -> HandleResult[list[WorkflowTaskInfo]]
 
@@ -400,7 +400,7 @@ appearing during a pause are expected, not a fault.
 - `EXPIRED` → returns `Ok(Failed(task_error))` with `OutcomeCode.WORKFLOW_EXPIRED`. The error `data` holds the policy name and the age.
 - A stored error that is not JSON, is JSON but not an object, or does not decode as a `TaskError` → `Err(ResultDeserializationError(...))`, with the cause in the message. Any other exception in the decode is a defect and propagates.
 - The workflow row is removed after `get()` read its terminal status, also `COMPLETED` (retention) → `Err(WorkflowNotFound(...))`.
-- A status read that fails: no workflow has the id → `Err(WorkflowNotFound(...))`; a database failure or a stored status that does not parse → `Err(BrokerError(...))`.
+- A status read that fails: no workflow has the id → `Err(WorkflowNotFound(...))`; a database failure or a stored status that does not parse → `Err(ReadDatabaseError(...))`.
 - `PAUSED` → returns immediately with `Ok(Failed(task_error))` with `OutcomeCode.WORKFLOW_PAUSED`.
 - Timeout → returns `Err(WaitTimeout(...))`. The workflow can still end; a later `get()` can read its outcome.
 
@@ -408,28 +408,29 @@ appearing during a pause are expected, not a fault.
 
 Non-blocking single DB query. Returns `Err(ResultNotReady(...))` if the node has no result yet. Always call `handle.get()` first to wait for completion. A node with no `node_id` returns `Err(WorkflowCtxMissingId(...))`.
 
-### HandleOperationError / HandleErrorCode
+### WorkflowHandleError / WorkflowHandleErrorCode
 
-`HandleOperationError` is a union with one frozen variant per `HandleErrorCode` member. Every variant has `code`, `message`, `retryable` and `workflow_id`. Match on the variant; a read of `exception` needs the match first. Any other exception, for example a defect in `pause_workflow()` or `resume_workflow()`, propagates.
+`WorkflowHandleError` is a union with one frozen variant per `WorkflowHandleErrorCode` member other than `INVALID_WORKFLOW_ID`. Every variant has `code`, `message`, `retryable` and `workflow_id`. Match on the variant; a read of `cause` needs the match first. Any other exception, for example a defect in `pause_workflow()` or `resume_workflow()`, propagates.
 
-<!-- members: HandleErrorCode -->
+<!-- members: WorkflowHandleErrorCode -->
 | Code | Variant | Other fields | Retryable | After the failure |
 |---|---|---|---|---|
-| `WORKFLOW_NOT_FOUND` | `HandleWorkflowNotFound` | – | No | No workflow has this id; nothing changed |
-| `DB_OPERATION_FAILED` | `HandleDbOperationFailed` | `exception: BaseException` | the core's classification | A read changed nothing; `cancel`, `pause` and `resume` before its commit rolled back, or the commit outcome is unknown |
-| `STORED_DATA_INVALID` | `HandleStoredDataInvalid` | `exception: BaseException` | No | A stored workflow status or subworkflow summary does not parse; nothing changed, a repeat returns the same error |
-| `RESUME_RECOVERY_FAILED` | `HandleResumeRecoveryFailed` | `exception: BaseException` | No | `resume` committed and the recovery pass after the commit failed; the workflow is `RUNNING`, the worker reaper runs the same pass, a repeated `resume` returns `Ok(False)` |
-| `ASYNC_CONTEXT` | `HandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran — call the `*_async` form (sync `get()` / `result_for()` return `Err(AsyncContext(...))` instead) |
+| `WORKFLOW_NOT_FOUND` | `WorkflowHandleNotFound` | – | No | No workflow has this id; nothing changed |
+| `DATABASE_OPERATION_FAILED` | `WorkflowHandleDatabaseOperationFailed` | `cause: BaseException` | the core's classification | A read changed nothing; `cancel`, `pause` and `resume` before its commit rolled back, or the commit outcome is unknown |
+| `STORED_DATA_INVALID` | `WorkflowHandleStoredDataInvalid` | `cause: BaseException` | No | A stored workflow status or subworkflow summary does not parse; nothing changed, a repeat returns the same error |
+| `RESUME_RECOVERY_FAILED` | `WorkflowHandleResumeRecoveryFailed` | `cause: BaseException` | No | `resume` committed and the recovery pass after the commit failed; the workflow is `RUNNING`, the worker reaper runs the same pass, a repeated `resume` returns `Ok(False)` |
+| `ASYNC_CONTEXT` | `WorkflowHandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran — call the `*_async` form (sync `get()` / `result_for()` return `Err(AsyncContext(...))` instead) |
+| `INVALID_WORKFLOW_ID` | `WorkflowHandleInvalidWorkflowId` | `workflow_id_text: str`, `cause: BaseException` | No | The workflow id text of `WorkflowHandle.for_id` is not a UUID; no handle was built, the same text is refused again; not in the `WorkflowHandleError` union |
 
 ```python
-from horsies import Err, HandleResumeRecoveryFailed, Ok
+from horsies import Err, WorkflowHandleResumeRecoveryFailed, Ok
 
 match handle.resume():
     case Ok(True):
         ...  # resumed
     case Ok(False):
         ...  # not PAUSED; nothing changed
-    case Err(HandleResumeRecoveryFailed()):
+    case Err(WorkflowHandleResumeRecoveryFailed()):
         ...  # resumed; the recovery pass failed and the reaper runs it again
     case Err(err):
         print(f"[{err.code}] {err.message}")
@@ -524,7 +525,7 @@ policy = SuccessPolicy(
   - `result_for()` returns `Ok(Failed(error))`. `results()` and `tasks()` hold `Failed(error)`. Without a success policy the parent is `FAILED`, and its `get()` returns `Ok(Failed(error))`.
   - `SubWorkflowSummary.status` is `COMPLETED` on this `FAILED` node. `SubWorkflowSummary.output` is `None`.
   - A parent can complete when the node is in `optional` or in no case. `OnError.FAIL` stores the node's error on the workflow, and the workflow stays `RUNNING`; the success case then decides. A `COMPLETED` parent keeps that error in its error column, as for a failed `TaskNode`. `OnError.PAUSE` pauses the parent.
-  - The next level sees a parent that is `FAILED` as a failed child, with `SUBWORKFLOW_FAILED`. A parent that is `COMPLETED` with this node as its output stores the error, so the next level is `FAILED` with the same error.
+  - The next level sees a parent that is `FAILED` as a failed child, with `SUB_WORKFLOW_FAILED`. A parent that is `COMPLETED` with this node as its output stores the error, so the next level is `FAILED` with the same error.
 - A `COMPLETED` child whose stored result is not a well-formed result envelope, or that stores no result, makes a `FAILED` node. The node holds an error envelope with `RESULT_DESERIALIZATION_ERROR` that names the child and the cause, so each reader and the parent's `get()` report that code in `Failed(task_error)`. The stored text stays on the child workflow row.
 
 ## WorkflowContext
@@ -621,7 +622,7 @@ A recovery repair that raises rolls back, and the next reaper pass runs it again
 - Persistent: a defect, stored data that the engine cannot use, and a SQL error outside `OperationalError`. It counts once per pass, for the workflow.
 - The count is stored in `horsies_workflow_recovery_failures`, so a restart keeps it. The count has no reset, so a later unrelated raise after a repair reaches the limit sooner.
 - At the limit: the node that raised goes `FAILED`, other `PENDING` and `READY` nodes go `SKIPPED`, and a stored first error stays. Live nodes finish, and the workflow goes `FAILED` at the last one. A `success_policy` that nodes met can then end it `COMPLETED`. With no live node it goes `FAILED` at once, with no `success_policy` evaluation.
-- A child at the limit fails its parent node with `SUBWORKFLOW_FAILED`.
+- A child at the limit fails its parent node with `SUB_WORKFLOW_FAILED`.
 - A phase-2 row whose progression raises counts toward `finalization_quarantine_after_attempts`. At that bound the row moves to quarantine and the workflow fails the same way.
 
 ### SKIPPED cascade
@@ -678,7 +679,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 
 ## Validation Errors (HRS-001–HRS-038)
 
-<!-- members: ErrorCode subset -->
+<!-- members: HorsiesErrorCode subset -->
 | Code | Name | Trigger |
 |---|---|---|
 | HRS-001 | `WORKFLOW_NO_NAME` | Missing `name` |
@@ -689,8 +690,8 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | HRS-006 | `WORKFLOW_INVALID_DEPENDENCY` | `waits_for` references node not in task list |
 | HRS-007 | `WORKFLOW_CYCLE_DETECTED` | Cycle in dependency graph |
 | HRS-008 | `WORKFLOW_INVALID_ARGS_FROM` | `args_from` node not in `waits_for` |
-| HRS-009 | `WORKFLOW_INVALID_CTX_FROM` | `workflow_context_from` node not in `waits_for` |
-| HRS-010 | `WORKFLOW_CTX_PARAM_MISSING` | `workflow_context_from` set but fn lacks param |
+| HRS-009 | `WORKFLOW_INVALID_CONTEXT_FROM` | `workflow_context_from` node not in `waits_for` |
+| HRS-010 | `WORKFLOW_CONTEXT_PARAMETER_MISSING` | `workflow_context_from` set but fn lacks param |
 | HRS-011 | `WORKFLOW_INVALID_OUTPUT` | `output` node not in task list |
 | HRS-012 | `WORKFLOW_INVALID_SUCCESS_POLICY` | Policy references unknown nodes |
 | HRS-013 | `WORKFLOW_INVALID_JOIN` | `quorum` without valid `min_success` |
@@ -747,9 +748,9 @@ from horsies import (
     # Handle
     WorkflowHandle, WorkflowTaskInfo,
     # Handle result types
-    HandleResult, HandleOperationError, HandleErrorCode,
-    HandleWorkflowNotFound, HandleDbOperationFailed, HandleStoredDataInvalid,
-    HandleResumeRecoveryFailed, HandleAsyncContext,
+    HandleResult, WorkflowHandleError, WorkflowHandleErrorCode,
+    WorkflowHandleNotFound, WorkflowHandleDatabaseOperationFailed, WorkflowHandleStoredDataInvalid,
+    WorkflowHandleResumeRecoveryFailed, WorkflowHandleAsyncContext,
     # Start result types
     WorkflowStartResult, WorkflowStartError, WorkflowStartErrorCode,
     WorkflowStartRetryable, WorkflowStartBrokerNotConfigured,
@@ -760,7 +761,7 @@ from horsies import (
     # Outcomes and reads
     TaskOutcome, Succeeded, Failed, ReadResult, ReadError,
     WaitTimeout, WorkflowNotFound, ResultNotReady, ResultDeserializationError,
-    BrokerError, NoTypeAvailable, AsyncContext, WaitInsideTask, InvalidInput,
+    ReadDatabaseError, NoTypeAvailable, AsyncContext, WaitInsideTask, InvalidInput,
     WorkflowCtxMissingId,
 )
 ```

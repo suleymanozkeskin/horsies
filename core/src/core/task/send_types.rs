@@ -40,9 +40,8 @@ pub enum TaskSendErrorCode {
     /// Nothing was written. The retry methods refuse it.
     PayloadMismatch,
     /// The idempotency key is reserved by another task with a different
-    /// command. Nothing was written. The retry methods accept it: a retry
-    /// after the reservation ends is accepted, one before returns the same
-    /// error.
+    /// command. Nothing was written. Non-retryable: send the same command, or
+    /// use another key. The retry methods refuse it.
     IdempotencyKeyConflict,
     /// Serialized payload exceeded `payload.reject_bytes`; nothing was
     /// written. Non-retryable — shrink the payload (pass a reference to
@@ -153,7 +152,7 @@ pub enum TaskSendError {
     /// during ``check()``, and under ``HORSIES_SUPPRESS_SENDS=1``. The retry
     /// methods refuse this error.
     #[error_class(class = "TaskSendSuppressed", code = "SendSuppressed")]
-    SendSuppressed {
+    Suppressed {
         #[error_slot(python = "Str", hidden)]
         message: String,
     },
@@ -175,7 +174,7 @@ pub enum TaskSendError {
     },
     /// The input was refused before anything was written.
     ///
-    /// ``exception`` is the cause, or ``NoCause()`` when a check refused the
+    /// ``cause`` is the exception of the cause, or ``NoCause()`` when a check refused the
     /// input without a Python exception. The retry methods refuse this error.
     // `cause` is what refused it.
     #[error_class(
@@ -193,7 +192,7 @@ pub enum TaskSendError {
     ///
     /// ``retryable`` is the core's classification of the cause. ``retry_send(err)``
     /// sends the same task id and payload again; the broker returns the existing
-    /// task for a duplicate. ``exception`` is ``NoCause()`` when the broker found
+    /// task for a duplicate. ``cause`` is ``NoCause()`` when the broker found
     /// the failure by a data check.
     // `cause` is what the enqueue met.
     #[error_class(
@@ -241,13 +240,15 @@ pub enum TaskSendError {
     /// The idempotency key is reserved by another task with a different command.
     ///
     /// Nothing was written. ``owner_task_id`` names the task that holds the key.
-    /// ``retryable`` is ``True``: the conflict clears when the reservation ends.
-    /// The retry methods accept this error: a retry after the reservation ends
-    /// is accepted, and a retry before that returns the same error.
+    /// ``retryable`` is ``False``: a repeat of the same send does not complete
+    /// it. While the owner task is live, the repeat meets the same conflict.
+    /// After the reservation ends, the repeat starts a second task under the
+    /// key. To complete the send, send the same command as the owner task, or
+    /// use another key. The retry methods refuse this error.
     #[error_class(
         class = "TaskSendIdempotencyKeyConflict",
         code = "IdempotencyKeyConflict",
-        always_retryable
+        never_retryable
     )]
     IdempotencyKeyConflict {
         #[error_slot(python = "Uuid")]
@@ -276,17 +277,17 @@ impl TaskSendError {
     }
 
     /// Whether the condition may clear, so the same send can succeed later.
-    /// Only an enqueue failure carries a driver classification; a key
-    /// conflict clears when the reservation ends; every refusal stays. An
+    /// Only an enqueue failure carries a driver classification; every
+    /// refusal, the key conflict included, stays. An
     /// async context does not clear on its thread (Python
     /// `TaskSendAsyncContext`, which carries no retry flag): the async forms
     /// complete the send.
     pub fn retryable(&self) -> bool {
         match self {
             Self::EnqueueFailed { retryable, .. } => *retryable,
-            Self::IdempotencyKeyConflict { .. } => true,
             Self::AsyncContext { .. }
-            | Self::SendSuppressed { .. }
+            | Self::IdempotencyKeyConflict { .. }
+            | Self::Suppressed { .. }
             | Self::ValidationFailed { .. }
             | Self::PayloadMismatch { .. }
             | Self::PayloadTooLarge { .. } => false,
@@ -296,7 +297,7 @@ impl TaskSendError {
     /// The human-readable description. It never holds input values.
     pub fn message(&self) -> &str {
         match self {
-            Self::SendSuppressed { message }
+            Self::Suppressed { message }
             | Self::AsyncContext { message, .. }
             | Self::ValidationFailed { message, .. }
             | Self::EnqueueFailed { message, .. }
@@ -314,7 +315,7 @@ impl TaskSendError {
             Self::ValidationFailed { cause, .. } | Self::EnqueueFailed { cause, .. } => {
                 cause.clone()
             }
-            Self::SendSuppressed { .. }
+            Self::Suppressed { .. }
             | Self::AsyncContext { .. }
             | Self::PayloadMismatch { .. }
             | Self::PayloadTooLarge { .. }
@@ -329,7 +330,7 @@ impl TaskSendError {
             | Self::EnqueueFailed { task_id, .. }
             | Self::PayloadMismatch { task_id, .. }
             | Self::IdempotencyKeyConflict { task_id, .. } => Some(*task_id),
-            Self::SendSuppressed { .. }
+            Self::Suppressed { .. }
             | Self::ValidationFailed { .. }
             | Self::PayloadTooLarge { .. } => None,
         }
@@ -337,9 +338,11 @@ impl TaskSendError {
 
     /// The task id and payload when the retry methods accept this error,
     /// else `None`. Python's accepted set (`TaskSendRetryable`,
-    /// `clients/python/horsies/core/models/task_send_types.py`): an async context, an
-    /// enqueue failure and a key conflict. A refusal is never replayed,
-    /// because the same input meets the same refusal.
+    /// `clients/python/horsies/core/models/task_send_types.py`): an async context
+    /// and an enqueue failure. A refusal is never replayed, because the same
+    /// input meets the same refusal. A key conflict is a refusal: a repeat of
+    /// the same send meets the same conflict, or starts a second task under
+    /// the key once the reservation ends.
     pub fn resend_target(&self) -> Option<ResendTarget<'_>> {
         match self {
             Self::AsyncContext {
@@ -347,17 +350,15 @@ impl TaskSendError {
             }
             | Self::EnqueueFailed {
                 task_id, payload, ..
-            }
-            | Self::IdempotencyKeyConflict {
-                task_id, payload, ..
             } => Some(ResendTarget {
                 task_id: *task_id,
                 payload: payload.as_ref(),
             }),
-            Self::SendSuppressed { .. }
+            Self::Suppressed { .. }
             | Self::ValidationFailed { .. }
             | Self::PayloadMismatch { .. }
-            | Self::PayloadTooLarge { .. } => None,
+            | Self::PayloadTooLarge { .. }
+            | Self::IdempotencyKeyConflict { .. } => None,
         }
     }
 }
@@ -380,7 +381,7 @@ impl std::error::Error for TaskSendError {}
 /// The instance slot values of each class, written by hand:
 /// `ValidationFailed` and `EnqueueFailed` keep the [`FailureCause`] of the
 /// failure, not the typed cause that `#[derive(ErrorClassValues)]` reads.
-/// The `exception` slot of the two comes from [`refusal_exception`] and
+/// The `cause` slot of the two comes from [`refusal_exception`] and
 /// [`enqueue_exception`]. A client that holds the broker error of a failed
 /// enqueue gives the exact `exception` with [`send_failure_exception`].
 /// The tests keep the slot names and their order equal to the class slots
@@ -388,7 +389,7 @@ impl std::error::Error for TaskSendError {}
 impl ErrorClassValues for TaskSendError {
     fn slot_values(&self) -> Vec<SlotValue<'_>> {
         match self {
-            Self::SendSuppressed { message } => vec![slot("message", SlotData::Str(message))],
+            Self::Suppressed { message } => vec![slot("message", SlotData::Str(message))],
             Self::AsyncContext {
                 task_id,
                 payload,
@@ -405,7 +406,7 @@ impl ErrorClassValues for TaskSendError {
             ],
             Self::ValidationFailed { message, cause } => vec![
                 slot("message", SlotData::Str(message)),
-                slot("exception", SlotData::Exception(refusal_exception(cause))),
+                slot("cause", SlotData::Exception(refusal_exception(cause))),
             ],
             Self::EnqueueFailed {
                 task_id,
@@ -419,7 +420,7 @@ impl ErrorClassValues for TaskSendError {
                 slot("message", SlotData::Str(message)),
                 slot("retryable", SlotData::Bool(*retryable)),
                 slot(
-                    "exception",
+                    "cause",
                     SlotData::Exception(enqueue_exception(message, *retryable, cause)),
                 ),
             ],
@@ -497,14 +498,14 @@ fn enqueue_exception(message: &str, retryable: bool, cause: &FailureCause) -> Ex
     }
 }
 
-/// The `exception` slot of the send error of a failed enqueue.
+/// The `cause` slot of the send error of a failed enqueue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendFailureException {
-    /// The class of the send error has an `exception` slot
+    /// The class of the send error has a `cause` slot
     /// (`VALIDATION_FAILED`, `ENQUEUE_FAILED`): the exception that Python
     /// stores for the same broker error.
     Slot(ExceptionValue),
-    /// The class of the send error has no `exception` slot
+    /// The class of the send error has no `cause` slot
     /// (`PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`).
     NoSlot,
 }
@@ -513,7 +514,7 @@ pub enum SendFailureException {
 /// makes of `error`, in the form that Python stores. Python's send path
 /// (`_map_broker_err` in `clients/python/horsies/core/task_decorator.py`)
 /// copies the `exception` of the broker class of the failure
-/// ([`crate::BrokerOperationError::enqueue_error`]); this function uses the
+/// ([`crate::DatabaseOperationError::enqueue_error`]); this function uses the
 /// same causes:
 /// - a refusal before any statement: the cause of the refusal
 ///   ([`BrokerRefusalCause::of_enqueue_refusal`]): a `ValueError` with the
@@ -525,7 +526,7 @@ pub enum SendFailureException {
 /// - a conflict whose row was gone before the compare: `NoCause()` (the
 ///   broker found it by a data check);
 /// - a task id with another command, a key that another task holds: no
-///   `exception` slot;
+///   `cause` slot;
 /// - every other error: the core's class of the error, with its text and
 ///   its retry rule.
 ///
@@ -702,10 +703,12 @@ mod tests {
         );
     }
 
-    /// Python `test_send_idempotency_conflict.py::TestKeyReservedByAnotherTask::
-    /// test_conflict_names_the_owner_and_retry_is_accepted`.
+    /// A key conflict names the owner, is not retryable and is refused for a
+    /// resend. Reverting `Self::IdempotencyKeyConflict { .. } => false` in
+    /// `retryable()` fails the `retryable` assertion; reverting the `None` arm
+    /// in `resend_target()` fails the `resend_target` assertion.
     #[test]
-    fn a_key_conflict_names_the_owner_and_is_accepted_for_a_resend() {
+    fn a_key_conflict_names_the_owner_is_not_retryable_and_is_refused_for_a_resend() {
         let task_id = Uuid::from_u128(1);
         let owner = Uuid::from_u128(2);
         let error = send_error_from_enqueue(
@@ -722,14 +725,13 @@ mod tests {
             error,
             TaskSendError::IdempotencyKeyConflict { owner_task_id, .. } if owner_task_id == owner
         ));
-        let target = error.resend_target().expect("a key conflict is accepted");
-        assert_eq!(target.task_id, task_id);
-        assert!(error.retryable());
+        assert!(error.resend_target().is_none());
+        assert!(!error.retryable());
     }
 
     /// The fixed `retryable` of a class in the catalog is the value of
-    /// `retryable()` for a value of that class: the conflict is retryable,
-    /// and no send class has a `retryable` that never clears.
+    /// `retryable()` for a value of that class: the key conflict is the only
+    /// class with a fixed value, and it never clears.
     #[test]
     fn the_fixed_retry_slot_of_a_class_is_the_retry_rule_of_its_value() {
         use crate::error_catalog::ErrorSlot;
@@ -760,9 +762,9 @@ mod tests {
 
         assert_eq!(
             fixed,
-            [(conflict.python_class(), &ErrorSlot::AlwaysRetryable)]
+            [(conflict.python_class(), &ErrorSlot::NeverRetryable)]
         );
-        assert!(conflict.retryable());
+        assert!(!conflict.retryable());
     }
 
     /// A refused input is never replayed: the same input meets the same
@@ -999,7 +1001,7 @@ mod tests {
                 | ErrorSlot::AlwaysRetryable => None,
                 ErrorSlot::CodeSubset { .. } => Some("code"),
                 ErrorSlot::Field { name, .. } => Some(*name),
-                ErrorSlot::Exception { .. } => Some("exception"),
+                ErrorSlot::Exception { .. } => Some("cause"),
             })
             .collect()
     }
@@ -1017,31 +1019,31 @@ mod tests {
         named
     }
 
-    /// The `exception` slot of `error`.
+    /// The `cause` slot of `error`.
     fn exception_of(error: &TaskSendError) -> ExceptionValue {
         let slot = error
             .slot_values()
             .into_iter()
-            .find(|slot| slot.name == "exception")
-            .expect("the class has an exception slot");
+            .find(|slot| slot.name == "cause")
+            .expect("the class has a cause slot");
         let SlotData::Exception(exception) = slot.value else {
-            panic!("the exception slot holds {:?}", slot.value);
+            panic!("the cause slot holds {:?}", slot.value);
         };
         exception
     }
 
     /// The `exception` that Python stores for the failed enqueue of
     /// `error`: the broker's class of the failure
-    /// (`BrokerOperationError::enqueue_error`), whose `exception`
+    /// (`DatabaseOperationError::enqueue_error`), whose `exception`
     /// `_map_broker_err` copies into the send error.
     fn python_exception(error: BrokerError) -> ExceptionValue {
-        let broker = crate::BrokerOperationError::enqueue_error("my_task", error);
+        let broker = crate::DatabaseOperationError::enqueue_error("my_task", error);
         let slot = crate::error_catalog::ErrorClassValues::slot_values(&broker)
             .into_iter()
-            .find(|slot| slot.name == "exception")
-            .expect("the broker class has an exception slot");
+            .find(|slot| slot.name == "cause")
+            .expect("the broker class has a cause slot");
         let SlotData::Exception(exception) = slot.value else {
-            panic!("the exception slot holds {:?}", slot.value);
+            panic!("the cause slot holds {:?}", slot.value);
         };
         exception
     }
@@ -1056,7 +1058,7 @@ mod tests {
 
     #[test]
     fn a_suppressed_send_has_its_message() {
-        let error = TaskSendError::SendSuppressed {
+        let error = TaskSendError::Suppressed {
             message: "sends are suppressed".to_owned(),
         };
 
@@ -1111,7 +1113,7 @@ mod tests {
                 named_slots(&error),
                 [
                     ("message", SlotData::Str("refused")),
-                    ("exception", SlotData::Exception(ExceptionValue::NoCause)),
+                    ("cause", SlotData::Exception(ExceptionValue::NoCause)),
                 ],
                 "{cause:?}"
             );
@@ -1190,7 +1192,7 @@ mod tests {
                     ("message", SlotData::Str("the write failed")),
                     ("retryable", SlotData::Bool(retryable)),
                     (
-                        "exception",
+                        "cause",
                         SlotData::Exception(ExceptionValue::CoreFailure {
                             text: "the write failed".to_owned(),
                             retryable,
@@ -1302,7 +1304,7 @@ mod tests {
     /// after a check that it is Python's form for the same error.
     fn exact_exception(error: fn() -> BrokerError) -> ExceptionValue {
         let SendFailureException::Slot(exception) = send_failure_exception(&error()) else {
-            panic!("the class of the send error has an exception slot");
+            panic!("the class of the send error has a cause slot");
         };
         assert_eq!(exception, python_exception(error()));
         exception
@@ -1434,7 +1436,7 @@ mod tests {
     }
 
     /// The classes of a task id with another command and of a key that
-    /// another task holds have no `exception` slot.
+    /// another task holds have no `cause` slot.
     #[test]
     fn a_payload_mismatch_and_a_key_conflict_have_no_exception_slot() {
         for error in [
@@ -1456,7 +1458,7 @@ mod tests {
                 send_error
                     .slot_values()
                     .iter()
-                    .all(|slot| slot.name != "exception"),
+                    .all(|slot| slot.name != "cause"),
                 "{error}"
             );
         }

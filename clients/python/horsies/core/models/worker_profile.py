@@ -42,7 +42,7 @@ from typing import Annotated, Final, Literal, Union, assert_never
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.models.child_sizing import (
     DEFAULT_ISOLATED_POOL_CONNECTIONS,
     DEFAULT_TASK_SEND_POOL_CONNECTIONS,
@@ -932,7 +932,7 @@ def _profile_error(
 ) -> ConfigurationError:
     return ConfigurationError(
         message=message,
-        code=ErrorCode.CONFIG_INVALID_WORKER_PROFILE,
+        code=HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE,
         notes=notes,
         help_text=help_text,
     )

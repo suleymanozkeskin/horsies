@@ -94,7 +94,7 @@ const OUTCOME_DECODE_CLASS = "OutcomeDecodeError";
 /** The core exception class of a history read that breaks its contract. */
 const HISTORY_CONTRACT_CLASS = "HistoryContractError";
 
-/** The public form of the `exception` slot of a catalog error. An exception class that this build does not know is a defect. Pure. */
+/** The public form of the `cause` slot of a catalog error. An exception class that this build does not know is a defect. Pure. */
 export function publicExceptionCause(record: ExceptionRecord): CoreCause | NoCause {
   switch (record.kind) {
     case "noCause":

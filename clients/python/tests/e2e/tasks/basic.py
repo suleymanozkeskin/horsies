@@ -8,11 +8,11 @@ from typing import Any, cast
 
 from pydantic import BaseModel
 
-from horsies.core.brokers.result_types import BrokerWaitInsideTask
+from horsies.core.brokers.result_types import DatabaseWaitInsideTask
 from horsies.core.codec.json_value import JsonValue
 from horsies.core.models.outcome import ReadResult, WaitInsideTask
 from horsies.core.models.tasks import (
-    OperationalErrorCode,
+    OperationalCode,
     TaskError,
 )
 from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
@@ -136,7 +136,7 @@ def return_none_task() -> Result[int, TaskError]:
 @app.task(task_name='e2e_error_code')
 def error_code_task() -> Result[str, TaskError]:
     return Err(
-        TaskError(error_code=OperationalErrorCode.TASK_EXCEPTION, message='boom')
+        TaskError(error_code=OperationalCode.TASK_EXCEPTION, message='boom')
     )
 
 
@@ -297,7 +297,7 @@ def wait_inside_task() -> Result[dict[str, bool], TaskError]:
             'thread_get_refused': thread_refusals == [True],
             'app_get_result_refused': _refused(read),
             'raw_refused': is_err(raw)
-            and isinstance(raw.err_value, BrokerWaitInsideTask),
+            and isinstance(raw.err_value, DatabaseWaitInsideTask),
             'workflow_started': is_ok(started),
             'workflow_get_refused': is_ok(started)
             and _refused(started.ok_value.get(timeout_ms=1000)),

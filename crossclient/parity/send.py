@@ -197,6 +197,7 @@ async def _rerun_one(rerun: Rerun, sent: list[str]) -> str:
                 connection,
                 RerunTask(source_task_id=source, deadline=None),
                 RERUN_POLICY,
+                registered_task_codes=parity.app.registered_task_codes(),
             )
     finally:
         await engine.dispose()

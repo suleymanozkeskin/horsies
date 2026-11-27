@@ -5,7 +5,7 @@
 //! generated class of the core's `TaskActionError`
 //! (`horsies._catalog.monitoring_errors`: `TaskActionNotFound`,
 //! `TaskActionNotCancellable`, `TaskActionWorkflowTask`,
-//! `TaskActionDbOperationFailed` or `TaskActionStoredDataInvalid`), built in
+//! `TaskActionDatabaseOperationFailed` or `TaskActionStoredDataInvalid`), built in
 //! Rust (`catalog_errors`). The core gives each class its message, so the
 //! Python client returns it as it is. An outcome that contradicts the
 //! function panics in the core and raises `PanicException`, as Python
@@ -68,7 +68,7 @@ fn cancel_outcome(answer: TaskActionResult<TaskCancelled>) -> CancelOutcome {
 
 /// Cancel one plain task. Writes, in one statement; a caller that leaves
 /// early does not stop the statement, and sees its outcome as unknown. A
-/// failed connect is `TaskActionDbOperationFailed`: nothing was sent.
+/// failed connect is `TaskActionDatabaseOperationFailed`: nothing was sent.
 pub async fn cancel_task_operation(
     connection: BrokerConnection,
     task_id: Uuid,
@@ -114,14 +114,14 @@ mod tests {
             task(),
             BrokerError::ClaimContract("planned failure".to_owned()),
         )));
-        let CancelOutcome::Refused(TaskActionError::DbOperationFailed {
+        let CancelOutcome::Refused(TaskActionError::DatabaseOperationFailed {
             message,
             retryable,
             task_id,
             cause,
         }) = outcome
         else {
-            panic!("a broker failure stays DbOperationFailed");
+            panic!("a broker failure stays DatabaseOperationFailed");
         };
         assert_eq!(
             message,

@@ -284,14 +284,14 @@ def make_retryable_task(
     max_retries: int = 3,
 ) -> Any:
     """Create a task with a retry policy configured."""
-    from horsies.core.models.tasks import RetryPolicy
+    from horsies.core.models.tasks import OperationalCode, RetryPolicy
 
     # Create fixed intervals list matching max_retries count
     intervals = [60] * max_retries
 
     @app.task(
         task_name=name,
-        retry_policy=RetryPolicy.fixed(intervals, auto_retry_for=['TASK_EXCEPTION']),
+        retry_policy=RetryPolicy.fixed(intervals, auto_retry_for=[OperationalCode.TASK_EXCEPTION]),
     )
     def retryable_task(*, value: int) -> Result[int, TaskError]:
         return Ok(value * 2)

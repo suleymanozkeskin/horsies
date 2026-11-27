@@ -201,7 +201,7 @@ describe("the workflow operations of a task child", () => {
 
     const direct = envelopeValue(await workflowsAddon().resumeWorkflow(app.native, workflowId));
 
-    assert.equal(direct.kind === "failed" ? direct.error.class : direct.kind, "HandleDbOperationFailed");
+    assert.equal(direct.kind === "failed" ? direct.error.class : direct.kind, "WorkflowHandleDatabaseOperationFailed");
     assert.equal(envelopeValue(await child.close()), "CLOSED");
     await reader.close();
   });
@@ -214,11 +214,11 @@ describe("the workflow operations of a task child", () => {
       await workflowsChildProducerProbeAddon().probeWorkflowStatusInChild(app.native, child, randomUUID()),
     );
 
-    assert.equal(read.kind === "failed" ? read.error.class : read.kind, "HandleWorkflowNotFound");
+    assert.equal(read.kind === "failed" ? read.error.class : read.kind, "WorkflowHandleNotFound");
 
     const direct = envelopeValue(await workflowsAddon().workflowStatus(app.native, randomUUID()));
 
-    assert.equal(direct.kind === "failed" ? direct.error.class : direct.kind, "HandleDbOperationFailed");
+    assert.equal(direct.kind === "failed" ? direct.error.class : direct.kind, "WorkflowHandleDatabaseOperationFailed");
     assert.equal(envelopeValue(await child.close()), "CLOSED");
   });
 });

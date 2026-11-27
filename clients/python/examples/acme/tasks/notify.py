@@ -13,7 +13,7 @@ from horsies import (
     Err,
     Failed,
     Ok,
-    OperationalErrorCode,
+    OperationalCode,
     Result,
     RetryPolicy,
     Succeeded,
@@ -42,7 +42,7 @@ APOLOGY_TEMPLATE = 'order-problem'
     queue_name=QUEUE_NOTIFICATIONS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def send_order_email(
@@ -84,7 +84,7 @@ def send_order_email(
     queue_name=QUEUE_NOTIFICATIONS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def send_shipping_sms(
@@ -123,7 +123,7 @@ def send_shipping_sms(
     queue_name=QUEUE_NOTIFICATIONS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def marketing_blast(*, segment: str) -> Result[MarketingBlast, TaskError]:
@@ -149,7 +149,7 @@ def marketing_blast(*, segment: str) -> Result[MarketingBlast, TaskError]:
     queue_name=QUEUE_NOTIFICATIONS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        auto_retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def winback_blast(

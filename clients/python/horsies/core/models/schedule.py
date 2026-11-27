@@ -7,7 +7,7 @@ from typing_extensions import Self
 from enum import Enum
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     ValidationReport,
     raise_collected,
 )
@@ -64,7 +64,7 @@ class IntervalSchedule(BaseModel):
             report.add(
                 ConfigurationError(
                     message='IntervalSchedule requires at least one time unit',
-                    code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                    code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
                     notes=['all time units (seconds, minutes, hours, days) are None'],
                     help_text='specify at least one: seconds, minutes, hours, or days',
                 )
@@ -119,7 +119,7 @@ def _validate_time_of_day(
         report.add(
             ConfigurationError(
                 message=f'{pattern_name} time has a time zone',
-                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
                 notes=[f'time: {value.isoformat()}'],
                 help_text=(
                     "give the time without tzinfo and set the zone in the schedule's "
@@ -131,7 +131,7 @@ def _validate_time_of_day(
         report.add(
             ConfigurationError(
                 message=f'{pattern_name} time has microseconds',
-                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
                 notes=[f'time: {value.isoformat()}'],
                 help_text=(
                     'schedules fire at whole seconds; give the time without microseconds'
@@ -196,7 +196,7 @@ class WeeklySchedule(BaseModel):
             report.add(
                 ConfigurationError(
                     message='WeeklySchedule has duplicate days',
-                    code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                    code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
                     notes=[f'days: {[d.value for d in self.days]}'],
                     help_text='each day should appear only once in the list',
                 )
@@ -478,7 +478,7 @@ def _numeric_config_error(field_name: str, detail: str) -> ConfigurationError:
     """Build a CONFIG_INVALID_SCHEDULE error scoped to a named field."""
     return ConfigurationError(
         message=f"invalid cron '{field_name}' field: {detail}",
-        code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+        code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
         notes=[f'field: {field_name}'],
         help_text=f'every {field_name} value must satisfy the field domain',
     )
@@ -673,7 +673,7 @@ def _validate_satisfiable(
                 report.add(
                     ConfigurationError(
                         message='cron schedule can never fire',
-                        code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                        code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
                         notes=[
                             f'months: {sorted(month_set)}',
                             f'days-of-month: {sorted(dom_set)}',
@@ -865,7 +865,7 @@ class ScheduleConfig(BaseModel):
             report.add(
                 ConfigurationError(
                     message='duplicate schedule names',
-                    code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                    code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
                     notes=[f'schedule names: {names}'],
                     help_text='each schedule must have a unique name',
                 )

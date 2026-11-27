@@ -186,7 +186,7 @@ app.on_event_blocking::<AttemptEnded>("audit.write", write_audit_row)?;
 | `name` | `impl Into<String>` | The handler's name and metric label |
 | `handler` | `impl AsyncFn(E) -> Result<(), HandlerError> + Send + Sync + 'static` | The async handler |
 
-**Errors:** `HorsiesError` with the code of the same refusal of the Python registration: `HRS-225` (`ErrorCode::EventHandlerInvalidName`) for a name that is empty, longer than 255 characters or `(unknown)`, `HRS-224` (`ErrorCode::EventHandlerDuplicateName`) for a name that another handler has, `HRS-226` (`ErrorCode::EventHandlerLimit`) for a 33rd handler. Nothing is registered then.
+**Errors:** `HorsiesError` with the code of the same refusal of the Python registration: `HRS-225` (`HorsiesErrorCode::EventHandlerInvalidName`) for a name that is empty, longer than 255 characters or `(unknown)`, `HRS-224` (`HorsiesErrorCode::EventHandlerDuplicateName`) for a name that another handler has, `HRS-226` (`HorsiesErrorCode::EventHandlerLimit`) for a 33rd handler. Nothing is registered then.
 
 ### `Horsies::on_event_blocking::<E>(name, handler) -> Result<(), HorsiesError>`
 

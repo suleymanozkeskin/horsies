@@ -21,7 +21,7 @@ from horsies import (
     Err,
     Failed,
     Ok,
-    OperationalErrorCode,
+    OperationalCode,
     OutcomeCode,
     Result,
     Succeeded,
@@ -30,9 +30,9 @@ from horsies import (
     UnknownCustomCode,
 )
 from horsies.core.app import Horsies
-from horsies.core.brokers.result_types import BrokerResult, RawResultRecord
+from horsies.core.brokers.result_types import DatabaseResult, RawResultRecord
 from horsies.core.codec.typed import encode_returned_result
-from horsies.core.errors import ErrorCode, TaskDefinitionError
+from horsies.core.errors import HorsiesErrorCode, TaskDefinitionError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import EnumCodes, TextCodes
@@ -66,7 +66,7 @@ def _app(mapper: dict[type[BaseException], str] | None = None) -> Horsies:
     ))
 
 
-def _stored_error(code: str) -> BrokerResult[RawResultRecord | None]:
+def _stored_error(code: str) -> DatabaseResult[RawResultRecord | None]:
     return Ok(RawResultRecord(
         task_id=TASK_ID,
         task_name='send_welcome_email',
@@ -142,7 +142,7 @@ def test_typed_error_without_its_declaration_is_refused() -> None:
         def send_welcome_email(*, email: str) -> Result[str, TaskError[WelcomeCode]]:  # pyright: ignore[reportUnusedFunction]
             return Ok(email)
 
-    assert refused.value.code == ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
+    assert refused.value.code == HorsiesErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
 
 
 def test_mapper_code_outside_the_enum_is_refused() -> None:
@@ -153,7 +153,7 @@ def test_mapper_code_outside_the_enum_is_refused() -> None:
         def send_welcome_email(*, email: str) -> Result[str, TaskError[WelcomeCode]]:  # pyright: ignore[reportUnusedFunction]
             return Ok(email)
 
-    assert refused.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
+    assert refused.value.code == HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
 
 
 def test_mapped_exception_gives_the_member() -> None:
@@ -208,7 +208,7 @@ def test_stored_code_that_the_enum_does_not_name_is_unknown_custom_code() -> Non
 
 
 def test_built_in_code_reads_unchanged_with_typed_codes() -> None:
-    stored: BrokerResult[RawResultRecord | None] = Ok(RawResultRecord(
+    stored: DatabaseResult[RawResultRecord | None] = Ok(RawResultRecord(
         task_id=TASK_ID, task_name='send_welcome_email', status=TaskStatus.CANCELLED, raw_result=None,
     ))
     match read_of_record(TASK_ID, stored, str, None, EnumCodes(code_type=WelcomeCode)):
@@ -298,7 +298,7 @@ def test_args_from_source_with_other_codes_is_refused() -> None:
     )
 
     assert refusal is not None
-    assert refusal.code == ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
+    assert refusal.code == HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
 
 def test_args_from_source_with_the_same_codes_is_accepted() -> None:
@@ -385,7 +385,7 @@ def test_results_map_folds_an_unknown_code_into_the_entry() -> None:
     from horsies.core.models.workflow.handle import _folded
 
     match _folded('n', _node_decode(_typed_app(), 'send_welcome_email', 'RATE_LIMITED')):
-        case Failed(TaskError(error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, data=data)):
+        case Failed(TaskError(error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR, data=data)):
             assert isinstance(data, dict) and data['custom_code'] == 'RATE_LIMITED'
         case other:
             pytest.fail(f'expected Failed(RESULT_DESERIALIZATION_ERROR), got {other!r}')
@@ -430,7 +430,7 @@ def test_context_entry_with_an_unknown_code_is_result_deserialization_error() ->
     match child_runner._context_entry(
         'n', Failed(TaskError(error_code='RATE_LIMITED')), EnumCodes(code_type=WelcomeCode),
     ):
-        case Failed(TaskError(error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, data=data)):
+        case Failed(TaskError(error_code=OperationalCode.RESULT_DESERIALIZATION_ERROR, data=data)):
             assert isinstance(data, dict) and data['custom_code'] == 'RATE_LIMITED'
         case other:
             pytest.fail(f'expected Failed(RESULT_DESERIALIZATION_ERROR), got {other!r}')

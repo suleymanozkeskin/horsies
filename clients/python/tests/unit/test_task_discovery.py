@@ -16,7 +16,7 @@ import pytest
 from horsies._core import RuntimeStartFailed
 from horsies.core.app import Horsies
 from horsies.core.cli import discover_app
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig, SessionDatabaseSeparate
 
@@ -372,7 +372,7 @@ class TestCheckTaskImportsErrorClassification:
         errors = app.check().refusals
 
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.CLI_INVALID_ARGS
+        assert errors[0].code == HorsiesErrorCode.CLI_INVALID_ARGS
         assert 'failed to import module' in errors[0].message
 
     def test_missing_file_path_returns_e206(self, tmp_path: Path) -> None:
@@ -384,11 +384,11 @@ class TestCheckTaskImportsErrorClassification:
         errors = app.check().refusals
 
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.CLI_INVALID_ARGS
+        assert errors[0].code == HorsiesErrorCode.CLI_INVALID_ARGS
         assert 'task module not found' in errors[0].message
 
     def test_type_error_in_module_returns_e210(self, tmp_path: Path) -> None:
-        """Module that raises TypeError during import -> HRS-210 (MODULE_EXEC_ERROR)."""
+        """Module that raises TypeError during import -> HRS-210 (MODULE_IMPORT_ERROR)."""
         bad_module = tmp_path / 'bad_type.py'
         bad_module.write_text('raise TypeError("missing required argument")')
 
@@ -398,13 +398,13 @@ class TestCheckTaskImportsErrorClassification:
         errors = app.check().refusals
 
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.MODULE_EXEC_ERROR
+        assert errors[0].code == HorsiesErrorCode.MODULE_IMPORT_ERROR
         assert 'error while importing module' in errors[0].message
         assert 'TypeError' in errors[0].notes[0]
         assert 'missing required argument' in errors[0].notes[0]
 
     def test_attribute_error_in_module_returns_e210(self, tmp_path: Path) -> None:
-        """Module that raises AttributeError during import -> HRS-210 (MODULE_EXEC_ERROR)."""
+        """Module that raises AttributeError during import -> HRS-210 (MODULE_IMPORT_ERROR)."""
         bad_module = tmp_path / 'bad_attr.py'
         bad_module.write_text('None.nonexistent_method()')
 
@@ -414,7 +414,7 @@ class TestCheckTaskImportsErrorClassification:
         errors = app.check().refusals
 
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.MODULE_EXEC_ERROR
+        assert errors[0].code == HorsiesErrorCode.MODULE_IMPORT_ERROR
         assert 'AttributeError' in errors[0].notes[0]
 
     def test_import_error_in_module_returns_e206(self, tmp_path: Path) -> None:
@@ -428,11 +428,11 @@ class TestCheckTaskImportsErrorClassification:
         errors = app.check().refusals
 
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.CLI_INVALID_ARGS
+        assert errors[0].code == HorsiesErrorCode.CLI_INVALID_ARGS
         assert 'failed to import module' in errors[0].message
 
     def test_syntax_error_in_module_returns_e210(self, tmp_path: Path) -> None:
-        """Module with syntax error -> HRS-210 (MODULE_EXEC_ERROR)."""
+        """Module with syntax error -> HRS-210 (MODULE_IMPORT_ERROR)."""
         bad_module = tmp_path / 'bad_syntax.py'
         bad_module.write_text('def broken(\n')
 
@@ -442,7 +442,7 @@ class TestCheckTaskImportsErrorClassification:
         errors = app.check().refusals
 
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.MODULE_EXEC_ERROR
+        assert errors[0].code == HorsiesErrorCode.MODULE_IMPORT_ERROR
         assert 'SyntaxError' in errors[0].notes[0]
 
     def test_help_text_differs_between_e206_and_e210(self, tmp_path: Path) -> None:
@@ -457,8 +457,8 @@ class TestCheckTaskImportsErrorClassification:
 
         # check() early-returns on first phase errors, so both should appear
         assert len(errors) == 2
-        e206 = [e for e in errors if e.code == ErrorCode.CLI_INVALID_ARGS]
-        e210 = [e for e in errors if e.code == ErrorCode.MODULE_EXEC_ERROR]
+        e206 = [e for e in errors if e.code == HorsiesErrorCode.CLI_INVALID_ARGS]
+        e210 = [e for e in errors if e.code == HorsiesErrorCode.MODULE_IMPORT_ERROR]
         assert len(e206) == 1
         assert len(e210) == 1
         assert 'importable' in (e206[0].help_text or '')
@@ -570,7 +570,7 @@ class TestLiveBrokerConnectivityCheck:
                 errors = app.check(live=True).refusals
 
             assert len(errors) == 1, step
-            assert errors[0].code == ErrorCode.DATABASE_INVALID_URL
+            assert errors[0].code == HorsiesErrorCode.DATABASE_INVALID_URL
             assert errors[0].message == 'broker connectivity check failed'
             assert errors[0].notes == ['db down']
             assert built[0].closes == 1
@@ -581,7 +581,7 @@ class TestLiveBrokerConnectivityCheck:
         with _core_check(RuntimeStartFailed('the core runtime could not start')) as built:
             errors = app.check(live=True).refusals
 
-        assert [error.code for error in errors] == [ErrorCode.DATABASE_INVALID_URL]
+        assert [error.code for error in errors] == [HorsiesErrorCode.DATABASE_INVALID_URL]
         assert errors[0].notes == ['the core runtime could not start']
         assert built[0].closes == 1
 
@@ -610,7 +610,7 @@ class TestLiveBrokerConnectivityCheck:
             errors = app.check(live=True).refusals
 
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.DATABASE_INVALID_URL
+        assert errors[0].code == HorsiesErrorCode.DATABASE_INVALID_URL
         assert errors[0].message == 'broker listener capability check failed'
         assert errors[0].notes is not None
         assert (
@@ -635,7 +635,7 @@ class TestDiscoverAppErrorClassification:
         with pytest.raises(ConfigurationError) as exc_info:
             discover_app(f'{bad_file}:app')
 
-        assert exc_info.value.code == ErrorCode.MODULE_EXEC_ERROR
+        assert exc_info.value.code == HorsiesErrorCode.MODULE_IMPORT_ERROR
         assert 'TypeError' in exc_info.value.notes[0]
 
     def test_file_path_import_error_returns_e206(self, tmp_path: Path) -> None:
@@ -646,7 +646,7 @@ class TestDiscoverAppErrorClassification:
         with pytest.raises(ConfigurationError) as exc_info:
             discover_app(f'{bad_file}:app')
 
-        assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+        assert exc_info.value.code == HorsiesErrorCode.CLI_INVALID_ARGS
 
     def test_dotted_path_type_error_returns_e210(self, tmp_path: Path) -> None:
         """Dotted module that raises TypeError -> HRS-210 via discover_app()."""
@@ -664,7 +664,7 @@ class TestDiscoverAppErrorClassification:
             with pytest.raises(ConfigurationError) as exc_info:
                 discover_app('test_pkg_e210.crasher:app')
 
-            assert exc_info.value.code == ErrorCode.MODULE_EXEC_ERROR
+            assert exc_info.value.code == HorsiesErrorCode.MODULE_IMPORT_ERROR
             assert 'TypeError' in exc_info.value.notes[0]
         finally:
             sys.path[:] = original_path
@@ -687,7 +687,7 @@ class TestDiscoverAppErrorClassification:
                 discover_app('test_pkg_e206.bad_dep:app')
 
             # ModuleNotFoundError (subclass of ImportError) -> HRS-206
-            assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+            assert exc_info.value.code == HorsiesErrorCode.CLI_INVALID_ARGS
         finally:
             sys.path[:] = original_path
             sys.modules.pop('test_pkg_e206.bad_dep', None)

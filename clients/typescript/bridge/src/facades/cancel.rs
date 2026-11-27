@@ -149,9 +149,9 @@ mod tests {
         let refused = TaskActionError::cancel_failed(task(), BrokerError::ListenerClosed);
         match cancel_outcome(Err(refused)) {
             Outcome::Failed(error) => {
-                assert_eq!(error.class, "TaskActionDbOperationFailed");
+                assert_eq!(error.class, "TaskActionDatabaseOperationFailed");
                 let names: Vec<&str> = error.slots.iter().map(|slot| slot.name.as_str()).collect();
-                assert_eq!(names, ["message", "retryable", "task_id", "exception"]);
+                assert_eq!(names, ["message", "retryable", "task_id", "cause"]);
             }
             Outcome::Done(record) => panic!("a refused cancel, got {record:?}"),
         }

@@ -231,7 +231,7 @@ def log_end(event: AttemptEnded) -> None: ...
 
 **Raises:** `ConfigurationError` with one code per rule:
 
-<!-- members: ErrorCode subset -->
+<!-- members: HorsiesErrorCode subset -->
 | Code | When |
 |------|------|
 | `HRS-222` | `event_type` is not an event type (at the call of `on_event`) |

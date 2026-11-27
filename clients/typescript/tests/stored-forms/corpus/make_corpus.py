@@ -1,7 +1,8 @@
 # pyright: strict
 '''Write the corpus files of the TypeScript stored-form tests: Python's stored text of floats, decimals, date-times
 and times of day; the decimal texts that the Python client accepts and refuses; Python's whitespace and digit
-tables of `Decimal`.
+tables of `Decimal`; the stored text of a recursive model, of tuples with a variadic item, and of a model with a
+`default_factory` member (`structures.json`).
 
 Run from the repository root. The command installs only pydantic, in a cached environment; it builds no part
 of the repository:
@@ -11,11 +12,12 @@ of the repository:
 
 The steps are those of the Python client's typed encode (`clients/python/horsies/core/codec/typed.py`):
 `TypeAdapter(T).validate_python`, `dump_python(mode='json')`, then the text of `dumps_json`
-(`json.dumps(ensure_ascii=False, separators=(',', ':'), allow_nan=False)`). The script does not import horsies.
+(`json.dumps(ensure_ascii=False, separators=(',', ':'), allow_nan=False)`). A read is the client's typed decode:
+`validate_json(text, strict=True)`. The script does not import horsies.
 One fixed seed: the same Python and pydantic versions write the same files.
 
-Exit status: 0 when the files are written; 1 when pydantic and `str(Decimal)` disagree on a corpus text (no
-file is written then); 2 for a usage error.
+Exit status: 0 when the files are written; 1 when pydantic and `str(Decimal)` disagree on a corpus text, or Python
+does not read a structure text as the tests expect (no file is written then); 2 for a usage error.
 '''
 
 import datetime as dt
@@ -27,11 +29,13 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import unicodedata
+import uuid
 from typing import Final, Literal, TypedDict
 
 import pydantic
 import pydantic_core
-from pydantic import TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter
+from pydantic_core import SchemaSerializer, SchemaValidator, core_schema
 
 SEED: Final = 20261125
 FLOAT_COUNT: Final = 10_000
@@ -158,6 +162,53 @@ class CorpusRefused:
     '''Pydantic and `str(Decimal)` disagree on a corpus text: the corpus would not pin one text.'''
 
     reason: str
+
+
+class Tree(BaseModel):
+    '''A recursive model: a node and the list of its child nodes.'''
+
+    name: str
+    children: list['Tree']
+
+
+class Item(BaseModel):
+    '''A model whose `id` member has a `default_factory`: each read that leaves it out gets a new UUID.'''
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4)
+    name: str
+
+
+class StructureText(TypedDict):
+    case: str
+    text: str
+
+
+class StructureRefused(TypedDict):
+    case: str
+    text: str
+    loc: list[int | str]
+
+
+TREE_VALUE: Final = {
+    'name': 'root',
+    'children': [
+        {'name': 'a', 'children': []},
+        {'name': 'b', 'children': [{'name': 'c', 'children': []}]},
+    ],
+}
+ITEM_ID: Final = '1b4e28ba-2fa1-11d2-883f-b9a761bde3fb'
+VARIADIC_VALUES: Final = [[], [True], [True, False, True]]
+REST_VALUES: Final = [[1, 'a'], [1, 'a', True], [1, 'a', True, False, True]]
+REST_REFUSED: Final = '[1,"a",true,0]'
+ITEM_LEFT_OUT: Final = '{"name":"a"}'
+
+# pydantic 2.13 reads `tuple[int, str, *tuple[bool, ...]]` as a tuple of three items (the last one a nested tuple),
+# so the tuple with fixed items and a variadic item is pydantic-core's own tuple schema: `variadic_item_index` names
+# the item that repeats. `tuple[bool, ...]` is that schema with no fixed items.
+REST_SCHEMA: Final = core_schema.tuple_schema(
+    [core_schema.int_schema(), core_schema.str_schema(), core_schema.bool_schema()],
+    variadic_item_index=2,
+)
 
 
 def stored_text[T](adapter: TypeAdapter[T], value: object) -> str:
@@ -438,6 +489,53 @@ def decimal_fuzz_lines(digit_zeros: list[int]) -> list[str]:
     return lines
 
 
+def core_stored_text(value: object) -> str:
+    '''The stored text of `value` under `REST_SCHEMA`: the steps of `stored_text` on pydantic-core's schema.'''
+    validated = SchemaValidator(REST_SCHEMA).validate_python(value)
+    dumped = SchemaSerializer(REST_SCHEMA).to_python(validated, mode='json')
+    return json.dumps(
+        dumped, ensure_ascii=False, separators=(',', ':'), allow_nan=False
+    )
+
+
+def refused_loc(text: str) -> list[int | str] | None:
+    '''The location of the first error of the strict read of `text` under `REST_SCHEMA`, or None when it reads.'''
+    try:
+        SchemaValidator(REST_SCHEMA).validate_json(text, strict=True)
+    except pydantic_core.ValidationError as error:
+        return list(error.errors()[0]['loc'])
+    return None
+
+
+def structure_texts() -> list[StructureText]:
+    '''The stored text of each structure value, each read back by the strict read to the same text.'''
+    tree = TypeAdapter(Tree)
+    variadic = TypeAdapter(tuple[bool, ...])
+    item = TypeAdapter(Item)
+    texts = [StructureText(case='recursive_model', text=stored_text(tree, TREE_VALUE))]
+    texts += [StructureText(case='variadic_tuple', text=stored_text(variadic, value)) for value in VARIADIC_VALUES]
+    texts += [StructureText(case='tuple_with_rest', text=core_stored_text(value)) for value in REST_VALUES]
+    texts.append(StructureText(case='default_factory', text=stored_text(item, {'id': ITEM_ID, 'name': 'a'})))
+    return texts
+
+
+def structure_lines() -> dict[str, object] | CorpusRefused:
+    '''The structure cases. A refusal when Python does not read a text as the tests expect.'''
+    item = TypeAdapter(Item)
+    first = item.validate_json(ITEM_LEFT_OUT, strict=True)
+    second = item.validate_json(ITEM_LEFT_OUT, strict=True)
+    if first.id == second.id:
+        return CorpusRefused('two reads of a text that leaves out a default_factory member gave one value')
+    loc = refused_loc(REST_REFUSED)
+    if loc is None:
+        return CorpusRefused(f'the strict read accepts {REST_REFUSED}')
+    return {
+        'texts': structure_texts(),
+        'refused': [StructureRefused(case='tuple_with_rest', text=REST_REFUSED, loc=loc)],
+        'default_factory_left_out': ITEM_LEFT_OUT,
+    }
+
+
 def write_lines(path: Path, lines: list[str]) -> None:
     path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
@@ -455,6 +553,9 @@ def write_corpus(folder: Path) -> CorpusRefused | None:
     if isinstance(digit_zeros, CorpusRefused):
         return digit_zeros
     fuzz = decimal_fuzz_lines(digit_zeros)
+    structures = structure_lines()
+    if isinstance(structures, CorpusRefused):
+        return structures
     write_lines(
         folder / 'floats.txt',
         [f'{float_bits(value)} {stored_text(FLOAT, value)}' for value in floats],
@@ -471,6 +572,9 @@ def write_corpus(folder: Path) -> CorpusRefused | None:
     (folder / 'decimal-tables.json').write_text(
         json.dumps(tables) + '\n', encoding='utf-8'
     )
+    (folder / 'structures.json').write_text(
+        json.dumps(structures, ensure_ascii=False, indent=1) + '\n', encoding='utf-8'
+    )
     facts = {
         'python': sys.version.split()[0],
         'pydantic': pydantic.VERSION,
@@ -482,6 +586,7 @@ def write_corpus(folder: Path) -> CorpusRefused | None:
         'times': len(times),
         'decimal_fuzz': len(fuzz),
         'decimal_fuzz_refused': sum(1 for line in fuzz if line.endswith(', null]')),
+        'structures': len(structure_texts()),
     }
     (folder / 'corpus.json').write_text(
         json.dumps(facts, indent=1) + '\n', encoding='utf-8'

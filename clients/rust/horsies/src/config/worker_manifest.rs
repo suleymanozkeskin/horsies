@@ -200,7 +200,7 @@ pub(crate) fn task_records(tasks: &TaskRegistry) -> BTreeMap<String, wire::TaskM
 /// The declared error codes of the registered task `name`. The
 /// registration refused a set that breaks a rule (`register_task`), so a
 /// refusal here is a defect: it panics with the task and the cause.
-fn declared_codes(name: &str, task: &RegisteredTask) -> DeclaredErrorCodes {
+pub(crate) fn declared_codes(name: &str, task: &RegisteredTask) -> DeclaredErrorCodes {
     DeclaredErrorCodes::parse(task.error_codes()).unwrap_or_else(|refused| {
         panic!("task '{name}' was registered with error codes that the registration refuses: {refused}")
     })

@@ -2,7 +2,7 @@
 // `PayloadPolicy`, `core/src/core/config/payload.rs`). A refusal of a payload field has the code of the payload
 // guardrail (`HRS-227`).
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import {
   accepted,
@@ -27,7 +27,7 @@ export interface PayloadPolicyInput {
 }
 
 /** A `u64` field of the payload guardrail. */
-const PAYLOAD_U64 = u64Field(ErrorCode.CONFIG_INVALID_PAYLOAD);
+const PAYLOAD_U64 = u64Field(HorsiesErrorCode.CONFIG_INVALID_PAYLOAD);
 
 /** The core's `payload` object of `input`. Pure. */
 export function payloadJson(input: PayloadPolicyInput, path: string): Checked<ConfigJson> {

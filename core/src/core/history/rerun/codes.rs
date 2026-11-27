@@ -53,4 +53,11 @@ pub enum RerunErrorCode {
     /// text, for example a `pg` client with `binary: true`. The statement
     /// ran: roll the caller's transaction back.
     ResultNotText,
+    /// The stored retry list of the source names a custom code that the
+    /// task does not declare in the calling app. Nothing was written.
+    RetryCodeNotDeclared,
+    /// The stored retry list of the source names a custom code, and the
+    /// calling app does not register the task, so the code cannot be
+    /// checked. Nothing was written.
+    TaskNotRegistered,
 }

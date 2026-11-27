@@ -11,7 +11,7 @@
 
 use chrono::{DateTime, TimeDelta, Utc};
 use horsies_core::{
-    BoundedTaskList, BrokerError, BrokerOperationError, BrokerOperationSource, ExpiredTaskRow,
+    BoundedTaskList, BrokerError, BrokerOperationSource, DatabaseOperationError, ExpiredTaskRow,
     StaleMinutes, StaleTaskRow, StaleThresholdRefusal,
 };
 use pyo3::prelude::*;
@@ -210,7 +210,7 @@ pub fn stale_threshold(
 pub(crate) fn connect_failed(operation: &'static str, error: BrokerError) -> BrokerFailure {
     BrokerFailure::of_operation_error(
         operation,
-        BrokerOperationError::monitoring_query_failed(
+        DatabaseOperationError::monitoring_query_failed(
             operation,
             BrokerOperationSource::Broker(error),
         ),
@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(failed.subject, "get_expired_tasks");
         assert_eq!(
             failed.error.code(),
-            horsies_core::BrokerErrorCode::MonitoringQueryFailed
+            horsies_core::DatabaseErrorCode::MonitoringQueryFailed
         );
         assert_eq!(
             failed.error.message(),

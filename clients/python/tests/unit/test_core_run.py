@@ -22,7 +22,7 @@ from pydantic import SecretStr
 from horsies import _core
 from horsies._catalog import worker_manifest as wire
 from horsies.core.app import Horsies
-from horsies.core.errors import ConfigurationError, ErrorCode, HorsiesError
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode, HorsiesError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.worker_profile import IsolatedChildren, WorkerProfile
@@ -80,7 +80,7 @@ def _no_panic_rule() -> Generator[MagicMock, None, None]:
 def test_a_broker_that_does_not_build_is_a_startup_error() -> None:
     reported = _Reported()
     app = _app()
-    refused = HorsiesError(message='broker refused', code=ErrorCode.BROKER_INIT_FAILED)
+    refused = HorsiesError(message='broker refused', code=HorsiesErrorCode.DATABASE_INIT_FAILED)
     with (
         _no_panic_rule() as set_panic_rule,
         patch.object(Horsies, 'get_broker', side_effect=refused),
@@ -103,7 +103,7 @@ def test_a_profile_that_the_core_refuses_is_reported_with_its_lines() -> None:
     assert reported.errors
     for error in reported.errors:
         assert isinstance(error, ConfigurationError)
-        assert error.code is ErrorCode.CONFIG_INVALID_WORKER_PROFILE
+        assert error.code is HorsiesErrorCode.CONFIG_INVALID_WORKER_PROFILE
     assert any('missing' in error.message for error in reported.errors)
 
 
@@ -122,7 +122,7 @@ def test_a_locator_in_main_is_a_startup_error_before_any_core_call() -> None:
     assert len(reported.errors) == 1
     error = reported.errors[0]
     assert isinstance(error, ConfigurationError)
-    assert error.code is ErrorCode.WORKER_INVALID_LOCATOR
+    assert error.code is HorsiesErrorCode.WORKER_INVALID_LOCATOR
     assert "'__main__:app'" in error.message
     set_panic_rule.assert_not_called()
     get_broker.assert_not_called()

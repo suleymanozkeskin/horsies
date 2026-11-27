@@ -1,7 +1,7 @@
 use crate::broker::core_rows::{column, one_row, RowDecodeError};
 use crate::broker::PostgresBroker;
 use crate::core::config::retention::PausedWorkflowAge;
-use crate::core::workflow::handle_types::{HandleOperation, HandleOperationError, HandleResult};
+use crate::core::workflow::handle_types::{HandleOperation, HandleResult, WorkflowHandleError};
 #[cfg(test)]
 use crate::test_support::child_specs::TestChildSpecs;
 use uuid::Uuid;
@@ -93,13 +93,13 @@ fn paused_expiry_outcome(rows: Vec<Row>) -> Result<PausedExpiry, StepContractErr
 /// variant's typed cause, and the message is Python's: the operation's label, the workflow id and the
 /// error's text ([`HandleOperation::failure_message`]).
 ///
-/// - No workflow has the id: `WORKFLOW_NOT_FOUND` ([`HandleOperationError::not_found`]).
+/// - No workflow has the id: `WORKFLOW_NOT_FOUND` ([`WorkflowHandleError::not_found`]).
 /// - A stored value that does not parse (an unknown status, a stored JSON value) is `STORED_DATA_INVALID`,
 ///   not retryable: the same call gets the same answer (`core/models/workflow/handle_types.py:33-57`).
 /// - A failure of a step on the statement layer (`WorkflowError::Broker` with `BrokerError::Statement`) is
-///   `DB_OPERATION_FAILED`, retryable by the statement layer's transience.
+///   `DATABASE_OPERATION_FAILED`, retryable by the statement layer's transience.
 ///
-/// The other variants have no entry in the handle catalog (Python's `HandleErrorCode`,
+/// The other variants have no entry in the handle catalog (Python's `WorkflowHandleErrorCode`,
 /// `clients/python/horsies/core/models/workflow/handle_types.py`). Each is a defect at this boundary, and the call
 /// panics with the workflow id and the cause, where Python raises:
 /// - `StepContract`: a step row outside its function's contract; the core and the installed baseline
@@ -107,19 +107,19 @@ fn paused_expiry_outcome(rows: Vec<Row>) -> Result<PausedExpiry, StepContractErr
 /// - `Validation`: only the host build of a child that a resume owes gives it (a stored node input that the
 ///   `args_from` merge refuses, a built child spec that the tree arguments refuse); Python's resume lets
 ///   every exception other than a database error propagate.
-pub(crate) fn handle_operation_error(
+pub(crate) fn workflow_handle_error(
     operation: &HandleOperation,
     error: WorkflowError,
     workflow_id: Uuid,
-) -> HandleOperationError {
+) -> WorkflowHandleError {
     match error {
-        WorkflowError::WorkflowNotFound { .. } => HandleOperationError::not_found(workflow_id),
+        WorkflowError::WorkflowNotFound { .. } => WorkflowHandleError::not_found(workflow_id),
         // The step rolled back. A build that did not run is retryable; an
         // interrupted one, or one that raised, is not. The Python client
         // raises the interrupt, or the exception of a start or a resume,
         // again to its caller before it reads this error.
         WorkflowError::Broker(_) | WorkflowError::ChildSpecSource(_) => {
-            HandleOperationError::DbOperationFailed {
+            WorkflowHandleError::DatabaseOperationFailed {
                 message: operation.failure_message(workflow_id, &error),
                 retryable: error.is_retryable(),
                 workflow_id,
@@ -127,7 +127,7 @@ pub(crate) fn handle_operation_error(
             }
         }
         WorkflowError::InvalidStatus(_) | WorkflowError::Serialization(_) => {
-            HandleOperationError::StoredDataInvalid {
+            WorkflowHandleError::StoredDataInvalid {
                 message: operation.failure_message(workflow_id, &error),
                 workflow_id,
                 cause: error,
@@ -144,8 +144,8 @@ pub(crate) fn handle_operation_error(
 /// first write of a workflow operation (pause, resume, cancel).
 ///
 /// A database of the other family, or with no family row, is `BrokerError::ClientFamilyMismatch`:
-/// `DB_OPERATION_FAILED`, not retryable, and nothing is written. A database failure of the check is
-/// `DB_OPERATION_FAILED`, retryable by the core's rule; the next call checks again.
+/// `DATABASE_OPERATION_FAILED`, not retryable, and nothing is written. A database failure of the check is
+/// `DATABASE_OPERATION_FAILED`, retryable by the core's rule; the next call checks again.
 async fn admit_workflow_write(
     broker: &PostgresBroker,
     operation: HandleOperation,
@@ -155,7 +155,7 @@ async fn admit_workflow_write(
         .ensure_client_family_for_write()
         .await
         .map_err(|error| {
-            handle_operation_error(&operation, WorkflowError::Broker(error), workflow_id)
+            workflow_handle_error(&operation, WorkflowError::Broker(error), workflow_id)
         })
 }
 
@@ -176,10 +176,10 @@ async fn admit_workflow_write(
 /// - `Ok(true)`: the tree is cancelled.
 /// - `Ok(false)`: the workflow is COMPLETED, FAILED, CANCELLED or EXPIRED; nothing was written.
 /// - `WORKFLOW_NOT_FOUND`: no workflow has this id; nothing was written.
-/// - `DB_OPERATION_FAILED`: the client family check refused the handle, or the statement failed
+/// - `DATABASE_OPERATION_FAILED`: the client family check refused the handle, or the statement failed
 ///   (retryable by the statement layer's transience; an `OutcomeUnknown` may have committed).
 ///
-/// Panics: a row outside the function's contract ([`handle_operation_error`]).
+/// Panics: a row outside the function's contract ([`workflow_handle_error`]).
 ///
 /// The handle's client family is checked before the first write (`admit_workflow_write`).
 pub async fn cancel_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> HandleResult<bool> {
@@ -198,8 +198,8 @@ pub async fn cancel_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> Hand
             Ok(true)
         }
         Ok(CancelOutcome::NotCancellable) => Ok(false),
-        Ok(CancelOutcome::NotFound) => Err(HandleOperationError::not_found(workflow_id)),
-        Err(error) => Err(handle_operation_error(
+        Ok(CancelOutcome::NotFound) => Err(WorkflowHandleError::not_found(workflow_id)),
+        Err(error) => Err(workflow_handle_error(
             &HandleOperation::Cancel,
             error,
             workflow_id,
@@ -350,7 +350,7 @@ fn python_timedelta_text(total_micros: u64) -> String {
 /// - `Ok(true)`: the workflow was RUNNING and is PAUSED with its RUNNING descendants.
 /// - `Ok(false)`: the workflow exists and is not RUNNING; nothing was written.
 /// - `WORKFLOW_NOT_FOUND`: no workflow has this id; nothing was written.
-/// - `DB_OPERATION_FAILED`: as [`cancel_workflow`].
+/// - `DATABASE_OPERATION_FAILED`: as [`cancel_workflow`].
 ///
 /// Panics: as [`cancel_workflow`].
 ///
@@ -371,8 +371,8 @@ pub async fn pause_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> Handl
             Ok(true)
         }
         Ok(PauseOutcome::NotRunning) => Ok(false),
-        Ok(PauseOutcome::NotFound) => Err(HandleOperationError::not_found(workflow_id)),
-        Err(error) => Err(handle_operation_error(
+        Ok(PauseOutcome::NotFound) => Err(WorkflowHandleError::not_found(workflow_id)),
+        Err(error) => Err(workflow_handle_error(
             &HandleOperation::Pause,
             error,
             workflow_id,
@@ -394,19 +394,19 @@ pub async fn pause_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> Handl
 ///   commit ([`advance_parents`]). Then the tree recovery pass runs as before.
 /// - `Ok(false)`: the workflow exists and is not PAUSED, RUNNING included; nothing was written (Python's rule).
 /// - `WORKFLOW_NOT_FOUND`: no workflow has this id; nothing was written.
-/// - `DB_OPERATION_FAILED`: as [`cancel_workflow`]; nothing of the step committed, or its `COMMIT` reply was
+/// - `DATABASE_OPERATION_FAILED`: as [`cancel_workflow`]; nothing of the step committed, or its `COMMIT` reply was
 ///   lost.
 /// - `STORED_DATA_INVALID`: the host build of an owed child met a value that does not encode; nothing
 ///   committed.
 /// - `RESUME_RECOVERY_FAILED`, not retryable: the resume committed, and the parent advance or the tree recovery
 ///   pass after it failed.
 ///
-/// Panics ([`handle_operation_error`]), and nothing committed: a row outside a function's contract, or a host
+/// Panics ([`workflow_handle_error`]), and nothing committed: a row outside a function's contract, or a host
 /// build of an owed child that the core refuses (`Validation`).
 ///
 /// The children of the owed child starts come from the client's `source` (the Python client's
 /// `build_with`, the Rust client's registry); a child build that `source` did not run is
-/// `DB_OPERATION_FAILED`, retryable, and nothing committed.
+/// `DATABASE_OPERATION_FAILED`, retryable, and nothing committed.
 ///
 /// The handle's client family is checked before the first write (`admit_workflow_write`).
 pub(crate) async fn resume_client_workflow(
@@ -429,18 +429,18 @@ pub(crate) enum ResumeFailure {
     /// Every other failure, as the handle catalog names it: the client family
     /// check, an unknown workflow, and a failure after the commit
     /// (`RESUME_RECOVERY_FAILED`).
-    Handle(HandleOperationError),
+    Handle(WorkflowHandleError),
 }
 
 impl ResumeFailure {
     /// The failure as the handle catalog names it: the error of a step
-    /// through [`handle_operation_error`]. Pure.
+    /// through [`workflow_handle_error`]. Pure.
     ///
-    /// Panics: as [`handle_operation_error`].
-    pub(crate) fn into_handle_error(self, workflow_id: Uuid) -> HandleOperationError {
+    /// Panics: as [`workflow_handle_error`].
+    pub(crate) fn into_handle_error(self, workflow_id: Uuid) -> WorkflowHandleError {
         match self {
             Self::Step(error) => {
-                handle_operation_error(&HandleOperation::Resume, error, workflow_id)
+                workflow_handle_error(&HandleOperation::Resume, error, workflow_id)
             }
             Self::Handle(error) => error,
         }
@@ -465,7 +465,7 @@ pub(crate) async fn resume_with(
         .map_err(ResumeFailure::Step)?;
     match committed.disposition {
         ResumeDisposition::NotFound => {
-            return Err(ResumeFailure::Handle(HandleOperationError::not_found(
+            return Err(ResumeFailure::Handle(WorkflowHandleError::not_found(
                 workflow_id,
             )))
         }
@@ -523,7 +523,7 @@ fn resume_recovery_failed(
     workflow_id: Uuid,
     failed: &AfterResumeCommit,
     error: WorkflowError,
-) -> HandleOperationError {
+) -> WorkflowHandleError {
     let message = match failed {
         AfterResumeCommit::ParentAdvance { child_workflow_id } => format!(
             "Workflow {workflow_id} resumed; the parent advance of child workflow \
@@ -533,7 +533,7 @@ fn resume_recovery_failed(
             "Workflow {workflow_id} resumed; the recovery pass for its tree failed: {error}"
         ),
     };
-    HandleOperationError::ResumeRecoveryFailed {
+    WorkflowHandleError::ResumeRecoveryFailed {
         message,
         workflow_id,
         cause: error,
@@ -1520,7 +1520,7 @@ mod cancel_lock_order_tests {
 #[cfg(test)]
 mod cancel_tree_tests {
     use super::*;
-    use crate::core::workflow::handle_types::HandleErrorCode;
+    use crate::core::workflow::handle_types::WorkflowHandleErrorCode;
     use crate::test_support::sql::{self, TestPool};
 
     async fn seed_workflow(pool: &TestPool, id: Uuid, status: &str, parent: Option<Uuid>) {
@@ -1658,7 +1658,10 @@ mod cancel_tree_tests {
             .unwrap();
 
         let error = outcome.unwrap_err();
-        assert_eq!(error.code(), HandleErrorCode::DbOperationFailed);
+        assert_eq!(
+            error.code(),
+            WorkflowHandleErrorCode::DatabaseOperationFailed
+        );
         // RAISE EXCEPTION is SQLSTATE P0001, which is not a retryable class.
         assert!(!error.retryable());
         assert_eq!(
@@ -1678,7 +1681,7 @@ mod cancel_tree_tests {
     #[test]
     fn handle_errors_follow_the_python_catalog() {
         let workflow_id = Uuid::new_v4();
-        let transient = handle_operation_error(
+        let transient = workflow_handle_error(
             &HandleOperation::Status,
             WorkflowError::Broker(crate::broker::BrokerError::Statement(
                 crate::db::StatementFailure::NotSent {
@@ -1693,9 +1696,12 @@ mod cancel_tree_tests {
             )),
             workflow_id,
         );
-        assert_eq!(transient.code(), HandleErrorCode::DbOperationFailed);
+        assert_eq!(
+            transient.code(),
+            WorkflowHandleErrorCode::DatabaseOperationFailed
+        );
         assert!(transient.retryable());
-        let persistent = handle_operation_error(
+        let persistent = workflow_handle_error(
             &HandleOperation::Status,
             WorkflowError::Broker(crate::broker::BrokerError::RowDecode(
                 crate::broker::RowDecodeError::NoRow {
@@ -1704,31 +1710,34 @@ mod cancel_tree_tests {
             )),
             workflow_id,
         );
-        assert_eq!(persistent.code(), HandleErrorCode::DbOperationFailed);
+        assert_eq!(
+            persistent.code(),
+            WorkflowHandleErrorCode::DatabaseOperationFailed
+        );
         assert!(!persistent.retryable());
-        let stored = handle_operation_error(
+        let stored = workflow_handle_error(
             &HandleOperation::Status,
             WorkflowError::InvalidStatus("CORRUPT".to_owned()),
             workflow_id,
         );
-        assert_eq!(stored.code(), HandleErrorCode::StoredDataInvalid);
+        assert_eq!(stored.code(), WorkflowHandleErrorCode::StoredDataInvalid);
         assert!(!stored.retryable());
-        let missing = handle_operation_error(
+        let missing = workflow_handle_error(
             &HandleOperation::Status,
             WorkflowError::WorkflowNotFound { workflow_id },
             workflow_id,
         );
-        assert_eq!(missing.code(), HandleErrorCode::WorkflowNotFound);
+        assert_eq!(missing.code(), WorkflowHandleErrorCode::WorkflowNotFound);
     }
 
     /// Python's messages (the Python facade before the core built them): the
     /// operation's label, the workflow id and the error's text; the error
     /// stays the cause. An absent workflow has Python's
-    /// `HandleWorkflowNotFound` message.
+    /// `WorkflowHandleNotFound` message.
     #[test]
     fn each_handle_error_has_python_s_message_and_keeps_its_cause() {
         let workflow_id = Uuid::from_u128(0x3f9c_1a2b_4d5e_4f60_8a71_b2c3_d4e5_f607);
-        let failed = handle_operation_error(
+        let failed = workflow_handle_error(
             &HandleOperation::Pause,
             WorkflowError::Broker(crate::broker::BrokerError::ConnectionFailed(
                 "refused".to_owned(),
@@ -1743,13 +1752,13 @@ mod cancel_tree_tests {
         assert!(failed.retryable());
         assert!(matches!(
             failed,
-            HandleOperationError::DbOperationFailed {
+            WorkflowHandleError::DatabaseOperationFailed {
                 cause: WorkflowError::Broker(crate::broker::BrokerError::ConnectionFailed(_)),
                 ..
             }
         ));
 
-        let stored = handle_operation_error(
+        let stored = workflow_handle_error(
             &HandleOperation::Status,
             WorkflowError::InvalidStatus("CORRUPT".to_owned()),
             workflow_id,
@@ -1761,13 +1770,13 @@ mod cancel_tree_tests {
         );
         assert!(matches!(
             stored,
-            HandleOperationError::StoredDataInvalid {
+            WorkflowHandleError::StoredDataInvalid {
                 cause: WorkflowError::InvalidStatus(ref status),
                 ..
             } if status == "CORRUPT"
         ));
 
-        let missing = handle_operation_error(
+        let missing = workflow_handle_error(
             &HandleOperation::Cancel,
             WorkflowError::WorkflowNotFound { workflow_id },
             workflow_id,
@@ -1796,7 +1805,7 @@ mod cancel_tree_tests {
              tree failed: broker error: connection failed: refused"
         );
         assert!(!failed.retryable());
-        assert_eq!(failed.code(), HandleErrorCode::ResumeRecoveryFailed);
+        assert_eq!(failed.code(), WorkflowHandleErrorCode::ResumeRecoveryFailed);
         assert_eq!(failed.failure_cause(), crate::FailureCause::Connection);
     }
 }
@@ -1806,7 +1815,7 @@ mod client_family_tests {
     //! A workflow operation of a handle checks the client family before its first write.
     use super::*;
     use crate::broker::client_family::ClientFamily;
-    use crate::core::workflow::handle_types::HandleErrorCode;
+    use crate::core::workflow::handle_types::WorkflowHandleErrorCode;
     use crate::test_support::sql::{self, TestPool};
 
     async fn workflow_status(pool: &TestPool, workflow_id: Uuid) -> String {
@@ -1818,7 +1827,7 @@ mod client_family_tests {
     }
 
     /// Pause, resume and cancel through a handle of the other client family are refused as
-    /// `DB_OPERATION_FAILED`, not retryable, and write nothing. A handle of the recorded family
+    /// `DATABASE_OPERATION_FAILED`, not retryable, and write nothing. A handle of the recorded family
     /// passes the same check.
     #[tokio::test]
     async fn pause_resume_and_cancel_of_another_family_write_nothing() {
@@ -1849,7 +1858,10 @@ mod client_family_tests {
                 .expect_err("cancel of another family"),
         ];
         for refused in refusals {
-            assert_eq!(refused.code(), HandleErrorCode::DbOperationFailed);
+            assert_eq!(
+                refused.code(),
+                WorkflowHandleErrorCode::DatabaseOperationFailed
+            );
             assert!(!refused.retryable());
             assert!(
                 refused.message().contains("its own family"),

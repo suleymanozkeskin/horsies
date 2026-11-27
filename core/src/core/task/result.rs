@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 
 use super::error::{
-    BuiltInTaskCode, OperationalErrorCode, StoredErrorRefused, TaskError, TaskErrorCode,
+    BuiltInTaskCode, OperationalCode, StoredErrorRefused, TaskError, TaskErrorCode,
 };
 use crate::core::codec::user_value::{check_user_value_text, MAX_VALUE_JSON_DEPTH};
 use crate::core::codec::{JsonText, StrictJsonError};
@@ -172,7 +172,7 @@ impl<T> TaskResult<T> {
     /// Returns `true` if this is a transient error that may resolve on retry.
     ///
     /// Transient errors are retrieval-class codes (`RetrievalCode`) and
-    /// `OperationalErrorCode::BrokerError`. All other errors are terminal.
+    /// `OperationalCode::DatabaseError`. All other errors are terminal.
     pub fn is_transient(&self) -> bool {
         match self {
             Self::Ok(_) => false,
@@ -232,13 +232,13 @@ impl<T> TaskResult<T> {
 impl TaskError {
     /// Returns `true` if this error is transient (may resolve on retry).
     ///
-    /// Transient errors: `RetrievalCode::*` and `OperationalErrorCode::BrokerError`.
+    /// Transient errors: `RetrievalCode::*` and `OperationalCode::DatabaseError`.
     pub fn is_transient(&self) -> bool {
         matches!(
             &self.error_code,
             TaskErrorCode::BuiltIn(BuiltInTaskCode::Retrieval(_))
                 | TaskErrorCode::BuiltIn(BuiltInTaskCode::Operational(
-                    OperationalErrorCode::BrokerError,
+                    OperationalCode::DatabaseError,
                 ))
         )
     }
@@ -256,7 +256,7 @@ impl<T: std::fmt::Display> std::fmt::Display for TaskResult<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::task::error::{OperationalErrorCode, RetrievalCode, TaskErrorCode};
+    use crate::core::task::error::{OperationalCode, RetrievalCode, TaskErrorCode};
 
     #[test]
     fn ok_predicates() {
@@ -267,10 +267,8 @@ mod tests {
 
     #[test]
     fn err_predicates() {
-        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalErrorCode::TaskException,
-            "boom",
-        ));
+        let result: TaskResult<i32> =
+            TaskResult::Err(TaskError::builtin(OperationalCode::TaskException, "boom"));
         assert!(!result.is_ok());
         assert!(result.is_err());
     }
@@ -284,21 +282,19 @@ mod tests {
     #[test]
     #[should_panic(expected = "called unwrap() on TaskResult::Err")]
     fn unwrap_err_panics() {
-        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalErrorCode::TaskException,
-            "boom",
-        ));
+        let result: TaskResult<i32> =
+            TaskResult::Err(TaskError::builtin(OperationalCode::TaskException, "boom"));
         result.unwrap();
     }
 
     #[test]
     fn unwrap_err_ok() {
-        let err = TaskError::builtin(OperationalErrorCode::TaskException, "boom");
+        let err = TaskError::builtin(OperationalCode::TaskException, "boom");
         let result: TaskResult<i32> = TaskResult::Err(err);
         let extracted = result.unwrap_err();
         assert_eq!(
             extracted.error_code,
-            TaskErrorCode::from(OperationalErrorCode::TaskException),
+            TaskErrorCode::from(OperationalCode::TaskException),
         );
     }
 
@@ -310,10 +306,8 @@ mod tests {
 
     #[test]
     fn ok_returns_none_for_err() {
-        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalErrorCode::TaskException,
-            "boom",
-        ));
+        let result: TaskResult<i32> =
+            TaskResult::Err(TaskError::builtin(OperationalCode::TaskException, "boom"));
         assert_eq!(result.ok(), None);
     }
 
@@ -326,10 +320,8 @@ mod tests {
 
     #[test]
     fn map_preserves_err() {
-        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalErrorCode::TaskException,
-            "boom",
-        ));
+        let result: TaskResult<i32> =
+            TaskResult::Err(TaskError::builtin(OperationalCode::TaskException, "boom"));
         let mapped = result.map(|v| v * 2);
         assert!(mapped.is_err());
     }
@@ -343,10 +335,8 @@ mod tests {
 
     #[test]
     fn and_then_short_circuits_err() {
-        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalErrorCode::TaskException,
-            "boom",
-        ));
+        let result: TaskResult<i32> =
+            TaskResult::Err(TaskError::builtin(OperationalCode::TaskException, "boom"));
         let chained = result.and_then(|v| TaskResult::Ok(v * 2));
         assert!(chained.is_err());
     }
@@ -361,16 +351,14 @@ mod tests {
 
     #[test]
     fn serde_round_trip_err() {
-        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalErrorCode::TaskException,
-            "boom",
-        ));
+        let result: TaskResult<i32> =
+            TaskResult::Err(TaskError::builtin(OperationalCode::TaskException, "boom"));
         let json = serde_json::to_string(&result).unwrap();
         let back: TaskResult<i32> = serde_json::from_str(&json).unwrap();
         let err = back.unwrap_err();
         assert_eq!(
             err.error_code,
-            TaskErrorCode::from(OperationalErrorCode::TaskException),
+            TaskErrorCode::from(OperationalCode::TaskException),
         );
         assert_eq!(err.message.as_deref(), Some("boom"));
     }
@@ -683,10 +671,8 @@ mod tests {
 
     #[test]
     fn task_exception_is_terminal() {
-        let r: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalErrorCode::TaskException,
-            "boom",
-        ));
+        let r: TaskResult<i32> =
+            TaskResult::Err(TaskError::builtin(OperationalCode::TaskException, "boom"));
         assert!(r.is_terminal());
         assert!(!r.is_transient());
     }
@@ -702,7 +688,7 @@ mod tests {
     #[test]
     fn broker_error_is_transient() {
         let r: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalErrorCode::BrokerError,
+            OperationalCode::DatabaseError,
             "connection refused",
         ));
         assert!(r.is_transient());
@@ -729,7 +715,7 @@ mod tests {
     #[test]
     fn broker_error_serde_round_trip() {
         let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalErrorCode::BrokerError,
+            OperationalCode::DatabaseError,
             "database connection pool exhausted",
         ));
         let json = serde_json::to_string(&result).unwrap();

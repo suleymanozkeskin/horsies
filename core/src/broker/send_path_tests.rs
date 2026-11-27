@@ -402,12 +402,11 @@ async fn a_shared_task_with_a_timeout_is_enqueued() {
 }
 
 /// Python `test_send_idempotency_conflict.py::TestKeyReservedByAnotherTask::
-/// test_conflict_names_the_owner_and_retry_is_accepted`: a key that another
-/// command holds is `IDEMPOTENCY_KEY_CONFLICT` naming the owner task. The
-/// resend methods accept it; a resend while the reservation is active meets
-/// the same conflict with the same owner. Nothing more is written.
+/// A key that another command holds is `IDEMPOTENCY_KEY_CONFLICT` naming the
+/// owner task. The send error is not retryable and the resend methods refuse
+/// it, so nothing more is written.
 #[tokio::test]
-async fn a_key_held_by_another_command_names_its_owner_and_a_resend_meets_the_same_conflict() {
+async fn a_key_held_by_another_command_names_its_owner_and_is_refused_for_a_resend() {
     let pool = migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let task_name = unique_task_name("key_owner");
@@ -442,18 +441,8 @@ async fn a_key_held_by_another_command_names_its_owner_and_a_resend_meets_the_sa
         }
         other => panic!("expected a key conflict send error, got {other:?}"),
     }
-    let resend = send_error
-        .resend_target()
-        .expect("the resend methods accept a key conflict");
-
-    let resent = enqueue_payload(&broker, resend.task_id, resend.payload)
-        .await
-        .expect_err("the reservation is still active");
-
-    match resent {
-        BrokerError::IdempotencyKeyConflict { task_id, .. } => assert_eq!(task_id, owner),
-        other => panic!("expected the same key conflict, got {other:?}"),
-    }
+    assert!(!send_error.retryable());
+    assert!(send_error.resend_target().is_none());
     assert_eq!(rows_of_task_name(&pool, &task_name).await, 1);
     remove_task_name(&pool, &task_name).await;
 }

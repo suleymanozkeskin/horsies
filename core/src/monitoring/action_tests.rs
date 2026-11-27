@@ -277,7 +277,7 @@ fn action_models_and_task_mapping_serialize_exactly() {
             r#"{"code":"TASK_NOT_CANCELLABLE","current_status":"COMPLETED"}"#,
         ),
         (
-            TaskActionError::DbOperationFailed {
+            TaskActionError::DatabaseOperationFailed {
                 message: "database".to_owned(),
                 retryable: true,
                 task_id,
@@ -289,7 +289,7 @@ fn action_models_and_task_mapping_serialize_exactly() {
             r#"{"detail":"database"}"#,
         ),
         (
-            TaskActionError::DbOperationFailed {
+            TaskActionError::DatabaseOperationFailed {
                 message: "refused".to_owned(),
                 retryable: false,
                 task_id,
@@ -486,7 +486,7 @@ async fn task_and_workflow_database_failures_are_service_unavailable() {
     let task = cancel_task(&broker, Uuid::new_v4(), false)
         .await
         .expect_err("task database failure");
-    assert_eq!(task.code(), TaskActionErrorCode::DbOperationFailed);
+    assert_eq!(task.code(), TaskActionErrorCode::DatabaseOperationFailed);
     assert!(task.retryable());
     let workflow = pause_workflow_action(&broker, Uuid::new_v4()).await;
     assert_eq!(workflow.status_code(), 503);

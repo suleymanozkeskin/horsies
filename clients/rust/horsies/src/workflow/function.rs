@@ -24,7 +24,7 @@ use super::registry::{CaseBuild, CheckCase, Definition, DefinitionKind};
 use super::spec::{WorkflowSpec, WorkflowSpecBuilder};
 use super::start::{new_workflow_id, WorkflowStarter};
 use super::sub_workflow::{SubWorkflowNode, SubWorkflowParams};
-use crate::{ErrorCode, Horsies, HorsiesError};
+use crate::{Horsies, HorsiesError, HorsiesErrorCode};
 
 /// A registered workflow definition without params, with the result type
 /// `T`. Clones share one app.
@@ -254,7 +254,7 @@ where
                 "workflow builder '{}' has no check case",
                 self.name
             ))
-            .with_code(ErrorCode::WorkflowCheckCasesRequired)
+            .with_code(HorsiesErrorCode::WorkflowCheckCasesRequired)
             .with_help("add at least one case with .case(...) or .cases(...)"));
         }
         let cases = self

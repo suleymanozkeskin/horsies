@@ -14,13 +14,13 @@ use horsies_core::manifest::{
     SessionDatabase as SessionDatabaseManifest, WholeSeconds,
 };
 
-use crate::{ErrorCode, HorsiesError};
+use crate::{HorsiesError, HorsiesErrorCode};
 
 mod scheduler_manifest;
 mod worker_manifest;
 
 pub(crate) use scheduler_manifest::{schedule_input_text, scheduler_manifest};
-pub(crate) use worker_manifest::{rust_child_launch, worker_manifest};
+pub(crate) use worker_manifest::{declared_codes, rust_child_launch, worker_manifest};
 
 pub use horsies_core::core::config::worker_profile::input::{
     ClaimLimits, ExecutorThreadsSetting, IsolatedChildren, IsolatedPool, IsolatedRecycle,
@@ -195,7 +195,7 @@ fn preload_refusal(profile_name: &str, preload: ChildPreload) -> HorsiesError {
         "worker_profiles.{profile_name}.preload: '{}' is not available to a Rust worker",
         preload.as_str()
     ))
-    .with_code(ErrorCode::ConfigInvalidWorkerProfile)
+    .with_code(HorsiesErrorCode::ConfigInvalidWorkerProfile)
     .with_note(
         "a Rust worker starts each child with exec of its own binary, which holds every \
          task, so there is nothing to preload",
@@ -343,7 +343,7 @@ mod tests {
         assert!(messages[1].starts_with("worker_profiles.library.preload"));
         assert!(refusals
             .iter()
-            .all(|error| error.code == Some(ErrorCode::ConfigInvalidWorkerProfile)));
+            .all(|error| error.code == Some(HorsiesErrorCode::ConfigInvalidWorkerProfile)));
     }
 
     /// `Horsies::new` refuses a config with two profile values outside
@@ -367,7 +367,7 @@ mod tests {
         assert_eq!(refusals.len(), 2, "{refused}");
         assert!(refusals
             .iter()
-            .all(|refusal| refusal.code == Some(ErrorCode::ConfigInvalidWorkerProfile)));
+            .all(|refusal| refusal.code == Some(HorsiesErrorCode::ConfigInvalidWorkerProfile)));
         assert!(
             refusals[0].to_string().contains(
                 "worker_profiles['web'].isolated.count: 0 is outside the bounds 1 to 1024"

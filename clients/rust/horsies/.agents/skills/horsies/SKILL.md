@@ -302,8 +302,8 @@ impl WorkflowDefinition for DailyReport {
 | `TaskHandle::info`, `Horsies::get_task_info` | `Result<TaskInfo, ReadError>` |
 | Workflow start | `Result<WorkflowHandle<T>, WorkflowStartError>` |
 | `WorkflowHandle::get` | `Result<TaskOutcome<T, UserCode>, WorkflowReadError>` |
-| `WorkflowHandle::status`, `cancel`, `pause`, `resume` | `HandleResult<_>` (`Result<_, HandleOperationError>`) |
-| Health reads on the app | `Result<_, BrokerOperationError>` |
+| `WorkflowHandle::status`, `cancel`, `pause`, `resume` | `HandleResult<_>` (`Result<_, WorkflowHandleError>`) |
+| Health reads on the app | `Result<_, DatabaseOperationError>` |
 | Config, registration, `provide` | `Result<_, HorsiesError>` (`HRS-xxx` codes) |
 | `check`, `check_live` | `Result<CheckPassed, ValidationReport>` |
 

@@ -34,7 +34,7 @@ from horsies.core.models.workflow import (
     WorkflowDefinitionConfig,
     slugify,
 )
-from horsies.core.errors import ErrorCode, HorsiesError, MultipleValidationErrors
+from horsies.core.errors import HorsiesErrorCode, HorsiesError, MultipleValidationErrors
 
 
 _definition_key_counter = 0
@@ -806,7 +806,7 @@ class TestWorkflowSpecValidation:
         """WorkflowSpec with tasks=[] raises WORKFLOW_NO_NODES."""
         with pytest.raises(WorkflowValidationError, match='has no tasks') as exc_info:
             WorkflowSpec(name='empty', tasks=[])
-        assert exc_info.value.code == ErrorCode.WORKFLOW_NO_NODES
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_NO_NODES
 
     def test_valid_linear_dag(self) -> None:
         """A -> B -> C passes validation."""
@@ -855,8 +855,8 @@ class TestWorkflowSpecValidation:
             WorkflowSpec(name='no_roots', tasks=[node_a, node_b])
 
         codes = [e.code for e in exc_info.value.report.refusals]
-        assert ErrorCode.WORKFLOW_NO_ROOT_TASKS in codes
-        assert ErrorCode.WORKFLOW_CYCLE_DETECTED in codes
+        assert HorsiesErrorCode.WORKFLOW_NO_ROOT_TASKS in codes
+        assert HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED in codes
 
     def test_cycle_detection_simple(self) -> None:
         """A -> B -> A raises MultipleValidationErrors with cycle and no-root codes."""
@@ -874,10 +874,10 @@ class TestWorkflowSpecValidation:
 
         errors = exc_info.value.report.refusals
         codes = [e.code for e in errors]
-        assert ErrorCode.WORKFLOW_NO_ROOT_TASKS in codes
-        assert ErrorCode.WORKFLOW_CYCLE_DETECTED in codes
+        assert HorsiesErrorCode.WORKFLOW_NO_ROOT_TASKS in codes
+        assert HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED in codes
 
-        cycle_error = next(e for e in errors if e.code == ErrorCode.WORKFLOW_CYCLE_DETECTED)
+        cycle_error = next(e for e in errors if e.code == HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED)
         assert 'task_a' in cycle_error.notes[0]
         assert 'task_b' in cycle_error.notes[0]
 
@@ -899,10 +899,10 @@ class TestWorkflowSpecValidation:
 
         errors = exc_info.value.report.refusals
         codes = [e.code for e in errors]
-        assert ErrorCode.WORKFLOW_NO_ROOT_TASKS in codes
-        assert ErrorCode.WORKFLOW_CYCLE_DETECTED in codes
+        assert HorsiesErrorCode.WORKFLOW_NO_ROOT_TASKS in codes
+        assert HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED in codes
 
-        cycle_error = next(e for e in errors if e.code == ErrorCode.WORKFLOW_CYCLE_DETECTED)
+        cycle_error = next(e for e in errors if e.code == HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED)
         assert 'task_a' in cycle_error.notes[0]
         assert 'task_b' in cycle_error.notes[0]
         assert 'task_c' in cycle_error.notes[0]
@@ -982,7 +982,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError, match='not in workflow') as exc_info:
             WorkflowSpec(name='invalid_dep', tasks=[node_a, node_b])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_DEPENDENCY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_DEPENDENCY
 
     def test_args_from_not_in_waits_for(self) -> None:
         """args_from ref not in waits_for raises WORKFLOW_INVALID_ARGS_FROM."""
@@ -1002,10 +1002,10 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError, match='not in waits_for') as exc_info:
             WorkflowSpec(name='bad_args_from', tasks=[node_a, node_b, node_c])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_ARGS_FROM
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_ARGS_FROM
 
     def test_workflow_context_from_not_in_waits_for(self) -> None:
-        """ctx_from ref not in waits_for raises WORKFLOW_INVALID_CTX_FROM."""
+        """ctx_from ref not in waits_for raises WORKFLOW_INVALID_CONTEXT_FROM."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
         # Use MockTaskWrapperWithCtx so only the waits_for check fires
@@ -1024,10 +1024,10 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError, match='not in waits_for') as exc_info:
             WorkflowSpec(name='bad_ctx_from', tasks=[node_a, node_b, node_c])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_CTX_FROM
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_CONTEXT_FROM
 
     def test_workflow_context_from_requires_workflow_ctx_param(self) -> None:
-        """workflow_context_from requires workflow_ctx param → WORKFLOW_CTX_PARAM_MISSING."""
+        """workflow_context_from requires workflow_ctx param → WORKFLOW_CONTEXT_PARAMETER_MISSING."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_with_ctx = MockTaskWrapperWithCtx(task_name='task_with_ctx')
         fn_b = MockTaskWrapper(task_name='task_b')
@@ -1051,7 +1051,7 @@ class TestWorkflowSpecValidation:
         ) as exc_info:
             WorkflowSpec(name='ctx_param_missing', tasks=[node_a, node_c])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_CTX_PARAM_MISSING
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_CONTEXT_PARAMETER_MISSING
 
     def test_tasknode_args_kw_rejected(self) -> None:
         """TaskNode constructor rejects args=... directly."""
@@ -1108,7 +1108,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='subworkflow_default_build_with_kwargs', tasks=[child_node])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH
 
     def test_subworkflow_inherited_default_build_with_requires_override(self) -> None:
         """Inherited default build_with must still reject runtime params (HRS-022)."""
@@ -1139,7 +1139,7 @@ class TestWorkflowSpecValidation:
                 tasks=[child_node],
             )
 
-        assert exc.value.code == ErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH
 
     def test_subworkflow_default_build_with_no_params_allowed(self) -> None:
         """Default build_with remains valid when no params are passed."""
@@ -1191,7 +1191,7 @@ class TestWorkflowSpecValidation:
                 tasks=[child_node],
             )
 
-        assert exc.value.code == ErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS
 
     def test_subworkflow_inherited_custom_build_with_invalid_kwarg_rejected(self) -> None:
         """Inherited custom build_with keeps kwarg-key validation (HRS-019)."""
@@ -1227,7 +1227,7 @@ class TestWorkflowSpecValidation:
                 tasks=[child_node],
             )
 
-        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_subworkflow_inherited_definition_key_rejected(self) -> None:
         """Concrete child workflow must declare its own definition_key."""
@@ -1254,7 +1254,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='subworkflow_inherited_definition_key', tasks=[child_node])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_NO_DEFINITION_KEY
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_NO_DEFINITION_KEY
 
     def test_subworkflow_build_with_positional_args_constructor_rejected(self) -> None:
         """SubWorkflowNode constructor rejects args=... immediately."""
@@ -1301,7 +1301,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='subworkflow_mutated_positional', tasks=[child_node])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
 
     def test_invalid_args_from_key_rejected(self) -> None:
         """args_from key must match function parameter name."""
@@ -1319,7 +1319,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='invalid_args_from_key', tasks=[node_a, node_b])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_kwargs_args_from_overlap_rejected(self) -> None:
         """Overlapping kwargs and args_from keys raises HRS-021."""
@@ -1337,7 +1337,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='overlap_rejected', tasks=[node_a, node_b])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
 
     def test_kwargs_args_from_disjoint_accepted(self) -> None:
         """Disjoint kwargs and args_from keys pass validation."""
@@ -1371,7 +1371,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='args_from_type_mismatch', tasks=[node_a, node_b])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
     def test_args_from_requires_outcome_param_annotation(self) -> None:
         """args_from target param must be annotated as TaskOutcome[OkT, TaskError]."""
@@ -1389,7 +1389,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='args_from_raw_param', tasks=[node_a, node_b])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
     def test_args_from_type_match_accepted(self) -> None:
         """args_from passes when producer and consumer TaskOutcome ok-types match."""
@@ -1437,7 +1437,7 @@ class TestWorkflowSpecValidation:
                 tasks=[node_a, child_node],
             )
 
-        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
 
     def test_tasknode_positional_args_constructor_rejected(self) -> None:
         """TaskNode constructor rejects args=... immediately."""
@@ -1454,7 +1454,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='mutated_positional_args', tasks=[node_a])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
 
     def test_from_node_marker_in_direct_kwargs_rejected(self) -> None:
         """Raw from_node() marker in TaskNode kwargs is rejected."""
@@ -1471,7 +1471,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='marker_in_kwargs', tasks=[node_a, node_b])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_ARGS_FROM
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_INVALID_ARGS_FROM
 
     def test_missing_required_params_rejected(self) -> None:
         """Missing required parameters raises validation error."""
@@ -1481,7 +1481,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='missing_required', tasks=[node_a])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS
 
     def test_required_workflow_meta_treated_as_injected(self) -> None:
         """Required workflow_meta is treated as auto-injected by validator."""
@@ -1515,7 +1515,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='subworkflow_missing_required', tasks=[child_node])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS
 
     def test_subworkflow_invalid_kwargs_key_rejected(self) -> None:
         """SubWorkflowNode kwargs keys must match build_with signature."""
@@ -1541,7 +1541,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='subworkflow_invalid_kwargs', tasks=[child_node])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_subworkflow_invalid_args_from_key_rejected(self) -> None:
         """SubWorkflowNode args_from keys must match build_with signature."""
@@ -1570,7 +1570,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='subworkflow_invalid_args_from', tasks=[node_a, child_node])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_subworkflow_args_from_type_mismatch_rejected(self) -> None:
         """SubWorkflowNode args_from must match build_with TaskOutcome ok-type annotations."""
@@ -1600,7 +1600,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='subworkflow_args_from_type_mismatch', tasks=[node_a, child_node])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
     def test_a_kwargs_catch_all_takes_nothing_from_a_node(self) -> None:
         """A catch-all has no declared type, so no key binds to it."""
@@ -1613,7 +1613,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='kwargs_task', tasks=[node_a])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_subworkflow_kwargs_rejected_for_untyped_build_with(self) -> None:
         """A key that reaches `**kwargs` of a build_with is an invalid key: each
@@ -1640,7 +1640,7 @@ class TestWorkflowSpecValidation:
 
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='subworkflow_kwargs_ok', tasks=[child_node])
-        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_subworkflow_cycle_detection_allows_same_name_distinct_definitions(self) -> None:
         """Same workflow name in distinct definitions is not a cycle."""
@@ -1688,7 +1688,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc_info:
             WorkflowSpec(name='same_name_cycle_not_skipped', tasks=[safe_node, cyclic_node])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_CYCLE_DETECTED
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED
 
     def test_output_not_in_workflow(self) -> None:
         """output task not in tasks raises HRS-011."""
@@ -1701,7 +1701,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError, match='not in workflow') as exc_info:
             WorkflowSpec(name='bad_output', tasks=[node_a], output=node_external)
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_OUTPUT
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_OUTPUT
 
     def test_index_assignment(self) -> None:
         """index assigned based on list position."""
@@ -1742,7 +1742,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError, match='duplicate node_id') as exc_info:
             WorkflowSpec(name='dup_ids', tasks=[node_a, node_b])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_DUPLICATE_NODE_ID
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_DUPLICATE_NODE_ID
 
     def test_node_id_invalid_characters_raises(self) -> None:
         """Invalid node_id characters raise WORKFLOW_INVALID_NODE_ID."""
@@ -1754,7 +1754,7 @@ class TestWorkflowSpecValidation:
         ) as exc_info:
             WorkflowSpec(name='bad_id', tasks=[node_a])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_NODE_ID
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID
 
     def test_success_policy_empty_cases_raises(self) -> None:
         """SuccessPolicy with empty cases list raises HRS-012."""
@@ -1766,7 +1766,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError, match='at least one SuccessCase') as exc_info:
             WorkflowSpec(name='empty_cases', tasks=[node_a], success_policy=policy)
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
 
     def test_success_policy_empty_required_raises(self) -> None:
         """SuccessCase with empty required list raises HRS-012."""
@@ -1778,7 +1778,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError, match='has no required tasks') as exc_info:
             WorkflowSpec(name='empty_required', tasks=[node_a], success_policy=policy)
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
 
     def test_success_policy_invalid_task_raises(self) -> None:
         """SuccessCase referencing task not in workflow raises HRS-012."""
@@ -1795,7 +1795,7 @@ class TestWorkflowSpecValidation:
                 name='invalid_policy_task', tasks=[node_a], success_policy=policy
             )
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
 
     def test_success_policy_valid(self) -> None:
         """Valid success policy passes validation."""
@@ -1833,7 +1833,7 @@ class TestWorkflowSpecValidation:
 
         with pytest.raises(WorkflowValidationError, match='min_success is not set') as exc_info:
             WorkflowSpec(name='quorum_no_min', tasks=[node_a, node_b])
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_JOIN
 
     def test_quorum_min_success_too_high_raises(self) -> None:
         """min_success exceeding dependency count raises error."""
@@ -1850,7 +1850,7 @@ class TestWorkflowSpecValidation:
 
         with pytest.raises(WorkflowValidationError, match='exceeds dependency count') as exc_info:
             WorkflowSpec(name='quorum_too_high', tasks=[node_a, node_b])
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_JOIN
 
     def test_quorum_min_success_zero_raises(self) -> None:
         """min_success < 1 raises error."""
@@ -1867,7 +1867,7 @@ class TestWorkflowSpecValidation:
 
         with pytest.raises(WorkflowValidationError, match='must be >= 1') as exc_info:
             WorkflowSpec(name='quorum_zero', tasks=[node_a, node_b])
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_JOIN
 
     def test_all_join_with_min_success_raises(self) -> None:
         """min_success set with join='all' raises error."""
@@ -1886,7 +1886,7 @@ class TestWorkflowSpecValidation:
             WorkflowValidationError, match="only used with join='quorum'"
         ) as exc_info:
             WorkflowSpec(name='all_with_min', tasks=[node_a, node_b])
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_JOIN
 
     def test_any_join_with_min_success_raises(self) -> None:
         """min_success set with join='any' raises error."""
@@ -1905,7 +1905,7 @@ class TestWorkflowSpecValidation:
             WorkflowValidationError, match="only used with join='quorum'"
         ) as exc_info:
             WorkflowSpec(name='any_with_min', tasks=[node_a, node_b])
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_JOIN
 
     def test_any_join_args_from_without_default_raises(self) -> None:
         """join='any' + args_from targeting a no-default param is rejected.
@@ -1935,7 +1935,7 @@ class TestWorkflowSpecValidation:
                 name='any_args_from_no_default',
                 tasks=[node_a, node_c, node_b],
             )
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_JOIN
 
     def test_any_join_args_from_with_default_accepted(self) -> None:
         """join='any' + args_from is supported when the param has a default."""
@@ -2414,7 +2414,7 @@ class TestWorkflowDefinition:
 
         with pytest.raises(WorkflowValidationError, match="must define a 'name'") as exc_info:
             NoNameWorkflow.build(app)
-        assert exc_info.value.code == ErrorCode.WORKFLOW_NO_NAME
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_NO_NAME
 
     def test_no_tasks_raises(self) -> None:
         """No TaskNode attributes raises WorkflowValidationError."""
@@ -2438,7 +2438,7 @@ class TestWorkflowDefinition:
 
         with pytest.raises(WorkflowValidationError, match='has no TaskNode') as exc_info:
             EmptyWorkflow.build(app)
-        assert exc_info.value.code == ErrorCode.WORKFLOW_NO_NODES
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_NO_NODES
 
     def test_missing_definition_key_raises(self) -> None:
         """WorkflowDefinition must declare an explicit definition_key."""
@@ -2463,7 +2463,7 @@ class TestWorkflowDefinition:
 
         with pytest.raises(WorkflowValidationError, match="definition_key") as exc_info:
             MissingTypeWorkflow.build(app)
-        assert exc_info.value.code == ErrorCode.WORKFLOW_NO_DEFINITION_KEY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_NO_DEFINITION_KEY
 
     def test_duplicate_task_function_allowed(self) -> None:
         """Same task function can be used multiple times."""
@@ -2594,7 +2594,7 @@ class TestWorkflowOutputTypeMismatch:
             MismatchWorkflow.build(app)
 
         err = exc.value
-        assert err.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert err.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
         assert 'int' in err.message
         assert 'str' in err.message
 
@@ -2644,7 +2644,7 @@ class TestWorkflowOutputTypeMismatch:
             NoOutputWorkflow.build(app)
 
         err = exc.value
-        assert err.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert err.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
         assert 'config.output' in err.message
         assert 'int' in err.message
 
@@ -2688,7 +2688,7 @@ class TestWorkflowOutputTypeMismatch:
             NoOutputWorkflow.build(app)
 
         err = exc.value
-        assert err.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert err.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
         assert 'config.output' in err.message
 
     def test_subclass_compatible_output_accepted(self) -> None:
@@ -2794,7 +2794,7 @@ class TestWorkflowDefinitionConfig:
 
             _ = OldStyleWorkflow  # not reached: class creation raises
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
         assert "OldStyleWorkflow' defines 'Meta'" in exc_info.value.message
         assert 'config = WorkflowDefinitionConfig(...)' in exc_info.value.message
 
@@ -2814,7 +2814,7 @@ class TestWorkflowDefinitionConfig:
 
             _ = NamespaceMetaWorkflow  # not reached: class creation raises
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
 
     def test_meta_from_a_mixin_base_is_refused(self) -> None:
         """A Meta that a non-workflow base class defines is refused too."""
@@ -2833,7 +2833,7 @@ class TestWorkflowDefinitionConfig:
 
             _ = MixinWorkflow  # not reached: class creation raises
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
 
     def test_config_that_is_not_a_definition_config_is_refused(self) -> None:
         """config of another type raises HRS-033 at class creation and names the type."""
@@ -2850,7 +2850,7 @@ class TestWorkflowDefinitionConfig:
 
             _ = WrongConfigWorkflow  # not reached: class creation raises
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
         assert "sets 'config' to dict, not WorkflowDefinitionConfig" in exc_info.value.message
 
     def test_config_is_frozen(self) -> None:
@@ -2966,8 +2966,8 @@ class TestMultiErrorWorkflowCollection:
             WorkflowSpec(name='overlap_no_mask', tasks=[node_a, node_b])
 
         codes = {e.code for e in exc_info.value.report.refusals}
-        assert ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP in codes
-        assert ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH in codes
+        assert HorsiesErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP in codes
+        assert HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH in codes
 
     def test_non_dependency_args_from_source_does_not_mask_type_errors(self) -> None:
         """A non-dependency args_from source must not suppress type-checking of other keys.
@@ -2994,8 +2994,8 @@ class TestMultiErrorWorkflowCollection:
             WorkflowSpec(name='nondep_no_mask', tasks=[node_dep, node_orphan, node_b])
 
         codes = {e.code for e in exc_info.value.report.refusals}
-        assert ErrorCode.WORKFLOW_INVALID_ARGS_FROM in codes
-        assert ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH in codes
+        assert HorsiesErrorCode.WORKFLOW_INVALID_ARGS_FROM in codes
+        assert HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH in codes
 
 
 # =============================================================================
@@ -3753,7 +3753,7 @@ class TestNodeIdLengthValidation:
         with pytest.raises(WorkflowValidationError) as exc_info:
             WorkflowSpec(name='long_id', tasks=[node_a])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_NODE_ID
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID
 
 
 # =============================================================================
@@ -3788,7 +3788,7 @@ class TestTaskNodeOptionValidation:
         with pytest.raises(WorkflowValidationError) as exc_info:
             WorkflowSpec(name='bad_priority', tasks=[node])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_PRIORITY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_PRIORITY
         assert f"node 'rank' sets priority={priority}" in exc_info.value.notes
 
     @pytest.mark.parametrize('priority', [1, 100, None])
@@ -3810,7 +3810,7 @@ class TestTaskNodeOptionValidation:
         with pytest.raises(WorkflowValidationError) as exc_info:
             WorkflowSpec(name='naive_deadline', tasks=[node])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL
         assert "node 'expire'" in exc_info.value.notes[0]
 
     @pytest.mark.parametrize(
@@ -3842,7 +3842,7 @@ class TestTaskNodeOptionValidation:
         with pytest.raises(WorkflowValidationError) as exc_info:
             WorkflowSpec(name='child_priority', tasks=[root, child])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_PRIORITY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_PRIORITY
         assert "node 'child' sets priority=0" in exc_info.value.notes
 
     def test_both_rules_on_one_node_are_reported_together(self) -> None:
@@ -3857,8 +3857,8 @@ class TestTaskNodeOptionValidation:
 
         codes = [error.code for error in exc_info.value.report.refusals]
         assert codes == [
-            ErrorCode.WORKFLOW_INVALID_PRIORITY,
-            ErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL,
+            HorsiesErrorCode.WORKFLOW_INVALID_PRIORITY,
+            HorsiesErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL,
         ]
 
     def test_app_workflow_refuses_a_node_priority_outside_the_range(self) -> None:
@@ -3871,7 +3871,7 @@ class TestTaskNodeOptionValidation:
                 definition_key=_definition_key('app_bad_priority'),
             )
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_PRIORITY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_PRIORITY
 
     def test_definition_build_refuses_a_naive_good_until(self) -> None:
         fn = MockTaskWrapper(task_name='expire')
@@ -3884,7 +3884,7 @@ class TestTaskNodeOptionValidation:
         with pytest.raises(WorkflowValidationError) as exc_info:
             NaiveDeadlineWorkflow.build(_minimal_app())
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL
 
 
 # =============================================================================
@@ -3914,7 +3914,7 @@ class TestSuccessPolicyOptionalValidation:
                 name='bad_optional', tasks=[node_a], success_policy=policy,
             )
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
 
 
 # =============================================================================

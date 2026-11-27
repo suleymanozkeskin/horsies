@@ -30,7 +30,7 @@ use super::link::{read_frame, FrameWriter};
 use super::panic::install_panic_hook;
 use super::seats::ServeEnd;
 use crate::core::config::bounded::BoundedU32;
-use crate::core::error::ErrorCode;
+use crate::core::error::HorsiesErrorCode;
 use crate::core::task::Execution;
 use crate::events::{Event, EventDecodeError, EventTypeName, SlotRecovered, TaskClaimed};
 use crate::process_exit::ProcessExit;
@@ -165,21 +165,21 @@ fn each_handler_refusal_has_the_code_of_the_python_refusal() {
             EventHandlerRefused::InvalidName {
                 cause: "empty".to_owned(),
             },
-            ErrorCode::EventHandlerInvalidName,
+            HorsiesErrorCode::EventHandlerInvalidName,
             "HRS-225",
         ),
         (
             EventHandlerRefused::RepeatedName {
                 name: "audit".to_owned(),
             },
-            ErrorCode::EventHandlerDuplicateName,
+            HorsiesErrorCode::EventHandlerDuplicateName,
             "HRS-224",
         ),
         (
             EventHandlerRefused::TooMany {
                 name: "one.more".to_owned(),
             },
-            ErrorCode::EventHandlerLimit,
+            HorsiesErrorCode::EventHandlerLimit,
             "HRS-226",
         ),
     ];

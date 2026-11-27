@@ -208,7 +208,7 @@ mod terminal_failure {
         let pool = pool().await;
         let task_id = seed_task(&pool, &running()).await;
         let worker_failure = FinishFailedAttempt {
-            error_code: Some("BROKER_ERROR".to_owned()),
+            error_code: Some("DATABASE_ERROR".to_owned()),
             failed_reason: Some("worker lost it".to_owned()),
             attempt: AttemptFailure {
                 kind: AttemptFailureKind::WorkerFailure,
@@ -238,7 +238,7 @@ mod terminal_failure {
             ),
             (
                 "WORKER_FAILURE",
-                Some("BROKER_ERROR"),
+                Some("DATABASE_ERROR"),
                 Some("worker lost it")
             )
         );

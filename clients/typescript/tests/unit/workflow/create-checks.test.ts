@@ -121,9 +121,11 @@ describe("checkWorkflowsAtCreate", () => {
   });
 
   test("params with a key and no check cases: HRS-027", () => {
-    // SAFETY: the types require check cases for params with a key; the create check refuses them at run time too.
-    const noCases = defineWorkflow(
-      { name: "c", definitionKey: "tests.c.v1", outputType: h.int(), parameters: { n: h.int() } } as never,
+    const int = h.int();
+
+    const noCases = defineWorkflow<{ readonly n: typeof int }, typeof int>(
+      // SAFETY: the types require check cases for params with a key; the create check refuses them at run time too.
+      { name: "c", definitionKey: "tests.c.v1", outputType: int, parameters: { n: int } } as never,
       (w) => ({
         output: w.task(ping, {}, { nodeId: "a" }),
       }),

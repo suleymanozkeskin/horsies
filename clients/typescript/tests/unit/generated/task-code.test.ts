@@ -8,7 +8,7 @@ import {
 import type { BuiltInTaskCode } from "../../../horsies/src/_catalog/task_code.ts";
 import {
   ContractCode,
-  OperationalErrorCode,
+  OperationalCode,
   OutcomeCode,
   RetrievalCode,
 } from "../../../horsies/src/_catalog/task_codes.ts";
@@ -16,13 +16,13 @@ import {
 describe("task codes", () => {
   test("the built-in codes are the members of the four catalogs, in order", () => {
     expect(BUILT_IN_TASK_CODES).toEqual([
-      ...Object.values(OperationalErrorCode),
+      ...Object.values(OperationalCode),
       ...Object.values(ContractCode),
       ...Object.values(RetrievalCode),
       ...Object.values(OutcomeCode),
     ]);
-    expect(BUILT_IN_TASK_CODES).toHaveLength(36);
-    expect(new Set(BUILT_IN_TASK_CODES).size).toBe(36);
+    expect(BUILT_IN_TASK_CODES).toHaveLength(37);
+    expect(new Set(BUILT_IN_TASK_CODES).size).toBe(37);
     expect(Object.isFrozen(BUILT_IN_TASK_CODES)).toBe(true);
   });
 

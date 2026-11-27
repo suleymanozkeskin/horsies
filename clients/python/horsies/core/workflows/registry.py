@@ -23,14 +23,14 @@ def register_workflow_definition(
         return
     existing = _workflow_defs_by_key.get(definition_key)
     if existing is not None and existing is not workflow_def:
-        from horsies.core.errors import ErrorCode, WorkflowValidationError
+        from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 
         raise WorkflowValidationError(
             (
                 f"definition_key '{definition_key}' is already registered to "
                 f"'{existing.__qualname__}'"
             ),
-            code=ErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY,
+            code=HorsiesErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY,
             help_text='give each WorkflowDefinition its own definition_key',
         )
     _workflow_defs_by_key[definition_key] = workflow_def

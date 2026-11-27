@@ -18,8 +18,8 @@ export const SKILL_FILES: readonly string[] = SKILL_FILE_NAMES;
 /** The command that the `bin` field of `horsies` names: the tool with `get-docs` and `skills install`. */
 export const BIN_NAME = "horsies";
 
-/** The skill folder of the package source: not written yet, or the names of its files. */
-export type SkillFolder = { readonly kind: "notWritten" } | { readonly kind: "written"; readonly files: readonly string[] };
+/** The skill folder of the package source: missing, or the names of its files. The package ships the folder always. */
+export type SkillFolder = { readonly kind: "missing" } | { readonly kind: "found"; readonly files: readonly string[] };
 
 /** The deepest nesting of conditions in an exports map that the check reads. */
 const EXPORTS_DEPTH_BOUND = 4;
@@ -44,6 +44,20 @@ export function exportTargets(exportsMap: ParsedJson | undefined): readonly stri
   return targets;
 }
 
+/**
+ * The import specifiers of the entry points of an exports map: `horsies` for `.`, `horsies/zod` for `./zod`. The
+ * `./package.json` member is not an entry point. Pure.
+ */
+export function entryPointSpecifiers(exportsMap: ParsedJson | undefined): readonly string[] {
+  if (!isPlainObject(exportsMap)) {
+    return [];
+  }
+
+  return Object.keys(exportsMap)
+    .filter((key) => key !== "./package.json")
+    .map((key) => `horsies${key.slice(1)}`);
+}
+
 /** The problems of the paths that the `horsies` tarball holds. Pure. */
 export function horsiesFileProblems(files: readonly string[], targets: readonly string[], skills: SkillFolder): readonly string[] {
   const problems = [
@@ -57,19 +71,24 @@ export function horsiesFileProblems(files: readonly string[], targets: readonly 
   return [...problems, ...skillProblems(files, skills)];
 }
 
-/** The problems of the packed skill files against the source folder. Pure. */
+/**
+ * The problems of the packed skill files against the source folder. The package ships the five skill files always:
+ * a source with no skill folder is a problem, and so is a file of the source that is not packed. Pure.
+ */
 function skillProblems(files: readonly string[], skills: SkillFolder): readonly string[] {
   const packed = files.filter((file) => file.startsWith(`${SKILL_FOLDER}/`)).map((file) => file.slice(SKILL_FOLDER.length + 1));
+  const notPacked = SKILL_FILES.filter((name) => !packed.includes(name)).map((name) => `the skill file ${name} is not packed`);
 
   switch (skills.kind) {
-    case "notWritten":
-      return packed.map((file) => `holds the skill file ${file}, and the source has no skill folder`);
-    case "written": {
-      const missing = SKILL_FILES.filter((name) => !skills.files.includes(name));
-      const unpacked = skills.files.filter((name) => !packed.includes(name));
+    case "missing":
+      return [`the source has no skill folder ${SKILL_FOLDER}`, ...notPacked];
+    case "found": {
+      const absent = SKILL_FILES.filter((name) => !skills.files.includes(name));
+      const unpacked = skills.files.filter((name) => !packed.includes(name) && !SKILL_FILES.includes(name));
 
       return [
-        ...missing.map((name) => `the skill folder of the source has no ${name}`),
+        ...absent.map((name) => `the skill folder of the source has no ${name}`),
+        ...notPacked,
         ...unpacked.map((name) => `the skill file ${name} is not packed`),
       ];
     }
@@ -233,4 +252,38 @@ export function platformManifestProblems(manifest: JsonObject, expected: Platfor
     .map(([field, value]) => `${expected.packageName}: ${field} is ${JSON.stringify(manifest[field])}, not ${JSON.stringify(value)}`);
 
   return [...problems, ...publicAccessProblems(manifest).map((problem) => `${expected.packageName}: ${problem}`)];
+}
+
+/** The npm name of the lint package. */
+export const LINT_PACKAGE_NAME = "@horsies/eslint-plugin";
+
+/** The files that the lint tarball holds besides its `exports` targets. */
+const LINT_REQUIRED_FILES: readonly string[] = ["package.json", "README.md", "LICENSE"];
+
+/** The problems of the paths that the lint tarball holds. Pure. */
+export function lintFileProblems(files: readonly string[], targets: readonly string[]): readonly string[] {
+  return [
+    ...[...new Set([...LINT_REQUIRED_FILES, ...targets])].filter((file) => !files.includes(file)).map((file) => `${LINT_PACKAGE_NAME} does not hold ${file}`),
+    ...files.filter((file) => file.startsWith("src/") || file.startsWith("tests/")).map((file) => `${LINT_PACKAGE_NAME} holds the source file ${file}`),
+    ...files.filter((file) => file.endsWith(".tsbuildinfo")).map((file) => `${LINT_PACKAGE_NAME} holds the build info ${file}`),
+  ];
+}
+
+/** The problems of the manifest that the lint tarball carries: its name, the one version of the release, publishable. Pure. */
+export function lintManifestProblems(manifest: JsonObject, version: string): readonly string[] {
+  const problems: string[] = [];
+
+  if (manifest["name"] !== LINT_PACKAGE_NAME) {
+    problems.push(`${LINT_PACKAGE_NAME}: the packed name is ${JSON.stringify(manifest["name"])}`);
+  }
+
+  if (manifest["version"] !== version) {
+    problems.push(`${LINT_PACKAGE_NAME}: the packed version is ${JSON.stringify(manifest["version"])}, not ${version}`);
+  }
+
+  if ("private" in manifest) {
+    problems.push(`${LINT_PACKAGE_NAME}: the packed manifest has the field private, so npm refuses to publish it`);
+  }
+
+  return [...problems, ...publicAccessProblems(manifest).map((problem) => `${LINT_PACKAGE_NAME}: ${problem}`)];
 }

@@ -33,6 +33,17 @@ export interface RerunPolicyArg {
   readonly reservationWindowMicros: bigint;
 }
 
+/** One task that the calling app lists, with the custom codes that its contract declares (none for a contract with no list). */
+export interface RegisteredTaskArg {
+  readonly taskName: string;
+  readonly codes: string[];
+}
+
+/** The tasks that the calling app lists, each once: a rerun checks the stored retry list of its source against them. */
+export interface RegisteredTaskCodesArg {
+  readonly tasks: RegisteredTaskArg[];
+}
+
 /** The text form of one SQL value: its PostgreSQL text input or output, or SQL NULL. */
 export type SqlTextValue = { readonly kind: "text"; readonly text: string } | { readonly kind: "null" };
 
@@ -106,6 +117,13 @@ export type AppRerunFailure =
   | { readonly code: typeof RerunErrorCode.CLIENT_FAMILY_MISMATCH; readonly message: string; readonly stored: StoredFamilyRecord }
   | { readonly code: typeof RerunErrorCode.UNKNOWN_STORED_FAMILY; readonly message: string; readonly stored: string }
   | { readonly code: typeof RerunErrorCode.FAMILY_CHECK_FAILED; readonly message: string; readonly cause: CauseRecord }
+  | {
+      readonly code: typeof RerunErrorCode.RETRY_CODE_NOT_DECLARED;
+      readonly message: string;
+      readonly taskName: string;
+      readonly retryCode: string;
+    }
+  | { readonly code: typeof RerunErrorCode.TASK_NOT_REGISTERED; readonly message: string; readonly taskName: string }
   | { readonly code: typeof RerunErrorCode.CONTRACT_VIOLATION; readonly message: string };
 
 /** How one rerun in the app's transaction ended. */
@@ -120,6 +138,13 @@ export type CallerStepRefusal =
   | { readonly code: typeof RerunErrorCode.ID_MINT_REFUSED; readonly message: string }
   | { readonly code: typeof RerunErrorCode.CLIENT_FAMILY_MISMATCH; readonly message: string; readonly stored: StoredFamilyRecord }
   | { readonly code: typeof RerunErrorCode.UNKNOWN_STORED_FAMILY; readonly message: string; readonly stored: string }
+  | {
+      readonly code: typeof RerunErrorCode.RETRY_CODE_NOT_DECLARED;
+      readonly message: string;
+      readonly taskName: string;
+      readonly retryCode: string;
+    }
+  | { readonly code: typeof RerunErrorCode.TASK_NOT_REGISTERED; readonly message: string; readonly taskName: string }
   | { readonly code: typeof RerunErrorCode.CONTRACT_VIOLATION; readonly message: string };
 
 /** The outcome of the write's row. */
@@ -146,6 +171,7 @@ export interface RerunAddon {
     command: RerunCommandArg,
     policy: RerunPolicyArg,
     trace: TraceArgument,
+    codes: RegisteredTaskCodesArg,
   ): Promise<NativeEnvelope<AppRerunAnswer>>;
   rerunReadStatement(command: RerunCommandArg, policy: RerunPolicyArg): NativeEnvelope<CallerStatementRecord>;
   prepareRerunWrite(
@@ -153,6 +179,7 @@ export interface RerunAddon {
     policy: RerunPolicyArg,
     trace: TraceArgument,
     readRow: CallerRowArg,
+    codes: RegisteredTaskCodesArg,
   ): NativeEnvelope<RerunPreparationRecord>;
 }
 

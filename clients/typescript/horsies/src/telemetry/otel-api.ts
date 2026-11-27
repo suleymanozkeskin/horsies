@@ -88,6 +88,7 @@ export interface OtelTraceApi {
   getTracerProvider(): OtelTracerProvider;
   setSpan(context: OtelContext, span: OtelSpan): OtelContext;
   getSpan(context: OtelContext): OtelSpan | undefined;
+  deleteSpan(context: OtelContext): OtelContext;
   isSpanContextValid(spanContext: OtelSpanContext): boolean;
 }
 
@@ -120,6 +121,11 @@ export interface OtelInstrumentOptions {
   readonly description: string;
 }
 
+/** The options of a counter: the value type of its points. */
+export interface OtelCounterOptions extends OtelInstrumentOptions {
+  readonly valueType: number;
+}
+
 /** The options of a histogram: its bucket bounds as advice. */
 export interface OtelHistogramOptions extends OtelInstrumentOptions {
   readonly advice: { readonly explicitBucketBoundaries: number[] };
@@ -137,7 +143,7 @@ export interface OtelHistogram {
 
 /** A meter of the global meter provider. */
 export interface OtelMeter {
-  createCounter(name: string, options: OtelInstrumentOptions): OtelCounter;
+  createCounter(name: string, options: OtelCounterOptions): OtelCounter;
   createHistogram(name: string, options: OtelHistogramOptions): OtelHistogram;
 }
 
@@ -155,6 +161,7 @@ export interface OtelApi {
   readonly ROOT_CONTEXT: OtelContext;
   readonly SpanKind: { readonly PRODUCER: number; readonly CONSUMER: number };
   readonly SpanStatusCode: { readonly OK: number; readonly ERROR: number };
+  readonly ValueType: { readonly INT: number };
 }
 
 /** Why the API did not load: the cause of the failed `require`. */

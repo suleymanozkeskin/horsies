@@ -4,7 +4,7 @@
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 
-use horsies::{BrokerErrorCode, MinResponses, PingTarget, WorkerHistoryLimit};
+use horsies::{DatabaseErrorCode, MinResponses, PingTarget, WorkerHistoryLimit};
 use horsies_test_support::poll;
 use horsies_test_worker::harness::Suite;
 use horsies_test_worker::instance::{Instance, Profile};
@@ -146,7 +146,7 @@ async fn test_ping_workers_rejects_zero_wait() {
         )
         .await
         .expect_err("a zero wait is refused");
-    assert_eq!(refused.code(), BrokerErrorCode::InvalidInput);
+    assert_eq!(refused.code(), DatabaseErrorCode::InvalidInput);
     assert!(!refused.retryable(), "a bad argument is not retryable");
 }
 

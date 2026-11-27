@@ -154,16 +154,16 @@ export function builtInErrorEnvelope(code: string): string {
   return `{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"${code}"},"data":null,"message":"the broker refused the write"}}`;
 }
 
-/** `BrokerOperationFailed` with `code`: the slot list of `NativeBrokerOperationFailed`. */
+/** `DatabaseOperationFailed` with `code`: the slot list of `NativeDatabaseOperationFailed`. */
 export function operationFailedRaw(code: string, retryable: boolean): RawCatalogError {
   return {
-    class: "BrokerOperationFailed",
+    class: "DatabaseOperationFailed",
     slots: [
-      { name: "code", value: { kind: "codeMember", catalog: "BrokerOperationFailedCode", value: code } },
+      { name: "code", value: { kind: "codeMember", catalog: "DatabaseOperationFailedCode", value: code } },
       { name: "message", value: { kind: "text", text: "connection failed: refused" } },
       { name: "retryable", value: { kind: "flag", value: retryable } },
       {
-        name: "exception",
+        name: "cause",
         value: {
           kind: "exception",
           exception: {
@@ -176,14 +176,14 @@ export function operationFailedRaw(code: string, retryable: boolean): RawCatalog
   };
 }
 
-/** `BrokerInvalidJsonPayload`: the slot list of `NativeBrokerInvalidJsonPayload`. */
+/** `DatabaseInvalidJsonPayload`: the slot list of `NativeDatabaseInvalidJsonPayload`. */
 export function invalidJsonPayloadRaw(): RawCatalogError {
   return {
-    class: "BrokerInvalidJsonPayload",
+    class: "DatabaseInvalidJsonPayload",
     slots: [
       { name: "message", value: { kind: "text", text: "result JSON is refused: duplicate key" } },
       {
-        name: "exception",
+        name: "cause",
         value: { kind: "exception", exception: { kind: "clientClass", class: "serializationError", text: "duplicate key" } },
       },
     ],

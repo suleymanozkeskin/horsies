@@ -1,7 +1,7 @@
 // The findings of the spec checks, and the checked spec that a build gives when it has none. The checked spec is plain
 // data (no function, no contract object), so a seat isolate can send it to the main thread of its child.
 
-import type { ErrorCode } from "../_catalog/error_codes.ts";
+import type { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import type { SpecOnError, SpecSubWorkflowParams } from "../_catalog/workflow_spec.ts";
 import type { RefusalCode } from "../app/refusal.ts";
 import type { JsonText } from "../codec/json-text.ts";
@@ -15,7 +15,7 @@ export type SpecFinding = {
 };
 
 /** A frozen finding. Pure. */
-export function finding(code: ErrorCode, place: string, detail: string, help: readonly string[]): SpecFinding {
+export function finding(code: HorsiesErrorCode, place: string, detail: string, help: readonly string[]): SpecFinding {
   return Object.freeze({ code, place, detail, help: Object.freeze([...help]) });
 }
 
@@ -69,13 +69,15 @@ export type CheckedPolicy =
       readonly optional: readonly number[];
     };
 
+/** The output of a checked spec: the index of its output node, or none (a workflow with no `outputType`). */
+export type CheckedOutput = { readonly kind: "node"; readonly index: number } | { readonly kind: "noOutput" };
+
 /** A spec that passed both gates of the checks. Plain data. */
 export type CheckedSpec = {
   readonly name: string;
   readonly definitionKey: string;
   readonly onError: SpecOnError;
   readonly nodes: readonly CheckedNode[];
-  /** The index of the output node. */
-  readonly output: number;
+  readonly output: CheckedOutput;
   readonly successPolicy: CheckedPolicy;
 };

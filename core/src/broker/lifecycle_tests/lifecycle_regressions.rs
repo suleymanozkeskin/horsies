@@ -77,7 +77,7 @@ fn crash_write(task_id: Uuid, retry: RetryRequest) -> FinishFailedAttempt {
 /// A worker-level failure: the worker reports it, and it is never retried.
 fn worker_failure(task_id: Uuid) -> FinishFailedAttempt {
     FinishFailedAttempt {
-        error_code: Some("BROKER_ERROR".to_owned()),
+        error_code: Some("DATABASE_ERROR".to_owned()),
         attempt: AttemptFailure {
             kind: AttemptFailureKind::WorkerFailure,
             error_message: Some("the worker lost the task".to_owned()),

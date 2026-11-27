@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.utils.imports import (
     _compute_synthetic_module_name,
     import_file_path,
@@ -266,7 +266,7 @@ class TestLocateApp:
             _locate_app(locator)
 
         exc = exc_info.value
-        assert exc.code == ErrorCode.WORKER_INVALID_LOCATOR
+        assert exc.code == HorsiesErrorCode.WORKER_INVALID_LOCATOR
         assert any(locator in note for note in exc.notes)
         assert exc.help_text is not None
 
@@ -276,7 +276,7 @@ class TestLocateApp:
             _locate_app('')
 
         exc = exc_info.value
-        assert exc.code == ErrorCode.WORKER_INVALID_LOCATOR
+        assert exc.code == HorsiesErrorCode.WORKER_INVALID_LOCATOR
         assert any("''" in note for note in exc.notes)
 
     def test_raises_for_non_horsies_object(self) -> None:
@@ -290,7 +290,7 @@ class TestLocateApp:
             _locate_app(locator)
 
         exc = exc_info.value
-        assert exc.code == ErrorCode.WORKER_INVALID_LOCATOR
+        assert exc.code == HorsiesErrorCode.WORKER_INVALID_LOCATOR
         # Notes should include the locator and the resolved type
         assert any(locator in note for note in exc.notes)
         assert any('ModelMetaclass' in note for note in exc.notes)

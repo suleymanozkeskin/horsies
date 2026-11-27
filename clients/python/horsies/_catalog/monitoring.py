@@ -14,7 +14,7 @@ class MonitoringQueryErrorCode(str, Enum):
     Each member names one variant of `MonitoringQueryError`.
     """
 
-    DB_OPERATION_FAILED = 'DB_OPERATION_FAILED'
+    DATABASE_OPERATION_FAILED = 'DATABASE_OPERATION_FAILED'
     """The read failed with a database or driver error, or the core of this
     process could not run it. `retryable` is the core's classification of
     the cause.
@@ -40,7 +40,7 @@ class TaskActionErrorCode(str, Enum):
 
     TASK_IS_WORKFLOW_TASK = 'TASK_IS_WORKFLOW_TASK'
 
-    DB_OPERATION_FAILED = 'DB_OPERATION_FAILED'
+    DATABASE_OPERATION_FAILED = 'DATABASE_OPERATION_FAILED'
 
     STORED_DATA_INVALID = 'STORED_DATA_INVALID'
     """Stored task data does not parse: a history status that is not a task
@@ -61,5 +61,5 @@ class MonitoringQueryRefusalCode(str, Enum):
     hold the other values.
     """
 
-    QUERY_REFUSED = 'QUERY_REFUSED'
+    INVALID_INPUT = 'INVALID_INPUT'
     """A value of the query is refused; no connect and no statement ran."""

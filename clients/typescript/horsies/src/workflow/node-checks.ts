@@ -1,7 +1,7 @@
 // Gate 2 of the spec checks for each node: the app lists its task or child workflow, the node options (queue,
 // priority, deadline, join, context sources) and the node's input. Every finding of every node is reported.
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import { MIN_SUCCESS_MIN, QUEUE_PRIORITY_MAX, QUEUE_PRIORITY_MIN } from "../_catalog/workflow_spec.ts";
 import { DEFAULT_QUEUE_ROUTE } from "../app/contract-list.ts";
 import { isObjectLike } from "../codec/values.ts";
@@ -140,7 +140,7 @@ function checkTaskNode(context: NodeContext, node: TaskRecordedNode): NodeChecke
   if (listed.kind === "notListed") {
     return err([
       finding(
-        ErrorCode.WORKFLOW_UNREGISTERED_TASK,
+        HorsiesErrorCode.WORKFLOW_UNREGISTERED_TASK,
         context.place,
         `the task ${contractRecord(node.contract).name} is not in the tasks list of the app`,
         ["add its contract to Horsies.create({ tasks })"],
@@ -168,7 +168,7 @@ function checkSubWorkflowNode(context: NodeContext, node: SubWorkflowRecordedNod
   if (listed.kind === "notListed") {
     return err([
       finding(
-        ErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS,
+        HorsiesErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS,
         context.place,
         "the child workflow is not in the workflows list of the app",
         ["add its contract to Horsies.create({ workflows })"],
@@ -205,7 +205,7 @@ function noParams(context: NodeContext, input: object): Result<CheckedInput, Non
     ? ok({ staticInput: NO_STATIC_MEMBERS, argsFrom: new Map() })
     : err([
         finding(
-          ErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH,
+          HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH,
           `${context.place} input`,
           "the child workflow takes no parameters",
           ["give {} to a child with parameters: {}"],
@@ -316,14 +316,14 @@ function joinFindings(place: string, join: CheckedJoin, dependencies: number): r
         ? []
         : [
             finding(
-              ErrorCode.WORKFLOW_INVALID_JOIN,
+              HorsiesErrorCode.WORKFLOW_INVALID_JOIN,
               `${place} join`,
               `minSuccess ${String(join.minSuccess)} with ${dependencies} dependencies`,
               [`set minSuccess to an integer from ${MIN_SUCCESS_MIN} to the number of dependencies`],
             ),
           ];
     default:
-      return [finding(ErrorCode.WORKFLOW_INVALID_JOIN, `${place} join`, "a join is all, any or quorum", [])];
+      return [finding(HorsiesErrorCode.WORKFLOW_INVALID_JOIN, `${place} join`, "a join is all, any or quorum", [])];
   }
 }
 
@@ -342,7 +342,7 @@ function contextFindings(
   if (use === "noContext") {
     return [
       finding(
-        ErrorCode.WORKFLOW_CTX_PARAM_MISSING,
+        HorsiesErrorCode.WORKFLOW_CONTEXT_PARAMETER_MISSING,
         `${context.place} workflowContextFrom`,
         "workflowContextFrom is given, but the task takes no workflow context",
         ["define the task with workflowContext: true, or remove workflowContextFrom"],
@@ -354,7 +354,7 @@ function contextFindings(
     .filter((source) => !dependencies.has(indexOf(context.session, source)))
     .map((source) =>
       finding(
-        ErrorCode.WORKFLOW_INVALID_CTX_FROM,
+        HorsiesErrorCode.WORKFLOW_INVALID_CONTEXT_FROM,
         `${context.place} workflowContextFrom`,
         `the context source "${source.nodeId}" is not a dependency`,
         ["add the node to waitsFor"],
@@ -398,7 +398,7 @@ function priorityFindings(place: string, priority: number): readonly SpecFinding
 
   const detail = `the priority ${String(priority)} is not an integer from ${QUEUE_PRIORITY_MIN} to ${QUEUE_PRIORITY_MAX}`;
 
-  return [finding(ErrorCode.WORKFLOW_INVALID_PRIORITY, `${place} priority`, detail, [])];
+  return [finding(HorsiesErrorCode.WORKFLOW_INVALID_PRIORITY, `${place} priority`, detail, [])];
 }
 
 /** The route of a queue that the node names: one that the app admits, else `HRS-014`. */
@@ -406,7 +406,7 @@ function admittedRoute(context: NodeContext, queue: string): Result<QueueRoute, 
   const queues = context.view.queues;
   const detail = `the queue "${queue}" is not a queue of the app`;
 
-  const refused = finding(ErrorCode.WORKFLOW_UNRESOLVED_QUEUE, `${context.place} queue`, detail, [
+  const refused = finding(HorsiesErrorCode.WORKFLOW_UNRESOLVED_QUEUE, `${context.place} queue`, detail, [
     "name one of the customQueues, or leave queue out",
   ]);
 
@@ -436,7 +436,7 @@ function deadlineOf(context: NodeContext, goodUntil: Temporal.Instant | undefine
     ? ok({ kind: "until", epochMicros })
     : err(
         finding(
-          ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
+          HorsiesErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
           `${context.place} goodUntil`,
           "the deadline is outside the years 1 to 9999",
           [],

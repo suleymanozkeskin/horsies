@@ -11,7 +11,7 @@ pub mod send_types;
 
 pub use error::{
     error_code_label, BuiltInTaskCode, ContractCode, DeclaredCodeRefusal, DeclaredCodesRefused,
-    DeclaredErrorCode, DeclaredErrorCodes, ErrorCodeLabel, ExceptionRecord, OperationalErrorCode,
+    DeclaredErrorCode, DeclaredErrorCodes, ErrorCodeLabel, ExceptionRecord, OperationalCode,
     OutcomeCode, RetrievalCode, StoredErrorRefused, SubWorkflowFailure, TaskError, TaskErrorCode,
     TaskErrorKind, UserCode, UserCodeRefused, UNDECLARED_LABEL,
 };

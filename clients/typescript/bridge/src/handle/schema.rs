@@ -10,7 +10,7 @@
 
 use horsies_core::manifest::SchemaMode;
 use horsies_core::web::{SchemaProbe, SchemaState, SchemaStatus};
-use horsies_core::{expected_schema_version, BrokerOperationError};
+use horsies_core::{expected_schema_version, DatabaseOperationError};
 use napi::bindgen_prelude::BigInt;
 use napi_derive::napi;
 
@@ -117,7 +117,7 @@ pub async fn install_operation(connection: BrokerConnection) -> InstallOutcome {
         Err(error) => InstallOutcome::Failed {
             error: RawCatalogError::of(
                 INSTALL_SUBJECT,
-                &BrokerOperationError::schema_init_failed(error),
+                &DatabaseOperationError::schema_init_failed(error),
             ),
         },
     }

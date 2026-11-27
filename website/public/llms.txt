@@ -133,9 +133,9 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - ReadResult[T, E] = Ok[Succeeded[T]] | Ok[Failed[E]] | Err[ReadError]: TaskHandle.get/get_async, WorkflowHandle.get/get_async/result_for/result_for_async, app.get_result/get_result_async
 - Read with one match: case Ok(Succeeded(value)) / case Ok(Failed(task_error)) / case Err(read_error)
 - Ok(Failed(task_error)): the task returned the error, or the library recorded it (TASK_CANCELLED, TASK_TIMEOUT, WORKER_CRASHED, TASK_EXPIRED, WORKFLOW_FAILED, WORKFLOW_PAUSED, UPSTREAM_SKIPPED, RETURN_TYPE_MISMATCH, ...)
-- ReadError: a closed union of frozen classes, one per catalog code; each has code (ClassVar, the catalog member) and message: WaitTimeout, TaskNotFound, WorkflowNotFound, ResultNotAvailable, ResultNotReady, WaitInsideTask, AsyncContext, InvalidInput, ResultDeserializationError, UnknownCustomCode (RESULT_DESERIALIZATION_ERROR; a stored custom code that the declared Enum does not name; adds custom_code: str), BrokerError (adds retryable: bool and exception: BaseException | NoCause), NoTypeAvailable, WorkflowCtxMissingId
+- ReadError: a closed union of frozen classes, one per catalog code; each has code (ClassVar, the catalog member) and message: WaitTimeout, TaskNotFound, WorkflowNotFound, ResultNotAvailable, ResultNotReady, WaitInsideTask, AsyncContext, InvalidInput, ResultDeserializationError, UnknownCustomCode (UNKNOWN_CUSTOM_CODE; a stored custom code that the declared Enum does not name; adds custom_code: str), ReadDatabaseError (adds retryable: bool and cause: BaseException | NoCause), NoTypeAvailable, WorkflowCtxMissingId
 - TaskError[C]: generic in its custom code type, default str. error_codes=E with -> Result[T, TaskError[E]]: the body passes members of E; TaskHandle.get and args_from parameters annotated TaskOutcome[T, TaskError[E]] give members of E, and so do WorkflowHandle.result_for(node) and WorkflowContext.result_for(node) for a TaskNode[T, E] (task.node()(...)), the entries of results(), tasks() and an outputless get() map, and app.get_result (typed TaskError[Any]); the error of a workflow from WorkflowHandle.get and a SubWorkflowNode keep text, because the failed node can be any task. TaskError[E] without error_codes=E is HRS-105; a mapper or default code that E does not name is HRS-209
-- A later read can give an outcome after WaitTimeout, TaskNotFound or BrokerError; a TaskHandle keeps the final answers (an outcome, ResultNotAvailable, ResultDeserializationError, UnknownCustomCode, NoTypeAvailable) and not the others
+- A later read can give an outcome after WaitTimeout, TaskNotFound or ReadDatabaseError; a TaskHandle keeps the final answers (an outcome, ResultNotAvailable, ResultDeserializationError, UnknownCustomCode, NoTypeAvailable) and not the others
 - read.unwrap() on a ReadResult gives the TaskOutcome, not the value
 
 ### TaskError
@@ -145,56 +145,56 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - exception: dict[str, Any] | BaseException | None
 - Unknown keys are refused, at construction and at decode
 
-### BuiltInTaskCode (type alias = OperationalErrorCode | ContractCode | RetrievalCode | OutcomeCode)
-- OperationalErrorCode: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED, BROKER_ERROR, WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR, RESULT_DESERIALIZATION_ERROR, WORKFLOW_ENQUEUE_FAILED, SUBWORKFLOW_LOAD_FAILED, WORKFLOW_RECOVERY_LIMIT_REACHED, SUBWORKFLOW_DEPTH_LIMIT_REACHED, TASK_BLOCKED_LOOP, NEIGHBOUR_BLOCKED_LOOP, WORKFLOW_START_INCOMPLETE
-- ContractCode: RETURN_TYPE_MISMATCH, WORKFLOW_CTX_MISSING_ID, NO_TYPE_AVAILABLE
-- RetrievalCode: WAIT_TIMEOUT, TASK_NOT_FOUND, WORKFLOW_NOT_FOUND, RESULT_NOT_AVAILABLE, RESULT_NOT_READY, ASYNC_CONTEXT, INVALID_INPUT, WAIT_INSIDE_TASK
+### BuiltInTaskCode (type alias = OperationalCode | ContractCode | RetrievalCode | OutcomeCode)
+- OperationalCode: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED, DATABASE_ERROR, WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR, RESULT_DESERIALIZATION_ERROR, WORKFLOW_ENQUEUE_FAILED, SUBWORKFLOW_LOAD_FAILED, WORKFLOW_RECOVERY_LIMIT_REACHED, SUBWORKFLOW_DEPTH_LIMIT_REACHED, TASK_BLOCKED_LOOP, NEIGHBOUR_BLOCKED_LOOP, WORKFLOW_START_INCOMPLETE
+- ContractCode: RETURN_TYPE_MISMATCH, WORKFLOW_CONTEXT_MISSING_ID, NO_TYPE_AVAILABLE
+- RetrievalCode: WAIT_TIMEOUT, TASK_NOT_FOUND, WORKFLOW_NOT_FOUND, RESULT_NOT_AVAILABLE, RESULT_NOT_READY, ASYNC_CONTEXT, INVALID_INPUT, WAIT_INSIDE_TASK, UNKNOWN_CUSTOM_CODE
 - A read gives a RetrievalCode value as read_error.code of its ReadError class (Err(WaitTimeout(...)) has code WAIT_TIMEOUT), not inside a TaskError
-- A result wait inside a worker child (get(), get_async(), app.get_result(), WorkflowHandle.get()) returns Err(WaitInsideTask(...)) at once, as its first check; the raw reads (app.get_raw_result(), broker.get_raw_result_record()) return Err(BrokerWaitInsideTask); compose tasks with a workflow instead
-- OutcomeCode: TASK_CANCELLED, TASK_EXPIRED, TASK_TIMEOUT, WORKFLOW_PAUSED, WORKFLOW_EXPIRED, WORKFLOW_FAILED, WORKFLOW_CANCELLED, UPSTREAM_SKIPPED, SUBWORKFLOW_FAILED, WORKFLOW_SUCCESS_CASE_NOT_MET, WORKFLOW_OUTPUT_SKIPPED
+- A result wait inside a worker child (get(), get_async(), app.get_result(), WorkflowHandle.get()) returns Err(WaitInsideTask(...)) at once, as its first check; the raw reads (app.get_raw_result(), broker.get_raw_result_record()) return Err(DatabaseWaitInsideTask); compose tasks with a workflow instead
+- OutcomeCode: TASK_CANCELLED, TASK_EXPIRED, TASK_TIMEOUT, WORKFLOW_PAUSED, WORKFLOW_EXPIRED, WORKFLOW_FAILED, WORKFLOW_CANCELLED, UPSTREAM_SKIPPED, SUB_WORKFLOW_FAILED, WORKFLOW_SUCCESS_CASE_NOT_MET, WORKFLOW_OUTPUT_SKIPPED
 - All built-in code string values are globally reserved; user-defined error codes must not collide
 - BUILTIN_CODE_REGISTRY: dict[str, BuiltInTaskCode] maps every reserved string to its enum member
 - horsies check reports HRS-212 when exception_mapper or default_unhandled_error_code collides with a reserved code
 - User-defined error codes are plain str only (foreign str,Enum types rejected)
-- Strict construction: TaskError(error_code="BROKER_ERROR", message="...") raises ValueError (reserved string)
-- Use enum members: TaskError(error_code=OperationalErrorCode.BROKER_ERROR, message="...") — accepted
+- Strict construction: TaskError(error_code="DATABASE_ERROR", message="...") raises ValueError (reserved string)
+- Use enum members: TaskError(error_code=OperationalCode.DATABASE_ERROR, message="...") — accepted
 - Serialization: built-in codes use tagged format {"__builtin_task_code__": "VALUE"}, user strings as-is
 - Deserialization: standard model_validate() / model_validate_json() work everywhere — including nested models
 
-### SubWorkflowError (extends TaskError)
+### SubWorkflowFailure (extends TaskError)
 - sub_workflow_id: str
 - sub_workflow_summary: SubWorkflowSummary[Any]
-- Pattern match to distinguish: case SubWorkflowError() vs case TaskError()
+- Pattern match to distinguish: case SubWorkflowFailure() vs case TaskError()
 
-### BrokerResult[T] (infrastructure Result type)
-- PostgresBroker methods return BrokerResult[T] = Ok[T] | Err[BrokerOperationError]; enqueue_async, enqueue and ensure_schema_initialized return a subset of BrokerOperationError (see "Broker methods" below)
+### DatabaseResult[T] (infrastructure Result type)
+- PostgresBroker methods return DatabaseResult[T] = Ok[T] | Err[DatabaseOperationError]; enqueue_async, enqueue and ensure_schema_initialized return a subset of DatabaseOperationError (see "Broker methods" below)
 - Ok(value): operation succeeded
-- Err(BrokerOperationError): operation failed
+- Err(DatabaseOperationError): operation failed
 - Use is_ok(result) / is_err(result) type guards, then access ok_value/err_value
-- BrokerOperationError is a union of frozen variants; every variant has code (BrokerErrorCode), message (str), retryable (bool). BrokerOperationFailed (the nine operation codes SCHEMA_INIT_FAILED .. LISTENER_SUBSCRIBE_FAILED; exception: BaseException), BrokerEnqueueFailed (ENQUEUE_FAILED; exception: BaseException | NoCause; the row may or may not exist), BrokerPayloadMismatch, BrokerIdempotencyKeyConflict (owner_task_id), BrokerNotAttached (NO_BROKER), BrokerNoTypeAvailable, BrokerInvalidJsonPayload (exception), BrokerInvalidTaskOptions (exception), BrokerInvalidInput (INVALID_INPUT; exception; a refused argument, nothing written), BrokerAsyncContext, BrokerListenerDisabled (LISTENER_DISABLED; a broker with the schema mode SchemaMode.ASSUME_INITIALIZED has no listener), BrokerWaitInsideTask (WAIT_INSIDE_TASK; a raw result read in a worker child; nothing ran). Match on the variant; broker_error_cause(err) gives the cause or NoCause() before raise ... from
-- BrokerEnqueueError = BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict | BrokerInvalidTaskOptions | BrokerInvalidInput (every failure of enqueue_async); BrokerSyncCallError = BrokerAsyncContext (the failure that the sync enqueue adds; nothing ran)
+- DatabaseOperationError is a union of frozen variants; every variant has code (DatabaseErrorCode), message (str), retryable (bool). DatabaseOperationFailed (the nine operation codes SCHEMA_INIT_FAILED .. LISTENER_SUBSCRIBE_FAILED; cause: BaseException), DatabaseEnqueueFailed (ENQUEUE_FAILED; cause: BaseException | NoCause; the row may or may not exist), DatabasePayloadMismatch, DatabaseIdempotencyKeyConflict (owner_task_id), DatabaseNotAttached (NO_DATABASE), DatabaseNoTypeAvailable, DatabaseInvalidJsonPayload (cause), DatabaseInvalidTaskOptions (cause), DatabaseInvalidInput (INVALID_INPUT; cause; a refused argument, nothing written), DatabaseAsyncContext, DatabaseListenerDisabled (LISTENER_DISABLED; a broker with the schema mode SchemaMode.ASSUME_INITIALIZED has no listener), DatabaseWaitInsideTask (WAIT_INSIDE_TASK; a raw result read in a worker child; nothing ran). Match on the variant; err.failure_cause() gives the exception of the cause or NoCause() before raise ... from
+- DatabaseEnqueueError = DatabaseEnqueueFailed | DatabasePayloadMismatch | DatabaseIdempotencyKeyConflict | DatabaseInvalidTaskOptions | DatabaseInvalidInput (every failure of enqueue_async); DatabaseSyncCallError = DatabaseAsyncContext (the failure that the sync enqueue adds; nothing ran)
 - enqueue_async and enqueue require sent_at and send_kind (from horsies import SendKind): SendKind.FIRST for the first send of a task id, SendKind.REPEAT for a resend (reads history first, so a finished task does not run again)
-- BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, PAYLOAD_MISMATCH, IDEMPOTENCY_KEY_CONFLICT, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DB_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED, LISTENER_START_FAILED, LISTENER_SUBSCRIBE_FAILED, NO_BROKER, NO_TYPE_AVAILABLE, INVALID_JSON_PAYLOAD, INVALID_TASK_OPTIONS, ASYNC_CONTEXT, INVALID_INPUT, LISTENER_DISABLED, WAIT_INSIDE_TASK
-- ASYNC_CONTEXT (BrokerErrorCode, TaskSendErrorCode, WorkflowStartErrorCode, HandleErrorCode, RetrievalCode): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell); nothing ran; call the *_async form (not retryable; a read returns Err(AsyncContext(...)), which a TaskHandle does not keep)
+- DatabaseErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, PAYLOAD_MISMATCH, IDEMPOTENCY_KEY_CONFLICT, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DATABASE_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED, LISTENER_START_FAILED, LISTENER_SUBSCRIBE_FAILED, NO_DATABASE, NO_TYPE_AVAILABLE, INVALID_JSON_PAYLOAD, INVALID_TASK_OPTIONS, ASYNC_CONTEXT, INVALID_INPUT, LISTENER_DISABLED, WAIT_INSIDE_TASK
+- ASYNC_CONTEXT (DatabaseErrorCode, TaskSendErrorCode, WorkflowStartErrorCode, WorkflowHandleErrorCode, RetrievalCode): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell); nothing ran; call the *_async form (not retryable; a read returns Err(AsyncContext(...)), which a TaskHandle does not keep)
 - Every call runs on the core of the process: one pool for every thread and event loop, so no call has an event loop limit. A sync call runs the core's blocking form on the calling thread; any exception from a sync call that is not a catalog error propagates, as from the *_async form
 - retryable=True: transient (connection blip), retryable=False: permanent (schema drift, code bug)
-- Broker methods: enqueue_async -> Result[str, BrokerEnqueueError], enqueue (sync) -> Result[str, BrokerEnqueueError | BrokerSyncCallError], get_task_info_async -> BrokerResult[TaskInfo | None],
-  ensure_schema_initialized -> Result[None, BrokerOperationFailed], get_stale_tasks(threshold_minutes=2) -> BrokerResult[BoundedTaskList[StaleTaskRow]],
-  get_expired_tasks -> BrokerResult[BoundedTaskList[ExpiredTaskRow]],
-  mark_stale_tasks_as_failed -> BrokerResult[int], requeue_stale_claimed -> BrokerResult[int],
-  terminate_orphaned_workflow_tasks -> BrokerResult[int],
-  close_async -> BrokerResult[None]
+- Broker methods: enqueue_async -> Result[str, DatabaseEnqueueError], enqueue (sync) -> Result[str, DatabaseEnqueueError | DatabaseSyncCallError], get_task_info_async -> DatabaseResult[TaskInfo | None],
+  ensure_schema_initialized -> Result[None, DatabaseOperationFailed], get_stale_tasks(threshold_minutes=2) -> DatabaseResult[BoundedTaskList[StaleTaskRow]],
+  get_expired_tasks -> DatabaseResult[BoundedTaskList[ExpiredTaskRow]],
+  mark_stale_tasks_as_failed -> DatabaseResult[int], requeue_stale_claimed -> DatabaseResult[int],
+  terminate_orphaned_workflow_tasks -> DatabaseResult[int],
+  close_async -> DatabaseResult[None]
 - Health/liveness API (app-level, async + sync; broker exposes the async forms):
-  ping_database_async -> BrokerResult[DatabasePing] (SELECT 1 + latency via live pool),
-  ping_workers_async(target=PingTargetEveryWorker() | PingTargetWorker(worker_id), wait_ms=2000, min_responses=MinResponsesFullWindow() | MinResponsesAtLeast(count)) -> BrokerResult[list[WorkerPong]] (active LISTEN/NOTIFY ping-pong; MinResponsesAtLeast(1) returns on first reply = fast liveness gate),
-  list_worker_states_async -> BrokerResult[list[WorkerStateSnapshot]] (latest per worker, includes idle workers),
-  get_worker_state_async(worker_id) -> BrokerResult[WorkerStateSnapshot | None],
-  get_worker_state_history_async(worker_id, limit=WorkerHistoryLimitAllRetained() | WorkerHistoryLimitNewest(count)) -> BrokerResult[list[WorkerStateSnapshot]],
-  get_stale_tasks_async(threshold_minutes) -> BrokerResult[BoundedTaskList[StaleTaskRow]] (RUNNING tasks with no runner heartbeat within the threshold; StaleTaskRow: task_id, task_name, worker_hostname, worker_pid, worker_process_name, started_at, last_heartbeat_at),
-  get_expired_tasks_async -> BrokerResult[BoundedTaskList[ExpiredTaskRow]] (PENDING tasks past good_until; ExpiredTaskRow: task_id, task_name, queue_name, priority, sent_at, enqueued_at, good_until, expired_for: timedelta),
+  ping_database_async -> DatabaseResult[DatabasePing] (SELECT 1 + latency via live pool),
+  ping_workers_async(target=PingTargetEveryWorker() | PingTargetWorker(worker_id), wait_ms=2000, min_responses=MinResponsesFullWindow() | MinResponsesAtLeast(count)) -> DatabaseResult[list[WorkerPong]] (active LISTEN/NOTIFY ping-pong; MinResponsesAtLeast(1) returns on first reply = fast liveness gate),
+  list_worker_states_async -> DatabaseResult[list[WorkerStateSnapshot]] (latest per worker, includes idle workers),
+  get_worker_state_async(worker_id) -> DatabaseResult[WorkerStateSnapshot | None],
+  get_worker_state_history_async(worker_id, limit=WorkerHistoryLimitAllRetained() | WorkerHistoryLimitNewest(count)) -> DatabaseResult[list[WorkerStateSnapshot]],
+  get_stale_tasks_async(threshold_minutes) -> DatabaseResult[BoundedTaskList[StaleTaskRow]] (RUNNING tasks with no runner heartbeat within the threshold; StaleTaskRow: task_id, task_name, worker_hostname, worker_pid, worker_process_name, started_at, last_heartbeat_at),
+  get_expired_tasks_async -> DatabaseResult[BoundedTaskList[ExpiredTaskRow]] (PENDING tasks past good_until; ExpiredTaskRow: task_id, task_name, queue_name, priority, sent_at, enqueued_at, good_until, expired_for: timedelta),
   BoundedTaskList = BoundedTaskListComplete(rows) | BoundedTaskListTruncated(rows, bound) (at most TASK_LIST_ROW_BOUND = 10,000 rows)
 - get_worker_stats was removed in 0.1.4; use list_worker_states_async (typed, includes idle workers)
-- Note: app.get_result_async / app.get_result return ReadResult[Any, TaskError], not a BrokerResult: a database failure is Err(BrokerError(...)), a stored value that does not decode Err(ResultDeserializationError(...)), a task that is not registered in this process Err(NoTypeAvailable(...)), a sync call in a running event loop Err(AsyncContext(...)); the raw reads app.get_raw_result / broker.get_raw_result_record keep BrokerResult
+- Note: app.get_result_async / app.get_result return ReadResult[Any, TaskError], not a DatabaseResult: a database failure is Err(ReadDatabaseError(...)), a stored value that does not decode Err(ResultDeserializationError(...)), a task that is not registered in this process Err(NoTypeAvailable(...)), a sync call in a running event loop Err(AsyncContext(...)); the raw reads app.get_raw_result / broker.get_raw_result_record keep DatabaseResult
 
 ### Result[T, E] (vendored Ok/Err type)
 - from horsies import Result, Ok, Err, is_ok, is_err
@@ -249,8 +249,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .task_id -> str
 - .get(timeout_ms=None) -> ReadResult[T, TaskError] (blocking)
 - .get_async(timeout_ms=None) -> ReadResult[T, TaskError] (async blocking)
-- .info(include_result=False, include_failed_reason=False) -> BrokerResult[TaskInfo | None]
-- .info_async(include_result=False, include_failed_reason=False) -> BrokerResult[TaskInfo | None]
+- .info(include_result=False, include_failed_reason=False) -> DatabaseResult[TaskInfo | None]
+- .info_async(include_result=False, include_failed_reason=False) -> DatabaseResult[TaskInfo | None]
 
 ### TaskSendResult[T] (send/schedule Result type)
 - type TaskSendResult[T] = Result[T, TaskSendError]
@@ -261,25 +261,25 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .retry_send(error) / .retry_send_async(error) / .retry_schedule(error): replay stored payload
 
 ### TaskSendError (union, one frozen variant per TaskSendErrorCode member)
-- Match on the variant; err.code (class variable) names its member; payload, message and exception are not in the repr
+- Match on the variant; err.code (class variable) names its member; payload, message and cause are not in the repr
 - TaskSendSuppressed: message
 - TaskSendAsyncContext: task_id, payload, message
-- TaskSendValidationFailed: message, exception
-- TaskSendEnqueueFailed: task_id, payload, message, retryable (bool, the core's classification), exception
+- TaskSendValidationFailed: message, cause
+- TaskSendEnqueueFailed: task_id, payload, message, retryable (bool, the core's classification), cause
 - TaskSendPayloadMismatch: task_id, payload, message
 - TaskSendPayloadTooLarge: message, size_bytes (int), limit_bytes (int)
-- TaskSendIdempotencyKeyConflict: task_id, payload, message, owner_task_id (str); retryable is True (a class variable: the conflict clears when the reservation ends)
-- exception (TaskSendValidationFailed, TaskSendEnqueueFailed): BaseException | NoCause; NoCause() means a check found the failure without a Python exception; match on it before raise ... from or exc_info=
+- TaskSendIdempotencyKeyConflict: task_id, payload, message, owner_task_id (str); retryable is False (a class variable: a repeat of the same send does not complete it)
+- cause (TaskSendValidationFailed, TaskSendEnqueueFailed): BaseException | NoCause; NoCause() means a check found the failure without a Python exception; match on it before raise ... from or exc_info=
 - Validation failure text: `<loc>: <msg> [<type>]`, at most 10 entries, no input values (`<input>` replaces an input part of a message; validator-written text is kept). A caught pydantic ValidationError is kept as ValueValidationError (horsies.core.codec). RETURN_TYPE_MISMATCH data: variant, expected_type, actual_type, validation_errors, validation_error_count; the returned value is not stored
-- TaskSendRetryable = TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict: the retry methods' parameter type; another variant is a type error and fails an assertion at run time
+- TaskSendRetryable = TaskSendEnqueueFailed | TaskSendAsyncContext: the retry methods' parameter type; another variant is a type error and fails an assertion at run time
 
 ### TaskSendErrorCode (enum)
 <!-- members: TaskSendErrorCode -->
 - SEND_SUPPRESSED: send suppressed during worker import/discovery
 - VALIDATION_FAILED: argument serialization or validation failed
-- ENQUEUE_FAILED: broker/database failure during enqueue, or the core of the process could not run the send (exception is the core error: TooManyPendingCalls and CoreCallTimedOut are retryable; RuntimeStartFailed is not); the row may or may not exist; retryable is the core's classification
+- ENQUEUE_FAILED: broker/database failure during enqueue, or the core of the process could not run the send (cause is the core error: TooManyPendingCalls and CoreCallTimedOut are retryable; RuntimeStartFailed is not); the row may or may not exist; retryable is the core's classification
 - PAYLOAD_MISMATCH: the task id exists, and the command or the idempotency key differs from the original send (payload altered)
-- IDEMPOTENCY_KEY_CONFLICT: the idempotency key is reserved by another task with a different command; owner_task_id names the owner task; the retry methods accept it
+- IDEMPOTENCY_KEY_CONFLICT: the idempotency key is reserved by another task with a different command; owner_task_id names the owner task; not retryable (send the same command as the owner task, or use another key); the retry methods refuse it
 - PAYLOAD_TOO_LARGE: the serialized input exceeds payload.reject_bytes bytes of UTF-8 text; nothing was enqueued
 - ASYNC_CONTEXT: sync send/schedule (or sync retry) called inside a running event loop; nothing was enqueued; the error keeps the payload for retry_send_async / retry_schedule_async
 
@@ -361,13 +361,13 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .get(timeout_ms=None) / .get_async(...) -> ReadResult[T, TaskError] (blocking; an outputless workflow gives Ok(Succeeded(terminal_results)), WorkflowTerminalResults = dict[str, TaskOutcome[Any, TaskError] | None])
 - .results() / .results_async() -> HandleResult[dict[str, TaskOutcome[Any, TaskError]]] (keyed by node_id)
 - .result_for(node) / .result_for_async(node) -> ReadResult[T, TaskError] (non-blocking query; Err(ResultNotReady(...)) before the node has a result)
-- get and result_for put a read failure in Err(ReadError) (WaitTimeout, WorkflowNotFound, ResultNotReady, ResultDeserializationError, BrokerError, AsyncContext, ...); the workflow's or the node's error is Ok(Failed(task_error)); the other methods return HandleResult
+- get and result_for put a read failure in Err(ReadError) (WaitTimeout, WorkflowNotFound, ResultNotReady, ResultDeserializationError, ReadDatabaseError, AsyncContext, ...); the workflow's or the node's error is Ok(Failed(task_error)); the other methods return HandleResult
 - .tasks() / .tasks_async() -> HandleResult[list[WorkflowTaskInfo]]
 - .cancel() / .cancel_async() -> HandleResult[None]
 - .pause() / .pause_async() -> HandleResult[bool]
 - .resume() / .resume_async() -> HandleResult[bool]
-- `HandleResult[T]` = Result[T, HandleOperationError]; HandleOperationError is a union of frozen variants, one per HandleErrorCode member; every variant has code, message, retryable, workflow_id. HandleWorkflowNotFound, HandleDbOperationFailed (exception: BaseException; retryable is the core's classification; a write rolled back or its commit outcome is unknown), HandleStoredDataInvalid (exception; a stored status or subworkflow summary does not parse; nothing changed), HandleResumeRecoveryFailed (exception; resume committed, the recovery pass after the commit failed, the workflow is RUNNING), HandleAsyncContext. Match on the variant. A defect in pause or resume propagates
-- HandleErrorCode: WORKFLOW_NOT_FOUND, DB_OPERATION_FAILED, STORED_DATA_INVALID, RESUME_RECOVERY_FAILED, ASYNC_CONTEXT
+- `HandleResult[T]` = Result[T, WorkflowHandleError]; WorkflowHandleError is a union of frozen variants, one per WorkflowHandleErrorCode member other than INVALID_WORKFLOW_ID; every variant has code, message, retryable, workflow_id. WorkflowHandleNotFound, WorkflowHandleDatabaseOperationFailed (cause: BaseException; retryable is the core's classification; a write rolled back or its commit outcome is unknown), WorkflowHandleStoredDataInvalid (cause; a stored status or subworkflow summary does not parse; nothing changed), WorkflowHandleResumeRecoveryFailed (cause; resume committed, the recovery pass after the commit failed, the workflow is RUNNING), WorkflowHandleAsyncContext. Match on the variant. A defect in pause or resume propagates
+- WorkflowHandleErrorCode: WORKFLOW_NOT_FOUND, DATABASE_OPERATION_FAILED, STORED_DATA_INVALID, RESUME_RECOVERY_FAILED, ASYNC_CONTEXT, INVALID_WORKFLOW_ID
 
 ### WorkflowStatus (enum)
 - PENDING -> RUNNING -> COMPLETED | FAILED | PAUSED | CANCELLED; PAUSED -> EXPIRED when paused_workflow_cancel_after elapses
@@ -458,7 +458,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Ok(WorkflowHandle): workflow created and root tasks enqueued
 - Err(WorkflowStartError): start failed; match on the variant
 - WorkflowStartError is a union of frozen variants; every variant has code (WorkflowStartErrorCode), message (str), retryable (bool), workflow_name (str), workflow_id (str, the id this start used)
-- Variants: WorkflowStartBrokerNotConfigured; WorkflowStartValidationFailed (exception: BaseException | NoCause); WorkflowStartIdConflict (existing_workflow_name: str); WorkflowStartCommandConflict; WorkflowStartEnqueueFailed (retryable = the core's classification, exception: BaseException); WorkflowStartAsyncContext
+- Variants: WorkflowStartBrokerNotConfigured; WorkflowStartValidationFailed (cause: BaseException | NoCause); WorkflowStartIdConflict (existing_workflow_name: str); WorkflowStartCommandConflict; WorkflowStartEnqueueFailed (retryable = the core's classification, cause: BaseException); WorkflowStartAsyncContext
 - WorkflowStartErrorCode: BROKER_NOT_CONFIGURED, VALIDATION_FAILED, WORKFLOW_ID_CONFLICT, WORKFLOW_COMMAND_CONFLICT, ENQUEUE_FAILED, ASYNC_CONTEXT
 - WORKFLOW_ID_CONFLICT: the workflow id exists for another workflow name; nothing was written; use another id
 - WORKFLOW_COMMAND_CONFLICT: the workflow id holds a workflow of the same name that another start command started, or a sub-workflow; nothing was written; never retryable; retry_start refuses it; send the same start command or use another id
@@ -476,9 +476,10 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Per-task: @app.task("name", exception_mapper={TimeoutError: "TIMEOUT"})
 
 ### RetryPolicy
-- RetryPolicy.fixed(intervals, *, auto_retry_for, jitter) e.g. RetryPolicy.fixed([60, 120, 300], auto_retry_for=["ERROR_CODE", ...]); the length of intervals is the retry count
+- RetryPolicy.fixed(intervals, *, auto_retry_for, jitter) e.g. RetryPolicy.fixed([60, 120, 300], auto_retry_for=[OperationalCode.WORKER_CRASHED, MyCode.RATE_LIMITED]); the length of intervals is the retry count
 - RetryPolicy.exponential(base_seconds, *, max_retries, auto_retry_for, jitter, max_delay_seconds=None)
-- auto_retry_for: required list of error codes that trigger retries
+- auto_retry_for: required list of code members that trigger retries: built-in code members, or members of the Enum class that the task declares with error_codes= (error_codes=MyCode)
+- @app.task refuses a plain str entry, a member of another Enum class, or a custom member of a task that declares a tuple or no error_codes: TaskDefinitionError TASK_INVALID_OPTIONS (HRS-102), the notes name the task and the entry; pyright refuses a plain str
 - jitter: bool (default True, adds a random 0-25% to each delay; never shortens)
 - Exponential: exactly one base interval, delay = base * 2^(attempt-1)
 
@@ -603,9 +604,9 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### Error Types and Reporting
 
-#### ErrorCode (enum, startup/validation errors HRS-001-HRS-399)
+#### HorsiesErrorCode (enum, startup/validation errors HRS-001-HRS-399)
 Workflow validation (HRS-001-HRS-099):
-<!-- members: ErrorCode part -->
+<!-- members: HorsiesErrorCode part -->
 - HRS-001 WORKFLOW_NO_NAME
 - HRS-002 WORKFLOW_NO_NODES
 - HRS-003 WORKFLOW_INVALID_NODE_ID
@@ -614,8 +615,8 @@ Workflow validation (HRS-001-HRS-099):
 - HRS-006 WORKFLOW_INVALID_DEPENDENCY
 - HRS-007 WORKFLOW_CYCLE_DETECTED
 - HRS-008 WORKFLOW_INVALID_ARGS_FROM
-- HRS-009 WORKFLOW_INVALID_CTX_FROM
-- HRS-010 WORKFLOW_CTX_PARAM_MISSING
+- HRS-009 WORKFLOW_INVALID_CONTEXT_FROM
+- HRS-010 WORKFLOW_CONTEXT_PARAMETER_MISSING
 - HRS-011 WORKFLOW_INVALID_OUTPUT
 - HRS-012 WORKFLOW_INVALID_SUCCESS_POLICY
 - HRS-013 WORKFLOW_INVALID_JOIN
@@ -644,7 +645,7 @@ Workflow validation (HRS-001-HRS-099):
 - HRS-037 WORKFLOW_SUBWORKFLOW_SELF_NESTING
 - HRS-038 WORKFLOW_TOO_MANY_NODES
 Task definition (HRS-100-HRS-199):
-<!-- members: ErrorCode part -->
+<!-- members: HorsiesErrorCode part -->
 - HRS-100 TASK_NO_RETURN_TYPE
 - HRS-101 TASK_INVALID_RETURN_TYPE
 - HRS-102 TASK_INVALID_OPTIONS
@@ -659,7 +660,7 @@ Task definition (HRS-100-HRS-199):
 - HRS-112 TASK_INVALID_ERROR_CODE (an error_codes entry is empty, not UPPER_SNAKE_CASE, or an exception class name)
 - HRS-113 TASK_DUPLICATE_ERROR_CODE (an error_codes entry is given twice)
 Config/broker (HRS-200-HRS-299):
-<!-- members: ErrorCode part -->
+<!-- members: HorsiesErrorCode part -->
 - HRS-200 CONFIG_INVALID_QUEUE_MODE
 - HRS-201 CONFIG_INVALID_CLUSTER_CAP
 - HRS-202 CONFIG_INVALID_PREFETCH
@@ -670,10 +671,10 @@ Config/broker (HRS-200-HRS-299):
 - HRS-207 WORKER_INVALID_LOCATOR
 - HRS-208 CONFIG_INVALID_RESILIENCE
 - HRS-209 CONFIG_INVALID_EXCEPTION_MAPPER
-- HRS-210 MODULE_EXEC_ERROR
-- HRS-211 BROKER_INIT_FAILED
+- HRS-210 MODULE_IMPORT_ERROR
+- HRS-211 DATABASE_INIT_FAILED
 - HRS-212 CHECK_RESERVED_CODE_COLLISION (exception_mapper/default_unhandled_error_code collides with built-in code; an error_codes entry is a built-in code or WORKFLOW_STOPPED)
-- HRS-213 CONFIG_INVALID_BROKER_POOL
+- HRS-213 CONFIG_INVALID_DATABASE_POOL
 - HRS-214 CONFIG_INVALID_CHILD_HOOK
 - HRS-215 CONFIG_INVALID_KEEPALIVE
 - HRS-216 CONFIG_INVALID_RETENTION
@@ -689,15 +690,15 @@ Config/broker (HRS-200-HRS-299):
 - HRS-226 EVENT_HANDLER_LIMIT (the app has 32 event handlers already)
 - HRS-227 CONFIG_INVALID_PAYLOAD (a payload size bound, warn_bytes or reject_bytes, is not valid; only the Rust and TypeScript clients raise it, Python's PayloadPolicy refuses the value through its field bounds)
 Registry (HRS-300-HRS-399):
-<!-- members: ErrorCode part -->
+<!-- members: HorsiesErrorCode part -->
 - HRS-300 TASK_NOT_REGISTERED
 - HRS-301 TASK_DUPLICATE_NAME
 - HRS-302 WORKFLOW_UNREGISTERED_TASK (a workflow node names a task that the app of its workflow builder does not register; the Rust client raises it at builder.task(node), and the node is not added)
 
 #### HorsiesError (base exception)
 - Rust-style formatted error display (like rustc compiler errors)
-- Fields: message, code (ErrorCode | None), location (SourceLocation | None), notes (list[str]), help_text (str | None)
-- .format_rust_style(use_colors=None) -> str (ANSI-colored for TTY)
+- Fields: message, code (HorsiesErrorCode | None), location (SourceLocation | None), notes (list[str]), help_text (str | None)
+- .format_diagnostic(use_colors=None) -> str (ANSI-colored for TTY)
 - Auto-detects source location from call stack (first frame outside horsies internals)
 - Subclasses: WorkflowValidationError, ConfigurationError, TaskDefinitionError, RegistryError
 - Environment variables:
@@ -714,7 +715,7 @@ Registry (HRS-300-HRS-399):
 - Collects multiple HorsiesError instances within a validation phase
 - ValidationReport(phase_name: str)
 - .add(error: HorsiesError), .has_errors() -> bool, .refusals -> list[HorsiesError]
-- .format_rust_style() -> str (formats all errors with "aborting due to N errors" summary)
+- .format_diagnostic() -> str (formats all errors with "aborting due to N errors" summary)
 - Used by WorkflowSpec construction, AppConfig validation, and app.check() (its return value)
 
 #### raise_collected(report: ValidationReport) -> None
@@ -725,9 +726,9 @@ Registry (HRS-300-HRS-399):
 #### MultipleValidationErrors (extends HorsiesError)
 - Wraps a ValidationReport with 2+ errors
 - .report -> ValidationReport
-- .format_rust_style() delegates to report
+- .format_diagnostic() delegates to report
 
-#### WorkflowContextMissingIdError (RuntimeError)
+#### WorkflowContextMissingId (RuntimeError)
 - Raised when TaskNode/NodeKey has no node_id for WorkflowContext.result_for()
 
 ### Serialization
@@ -802,7 +803,7 @@ Each entry: Title -- summary -> URL
 - Sending Tasks -- enqueue for background execution -> /horsies/tasks/sending-tasks/
 - Error Handling -- error patterns of Result, TaskError and ReadResult -> /horsies/tasks/error-handling/
 - Errors Reference -- the error codes for both clients: task codes, send, workflow start and handle codes, HRS config codes -> /horsies/tasks/errors/
-- Error Types -- the Python error types: TaskError, BrokerResult and BrokerOperationError, the calls that run on the core, TaskSendError, WorkflowStartResult, HandleResult, HorsiesError, ReadResult and the ReadError classes -> /horsies/tasks/error-types/
+- Error Types -- the Python error types: TaskError, DatabaseResult and DatabaseOperationError, the calls that run on the core, TaskSendError, WorkflowStartResult, HandleResult, HorsiesError, ReadResult and the ReadError classes -> /horsies/tasks/error-types/
 - Task Types -- the Python type surface of task signatures, strict values, shapes refused at definition, JsonValue and JsonInput, StrictJsonError, the codec functions -> /horsies/tasks/task-types/
 - Retrieving Results -- TaskHandle.get() -> /horsies/tasks/retrieving-results/
 - Retry Policy -- policy fields and limits, the retry delay (backoff, floor, jitter, cap), auto-retry triggers, retry vs rerun -> /horsies/tasks/retry-policy/
@@ -867,7 +868,7 @@ Each entry: Title -- summary -> URL
 - Atomic Enqueue and Topology -- send after commit, resend_on_transient_error, idempotency_key window and limits, no send API joins a caller transaction -> /horsies/operations/atomic-enqueue-and-topology/
 - Deploying Code Changes -- renamed or removed tasks and parameters, in-flight rows, old and new workers, error codes per change -> /horsies/operations/deploying-code-changes/
 - Code Change Examples -- the Python code of the deploy steps: a parameter with a default, two names for one task, a model field with a default, a renamed field with AliasChoices -> /horsies/operations/code-change-examples/
-- Rerun in Your Transaction -- the Python rerun_task: re-execute a terminal task as a new task in the caller's transaction, RerunTask, RerunEnqueuePolicy, RerunOutcome -> /horsies/operations/rerun-in-your-transaction/
+- Rerun in Your Transaction -- the Python rerun_task: re-execute a terminal task as a new task in the caller's transaction, RerunTask, RerunEnqueuePolicy, RerunOutcome, registered_task_codes (the stored retry list is checked against the app's declared codes: RETRY_CODE_NOT_DECLARED, TASK_NOT_REGISTERED) -> /horsies/operations/rerun-in-your-transaction/
 - Testing -- direct task calls, TaskOutcome kwargs, WorkflowContext.from_serialized, HORSIES_SUPPRESS_SENDS -> /horsies/operations/testing/
 - Autovacuum Tuning -- per-table autovacuum settings for high-churn tables, verification queries -> /horsies/operations/autovacuum-tuning/
 
@@ -915,7 +916,7 @@ RecoveryConfig, HRS-204 example, disable recovery -> /horsies/configuration/app-
 @app.task, decorator, task definition, define task -> /horsies/tasks/defining-tasks/
 send, send_async, enqueue, dispatch, produce, TaskSendResult, TaskSendError, retry_send -> /horsies/tasks/sending-tasks/
 Result, Ok, Err, TaskError, Ok(Failed), Err(ReadError), error patterns -> /horsies/tasks/error-handling/
-BuiltInTaskCode, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode, TaskError, TaskSendErrorCode, error codes, UNHANDLED_EXCEPTION -> /horsies/tasks/errors/
+BuiltInTaskCode, OperationalCode, ContractCode, RetrievalCode, OutcomeCode, TaskError, TaskSendErrorCode, error codes, UNHANDLED_EXCEPTION -> /horsies/tasks/errors/
 TaskHandle, get, get_async, timeout, result, ReadResult, WaitTimeout, TaskNotFound -> /horsies/tasks/retrieving-results/
 retry, backoff, exponential, fixed, jitter, max_delay_seconds, auto_retry_for -> /horsies/tasks/retry-policy/
 RetryPolicy, RetryPolicy.fixed, RetryPolicy.exponential, exception_mapper -> /horsies/tasks/defining-tasks/#configure-retries
@@ -948,7 +949,7 @@ concurrency, max_concurrency, cluster_wide_cap, prefetch -> /horsies/workers/con
 heartbeat, crash, stale, worker recovery -> /horsies/workers/heartbeats-recovery/
 list_worker_states, get_worker_state, broker methods -> /horsies/monitoring/broker-methods/
 TaskInfo, retry_count, next_retry_at, task metadata -> /horsies/monitoring/broker-methods/
-BrokerResult, BrokerOperationError, BrokerErrorCode, retryable, Ok, Err, Result -> /horsies/monitoring/broker-methods/
+DatabaseResult, DatabaseOperationError, DatabaseErrorCode, retryable, Ok, Err, Result -> /horsies/monitoring/broker-methods/
 ScheduleConfig, TaskSchedule, IntervalSchedule, DailySchedule -> /horsies/scheduling/schedule-config/
 schedule pattern, Interval, Hourly, Daily, Weekly, Monthly -> /horsies/scheduling/schedule-patterns/
 scheduler, check_interval, cron -> /horsies/scheduling/scheduler-overview/
@@ -958,10 +959,10 @@ serialization, envelope, __h_task_result__, strict JSON, NaN, surrogate -> /hors
 JsonValue, JsonInput, pydantic, datetime, SignatureValidationError, encode_value, decode_task_result -> /horsies/tasks/task-types/
 architecture, LISTEN/NOTIFY, components, data flow -> /horsies/concepts/architecture/
 FAQ, questions, trade-offs, why PostgreSQL, production-ready, compatibility -> /horsies/questions-and-answers/
-ErrorCode, HorsiesError, WorkflowValidationError, validation -> /horsies/tasks/errors/
-TaskError, BrokerOperationError, TaskSendError, NoCause, broker_error_cause, ReadError, BrokerError, ResultDeserializationError -> /horsies/tasks/error-types/
+HorsiesErrorCode, HorsiesError, WorkflowValidationError, validation -> /horsies/tasks/errors/
+TaskError, DatabaseOperationError, TaskSendError, NoCause, ReadError, ReadDatabaseError, ResultDeserializationError -> /horsies/tasks/error-types/
 ValidationReport, MultipleValidationErrors, raise_collected, error collection -> /horsies/tasks/errors/
-SourceLocation, Rust-style errors, format_rust_style, error display -> /horsies/tasks/error-types/
+SourceLocation, Rust-style errors, format_diagnostic, error display -> /horsies/tasks/error-types/
 HORSIES_FORCE_COLOR, NO_COLOR -> /horsies/tasks/errors/
 horsies check, app.check, phased validation, startup validation -> /horsies/cli/
 get-docs, AI agent, local docs, offline docs -> /horsies/cli/

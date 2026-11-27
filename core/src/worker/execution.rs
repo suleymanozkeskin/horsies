@@ -44,7 +44,7 @@ use crate::core::lifecycle::{
     PhaseTwoStep, TerminalizationCommand, TerminalizationOutcome, UnreportedAttemptOutcome,
     WorkflowSuccessOutcome,
 };
-use crate::core::task::error::{OperationalErrorCode, TaskError};
+use crate::core::task::error::{OperationalCode, TaskError};
 use crate::core::task::result::TaskResult;
 use crate::core::workflow::context::{WORKFLOW_CTX_KWARG, WORKFLOW_META_KWARG};
 use crate::db::{
@@ -353,7 +353,7 @@ fn task_input_text(members: &[(String, TaskMember<'_>)], workflow_ctx: Option<&s
 }
 
 fn serialization_error(message: String) -> TaskError {
-    TaskError::builtin(OperationalErrorCode::WorkerSerializationError, message)
+    TaskError::builtin(OperationalCode::WorkerSerializationError, message)
 }
 
 fn input_refused(refusal: &InputRefused) -> TaskError {
@@ -621,10 +621,7 @@ pub(crate) async fn persist_undecodable_result(
     placement: AttemptPlacement,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let message = format!("failed to parse task result JSON: {diagnosis}");
-    let error = TaskError::builtin(
-        OperationalErrorCode::WorkerSerializationError,
-        message.clone(),
-    );
+    let error = TaskError::builtin(OperationalCode::WorkerSerializationError, message.clone());
     let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error))
         .map_err(|error| envelope_error(task_id, &error))?;
     let command = FinishFailedAttempt {
@@ -632,7 +629,7 @@ pub(crate) async fn persist_undecodable_result(
         fence,
         retry: RetryRequest::NoRetry,
         result_json,
-        error_code: Some(OperationalErrorCode::WorkerSerializationError.to_string()),
+        error_code: Some(OperationalCode::WorkerSerializationError.to_string()),
         failed_reason: None,
         attempt: AttemptFailure {
             kind: AttemptFailureKind::Failed,
@@ -1434,7 +1431,7 @@ mod parse {
     use serde_json::value::RawValue;
     use uuid::Uuid;
 
-    use crate::core::task::error::{OperationalErrorCode, TaskError, TaskErrorKind};
+    use crate::core::task::error::{OperationalCode, TaskError, TaskErrorKind};
     use crate::core::task::result::TaskResult;
     use crate::core::workflow::SubWorkflowSummary;
 
@@ -1491,7 +1488,7 @@ mod parse {
         let payload: WorkflowCtxPayload =
             crate::core::codec::from_json_str(payload_text).map_err(|e| {
                 TaskError::builtin(
-                    OperationalErrorCode::WorkerSerializationError,
+                    OperationalCode::WorkerSerializationError,
                     format!("failed to parse workflow context payload: {}", e),
                 )
             })?;
@@ -1519,7 +1516,7 @@ mod parse {
         };
         serde_json::to_string(&field).map_err(|e| {
             TaskError::builtin(
-                OperationalErrorCode::WorkerSerializationError,
+                OperationalCode::WorkerSerializationError,
                 format!("failed to serialize workflow context: {}", e),
             )
         })
@@ -1536,7 +1533,7 @@ mod parse {
             };
             let parsed: SubWorkflowSummary = serde_json::from_str(&summary_text).map_err(|e| {
                 TaskError::builtin(
-                    OperationalErrorCode::WorkerSerializationError,
+                    OperationalCode::WorkerSerializationError,
                     format!(
                         "failed to parse workflow context summary for node_id '{}': {}",
                         node_id, e,
@@ -1558,7 +1555,7 @@ mod parse {
         let unreadable = |message: String, data: serde_json::Value| -> ContextEntry {
             ContextEntry::Unreadable(TaskResult::Err(TaskError {
                 exception: None,
-                error_code: OperationalErrorCode::ResultDeserializationError.into(),
+                error_code: OperationalCode::ResultDeserializationError.into(),
                 data: Some(crate::core::codec::JsonText::of_engine_value(&data)),
                 message: Some(message),
                 kind: TaskErrorKind::Plain,

@@ -163,7 +163,7 @@ describe("app.rerunTaskIn with a database", () => {
     const handle = buildCoreHandle(manifestJson(testDatabaseUrl(), false), "PRODUCER");
 
     assert.equal((await handle.installSchema()).kind, "installed");
-    area = createRerunArea({ coreHandle: () => handle, activeCarrier: () => NO_ACTIVE_CARRIER });
+    area = createRerunArea({ coreHandle: () => handle, activeCarrier: () => NO_ACTIVE_CARRIER, registeredCodes: () => ({ tasks: [] }) });
   });
 
   for (const driver of DRIVERS) {

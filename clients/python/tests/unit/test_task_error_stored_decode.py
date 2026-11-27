@@ -16,7 +16,7 @@ from pydantic import SecretStr, ValidationError
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.result_types import (
-    BrokerInvalidJsonPayload,
+    DatabaseInvalidJsonPayload,
     RawResultRecord,
 )
 from horsies.core.codec.error_payload import FALLBACK_ERROR_JSON
@@ -32,8 +32,8 @@ from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
-    OperationalErrorCode,
-    SubWorkflowError,
+    OperationalCode,
+    SubWorkflowFailure,
     TaskError,
     TaskInfo,
 )
@@ -202,7 +202,7 @@ class TestRequiredFields:
 
         error = builds_no_code().unwrap_err()
 
-        assert error.error_code is OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert error.error_code is OperationalCode.UNHANDLED_EXCEPTION
         assert error.message is not None
         assert 'error_code: Field required' in error.message
 
@@ -334,14 +334,14 @@ class TestDecodeTaskError:
 
     def test_the_built_in_discriminator_stays_valid_inside_error_code(self) -> None:
         decoded = decode_task_error({
-            'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+            'error_code': {'__builtin_task_code__': 'DATABASE_ERROR'},
             'message': 'm',
         })
-        assert decoded.error_code is OperationalErrorCode.BROKER_ERROR
+        assert decoded.error_code is OperationalCode.DATABASE_ERROR
 
     def test_the_discriminator_key_is_refused_as_a_field_of_the_error(self) -> None:
         with pytest.raises(ValueValidationError, match='extra_forbidden'):
-            decode_task_error({**_DECLARED, '__builtin_task_code__': 'BROKER_ERROR'})
+            decode_task_error({**_DECLARED, '__builtin_task_code__': 'DATABASE_ERROR'})
 
     def test_the_fields_of_a_subworkflow_error_decode(self) -> None:
         decoded = decode_task_error({
@@ -349,7 +349,7 @@ class TestDecodeTaskError:
             'sub_workflow_id': 'wf-child',
             'sub_workflow_summary': _SUMMARY,
         })
-        assert isinstance(decoded, SubWorkflowError)
+        assert isinstance(decoded, SubWorkflowFailure)
         assert decoded.sub_workflow_id == 'wf-child'
         assert decoded.sub_workflow_summary.failed_tasks == 1
 
@@ -368,7 +368,7 @@ class TestDecodeTaskError:
 
     def test_the_engine_dump_of_a_subworkflow_error_decodes(self) -> None:
         """The engine stores this dump in a parent node, not ``encode_task_error``."""
-        error = SubWorkflowError(
+        error = SubWorkflowFailure(
             error_code='MY_CODE',
             message='m',
             sub_workflow_id='wf-child',
@@ -383,14 +383,14 @@ class TestDecodeTaskError:
             ),
         )
         decoded = decode_task_error(cast(Json, error.model_dump(mode='json')))
-        assert isinstance(decoded, SubWorkflowError)
+        assert isinstance(decoded, SubWorkflowFailure)
 
     @pytest.mark.parametrize(
         'error',
         [
             TaskError(error_code='MY_CODE', message='m'),
             TaskError(
-                error_code=OperationalErrorCode.BROKER_ERROR,
+                error_code=OperationalCode.DATABASE_ERROR,
                 message='m',
                 data={'k': 1},
             ),
@@ -431,7 +431,7 @@ class TestDecodeTaskError:
         )
         match decoded:
             case Failed(error=error):
-                assert error.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+                assert error.error_code is OperationalCode.WORKER_SERIALIZATION_ERROR
                 assert error.message == 'secondary serialization failure'
             case Succeeded():
                 pytest.fail(f'expected a failed outcome, got {decoded!r}')
@@ -503,7 +503,7 @@ class TestClientReaders:
         result = await app.get_task_info_async('task-1', include_result=True)
 
         assert is_err(result)
-        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
+        assert isinstance(result.err_value, DatabaseInvalidJsonPayload)
         assert cause in result.err_value.message
 
     @_REFUSED
@@ -538,7 +538,7 @@ class TestClientReaders:
                 assert cause in unreadable.message
                 assert (
                     unreadable.as_outcome().error.error_code
-                    is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+                    is OperationalCode.RESULT_DESERIALIZATION_ERROR
                 )
             case Ok():
                 pytest.fail(f'expected an unreadable node, got {result!r}')

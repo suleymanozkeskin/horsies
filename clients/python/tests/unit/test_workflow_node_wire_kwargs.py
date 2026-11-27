@@ -9,7 +9,7 @@ import pytest
 from pydantic import BaseModel
 
 from horsies import AppConfig, Horsies, JsonValue, Ok, PostgresConfig, Result, TaskError
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.workflow import (
     SubWorkflowNode,
     TaskNode,
@@ -160,7 +160,7 @@ class TestWireForm:
         with pytest.raises(WorkflowValidationError) as caught:
             WorkflowSpec(name='s', tasks=[node])
 
-        assert caught.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert caught.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
     def test_a_target_with_hints_that_do_not_resolve_takes_no_kwarg(self) -> None:
         def scaffold(*, value: 'NotDefinedHere') -> None:  # type: ignore[name-defined]  # noqa: F821
@@ -172,7 +172,7 @@ class TestWireForm:
         with pytest.raises(WorkflowValidationError, match='no readable hints') as caught:
             WorkflowSpec(name='s', tasks=[node])
 
-        assert caught.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert caught.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
     def test_a_node_with_no_kwargs_has_an_empty_form(self) -> None:
         def scaffold(*, value=None):  # type: ignore[no-untyped-def]  # noqa: ANN001, ANN202
@@ -207,7 +207,7 @@ class TestBuildWithWithoutHints:
         with pytest.raises(WorkflowValidationError) as caught:
             app.workflow(name='o', tasks=[node], definition_key='d.o')
 
-        assert caught.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert caught.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_a_named_parameter_with_no_hint_is_refused_at_the_spec(self) -> None:
         app = _app()
@@ -219,4 +219,4 @@ class TestBuildWithWithoutHints:
         with pytest.raises(WorkflowValidationError) as caught:
             app.workflow(name='h', tasks=[node], definition_key='d.h')
 
-        assert caught.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert caught.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE

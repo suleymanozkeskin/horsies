@@ -51,6 +51,7 @@ import type {
   StartHookCall,
 } from "../native/child/addon.ts";
 import type { AppConfigCheck } from "../native/sends/addon.ts";
+import { seatBodyObserverOf } from "../seats/body-observer.ts";
 import { processSeatHost } from "../seats/node-isolates.ts";
 import { serveSeatOperation } from "../seats/operations.ts";
 import type { SeatHost } from "../seats/pool.ts";
@@ -303,6 +304,9 @@ function seatRouterOf(context: AppContext, serve: ChildServe, deps: ChildModeDep
     ...deps.seats,
     settle: (runKey, taskName, outcome) => {
       settleRun(serve, runKey, taskName, outcome);
+    },
+    isolateEnded: (run) => {
+      seatBodyObserverOf(context).isolateEnded(run);
     },
     serve: async (request) => serveSeatOperation(context.core, request),
     endChild: (code) => {

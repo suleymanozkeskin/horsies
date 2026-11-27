@@ -162,8 +162,8 @@ The registrations belong to the app. The generated sends (`name::send(&app, ...)
 | `suppress_sends(bool)` | Suppresses the sends of this process (`true`) or stops suppressing them (`false`) |
 | `are_sends_suppressed()` | `true` when `suppress_sends(true)` was called, or when the environment variable `HORSIES_SUPPRESS_SENDS` (`SUPPRESS_SENDS_ENV`) is `1`. The variable is read at each call |
 
-A suppressed send returns `TaskSendError::SendSuppressed` and writes nothing.
+A suppressed send returns `TaskSendError::Suppressed` and writes nothing.
 
 ## Refusals
 
-A refusal of the config, of a registration or of `provide` is a `HorsiesError`: an `ErrorCode` (`HRS-xxx`) and its `ErrorCategory` where the refusal has one, the message, notes and help text. A `ValidationReport` collects the refusals of one phase. Both clients print the same codes; the codes are in the [Errors Reference](/horsies/tasks/errors/#config-error-codes-horsieserror).
+A refusal of the config, of a registration or of `provide` is a `HorsiesError`: an `HorsiesErrorCode` (`HRS-xxx`) and its `HorsiesErrorCategory` where the refusal has one, the message, notes and help text. A `ValidationReport` collects the refusals of one phase. Both clients print the same codes; the codes are in the [Errors Reference](/horsies/tasks/errors/#config-error-codes-horsieserror).

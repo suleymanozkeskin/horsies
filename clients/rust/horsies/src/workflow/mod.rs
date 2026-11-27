@@ -61,8 +61,8 @@ pub(crate) use spec_data::task_options_text;
 /// The start errors and the handle errors of the core's catalogs, with
 /// Python's codes.
 pub use horsies_core::{
-    HandleErrorCode, HandleOperationError, HandleResult, StartRefusalCause, WorkflowStartError,
-    WorkflowStartErrorCode,
+    HandleResult, StartRefusalCause, WorkflowHandleError, WorkflowHandleErrorCode,
+    WorkflowStartError, WorkflowStartErrorCode,
 };
 
 /// The workflow types of the core: the error policy, the statuses, the

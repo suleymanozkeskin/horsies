@@ -2,7 +2,7 @@
 
 ``for_id`` returns ``Ok(handle)`` for each spelling of a UUID that
 ``uuid.UUID`` accepts; the handle holds the UUID, whose text is the canonical
-form. Any other text is ``Err(HandleInvalidWorkflowId)`` with the text and
+form. Any other text is ``Err(WorkflowHandleInvalidWorkflowId)`` with the text and
 the ``ValueError`` of ``uuid.UUID``. The parse reads nothing.
 """
 
@@ -14,8 +14,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from horsies import HandleInvalidWorkflowId, HandleOperationError, WorkflowHandle
+from horsies import WorkflowHandleInvalidWorkflowId, WorkflowHandleError, WorkflowHandle
 from horsies.core.types.result import is_err, is_ok
+from horsies.core.models.workflow.handle_types import WorkflowHandleErrorCode
 from tests.union_members import union_members
 
 pytestmark = [pytest.mark.unit]
@@ -75,10 +76,10 @@ def test_text_that_is_not_a_uuid_is_an_invalid_workflow_id(text: str) -> None:
 
     assert is_err(result)
     error = result.err_value
-    assert type(error) is HandleInvalidWorkflowId
+    assert type(error) is WorkflowHandleInvalidWorkflowId
     assert error.workflow_id_text == text
-    assert type(error.exception) is ValueError
-    assert str(error.exception) == str(parse_error.value)
+    assert type(error.cause) is ValueError
+    assert str(error.cause) == str(parse_error.value)
     assert error.message == f'workflow id {text!r} is not a UUID: {parse_error.value}'
     assert broker.mock_calls == []
 
@@ -97,10 +98,10 @@ def test_the_same_text_gives_the_same_error() -> None:
 
 def test_the_error_is_frozen_and_its_repr_hides_the_message_and_the_cause() -> None:
     marker = 'cause-marker-5b1c'
-    error = HandleInvalidWorkflowId(
+    error = WorkflowHandleInvalidWorkflowId(
         message=f'message {marker}',
         workflow_id_text='not-a-uuid',
-        exception=ValueError(marker),
+        cause=ValueError(marker),
     )
 
     assert marker not in repr(error)
@@ -110,5 +111,8 @@ def test_the_error_is_frozen_and_its_repr_hides_the_message_and_the_cause() -> N
 
 
 def test_the_error_is_not_a_handle_operation_failure() -> None:
-    assert HandleInvalidWorkflowId not in union_members(HandleOperationError)
-    assert not hasattr(HandleInvalidWorkflowId, 'code')
+    assert WorkflowHandleInvalidWorkflowId not in union_members(WorkflowHandleError)
+    assert (
+        WorkflowHandleInvalidWorkflowId.code
+        is WorkflowHandleErrorCode.INVALID_WORKFLOW_ID
+    )

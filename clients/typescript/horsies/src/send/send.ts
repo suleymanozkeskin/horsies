@@ -91,8 +91,8 @@ export async function sendTask<O, E extends string>(
 }
 
 /**
- * Send again the payload of a retryable error (`ENQUEUE_FAILED`, `IDEMPOTENCY_KEY_CONFLICT`), under the same task id,
- * with `REPEAT`. A key conflict before the reservation ends gives the same conflict again.
+ * Send again the payload of an `ENQUEUE_FAILED` error, under the same task id, with `REPEAT`. An
+ * `IDEMPOTENCY_KEY_CONFLICT` is not retryable: the type refuses it, and untyped code gets `VALIDATION_FAILED`.
  */
 export async function resend<O, E extends string>(
   context: SendContext,
@@ -102,7 +102,7 @@ export async function resend<O, E extends string>(
   const code: string = error.code;
 
   if (!isResendCode(code)) {
-    const message = `resend takes ENQUEUE_FAILED and IDEMPOTENCY_KEY_CONFLICT only; ${code} is not retryable`;
+    const message = `resend takes ENQUEUE_FAILED only; ${code} is not retryable`;
 
     return err(validationFailed(message, ruleRefused(message)));
   }
@@ -126,7 +126,6 @@ export async function resend<O, E extends string>(
 function isResendCode(code: string): boolean {
   switch (code) {
     case "ENQUEUE_FAILED":
-    case "IDEMPOTENCY_KEY_CONFLICT":
       return true;
     default:
       return false;

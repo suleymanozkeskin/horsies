@@ -286,7 +286,7 @@ class TestStartAnswers:
             retryable=True,
             workflow_name='start_core.flow',
             workflow_id=WORKFLOW_ID,
-            exception=cause,
+            cause=cause,
         )
         broker = _broker(failed)
         result = await start_workflow_async(_spec(), broker, WORKFLOW_ID, SENT_AT)
@@ -297,7 +297,7 @@ class TestStartAnswers:
         assert isinstance(error, WorkflowStartEnqueueFailed)
         assert error.retryable is True
         assert error.message == 'connection refused'
-        assert error.exception is cause
+        assert error.cause is cause
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_a_core_boundary_error_is_the_enqueue_failure(self) -> None:
@@ -308,7 +308,7 @@ class TestStartAnswers:
         error = result.err_value
         assert isinstance(error, WorkflowStartEnqueueFailed)
         assert error.retryable is True
-        assert isinstance(error.exception, core.TooManyPendingCalls)
+        assert isinstance(error.cause, core.TooManyPendingCalls)
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_spec_data_that_does_not_encode_is_refused_with_no_core_call(self) -> None:
@@ -322,7 +322,7 @@ class TestStartAnswers:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, WorkflowStartValidationFailed)
-        assert isinstance(error.exception, SerializationError)
+        assert isinstance(error.cause, SerializationError)
         broker._core_handle.start_workflow_async.assert_not_awaited()  # pyright: ignore[reportPrivateUsage]
 
     @pytest.mark.asyncio(loop_scope='function')

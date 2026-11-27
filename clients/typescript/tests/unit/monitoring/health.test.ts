@@ -130,11 +130,11 @@ describe("the worker state reads", () => {
     assert.deepEqual(missing, { ok: true, value: { kind: "notFound", workerId: "w2" } });
   });
 
-  test("a worker id that is not well-formed text is QUERY_REFUSED before the call", async () => {
+  test("a worker id that is not well-formed text is invalidInput before the call", async () => {
     const target = fakeTarget({ getWorkerState: async () => assert.fail("the addon is not called") });
     const read = await worker(target, "w\uDC00");
 
-    assert.ok(!read.ok && read.error.code === "QUERY_REFUSED" && read.error.field === "workerId");
+    assert.ok(!read.ok && read.error.kind === "invalidInput" && "field" in read.error && read.error.field === "workerId");
   });
 
   test("workerHistory passes its limit and gives INVALID_INPUT of the core", async () => {
@@ -163,7 +163,7 @@ describe("each read gives only its broker codes", () => {
   });
 
   test("a code that a read cannot give is a defect", async () => {
-    const target = fakeTarget({ listWorkerStates: async () => failed(brokerOperationFailed("DB_PING_FAILED", "list_worker_states")) });
+    const target = fakeTarget({ listWorkerStates: async () => failed(brokerOperationFailed("DATABASE_PING_FAILED", "list_worker_states")) });
 
     await assert.rejects(workers(target), { name: "ClientDefect", subject: "workers" });
   });
@@ -271,20 +271,20 @@ describe("the class reads", () => {
 });
 
 describe("the pings", () => {
-  test("pingDatabase gives the latency, or DB_PING_FAILED", async () => {
+  test("pingDatabase gives the latency, or DATABASE_PING_FAILED", async () => {
     const handle = fakeHandle();
     const answered: NativeCoreHandle = { ...handle, pingDatabase: async () => done({ latencyMs: 1.5 }) };
 
     const refused: NativeCoreHandle = {
       ...handle,
-      pingDatabase: async () => failed(brokerOperationFailed("DB_PING_FAILED", "ping_database")),
+      pingDatabase: async () => failed(brokerOperationFailed("DATABASE_PING_FAILED", "ping_database")),
     };
 
     assert.deepEqual(await pingDatabase(async () => answered.pingDatabase()), { ok: true, value: { latencyMs: 1.5 } });
 
     const failure = await pingDatabase(async () => refused.pingDatabase());
 
-    assert.ok(!failure.ok && failure.error.code === "DB_PING_FAILED");
+    assert.ok(!failure.ok && failure.error.code === "DATABASE_PING_FAILED");
   });
 
   test("pingWorkers passes the defaults of the Python client", async () => {
@@ -318,10 +318,10 @@ describe("the pings", () => {
     }
   });
 
-  test("a target worker id that is not well-formed text is QUERY_REFUSED before the call", async () => {
+  test("a target worker id that is not well-formed text is invalidInput before the call", async () => {
     const target = fakeTarget({ pingWorkers: async () => assert.fail("the addon is not called") });
     const read = await pingWorkers(target, { target: { kind: "worker", workerId: "\uD800" } });
 
-    assert.ok(!read.ok && read.error.code === "QUERY_REFUSED" && read.error.field === "workerId");
+    assert.ok(!read.ok && read.error.kind === "invalidInput" && "field" in read.error && read.error.field === "workerId");
   });
 });
