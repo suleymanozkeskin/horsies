@@ -72,6 +72,7 @@ Codes of the read errors of `handle.get()` / `get_async()`, `result_for()` and t
 | `ASYNC_CONTEXT` | Sync `get()` / `result_for()` was called on a thread that runs an event loop; nothing ran; not cached. Call `await handle.get_async()` / `result_for_async()` | No |
 | `INVALID_INPUT` | An argument of `get()` / `get_async()` was refused before any read, for example a `timeout_ms` that is negative, not an int, or above `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached | No |
 | `WAIT_INSIDE_TASK` | A result wait was called inside a worker child, where task bodies run; it waited for nothing; not cached. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task) | No |
+| `UNKNOWN_CUSTOM_CODE` | The stored error has a custom code that the declared code type of the task does not name; the same read gives the same error | No |
 
 #### OutcomeCode
 
@@ -164,6 +165,7 @@ The codes of the client calls. The error types that carry them are on the client
 | `STORED_DATA_INVALID` | `WorkflowHandleStoredDataInvalid` | `cause: BaseException` | No | A stored workflow status that is not a `WorkflowStatus` (`status()`, `cancel()`), or a subworkflow summary that is not valid (`tasks()`); nothing changed, and a repeat returns the same error |
 | `RESUME_RECOVERY_FAILED` | `WorkflowHandleResumeRecoveryFailed` | `cause: BaseException` | No | `resume()` committed, and the recovery pass for the workflow tree, which runs after the commit, failed with a database error. The workflow is `RUNNING`; the worker reaper runs the same pass over all workflows. A repeated `resume()` returns `Ok(False)` |
 | `ASYNC_CONTEXT` | `WorkflowHandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran. Call the `*_async` form (sync `get()` / `result_for()` return the read error `ASYNC_CONTEXT` instead) |
+| `INVALID_WORKFLOW_ID` | `WorkflowHandleInvalidWorkflowId` | `workflow_id_text: str`, `cause: BaseException` | No | The workflow id text of `WorkflowHandle.for_id` is not a UUID; no handle was built, and the same text is refused again. It is not in the `WorkflowHandleError` union |
 
 `get()` returns a status read failure as a read error. `WORKFLOW_NOT_FOUND` becomes `Err(WorkflowNotFound(...))`. `DATABASE_OPERATION_FAILED` and `STORED_DATA_INVALID` become `Err(ReadDatabaseError(...))`.
 

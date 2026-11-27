@@ -151,7 +151,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### BuiltInTaskCode (type alias = OperationalCode | ContractCode | RetrievalCode | OutcomeCode)
 - OperationalCode: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED, DATABASE_ERROR, WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR, RESULT_DESERIALIZATION_ERROR, WORKFLOW_ENQUEUE_FAILED, SUBWORKFLOW_LOAD_FAILED, WORKFLOW_RECOVERY_LIMIT_REACHED, SUBWORKFLOW_DEPTH_LIMIT_REACHED, TASK_BLOCKED_LOOP, NEIGHBOUR_BLOCKED_LOOP, WORKFLOW_START_INCOMPLETE
 - ContractCode: RETURN_TYPE_MISMATCH, WORKFLOW_CONTEXT_MISSING_ID, NO_TYPE_AVAILABLE
-- RetrievalCode: WAIT_TIMEOUT, TASK_NOT_FOUND, WORKFLOW_NOT_FOUND, RESULT_NOT_AVAILABLE, RESULT_NOT_READY, ASYNC_CONTEXT, INVALID_INPUT, WAIT_INSIDE_TASK
+- RetrievalCode: WAIT_TIMEOUT, TASK_NOT_FOUND, WORKFLOW_NOT_FOUND, RESULT_NOT_AVAILABLE, RESULT_NOT_READY, ASYNC_CONTEXT, INVALID_INPUT, WAIT_INSIDE_TASK, UNKNOWN_CUSTOM_CODE
 - A read gives a RetrievalCode value as read_error.code of its ReadError class (Err(WaitTimeout(...)) has code WAIT_TIMEOUT), not inside a TaskError
 - A result wait inside a worker child (get(), get_async(), app.get_result(), WorkflowHandle.get()) returns Err(WaitInsideTask(...)) at once, as its first check; the raw reads (app.get_raw_result(), broker.get_raw_result_record()) return Err(DatabaseWaitInsideTask); compose tasks with a workflow instead
 - OutcomeCode: TASK_CANCELLED, TASK_EXPIRED, TASK_TIMEOUT, WORKFLOW_PAUSED, WORKFLOW_EXPIRED, WORKFLOW_FAILED, WORKFLOW_CANCELLED, UPSTREAM_SKIPPED, SUB_WORKFLOW_FAILED, WORKFLOW_SUCCESS_CASE_NOT_MET, WORKFLOW_OUTPUT_SKIPPED
@@ -367,7 +367,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .pause() / .pause_async() -> HandleResult[bool]
 - .resume() / .resume_async() -> HandleResult[bool]
 - `HandleResult[T]` = Result[T, WorkflowHandleError]; WorkflowHandleError is a union of frozen variants, one per WorkflowHandleErrorCode member other than INVALID_WORKFLOW_ID; every variant has code, message, retryable, workflow_id. WorkflowHandleNotFound, WorkflowHandleDatabaseOperationFailed (cause: BaseException; retryable is the core's classification; a write rolled back or its commit outcome is unknown), WorkflowHandleStoredDataInvalid (cause; a stored status or subworkflow summary does not parse; nothing changed), WorkflowHandleResumeRecoveryFailed (cause; resume committed, the recovery pass after the commit failed, the workflow is RUNNING), WorkflowHandleAsyncContext. Match on the variant. A defect in pause or resume propagates
-- WorkflowHandleErrorCode: WORKFLOW_NOT_FOUND, DATABASE_OPERATION_FAILED, STORED_DATA_INVALID, RESUME_RECOVERY_FAILED, ASYNC_CONTEXT
+- WorkflowHandleErrorCode: WORKFLOW_NOT_FOUND, DATABASE_OPERATION_FAILED, STORED_DATA_INVALID, RESUME_RECOVERY_FAILED, ASYNC_CONTEXT, INVALID_WORKFLOW_ID
 
 ### WorkflowStatus (enum)
 - PENDING -> RUNNING -> COMPLETED | FAILED | PAUSED | CANCELLED; PAUSED -> EXPIRED when paused_workflow_auto_cancel_after elapses

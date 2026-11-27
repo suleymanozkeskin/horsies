@@ -16,6 +16,7 @@ import pytest
 
 from horsies import WorkflowHandleInvalidWorkflowId, WorkflowHandleError, WorkflowHandle
 from horsies.core.types.result import is_err, is_ok
+from horsies.core.models.workflow.handle_types import WorkflowHandleErrorCode
 from tests.union_members import union_members
 
 pytestmark = [pytest.mark.unit]
@@ -111,4 +112,7 @@ def test_the_error_is_frozen_and_its_repr_hides_the_message_and_the_cause() -> N
 
 def test_the_error_is_not_a_handle_operation_failure() -> None:
     assert WorkflowHandleInvalidWorkflowId not in union_members(WorkflowHandleError)
-    assert not hasattr(WorkflowHandleInvalidWorkflowId, 'code')
+    assert (
+        WorkflowHandleInvalidWorkflowId.code
+        is WorkflowHandleErrorCode.INVALID_WORKFLOW_ID
+    )

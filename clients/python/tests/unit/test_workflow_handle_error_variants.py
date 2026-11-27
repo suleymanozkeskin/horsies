@@ -83,7 +83,9 @@ class TestVariantCatalog:
         codes = [variant.code for variant in union_members(WorkflowHandleError)]
 
         assert len(codes) == len(set(codes))
-        assert set(codes) == set(WorkflowHandleErrorCode)
+        assert set(codes) == (
+            set(WorkflowHandleErrorCode) - {WorkflowHandleErrorCode.INVALID_WORKFLOW_ID}
+        )
 
     def test_the_fixture_builds_every_variant(self) -> None:
         built = {type(error) for error in _every_variant(RuntimeError('x'))}

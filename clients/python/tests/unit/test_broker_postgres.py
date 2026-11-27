@@ -94,25 +94,25 @@ from horsies.core.types.status import TaskAttemptOutcome, TaskStatus
 
 
 _CONNECTION_LOST = CoreConnectionError('task_info', 'connection lost', True)
-"""The exception of a failure record whose connection was lost."""
+"""The cause of a failure record whose connection was lost."""
 
 _DIGEST_MISMATCH = CoreContractViolation('task_info', 'stored result digest mismatch')
-"""The exception of a failure record whose stored data does not read."""
+"""The cause of a failure record whose stored data does not read."""
 
 _LOCK_NOT_AVAILABLE = CoreServerError(
     'audit_orphaned_workflow_tasks', '55P03', 'could not obtain lock', True,
 )
-"""The exception of an orphan page whose cursor another sweep holds."""
+"""The cause of an orphan page whose cursor another sweep holds."""
 
 _COUNT_DIFFERS = CoreContractViolation(
     'audit_orphaned_workflow_tasks', 'the cursor candidate count 2 differs',
 )
-"""The exception of an orphan page outside the function's contract."""
+"""The cause of an orphan page outside the function's contract."""
 
 _FAMILY_MISMATCH = CorePreconditionFailed(
     'install_schema', 'the database was installed by the RUST client', False,
 )
-"""The exception of a schema install into a database of the other family."""
+"""The cause of a schema install into a database of the other family."""
 
 
 def _make_broker(database_url: str = 'postgresql://u:p@localhost/db') -> Any:
@@ -585,9 +585,9 @@ class TestEnqueueThroughCore:
         assert type(refused) is error_class
         assert refused.code is code
         assert refused.retryable is False
-        assert isinstance(refused.exception, cause_class)
-        assert type(refused.exception) is cause_class
-        match refused.exception:
+        assert isinstance(refused.cause, cause_class)
+        assert type(refused.cause) is cause_class
+        match refused.cause:
             case SerializationError() as unreadable:
                 reader_error = str(unreadable)
                 assert reader_error != ''
@@ -860,7 +860,7 @@ class TestGetRawResultRecordAsync:
         assert is_err(result)
         assert result.err_value.code is DatabaseErrorCode.TASK_INFO_QUERY_FAILED
         assert result.err_value.retryable is True
-        assert result.err_value.exception is error
+        assert result.err_value.cause is error
 
     @pytest.mark.asyncio
     async def test_a_refused_limit_is_invalid_input_before_the_core(self) -> None:
@@ -955,7 +955,7 @@ class TestPingDatabase:
         assert failed.code is DatabaseErrorCode.DATABASE_PING_FAILED
         assert failed.retryable is True
         assert failed.message == 'ping_database failed: connection failed: refused'
-        assert failed.exception is _CONNECTION_LOST
+        assert failed.cause is _CONNECTION_LOST
 
     @pytest.mark.asyncio
     async def test_a_core_that_cannot_run_the_ping_is_db_ping_failed(self) -> None:
@@ -971,7 +971,7 @@ class TestPingDatabase:
         failed = result.err_value
         assert failed.code is DatabaseErrorCode.DATABASE_PING_FAILED
         assert failed.retryable is True
-        assert failed.exception is error
+        assert failed.cause is error
 
     @pytest.mark.asyncio
     async def test_another_failure_code_is_a_defect(self) -> None:
@@ -1079,7 +1079,7 @@ class TestMarkStaleTasksAsFailed:
         assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
         assert failed.message == 'mark_stale_tasks_as_failed failed: stale scan: connection lost'
-        assert failed.exception is _CONNECTION_LOST
+        assert failed.cause is _CONNECTION_LOST
 
     @pytest.mark.asyncio
     async def test_a_core_that_cannot_run_the_pass_is_cleanup_failed(self) -> None:
@@ -1093,7 +1093,7 @@ class TestMarkStaleTasksAsFailed:
         failed = result.err_value
         assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
-        assert failed.exception is error
+        assert failed.cause is error
 
     @pytest.mark.parametrize(
         ('stale_ms', 'finalizing_ms'),
@@ -1116,7 +1116,7 @@ class TestMarkStaleTasksAsFailed:
         failed = result.err_value
         assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is False
-        assert isinstance(failed.exception, OverflowError)
+        assert isinstance(failed.cause, OverflowError)
         broker._core_handle.mark_stale_running_async.assert_not_awaited()
 
 
@@ -1183,7 +1183,7 @@ class TestExpirePendingTasks:
         assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
         assert failed.message == 'expire_pending_tasks failed: pending expiry: connection lost'
-        assert failed.exception is _CONNECTION_LOST
+        assert failed.cause is _CONNECTION_LOST
 
     @pytest.mark.asyncio
     async def test_a_core_that_cannot_run_the_pass_is_cleanup_failed(self) -> None:
@@ -1197,7 +1197,7 @@ class TestExpirePendingTasks:
         failed = result.err_value
         assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
-        assert failed.exception is error
+        assert failed.cause is error
 
 
 # ---------------------------------------------------------------------------
@@ -1277,9 +1277,9 @@ class TestTerminateOrphanedWorkflowTasks:
         failed = result.err_value
         assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
-        assert failed.exception is _LOCK_NOT_AVAILABLE
-        assert isinstance(failed.exception, CoreServerError)
-        assert failed.exception.sqlstate == '55P03'
+        assert failed.cause is _LOCK_NOT_AVAILABLE
+        assert isinstance(failed.cause, CoreServerError)
+        assert failed.cause.sqlstate == '55P03'
 
     @pytest.mark.asyncio
     async def test_a_failed_page_is_cleanup_failed(self) -> None:
@@ -1300,8 +1300,8 @@ class TestTerminateOrphanedWorkflowTasks:
         assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is False
         assert failed.message.startswith('audit_orphaned_workflow_tasks failed: ')
-        assert failed.exception is _COUNT_DIFFERS
-        assert not isinstance(failed.exception, CoreServerError)
+        assert failed.cause is _COUNT_DIFFERS
+        assert not isinstance(failed.cause, CoreServerError)
 
     @pytest.mark.asyncio
     async def test_a_core_that_cannot_run_the_page_is_cleanup_failed(self) -> None:
@@ -1315,7 +1315,7 @@ class TestTerminateOrphanedWorkflowTasks:
         failed = result.err_value
         assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
-        assert failed.exception is error
+        assert failed.cause is error
 
     @pytest.mark.asyncio
     async def test_terminate_a_held_cursor_is_a_refusal_with_its_sqlstate(self) -> None:
@@ -1338,9 +1338,9 @@ class TestTerminateOrphanedWorkflowTasks:
         assert failed.message == (
             'terminate_orphaned_workflow_tasks failed: orphan page: lock not available'
         )
-        assert failed.exception is _LOCK_NOT_AVAILABLE
-        assert isinstance(failed.exception, CoreServerError)
-        assert failed.exception.sqlstate == '55P03'
+        assert failed.cause is _LOCK_NOT_AVAILABLE
+        assert isinstance(failed.cause, CoreServerError)
+        assert failed.cause.sqlstate == '55P03'
 
     @pytest.mark.asyncio
     async def test_terminate_a_failed_page_is_cleanup_failed(self) -> None:
@@ -1364,7 +1364,7 @@ class TestTerminateOrphanedWorkflowTasks:
             'terminate_orphaned_workflow_tasks failed: '
             'horsies_cancel_orphaned_tasks: the cursor candidate count 2 differs'
         )
-        assert failed.exception is _COUNT_DIFFERS
+        assert failed.cause is _COUNT_DIFFERS
 
     @pytest.mark.asyncio
     async def test_terminate_a_core_that_cannot_run_the_page_is_cleanup_failed(self) -> None:
@@ -1378,7 +1378,7 @@ class TestTerminateOrphanedWorkflowTasks:
         failed = result.err_value
         assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
-        assert failed.exception is error
+        assert failed.cause is error
 
 
 # ---------------------------------------------------------------------------
@@ -1448,7 +1448,7 @@ class TestRequeueStaleClaimed:
             'requeue_stale_claimed failed after requeueing 7 task(s): '
             'requeue batch: connection lost'
         )
-        assert failed.exception is _CONNECTION_LOST
+        assert failed.cause is _CONNECTION_LOST
 
     @pytest.mark.asyncio
     async def test_a_core_that_cannot_run_the_pass_is_cleanup_failed(self) -> None:
@@ -1464,7 +1464,7 @@ class TestRequeueStaleClaimed:
         failed = result.err_value
         assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
-        assert failed.exception is error
+        assert failed.cause is error
 
     @pytest.mark.asyncio
     async def test_a_threshold_past_64_bits_is_refused_before_the_core(self) -> None:
@@ -1479,7 +1479,7 @@ class TestRequeueStaleClaimed:
         failed = result.err_value
         assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is False
-        assert isinstance(failed.exception, OverflowError)
+        assert isinstance(failed.cause, OverflowError)
         broker._core_handle.requeue_stale_claimed_async.assert_not_awaited()
 
 
@@ -1766,7 +1766,7 @@ class TestGetTaskInfoAsync:
         assert is_err(result)
         assert result.err_value.code is DatabaseErrorCode.TASK_INFO_QUERY_FAILED
         assert result.err_value.retryable is True
-        assert result.err_value.exception is error
+        assert result.err_value.cause is error
 
     @pytest.mark.asyncio
     async def test_another_failure_code_is_a_defect(self) -> None:
@@ -1820,7 +1820,7 @@ class TestClose:
 
         assert is_err(result)
         assert result.err_value.code == DatabaseErrorCode.CLOSE_FAILED
-        assert result.err_value.exception is refused
+        assert result.err_value.cause is refused
 
     def test_an_exception_that_is_not_a_core_error_propagates(self) -> None:
         """An exception that is not a CoreError propagates unchanged."""
@@ -1890,7 +1890,7 @@ class TestEnsureSchemaInitialized:
         assert failed.code is DatabaseErrorCode.SCHEMA_INIT_FAILED
         assert failed.retryable is False
         assert 'installed by the RUST client' in failed.message
-        assert failed.exception is _FAMILY_MISMATCH
+        assert failed.cause is _FAMILY_MISMATCH
         assert is_err(second)
         assert broker._core_handle.install_schema_async.await_count == 2
         assert broker._initialized is False
@@ -1907,7 +1907,7 @@ class TestEnsureSchemaInitialized:
         failed = result.err_value
         assert failed.code is DatabaseErrorCode.SCHEMA_INIT_FAILED
         assert failed.retryable is True
-        assert failed.exception is error
+        assert failed.cause is error
 
     @pytest.mark.asyncio
     async def test_another_failure_code_is_a_defect(self) -> None:

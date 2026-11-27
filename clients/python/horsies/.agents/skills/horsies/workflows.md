@@ -410,7 +410,7 @@ Non-blocking single DB query. Returns `Err(ResultNotReady(...))` if the node has
 
 ### WorkflowHandleError / WorkflowHandleErrorCode
 
-`WorkflowHandleError` is a union with one frozen variant per `WorkflowHandleErrorCode` member other than `INVALID_WORKFLOW_ID`. Every variant has `code`, `message`, `retryable` and `workflow_id`. Match on the variant; a read of `exception` needs the match first. Any other exception, for example a defect in `pause_workflow()` or `resume_workflow()`, propagates.
+`WorkflowHandleError` is a union with one frozen variant per `WorkflowHandleErrorCode` member other than `INVALID_WORKFLOW_ID`. Every variant has `code`, `message`, `retryable` and `workflow_id`. Match on the variant; a read of `cause` needs the match first. Any other exception, for example a defect in `pause_workflow()` or `resume_workflow()`, propagates.
 
 <!-- members: WorkflowHandleErrorCode -->
 | Code | Variant | Other fields | Retryable | After the failure |
@@ -420,6 +420,7 @@ Non-blocking single DB query. Returns `Err(ResultNotReady(...))` if the node has
 | `STORED_DATA_INVALID` | `WorkflowHandleStoredDataInvalid` | `cause: BaseException` | No | A stored workflow status or subworkflow summary does not parse; nothing changed, a repeat returns the same error |
 | `RESUME_RECOVERY_FAILED` | `WorkflowHandleResumeRecoveryFailed` | `cause: BaseException` | No | `resume` committed and the recovery pass after the commit failed; the workflow is `RUNNING`, the worker reaper runs the same pass, a repeated `resume` returns `Ok(False)` |
 | `ASYNC_CONTEXT` | `WorkflowHandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran — call the `*_async` form (sync `get()` / `result_for()` return `Err(AsyncContext(...))` instead) |
+| `INVALID_WORKFLOW_ID` | `WorkflowHandleInvalidWorkflowId` | `workflow_id_text: str`, `cause: BaseException` | No | The workflow id text of `WorkflowHandle.for_id` is not a UUID; no handle was built, the same text is refused again; not in the `WorkflowHandleError` union |
 
 ```python
 from horsies import Err, WorkflowHandleResumeRecoveryFailed, Ok
