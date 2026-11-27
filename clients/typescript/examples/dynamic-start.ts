@@ -58,7 +58,7 @@ const startReport = defineTask({
 });
 
 const created = Horsies.create({
-  broker: { databaseUrl: DATABASE_URL },
+  database: { databaseUrl: DATABASE_URL },
   workerProfiles: { [DEFAULT_PROFILE]: ISOLATED_PROFILE },
   tasks: [fetchSales, formatReport, startReport],
   workflows: [regionalReport],

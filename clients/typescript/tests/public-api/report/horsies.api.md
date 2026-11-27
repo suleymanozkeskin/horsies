@@ -55,8 +55,8 @@ export type AnyWorkflowContract = WorkflowContract<ParameterSchemas, BuildReturn
 
 // @public
 export type AppConfigInput = QueueConfigInput & {
-    readonly broker: BrokerConfigInput;
-    readonly clusterWideCap?: TaskCap;
+    readonly database: DatabaseConfigInput;
+    readonly clusterWideCap?: ClusterCapSetting;
     readonly claim?: ClaimMode;
     readonly maxClaimRenewAgeMs?: number;
     readonly payload?: PayloadPolicyInput;
@@ -407,36 +407,6 @@ export interface BreakdownValueGroup {
 }
 
 // @public
-export interface BrokerConfigInput {
-    readonly connection?: BrokerConnection;
-    readonly databaseUrl: Secret;
-    readonly echo?: boolean;
-    readonly maxOverflow?: number;
-    // (undocumented)
-    readonly poolPrePing?: boolean;
-    // (undocumented)
-    readonly poolRecycle?: PoolRecycle;
-    readonly poolSize?: number;
-    readonly poolTimeoutSeconds?: number;
-    // (undocumented)
-    readonly retainRerunInputDefault?: RerunInputDefault;
-    // (undocumented)
-    readonly tcpKeepalives?: TcpKeepalives;
-    // (undocumented)
-    readonly tcpUserTimeout?: TcpUserTimeout;
-    readonly workerPoolPrePing?: boolean;
-}
-
-// @public
-export type BrokerConnection = {
-    readonly kind: "direct";
-    readonly sessionDatabase?: SessionDatabase;
-} | {
-    readonly kind: "pgbouncerTransaction";
-    readonly sessionDatabaseUrl: Secret;
-};
-
-// @public
 export interface BudgetLoad {
     // (undocumented)
     readonly budget: Execution;
@@ -659,6 +629,12 @@ export interface ClaimEarlierInfo {
 }
 
 // @public
+export interface ClaimLimits {
+    readonly claimedPerWorker: TaskLimit;
+    readonly perQueuePerPass: TaskLimit;
+}
+
+// @public
 export interface ClaimLimitsInput {
     readonly claimedPerWorker?: TaskLimit;
     readonly perQueuePerPass?: TaskLimit;
@@ -721,36 +697,6 @@ export interface ClaimsNotCountedInfo {
 }
 
 // @public
-export interface ClassBudget {
-    // (undocumented)
-    readonly budget: Execution;
-    // (undocumented)
-    readonly capacity: bigint;
-    // (undocumented)
-    readonly serves: readonly Execution[];
-}
-
-// @public
-export interface ClassCoverage {
-    // (undocumented)
-    readonly checkedAt: Temporal.Instant;
-    // (undocumented)
-    readonly liveWorkers: bigint;
-    // (undocumented)
-    readonly streams: readonly StreamCoverage[];
-}
-
-// @public
-export interface ClassReport {
-    // (undocumented)
-    readonly checkedAt: Temporal.Instant;
-    // (undocumented)
-    readonly streams: readonly PendingStream[];
-    // (undocumented)
-    readonly workers: readonly WorkerClassLoad[];
-}
-
-// @public
 export type ClearableBootCause = {
     readonly kind: "resourceShortage";
     readonly errno: ShortageErrno;
@@ -783,11 +729,11 @@ export class ClientDefect extends CoreDefect {
 }
 
 // @public
-export type ClusterWideCap = {
-    readonly kind: "capped";
-    readonly cap: number;
+export type ClusterCapSetting = {
+    readonly kind: "clusterCap";
+    readonly tasks: number;
 } | {
-    readonly kind: "uncapped";
+    readonly kind: "noClusterCap";
 };
 
 // @public
@@ -935,7 +881,7 @@ export abstract class CoreError extends Error {
 }
 
 // @public
-export type CoreErrorCode = "CORE_STOPPED" | "CORE_START_FAILED" | "TOO_MANY_PENDING_CALLS" | "FORKED_AFTER_CORE_START";
+export type CoreErrorCode = "CORE_STOPPED" | "RUNTIME_START_FAILED" | "TOO_MANY_PENDING_CALLS" | "FORKED_AFTER_CORE_START";
 
 // @public
 export type CoreFailure = CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed;
@@ -984,19 +930,6 @@ export interface CoreServerError {
     readonly sqlstate: string;
     // (undocumented)
     readonly subject: string;
-}
-
-// @public
-export class CoreStartFailed extends CoreError {
-    constructor(facts: {
-        readonly cause: string;
-    });
-    // (undocumented)
-    readonly cause: string;
-    // (undocumented)
-    readonly code = "CORE_START_FAILED";
-    // (undocumented)
-    readonly name = "CoreStartFailed";
 }
 
 // @public
@@ -1106,6 +1039,36 @@ export interface DailySchedule {
     // (undocumented)
     readonly time: Temporal.PlainTime;
 }
+
+// @public
+export interface DatabaseConfigInput {
+    readonly connection?: DatabaseConnection;
+    readonly databaseUrl: Secret;
+    readonly echo?: boolean;
+    readonly maxOverflow?: number;
+    // (undocumented)
+    readonly poolPrePing?: boolean;
+    // (undocumented)
+    readonly poolRecycle?: PoolRecycle;
+    readonly poolSize?: number;
+    readonly poolTimeoutSeconds?: number;
+    // (undocumented)
+    readonly retainRerunInputDefault?: RerunInputDefault;
+    // (undocumented)
+    readonly tcpKeepalives?: TcpKeepalives;
+    // (undocumented)
+    readonly tcpUserTimeout?: TcpUserTimeout;
+    readonly workerPoolPrePing?: boolean;
+}
+
+// @public
+export type DatabaseConnection = {
+    readonly kind: "direct";
+    readonly sessionDatabase?: SessionDatabase;
+} | {
+    readonly kind: "pgbouncerTransaction";
+    readonly sessionDatabaseUrl: Secret;
+};
 
 // @public (undocumented)
 export const DatabaseErrorCode: {
@@ -1465,6 +1428,38 @@ export type ExceptionRecord = {
 export type Execution = "ISOLATED" | "SHARED_ASYNC" | "SHARED_THREAD";
 
 // @public
+export interface ExecutionClassBudget {
+    // (undocumented)
+    readonly budget: Execution;
+    // (undocumented)
+    readonly capacity: bigint;
+    // (undocumented)
+    readonly serves: readonly Execution[];
+}
+
+// @public
+export interface ExecutionClassCoverage {
+    // (undocumented)
+    readonly checkedAt: Temporal.Instant;
+    // (undocumented)
+    readonly liveWorkers: bigint;
+    // (undocumented)
+    readonly streams: readonly StreamCoverage[];
+}
+
+// @public
+export interface ExecutionClassReport {
+    // (undocumented)
+    readonly checkedAt: Temporal.Instant;
+    // (undocumented)
+    readonly liveWindow: Temporal.Duration;
+    // (undocumented)
+    readonly streams: readonly PendingStream[];
+    // (undocumented)
+    readonly workers: readonly WorkerExecutionClassLoad[];
+}
+
+// @public
 export type ExecutionFact = {
     readonly kind: "class";
     readonly execution: Execution;
@@ -1500,13 +1495,13 @@ export interface ExpiredTaskRow {
     // (undocumented)
     readonly goodUntil: Temporal.Instant;
     // (undocumented)
-    readonly id: TaskId;
-    // (undocumented)
     readonly priority: number;
     // (undocumented)
     readonly queueName: string;
     // (undocumented)
     readonly sentAt: Temporal.Instant;
+    // (undocumented)
+    readonly taskId: TaskId;
     // (undocumented)
     readonly taskName: string;
 }
@@ -1626,7 +1621,24 @@ export type HasRequiredUpstreamOutcome<P extends ParameterSchemas> = true extend
 }[keyof P] ? true : false;
 
 // @public
-export type HealthInputError = DatabaseInvalidInput | DatabaseOperationFailed<"MONITORING_QUERY_FAILED"> | SeatRelayFull;
+export type HealthInputError = HealthInputRefused | DatabaseOperationFailed<"MONITORING_QUERY_FAILED"> | SeatRelayFull;
+
+// @public
+export interface HealthInputRefused {
+    // (undocumented)
+    readonly cause: string;
+    // (undocumented)
+    readonly code: "INVALID_INPUT";
+    // (undocumented)
+    readonly kind: "invalidInput";
+    // (undocumented)
+    readonly retryable: false;
+    // (undocumented)
+    readonly subject: HealthInputSubject;
+}
+
+// @public
+export type HealthInputSubject = "pingWorkers" | "worker" | "workerHistory" | "staleTasks";
 
 // @public
 export type HealthReadError = DatabaseOperationFailed<"MONITORING_QUERY_FAILED"> | SeatRelayFull;
@@ -2082,9 +2094,9 @@ export interface Monitoring {
     // (undocumented)
     cancelTask(taskId: TaskId, options: CancelTaskOptions): Promise<Result<TaskCancelled, CancelTaskError>>;
     // (undocumented)
-    getExecutionClassCoverage(): Promise<Result<ClassCoverage, HealthReadError>>;
+    getExecutionClassCoverage(): Promise<Result<ExecutionClassCoverage, HealthReadError>>;
     // (undocumented)
-    getExecutionClassReport(): Promise<Result<ClassReport, HealthReadError>>;
+    getExecutionClassReport(): Promise<Result<ExecutionClassReport, HealthReadError>>;
     // (undocumented)
     getExpiredTasks(): Promise<Result<BoundedTaskList<ExpiredTaskRow>, HealthReadError>>;
     // (undocumented)
@@ -2553,11 +2565,11 @@ export interface PayloadPolicyInput {
 // @public
 export interface PendingStream {
     // (undocumented)
+    readonly coverage: StreamCoverageState;
+    // (undocumented)
     readonly execution: Execution;
     // (undocumented)
-    readonly queueName: string;
-    // (undocumented)
-    readonly state: StreamCoverageState;
+    readonly queue: string;
     // (undocumented)
     readonly wait: StreamWait;
 }
@@ -2654,7 +2666,7 @@ export type PingTarget = {
 };
 
 // @public
-export type PingWorkersError = DatabaseInvalidInput | DatabaseListenerDisabled | DatabaseOperationFailed<"WORKER_PING_FAILED"> | QueryRefused | SeatRelayFull;
+export type PingWorkersError = HealthInputRefused | DatabaseListenerDisabled | DatabaseOperationFailed<"WORKER_PING_FAILED"> | SeatRelayFull;
 
 // @public
 export interface PingWorkersOptions {
@@ -2727,7 +2739,7 @@ export interface QueryRefused {
 }
 
 // @public
-export type QueryRefusedField = "window" | "page" | "limit" | "taskNames" | "queues" | "workers" | "errorCodes" | "workflowName" | "nodeIndex" | "workerId";
+export type QueryRefusedField = "window" | "page" | "limit" | "taskNames" | "queues" | "workers" | "errorCodes" | "workflowName" | "nodeIndex";
 
 // @public
 export type QueueConfigInput = {
@@ -3496,6 +3508,19 @@ export type RunningTask = {
 export type RuntimeOf<X extends Execution, C extends ContextUse = "noContext"> = [C] extends ["takesContext"] ? ContextBodyRuntimes[X] : BodyRuntimes[X];
 
 // @public
+export class RuntimeStartFailed extends CoreError {
+    constructor(facts: {
+        readonly cause: string;
+    });
+    // (undocumented)
+    readonly cause: string;
+    // (undocumented)
+    readonly code = "RUNTIME_START_FAILED";
+    // (undocumented)
+    readonly name = "RuntimeStartFailed";
+}
+
+// @public
 export type RuntimeWorkflowContext = {
     readonly kind: "context";
     readonly context: WorkflowContext;
@@ -3861,11 +3886,11 @@ export type SqlText = string | null;
 // @public
 export interface StaleTaskRow {
     // (undocumented)
-    readonly id: TaskId;
-    // (undocumented)
-    readonly lastHeartbeat: LastBeat;
+    readonly lastHeartbeatAt: LastBeat;
     // (undocumented)
     readonly startedAt: Temporal.Instant;
+    // (undocumented)
+    readonly taskId: TaskId;
     // (undocumented)
     readonly taskName: string;
     // (undocumented)
@@ -3940,11 +3965,11 @@ export interface StoredWorkflowContext {
 // @public
 export interface StreamCoverage {
     // (undocumented)
+    readonly coverage: StreamCoverageState;
+    // (undocumented)
     readonly execution: Execution;
     // (undocumented)
-    readonly queueName: string;
-    // (undocumented)
-    readonly state: StreamCoverageState;
+    readonly queue: string;
 }
 
 // @public
@@ -3961,8 +3986,8 @@ export type StreamCoverageState = {
 
 // @public
 export type StreamWait = {
-    readonly kind: "oldestWaiting";
-    readonly enqueuedAt: Temporal.Instant;
+    readonly kind: "due";
+    readonly oldestDueAt: Temporal.Instant;
     readonly wait: Temporal.Duration;
 } | {
     readonly kind: "noneDue";
@@ -4932,8 +4957,14 @@ export type WithSentTypes<V, O, E extends string> = V & {
     readonly [sentTypes]?: SentTypes<O, E>;
 };
 
+// @public (undocumented)
+export type WorkerDecision = "TIMED_OUT" | "TASK_BLOCKED_LOOP" | "NEIGHBOUR_BLOCKED_LOOP" | "CHILD_LOST" | "KILLED_AFTER_CANCEL" | "LOST_AFTER_CANCEL";
+
 // @public
-export interface WorkerClassLoad {
+export type WorkerEndedSpans = "makeSpans" | "noSpans";
+
+// @public
+export interface WorkerExecutionClassLoad {
     // (undocumented)
     readonly budgets: readonly BudgetLoad[];
     // (undocumented)
@@ -4942,14 +4973,8 @@ export interface WorkerClassLoad {
     readonly workerId: string;
 }
 
-// @public (undocumented)
-export type WorkerDecision = "TIMED_OUT" | "TASK_BLOCKED_LOOP" | "NEIGHBOUR_BLOCKED_LOOP" | "CHILD_LOST" | "KILLED_AFTER_CANCEL" | "LOST_AFTER_CANCEL";
-
 // @public
-export type WorkerEndedSpans = "makeSpans" | "noSpans";
-
-// @public
-export type WorkerHistoryError = HealthInputError | QueryRefused;
+export type WorkerHistoryError = HealthInputError;
 
 // @public
 export type WorkerHistoryLimit = {
@@ -4989,7 +5014,7 @@ export interface WorkerProfileInput {
 }
 
 // @public
-export type WorkerReadError = HealthReadError | QueryRefused;
+export type WorkerReadError = HealthReadError | HealthInputRefused;
 
 // @public
 export type WorkerStateRead = {
@@ -5002,26 +5027,22 @@ export type WorkerStateRead = {
 
 // @public
 export interface WorkerStateSnapshot {
+    readonly childCount: number;
     readonly childrenMemoryMb: Measure;
     // (undocumented)
-    readonly classCapacity: readonly ClassBudget[];
-    // (undocumented)
-    readonly clusterWideCap: ClusterWideCap;
+    readonly claimLimits: ClaimLimits;
+    readonly clusterWideCap: ClusterCapSetting;
     // (undocumented)
     readonly cpuPercent: Measure;
     // (undocumented)
+    readonly executionClassBudgets: readonly ExecutionClassBudget[];
+    // (undocumented)
     readonly hostname: string;
-    // (undocumented)
-    readonly maxClaimBatch: number;
-    // (undocumented)
-    readonly maxClaimPerWorker: number;
     // (undocumented)
     readonly memoryPercent: Measure;
     readonly memoryUsageMb: Measure;
     // (undocumented)
     readonly pid: number;
-    // (undocumented)
-    readonly processes: number;
     // (undocumented)
     readonly profile: SnapshotProfile;
     // (undocumented)

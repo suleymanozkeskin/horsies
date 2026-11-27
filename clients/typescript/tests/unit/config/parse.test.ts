@@ -14,7 +14,7 @@ const NO_ENVIRONMENT: EnvironmentRead = () => undefined;
 
 /** A config with only a database URL value and the given fields. */
 function configWith(fields: Partial<AppConfigInput>): AppConfigInput {
-  return { broker: { databaseUrl: { kind: "value", value: DATABASE_URL } }, ...fields };
+  return { database: { databaseUrl: { kind: "value", value: DATABASE_URL } }, ...fields };
 }
 
 /** The refusals of a config that the parse must refuse. */
@@ -38,38 +38,38 @@ function coreObjectOf(input: AppConfigInput, environment: EnvironmentRead = NO_E
 describe("parseAppConfig", () => {
   test("a config with a URL value is accepted, and the text holds only the given fields", () => {
     assert.deepEqual(coreObjectOf(configWith({})), {
-      broker: { database_url: DATABASE_URL },
-      resend_on_transient_err: false,
+      database: { database_url: DATABASE_URL },
+      resend_on_transient_error: false,
     });
   });
 
   test("a URL from the environment is read at the parse", () => {
-    const input: AppConfigInput = { broker: { databaseUrl: { kind: "fromEnv", name: "APP_DATABASE_URL" } } };
+    const input: AppConfigInput = { database: { databaseUrl: { kind: "fromEnv", name: "APP_DATABASE_URL" } } };
     const environment: EnvironmentRead = (name) => (name === "APP_DATABASE_URL" ? DATABASE_URL : undefined);
 
     assert.deepEqual(coreObjectOf(input, environment), {
-      broker: { database_url: DATABASE_URL },
-      resend_on_transient_err: false,
+      database: { database_url: DATABASE_URL },
+      resend_on_transient_error: false,
     });
   });
 
   test("an environment variable that is not set is refused with HRS-203, and the message names the variable", () => {
-    const refusals = refusalsOf({ broker: { databaseUrl: { kind: "fromEnv", name: "APP_DATABASE_URL" } } });
+    const refusals = refusalsOf({ database: { databaseUrl: { kind: "fromEnv", name: "APP_DATABASE_URL" } } });
 
     assert.deepEqual(
       refusals.map((one) => [one.code, one.path]),
-      [["HRS-203", "broker.databaseUrl"]],
+      [["HRS-203", "database.databaseUrl"]],
     );
     assert.match(refusals[0]?.message ?? "", /APP_DATABASE_URL is not set/);
   });
 
   test("a number that is not a whole number in the range of its field is refused with the code of its section", () => {
     for (const poolSize of [1.5, -1, 2 ** 32, Number.NaN]) {
-      const refusals = refusalsOf(configWith({ broker: { databaseUrl: { kind: "value", value: DATABASE_URL }, poolSize } }));
+      const refusals = refusalsOf(configWith({ database: { databaseUrl: { kind: "value", value: DATABASE_URL }, poolSize } }));
 
       assert.deepEqual(
         refusals.map((one) => [one.code, one.path]),
-        [["HRS-213", "broker.poolSize"]],
+        [["HRS-213", "database.poolSize"]],
       );
       assert.match(refusals[0]?.message ?? "", /from 0 to 4294967295/);
     }
@@ -78,15 +78,15 @@ describe("parseAppConfig", () => {
   test("a number outside the range of its field has the catalog code of its config section", () => {
     const cases: readonly (readonly [Partial<AppConfigInput>, string, string])[] = [
       [{ customQueues: [{ name: "urgent", priority: -1 }], queueMode: "custom" }, "HRS-200", "customQueues[0].priority"],
-      [{ clusterWideCap: { kind: "cap", tasks: -1 } }, "HRS-201", "clusterWideCap.tasks"],
+      [{ clusterWideCap: { kind: "clusterCap", tasks: -1 } }, "HRS-201", "clusterWideCap.tasks"],
       [{ claim: { kind: "hardCap", leaseMs: -1 } }, "HRS-202", "claim.leaseMs"],
       [{ maxClaimRenewAgeMs: -1 }, "HRS-202", "maxClaimRenewAgeMs"],
       [{ recovery: { checkIntervalMs: -1 } }, "HRS-204", "recovery.checkIntervalMs"],
       [{ resilience: { databaseRetryMaxMs: -1 } }, "HRS-208", "resilience.databaseRetryMaxMs"],
       [
-        { broker: { databaseUrl: { kind: "value", value: DATABASE_URL }, poolRecycle: { kind: "after", seconds: -1 } } },
+        { database: { databaseUrl: { kind: "value", value: DATABASE_URL }, poolRecycle: { kind: "after", seconds: -1 } } },
         "HRS-213",
-        "broker.poolRecycle.seconds",
+        "database.poolRecycle.seconds",
       ],
       [{ retention: { retentionPeriods: [{ days: -1 }] } }, "HRS-216", "retention.retentionPeriods[0].days"],
       [{ payload: { warnBytes: { kind: "bytes", bytes: -1 } } }, "HRS-227", "payload.warnBytes.bytes"],
@@ -104,7 +104,7 @@ describe("parseAppConfig", () => {
     const refusals = refusalsOf({
       queueMode: "custom",
       customQueues: [{ name: "urgent\uD800", priority: 1 }],
-      broker: { databaseUrl: { kind: "value", value: "postgresql://\uD800" } },
+      database: { databaseUrl: { kind: "value", value: "postgresql://\uD800" } },
       retention: { queueRetention: { ["bulk\uD800"]: { kind: "forever" } } },
     });
 
@@ -112,7 +112,7 @@ describe("parseAppConfig", () => {
       refusals.map((one) => [one.code, one.path]),
       [
         ["HRS-200", "customQueues[0].name"],
-        ["HRS-203", "broker.databaseUrl"],
+        ["HRS-203", "database.databaseUrl"],
         ["HRS-216", 'retention.queueRetention["bulk\\ud800"]'],
       ],
     );
@@ -122,7 +122,7 @@ describe("parseAppConfig", () => {
   test("a session URL with a lone surrogate is refused with HRS-203 at the path of its connection mode", () => {
     const refusals = refusalsOf(
       configWith({
-        broker: {
+        database: {
           databaseUrl: { kind: "value", value: DATABASE_URL },
           connection: { kind: "pgbouncerTransaction", sessionDatabaseUrl: { kind: "value", value: "postgresql://\uD800" } },
         },
@@ -131,7 +131,7 @@ describe("parseAppConfig", () => {
 
     assert.deepEqual(
       refusals.map((one) => [one.code, one.path]),
-      [["HRS-203", "broker.connection.sessionDatabaseUrl"]],
+      [["HRS-203", "database.connection.sessionDatabaseUrl"]],
     );
   });
 
@@ -148,7 +148,7 @@ describe("parseAppConfig", () => {
   test("a keepalive outside the bounds of the core's socket settings is refused with HRS-215", () => {
     const refusals = refusalsOf(
       configWith({
-        broker: {
+        database: {
           databaseUrl: { kind: "value", value: DATABASE_URL },
           tcpKeepalives: { kind: "on", idleSeconds: 0, intervalSeconds: 10, probes: 128 },
         },
@@ -158,8 +158,8 @@ describe("parseAppConfig", () => {
     assert.deepEqual(
       refusals.map((one) => [one.code, one.path]),
       [
-        ["HRS-215", "broker.tcpKeepalives.idleSeconds"],
-        ["HRS-215", "broker.tcpKeepalives.probes"],
+        ["HRS-215", "database.tcpKeepalives.idleSeconds"],
+        ["HRS-215", "database.tcpKeepalives.probes"],
       ],
     );
   });
@@ -262,7 +262,7 @@ describe("parseAppConfig", () => {
     const refusals = refusalsOf({
       queueMode: "custom",
       customQueues: [{ name: "urgent", priority: 1.5 }],
-      broker: { databaseUrl: { kind: "fromEnv", name: "UNSET_URL" }, maxOverflow: -1 },
+      database: { databaseUrl: { kind: "fromEnv", name: "UNSET_URL" }, maxOverflow: -1 },
       claim: { kind: "softCap", prefetchBuffer: 0.5, leaseMs: 30_000 },
       workerProfiles: { cpu: { drainTimeoutMs: 0 } },
     });
@@ -271,8 +271,8 @@ describe("parseAppConfig", () => {
       refusals.map((one) => [one.code, one.path]),
       [
         ["HRS-200", "customQueues[0].priority"],
-        ["HRS-203", "broker.databaseUrl"],
-        ["HRS-213", "broker.maxOverflow"],
+        ["HRS-203", "database.databaseUrl"],
+        ["HRS-213", "database.maxOverflow"],
         ["HRS-202", "claim.prefetchBuffer"],
         ["HRS-218", 'workerProfiles["cpu"].drainTimeoutMs'],
       ],

@@ -58,8 +58,8 @@ function mainFacades(handle: NativeCoreHandle, called: string[]): FacadeAddons {
       getWorkerStateHistory: unused,
       getStaleTasks: unused,
       getExpiredTasks: done("getExpiredTasks", { kind: "complete" as const, rows: [] }),
-      getClassCoverage: unused,
-      getClassReport: unused,
+      getExecutionClassCoverage: unused,
+      getExecutionClassReport: unused,
     }),
     cancel: () => ({
       cancelTask: async (given, taskId) => done("cancelTask", { taskId, wasStatus: "CLAIMED" })(given),

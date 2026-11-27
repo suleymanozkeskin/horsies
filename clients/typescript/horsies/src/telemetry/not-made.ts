@@ -57,7 +57,7 @@ export class SpansNotMade {
 }
 
 /**
- * The writer of a main thread: the record of the addon. A forwarder that does not start (`CORE_START_FAILED`) gives
+ * The writer of a main thread: the record of the addon. A forwarder that does not start (`RUNTIME_START_FAILED`) gives
  * one line to `writeLine`; any other thrown code is the class of that code, a defect.
  */
 export function addonNotMadeWriter(log: LogSpanNotMade, writeLine: (line: string) => void): NotMadeWriter {
@@ -68,7 +68,7 @@ export function addonNotMadeWriter(log: LogSpanNotMade, writeLine: (line: string
       case "value":
         return;
       case "thrown":
-        if (envelope.thrown.code === "CORE_START_FAILED") {
+        if (envelope.thrown.code === "RUNTIME_START_FAILED") {
           writeLine(`${lineText(span, cause)} The core log did not start: ${envelope.thrown.cause}.`);
 
           return;

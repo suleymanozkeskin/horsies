@@ -205,7 +205,7 @@ pub fn child_arguments(process_arguments: Vec<String>) -> Envelope<ChildArgument
             Ok(ArgumentsRead::Bad { cause }) => {
                 Envelope::Value(ChildArgumentsCheck::BadArguments {
                     cause,
-                    code: ChildHostExit::BadArguments.code(),
+                    code: ChildHostExit::BadArguments.exit_code(),
                 })
             }
             Err(thrown) => Envelope::Thrown(thrown),
@@ -256,7 +256,7 @@ fn resolve_once(slot: &Mutex<Option<ServeDeferred>>, envelope: Envelope<ChildSer
 
 /// Start the host thread with a duplicate of the child's socket; a socket
 /// that the OS refuses to duplicate or a thread that the OS refuses resolves
-/// with `CORE_START_FAILED`, and nothing runs.
+/// with `RUNTIME_START_FAILED`, and nothing runs.
 fn start_host(deferred: ServeDeferred, served: ServedApp) {
     let ServedApp {
         app,
@@ -269,7 +269,7 @@ fn start_host(deferred: ServeDeferred, served: ServedApp) {
         Err(error) => {
             resolve_once(
                 &slot,
-                Envelope::Thrown(NativeThrown::CoreStartFailed {
+                Envelope::Thrown(NativeThrown::RuntimeStartFailed {
                     cause: format!("the child socket could not be kept open: {error}"),
                 }),
             );
@@ -286,7 +286,7 @@ fn start_host(deferred: ServeDeferred, served: ServedApp) {
     if let Err(error) = started {
         resolve_once(
             &slot,
-            Envelope::Thrown(NativeThrown::CoreStartFailed {
+            Envelope::Thrown(NativeThrown::RuntimeStartFailed {
                 cause: format!("the child host thread did not start: {error}"),
             }),
         );
@@ -296,7 +296,7 @@ fn start_host(deferred: ServeDeferred, served: ServedApp) {
 /// The end record of the host's exit. Pure.
 fn serve_end(exit: ChildHostExit) -> ChildServeEnd {
     ChildServeEnd {
-        code: exit.code(),
+        code: exit.exit_code(),
         exit: ChildExitName::of(exit),
     }
 }

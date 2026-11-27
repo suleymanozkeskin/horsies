@@ -1,6 +1,6 @@
 // The process-level functions of the addon: the core state, the panic rule, the defect report, the
 // task id source, the migration files and the environment count. None of them starts the core. Each takes the
-// addon before the call wrapper, so a failed load throws its own error (`CoreStartFailed`,
+// addon before the call wrapper, so a failed load throws its own error (`RuntimeStartFailed`,
 // `AddonOutsideMainThread`), not a defect of the call.
 
 import type { PanicRule } from "../../thrown-errors.ts";

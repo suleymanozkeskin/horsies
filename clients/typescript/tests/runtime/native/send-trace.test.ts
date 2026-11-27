@@ -37,7 +37,7 @@ const OVER_BOUND_PROPAGATOR: otel.TextMapPropagator = {
 
 function tracedApp(): Horsies {
   const created = Horsies.create({
-    broker: { databaseUrl: { kind: "value", value: testDatabaseUrl() } },
+    database: { databaseUrl: { kind: "value", value: testDatabaseUrl() } },
     tracing: { kind: "otelTracing" },
     tasks: [ping],
   });

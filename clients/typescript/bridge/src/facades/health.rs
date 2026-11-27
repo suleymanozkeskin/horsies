@@ -1,6 +1,6 @@
 //! The health reads on the handle: the worker ping, the worker state
-//! snapshots, the stale and expired task lists, and the class coverage and
-//! report.
+//! snapshots, the stale and expired task lists, and the execution class
+//! coverage and report.
 //!
 //! - Each read connects the handle's broker and installs the schema once
 //!   per handle, as a send does (Rust `Horsies::ping_workers` and the reads
@@ -33,8 +33,8 @@ use crate::call::operation::{guarded_start, spawn_operation};
 use crate::call::thrown::Envelope;
 use crate::facades::answer::answered_at_once;
 use crate::facades::health_records::{
-    ClassCoverageRecord, ClassReportRecord, ExpiredTaskList, StaleTaskList, WorkerPongRecord,
-    WorkerStateRecord,
+    ExecutionClassCoverageRecord, ExecutionClassReportRecord, ExpiredTaskList, StaleTaskList,
+    WorkerPongRecord, WorkerStateRecord,
 };
 use crate::facades::monitoring_query::whole_number;
 use crate::handle::core_handle::{BrokerConnection, CoreHandle};
@@ -255,31 +255,42 @@ pub fn get_expired_tasks<'env>(env: &'env Env, handle: &CoreHandle) -> napi::Res
 }
 
 /// For each pending stream, whether a live worker can run it.
-#[napi(ts_return_type = "Promise<NativeEnvelope<NativeOutcome<ClassCoverageRecord>>>")]
-pub fn get_class_coverage<'env>(env: &'env Env, handle: &CoreHandle) -> napi::Result<Object<'env>> {
+#[napi(ts_return_type = "Promise<NativeEnvelope<NativeOutcome<ExecutionClassCoverageRecord>>>")]
+pub fn get_execution_class_coverage<'env>(
+    env: &'env Env,
+    handle: &CoreHandle,
+) -> napi::Result<Object<'env>> {
     monitoring_read(
         env,
         handle,
-        "get_class_coverage",
+        "get_execution_class_coverage",
         || Ok(()),
         |broker, ()| async move {
             broker
-                .get_class_coverage()
+                .get_execution_class_coverage()
                 .await
-                .map(ClassCoverageRecord::from)
+                .map(ExecutionClassCoverageRecord::from)
         },
     )
 }
 
 /// The pending streams and the budget load of each live worker.
-#[napi(ts_return_type = "Promise<NativeEnvelope<NativeOutcome<ClassReportRecord>>>")]
-pub fn get_class_report<'env>(env: &'env Env, handle: &CoreHandle) -> napi::Result<Object<'env>> {
+#[napi(ts_return_type = "Promise<NativeEnvelope<NativeOutcome<ExecutionClassReportRecord>>>")]
+pub fn get_execution_class_report<'env>(
+    env: &'env Env,
+    handle: &CoreHandle,
+) -> napi::Result<Object<'env>> {
     monitoring_read(
         env,
         handle,
-        "get_class_report",
+        "get_execution_class_report",
         || Ok(()),
-        |broker, ()| async move { broker.get_class_report().await.map(ClassReportRecord::from) },
+        |broker, ()| async move {
+            broker
+                .get_execution_class_report()
+                .await
+                .map(ExecutionClassReportRecord::from)
+        },
     )
 }
 

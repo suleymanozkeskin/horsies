@@ -17,7 +17,7 @@ import type {
   WorkerPreparation,
   WorkerRunEnded,
 } from "../../../horsies/src/native/worker/addon.ts";
-import { ClientDefect, CoreStartFailed, CoreStopped } from "../../../horsies/src/thrown-errors.ts";
+import { ClientDefect, RuntimeStartFailed, CoreStopped } from "../../../horsies/src/thrown-errors.ts";
 import { createHorsies } from "../../../horsies/src/app.ts";
 import type { CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import type { LaunchFacts } from "../../../horsies/src/worker/child-command.ts";
@@ -219,7 +219,7 @@ describe("the worker run", () => {
   test("a core refusal of the preparation or of the run is coreRefused", async () => {
     const context = contextOf(implementedApp());
     const stopped = new CoreStopped({ subject: "forwarder", cause: "panic", stateAfter: "noChange" });
-    const failed = new CoreStartFailed({ cause: "no threads" });
+    const failed = new RuntimeStartFailed({ cause: "no threads" });
 
     assert.deepEqual(
       await runError(context, {
@@ -268,7 +268,7 @@ describe("the worker run", () => {
       workerRunErrorText({ kind: "manifestBound", path: "claim.prefetchBuffer", min: 0n, max: 2_147_483_647n }),
       workerRunErrorText({ kind: "connectionSettingsRefused", cause: "no session URL" }),
       workerRunErrorText({ kind: "sharedThreadUnavailable", profile: "cpu" }),
-      workerRunErrorText({ kind: "coreRefused", error: new CoreStartFailed({ cause: "no threads" }) }),
+      workerRunErrorText({ kind: "coreRefused", error: new RuntimeStartFailed({ cause: "no threads" }) }),
       workerRunErrorText({ kind: "bootFailed", cause: "SCHEMA_REFUSED", message: "schema" }),
       workerRunErrorText({ kind: "failed", cause: "CLAIM_FAILED", message: "claim" }),
     ];
@@ -311,7 +311,7 @@ describe("the worker run", () => {
     const { deps, steps } = fakeDeps();
 
     const created = createHorsies(
-      { broker: { databaseUrl: DATABASE_URL }, tracing: { kind: "otelTracing" }, tasks: [] },
+      { database: { databaseUrl: DATABASE_URL }, tracing: { kind: "otelTracing" }, tasks: [] },
       fakeEnvironment({ otelApi: () => ({ kind: "loaded", api: API }) }),
     );
 
@@ -327,7 +327,7 @@ describe("the worker run", () => {
 describe("the worker run of this process", () => {
   test("the run gets the core handle that Horsies.create built for the app", async () => {
     const handle = fakeCoreHandle();
-    const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [] }, fakeEnvironment({ handle }));
+    const created = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [] }, fakeEnvironment({ handle }));
 
     if (!created.ok) {
       assert.fail("the app is created");
@@ -352,7 +352,7 @@ describe("the worker run of this process", () => {
   });
 
   test("the preparation gets the heap cap of the worker threads of the runtime of this process", () => {
-    const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [] }, fakeEnvironment());
+    const created = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [] }, fakeEnvironment());
 
     if (!created.ok) {
       assert.fail("the app is created");
@@ -391,7 +391,7 @@ describe("the worker run of this process", () => {
 
   test("the handle of an app without the addon is a defect", () => {
     const created = createHorsies(
-      { broker: { databaseUrl: DATABASE_URL }, tasks: [] },
+      { database: { databaseUrl: DATABASE_URL }, tasks: [] },
       fakeEnvironment({ mainThread: false }),
     );
 

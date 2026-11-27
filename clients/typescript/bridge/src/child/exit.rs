@@ -167,7 +167,7 @@ pub fn spawn_host_thread(
             let exit = serve();
             resolve(exit);
             std::thread::sleep(flush_bound.backstop());
-            child_process_exit().end(exit.code())
+            child_process_exit().end(exit.exit_code())
         })
 }
 
@@ -330,7 +330,7 @@ mod tests {
         );
         assert_eq!(
             status.and_then(|status| status.code()),
-            Some(ChildHostExit::ChildHookFailed.code()),
+            Some(ChildHostExit::ChildHookFailed.exit_code()),
             "the probe at {CHANNEL_LOST_GRACE:?} after the end of its socket: {status:?}"
         );
     }

@@ -20,6 +20,6 @@ function handlerCallOutcome(app: Horsies): string {
   }
 }
 
-const created = Horsies.create({ broker: { databaseUrl: { kind: "value", value: DATABASE_URL } }, tasks: [] });
+const created = Horsies.create({ database: { databaseUrl: { kind: "value", value: DATABASE_URL } }, tasks: [] });
 
 parentPort?.postMessage(created.ok ? handlerCallOutcome(created.value) : "createRefused");

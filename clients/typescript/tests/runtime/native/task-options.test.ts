@@ -126,7 +126,7 @@ function checkedOptions(vector: OptionsVector): NativeTaskOptions {
 
 /** The send rules of a config with only a database URL. */
 function sendRules(): NativeSendRules {
-  const config = parseAppConfig({ broker: { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } } }, () => undefined);
+  const config = parseAppConfig({ database: { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } } }, () => undefined);
 
   if (!config.ok) {
     assert.fail(`the minimal config is refused: ${JSON.stringify(config.error)}`);

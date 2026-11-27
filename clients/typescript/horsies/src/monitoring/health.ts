@@ -2,9 +2,10 @@
 //
 // - Each health read connects the handle and installs the schema once per handle, as a send does; then it reads only.
 //   The database ping reads only.
-// - Expected failures are values: the database codes that each read lists (`errors.ts`), or `invalidInput` (`INVALID_INPUT`) for a
-//   worker id that is not well-formed text. A count or threshold outside its rule is the core's `INVALID_INPUT`,
-//   answered before any connect. In a `SHARED_THREAD` body, `SEAT_RELAY_FULL` when the seat relay sent nothing.
+// - Expected failures are values: the database codes that each read lists (`errors.ts`), or `invalidInput`
+//   (`INVALID_INPUT`, `HealthInputRefused`) for a worker id that is not well-formed text, and for a count, a wait or a
+//   threshold outside its rule (the core's check), answered before any connect. In a `SHARED_THREAD` body,
+//   `SEAT_RELAY_FULL` when the seat relay sent nothing.
 
 import type { NativeEnvelope } from "../native/call/envelope.ts";
 import { nativeValueAsync } from "../native/call/envelope.ts";
@@ -17,22 +18,23 @@ import { err, ok, type Result } from "../wire/result.ts";
 import {
   type HealthInputError,
   healthInputError,
+  type HealthInputRefused,
+  healthInputRefused,
+  type HealthInputSubject,
   type HealthReadError,
   healthReadError,
   type PingDatabaseError,
   pingDatabaseError,
   type PingWorkersError,
   pingWorkersError,
-  queryRefused,
-  type QueryRefused,
   type WorkerHistoryError,
   type WorkerReadError,
 } from "./errors.ts";
 import type {
   BoundedTaskList,
-  ClassCoverage,
-  ClassReport,
   DatabasePing,
+  ExecutionClassCoverage,
+  ExecutionClassReport,
   ExpiredTaskRow,
   PingWorkersOptions,
   StaleTaskRow,
@@ -41,7 +43,13 @@ import type {
   WorkerStateRead,
   WorkerStateSnapshot,
 } from "./health-types.ts";
-import { classCoverage, classReport, expiredTaskList, staleTaskList, workerStateSnapshot } from "./health-values.ts";
+import {
+  executionClassCoverage,
+  executionClassReport,
+  expiredTaskList,
+  staleTaskList,
+  workerStateSnapshot,
+} from "./health-values.ts";
 import type { RelayedAddon, RelayedPing } from "./seat-calls.ts";
 
 /** The wait of a worker ping when the options name none: the default of the Python client. */
@@ -100,7 +108,7 @@ export async function worker(
   target: HealthTarget,
   workerId: string,
 ): Promise<Result<WorkerStateRead, WorkerReadError>> {
-  const id = workerIdText(workerId);
+  const id = workerIdText("worker", workerId);
 
   if (!id.ok) {
     return id;
@@ -129,7 +137,7 @@ export async function workerHistory(
   workerId: string,
   limit: WorkerHistoryLimit,
 ): Promise<Result<readonly WorkerStateSnapshot[], WorkerHistoryError>> {
-  const id = workerIdText(workerId);
+  const id = workerIdText("workerHistory", workerId);
 
   if (!id.ok) {
     return id;
@@ -172,22 +180,26 @@ export async function expiredTasks(
 }
 
 /** For each pending stream of an execution class, whether a live worker can run it. */
-export async function readClassCoverage(target: HealthTarget): Promise<Result<ClassCoverage, HealthReadError>> {
+export async function readExecutionClassCoverage(
+  target: HealthTarget,
+): Promise<Result<ExecutionClassCoverage, HealthReadError>> {
   return healthCall(
-    "classCoverage",
-    () => target.addon.getClassCoverage(target.handle),
-    classCoverage,
-    (raw) => healthReadError("classCoverage", raw),
+    "executionClassCoverage",
+    () => target.addon.getExecutionClassCoverage(target.handle),
+    executionClassCoverage,
+    (raw) => healthReadError("executionClassCoverage", raw),
   );
 }
 
 /** The pending streams and the budget load of each live worker. */
-export async function readClassReport(target: HealthTarget): Promise<Result<ClassReport, HealthReadError>> {
+export async function readExecutionClassReport(
+  target: HealthTarget,
+): Promise<Result<ExecutionClassReport, HealthReadError>> {
   return healthCall(
-    "classReport",
-    () => target.addon.getClassReport(target.handle),
-    classReport,
-    (raw) => healthReadError("classReport", raw),
+    "executionClassReport",
+    () => target.addon.getExecutionClassReport(target.handle),
+    executionClassReport,
+    (raw) => healthReadError("executionClassReport", raw),
   );
 }
 
@@ -213,14 +225,14 @@ async function healthCall<Raw, Value, Failure>(
 }
 
 /** The addon target of a ping, or the refusal of a worker id that is not well-formed text. Pure. */
-function pingTargetArg(options: PingWorkersOptions): Result<PingTargetArg, QueryRefused> {
+function pingTargetArg(options: PingWorkersOptions): Result<PingTargetArg, HealthInputRefused> {
   const target = options.target ?? { kind: "everyWorker" };
 
   switch (target.kind) {
     case "everyWorker":
       return ok(target);
     case "worker": {
-      const id = workerIdText(target.workerId);
+      const id = workerIdText("pingWorkers", target.workerId);
 
       return id.ok ? ok({ kind: "worker", workerId: id.value }) : id;
     }
@@ -230,9 +242,9 @@ function pingTargetArg(options: PingWorkersOptions): Result<PingTargetArg, Query
   }
 }
 
-/** A worker id, or the refusal of text that is not well-formed. Pure. */
-function workerIdText(workerId: string): Result<string, QueryRefused> {
+/** A worker id, or the refusal of the read `subject` for text that is not well-formed. Pure. */
+function workerIdText(subject: HealthInputSubject, workerId: string): Result<string, HealthInputRefused> {
   return workerId.isWellFormed()
     ? ok(workerId)
-    : err(queryRefused("workerId", "the worker id is not well-formed text (it holds a lone surrogate)"));
+    : err(healthInputRefused(subject, "workerId: the worker id is not well-formed text (it holds a lone surrogate)"));
 }

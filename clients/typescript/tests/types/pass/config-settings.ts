@@ -2,7 +2,7 @@
 // kind, and a switch over each kind of a codec refusal.
 
 import {
-  type BrokerConfigInput,
+  type DatabaseConfigInput,
   type CodecRefused,
   configureLogging,
   type LogSinkSetting,
@@ -21,7 +21,7 @@ export const withoutChildren: WorkerProfileInput = {
   sharedThread: { kind: "noSharedThreadChildren" },
 };
 
-export const broker: BrokerConfigInput = {
+export const broker: DatabaseConfigInput = {
   databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" },
   poolRecycle: { kind: "after", seconds: 3_600 },
 };

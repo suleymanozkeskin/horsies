@@ -64,13 +64,13 @@ function appOf(config: HorsiesConfig): Horsies {
 
 /** The app of the default queue mode with `report`, `ping` and `upstreamOnly`. */
 export function defaultModeApp(): Horsies {
-  return appOf({ broker: { databaseUrl: DATABASE_URL }, tasks: [report, ping, upstreamOnly] });
+  return appOf({ database: { databaseUrl: DATABASE_URL }, tasks: [report, ping, upstreamOnly] });
 }
 
 /** The app of the custom queues `standard` and `urgent` with `sync`. */
 export function customModeApp(): Horsies {
   return appOf({
-    broker: { databaseUrl: DATABASE_URL },
+    database: { databaseUrl: DATABASE_URL },
     queueMode: "custom",
     customQueues: [
       { name: "standard", priority: 50 },

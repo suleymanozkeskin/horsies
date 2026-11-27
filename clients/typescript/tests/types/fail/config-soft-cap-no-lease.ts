@@ -4,6 +4,6 @@
 import type { AppConfigInput } from "../../../horsies/src/index.ts";
 
 export const config: AppConfigInput = {
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
   claim: { kind: "softCap", prefetchBuffer: 4 },
 };

@@ -183,7 +183,7 @@ function moduleUrl(packageDir: string, path: string): string {
 
 /** The problems of the page and the script that the monitoring handler of `app` serves. Effects: runs the handler. */
 async function webPageProblems(entry: PublicEntry): Promise<readonly string[]> {
-  const created = entry.Horsies.create({ broker: { databaseUrl: { kind: "value", value: REFUSED_DATABASE_URL } }, tasks: [] });
+  const created = entry.Horsies.create({ database: { databaseUrl: { kind: "value", value: REFUSED_DATABASE_URL } }, tasks: [] });
 
   if (!created.ok) {
     return [`Horsies.create refused the app of the page check: ${created.error.refusals.map((refusal) => refusal.message).join("; ")}`];
@@ -212,7 +212,7 @@ async function webPageProblems(entry: PublicEntry): Promise<readonly string[]> {
 
 /** The problems of `app.pingDatabase()` of an app on the test database. Effects: loads the addon; connects to the database. */
 async function pingProblems(entry: PublicEntry): Promise<readonly string[]> {
-  const created = entry.Horsies.create({ broker: { databaseUrl: { kind: "value", value: testDatabaseUrl() } }, tasks: [] });
+  const created = entry.Horsies.create({ database: { databaseUrl: { kind: "value", value: testDatabaseUrl() } }, tasks: [] });
 
   if (!created.ok) {
     return [`Horsies.create refused the app of the ping: ${created.error.refusals.map((refusal) => refusal.message).join("; ")}`];

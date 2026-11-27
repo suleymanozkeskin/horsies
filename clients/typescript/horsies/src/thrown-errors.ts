@@ -15,7 +15,7 @@ export type PanicRule = "STOP_CORE" | "ABORT_PROCESS";
 /** The codes of the process-state refusals. */
 export type CoreErrorCode =
   | "CORE_STOPPED"
-  | "CORE_START_FAILED"
+  | "RUNTIME_START_FAILED"
   | "TOO_MANY_PENDING_CALLS"
   | "FORKED_AFTER_CORE_START";
 
@@ -58,9 +58,9 @@ export class CoreStopped extends CoreError {
 }
 
 /** The core could not start in this process: its runtime, its log forwarder or its native addon. */
-export class CoreStartFailed extends CoreError {
-  override readonly name = "CoreStartFailed";
-  readonly code = "CORE_START_FAILED";
+export class RuntimeStartFailed extends CoreError {
+  override readonly name = "RuntimeStartFailed";
+  readonly code = "RUNTIME_START_FAILED";
   override readonly cause: string;
 
   constructor(facts: { readonly cause: string }) {

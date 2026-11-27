@@ -19,7 +19,7 @@ const ping = defineTask({ name: "producer_end_to_end_ping", input: { n: h.int() 
 /** The app of the test database, or the failed test with every refusal. */
 function testApp(): Horsies {
   const created = Horsies.create({
-    broker: { databaseUrl: { kind: "value", value: testDatabaseUrl() } },
+    database: { databaseUrl: { kind: "value", value: testDatabaseUrl() } },
     tasks: [ping],
   });
 

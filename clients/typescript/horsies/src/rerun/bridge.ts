@@ -55,7 +55,7 @@ export interface RerunBridge {
 
 /**
  * The rerun functions of the loaded addon. Each one takes the addon before the call wrapper, so a
- * failed load throws its own error (`CoreStartFailed`, `AddonOutsideMainThread`), not a defect of the
+ * failed load throws its own error (`RuntimeStartFailed`, `AddonOutsideMainThread`), not a defect of the
  * call.
  */
 export const addonRerunBridge: RerunBridge = {

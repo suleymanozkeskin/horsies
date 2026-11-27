@@ -36,7 +36,7 @@ const welcome = defineTask({
 const audit = defineTask({ name: "audit", input: { entry: h.string() }, output: h.int() });
 
 const created = Horsies.create({
-  broker: { databaseUrl: DATABASE_URL },
+  database: { databaseUrl: DATABASE_URL },
   workerProfiles: { [DEFAULT_PROFILE]: ISOLATED_PROFILE },
   tasks: [welcome, audit],
 });

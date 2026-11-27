@@ -31,7 +31,7 @@ const sendReceipt = defineTask({
 });
 
 const created = Horsies.create({
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
   queueMode: "custom",
   customQueues: [
     { name: "critical", priority: 1 },
@@ -79,7 +79,7 @@ const app = created.value;
 ## `HorsiesConfig`
 
 `HorsiesConfig` is `AppConfigInput` plus the contract lists. Only
-`broker.databaseUrl` is required. A field that the config leaves out takes
+`database.databaseUrl` is required. A field that the config leaves out takes
 the core's default: the package holds no copy of a default.
 
 | Field | Type | Shared docs page |
@@ -87,8 +87,8 @@ the core's default: the package holds no copy of a default.
 | `tasks` | `readonly AnyTaskContract[]` | `tasks.md` |
 | `workflows` | `readonly AnyWorkflowContract[]` | `workflows.md` |
 | `queueMode`, `customQueues` | `"default"`, or `"custom"` with a non-empty `CustomQueueInput[]` | `concepts/queue-modes` |
-| `broker` | `BrokerConfigInput` | `configuration/broker-config` |
-| `clusterWideCap` | `TaskCap`: `{ kind: "cap", tasks }` or `{ kind: "noCap" }` | `workers/concurrency` |
+| `database` | `DatabaseConfigInput` | `configuration/broker-config` |
+| `clusterWideCap` | `ClusterCapSetting`: `{ kind: "clusterCap", tasks }` or `{ kind: "noClusterCap" }` (the default) | `workers/concurrency` |
 | `claim` | `ClaimMode`: `{ kind: "hardCap", leaseMs? }` or `{ kind: "softCap", prefetchBuffer, leaseMs }` | `workers/concurrency` |
 | `maxClaimRenewAgeMs` | `number` | `workers/heartbeats-recovery` |
 | `payload` | `PayloadPolicyInput` (`warnBytes`, `rejectBytes`: `PayloadBound`) | `tasks.md` (sends) |
@@ -108,12 +108,12 @@ for example `https://suleymanozkeskin.github.io/horsies/configuration/broker-con
 - `resendOnTransientError: true` sends again, up to 3 times, after a send
   fails with a transient database error.
 
-### `broker`
+### `database`
 
 | Field | Type |
 |---|---|
 | `databaseUrl` | `Secret`: `{ kind: "fromEnv", name }` (read at `Horsies.create`) or `{ kind: "value", value }` |
-| `connection` | `BrokerConnection`: `{ kind: "direct", sessionDatabase? }` or `{ kind: "pgbouncerTransaction", sessionDatabaseUrl: Secret }` |
+| `connection` | `DatabaseConnection`: `{ kind: "direct", sessionDatabase? }` or `{ kind: "pgbouncerTransaction", sessionDatabaseUrl: Secret }` |
 | `poolSize`, `maxOverflow` | `number` (defaults 5 and 10) |
 | `poolTimeoutSeconds` | `number` |
 | `poolRecycle` | `PoolRecycle`: `{ kind: "never" }` or `{ kind: "after", seconds }` (0: at every checkout) |
@@ -132,7 +132,7 @@ for example `https://suleymanozkeskin.github.io/horsies/configuration/broker-con
 - A `fromEnv` variable that is not set is refused with `HRS-203`. The
   message names the variable and never the value.
 - `poolSize` persistent connections and up to `maxOverflow` more under load
-  size the general broker pool. It serves producers, web processes and the
+  size the general pool. It serves producers, web processes and the
   app-level reads. It does not size the pools of a worker: the worker
   process opens the `pool` of its worker profile, and task code in a worker
   child opens the `taskSendPool` of its child kind.
@@ -148,7 +148,7 @@ for example `https://suleymanozkeskin.github.io/horsies/configuration/broker-con
 import type { AppConfigInput } from "horsies";
 
 export const highTrafficConfig: AppConfigInput = {
-  broker: {
+  database: {
     databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" },
     poolSize: 20,
     maxOverflow: 40,
@@ -167,9 +167,9 @@ export const highTrafficConfig: AppConfigInput = {
 | `retention.pausedWorkflowCancelAfter` with years or months, or not whole microseconds | `HRS-216` |
 
 The code of a section: queues `HRS-200`, `clusterWideCap` `HRS-201`,
-`claim` and `maxClaimRenewAgeMs` `HRS-202`, `broker` URLs `HRS-203`,
-`recovery` `HRS-204`, `resilience` `HRS-208`, `broker` pool fields
-`HRS-213`, `broker` socket fields `HRS-215`, `retention` `HRS-216`,
+`claim` and `maxClaimRenewAgeMs` `HRS-202`, `database` URLs `HRS-203`,
+`recovery` `HRS-204`, `resilience` `HRS-208`, `database` pool fields
+`HRS-213`, `database` socket fields `HRS-215`, `retention` `HRS-216`,
 `workerProfiles` `HRS-218`, `payload` `HRS-227`.
 
 ### Queues
@@ -213,7 +213,7 @@ const resizeImage = defineTask({
 });
 
 export const created = Horsies.create({
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
   workerProfiles: {
     default: {
       isolated: {
@@ -404,7 +404,7 @@ import { cli, defineTask, h, Horsies } from "horsies";
 const greet = defineTask({ name: "greet", input: { name: h.string() }, output: h.string() });
 
 const created = Horsies.create({
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
   workerProfiles: { default: { isolated: { kind: "isolatedChildren", count: 2 } } },
   tasks: [greet],
 });
@@ -510,8 +510,8 @@ import {
   Horsies, HorsiesErrorCode, cli,
   type HorsiesConfig, type ValidationReport, type HorsiesError, type RefusalCode,
   // Config
-  type AppConfigInput, type BrokerConfigInput, type BrokerConnection, type SessionDatabase, type Secret,
-  type PoolRecycle, type TcpKeepalives, type TcpUserTimeout, type RerunInputDefault, type ClaimMode,
+  type AppConfigInput, type DatabaseConfigInput, type DatabaseConnection, type SessionDatabase, type Secret,
+  type PoolRecycle, type TcpKeepalives, type TcpUserTimeout, type RerunInputDefault, type ClaimMode, type ClusterCapSetting,
   type TaskCap, type CustomQueueInput, type QueueConfigInput, type PayloadPolicyInput, type PayloadBound,
   type RecoveryConfigInput, type RetentionConfigInput, type HoursRetention, type PausedWorkflowExpiry,
   type RetentionPeriod, type QueueRetention, type ResilienceConfigInput, type RetryAttempts,

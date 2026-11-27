@@ -44,14 +44,14 @@ pub fn probe_start_workflow_in_child<'env>(
     workflow_id: String,
     sent_at_micros: BigInt,
     trace: TraceArgument,
-    resend_on_transient_err: bool,
+    resend_on_transient_error: bool,
 ) -> napi::Result<Object<'env>> {
     let start = StartCall {
         spec,
         workflow_id,
         sent_at_micros,
         trace,
-        resend_on_transient_err,
+        resend_on_transient_error,
     };
     start_workflow_on(env, child.chosen_for(handle), handle, start)
 }

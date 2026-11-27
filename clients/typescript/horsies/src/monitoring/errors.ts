@@ -1,15 +1,16 @@
 // The error unions of the monitoring reads, the health reads and the cancel.
 //
 // - The core catalog errors come from the generated converters (`monitoring_errors.ts`, `broker_errors.ts`).
-// - `invalidInput` (`INVALID_INPUT`) of a query is the one client variant: an argument that the call refuses before any
-//   connect. Nothing ran.
+// - `invalidInput` (`INVALID_INPUT`) is one variant per union: an argument that the call refuses before any connect.
+//   Nothing ran. A monitoring read gives `QueryRefused` (the field and the rule). A health read gives
+//   `HealthInputRefused` (the read and the cause), for the client's own check of a worker id and for the core's check of
+//   a count, a wait or a threshold alike.
 // - `SEAT_RELAY_FULL` comes in a `SHARED_THREAD` body only: the seat relay held its bound and sent nothing.
 // - Each health read lists only the database codes that the read can give. A code outside the list is a defect of the
 //   core: it crashes loud.
 
 import type {
   DatabaseCoreError,
-  DatabaseInvalidInput,
   DatabaseListenerDisabled,
   DatabaseOperationFailed,
   NativeDatabaseCoreError,
@@ -40,8 +41,7 @@ export type QueryRefusedField =
   | "workers"
   | "errorCodes"
   | "workflowName"
-  | "nodeIndex"
-  | "workerId";
+  | "nodeIndex";
 
 /** An argument that the call refuses before any connect: no statement ran. `reason` names the rule. */
 export interface QueryRefused {
@@ -50,6 +50,21 @@ export interface QueryRefused {
   readonly retryable: false;
   readonly field: QueryRefusedField;
   readonly reason: string;
+}
+
+/** The health read that refused its input. */
+export type HealthInputSubject = "pingWorkers" | "worker" | "workerHistory" | "staleTasks";
+
+/**
+ * An argument of a health read that the read refuses before any connect: no statement ran. `subject` names the read;
+ * `cause` names the argument and the rule that it breaks.
+ */
+export interface HealthInputRefused {
+  readonly kind: "invalidInput";
+  readonly code: "INVALID_INPUT";
+  readonly retryable: false;
+  readonly subject: HealthInputSubject;
+  readonly cause: string;
 }
 
 /** The error of a monitoring read with no query to refuse. */
@@ -66,23 +81,22 @@ export type PingDatabaseError = DatabaseOperationFailed<"DATABASE_PING_FAILED"> 
 
 /** The error of a worker ping. */
 export type PingWorkersError =
-  | DatabaseInvalidInput
+  | HealthInputRefused
   | DatabaseListenerDisabled
   | DatabaseOperationFailed<"WORKER_PING_FAILED">
-  | QueryRefused
   | SeatRelayFull;
 
 /** The error of a health read with no argument to refuse. */
 export type HealthReadError = DatabaseOperationFailed<"MONITORING_QUERY_FAILED"> | SeatRelayFull;
 
-/** The error of a health read of one worker. */
-export type WorkerReadError = HealthReadError | QueryRefused;
+/** The error of a health read with an argument that the core checks: the limit of `workerHistory`, the threshold of `staleTasks`. */
+export type HealthInputError = HealthInputRefused | DatabaseOperationFailed<"MONITORING_QUERY_FAILED"> | SeatRelayFull;
 
-/** The error of a health read with a count or a threshold that the core checks: `staleTasks`. */
-export type HealthInputError = DatabaseInvalidInput | DatabaseOperationFailed<"MONITORING_QUERY_FAILED"> | SeatRelayFull;
+/** The error of a health read of one worker: its worker id. */
+export type WorkerReadError = HealthReadError | HealthInputRefused;
 
 /** The error of the history read of one worker: its limit, and its worker id. */
-export type WorkerHistoryError = HealthInputError | QueryRefused;
+export type WorkerHistoryError = HealthInputError;
 
 /** The frozen `invalidInput` refusal of `field`. Pure. */
 export function queryRefused(field: QueryRefusedField, reason: string): QueryRefused {
@@ -93,6 +107,11 @@ export function queryRefused(field: QueryRefusedField, reason: string): QueryRef
     field,
     reason,
   });
+}
+
+/** The frozen `invalidInput` refusal of the health read `subject`. Pure. */
+export function healthInputRefused(subject: HealthInputSubject, cause: string): HealthInputRefused {
+  return Object.freeze({ kind: "invalidInput", code: "INVALID_INPUT", retryable: false, subject, cause });
 }
 
 /** The monitoring query error of a raw record of the core. */
@@ -127,6 +146,7 @@ export function pingWorkersError(raw: RawCatalogError): PingWorkersError {
 
   switch (error.code) {
     case "INVALID_INPUT":
+      return healthInputRefused("pingWorkers", error.message);
     case "LISTENER_DISABLED":
     case "WORKER_PING_FAILED":
       return error;
@@ -140,12 +160,13 @@ export function healthReadError(read: string, raw: RawCatalogError): HealthReadE
   return readError(read, databaseError(raw), HEALTH_READ_CODES);
 }
 
-/** The error of a health read with a count or a threshold. Another code is a defect. */
-export function healthInputError(read: string, raw: RawCatalogError): HealthInputError {
+/** The error of a health read with an argument that the core checks. Another code is a defect. */
+export function healthInputError(read: HealthInputSubject, raw: RawCatalogError): HealthInputError {
   const error = readError(read, databaseError(raw), HEALTH_INPUT_CODES);
 
   switch (error.code) {
     case "INVALID_INPUT":
+      return healthInputRefused(read, error.message);
     case "MONITORING_QUERY_FAILED":
       return error;
     default:

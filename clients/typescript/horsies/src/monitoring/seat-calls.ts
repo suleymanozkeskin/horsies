@@ -142,8 +142,8 @@ function relayedHealth(relay: SeatRelay): RelayedAddon<HealthAddon> {
     getWorkerStateHistory: async (_handle, workerId, limit) => health({ method: "getWorkerStateHistory", args: [workerId, limit] }),
     getStaleTasks: async (_handle, thresholdMinutes) => health({ method: "getStaleTasks", args: [thresholdMinutes] }),
     getExpiredTasks: async () => health({ method: "getExpiredTasks", args: [] }),
-    getClassCoverage: async () => health({ method: "getClassCoverage", args: [] }),
-    getClassReport: async () => health({ method: "getClassReport", args: [] }),
+    getExecutionClassCoverage: async () => health({ method: "getExecutionClassCoverage", args: [] }),
+    getExecutionClassReport: async () => health({ method: "getExecutionClassReport", args: [] }),
   } satisfies RelayedAddon<HealthAddon>);
 }
 

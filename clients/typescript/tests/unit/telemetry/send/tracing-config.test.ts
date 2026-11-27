@@ -153,7 +153,7 @@ describe("Horsies.create and the tracing step", () => {
     const { loader } = countingLoader(MISSING);
 
     const created = createHorsies(
-      { broker: { databaseUrl: { kind: "fromEnv", name: "NOT_SET" } }, tracing: { kind: "otelTracing" }, tasks: [listed] },
+      { database: { databaseUrl: { kind: "fromEnv", name: "NOT_SET" } }, tracing: { kind: "otelTracing" }, tasks: [listed] },
       fakeEnvironment({ otelApi: loader }),
     );
 
@@ -172,7 +172,7 @@ describe("Horsies.create and the tracing step", () => {
     });
 
     const created = createHorsies(
-      { broker: { databaseUrl: DATABASE_URL }, tracing: { kind: "otelTracing" }, tasks: [listed] },
+      { database: { databaseUrl: DATABASE_URL }, tracing: { kind: "otelTracing" }, tasks: [listed] },
       fakeEnvironment({ otelApi: loader, checks }),
     );
 
@@ -182,7 +182,7 @@ describe("Horsies.create and the tracing step", () => {
 
   test("an app with no tracing never loads the API", () => {
     const { loader, calls } = countingLoader(MISSING);
-    const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [listed] }, fakeEnvironment({ otelApi: loader }));
+    const created = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [listed] }, fakeEnvironment({ otelApi: loader }));
 
     assert.equal(created.ok, true);
     assert.equal(calls.count, 0);
@@ -191,11 +191,11 @@ describe("Horsies.create and the tracing step", () => {
 
   test("an app with otel tracing has the attempt-span observers; an app with none has the ones that do nothing", () => {
     const traced = createHorsies(
-      { broker: { databaseUrl: DATABASE_URL }, tracing: { kind: "otelTracing" }, tasks: [listed] },
+      { database: { databaseUrl: DATABASE_URL }, tracing: { kind: "otelTracing" }, tasks: [listed] },
       fakeEnvironment({ otelApi: countingLoader({ kind: "loaded", api: API }).loader }),
     );
 
-    const plain = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [listed] }, fakeEnvironment());
+    const plain = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [listed] }, fakeEnvironment());
 
     assert.notEqual(traced.ok ? bodyObserverOf(appInternals(traced.value)) : NO_BODY_OBSERVER, NO_BODY_OBSERVER);
     assert.equal(plain.ok ? bodyObserverOf(appInternals(plain.value)) : undefined, NO_BODY_OBSERVER);
@@ -204,7 +204,7 @@ describe("Horsies.create and the tracing step", () => {
   });
 
   test("a context that Horsies.create did not make has no tracing parts: ClientDefect", () => {
-    const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [listed] }, fakeEnvironment());
+    const created = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [listed] }, fakeEnvironment());
     const context = created.ok ? appInternals(created.value) : assert.fail("the app is refused");
 
     assert.equal(tracingPartsOfApp(context).setting.kind, "noTracing");
@@ -215,7 +215,7 @@ describe("Horsies.create and the tracing step", () => {
     const { loader } = countingLoader({ kind: "loaded", api: API });
 
     const created = createHorsies(
-      { broker: { databaseUrl: DATABASE_URL }, tracing: { kind: "otelTracing", workerEndedSpans: "noSpans" }, tasks: [listed] },
+      { database: { databaseUrl: DATABASE_URL }, tracing: { kind: "otelTracing", workerEndedSpans: "noSpans" }, tasks: [listed] },
       fakeEnvironment({ otelApi: loader }),
     );
 

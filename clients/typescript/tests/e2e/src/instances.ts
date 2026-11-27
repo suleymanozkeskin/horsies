@@ -7,7 +7,7 @@
 
 import type {
   AppConfigInput,
-  BrokerConfigInput,
+  DatabaseConfigInput,
   CustomQueueInput,
   RecoveryConfigInput,
   SharedAsyncSetting,
@@ -171,7 +171,7 @@ export function readyQueue(instance: Instance): string {
 
 /** The config of `instance` on `connection`, without its task list. Pure. */
 export function instanceConfig(instance: Instance, connection: Connection): AppConfigInput {
-  const base = { broker: brokerOf(connection), workerProfiles: workerProfiles(instance) };
+  const base = { database: brokerOf(connection), workerProfiles: workerProfiles(instance) };
 
   switch (instance) {
     case "default":
@@ -191,7 +191,7 @@ export function instanceConfig(instance: Instance, connection: Connection): AppC
     case "recovery_queues":
       return { ...base, queueMode: "custom", customQueues: customQueues(RECOVERY_QUEUES), recovery: fastRecovery() };
     case "cluster_cap":
-      return { ...base, clusterWideCap: { kind: "cap", tasks: CLUSTER_WIDE_CAP } };
+      return { ...base, clusterWideCap: { kind: "clusterCap", tasks: CLUSTER_WIDE_CAP } };
     case "recovery":
       return { ...base, recovery: fastRecovery() };
     case "soft_cap":
@@ -223,7 +223,7 @@ export function instanceConfig(instance: Instance, connection: Connection): AppC
   }
 }
 
-function brokerOf(connection: Connection): BrokerConfigInput {
+function brokerOf(connection: Connection): DatabaseConfigInput {
   const pool = { poolSize: POOL_SIZE, maxOverflow: POOL_OVERFLOW };
 
   switch (connection.kind) {

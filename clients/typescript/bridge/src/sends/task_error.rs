@@ -170,7 +170,7 @@ pub enum TaskErrorBuild {
 /// that is not a built-in code, or a data text that is not strict JSON, throws
 /// `CLIENT_DEFECT`: the package gives only the codes of its catalog and the
 /// texts of its codec. Starts no core; starts the log bridge of the process,
-/// and a forwarder thread that cannot start throws `CORE_START_FAILED`.
+/// and a forwarder thread that cannot start throws `RUNTIME_START_FAILED`.
 #[napi(ts_return_type = "NativeEnvelope<TaskErrorBuild>")]
 pub fn build_task_error(parts: TaskErrorParts) -> Envelope<TaskErrorBuild> {
     sync_call("build_task_error", || match started_log() {

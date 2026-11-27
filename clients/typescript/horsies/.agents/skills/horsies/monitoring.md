@@ -33,8 +33,8 @@ export async function checkHealth(app: Horsies): Promise<boolean> {
   if (!pongs.ok) {
     switch (pongs.error.kind) {
       case "invalidInput":
-        // The core's refusal has `message`; the refusal of a worker id has `field` and `reason`.
-        console.error(`workers: ${"field" in pongs.error ? `${pongs.error.field}: ${pongs.error.reason}` : pongs.error.message}`);
+        // `subject` is the read; `cause` names the argument and the rule.
+        console.error(`workers: ${pongs.error.subject}: ${pongs.error.cause}`);
         break;
       case "listenerDisabled":
       case "workerPingFailed":
@@ -66,8 +66,8 @@ export async function checkHealth(app: Horsies): Promise<boolean> {
 | `app.monitoring.getWorkerStateHistory(workerId, limit?)` | `readonly WorkerStateSnapshot[]`, newest first. `WorkerHistoryLimit`: `{ kind: "allRetained" }` (default) or `{ kind: "newest", count }` |
 | `app.monitoring.getStaleTasks({ thresholdMinutes })` | `BoundedTaskList<StaleTaskRow>`: `RUNNING` tasks with no beat for `thresholdMinutes` (whole minutes, 0 to 525,600) |
 | `app.monitoring.getExpiredTasks()` | `BoundedTaskList<ExpiredTaskRow>`: `PENDING` tasks past their `goodUntil`, oldest deadline first |
-| `app.monitoring.getExecutionClassCoverage()` | `ClassCoverage`: whether a live worker can run each pending stream (a queue and an execution class) |
-| `app.monitoring.getExecutionClassReport()` | `ClassReport`: the pending streams and the budget load of each live worker |
+| `app.monitoring.getExecutionClassCoverage()` | `ExecutionClassCoverage`: whether a live worker can run each pending stream (a queue and an execution class) |
+| `app.monitoring.getExecutionClassReport()` | `ExecutionClassReport`: the pending streams, the budget load of each live worker, and `liveWindow` (how recent a snapshot of a live worker is) |
 
 - `PingWorkersOptions`: `target` (`{ kind: "everyWorker" }`, the default, or
   `{ kind: "worker", workerId }`), `waitMs` (a whole number above 0,
@@ -76,15 +76,16 @@ export async function checkHealth(app: Horsies): Promise<boolean> {
   The ping returns at the first of: the target worker replied, `count`
   workers replied, the window ended. A worker of `listWorkerStates()` that is not
   in the answer did not reply.
-- `pingWorkers` errors: `INVALID_INPUT` (a `waitMs` or a `count` that is
-  not a whole number above 0, answered before any connect),
-  `LISTENER_DISABLED` (the core handle of this process runs no listener),
-  `WORKER_PING_FAILED`, and `INVALID_INPUT` with `field` and `reason` (a
-  worker id that holds a lone surrogate).
-- The other health reads give `MONITORING_QUERY_FAILED`; `getWorkerState` and
-  `getWorkerStateHistory` add `INVALID_INPUT` with `field` and `reason` for a
-  worker id; `getStaleTasks` and `getWorkerStateHistory` add
-  `INVALID_INPUT` for a threshold or a count outside its rule.
+- `pingWorkers` errors: `INVALID_INPUT`, `LISTENER_DISABLED` (the core
+  handle of this process runs no listener) and `WORKER_PING_FAILED`.
+- The other health reads give `MONITORING_QUERY_FAILED`; `getWorkerState`,
+  `getWorkerStateHistory` and `getStaleTasks` add `INVALID_INPUT`.
+- `INVALID_INPUT` of a health read is one variant, `HealthInputRefused`
+  (`kind: "invalidInput"`): `subject` is the read (`pingWorkers`, `worker`,
+  `workerHistory`, `staleTasks`) and `cause` names the argument and the
+  rule: a worker id that holds a lone surrogate, or a `waitMs`, a `count`
+  or a threshold outside its rule. It is answered before any connect, and
+  nothing ran.
 - Each health read connects the app's handle and installs the schema once
   per handle, as a send does; then it reads only. The database ping reads
   only.
@@ -95,6 +96,16 @@ export async function checkHealth(app: Horsies): Promise<boolean> {
   build before schema migration 1004). A value that the worker could not
   measure is `{ kind: "notMeasured" }`; a 64-bit count is a `bigint`; an
   instant is a `Temporal.Instant`.
+- `WorkerStateSnapshot` also gives `childCount`, `claimLimits`
+  (`ClaimLimits`: `perQueuePerPass` and `claimedPerWorker`, each a
+  `TaskLimit`; `claimedPerWorker` is the limit that the worker resolved,
+  the seat count when its profile sets none), `clusterWideCap`
+  (`ClusterCapSetting`) and `executionClassBudgets`
+  (`ExecutionClassBudget[]`). `StaleTaskRow` and `ExpiredTaskRow` name the
+  task `taskId`; `StaleTaskRow.lastHeartbeatAt` is a `LastBeat`.
+- A pending stream names its `queue`, its `execution` and its `coverage`.
+  Its `wait` is `{ kind: "due", oldestDueAt, wait }` or
+  `{ kind: "noneDue", nextDueAt }`.
 - The meaning of each read is on the shared docs page
   `https://suleymanozkeskin.github.io/horsies/monitoring/worker-health/`.
 
@@ -180,7 +191,7 @@ Errors:
 
 | Code | When |
 |---|---|
-| `INVALID_INPUT` (`invalidInput`) | An argument that the call refuses before any connect: `field` (`window`, `page`, `limit`, `taskNames`, `queues`, `workers`, `errorCodes`, `workflowName`, `nodeIndex`, `workerId`) and `reason`. A count that is not a whole number, a value outside the core's bound, and text with a lone surrogate. Nothing ran. Not retryable |
+| `INVALID_INPUT` (`invalidInput`) | An argument that the call refuses before any connect: `field` (`window`, `page`, `limit`, `taskNames`, `queues`, `workers`, `errorCodes`, `workflowName`, `nodeIndex`) and `reason`. A count that is not a whole number, a value outside the core's bound, and text with a lone surrogate. Nothing ran. Not retryable |
 | `DATABASE_OPERATION_FAILED` | The database or the connect failed. `retryable` is the classification of the cause; `cause` holds the cause |
 | `HISTORY_CONTRACT_VIOLATION` | A history row does not decode. Not retryable |
 
@@ -713,9 +724,10 @@ import {
   DEFAULT_PING_WAIT_MS,
   type DatabasePing, type WorkerPong, type PingTarget, type PingWorkersOptions, type MinResponses,
   type WorkerHistoryLimit, type WorkerStateSnapshot, type WorkerStateRead, type SnapshotProfile,
-  type StaleTaskRow, type ExpiredTaskRow, type BoundedTaskList, type ClassCoverage, type ClassReport,
+  type StaleTaskRow, type ExpiredTaskRow, type BoundedTaskList, type ExecutionClassCoverage, type ExecutionClassReport,
   type PingDatabaseError, type PingWorkersError, type HealthReadError, type HealthInputError,
-  type WorkerReadError, type WorkerHistoryError, type StaleTasksQuery,
+  type WorkerReadError, type WorkerHistoryError, type HealthInputRefused, type HealthInputSubject,
+  type StaleTasksQuery,
   // Monitoring reads
   type Monitoring, MONITORING_WINDOW_DEFAULT, MAX_TASK_PAGE_LIMIT, MAX_TASK_PAGE_REACH, MAX_BREAKDOWN_LIMIT,
   MAX_WORKFLOW_RUNS_LIMIT, MonitoringQueryRefusalCode, TaskStatus,

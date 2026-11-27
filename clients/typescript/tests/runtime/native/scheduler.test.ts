@@ -188,7 +188,7 @@ describe("the scheduler area of the addon", () => {
   });
 
   test("the config facts of the default queue mode and of custom queues", () => {
-    const defaultMode = JSON.stringify({ broker: { database_url: "postgresql://127.0.0.1:55432/horsies" } });
+    const defaultMode = JSON.stringify({ database: { database_url: "postgresql://127.0.0.1:55432/horsies" } });
 
     assert.deepEqual(schedulerConfigFacts(defaultMode, ["default"]), {
       rejectBound: { kind: "noBound" },
@@ -197,7 +197,7 @@ describe("the scheduler area of the addon", () => {
     });
 
     const customMode = JSON.stringify({
-      broker: { database_url: "postgresql://127.0.0.1:55432/horsies", retain_rerun_input_default: true },
+      database: { database_url: "postgresql://127.0.0.1:55432/horsies", retain_rerun_input_default: true },
       queue_mode: "custom",
       custom_queues: [{ name: "urgent", priority: 20 }],
       payload: { reject_bytes: 4096 },

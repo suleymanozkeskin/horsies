@@ -1,5 +1,6 @@
 //! The records of the health reads: worker pings, worker state snapshots,
-//! the stale and expired task lists, and the class coverage and report.
+//! the stale and expired task lists, and the execution class coverage and
+//! report.
 //!
 //! The core types of these reads have no serde form, so they cross as napi
 //! records, by the boundary rules: an instant as a `BigInt` of epoch
@@ -9,11 +10,13 @@
 //! untyped JSON that the worker wrote.
 
 use chrono::TimeDelta;
+use horsies_core::core::config::worker_profile::input::{ClaimLimits, TaskLimitSetting};
+use horsies_core::core::ClusterCapSetting;
 use horsies_core::{
-    BoundedTaskList, BudgetLoad, ClassBudget, ClassCoverage, ClassReport, ClearableBootCause,
-    DownSlot, Execution, ExpiredTaskRow, PendingStream, ShortageErrno, SlotHealth, SnapshotProfile,
-    StaleTaskRow, StreamCoverage, StreamCoverageState, StreamWait, WorkerClassLoad, WorkerPong,
-    WorkerStateSnapshot,
+    BoundedTaskList, BudgetLoad, ClearableBootCause, DownSlot, Execution, ExecutionClassBudget,
+    ExecutionClassCoverage, ExecutionClassReport, ExpiredTaskRow, PendingStream, ShortageErrno,
+    SlotHealth, SnapshotProfile, StaleTaskRow, StreamCoverage, StreamCoverageState, StreamWait,
+    WorkerExecutionClassLoad, WorkerPong, WorkerStateSnapshot,
 };
 use napi::bindgen_prelude::BigInt;
 use napi_derive::napi;
@@ -117,10 +120,10 @@ pub enum SlotHealthRecord {
     },
 }
 
-/// One claim budget of a worker.
+/// One execution class budget of a worker.
 #[napi(object, object_from_js = false)]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClassBudgetRecord {
+pub struct ExecutionClassBudgetRecord {
     pub budget: ExecutionName,
     pub capacity: BigInt,
     pub serves: Vec<ExecutionName>,
@@ -149,7 +152,7 @@ pub enum MeasureRecord {
     NotMeasured,
 }
 
-/// The cluster-wide cap of a worker's claims.
+/// The cluster-wide cap that a worker ran with.
 #[napi(
     discriminant = "kind",
     discriminant_case = "camelCase",
@@ -157,8 +160,30 @@ pub enum MeasureRecord {
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClusterCapRecord {
-    Capped { cap: i32 },
-    Uncapped,
+    ClusterCap { tasks: u32 },
+    NoClusterCap,
+}
+
+/// A limit on a number of tasks.
+#[napi(
+    discriminant = "kind",
+    discriminant_case = "camelCase",
+    object_from_js = false
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TaskLimitRecord {
+    TaskLimit { tasks: u32 },
+    NoTaskLimit,
+}
+
+/// The claim limits of a worker.
+#[napi(object, object_from_js = false)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaimLimitsRecord {
+    pub per_queue_per_pass: TaskLimitRecord,
+    /// The limit that the worker resolved: the seat count of the worker
+    /// when its profile sets none.
+    pub claimed_per_worker: TaskLimitRecord,
 }
 
 /// One worker state snapshot.
@@ -169,9 +194,8 @@ pub struct WorkerStateRecord {
     pub snapshot_at_micros: BigInt,
     pub hostname: String,
     pub pid: i32,
-    pub processes: i32,
-    pub max_claim_batch: i32,
-    pub max_claim_per_worker: i32,
+    pub child_count: i32,
+    pub claim_limits: ClaimLimitsRecord,
     pub cluster_wide_cap: ClusterCapRecord,
     pub queues: Vec<String>,
     /// In queue-name order.
@@ -188,7 +212,7 @@ pub struct WorkerStateRecord {
     pub children_memory_mb: MeasureRecord,
     pub worker_started_at_micros: BigInt,
     pub slot_health: SlotHealthRecord,
-    pub class_capacity: Vec<ClassBudgetRecord>,
+    pub execution_class_budgets: Vec<ExecutionClassBudgetRecord>,
     pub profile: SnapshotProfileRecord,
 }
 
@@ -200,12 +224,11 @@ impl From<WorkerStateSnapshot> for WorkerStateRecord {
             snapshot_at_micros: epoch_micros_of(snapshot.snapshot_at),
             hostname: snapshot.hostname,
             pid: snapshot.pid,
-            processes: snapshot.processes,
-            max_claim_batch: snapshot.max_claim_batch,
-            max_claim_per_worker: snapshot.max_claim_per_worker,
+            child_count: snapshot.child_count,
+            claim_limits: claim_limits(snapshot.claim_limits),
             cluster_wide_cap: match snapshot.cluster_wide_cap {
-                Some(cap) => ClusterCapRecord::Capped { cap },
-                None => ClusterCapRecord::Uncapped,
+                ClusterCapSetting::ClusterCap { tasks } => ClusterCapRecord::ClusterCap { tasks },
+                ClusterCapSetting::NoClusterCap => ClusterCapRecord::NoClusterCap,
             },
             queues: snapshot.queues,
             queue_priorities: queue_numbers(snapshot.queue_priorities),
@@ -218,11 +241,11 @@ impl From<WorkerStateSnapshot> for WorkerStateRecord {
             children_memory_mb: measure(snapshot.children_memory_mb),
             worker_started_at_micros: epoch_micros_of(snapshot.worker_started_at),
             slot_health: slot_health(&snapshot.slot_health),
-            class_capacity: snapshot
-                .class_capacity
+            execution_class_budgets: snapshot
+                .execution_class_budgets
                 .as_slice()
                 .iter()
-                .map(class_budget)
+                .map(execution_class_budget)
                 .collect(),
             profile: match snapshot.profile {
                 SnapshotProfile::Named { name } => SnapshotProfileRecord::Named { name },
@@ -276,19 +299,19 @@ pub enum LastBeatRecord {
 #[napi(object, object_from_js = false)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StaleTaskRecord {
-    pub id: String,
+    pub task_id: String,
     pub task_name: String,
     pub worker_hostname: RecordedTextRecord,
     pub worker_pid: RecordedPidRecord,
     pub worker_process_name: RecordedTextRecord,
     pub started_at_micros: BigInt,
-    pub last_heartbeat: LastBeatRecord,
+    pub last_heartbeat_at: LastBeatRecord,
 }
 
 impl From<StaleTaskRow> for StaleTaskRecord {
     fn from(row: StaleTaskRow) -> Self {
         Self {
-            id: text_of_uuid(row.id),
+            task_id: text_of_uuid(row.task_id),
             task_name: row.task_name,
             worker_hostname: recorded_text(row.worker_hostname),
             worker_pid: match row.worker_pid {
@@ -297,7 +320,7 @@ impl From<StaleTaskRow> for StaleTaskRecord {
             },
             worker_process_name: recorded_text(row.worker_process_name),
             started_at_micros: epoch_micros_of(row.started_at),
-            last_heartbeat: match row.last_heartbeat {
+            last_heartbeat_at: match row.last_heartbeat_at {
                 Some(at) => LastBeatRecord::Beat {
                     at_micros: epoch_micros_of(at),
                 },
@@ -311,7 +334,7 @@ impl From<StaleTaskRow> for StaleTaskRecord {
 #[napi(object, object_from_js = false)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExpiredTaskRecord {
-    pub id: String,
+    pub task_id: String,
     pub task_name: String,
     pub queue_name: String,
     pub priority: i32,
@@ -325,14 +348,14 @@ pub struct ExpiredTaskRecord {
 impl From<ExpiredTaskRow> for ExpiredTaskRecord {
     fn from(row: ExpiredTaskRow) -> Self {
         Self {
-            id: text_of_uuid(row.id),
+            task_id: text_of_uuid(row.task_id),
             task_name: row.task_name,
             queue_name: row.queue_name,
             priority: row.priority,
             sent_at_micros: epoch_micros_of(row.sent_at),
             enqueued_at_micros: epoch_micros_of(row.enqueued_at),
             good_until_micros: epoch_micros_of(row.good_until),
-            expired_for_micros: bigint_of_i64(row.expired_for_us),
+            expired_for_micros: duration_micros(row.expired_for),
         }
     }
 }
@@ -418,22 +441,22 @@ pub enum StreamStateRecord {
 #[napi(object, object_from_js = false)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamCoverageRecord {
-    pub queue_name: String,
+    pub queue: String,
     pub execution: ExecutionName,
-    pub state: StreamStateRecord,
+    pub coverage: StreamStateRecord,
 }
 
 /// The fleet check: the coverage of every pending stream.
 #[napi(object, object_from_js = false)]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClassCoverageRecord {
+pub struct ExecutionClassCoverageRecord {
     pub checked_at_micros: BigInt,
     pub live_workers: BigInt,
     pub streams: Vec<StreamCoverageRecord>,
 }
 
-impl From<ClassCoverage> for ClassCoverageRecord {
-    fn from(coverage: ClassCoverage) -> Self {
+impl From<ExecutionClassCoverage> for ExecutionClassCoverageRecord {
+    fn from(coverage: ExecutionClassCoverage) -> Self {
         Self {
             checked_at_micros: epoch_micros_of(coverage.checked_at),
             live_workers: count_of(coverage.live_workers),
@@ -450,8 +473,8 @@ impl From<ClassCoverage> for ClassCoverageRecord {
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StreamWaitRecord {
-    OldestWaiting {
-        enqueued_at_micros: BigInt,
+    Due {
+        oldest_due_at_micros: BigInt,
         wait_micros: BigInt,
     },
     NoneDue {
@@ -463,10 +486,10 @@ pub enum StreamWaitRecord {
 #[napi(object, object_from_js = false)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingStreamRecord {
-    pub queue_name: String,
+    pub queue: String,
     pub execution: ExecutionName,
     pub wait: StreamWaitRecord,
-    pub state: StreamStateRecord,
+    pub coverage: StreamStateRecord,
 }
 
 /// One claim budget of a live worker, with its rows in flight.
@@ -482,26 +505,29 @@ pub struct BudgetLoadRecord {
 /// The claim budgets of one live worker.
 #[napi(object, object_from_js = false)]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkerClassLoadRecord {
+pub struct WorkerExecutionClassLoadRecord {
     pub worker_id: String,
     pub snapshot_at_micros: BigInt,
     pub budgets: Vec<BudgetLoadRecord>,
 }
 
-/// The class report: pending streams and the budget load of each live
-/// worker.
+/// The execution class report: pending streams and the budget load of each
+/// live worker. `live_window_micros`: how recent a snapshot must be for its
+/// worker to count as live.
 #[napi(object, object_from_js = false)]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClassReportRecord {
+pub struct ExecutionClassReportRecord {
     pub checked_at_micros: BigInt,
+    pub live_window_micros: BigInt,
     pub streams: Vec<PendingStreamRecord>,
-    pub workers: Vec<WorkerClassLoadRecord>,
+    pub workers: Vec<WorkerExecutionClassLoadRecord>,
 }
 
-impl From<ClassReport> for ClassReportRecord {
-    fn from(report: ClassReport) -> Self {
+impl From<ExecutionClassReport> for ExecutionClassReportRecord {
+    fn from(report: ExecutionClassReport) -> Self {
         Self {
             checked_at_micros: epoch_micros_of(report.checked_at),
+            live_window_micros: bigint_of_i64(wait_microseconds(report.live_window)),
             streams: report.streams.iter().map(pending_stream).collect(),
             workers: report.workers.iter().map(worker_class_load).collect(),
         }
@@ -513,6 +539,17 @@ fn count_of(count: usize) -> BigInt {
     match u64::try_from(count) {
         Ok(count) => bigint_of_u64(count),
         Err(_) => unreachable!("a usize fits in a u64 on every target of the addon"),
+    }
+}
+
+/// The microseconds of an expiry interval as a `BigInt`. The interval
+/// between two database instants holds fewer than 2^64 microseconds. Pure.
+fn duration_micros(interval: std::time::Duration) -> BigInt {
+    match u64::try_from(interval.as_micros()) {
+        Ok(microseconds) => bigint_of_u64(microseconds),
+        Err(_) => {
+            unreachable!("an interval between two database instants is below 2^64 microseconds")
+        }
     }
 }
 
@@ -545,10 +582,26 @@ fn recorded_text(value: Option<String>) -> RecordedTextRecord {
 /// The record of a slot health. Pure.
 fn slot_health(health: &SlotHealth) -> SlotHealthRecord {
     match health {
-        SlotHealth::AllSlotsServing => SlotHealthRecord::AllSlotsServing,
-        SlotHealth::SlotsDown(down) => SlotHealthRecord::SlotsDown {
-            slots: down.as_slice().iter().map(down_slot).collect(),
+        SlotHealth::AllServing => SlotHealthRecord::AllSlotsServing,
+        SlotHealth::SlotsDown { slots } => SlotHealthRecord::SlotsDown {
+            slots: slots.as_slice().iter().map(down_slot).collect(),
         },
+    }
+}
+
+/// The record of the claim limits of a snapshot. Pure.
+const fn claim_limits(limits: ClaimLimits) -> ClaimLimitsRecord {
+    ClaimLimitsRecord {
+        per_queue_per_pass: task_limit(limits.per_queue_per_pass),
+        claimed_per_worker: task_limit(limits.claimed_per_worker),
+    }
+}
+
+/// The record of a task limit. Pure.
+const fn task_limit(limit: TaskLimitSetting) -> TaskLimitRecord {
+    match limit {
+        TaskLimitSetting::TaskLimit { tasks } => TaskLimitRecord::TaskLimit { tasks },
+        TaskLimitSetting::NoTaskLimit {} => TaskLimitRecord::NoTaskLimit,
     }
 }
 
@@ -578,9 +631,9 @@ const fn boot_cause(cause: ClearableBootCause) -> BootCauseRecord {
     }
 }
 
-/// The record of a claim budget. Pure.
-fn class_budget(budget: &ClassBudget) -> ClassBudgetRecord {
-    ClassBudgetRecord {
+/// The record of an execution class budget. Pure.
+fn execution_class_budget(budget: &ExecutionClassBudget) -> ExecutionClassBudgetRecord {
+    ExecutionClassBudgetRecord {
         budget: budget.budget.into(),
         capacity: bigint_of_u64(budget.capacity),
         serves: executions(&budget.serves),
@@ -602,7 +655,7 @@ fn stream_state(state: StreamCoverageState) -> StreamStateRecord {
             workers: count_of(workers),
             capacity: bigint_of_u64(capacity),
         },
-        StreamCoverageState::WithoutCapacity { workers } => StreamStateRecord::WithoutCapacity {
+        StreamCoverageState::NoCapacity { workers } => StreamStateRecord::WithoutCapacity {
             workers: count_of(workers),
         },
         StreamCoverageState::Unserved => StreamStateRecord::Unserved,
@@ -612,17 +665,20 @@ fn stream_state(state: StreamCoverageState) -> StreamStateRecord {
 /// The record of the coverage of one stream. Pure.
 fn stream_coverage(stream: &StreamCoverage) -> StreamCoverageRecord {
     StreamCoverageRecord {
-        queue_name: stream.queue_name.clone(),
+        queue: stream.queue.clone(),
         execution: stream.execution.into(),
-        state: stream_state(stream.state),
+        coverage: stream_state(stream.coverage),
     }
 }
 
 /// The record of a stream wait. Pure.
 fn stream_wait(wait: StreamWait) -> StreamWaitRecord {
     match wait {
-        StreamWait::OldestWaiting { enqueued_at, wait } => StreamWaitRecord::OldestWaiting {
-            enqueued_at_micros: epoch_micros_of(enqueued_at),
+        StreamWait::Due {
+            oldest_due_at,
+            wait,
+        } => StreamWaitRecord::Due {
+            oldest_due_at_micros: epoch_micros_of(oldest_due_at),
             wait_micros: bigint_of_i64(wait_microseconds(wait)),
         },
         StreamWait::NoneDue { next_due_at } => StreamWaitRecord::NoneDue {
@@ -631,28 +687,29 @@ fn stream_wait(wait: StreamWait) -> StreamWaitRecord {
     }
 }
 
-/// The microseconds of a wait. A wait between two database instants holds
-/// fewer than 2^63 microseconds, so the count does not overflow. Pure.
+/// The microseconds of a wait or a live window. A wait between two
+/// database instants, and the live window constant, hold fewer than 2^63
+/// microseconds, so the count does not overflow. Pure.
 fn wait_microseconds(wait: TimeDelta) -> i64 {
     match wait.num_microseconds() {
         Some(microseconds) => microseconds,
-        None => unreachable!("a wait between two database instants is below 2^63 microseconds"),
+        None => unreachable!("a wait or a live window is below 2^63 microseconds"),
     }
 }
 
 /// The record of a pending stream. Pure.
 fn pending_stream(stream: &PendingStream) -> PendingStreamRecord {
     PendingStreamRecord {
-        queue_name: stream.queue_name.clone(),
+        queue: stream.queue.clone(),
         execution: stream.execution.into(),
         wait: stream_wait(stream.wait),
-        state: stream_state(stream.state),
+        coverage: stream_state(stream.coverage),
     }
 }
 
 /// The record of the load of one live worker. Pure.
-fn worker_class_load(load: &WorkerClassLoad) -> WorkerClassLoadRecord {
-    WorkerClassLoadRecord {
+fn worker_class_load(load: &WorkerExecutionClassLoad) -> WorkerExecutionClassLoadRecord {
+    WorkerExecutionClassLoadRecord {
         worker_id: load.worker_id.clone(),
         snapshot_at_micros: epoch_micros_of(load.snapshot_at),
         budgets: load.budgets.iter().map(budget_load).collect(),
@@ -682,15 +739,15 @@ mod tests {
             .expect("a valid instant")
     }
 
-    fn stale_row(last_heartbeat: Option<chrono::DateTime<Utc>>) -> StaleTaskRow {
+    fn stale_row(last_heartbeat_at: Option<chrono::DateTime<Utc>>) -> StaleTaskRow {
         StaleTaskRow {
-            id: Uuid::from_u128(9),
+            task_id: Uuid::from_u128(9),
             task_name: "resize".to_owned(),
             worker_hostname: None,
             worker_pid: Some(41),
             worker_process_name: Some("child-1".to_owned()),
             started_at: instant(),
-            last_heartbeat,
+            last_heartbeat_at,
         }
     }
 
@@ -734,7 +791,7 @@ mod tests {
                 value: "child-1".to_owned()
             }
         );
-        assert_eq!(record.last_heartbeat, LastBeatRecord::NoBeatSinceStart);
+        assert_eq!(record.last_heartbeat_at, LastBeatRecord::NoBeatSinceStart);
         assert_eq!(record.started_at_micros, epoch_micros_of(instant()));
     }
 
@@ -742,7 +799,7 @@ mod tests {
     fn a_stale_row_with_a_beat_keeps_its_instant() {
         let record = StaleTaskRecord::from(stale_row(Some(instant())));
         assert_eq!(
-            record.last_heartbeat,
+            record.last_heartbeat_at,
             LastBeatRecord::Beat {
                 at_micros: epoch_micros_of(instant())
             }
@@ -767,16 +824,16 @@ mod tests {
     #[test]
     fn an_expired_row_keeps_its_interval_in_microseconds() {
         let record = ExpiredTaskRecord::from(ExpiredTaskRow {
-            id: Uuid::from_u128(4),
+            task_id: Uuid::from_u128(4),
             task_name: "send".to_owned(),
             queue_name: "default".to_owned(),
             priority: 100,
             sent_at: instant(),
             enqueued_at: instant(),
             good_until: instant(),
-            expired_for_us: 1_500_000,
+            expired_for: std::time::Duration::from_micros(1_500_000),
         });
-        assert_eq!(record.expired_for_micros, bigint_of_i64(1_500_000));
+        assert_eq!(record.expired_for_micros, bigint_of_u64(1_500_000));
         let complete = ExpiredTaskList::from(BoundedTaskList::Complete(Vec::new()));
         assert_eq!(complete, ExpiredTaskList::Complete { rows: Vec::new() });
     }
@@ -794,7 +851,7 @@ mod tests {
             }
         );
         assert_eq!(
-            stream_state(StreamCoverageState::WithoutCapacity { workers: 1 }),
+            stream_state(StreamCoverageState::NoCapacity { workers: 1 }),
             StreamStateRecord::WithoutCapacity {
                 workers: count_of(1)
             }
@@ -807,14 +864,14 @@ mod tests {
 
     #[test]
     fn each_stream_wait_has_its_record() {
-        let waiting = stream_wait(StreamWait::OldestWaiting {
-            enqueued_at: instant(),
+        let waiting = stream_wait(StreamWait::Due {
+            oldest_due_at: instant(),
             wait: TimeDelta::milliseconds(1_250),
         });
         assert_eq!(
             waiting,
-            StreamWaitRecord::OldestWaiting {
-                enqueued_at_micros: epoch_micros_of(instant()),
+            StreamWaitRecord::Due {
+                oldest_due_at_micros: epoch_micros_of(instant()),
                 wait_micros: bigint_of_i64(1_250_000),
             }
         );
@@ -858,6 +915,31 @@ mod tests {
                 ShortageErrnoName::Eagain
             ]
         );
+    }
+
+    #[test]
+    fn each_task_limit_and_cluster_cap_has_its_record() {
+        assert_eq!(
+            claim_limits(ClaimLimits {
+                per_queue_per_pass: TaskLimitSetting::TaskLimit { tasks: 5 },
+                claimed_per_worker: TaskLimitSetting::NoTaskLimit {},
+            }),
+            ClaimLimitsRecord {
+                per_queue_per_pass: TaskLimitRecord::TaskLimit { tasks: 5 },
+                claimed_per_worker: TaskLimitRecord::NoTaskLimit,
+            }
+        );
+    }
+
+    #[test]
+    fn the_live_window_of_a_report_crosses_in_microseconds() {
+        let record = ExecutionClassReportRecord::from(ExecutionClassReport {
+            checked_at: instant(),
+            live_window: TimeDelta::seconds(60),
+            streams: Vec::new(),
+            workers: Vec::new(),
+        });
+        assert_eq!(record.live_window_micros, bigint_of_i64(60_000_000));
     }
 
     #[test]

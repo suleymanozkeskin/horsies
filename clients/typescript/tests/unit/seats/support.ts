@@ -44,7 +44,7 @@ export const fetchPage = defineTask({
 
 /** The app of `crunch` and `fetchPage`, built with the fakes; a failed create fails the test. */
 export function seatApp(): Horsies {
-  const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [crunch, fetchPage] }, fakeEnvironment());
+  const created = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [crunch, fetchPage] }, fakeEnvironment());
 
   if (!created.ok) {
     assert.fail(`the seat app was refused: ${created.error.refusals.map((refused) => refused.message).join("; ")}`);
