@@ -90,7 +90,7 @@ tokio-postgres = { version = "=0.7.18", features = [
     "with-uuid-1",
     "with-chrono-0_4",
 ], optional = true }
-toml = { version = "0.8", optional = true }
+toml = { version = "1", optional = true }
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",
     "fmt",

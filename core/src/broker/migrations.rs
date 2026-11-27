@@ -74,7 +74,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 use sha2::{Digest, Sha256, Sha384};
 use tokio::time::{sleep, Instant};
 use tokio_postgres::error::SqlState;
@@ -1744,7 +1744,7 @@ pub(crate) async fn install_schema_on(
 /// up to 200 ms times 2^(attempt - 1) (Python `_run_fleet_schema_init`).
 fn deadlock_backoff(attempt: u32) -> Duration {
     let scale = 1_u64 << attempt.saturating_sub(1).min(INSTALL_MAX_ATTEMPTS);
-    let jitter_ms = rand::thread_rng().gen_range(0..=200_u64) * scale;
+    let jitter_ms = rand::rng().random_range(0..=200_u64) * scale;
     Duration::from_millis(50 + jitter_ms)
 }
 

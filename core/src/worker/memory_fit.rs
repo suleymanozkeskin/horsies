@@ -73,7 +73,7 @@ pub struct MachineMemoryUnreadable {
 /// host, not a cgroup limit ([`read_cgroup_memory_limit`]).
 pub fn read_machine_memory() -> Result<MachineMemory, MachineMemoryUnreadable> {
     let mut system = sysinfo::System::new();
-    system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::new().with_ram());
+    system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
     machine_memory_of(system.total_memory())
 }
 

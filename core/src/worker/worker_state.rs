@@ -246,7 +246,9 @@ fn collect_resource_metrics(sys: &mut System, pid: Pid) -> ResourceMetrics {
     sys.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::Some(&[pid]),
         true,
-        sysinfo::ProcessRefreshKind::new().with_cpu().with_memory(),
+        sysinfo::ProcessRefreshKind::nothing()
+            .with_cpu()
+            .with_memory(),
     );
 
     if let Some(process) = sys.process(pid) {
@@ -445,7 +447,9 @@ impl SnapshotSource {
         sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::Some(&[sys_pid]),
             true,
-            sysinfo::ProcessRefreshKind::new().with_cpu().with_memory(),
+            sysinfo::ProcessRefreshKind::nothing()
+                .with_cpu()
+                .with_memory(),
         );
         sys.refresh_memory();
         Self {
@@ -1724,7 +1728,9 @@ mod tests {
         sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::Some(&[pid]),
             true,
-            sysinfo::ProcessRefreshKind::new().with_cpu().with_memory(),
+            sysinfo::ProcessRefreshKind::nothing()
+                .with_cpu()
+                .with_memory(),
         );
         sys.refresh_memory();
         let metrics = collect_resource_metrics(&mut sys, pid);

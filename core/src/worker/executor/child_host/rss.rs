@@ -16,7 +16,7 @@ pub(super) fn read_rss() -> RssReading {
     system.refresh_processes_specifics(
         ProcessesToUpdate::Some(&[pid]),
         true,
-        ProcessRefreshKind::new().with_memory(),
+        ProcessRefreshKind::nothing().with_memory(),
     );
     let mebibytes = system
         .process(pid)

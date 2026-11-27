@@ -4,7 +4,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
-use rand::RngCore;
+use rand::Rng;
 use uuid::{Uuid, Version};
 
 const MAX_UNIX_MILLISECONDS: i64 = (1_i64 << 48) - 1;
@@ -94,7 +94,7 @@ fn system_clock_ms() -> i64 {
 }
 
 fn system_entropy_62_bits() -> u64 {
-    rand::thread_rng().next_u64() >> 2
+    rand::rng().next_u64() >> 2
 }
 
 static PROCESS_GENERATOR: OnceLock<Mutex<MonotonicUuid7Generator>> = OnceLock::new();
